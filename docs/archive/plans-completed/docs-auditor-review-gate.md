@@ -295,7 +295,7 @@ reference now names the recorded lane.
 - **`docs/plans/docs-auditor-rename-guard.md`**: records the reasoning for deferring
   — *"a workflow decision about the `/do-docs` contract, not a bug fix, and it would
   change how every cascade behaves."* This plan makes that decision.
-- **`reflections/housekeeping/merged_branch_cleanup.py` + `tests/unit/reflections/test_merged_branch_cleanup.py`**:
+- **`reflections/housekeeping/merged_branch_cleanup.py` + `tests/unit/reflections/test_reflections_merged_branch_cleanup.py`**:
   the closest in-repo *structural* precedent for the test strategy this plan needs — a
   real git repo on disk, `PROJECT_ROOT` monkeypatched, and `git status --porcelain`
   asserted. Note its dispatcher patches `asyncio.create_subprocess_exec` because that
@@ -1982,7 +1982,7 @@ only under this shape, so do not substitute a broader patch.
 
 Precedent corrections, so nobody loses time hunting:
 
-- `tests/unit/reflections/test_merged_branch_cleanup.py` is the nearest *structural*
+- `tests/unit/reflections/test_reflections_merged_branch_cleanup.py` is the nearest *structural*
   model (real repo on disk, `monkeypatch.setattr(module, "PROJECT_ROOT", repo)`,
   `git status --porcelain` asserted), **but it patches
   `asyncio.create_subprocess_exec`, not `subprocess.run`** — its module is async. Its
@@ -2108,7 +2108,7 @@ The auto-merge assertions Q2 invalidates, enumerated so none is missed:
       #2842). This plan changes the count again, so the row must be recomputed from
       `--collect-only` after the test work lands, not left at 130.
 
-New coverage required (new file `tests/unit/reflections/test_docs_auditor_git_surface.py`,
+New coverage required (new file `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`,
 real git throughout — the filename keeps the `docs_auditor` keyword so
 `tests/conftest.py` `FEATURE_MAP` auto-tags it `validation`).
 
@@ -2302,7 +2302,7 @@ Test hygiene for this lane — every invocation:
 
 ```bash
 cd ${AI_REPO_ROOT:-$HOME/src/ai}/.worktrees/sdlc-2739
-POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py -q
+POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/reflections/test_reflections_docs_auditor_git_surface.py -q
 POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q
 ```
 
@@ -3015,7 +3015,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 
 - **Task ID**: build-rotation
 - **Depends On**: build-cascade
-- **Validates**: tests/unit/test_docs_auditor_substrate.py, tests/unit/reflections/test_docs_auditor_git_surface.py (create)
+- **Validates**: tests/unit/test_docs_auditor_substrate.py, tests/unit/reflections/test_reflections_docs_auditor_git_surface.py (create)
 - **Informed By**: spike-5 (files_touched is the complete write set)
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
@@ -3061,7 +3061,7 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 
 - **Task ID**: build-escalation
 - **Depends On**: build-rotation
-- **Validates**: tests/unit/reflections/test_docs_auditor_git_surface.py
+- **Validates**: tests/unit/reflections/test_reflections_docs_auditor_git_surface.py
 - **Informed By**: spike-4 (gh issue is the durable channel; output_summary is one line)
 - **Assigned To**: substrate-builder
 - **Agent Type**: builder
@@ -3294,16 +3294,16 @@ and destroy exactly the per-group reviewability the sequencing rule exists for.
 
 - **Task ID**: build-tests
 - **Depends On**: build-reference-parity
-- **Validates**: tests/unit/reflections/test_docs_auditor_git_surface.py (create), tests/unit/test_docs_auditor_substrate.py
+- **Validates**: tests/unit/reflections/test_reflections_docs_auditor_git_surface.py (create), tests/unit/test_docs_auditor_substrate.py
 - **Assigned To**: git-test-engineer
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - **Domain**: testing — real integrations, no mocks over the subject under test
-- Create `tests/unit/reflections/test_docs_auditor_git_surface.py`: real `git init`
+- Create `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: real `git init`
   repo, `PROJECT_ROOT` monkeypatched, and a **synchronous** `gh`-only dispatcher via
   `monkeypatch.setattr(docs_auditor.subprocess, "run", ...)` that delegates every
   non-`gh` command to the real `subprocess.run`. Read the precedent corrections in
-  **Test Impact** first — `test_merged_branch_cleanup.py` patches
+  **Test Impact** first — `test_reflections_merged_branch_cleanup.py` patches
   `asyncio.create_subprocess_exec` and is **not** reusable; this dispatcher has no
   in-repo precedent and must be written from scratch.
 - Cover every bullet in the **"Still owed by task 5"** list under **Test Impact** — and
@@ -3366,7 +3366,7 @@ post-build expectation that legitimately fails now.
 | Check | Command | Expected | When |
 |-------|---------|----------|------|
 | Tests pass (substrate) | `POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/test_docs_auditor_substrate.py -q` | exit code 0 | post-build |
-| Tests pass (real git surface) | `POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/reflections/test_docs_auditor_git_surface.py -q` | exit code 0 | post-build (file does not exist yet) |
+| Tests pass (real git surface) | `POPOTO_TEST_DB=13 ./scripts/pytest-clean.sh tests/unit/reflections/test_reflections_docs_auditor_git_surface.py -q` | exit code 0 | post-build (file does not exist yet) |
 | Lint clean | `python -m ruff check .` | exit code 0 | holds now |
 | Format clean | `python -m ruff format --check .` | exit code 0 | holds now |
 | No `git add -A` in the auditor | `grep -c '"-A"' reflections/docs_auditor.py` | `0` | post-build (currently `1`, at `:1494`) |
@@ -3383,15 +3383,15 @@ post-build expectation that legitimately fails now.
 | Guard-fired run still advances the rotation (NEW-1) | Real-git/Redis test: force `_has_open_pr_for_slug` true for the picked slug, run `run_docs_auditor`, assert the run returns `status="skipped"`, that `REDIS_LAST_RUN_HASH` now holds a fresh timestamp for that slug, and that a second immediately-following run picks a **different** doc. Grep-level guard that the call was not dropped: `grep -c '_update_rotation_hash' reflections/docs_auditor.py` | `status="skipped"`, the slug is stamped, the next pick differs; grep `> 2` (zero-diff path, guard path, success path) | post-build (today the guards are not in `run_docs_auditor` at all and the grep reads `3` for unrelated reasons — assert the behavior, not the count alone) |
 | Guard-fired run touches no working tree (NEW-1) | Real-git test: with the daily cap set, assert `git status --porcelain` in the temp repo is byte-identical before and after the run, and that `audit()` was never called. Redis writes are expected and are **not** covered by this row | porcelain unchanged; `audit()` not called | post-build |
 | Sweeper can still read a PR body (NEW-2) | `grep -c 'number,state,createdAt,body' reflections/docs_auditor.py` | > 0 | post-build (currently `0` — the sweeper's `pr list` at `:2147` omits `body`, and the only `body` fetch is inside the predicate Q2 deletes) |
-| Withheld filing is flood-capped (NEW-4 / R3-3) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: drive a rotation run whose result carries **more than 5** withheld entries and assert (a) `_file_issue_if_new` is invoked exactly 5 times, (b) a `logger.warning` fires naming the number suppressed, and (c) the run's status is unaffected by the suppression | exactly 5 issues filed, one suppression warning naming the remainder | post-build. The grep-count form this row used before is retired: it claimed `grep -c 'per_run_cap'` was "currently 2" and expected `> 2`, but the real current count is **3** (`:1278`, `:1281`, `:1285`), so the row was already green today and proved nothing. Counting a symbol also cannot distinguish "both loops share one cap" from "the withheld loop declared its own"; only behavior can. Companion structural check, if a grep is still wanted: `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` → `> 2` (definition, `audit()` derivation, withheld loop), currently `0` |
+| Withheld filing is flood-capped (NEW-4 / R3-3) | **Behavioral**, in `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: drive a rotation run whose result carries **more than 5** withheld entries and assert (a) `_file_issue_if_new` is invoked exactly 5 times, (b) a `logger.warning` fires naming the number suppressed, and (c) the run's status is unaffected by the suppression | exactly 5 issues filed, one suppression warning naming the remainder | post-build. The grep-count form this row used before is retired: it claimed `grep -c 'per_run_cap'` was "currently 2" and expected `> 2`, but the real current count is **3** (`:1278`, `:1281`, `:1285`), so the row was already green today and proved nothing. Counting a symbol also cannot distinguish "both loops share one cap" from "the withheld loop declared its own"; only behavior can. Companion structural check, if a grep is still wanted: `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` → `> 2` (definition, `audit()` derivation, withheld loop), currently `0` |
 | Dashboard renders the summary (C3) | `grep -c 'output_summary' ui/templates/reflections/_partials/modal_content.html` | > 0 | post-build (currently `0` — the value reaches `dashboard.json` and no template) |
 | Issue titles carry no volatile field (B4) | Read the two title templates in the built code and confirm neither interpolates an age, date, count, or run id — only `{doc}`/`{old}`/`{new}` for the per-defect title and `#{n}` for the sweeper title | no volatile interpolation | post-build |
 | New commit ownership declared | `grep -c 'files_touched' .claude/skill-context/do-docs.md` | > 0 | post-build (currently `0`) |
 | Scheduler wires the summary | `grep -c 'output_summary' agent/reflection_scheduler.py` | > 0 | post-build (currently `0`) |
-| Git surface is never blanket-mocked | `grep -c 'patch("subprocess.run"\|patch.object(subprocess' tests/unit/reflections/test_docs_auditor_git_surface.py` | `0` | post-build |
-| Real git in the new test file | `grep -c '"init"' tests/unit/reflections/test_docs_auditor_git_surface.py` | > 0 | post-build |
-| Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_docs_auditor_git_surface.py` | > 0 | post-build |
-| No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_docs_auditor_git_surface.py` | exit code 1 | post-build |
+| Git surface is never blanket-mocked | `grep -c 'patch("subprocess.run"\|patch.object(subprocess' tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` | `0` | post-build |
+| Real git in the new test file | `grep -c '"init"' tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` | > 0 | post-build |
+| Foreign dirt survives (Race 1) | `grep -c 'foreign\|unrelated_dirty' tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` | > 0 | post-build |
+| No stale xfails | `grep -rn 'xfail' tests/unit/reflections/test_reflections_docs_auditor_git_surface.py` | exit code 1 | post-build |
 | Test count row is recomputed | `POPOTO_TEST_DB=13 .venv/bin/python -m pytest tests/unit/test_docs_auditor_substrate.py --collect-only -q \| tail -1` and compare against `grep -n 'test_docs_auditor_substrate' tests/README.md` | the number in `tests/README.md:272` equals the collected count | post-build (both read `130` today, and the count will move) |
 | `.md` reporting branch exists (Q7a) | `grep -c 'broken-md-link' reflections/docs_auditor.py` | > 0 | post-build (currently `0`) |
 | Old auto-repairing `.md` detector stays gone (Q7a) | `grep -c '_detect_readme_broken_entries' reflections/docs_auditor.py` | `0` | **holds now** (#2842) — anti-criterion: Q7a must add a *reporting* branch, never resurrect the repair |
@@ -3407,9 +3407,9 @@ post-build expectation that legitimately fails now.
 | Dedup query no longer depends on a label surviving triage (Q7c / R5-4) | **Behavioral**, in `TestCrossMachineDedup`: a **closed** issue whose title matches exactly and which carries **no** `documentation` label still suppresses a fresh filing; the argv assertions in that class are updated for the removed label alongside `--state all` / `--limit 100`. Companion structural check: `grep -c '\"--label\"' reflections/docs_auditor.py` | closed unlabelled issue suppresses; grep `1` | post-build (grep currently `2` — `_open_issue_exists:1026` on the **query** side and `_file_issue_if_new:1115` on the **filing** side). Exactly one must survive, and it must be the filing one: new issues stay labelled `documentation`, while the gate stops depending on the label. A build that drops both loses the label on filed issues; a build that drops neither leaves "file once, ever" conditional on triage not touching the label |
 | Recurring-condition categories keep the open-only gate (Q7c exemption / R4-2, extended R5-1) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py`: with a `gh` stub, `_file_issue_if_new` on a `"category": "vault-drift"` finding dispatches `--state open`, likewise on `"category": "operational-failure"`, and on a `deleted-target` or `broken-md-link` finding dispatches `--state all`; a **closed** drift issue for the same vault/site pair does not suppress a fresh filing, while a closed `broken-md-link` issue does | drift → `open`, operational-failure → `open`, references → `all` | post-build. Vault-drift's condition is a recurring `vault_mtime > site_ts` comparison and the failure filing's is a recurring run outcome, neither a durable property of the tree, so `all` would let one human close silence either permanently. A build that applies `all` uniformly passes every other Q7c row and fails only this one. **The `grep -c 'vault-drift'` companion this row used to carry is deleted (R5-6):** it claimed "currently `2`" and expected `> 2`, while the real count today is **4** (`:1757`, `:1777`, `:1805`, `:1952`), so the row was green before any build work — the same defect class R3-3 caught on the `per_run_cap` row and R4-5 caught on the `_is_documented_deletion` row. The behavioral half is what actually gates this, and it now owns the check alone |
 | The two per-run budgets stay separate (R5-2) | `grep -c 'ISSUE_FILING_PER_RUN_CAP' reflections/docs_auditor.py` and `grep -c 'VAULT_DRIFT_ISSUE_CAP' reflections/docs_auditor.py` | `> 2` and **exactly `4`** | post-build (currently `0` and `4`). `VAULT_DRIFT_ISSUE_CAP` bounds a *different* channel (`_run_vault_drift_detection`, `:1803-1810`) and sits five lines above the `:75` insertion point for the new constant. A count below 4 means a builder read "one source of truth; no second literal" as an instruction to merge them, which would let a heavy drift day starve the reference channel |
-| Failed rotation escalates through a real channel (R5-1) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: force `_push_branch_and_pr` to return `None` after a write and assert (a) `_file_issue_if_new` is called exactly once, (b) with a title matching `docs-auditor: rotation failed to produce a PR for <slug>` carrying no date, run id or count, (c) with `"category": "operational-failure"`, and (d) the call happens **before** the `status="error"` return. Companion structural check: `grep -c 'rotation failed to produce a PR' reflections/docs_auditor.py` | one filing, slug-keyed, category set, then `status="error"`; grep `> 0` | post-build (currently `0`). `status="error"` alone reaches nobody: the return is a plain dict and `agent/reflection_scheduler.py:639-640` reads only `projects`. This row is the difference between the plan's claimed escalation and a built one |
+| Failed rotation escalates through a real channel (R5-1) | **Behavioral**, in `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: force `_push_branch_and_pr` to return `None` after a write and assert (a) `_file_issue_if_new` is called exactly once, (b) with a title matching `docs-auditor: rotation failed to produce a PR for <slug>` carrying no date, run id or count, (c) with `"category": "operational-failure"`, and (d) the call happens **before** the `status="error"` return. Companion structural check: `grep -c 'rotation failed to produce a PR' reflections/docs_auditor.py` | one filing, slug-keyed, category set, then `status="error"`; grep `> 0` | post-build (currently `0`). `status="error"` alone reaches nobody: the return is a plain dict and `agent/reflection_scheduler.py:639-640` reads only `projects`. This row is the difference between the plan's claimed escalation and a built one |
 | Dirty-tree guard is honestly labelled and stays quiet (R5-1) | **Behavioral**, in `tests/unit/test_docs_auditor_substrate.py::TestDirtyTreeGuard`: with `_git_dirty` true, the run returns `status="skipped"` (not `"ok"`), the summary still names `dirty`, and `_file_issue_if_new` is **not** called | `"skipped"`, no filing | post-build (today `"ok"`, asserted at `tests/unit/test_docs_auditor_substrate.py:1497`). Both halves matter: `"ok"` contradicts the `_write_liveness(..., "skipped", ...)` on the line above, and a filing guard would mint issues for a concurrent lane's uncommitted work in the shared checkout |
-| Withheld titles carry the term, not the regex source (R5-3) | **Behavioral**, in `tests/unit/reflections/test_docs_auditor_git_surface.py`: drive a rotation whose `withheld` entry is `{"old": r"\breal\b", "new": "realistic", ...}` and assert the filed title contains `(real -> realistic)` and **no** backslash. Companion: `grep -c 'removeprefix' reflections/docs_auditor.py` | title has no `\b`; grep `> 0` | post-build. The title is passed verbatim to `gh issue list --search` (`:1029-1031`); a `\b` in the dedup key makes the cross-machine gate depend on GitHub full-text search tolerating regex punctuation, and a search miss fails open and files a duplicate |
+| Withheld titles carry the term, not the regex source (R5-3) | **Behavioral**, in `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: drive a rotation whose `withheld` entry is `{"old": r"\breal\b", "new": "realistic", ...}` and assert the filed title contains `(real -> realistic)` and **no** backslash. Companion: `grep -c 'removeprefix' reflections/docs_auditor.py` | title has no `\b`; grep `> 0` | post-build. The title is passed verbatim to `gh issue list --search` (`:1029-1031`); a `\b` in the dedup key makes the cross-machine gate depend on GitHub full-text search tolerating regex punctuation, and a search miss fails open and files a duplicate |
 | The stale non-convergence comment is deleted (Q7c) | `grep -c 'dedup gate only sees open issues' reflections/docs_auditor.py` | `0` | post-build (currently `1`, in `audit()` at `:1259-1265`). Describe only the new status quo |
 | Q7 shares the per-run cap, no second budget | **Behavioral**: a rotation pass whose findings mix `deleted-target` and `broken-md-link` files at most `ISSUE_FILING_PER_RUN_CAP` issues **in total** | total ≤ 5 | post-build |
 | Q7 adds no write path | `git diff origin/main -- reflections/docs_auditor.py` shows no new `write_text`, `open(..., "w")`, or `git`/`gh` mutation introduced by the Q7 commit | no new write | post-build. #2739's whole thesis; a `.md` *repair* is the one thing Q7 must not grow |

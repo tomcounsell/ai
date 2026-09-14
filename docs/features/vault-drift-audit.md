@@ -153,47 +153,40 @@ run — one per site page plus one per optional repo-doc counterpart), so the
 cap is defense-in-depth against a future mapping that grows, not a load-bearing
 limiter today.
 
-## Liveness signal
+## Narratives-compared signal
 
 `_run_vault_drift_detection` returns `vault_narratives_compared` — the count
 of narratives that were actually read and compared (secrets-guarded, missing,
-or markitdown-sidecar entries don't count). This threads into
-`_write_liveness` through a new **explicit optional 5th parameter**:
+or markitdown-sidecar entries don't count). `_run_vault_drift_detection` is
+annotated `-> int` and returns an `int` on every exit: `0` when the vault
+root is unresolvable, the real `compared` count on success, and `0` from its
+own `except Exception`. It never returns `None`.
+
+The count reaches the operator by appending a trailing clause to the
+created-PR summary string, unconditionally, including when the count is `0`:
 
 ```python
-def _write_liveness(
-    slug: str,
-    status: str,
-    pr_url: str | None,
-    files_touched: int,
-    vault_narratives_compared: int | None = None,
-    fixes_withheld: int = 0,
-) -> None: ...
+f"...; vault {vault_narratives_compared} narratives compared"
 ```
 
-`_write_liveness` had a fixed 4-arg signature with four existing call sites,
-each passing exactly four positional args; a bare 5th positional arg would
-have raised `TypeError` inside the function's own swallow-and-log wrapper,
-silently dropping the liveness write. The explicit-optional-parameter approach
-avoids that: the summary dict only gains a `vault_narratives_compared` key
-when the value is not `None`, and only the rotation call site that actually
-ran the vault comparison passes it — the other three call sites are unchanged
-and unbroken.
+That clause is written only on the one return that created a PR. The other
+returns — locked, dirty-tree, no-candidates, guard-skipped, zero-diff — never
+carry it, because none of them ran to the point of producing a PR summary.
 
-This makes "detector ran, found zero drift" (`vault_narratives_compared: 0`,
-key present) observably different from "the mapping is silently broken" (key
-absent entirely, from a call site that never ran the vault comparison) or
-from "vault unresolvable" (`vault_narratives_compared: 0` via
-`_resolve_vault_root` returning `None` before any file is read — same `0`
-value, but paired with the `docs_audit: vault root resolution failed` /
-`no knowledge_base mapping` warning in the logs). Inspect the current value
-with (a per-machine debugging aid; the durable operator surfaces are the
-GitHub issue tracker and the reflections dashboard's rendered
-`output_summary`):
+This makes three outcomes distinguishable by reading the summary alone:
 
-```bash
-redis-cli GET docs_audit:last_completed_run_summary
-```
+- **"Detector ran and compared N narratives"** — the clause reads `N > 0`.
+- **"The run never reached the created-PR path"** — the clause is absent
+  from the summary entirely (any non-PR return).
+- **"Vault unresolvable"** — the clause reads `0` on a created-PR run, paired
+  with the `docs_audit: vault root resolution failed` / `no knowledge_base
+  mapping` warning in the logs, which is what separates it from "resolved and
+  genuinely found nothing to compare."
+
+Check the current value on the reflections dashboard's "Last run summary"
+panel for `docs-auditor` (sourced from the `Reflection` record's
+`output_summary`) — the durable operator surfaces are that panel plus the
+GitHub issue tracker; there is no Redis key to read.
 
 ## Advisory only
 
@@ -260,8 +253,8 @@ all three are gone and that `_select_primary_doc` still globs only
   repo-doc counterpart / missing file / markitdown sidecar / secrets-guarded
   entry never read), the issue cap, and vault-unresolvable graceful
   degradation.
-- `TestWriteLivenessVaultParam` — 4-arg call sites unaffected, 5-arg call
-  site includes the count.
+- `TestVaultClauseInSummary` — the created-PR summary carries the count
+  unconditionally, including `0`, and no other summary string carries it.
 - `TestVaultDeadCodeRemoved` — the removed schema hook stays removed.
 
 ```bash

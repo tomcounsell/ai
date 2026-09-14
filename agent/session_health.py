@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
 from agent.session_pickup import _truthy
 from agent.session_runner.liveness import derive_sdk_ever_output, subprocess_hang_verdict
 from agent.session_stall_classifier import (
@@ -637,8 +638,9 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     # first tick after a resume. No anchor at all ⇒ evaluate (legacy fallback,
     # matching #1979); boundary ``last_tool_use_at == anchor`` counts as
     # current-run via ``>=``.
+    last_at_ts = _ts(last_at)
     anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
-    if anchor is not None and _ts(last_at) < anchor:
+    if anchor is not None and last_at_ts < anchor:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
@@ -655,8 +657,7 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         if raised > budget:
             budget = raised
             declared_note = f" (declared {int(capped)}s + {TOOL_TIMEOUT_DECLARED_GRACE_SEC}s grace)"
-    last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
-    age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
+    age = datetime.now(tz=UTC).timestamp() - last_at_ts
     if age <= budget:
         return None
     reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s{declared_note}"
@@ -1611,8 +1612,7 @@ def _never_started_past_grace(
             # Legacy / phantom record — no running_seconds, safe default.
             return False
 
-        started_aware = started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-        running_seconds = (now - started_aware).total_seconds()
+        running_seconds = now.timestamp() - _ts(started_ref)
 
         threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
         return running_seconds > threshold
@@ -1747,8 +1747,7 @@ def _has_progress(entry: AgentSession) -> bool:
     for progress_attr in ("last_tool_use_at", "last_turn_at"):
         ts = getattr(entry, progress_attr, None)
         if isinstance(ts, datetime):
-            ts_aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
-            if (now_utc - ts_aware).total_seconds() < SDK_PROGRESS_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(ts) < SDK_PROGRESS_FRESHNESS_WINDOW:
                 return True
 
     # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed
@@ -1767,8 +1766,7 @@ def _has_progress(entry: AgentSession) -> bool:
     if not sdk_ever_output:
         hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
-            hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
-            if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(hb) < HEARTBEAT_FRESHNESS_WINDOW:
                 # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
                 # fast-path when the session is never-started past grace.
                 # Threads the shared trusted clock (now=now_utc, issue #1905)
@@ -1801,10 +1799,7 @@ def _has_progress(entry: AgentSession) -> bool:
                     # ``created_at`` introduction or phantom record) →
                     # preserve fast-path.
                     return True
-                started_aware = (
-                    started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-                )
-                running_seconds = (now_utc - started_aware).total_seconds()
+                running_seconds = now_utc.timestamp() - _ts(started_ref)
                 if running_seconds < STARTUP_GRACE_SECONDS:
                     # Inside the startup grace window (or clock-skew negative
                     # running_seconds) → preserve fast-path. The
@@ -1849,8 +1844,7 @@ def _has_progress(entry: AgentSession) -> bool:
         _hb_own = getattr(entry, "last_heartbeat_at", None)
         _own_progress_fresh = False
         if isinstance(_hb_own, datetime):
-            _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
-            _hb_age = (now_utc - _hb_own_aware).total_seconds()
+            _hb_age = now_utc.timestamp() - _ts(_hb_own)
             if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
                 _own_progress_fresh = True
         # If heartbeat is stale or absent, fall through — do NOT return True.
@@ -2532,21 +2526,6 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     )
 
 
-# Honest substitution delivered in place of a promise-flagged deferred draft on
-# terminal paths (issue #2423). At terminal-flush time there is no live agent to
-# self-draft a rewrite, so the flush substitutes rather than suppresses (suppression
-# would reintroduce the #1796 swallowed-reply class). Two constraints on this text
-# (#3135): it must itself pass the promise heuristic, and every clause must be true
-# given only "the filter withheld the final message" — a block verdict carries no
-# information about whether any work completed, so the text may not claim failure
-# or invent a pending request.
-TERMINAL_PROMISE_FALLBACK_MESSAGE = (
-    "An outbound safety filter held back this session's final message. "
-    "The work may have finished normally; if something you expected is "
-    "missing, ask again in a new message."
-)
-
-
 def _gate_terminal_promise(message: str, *, transport: str, session_id: str | None) -> str:
     """Promise-gate the exact text a terminal flush is about to deliver (#2423).
 
@@ -2864,6 +2843,41 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             len(attached),
         )
         delivered = True
+
+        # Stamp response_delivered_at (#3270). This flush is the path PM/eng
+        # replies actually take, and until now it wrote the outbox payload
+        # without recording that the human had been answered. The only two
+        # other writers (agent/session_executor.py under `action == "deliver"`,
+        # agent/session_completion.py gated on `delivery_attempted`) are
+        # unreachable from here, so #918's duplicate-delivery guard
+        # `_delivery_belongs_to_current_run` read None and returned False for
+        # every deferred-self-draft delivery — and the #944 orphan net requeued
+        # rows that had already replied, once per tick.
+        #
+        # Narrow save: a bare save() here would be a full popoto HSET of a
+        # possibly-stale instance, i.e. a silent lifecycle write.
+        #
+        # ALSO mutate the caller's in-memory `session` object, for the same
+        # reason the extra_context clear below does: `finalize_session` runs a
+        # full `session.save()` on its own `session` parameter immediately
+        # after this flush returns, which writes back whatever that object
+        # still holds. Without the mirror the stamp is erased microseconds
+        # after it lands, on the very save that finalizes the transition.
+        try:
+            _stamp_at = datetime.now(tz=UTC)
+            _stamp_target = get_authoritative_session(session_id) or source
+            _stamp_target.response_delivered_at = _stamp_at
+            _stamp_target.save(update_fields=["response_delivered_at", "updated_at"])
+            if session is not None and session is not _stamp_target:
+                session.response_delivered_at = _stamp_at
+        except Exception as _stamp_err:
+            logger.warning(
+                "[session-health] failed to stamp response_delivered_at for %s after "
+                "successful flush (non-fatal; the #918 delivery guard stays blind for "
+                "this row): %s",
+                session_id,
+                _stamp_err,
+            )
 
         # Post-delivery flag clear (#3053 correction — the flush is NOT
         # self-clearing via #2489; that clear covers only the redraft-success
@@ -3421,6 +3435,17 @@ async def _apply_recovery_transition(
     # that the delivery belongs to the current run's epoch
     # (response_delivered_at >= started_at, falling back to created_at; a
     # legacy row with no anchor still passes through, unguarded).
+    #
+    # No live-fence gate here, unlike the sibling guard in
+    # `_agent_session_health_check` (#3270). The difference is what this branch
+    # is an alternative TO: every caller of `_apply_recovery_transition` has
+    # already evaluated liveness and decided this row is being taken away from
+    # its runner — the only open question is whether it lands `pending`,
+    # `failed`, or `abandoned`. Finalizing a delivered row `completed` is
+    # strictly the gentler of those outcomes, so adding a fence gate here would
+    # not spare a live row, it would only route it into a harsher transition.
+    # The sibling guard needs the gate precisely because it runs BEFORE any
+    # liveness evaluation.
     if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
@@ -3719,6 +3744,7 @@ async def _apply_recovery_transition(
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_recovery_cap",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
@@ -3757,6 +3783,7 @@ async def _apply_recovery_transition(
                     f"kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_init_hang",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, init hang circuit break)
             try:
@@ -4651,7 +4678,23 @@ async def _agent_session_health_check() -> None:
         # falling back to created_at) so a stale prior-run delivery doesn't
         # suppress recovery of a genuinely stuck current run; legacy rows
         # with no anchor still pass through unguarded.
-        if _delivery_belongs_to_current_run(entry):
+        #
+        # ...and the row must not be EXECUTING (#3270). Because this branch
+        # deliberately skips the worker_alive/_has_progress evaluation, the
+        # only thing standing between it and a live mid-turn row is this
+        # check. `response_delivered_at` is now stamped mid-run on the
+        # deferred-self-draft redraft path (`agent/output_handler.py::send`),
+        # so a long eng/PM run that answers the human and then keeps working
+        # past this 300s cadence presents exactly the shape the branch below
+        # finalizes: status `running`, delivery inside the current run's
+        # epoch. Finalizing it `completed` writes a terminal status onto a row
+        # the runner is still driving — the mid-turn status corruption #3270
+        # exists to stop. A live execution fence is the same discriminator
+        # `models/session_lifecycle.py`'s idempotent-skip WARNING uses: the
+        # per-turn subprocess is still ours and still alive. A dead or absent
+        # fence still falls through, so the #918 duplicate-delivery guard this
+        # branch exists for is unchanged for genuinely stranded rows.
+        if _delivery_belongs_to_current_run(entry) and not _session_has_live_fence(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 

@@ -634,8 +634,16 @@ class TestDeliveryPathContracts:
         handler._redis.rpush.assert_called_once()
         assert handler._redis.rpush.call_args[0][0] == "telegram:outbox:contract-worker"
         payload = _json.loads(handler._redis.rpush.call_args[0][1])
-        # Identical shape to the CLI telegram contract above.
-        assert set(payload.keys()) == {"chat_id", "reply_to", "text", "session_id", "timestamp"}
+        # Identical shape to the CLI telegram contract above, including the
+        # `v` stamp every wire payload carries (bridge/wire_schemas.py).
+        assert set(payload.keys()) == {
+            "v",
+            "chat_id",
+            "reply_to",
+            "text",
+            "session_id",
+            "timestamp",
+        }
         assert payload["chat_id"] == "12345"
         assert payload["reply_to"] == 7
         assert payload["text"] == "silent worker reply"

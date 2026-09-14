@@ -256,11 +256,11 @@ The complementary defense at runtime is the `BackgroundTask._watchdog` cwd-vanis
 
 ## Bridge/Worker Restart After Merge
 
-If the merged PR touched `bridge/`, `agent/`, or `worker/`, run:
+If the merged PR touched `bridge/`, `agent/`, `worker/`, `models/`, `tools/`, `mcp_servers/`, or `config/` (the same path set `scripts/remote-update.sh` and `scripts/update/service.py` use to decide a restart), run:
 ```bash
 ./scripts/valor-service.sh restart
 ```
-Confirm with `tail -5 logs/bridge.log` showing "Connected to Telegram".
+Confirm with `tail -5 logs/bridge.log` showing "Connected to Telegram". On a worker-only machine use `worker-restart` instead. A PR that touched `reflections/` needs `scripts/install_reflection_worker.sh` (or `/update` with service restart enabled) as well: the reflection worker is a separate launchd service that `valor-service.sh restart` does not cycle.
 
 ## Gate Stack (this repo's deterministic checks)
 

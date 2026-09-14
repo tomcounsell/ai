@@ -2,13 +2,32 @@
 name: do-pr-review
 description: "Review a pull request against its plan. Triggered by 'review this PR', 'check the pull request', 'do a PR review', or a PR URL."
 argument-hint: "<pr-number>"
-context: fork
 allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*), Bash(sdlc-tool:*), Read, Write, Edit, Grep, Glob, Agent
 ---
 
 # PR Review
 
 Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing visual proof of UI changes before approval.
+
+## Execution Context
+
+This skill runs inline in the context that invokes it. It is deliberately not a
+`context: fork` skill: the harness withholds the Agent tool from any subagent at
+its spawn-depth limit (three layers below the main conversation by default, and
+a forked skill's subagent is an ordinary subagent, not a conversation fork). An
+SDLC supervisor already runs each stage inside its own general-purpose Agent, so
+a forked review landed exactly at that limit and could spawn no judges; the
+declared roster silently collapsed into one reviewer applying every lens in
+sequence while the posted review kept the multi-judge format. Running inline
+keeps the judges one layer shallower and leaves the isolation to whoever
+dispatched the stage. Invoke it directly from a top-level conversation and the
+judges are ordinary subagents; invoke it from a stage-runner Agent and they are
+that runner's subagents.
+
+Step 1 checks out the PR branch, so a caller that needs its own working
+directory preserved spawns this skill through the Agent tool with
+`isolation: "worktree"` and `run_in_background: false` — isolation belongs to
+the dispatcher, not to a fork declaration in this file.
 
 ## Repo Context Probe
 
@@ -140,6 +159,39 @@ Load `sub-skills/code-review.md` and follow it end to end. It covers:
 - The legacy cruft audit (advisory findings)
 - The Rubric, Pre-Verdict Checklist, and mechanical verdict derivation
 
+### 2.5 Judge Dispatch (only if the context file declares multi-judge consensus)
+
+In the generic case there is one reviewer and one verdict — skip this step.
+
+Where the context file declares a judge roster, dispatch one general-purpose
+Agent per declared judge, each carrying that judge's lens and the same PR
+context, then block on every judge returning in this turn before aggregating
+(Hard Rule 9). Pass `run_in_background: false` explicitly on every dispatch.
+**Do not pass `name` on judge dispatches:** a named spawn from inside a subagent
+is refused with a misleading "Teammates cannot spawn other teammates" error
+where the identical unnamed dispatch succeeds.
+
+**Record the mode.** The value of a judge roster is independent convergence: two
+judges reaching the same blocker without seeing each other's reasoning is
+stronger evidence than one pass listing it twice. Set `REVIEW_MODE` before
+dispatching:
+
+- Agent tool present and the roster dispatched → `independent roster ({M} judges)`.
+- Agent tool absent from this context, or every dispatch refused with the
+  harness's spawn-depth error → apply each declared judge's lens yourself, in
+  sequence, and set `REVIEW_MODE` to `sequential lenses (Agent tool unavailable:
+  {exact tool error or "not in tool list"})`.
+
+The mode is stated in the aggregate `## Review:` comment and in the Step 6
+Output Summary, and never alters the verdict string. A sequential run still
+produces cited, verified findings; what it cannot produce is corroboration, and
+the reader must be able to see that from the review artifact alone.
+
+Sequential lenses are a collapsed roster, so they report as one: only the judges
+that actually ran are listed, the declared roster size still sets
+`expected_judges`, and the shortfall is recorded rather than read back as
+agreement between judges.
+
 ### 3. Screenshot Capture (if UI changes detected)
 
 Load `sub-skills/screenshot.md` when the diff touches UI files (HTML, CSS,
@@ -233,6 +285,7 @@ entirely.
 - **Branch** — `{head_branch}` → `{base_branch}`
 - **Plan** — `{plan_file}` or "none"
 - **Result** — {Approved | Changes Requested}
+- **Mode** — {REVIEW_MODE, when a judge roster was declared: `independent roster (M judges)` or `sequential lenses (Agent tool unavailable: reason)`}
 - **Review** — [{review_url}]({review_url})
 
 **Issues Found: {total}**
@@ -257,6 +310,11 @@ Multi-judge & cross-vendor consensus review is optional and only runs if the
 context file declares it — `outcome-contract.md` carries the invariants. In the
 generic case: one reviewer, one verdict.
 
+When a roster was declared, `REVIEW_MODE` travels with the verdict: the posted
+review states it, and a `sequential lenses (Agent tool unavailable: ...)` run
+names the reason in the OUTCOME `notes` so the router sees the degraded run
+without a human reading review prose.
+
 ## Hard Rules
 
 1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Verify posting succeeded per `post-review.md`. The SDLC dispatcher checks for both reviews and comments before advancing.
@@ -267,9 +325,11 @@ generic case: one reviewer, one verdict.
 6. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
 8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal, and the OUTCOME contract MUST NOT be emitted until that finalize call exits 0.** Emitting the OUTCOME block does NOT complete the skill — the declared finalize call (verdict + the head SHA it judged + completion marker, on APPROVED) must run and succeed first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. A non-zero exit from the finalize call is a hard stop: do not emit OUTCOME, do not treat the review as done. This is the #1 local-pipeline failure mode — do not exit until the finalize call reads back success.
-9. **Judge subagents run in the foreground and MUST be awaited in-turn (issue #2124 / WS-D).** If the context file declares multi-judge consensus, dispatch the judges and BLOCK on each returning IN THE SAME TURN before you aggregate, post the `## Review:` comment, or record the verdict. Pass `run_in_background: false` explicitly on every judge dispatch; omitting the flag is denied in an eng session rather than defaulted to foreground. NEVER `run_in_background` a judge and return while it is still in flight — a fork that exits with judges running kills those children, so nothing ever posts (the #2112 miss). The aggregate review artifact must be posted AND the verdict recorded BEFORE this skill returns. The REVIEW completion marker is now refused (`REVIEW_ARTIFACT_MISSING`) unless a posted review artifact is verifiable, so an un-awaited-judge exit fails closed rather than advancing the pipeline on nothing.
+9. **Judge subagents run in the foreground and MUST be awaited in-turn (issue #2124 / WS-D).** If the context file declares multi-judge consensus, dispatch the judges and BLOCK on each returning IN THE SAME TURN before you aggregate, post the `## Review:` comment, or record the verdict. Pass `run_in_background: false` explicitly on every judge dispatch, and no `name` (Step 2.5); omitting the background flag is denied in an eng session rather than defaulted to foreground. NEVER `run_in_background` a judge and return while it is still in flight — a parent that returns with judges running kills those children, so nothing ever posts (the #2112 miss). The aggregate review artifact must be posted AND the verdict recorded BEFORE this skill returns. The REVIEW completion marker is now refused (`REVIEW_ARTIFACT_MISSING`) unless a posted review artifact is verifiable, so an un-awaited-judge exit fails closed rather than advancing the pipeline on nothing.
 
 10. **A number the PR claims is a claim, not evidence.** Counts, deltas, and benchmarks in a PR description, commit message, or upstream stage report ("mypy delta +0", "full suite green", "2x faster") were measured in someone else's environment. Reproduce any number you intend to rely on for the verdict, in your own environment, and review against what you observed. Two honest measurements can disagree — dependency sets, tool versions, and stub packages all move the number, and a suite that silently deselects tests reports green while running fewer of them. A number you cannot reproduce is an unverified finding: per the mandatory finding-verification rule, do not credit it, and say in the review that it was unverified rather than treating it as satisfied.
+
+11. **A judge roster that could not be spawned MUST be disclosed in the review.** If the context file declares multi-judge consensus and the Agent tool is unavailable — absent from the tool list, or every dispatch refused with the harness's spawn-depth error — the review body and the Output Summary state `sequential lenses (Agent tool unavailable: {exact tool error or "not in tool list"})`, and the run is recorded as the shortfall it is. A review that applied every lens in one pass while presenting itself as a multi-judge consensus asserts corroboration that never happened; that silent collapse is what #3198 fixed, and the disclosure is what keeps it visible if it recurs for any other reason.
 
 ## Best Practices
 

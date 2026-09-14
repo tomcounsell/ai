@@ -158,11 +158,12 @@ real terminal interruption, and zero messages for an auto-resuming one.
 
 ## Reason-Aware Interrupt Messaging and Failure Notification (issue #1877; silent-resume inversion)
 
-`agent/notification_copy.py` is the single source of truth for the
-user-facing lifecycle copy that both this doc and `agent/messenger.py` /
-`agent/session_completion.py` reference: `INTERRUPT_NO_RESUME` and
-`FAILURE_NOTICE`. Send sites import these constants rather than inlining
-literal strings, so a copy change is a single-file edit. There is no longer
+`agent/notification_copy.py` is the single source of truth for **every**
+user-facing session-lifecycle string, including the `INTERRUPT_NO_RESUME` and
+`FAILURE_NOTICE` constants this doc and `agent/messenger.py` /
+`agent/session_completion.py` reference. Read the module for the current set
+rather than relying on a list here. Send sites import these constants rather
+than inlining literal strings, so a copy change is a single-file edit. There is no longer
 a "will resume automatically" copy constant — auto-resuming interruptions
 are silent by design (issue #1937), not narrated with a mid-flight promise.
 A session finishes or fails; nothing in between speaks.

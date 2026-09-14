@@ -239,13 +239,14 @@ class BackgroundTask:
         """Execute the work and handle completion.
 
         Note (hotfix #1055): Post-session memory extraction is NO LONGER called
-        from here. It is scheduled by ``agent/session_executor.py::
-        _schedule_post_session_extraction`` AFTER ``complete_transcript(...)``
-        runs, as a fire-and-forget ``asyncio.create_task`` — so a hang in
-        extraction cannot block session finalization or the dev→PM nudge.
-        Do NOT re-introduce an ``await run_post_session_extraction(...)``
-        block here: it would couple extraction latency to ``_run_work`` and
-        regress the 6-hour stall observed in #1055.
+        from here. ``agent/session_executor.py`` enqueues a
+        ``SideEffectJob(kind="memory_extraction")`` AFTER
+        ``complete_transcript(...)`` runs, and the ``side-effect-drain``
+        reflection runs it out of process — so a hang in extraction cannot
+        block session finalization or the dev→PM nudge. Do NOT re-introduce an
+        ``await run_post_session_extraction(...)`` block here: it would couple
+        extraction latency to ``_run_work`` and regress the 6-hour stall
+        observed in #1055.
         """
         try:
             self._result = await coro

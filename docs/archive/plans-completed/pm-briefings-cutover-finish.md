@@ -169,23 +169,23 @@ Current (post-`bee105d5`) state → `git mv` package + import sweep → add re-e
 ## Test Impact
 
 - [ ] `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py` — DELETE: scenario no longer exists once the shim is gone.
-- [ ] `tests/unit/reflections/test_pm_audio_briefing_builder.py` — UPDATE: rename file to `test_pm_briefings_builder.py`; update `from reflections.pm_audio_briefing import builder` → `from reflections.pm_briefings import builder`.
+- [ ] `tests/unit/reflections/test_pm_audio_briefing_builder.py` — UPDATE: rename file to `test_reflections_pm_briefings_builder.py`; update `from reflections.pm_audio_briefing import builder` → `from reflections.pm_briefings import builder`.
 - [ ] `tests/unit/reflections/test_pm_audio_briefing_collector.py` — UPDATE: same rename + import update.
 - [ ] `tests/unit/reflections/test_pm_audio_briefing_delivery.py` — UPDATE: same rename + import update.
-- [ ] `tests/unit/reflections/test_pm_audio_briefing_init.py` — UPDATE: rename to `test_pm_briefings_init.py` + import update.
-- [ ] `tests/unit/reflections/test_pm_briefings_machine_gate.py` — UPDATE: change `from reflections import pm_audio_briefing as briefing` → `from reflections import pm_briefings as briefing`.
-- [ ] `tests/unit/reflections/test_pm_briefings_skip_when_empty.py` — UPDATE: same import change.
-- [ ] `tests/unit/reflections/test_pm_briefings_slot_match.py` — UPDATE: same import change.
-- [ ] `tests/unit/reflections/test_daily_log_renderer.py` — UPDATE: change `import reflections.pm_audio_briefing.daily_log as dr` → `import reflections.pm_briefings.daily_log as dr`. Drop the comment about the inlining transition.
-- [ ] `tests/unit/reflections/test_daily_log_audio_guard.py` — UPDATE: change `from reflections.pm_audio_briefing.builder import …` → `from reflections.pm_briefings.builder import …`. Rename test `test_regexes_importable_from_pm_audio_briefing` → `test_regexes_importable_from_pm_briefings`.
-- [ ] `tests/unit/reflections/test_log_audit_sentry.py` — UPDATE: import sweep to `reflections.pm_briefings.log_audit`.
-- [ ] `tests/unit/reflections/test_daily_log_aggregator.py` — UPDATE: import sweep to `reflections.pm_briefings.daily_log`.
+- [ ] `tests/unit/reflections/test_pm_audio_briefing_init.py` — UPDATE: rename to `test_reflections_pm_briefings_init.py` + import update.
+- [ ] `tests/unit/reflections/test_reflections_pm_briefings_machine_gate.py` — UPDATE: change `from reflections import pm_audio_briefing as briefing` → `from reflections import pm_briefings as briefing`.
+- [ ] `tests/unit/reflections/test_reflections_pm_briefings_skip_when_empty.py` — UPDATE: same import change.
+- [ ] `tests/unit/reflections/test_reflections_pm_briefings_slot_match.py` — UPDATE: same import change.
+- [ ] `tests/unit/reflections/test_reflections_daily_log_renderer.py` — UPDATE: change `import reflections.pm_audio_briefing.daily_log as dr` → `import reflections.pm_briefings.daily_log as dr`. Drop the comment about the inlining transition.
+- [ ] `tests/unit/reflections/test_reflections_daily_log_audio_guard.py` — UPDATE: change `from reflections.pm_audio_briefing.builder import …` → `from reflections.pm_briefings.builder import …`. Rename test `test_regexes_importable_from_pm_audio_briefing` → `test_regexes_importable_from_pm_briefings`.
+- [ ] `tests/unit/reflections/test_reflections_log_audit_sentry.py` — UPDATE: import sweep to `reflections.pm_briefings.log_audit`.
+- [ ] `tests/unit/reflections/test_reflections_daily_log_aggregator.py` — UPDATE: import sweep to `reflections.pm_briefings.daily_log`.
 - [ ] `tests/unit/test_ui_reflections_data.py` — UPDATE: any `pm-audio-briefing` literal in test fixtures swapped for `pm-briefings` per ui/data/reflections.py current state; assertions updated.
 - [ ] `tests/unit/test_reflections_package.py` — UPDATE: package-discovery assertions now resolve `reflections.pm_briefings` only; legacy module name drops out.
 - [ ] `tests/unit/test_reflection_scheduler.py` — UPDATE: any registry-entry fixture using `pm_audio_briefing` callable string updated.
-- [ ] `tests/integration/reflections/test_pm_audio_briefing_e2e.py` — UPDATE: rename file to `test_pm_briefings_e2e.py`; update all `reflections.pm_audio_briefing.*` imports → `reflections.pm_briefings.*`. Pre-existing test name like `test_*_pm_audio_briefing_*` renamed to `pm_briefings`.
-- [ ] `tests/integration/reflections/test_pm_briefings_dispatch.py` — UPDATE: import sweep to `reflections.pm_briefings`.
-- [ ] **NEW** `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` — REPLACE the deleted legacy-config-migration test with a test asserting the no-slots warning + clean return path.
+- [ ] `tests/integration/reflections/test_pm_audio_briefing_e2e.py` — UPDATE: rename file to `test_reflections_pm_briefings_e2e.py`; update all `reflections.pm_audio_briefing.*` imports → `reflections.pm_briefings.*`. Pre-existing test name like `test_*_pm_audio_briefing_*` renamed to `pm_briefings`.
+- [ ] `tests/integration/reflections/test_reflections_pm_briefings_dispatch.py` — UPDATE: import sweep to `reflections.pm_briefings`.
+- [ ] **NEW** `tests/unit/reflections/test_reflections_pm_briefings_no_slots_configured.py` — REPLACE the deleted legacy-config-migration test with a test asserting the no-slots warning + clean return path.
 - [ ] **NEW** `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` — assert that `reflections.pm_audio_briefing.run is reflections.pm_briefings.run` so the deploy-window shim doesn't silently regress.
 
 ## Rabbit Holes
@@ -303,7 +303,7 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 - **Parallel**: false
 - `git mv reflections/pm_audio_briefing reflections/pm_briefings`.
 - Sweep `pm_audio_briefing` → `pm_briefings` across `reflections/`, `tests/`, `ui/data/reflections.py`, `agent/`, `scripts/`, plus any docstrings. Use `grep -rl pm_audio_briefing` to enumerate, then per-file `sed`. **Do not** sweep `docs/plans/critiques/`, `docs/plans/daily-log-overhaul.md`, `docs/plans/completed/`, or this plan file — those are historical.
-- Rename test files `test_pm_audio_briefing_*.py` → `test_pm_briefings_*.py` (unit + integration) via `git mv`. Update `tests/integration/reflections/test_pm_audio_briefing_e2e.py` → `test_pm_briefings_e2e.py`.
+- Rename test files `test_pm_audio_briefing_*.py` → `test_pm_briefings_*.py` (unit + integration) via `git mv`. Update `tests/integration/reflections/test_pm_audio_briefing_e2e.py` → `test_reflections_pm_briefings_e2e.py`.
 - Create `reflections/pm_audio_briefing.py` (single-file shim, NOT a package) re-exporting from `reflections.pm_briefings` (see Technical Approach).
 - Add `tests/unit/reflections/test_pm_audio_briefing_reexport_shim.py` asserting `reflections.pm_audio_briefing.run is reflections.pm_briefings.run`.
 - Run `pytest tests/unit/reflections/ tests/integration/reflections/ -x -q` to confirm imports resolve.
@@ -311,14 +311,14 @@ builder + validator (Tier 1 only — Small appetite, mechanical work).
 ### 2. Delete `_load_slots` shim and add no-slots warning
 - **Task ID**: build-shim-removal
 - **Depends On**: build-rename
-- **Validates**: `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` (new), existing `test_pm_briefings_skip_when_empty.py`
+- **Validates**: `tests/unit/reflections/test_reflections_pm_briefings_no_slots_configured.py` (new), existing `test_reflections_pm_briefings_skip_when_empty.py`
 - **Assigned To**: cutover-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Delete `_load_slots()` function body in `reflections/pm_briefings/__init__.py`.
 - Replace `slots = _load_slots(project)` with `slots = (project.get("pm_briefing") or {}).get("slots") or []`. If empty, log warning and skip the project.
 - Delete `tests/unit/reflections/test_pm_briefings_legacy_config_migration.py`.
-- Add `tests/unit/reflections/test_pm_briefings_no_slots_configured.py` covering enabled-without-slots warning path.
+- Add `tests/unit/reflections/test_reflections_pm_briefings_no_slots_configured.py` covering enabled-without-slots warning path.
 
 ### 3. UI comment-block cleanup
 - **Task ID**: build-ui-comment

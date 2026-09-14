@@ -831,8 +831,15 @@ class TestSigtermExitCode:
             "Exit code 1 log line must mention ThrottleInterval for operator clarity"
         )
 
-    def test_configure_logging_uses_utc_formatter(self):
-        """_configure_logging() must attach a UTC-converting formatter to handlers."""
+    def test_configure_logging_emits_utc_timestamps(self):
+        """Every handler _configure_logging() attaches must timestamp in UTC.
+
+        Asserted on the rendered line, not on ``formatter.converter``. The
+        file handler emits JSON (#3183 lane 5a) and its formatter reaches UTC
+        by overriding ``formatTime`` rather than by setting ``converter``, so
+        a mechanism check would pass on the stderr handler and fail on the
+        file handler while both are, in fact, UTC.
+        """
         import logging
         import time
 
@@ -843,6 +850,10 @@ class TestSigtermExitCode:
         original_handlers = root_logger.handlers[:]
         root_logger.handlers = []
 
+        # A fixed instant whose UTC and local renderings differ anywhere but UTC.
+        created = 1_700_000_000.0
+        expected_hms = time.strftime("%H:%M:%S", time.gmtime(created))
+
         try:
             _configure_logging()
             handlers = root_logger.handlers
@@ -850,9 +861,20 @@ class TestSigtermExitCode:
             for handler in handlers:
                 fmt = handler.formatter
                 assert fmt is not None, f"Handler {handler} has no formatter"
-                assert getattr(fmt, "converter", None) is time.gmtime, (
-                    f"Handler {handler} formatter.converter must be time.gmtime (UTC), "
-                    f"got: {getattr(fmt, 'converter', None)}"
+                record = logging.LogRecord(
+                    name="utc-probe",
+                    level=logging.INFO,
+                    pathname=__file__,
+                    lineno=1,
+                    msg="probe",
+                    args=(),
+                    exc_info=None,
+                )
+                record.created = created
+                rendered = fmt.format(record)
+                assert expected_hms in rendered, (
+                    f"Handler {handler} rendered {rendered!r}, which does not carry "
+                    f"the UTC time {expected_hms}"
                 )
         finally:
             # Restore original handlers

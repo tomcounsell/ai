@@ -47,10 +47,11 @@ meaningless out of context.
 
 | Class | Sites | Rule |
 |-------|-------|------|
-| **Conversation-level originating writes** | `bridge/telegram_bridge.py` `_ack_steering_routed` (4 of its 5 callers) and both edit-steer paths, `tools/valor_session.py` resume, `agent/session_executor.py` `steer_session` | **Room**, when a Room resolves |
+| **Conversation-level originating writes** | `bridge/telegram_bridge.py` `_ack_steering_routed` (4 of its 5 callers) and both edit-steer paths, `agent/session_executor.py` `steer_session` | **Room**, when a Room resolves |
 | **Requeue writes** | `agent/health_check.py::_repush_messages`, `agent/session_runner/runner.py::_default_steering_push`, `agent/session_executor.py`'s remaining-message re-push | **The leg the message was drained from** |
 | **Abort signals** | any push with `is_abort` true, explicit or auto-detected from `ABORT_KEYWORDS`, including `scripts/steer_child.py --abort` | **Legacy, always** — "You MUST stop immediately" is destructive and non-idempotent; delivered to the wrong session it kills innocent work. Stranding an abort is the correct failure mode |
 | **Session-scoped diagnostics** | `agent/output_handler.py` drafter self-draft, `agent/session_health.py` tool-timeout advisory, `monitoring/session_watchdog.py` loop-break steer | **Legacy** — each describes the state of *this* session. Delivered to a successor it is noise. The drafter one also has a session-keyed attempt budget (`steering:attempts:{session_id}`) that a Room-durable copy would escape |
+| **Resume** | `tools/valor_session.py::resume_session` | **Legacy, always** — a resume names one row, transitions that row in place, and the worker runs it in that row's own `working_dir`. It calls `push_steering_message(session_id, outbound, ...)` with no `room_id`, which resolves to `steering:{session_id}` — the row it targets is the only row that can drain it. A Room-scoped push here would be drained by whichever session next serves the Room, not necessarily the resumed one |
 | **No live row / ORM-free writers** | `bridge/telegram_bridge.py`'s in-memory coalescing guard, `scripts/migrate_steering_queue_drain.py` | **Legacy** — neither holds a session row it could derive a Room from, and fabricating one picks an arbitrary row |
 
 The caller derives `room_id` via `models.room.room_id_for_session` and hands it

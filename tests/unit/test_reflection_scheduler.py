@@ -1162,6 +1162,7 @@ class TestEnqueueAgentReflectionTypedErrors:
 
         async def fake_push(**kwargs):
             captured.update(kwargs)
+            return 1, "0" * 32
 
         with (
             patch(
@@ -1201,6 +1202,7 @@ class TestEnqueueAgentReflectionTypedErrors:
 
         async def fake_push(**kwargs):
             captured.update(kwargs)
+            return 1, "0" * 32
 
         with (
             patch(

@@ -3,8 +3,8 @@
 Runs the REAL script inside a sandboxed fake project: a tmp project dir carrying the
 real ``valor-service.sh`` + ``scripts/lib/launchctl.sh``, a stub ``launchctl`` on PATH
 that mimics the errno-5 EIO race with a configurable ``kickstart -k`` recovery, a stub
-``pgrep`` that reports a process found only for worker-pattern queries, and an
-overridden ``$HOME``. No real launchd services are touched.
+``scripts/lib/service_pids.sh`` that reports a process found only for worker-pattern
+queries, and an overridden ``$HOME``. No real launchd services are touched.
 
 Covers, for each of the three bare-bootstrap call sites hardened by #2013
 (``install_bridge_components`` L548, ``bootstrap_plist_idempotent`` L392 — hit once
@@ -26,7 +26,7 @@ one run (bridge install L548 + ``bootstrap_plist_idempotent`` L392 for both the
 update-cron and watchdog labels — bridge role defaults to true when no
 ``projects.json`` is present, so the sandbox never needs to fabricate one). Its
 trailing ``status_bridge`` call independently returns non-zero in this sandbox (no real
-bridge process is ever spawned — see the pgrep stub below) which aborts the script
+bridge process is ever spawned — see the service_pids stub below) which aborts the script
 under ``set -e`` AFTER all three bootstrap call sites have already run. That is an
 unrelated environmental artifact of the sandbox, not a bootstrap failure, so the
 ``install`` tests assert on CALL_LOG/stdout/stderr markers (proving every stage was
@@ -48,6 +48,7 @@ pytestmark = pytest.mark.unit
 PROJECT_DIR = Path(__file__).parent.parent.parent
 REAL_SCRIPT = PROJECT_DIR / "scripts" / "valor-service.sh"
 REAL_LAUNCHCTL_LIB = PROJECT_DIR / "scripts" / "lib" / "launchctl.sh"
+REAL_SERVICE_PIDS_LIB = PROJECT_DIR / "scripts" / "lib" / "service_pids.sh"
 
 # Mirrors LAUNCHCTL_BOOTSTRAP_RETRIES (default) — the base env sets it to 3 so
 # count assertions on the bootstrap-retry loop (loop A) stay deterministic.
@@ -119,55 +120,74 @@ case "$cmd" in
 esac
 """
 
-# Only "worker"-pattern pgrep queries report a process found. This keeps
+# Every stub of `scripts/lib/service_pids.sh` installed into a fake project
+# first SOURCES the real library, then redefines only the two input functions:
+# `service_pids` (what the process table reports) and
+# `service_pid_is_own_ancestor` (what the ancestry walk answers). The real
+# `service_pid_refuse_self_kill` body — its list iteration, its message
+# wording, its `|| return 1` shape — is therefore exactly what the script
+# under test runs in every test here, and cannot drift from the library the
+# way a copied body would (#3208 review). It also replaces the old `pgrep`
+# stub on PATH and is a strictly tighter seam: the real helper shells out to
+# `ps` against the host process table, so shadowing `pgrep` no longer
+# intercepts anything. Stubbing the helper catches every probe by name instead.
+#
+# In the default stub, only "worker" queries report a process found. This keeps
 # `stop_bridge`'s retry loop from spinning (bridge queries report "not found" so
-# `stop_bridge` short-circuits immediately) while `is_worker_running` reports success
-# right away for worker-start.
-PGREP_STUB = """#!/bin/bash
-echo "PGREP $*" >> "$CALL_LOG"
-# Env-gated (webui `restart` tests, #2123): report the bridge process as running
-# so restart_bridge's post-kickstart is_running probe succeeds. Existing tests
-# never set PGREP_BRIDGE_FOUND, so their behavior is unchanged.
-if [ -n "${PGREP_BRIDGE_FOUND:-}" ]; then
+# `stop_bridge` short-circuits immediately) while `is_worker_running` reports
+# success right away for worker-start.
+#
+# `service_pid_is_own_ancestor` always answers "no": the PIDs this stub invents
+# are not real, and nothing in the sandbox is a descendant of them, so the stop
+# paths must proceed exactly as they would against an unrelated live service.
+# The refusal branch has its own coverage in tests/unit/test_service_pids_lib.py
+# and in the always-ancestor tests at the bottom of this file.
+_SOURCE_REAL_LIB = f'source "{REAL_SERVICE_PIDS_LIB}"'
+
+SERVICE_PIDS_STUB = (
+    _SOURCE_REAL_LIB
+    + """
+
+service_pids() {
+    echo "SERVICE_PIDS $*" >> "$CALL_LOG"
+    # Env-gated (webui `restart` tests, #2123): report the bridge process as
+    # running so restart_bridge's post-kickstart is_running probe succeeds.
+    # Existing tests never set SERVICE_PIDS_BRIDGE_FOUND.
+    if [ -n "${SERVICE_PIDS_BRIDGE_FOUND:-}" ]; then
+        for a in "$@"; do
+            case "$a" in
+                *telegram_bridge*) echo 88888; return 0 ;;
+            esac
+        done
+    fi
+    # Env-gated (#1338 email-start-via-launchd test): report the email bridge as
+    # running ONLY after launchd has bootstrapped it (a prior email-bridge
+    # bootstrap is in the call log). This mirrors reality — the bridge is not
+    # running before start_email routes through launchd — so start_email's early
+    # is_email_running short-circuit does not fire, but its post-bootstrap probe
+    # succeeds. Existing tests never set SERVICE_PIDS_EMAIL_FOUND.
+    _email_booted=""
+    if [ -n "${SERVICE_PIDS_EMAIL_FOUND:-}" ]; then
+        grep -q "bootstrap.*email-bridge" "$CALL_LOG" 2>/dev/null && _email_booted=1
+    fi
+    if [ -n "$_email_booted" ]; then
+        for a in "$@"; do
+            case "$a" in
+                *email_bridge*) echo 77777; return 0 ;;
+            esac
+        done
+    fi
     for a in "$@"; do
         case "$a" in
-            *telegram_bridge*)
-                echo 88888
-                exit 0
-                ;;
+            *worker*) echo 99999; return 0 ;;
         esac
     done
-fi
-# Env-gated (#1338 email-start-via-launchd test): report the email bridge as
-# running ONLY after launchd has bootstrapped it (a prior email-bridge bootstrap
-# is in the call log). This mirrors reality — the bridge is not running before
-# start_email routes through launchd — so start_email's early is_email_running
-# short-circuit does not fire, but its post-bootstrap probe succeeds. Existing
-# tests never set PGREP_EMAIL_FOUND, so their behavior is unchanged.
-_email_booted=""
-if [ -n "${PGREP_EMAIL_FOUND:-}" ]; then
-    grep -q "bootstrap.*email-bridge" "$CALL_LOG" 2>/dev/null && _email_booted=1
-fi
-if [ -n "$_email_booted" ]; then
-    for a in "$@"; do
-        case "$a" in
-            *email_bridge*)
-                echo 77777
-                exit 0
-                ;;
-        esac
-    done
-fi
-for a in "$@"; do
-    case "$a" in
-        *worker*)
-            echo 99999
-            exit 0
-            ;;
-    esac
-done
-exit 1
+    return 1
+}
+
+service_pid_is_own_ancestor() { return 1; }
 """
+)
 
 
 class Harness:
@@ -184,14 +204,12 @@ class Harness:
         (scripts_dir / "lib").mkdir(parents=True)
         (scripts_dir / "valor-service.sh").write_text(REAL_SCRIPT.read_text())
         (scripts_dir / "lib" / "launchctl.sh").write_text(REAL_LAUNCHCTL_LIB.read_text())
+        (scripts_dir / "lib" / "service_pids.sh").write_text(SERVICE_PIDS_STUB)
 
         self.stub_bin.mkdir()
         launchctl = self.stub_bin / "launchctl"
         launchctl.write_text(LAUNCHCTL_STUB)
         launchctl.chmod(0o755)
-        pgrep = self.stub_bin / "pgrep"
-        pgrep.write_text(PGREP_STUB)
-        pgrep.chmod(0o755)
 
         self.agents_dir = self.home / "Library" / "LaunchAgents"
         self.agents_dir.mkdir(parents=True)
@@ -394,7 +412,7 @@ def test_worker_start_pid_verification_failure_warns(harness):
 #
 # These tests drive the REAL `restart` arm end-to-end. restart_bridge and
 # restart_worker are steered down their fast kickstart paths via the env-gated
-# LAUNCHCTL_LIST_LOADED / PGREP_BRIDGE_FOUND stub branches above, then
+# LAUNCHCTL_LIST_LOADED / SERVICE_PIDS_BRIDGE_FOUND stub branches above, then
 # restart_webui runs against the stubs below.
 #
 # NOTE on `kill`: bash's builtin `kill` preempts any PATH stub, so the KILL stub
@@ -499,7 +517,7 @@ class WebuiHarness(Harness):
             "WEBUI_STATE_DIR": str(self.webui_state),
             # Steer restart_bridge/restart_worker down their kickstart paths.
             "LAUNCHCTL_LIST_LOADED": "1",
-            "PGREP_BRIDGE_FOUND": "1",
+            "SERVICE_PIDS_BRIDGE_FOUND": "1",
             # Tiny env-overridable verify windows so failure scenarios stay fast.
             "WEBUI_PORT_FREE_RETRIES": "3",
             "WEBUI_SERVE_RETRIES": "10",
@@ -583,8 +601,8 @@ def _email_launchctl_calls(harness: Harness) -> list[str]:
 
 def test_email_disable_disables_and_bootouts(harness):
     # email-disable is the symmetric teardown: launchctl disable + bootout so the
-    # KeepAlive=true job stays down. pgrep reports the email bridge not running,
-    # so no PID-kill fallback fires.
+    # KeepAlive=true job stays down. The stubbed lookup reports the email bridge
+    # not running, so no PID-kill fallback fires.
     result = harness.run("email-disable")
     email_calls = _email_launchctl_calls(harness)
     assert any(line.startswith("LAUNCHCTL disable") for line in email_calls), harness.calls()
@@ -611,7 +629,7 @@ def test_email_start_routes_through_launchd_when_plist_installed(harness):
     # nohup process — it routes through launchd (enable + bootstrap, since the
     # list probe reports the label not loaded) so there's a single owner.
     _seed_email_plist(harness)
-    result = harness.run("email-start", extra_env={"PGREP_EMAIL_FOUND": "1"})
+    result = harness.run("email-start", extra_env={"SERVICE_PIDS_EMAIL_FOUND": "1"})
     email_calls = _email_launchctl_calls(harness)
     assert any(line.startswith("LAUNCHCTL enable") for line in email_calls), harness.calls()
     assert any("bootstrap " in line for line in email_calls), harness.calls()
@@ -627,3 +645,149 @@ def test_email_stop_transient_bootout_when_launchd_loaded(harness):
     assert any(line.startswith("LAUNCHCTL bootout") for line in email_calls), harness.calls()
     assert "use email-disable to keep it down" in result.stdout, result.stdout
     assert result.returncode == 0
+
+
+# === every teardown path refuses a self-kill (#3187, #3208 review) ===
+#
+# The always-ancestor stub reports every service found — never "not running" —
+# and answers "yes, ancestor" for any PID, so `service_pid_refuse_self_kill`
+# (the REAL body, sourced from the library above) refuses the first PID it
+# checks. Driving each teardown subcommand against it pins three things at
+# once: the refusal fires on that path, the `|| return 1` aborts the command
+# before any success line, and — the ordering the round-3 blocker demanded —
+# the refusal happens BEFORE any launchctl teardown call, so a refused
+# disable/stop leaves the live service fully up for an out-of-session rerun.
+#
+# The propagation tests (install, restart, worker-restart, email-restart)
+# cover the callers: a refused stop must abort the install/restart arm rather
+# than fall through to a start that would leave two services on one session
+# file / IMAP mailbox.
+_ALWAYS_FOUND_SELF_KILL_STUB = (
+    _SOURCE_REAL_LIB
+    + """
+
+service_pids() {
+    echo "SERVICE_PIDS $*" >> "$CALL_LOG"
+    for a in "$@"; do
+        case "$a" in
+            *worker*) echo 99999; return 0 ;;
+            *telegram_bridge*) echo 88888; return 0 ;;
+            *email_bridge*) echo 77777; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+service_pid_is_own_ancestor() { return 0; }
+"""
+)
+
+
+def _install_always_found_self_kill_stub(harness: Harness) -> None:
+    (harness.proj / "scripts" / "lib" / "service_pids.sh").write_text(_ALWAYS_FOUND_SELF_KILL_STUB)
+
+
+def test_disable_worker_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("worker-disable")
+    assert "REFUSING to stop worker" in result.stdout, result.stdout
+    # The refusal must abort disable_worker — the "killing PID" fallback line and
+    # the function's own trailing success message must never be reached.
+    assert "killing PID" not in result.stdout, result.stdout
+    assert "auto-respawn disabled" not in result.stdout, result.stdout
+    # Ordering: the gate refused BEFORE any launchd teardown call, so a refused
+    # disable tears down nothing — the worker is still fully up.
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_disable_email_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("email-disable")
+    assert "REFUSING to stop email bridge" in result.stdout, result.stdout
+    assert "killing PID" not in result.stdout, result.stdout
+    assert "auto-respawn disabled" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_stop_bridge_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("stop")
+    assert "REFUSING to stop bridge" in result.stdout, result.stdout
+    assert "Stopping bridge (PID" not in result.stdout, result.stdout
+    assert "Bridge stopped" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_stop_worker_refuses_self_kill_and_does_not_proceed(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("worker-stop")
+    assert "REFUSING to stop worker" in result.stdout, result.stdout
+    assert "Stopping worker (PID" not in result.stdout, result.stdout
+    assert "Worker stopped" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_stop_email_refuses_self_kill_before_the_launchd_teardown(harness):
+    # The launchd-LOADED posture is what makes the ordering pin load-bearing:
+    # before the round-3 fix this path ran `launchctl bootout` (which SIGTERMs
+    # the hosted session's ancestor) before the gate could refuse.
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("email-stop", extra_env={"LAUNCHCTL_LIST_LOADED": "1"})
+    assert "REFUSING to stop email bridge" in result.stdout, result.stdout
+    assert "Stopping email bridge" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_install_aborts_when_a_running_bridge_is_an_ancestor(harness):
+    # install replaces a running bridge; the pre-install stop refuses when that
+    # bridge hosts this shell, and the install must abort rather than
+    # bootstrap a second bridge over the live one.
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("install")
+    assert "REFUSING to stop bridge" in result.stdout, result.stdout
+    assert "Bridge service installed and started" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_restart_aborts_when_the_pre_stop_refuses(harness):
+    # Not launchd-loaded, so restart_bridge takes the manual fallback whose
+    # first step is the gated stop. The refusal must abort the whole `restart`
+    # arm before anything is kicked or bootstrapped.
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("restart")
+    assert "REFUSING to stop bridge" in result.stdout, result.stdout
+    assert "Worker restarted" not in result.stdout, result.stdout
+    mutations = [
+        line
+        for line in harness.launchctl_calls()
+        if line.startswith(("LAUNCHCTL kickstart", "LAUNCHCTL bootstrap"))
+    ]
+    assert mutations == [], harness.calls()
+    assert result.returncode == 1
+
+
+def test_worker_restart_aborts_when_the_pre_stop_refuses(harness):
+    # Same shape as `restart`, on restart_worker's manual fallback.
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("worker-restart")
+    assert "REFUSING to stop worker" in result.stdout, result.stdout
+    assert "Worker restarted" not in result.stdout, result.stdout
+    assert not [
+        line for line in harness.launchctl_calls() if line.startswith("LAUNCHCTL kickstart")
+    ], harness.calls()
+    assert result.returncode == 1
+
+
+def test_email_restart_aborts_when_the_pre_stop_refuses(harness):
+    _install_always_found_self_kill_stub(harness)
+    result = harness.run("email-restart")
+    assert "REFUSING to stop email bridge" in result.stdout, result.stdout
+    assert "Email bridge stopped" not in result.stdout, result.stdout
+    assert harness.launchctl_calls() == [], harness.calls()
+    assert result.returncode == 1

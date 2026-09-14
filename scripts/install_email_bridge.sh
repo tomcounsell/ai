@@ -26,6 +26,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib/launchctl.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/service_pids.sh"
 
 set -a
 # shellcheck disable=SC1091
@@ -97,15 +99,19 @@ fi
 # nohup-spawned bridge. Bootstrapping over it would create a double-bridge
 # race (duplicate IMAP polling, kill-respawn collisions).
 # -----------------------------------------------------------------------------
+# Ancestor-safe (#3265). This is a read-only pre-check that fails DANGEROUS:
+# a missed foreground bridge lets the install proceed into the exact
+# double-bridge race the check exists to prevent. `pgrep` misses one whenever
+# the installer runs as a descendant of that bridge, so it reads `ps` instead.
 foreground_pids=""
-if pgrep -f "bridge.email_bridge" >/dev/null 2>&1; then
+if service_pids_email >/dev/null 2>&1; then
     # PIDs whose parent is not launchd (PPID != 1) are foreground-spawned.
     while IFS= read -r pid; do
         ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || echo "")
         if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
             foreground_pids="${foreground_pids} ${pid}"
         fi
-    done < <(pgrep -f "bridge.email_bridge")
+    done < <(service_pids_email || true)
 fi
 
 if [ -n "${foreground_pids// /}" ]; then
@@ -219,10 +225,10 @@ PYEOF
 # -----------------------------------------------------------------------------
 # Validate and bootstrap.
 # No watchdog: KeepAlive=true gives launchd-level restart on crash, mirroring
-# install_autoexperiment.sh and install_nightly_tests.sh which also rely on
-# KeepAlive alone. The com.valor.bridge-watchdog launchd service is specific
-# to the Telegram bridge's Telethon session-lock failure mode and does not
-# apply to the email bridge.
+# install_nightly_tests.sh which also relies on KeepAlive alone. The
+# com.valor.bridge-watchdog launchd service is specific to the Telegram
+# bridge's Telethon session-lock failure mode and does not apply to the
+# email bridge.
 # -----------------------------------------------------------------------------
 if ! plutil -lint "$PLIST_DST" > /dev/null; then
     echo "ERROR: Generated plist is invalid"

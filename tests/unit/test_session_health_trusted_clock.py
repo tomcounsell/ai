@@ -31,42 +31,30 @@ class TestHealNoLongerReSaves:
             "re-saving reshuffles the created_at-based index (C2, #1817)"
         )
 
-    @staticmethod
-    def _seed_future_updated_at(session: AgentSession, offset_hours: int = 7) -> datetime:
-        """Directly write a future updated_at into the Redis hash for the
-        given session, bypassing save()'s utc_now() stamping -- the same
-        seed technique used by tests/integration/test_updated_at_heal.py,
-        needed because there is no other way to reproduce the pre-fix
-        future-dated condition through the ORM."""
-        import msgpack
-        import popoto.redis_db as rdb
-
-        future_dt = datetime.now(UTC) + timedelta(hours=offset_hours)
-        encoded = msgpack.packb(
-            {"__datetime__": True, "as_encodable": future_dt.strftime("%Y%m%dT%H:%M:%S.%f")}
-        )
-        rdb.POPOTO_REDIS_DB.hset(session._redis_key, "updated_at", encoded)
-        return future_dt
-
     def test_heal_detects_but_does_not_persist_clamp(self, redis_test_db):
         """A future-dated record is detected (counted) but its persisted
         updated_at in Redis is left completely untouched -- no clamp,
-        no re-save, no index reshuffle."""
+        no re-save, no index reshuffle.
+
+        The future value is written through the ORM: `save(preserve_updated_at=True)`
+        skips the `updated_at = utc_now()` re-stamp that a plain `save()`
+        applies, so the future value survives the write; popoto 1.9.0 decodes
+        it back aware."""
         session = AgentSession(
             session_id="c2-heal-future-1",
             project_key="test-c2",
             status="completed",
         )
         session.save()
-        future_dt = self._seed_future_updated_at(session)
+        future_dt = datetime.now(UTC) + timedelta(hours=7)
+        session.updated_at = future_dt
+        session.save(preserve_updated_at=True)
 
         count = AgentSession._heal_future_updated_at()
         assert count >= 1, f"Expected the seeded future record to be detected, got count={count}"
 
         reloaded = AgentSession.get_by_id(session.id)
         reloaded_updated_at = reloaded.updated_at
-        if reloaded_updated_at.tzinfo is None:
-            reloaded_updated_at = reloaded_updated_at.replace(tzinfo=UTC)
 
         assert reloaded_updated_at > datetime.now(UTC), (
             "The persisted updated_at must STILL be future-dated after heal -- "

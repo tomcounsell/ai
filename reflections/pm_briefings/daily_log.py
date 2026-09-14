@@ -350,6 +350,8 @@ def _iso_in_window(iso: str, start: datetime, end: datetime) -> bool:
     except ValueError:
         return False
     if ts.tzinfo is None:
+        # Keep: `gh` emits both `Z`-suffixed and (rarely) offset-free
+        # timestamps; this is an external API response, not a popoto read.
         ts = ts.replace(tzinfo=UTC)
     return start <= ts <= end
 
@@ -377,9 +379,10 @@ def _collect_sessions(target_date: datetime) -> tuple[list[dict], str | None]:
         ca = getattr(s, "completed_at", None)
         if ca is None:
             continue
-        # `completed_at` is a DatetimeField — Popoto strips tzinfo on save
         if isinstance(ca, datetime):
-            ts = ca if ca.tzinfo else ca.replace(tzinfo=UTC)
+            # `completed_at` is in `_DATETIME_FIELDS`; popoto 1.9.0 decodes it
+            # aware, and every assignment coerces through `__setattr__`.
+            ts = ca
         else:
             try:
                 ts = datetime.fromtimestamp(float(ca), tz=UTC)

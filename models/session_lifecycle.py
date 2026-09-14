@@ -26,6 +26,8 @@ import socket
 import time
 from typing import NamedTuple
 
+from agent.lock_policy import record_lock_degradation
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,6 +232,57 @@ def update_session(
         session.save()
 
 
+def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
+    """Preserve a session's input on a terminal sink that never delivered it.
+
+    Two stages reach here, and they differ in exactly one way that matters:
+    whether replaying the input is meaningful.
+
+    ``session_recovery_cap`` is a session that ran, was recovered up to
+    MAX_RECOVERY_ATTEMPTS and never progressed. Its input is intact and
+    re-enqueuing it is a reasonable human decision, so the row is replayable.
+
+    ``session_init_hang`` is a session whose runner produced zero output. The
+    #2181 circuit breaker exists because re-spawning that identical input
+    reproduces the identical hang, so the row is deliberately NOT replayable:
+    it is evidence for a human, never something to auto-retry.
+
+    Best-effort and exception-isolated. A dead-letter write that raised here
+    would abort a terminal transition, which is strictly worse than losing the
+    record of a session that was already lost.
+    """
+    try:
+        from bridge import dead_letters
+
+        payload = {
+            "session_id": getattr(session, "session_id", None),
+            "agent_session_id": getattr(session, "agent_session_id", None),
+            "message_text": getattr(session, "message_text", None),
+            "chat_id": getattr(session, "chat_id", None),
+            "project_key": getattr(session, "project_key", None),
+            "extra_context": getattr(session, "extra_context", None),
+        }
+        project_key = getattr(session, "project_key", None)
+        if stage == "session_init_hang":
+            dead_letters.record(
+                "session_init_hang",
+                payload,
+                reason,
+                replayable=False,
+                project_key=project_key,
+            )
+        else:
+            dead_letters.record(
+                "session_recovery_cap",
+                payload,
+                reason,
+                replayable=True,
+                project_key=project_key,
+            )
+    except Exception as e:  # noqa: BLE001 -- never block a terminal transition
+        logger.debug("[lifecycle] terminal dead-letter write failed (non-fatal): %s", e)
+
+
 def finalize_session(
     session,
     status: str,
@@ -240,6 +293,7 @@ def finalize_session(
     skip_parent: bool = False,
     reject_from_terminal: bool = True,
     emit_telemetry: bool = True,
+    dead_letter_stage: str | None = None,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -284,6 +338,11 @@ def finalize_session(
             session is already terminal and the caller is trying to transition it to
             a different terminal status. Pass False for intentional terminal->terminal
             re-classification (e.g., escalating abandoned->failed on timeout).
+        dead_letter_stage: Keyword-only. When set, the session's input is
+            preserved as a DeadLetter of this stage before the terminal write.
+            Used by the two session-path sinks that end a session having never
+            delivered its work: ``session_recovery_cap`` and
+            ``session_init_hang``. Best-effort; never blocks the finalize.
 
     Raises:
         ValueError: If session is None or status is not terminal.
@@ -412,6 +471,7 @@ def finalize_session(
     current_status = getattr(session, "status", None)
     if current_status == status:
         _pending_on_reread = False
+        _fresh_for_idem = None
         try:
             _idem_sid = getattr(session, "session_id", None)
             if _idem_sid:
@@ -424,12 +484,69 @@ def finalize_session(
                     )
         except Exception:
             _pending_on_reread = False
-        _idem_log = logger.info if _pending_on_reread else logger.debug
-        _idem_log(
-            f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
-            f"already in terminal state {status!r}, skipping finalize"
-            + (" (deferred_self_draft_pending still set)" if _pending_on_reread else "")
-        )
+
+        # Promoted to WARNING when a LIVE execution fence is still bound to the
+        # row (#3270). A skip is routine when nobody is executing the session
+        # any more; it is an anomaly when the runner that owns this turn is
+        # still alive, because that is the turn-end finalize racing a status
+        # some other writer already put on the row. In the #3270 incident a
+        # stale full save wrote `completed` onto a mid-turn row, the real
+        # turn-end finalize skipped here, `completed_at` was never set, no
+        # lifecycle event was emitted — and a later stale save flipped the row
+        # back to `running`, where the orphan net requeued it once a tick for
+        # days. The live fence is the discriminator rather than a caller flag
+        # or a reason-string match, because it is a property of the row rather
+        # than of the caller.
+        #
+        # What the fence actually points at: the per-turn `claude -p`
+        # subprocess stamped by `agent/session_runner/runner.py` at spawn. By
+        # the ordinary turn-end finalize (`agent/session_executor.py`'s
+        # completion-exit guard) that subprocess has already exited, so the
+        # fence reads dead and the WARNING does NOT fire on the normal path —
+        # including the #3270 turn-end skip itself, which is why the incident
+        # was invisible in the first place. The finalizes that CAN trip it are
+        # the concurrent ones: a health-check or watchdog finalize landing
+        # while a turn's subprocess is still executing. That is exactly the
+        # signal wanted here — a terminal status being written onto a row
+        # somebody else is still running.
+        #
+        # Observability ONLY. The idempotency semantics are unchanged; that is
+        # #3253's territory.
+        _live_runner_pid = None
+        try:
+            _fence_src = _fresh_for_idem if _fresh_for_idem is not None else session
+            _fence = getattr(_fence_src, "live_fence", None)
+            if _fence:
+                from agent.pid_fence import fence_is_live
+
+                _fence_pid = _fence.get("pid")
+                if _fence_pid is not None and fence_is_live(
+                    int(_fence_pid), _fence.get("create_time")
+                ):
+                    _live_runner_pid = int(_fence_pid)
+        except Exception:
+            _live_runner_pid = None
+
+        if _live_runner_pid is not None:
+            logger.warning(
+                "[lifecycle] Session %s: finalize to %r skipped as idempotent while "
+                "runner pid=%s is still live — status found on the authoritative "
+                "record is %r. The turn is ending against a status this call did not "
+                "write, so completed_at and the lifecycle event are both lost. "
+                "reason=%r",
+                getattr(session, "session_id", "?"),
+                status,
+                _live_runner_pid,
+                getattr(_fresh_for_idem, "status", current_status),
+                reason,
+            )
+        else:
+            _idem_log = logger.info if _pending_on_reread else logger.debug
+            _idem_log(
+                f"[lifecycle] Session {getattr(session, 'session_id', '?')} "
+                f"already in terminal state {status!r}, skipping finalize"
+                + (" (deferred_self_draft_pending still set)" if _pending_on_reread else "")
+            )
         return
 
     # Terminal-state guard: refuse to re-classify a terminal session unless explicitly opted out.
@@ -542,6 +659,9 @@ def finalize_session(
     # reaper WANTS to find a still-alive detached harness whose session went
     # terminal, then reap it under the fence compare (a recycled pid reads as
     # "not ours"). Retaining the fence keeps that reap possible.
+    if dead_letter_stage:
+        _record_terminal_dead_letter(session, dead_letter_stage, reason)
+
     session.save()
 
     # 5.1. Defensive srem: remove session from ALL non-target status index sets.
@@ -573,18 +693,6 @@ def finalize_session(
             POPOTO_REDIS_DB.srem(idx_key.redis_key, member_key)
     except Exception as e:
         logger.debug(f"[lifecycle] Defensive srem failed (non-fatal): {e}")
-
-    # 5.5. Update TaskTypeProfile (after auto_tag sets task_type AND after status is saved)
-    # Runs only for completed sessions — profile is now authoritative after the Redis save above.
-    if not skip_auto_tag and status == "completed":
-        try:
-            from models.task_type_profile import update_task_type_profile
-
-            _profile_session_id = getattr(session, "session_id", None)
-            if _profile_session_id:
-                update_task_type_profile(_profile_session_id)
-        except Exception as e:
-            logger.debug(f"[lifecycle] TaskTypeProfile update failed (non-fatal): {e}")
 
     # Analytics: record session completion
     try:
@@ -846,8 +954,14 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
     NOT a general-purpose lock manager -- it exists solely to gate this one
     transition.
 
-    Fails OPEN (returns ``True``) on Redis errors: a Redis hiccup degrades
-    to today's CAS-only protection rather than starving the pending queue.
+    Policy: fail closed; a duplicate ``claude -p`` on one worktree corrupts
+    git state. On a Redis error this returns ``False`` and the caller skips
+    the session, so a prolonged Redis degradation stalls pickup rather than
+    risking two harnesses on one checkout. There is deliberately no
+    break-glass override (owner decision, #3183): the pop lock retries on the
+    next loop iteration anyway, and the degradation counter
+    (``agent/lock_policy.py``) makes the stall visible on the dashboard
+    instead of leaving it to be inferred from a corrupted worktree.
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
@@ -857,11 +971,12 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
         return bool(acquired)
     except Exception as e:
         logger.warning(
-            "[session-lifecycle] run-claim acquisition failed for %s (failing open): %s",
+            "[session-lifecycle] run-claim acquisition failed for %s (failing closed): %s",
             session_id,
             e,
         )
-        return True
+        record_lock_degradation("claim_pending_run", "closed")
+        return False
 
 
 # ── Issue-level SDLC ownership lock (issues #1954, #2003) ───────────────
@@ -1264,10 +1379,11 @@ def touch_issue_lock(
             then renew it to the max-lifetime ceiling with no supervisor
             behind it.
 
-    Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
-    ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
-    degrades to no cross-process protection rather than wedging the SDLC
-    pipeline. Each fail-open logs the swallowed error CLASS explicitly.
+    Fails OPEN (returns ``acquired=True``) on any Redis exception: a Redis
+    hiccup degrades to no cross-process protection rather than wedging the
+    SDLC pipeline, because the cost of two supervisors racing one issue is a
+    duplicated stage, not a corrupted checkout. Each fail-open logs the
+    swallowed error CLASS explicitly.
     A ``renew_only`` call is the ONE exception and fails CLOSED
     (``acquired=False``): reporting ownership it cannot verify is exactly
     the "renew a lease you do not hold" shape the mode exists to eliminate,

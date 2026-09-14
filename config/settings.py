@@ -10,7 +10,7 @@ import logging.handlers
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -237,7 +237,8 @@ class TimeoutSettings(BaseModel):
             "Timeout (seconds) for generic/other subprocess calls that are "
             "NOT git/gh-specific (grep, pgrep, launchctl kickstart, `ruff "
             "check`/`ruff format --check`, `pytest tests/unit/`, etc.), e.g. "
-            "monitoring/worker_watchdog.py's pgrep probe (5s) up to "
+            "monitoring/bridge_watchdog.py's `pgrep -f telegram_bridge.py` "
+            "stale-process sweep in kill_stale_processes() up to "
             "tools/doctor.py's full unit-test run (300s). Default normalizes "
             "to the LONGEST observed value in this bucket (300s, the pytest "
             "quality-gate check in tools/doctor.py) per Decision #1 -- safe "
@@ -563,6 +564,117 @@ class HybridEvalSettings(BaseModel):
     )
 
 
+class ImprovementSettings(BaseModel):
+    """Bounds for the recursive self-improvement controller (#3177).
+
+    The controller finds its own weaknesses, gathers what it needs to know,
+    tests candidate changes, and proposes measured improvements. These are the
+    limits it runs inside. Immutable, human-approved scope on top of them lives
+    in ``ImprovementCharter`` records in Redis, not here — a setting is a
+    default, a charter is an authorization, and the controller can amend
+    neither.
+
+    There is deliberately **no** setting bounding how many questions the
+    controller may ask a human per day. The bound is zero and the capability
+    does not exist: the controller asks Tom nothing. It resolves uncertainty
+    from Tom-sourced memories and online research, and records what it cannot
+    resolve as a provisional assumption with its evidence, surfaced on the
+    dashboard as an assumption rather than a fact. An anti-criterion in
+    ``docs/plans/recursive-self-improvement.md`` fails the build if a question
+    path reappears anywhere in bridge/, tools/, config/, models/, or ui/.
+
+    Budget is three separately reserved units, none of them a per-experiment
+    dollar ceiling for Claude. Claude work runs on the subscription and is
+    budgeted as SDLC lane concurrency. Paid inference on other models runs
+    through the existing OpenRouter path against a daily dollar pool, settled
+    per call from reported usage, with the controller and the evaluator drawing
+    separate reservations from it. Infrastructure (sandboxes, storage,
+    Cloudflare) draws on a weekly dollar pool of its own. The day and week
+    boundaries are disclosed rather than assumed, because a reservation that
+    resets on an undisclosed boundary cannot be audited.
+
+    Every default here is PROVISIONAL/TUNABLE. ``enabled`` defaults to False:
+    nothing in this system runs until it is deliberately turned on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the improvement controller. False means no "
+            "controller tick runs, no research session is dispatched, and no "
+            "evidence-collection adapter writes. The evidence-collection "
+            "reflection stays registered either way so turning this on needs "
+            "no re-registration. Env: IMPROVEMENT__ENABLED."
+        ),
+    )
+    max_concurrent_research_sessions: int = Field(
+        default=1,
+        ge=0,
+        le=4,
+        description=(
+            "How many research sessions may hold a lane slot at once. One is "
+            "the budgeted unit for Claude work: the subscription is the "
+            "constraint, so concurrency is the currency. Raising this competes "
+            "directly with ordinary SDLC lanes. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__MAX_CONCURRENT_RESEARCH_SESSIONS."
+        ),
+    )
+    daily_paid_inference_usd: float = Field(
+        default=10.00,
+        ge=0.0,
+        description=(
+            "Daily dollar pool for paid inference on non-Claude models through "
+            "the OpenRouter path, settled per call from the usage reported in "
+            "each response envelope. The controller and the evaluator draw "
+            "separate reservations from this one pool, so a runaway research "
+            "loop cannot starve the evaluator that would catch it. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__DAILY_PAID_INFERENCE_USD."
+        ),
+    )
+    weekly_infrastructure_usd: float = Field(
+        default=50.00,
+        ge=0.0,
+        description=(
+            "Weekly dollar pool for the infrastructure the loop runs on: "
+            "sandboxes, storage, and Cloudflare. Reserved separately from paid "
+            "inference and on a different window, because a week is the unit a "
+            "sandbox or a storage bucket is actually billed and reasoned about "
+            "in. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__WEEKLY_INFRASTRUCTURE_USD."
+        ),
+    )
+    budget_day_boundary: Literal["UTC"] = Field(
+        default="UTC",
+        description=(
+            "The timezone whose midnight ends a budget day. Disclosed rather "
+            "than assumed: a reservation that resets on an undisclosed "
+            "boundary cannot be audited against what was actually spent. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__BUDGET_DAY_BOUNDARY."
+        ),
+    )
+    budget_week_start: Literal["monday", "sunday"] = Field(
+        default="monday",
+        description=(
+            "The weekday a budget week begins on, for the infrastructure pool. "
+            "Disclosed for the same reason as the day boundary, and typed so a "
+            "bad override fails at settings load rather than at the first "
+            "window computation. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__BUDGET_WEEK_START."
+        ),
+    )
+    controller_tick_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description=(
+            "Cadence of the controller and evidence-collection ticks, in "
+            "seconds. Matches the cadence the evidence-collection reflection "
+            "registers with. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__CONTROLLER_TICK_SECONDS."
+        ),
+    )
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings."""
 
@@ -842,6 +954,18 @@ class FeatureSettings(BaseModel):
             "FEATURES__MAX_CRITIQUE_CYCLES."
         ),
     )
+    side_effects_paused: bool = Field(
+        default=False,
+        description=(
+            "Administrative pause for the side-effect drain "
+            "(agent/side_effects.py::run_due). While true the drain reports a "
+            "skip and runs no handler; jobs stay pending and drain when the "
+            "pause lifts, so pausing loses no work. Exists so post-session "
+            "memory extraction can be held off during an incident or a trial "
+            "arm without the enqueue path changing. Env: "
+            "FEATURES__SIDE_EFFECTS_PAUSED."
+        ),
+    )
 
 
 class SessionRunnerSettings(BaseModel):
@@ -926,6 +1050,85 @@ class SessionRunnerSettings(BaseModel):
             "Provisional/tunable. Override via WORKER_SUPERVISOR_BASE_BACKOFF_S env var."
         ),
     )
+
+
+class CodexSettings(BaseModel):
+    """Codex exec dev-lane configuration (plan #2001, Phase 3).
+
+    Provisional typed knobs for the opt-in Codex dev lane. Every value is
+    env-overridable via the ``CODEX__`` prefix (e.g.
+    ``CODEX__MAX_RESUMED_TURNS=20``) through the settings catalog — no
+    inline literals elsewhere. All defaults are provisional/tunable; a
+    version-floor bump must update fixtures/probes before changing the
+    gate (see agent/session_runner/harness/codex.py).
+    """
+
+    install_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in Codex CLI provisioning via scripts/update/codex_cli.py. "
+            "Default OFF — only opted-in machines install/upgrade @openai/codex. "
+            "Override via CODEX__INSTALL_ENABLED=1."
+        ),
+    )
+    npm_package: str = Field(
+        default="@openai/codex",
+        description="npm package name for Codex CLI provisioning. Override via CODEX__NPM_PACKAGE.",
+    )
+    min_version: str = Field(
+        default="0.144.3",
+        description=(
+            "Minimum verified Codex CLI version (JSONL/resume/schema contract, "
+            "live-probed). Override via CODEX__MIN_VERSION."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional Codex model override for dev turns. None inherits the "
+            "CLI default. Override via CODEX__MODEL."
+        ),
+    )
+    sandbox: str = Field(
+        default="workspace-write",
+        description=(
+            "Default Codex sandbox for dev turns. Only 'workspace-write' or "
+            "'danger-full-access' are accepted (validated); the CLI flag path "
+            "never selects danger-full-access. Override via CODEX__SANDBOX."
+        ),
+    )
+    turn_timeout_s: float = Field(
+        default=600.0,
+        gt=0,
+        le=900,
+        description=(
+            "Per-turn budget (seconds) bounding one codex_dev.run tool call. "
+            "Upper-bounded by the dev-lane lease TTL (900s, see "
+            "agent/codex_dev_lease.py): a turn that outlives the lease lets "
+            "a second turn acquire it and race on one thread. "
+            "Provisional/tunable. Override via CODEX__TURN_TIMEOUT_S."
+        ),
+    )
+    max_resumed_turns: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Provisional bound on resumed turns against one Codex thread. At "
+            "the limit the lane stops with an actionable PM-visible error "
+            "while preserving the thread — never silent rollover. "
+            "Override via CODEX__MAX_RESUMED_TURNS."
+        ),
+    )
+
+    @field_validator("sandbox")
+    @classmethod
+    def validate_sandbox(cls, v):
+        """Only the two explicit sandbox policies are accepted."""
+        allowed = ("workspace-write", "danger-full-access")
+        if v not in allowed:
+            raise ValueError(f"Codex sandbox must be one of: {', '.join(allowed)}")
+        return v
 
 
 class PathSettings(BaseModel):
@@ -1125,6 +1328,8 @@ class Settings(BaseSettings):
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     session_runner: SessionRunnerSettings = Field(default_factory=SessionRunnerSettings)
+    codex: CodexSettings = Field(default_factory=CodexSettings)
+    improvement: ImprovementSettings = Field(default_factory=ImprovementSettings)
 
     @field_validator("environment")
     @classmethod

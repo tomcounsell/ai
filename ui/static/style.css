@@ -1225,3 +1225,113 @@ a:hover {
     color: var(--text-primary);
     line-height: 1.3;
 }
+
+/* Nonzero counts on panels where zero is the healthy state (dead letters,
+   lock degradation): the neutral --text-primary above reads as "just a
+   number" for either state, so a real nonzero needs its own color. */
+.stat-card-value-alert {
+    color: var(--yellow);
+}
+
+/* --- Improvement + Pipeline integrity: compact secondary row -------------
+   Both panels are diagnostics, not the primary "what's running" view (that's
+   Jobs). They sit side-by-side in a bounded-width row instead of each
+   spanning the full page, so they read as a compact status strip rather than
+   competing with Jobs/Reflections for visual weight. */
+.compact-panels-row {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.compact-panel {
+    flex: 0 1 420px;
+    max-width: 420px;
+}
+
+.compact-panel .stats-group-cards {
+    grid-template-columns: 1fr;
+}
+
+/* --- Improvement controller panels (#3177) -------------------------------
+   Reuses the existing stat-card grid; these rules only add the prose,
+   table, and warning treatments the improvement panels need. The warning is
+   a full-width note rather than a colored left-border callout: a silent
+   collector is the panel's most important state, and it should read as a
+   sentence, not as decoration. */
+
+#improvement .improvement-meta,
+.improvement-panel .improvement-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin: 4px 0 10px;
+    max-width: 68ch;
+}
+
+.improvement-panel {
+    margin-bottom: 18px;
+}
+
+.improvement-warning {
+    font-size: 12px;
+    color: var(--yellow);
+    background: var(--yellow-bg);
+    padding: 8px 10px;
+    margin: 4px 0 10px;
+    max-width: 68ch;
+}
+
+.improvement-table {
+    width: 100%;
+    max-width: 420px;
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 12px;
+}
+
+.improvement-table th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    padding: 4px 8px 4px 0;
+}
+
+.improvement-table td {
+    padding: 3px 8px 3px 0;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.improvement-table td:first-child {
+    font-family: inherit;
+    color: var(--text-primary);
+}
+
+.improvement-list {
+    list-style: none;
+    padding: 0;
+    margin: 6px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.improvement-list li {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+}
+
+.improvement-tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-right: 6px;
+}
+
+#improvement h4 {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 14px 0 2px;
+}

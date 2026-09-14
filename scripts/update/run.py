@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.update import (  # noqa: E402
     cal_integration,
+    codex_cli,
     deps,
     env_sync,
     gh_auth,
@@ -53,6 +54,7 @@ from scripts.update import (  # noqa: E402
     warn_state,
     zshenv_sync,
 )
+from tools.process_lookup import is_own_ancestor  # noqa: E402
 
 
 @dataclass
@@ -165,11 +167,15 @@ class UpdateResult:
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
+    side_effect_drain_register_result: reflection_register.RegisterResult | None = None
+    dead_letter_replay_register_result: reflection_register.RegisterResult | None = None
+    improvement_collect_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
+    codex_cli_result: codex_cli.CodexCliResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
@@ -737,6 +743,9 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     the staleness the verify already computed and fix it in the same run.
 
     Sequence (parity with ``install_worker``'s #2141 drain gate):
+    0. Self-ancestry guard — if the running worker is an ancestor of THIS
+       process, DEFER (#3164). ``kickstart -k`` would SIGKILL the update run
+       itself; the launchd-parented cron restarts it instead.
     1. Drain — wait for in-flight sessions to finish. If they don't drain in
        the window, DEFER (return ``"deferred"``): never kill a live PM turn;
        the 30-min cron will restart the worker on its next tick.
@@ -748,6 +757,28 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     Returns one of ``"healed"`` | ``"deferred"`` | ``"failed"``. Never raises.
     """
     import time as _time
+
+    # 0. Never restart the worker this process is running inside (#3164).
+    #
+    # `service.get_worker_pid` is ancestor-safe now, so a `/update` run hosted
+    # by the worker gets back its own parent's PID — and `kickstart -k` SIGKILLs
+    # that process group, taking the run down mid-flight and leaving the verify
+    # unfinished. `pgrep`'s ancestor exclusion used to make this unreachable by
+    # accident; it is now an explicit decision. DEFER: the 30-min update cron
+    # runs from launchd, is not a worker descendant, and restarts it cleanly.
+    #
+    # Ordered ahead of the drain gate deliberately. Draining is a bounded but
+    # multi-minute wait, and the answer here does not depend on it.
+    worker_pid = service.get_worker_pid()
+    if worker_pid is not None and is_own_ancestor(worker_pid):
+        log(
+            f"self-heal: worker pid {worker_pid} is an ancestor of this update run — "
+            "DEFERRING restart (a kickstart would kill this process); "
+            "the update cron will restart it from launchd next cycle",
+            v,
+            always=True,
+        )
+        return "deferred"
 
     # 1. Drain before restart (#2141). Drain-probe errors fail open (restart).
     try:
@@ -824,15 +855,15 @@ def run_release_verify(
                 )
             elif outcome == "deferred":
                 log(
-                    "worker self-heal: restart DEFERRED (sessions in flight did not drain) — "
-                    "the 30-min update cron will restart the worker next cycle",
+                    "worker self-heal: restart DEFERRED — the 30-min update cron will "
+                    "restart the worker next cycle (reason logged above: sessions in "
+                    "flight, or the worker is this run's own ancestor)",
                     v,
                     always=True,
                 )
                 _append_warning(
                     result,
-                    "worker stale; self-heal restart deferred (sessions in flight) — "
-                    "cron will retry next update cycle",
+                    "worker stale; self-heal restart deferred — cron will retry next update cycle",
                 )
                 # A deferral is not a failure: drop the worker from alert
                 # consideration so it neither hard-fails nor Sentry-alerts.
@@ -1241,6 +1272,61 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not upr.success:
             log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
             _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
+
+        # Step 1.658b: Ensure the two ETL-pipeline reflections are registered
+        # (#3183) via the same generalized register path. Same ordering
+        # rationale as Steps 1.655-1.658: both run BEFORE Step 1.66's
+        # vault->config copy so the entries propagate into the per-machine
+        # config/reflections.yaml on this same cycle.
+        for _label, _register, _attr in (
+            (
+                "side-effect-drain",
+                reflection_register.register_side_effect_drain,
+                "side_effect_drain_register_result",
+            ),
+            (
+                "dead-letter-replay",
+                reflection_register.register_dead_letter_replay,
+                "dead_letter_replay_register_result",
+            ),
+        ):
+            log(f"Ensuring {_label} reflection is registered...", v)
+            _res = _register(project_dir)
+            setattr(result, _attr, _res)
+            if _res.action == "registered":
+                log(f"{_label} reflection registered in vault reflections.yaml", v, always=True)
+            elif _res.action == "noop":
+                log(f"{_label} reflection already registered", v)
+            elif _res.action == "skipped":
+                log(f"{_label} registration skipped: {_res.detail}", v)
+            if not _res.success:
+                log(f"WARN: {_label} registration: {_res.detail}", v, always=True)
+                _append_warning(result, f"{_label} registration: {_res.detail}")
+
+        # Step 1.6585: Ensure the improvement-evidence-collect reflection is
+        # registered (#3177) via the same generalized register path. Same
+        # ordering rationale as Steps 1.655-1.658: runs BEFORE Step 1.66's
+        # vault→config copy so the entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle. Without this tick nothing
+        # writes ImprovementEvidence and the improvement loop observes nothing.
+        log("Ensuring improvement-evidence-collect reflection is registered...", v)
+        result.improvement_collect_register_result = (
+            reflection_register.register_improvement_collect(project_dir)
+        )
+        icr = result.improvement_collect_register_result
+        if icr.action == "registered":
+            log(
+                "improvement-evidence-collect reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif icr.action == "noop":
+            log("improvement-evidence-collect reflection already registered", v)
+        elif icr.action == "skipped":
+            log(f"improvement-evidence-collect registration skipped: {icr.detail}", v)
+        if not icr.success:
+            log(f"WARN: improvement-evidence-collect registration: {icr.detail}", v, always=True)
+            _append_warning(result, f"improvement-evidence-collect registration: {icr.detail}")
 
         # Step 1.659: Repoint reflection callables onto the modules that own them.
         # Two migration families share one table: the `agent.sustainability.*` shim
@@ -1751,6 +1837,23 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
                 _append_warning(result, f"npm:{npm_r.name}: {npm_r.error}")
+
+    # Step 3.95: Codex CLI (opt-in dev lane, plan #2001 Task 4b). Disabled by
+    # default (CODEX__INSTALL_ENABLED=0): reports the installed version, if
+    # any, and touches nothing.
+    log("Checking Codex CLI...", v)
+    result.codex_cli_result = codex_cli.install_or_update()
+    cr = result.codex_cli_result
+    if cr.success:
+        if cr.action == "disabled":
+            log(f"  codex opt-in off{(' (' + cr.version + ' present)') if cr.version else ''}", v)
+        elif cr.action == "skipped":
+            log(f"  codex {cr.version} (up to date)", v)
+        else:
+            log(f"  codex {cr.action}: {cr.version}", v, always=True)
+    else:
+        log(f"  WARN: codex {cr.action}: {cr.error}", v)
+        _append_warning(result, f"codex:{cr.error}")
 
     # Step 3.10: sentry-cli install/update
     log("Checking sentry-cli...", v)
@@ -2359,6 +2462,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         else:
                             # Kickstart fallback: force-start the service if launchd
                             # didn't auto-start after bootout+bootstrap.
+                            #
+                            # No `is_own_ancestor` gate here, unlike the sibling
+                            # kickstart in `_self_heal_stale_worker`: this branch is
+                            # reached ONLY when `service.get_worker_pid()` returned
+                            # no PID — either no live worker, or a process table
+                            # that could not be read (`list_processes()` returns []
+                            # on any `ps` failure). There is therefore no PID in
+                            # hand to gate on. Safe in both cases because this is
+                            # `kickstart -k`, which asks launchd to kill-and-restart
+                            # its own job by label rather than signalling a PID this
+                            # run chose. That positional invariant is load-bearing
+                            # (#3164) — do not hoist this call out of the `else`,
+                            # where a live `worker_pid` IS in hand and skipping the
+                            # gate would let the run SIGKILL its own parent worker.
                             import subprocess
 
                             uid = os.getuid()

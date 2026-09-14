@@ -16,6 +16,14 @@ The schema-and-liveness half of the durability Room/Job/AgentSession refactor (p
 
 Stamped by the runner's `_on_turn_spawn` via `AgentSession.stamp_execution_spawn(...)` **before** the turn-await blocks, so a worker crash mid-turn always leaves a reapable, fenced record. `AgentSession.live_fence` returns the newest `spawn_history` entry (falling back to the denormalized scalars for a partially-written record). A save failure inside `stamp_execution_spawn` logs at WARNING, not DEBUG: this save is the fence's single point of entry, so a silent failure there would degrade every downstream consumer (kill, reprieve, sweep, and ownership sites) to "no fence recorded" without anyone noticing.
 
+### `exec_cwd` has a second writer and a second reader (issue #3176)
+
+`agent/session_executor.py` stamps `exec_cwd` a second time, earlier than `stamp_execution_spawn`: in the session-phase save block, immediately after the resolved worktree lane is known, before the harness subprocess is launched. This writes the identical value `stamp_execution_spawn` writes moments later from the same local (`str(working_dir)`) — the pre-stamp only narrows the window during which a lane resolved at execution time (a slugless eng session's synthesized `dev-{aid8}` worktree) is invisible to the busy scan, from "worktree creation through harness startup" down to "worktree creation through this save." A failed pre-stamp save logs `[lane-writeback]` at WARNING and does not fail the session.
+
+This pre-stamp carries **no pid and no `spawn_history` entry** — it writes only `exec_cwd` via `save(update_fields=[..., "exec_cwd"])`, nothing else in the fence. `AgentSession.live_fence` is therefore unaffected: it returns the newest `spawn_history` entry, or a reconstruction gated on `if self.exec_pid is not None:`, and a pre-stamp-only row satisfies neither. A row carrying only the pre-stamp reads `live_fence is None`, exactly as before this field had a second writer.
+
+The second reader is `agent/worktree_manager.py::_scan_worktree_sessions` (the busy-guard scan) — see [`session-isolation.md` § Worktree Busy Guard](session-isolation.md#worktree-busy-guard-issue-1357) for the full two-field match this enables.
+
 ### Removed fields
 
 The model does not carry `claude_pid`, `pm_pid`, `harness_pid`, or the write-only `expectations` field, and there is no `notify_sdk_started` callback path. There is no back-compat shim in the model — Popoto ignores unknown hash fields on load, so pre-cutover records hydrate fine, and a one-shot migration (below) reclaims the orphaned hash entries.

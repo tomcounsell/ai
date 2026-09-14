@@ -57,6 +57,16 @@ suppression notice spliced into the run's `summary` (placed before the PR
 URL so the 500-char truncation the reflection scheduler applies cannot drop
 it). Errors are swallowed; the auditor never crashes the worker.
 
+The resolution ladder itself — repo-root match, numeric `chat_id`, the
+`PROJECT_ROOT`-narrowed fallback — now lives in
+[`reflections/utilities.py::resolve_host_eng_chat`](reflection-telegram-routing.md)
+(#3072), lifted out of this module so `sentry_triage` and `stall_advisory`
+share the same host-machine rule instead of each asserting a destination.
+`docs_auditor._resolve_notify_chat(repo_root)` delegates to it, passing this
+module's own `load_local_projects` and `PROJECT_ROOT` bindings through so an
+existing `patch("reflections.docs_auditor....")` still lands correctly. The
+behavior described above is unchanged by the lift.
+
 A guard-skipped run (daily PR cap reached, or an open PR already exists for
 the picked doc's slug) performs no working-tree write and no git operation,
 but it still stamps the rotation hash for the doc it picked — exactly as a
@@ -65,6 +75,54 @@ the next run instead of re-picking the same blocked one forever. Without that
 stamp, one long-lived withheld PR (which the sweeper never closes — see
 [Branch Sweeper](#branch-sweeper)) would pin the whole rotation on a single
 document indefinitely.
+
+**The rotation restores and escalates when it aborts after writing (#3050).**
+`run_docs_auditor` captures `starting_ref = _current_ref(PROJECT_ROOT)` once,
+immediately after the cap/open-PR guards and before the substrate ever
+touches the shared checkout — that is the only point at which the ref is
+guaranteed to name the pre-write state. If the ref cannot be read, the run
+returns `skipped` before writing anything, and deliberately does **not** stamp
+the rotation hash (unlike the doc-specific cap/open-PR guards, a failed ref
+read is doc-independent, so stamping would advance the rotation past a doc
+that was never audited).
+
+A single `try`/`except Exception` in `run_docs_auditor` — opening immediately
+before the substrate call and closing immediately after the
+`_push_branch_and_pr(...)` assignment — owns everything from the write through
+the push. Any exception in that region, including one raised by `audit()`
+itself after it has already written (`audit()` carries its own top-level
+guard so a post-write exception returns `status="error"` with the write
+ledger intact, rather than propagating and losing it), routes to the
+module-level `_abort_after_write(slug, starting_ref, files_touched, reason)`
+helper. It restores the checkout via the same scoped `_restore_checkout`
+the push path uses — `git checkout <starting_ref>` then
+`git checkout HEAD -- <files_touched>`, never a whole-tree primitive — and
+then escalates. The `if pr_url is None:` block (R5-1, below) sits deliberately
+**outside** this try: by the time it runs, `_push_branch_and_pr`'s own
+`finally` has already restored the checkout, so a handler there would file a
+false "aborted after writing" issue over an already-clean tree.
+
+The escalation is scoped exactly like R5-1's: category `operational-failure`,
+keyed by slug alone (no run id, no date), so a failure that repeats every run
+files once and a closed issue can still re-file on a genuine recurrence. It
+skips entirely when `files_touched` is empty — a run that wrote nothing left
+no dirt to report. Three `operational-failure` titles are pairwise distinct,
+because `_file_issue_if_new` dedups on the exact title string and never
+compares bodies:
+
+- `docs-auditor: rotation failed to produce a PR for {slug}` — R5-1: the
+  substrate wrote and the push helper returned cleanly, but produced no PR URL.
+- `docs-auditor: rotation aborted after writing for {slug}` — the widened
+  handler fired and the restore succeeded.
+- `docs-auditor: rotation aborted after writing for {slug} — manual cleanup
+  required` — the widened handler fired and the restore itself failed.
+
+The restore outcome lives in the **title**, not only the body, precisely
+because dedup compares titles: a single title would let an open, benign
+"restored cleanly" issue mask a later run's failed restore. The body names
+every path in `files_touched`, states the observed restore outcome, and
+carries the manual cleanup command (see
+[Operational Cheatsheet](#operational-cheatsheet)).
 
 ### Caller B — `/do-docs` SDLC stage
 
@@ -370,12 +428,11 @@ applies at any age; the escalation issue waits for the same
 `STALE_PR_AGE_DAYS` threshold that would have closed a plain PR, so the
 title's "still unreviewed" claim is true when it is made. Because the dedup
 key fires once ever, a filing made on sight would make the wrong wording the
-permanent record. It also passes the withheld
-count to `_write_liveness` as a keyword `fixes_withheld`, emitted into the
-Redis summary only when non-zero — a secondary signal now that the durable
-operator surface is the GitHub issue plus the reflection dashboard's rendered
-`output_summary` (see [Configuration](#configuration)), not a manual
-`redis-cli` read.
+permanent record. The withheld count also reaches the reflection dashboard's
+rendered `output_summary` (see [Configuration](#configuration)): every
+returned summary string that mentions a withheld run interpolates the count
+directly, so the durable operator surface is the GitHub issue plus that
+rendered summary, not a Redis read.
 
 A rotation run that writes to the working tree and then fails to produce a PR
 — a `git`/`gh` step failing, or the scoped restore itself failing — files its
@@ -404,11 +461,10 @@ that branch for the cascade.
 `run_docs_auditor`'s outcome vocabulary is separate and stricter: `"ok"`
 survives on exactly the one return that created a PR. Every other return that
 reached the lock — the lock-held return, the dirty-tree guard, no candidates
-found, and a zero-diff pass — reports `"skipped"`, matching each one's own
-`_write_liveness(..., "skipped", ...)` call, so the field means "a PR was
-opened" and nothing weaker. (`"disabled"`, returned when the auth probe fails
-before the lock is even acquired, is a pre-flight bail rather than a run
-outcome and sits outside this vocabulary.)
+found, and a zero-diff pass — reports `"skipped"`, so the field means "a PR
+was opened" and nothing weaker. (`"disabled"`, returned when the auth probe
+fails before the lock is even acquired, is a pre-flight bail rather than a
+run outcome and sits outside this vocabulary.)
 
 ### File-as-issue (judgment required)
 
@@ -579,6 +635,11 @@ them with a real vault-aware mechanism that runs **beside**, not through, this
 rotation — see [Vault↔Site/Docs Drift Detector](#vaultsitedocs-drift-detector)
 below.
 
+Run outcomes reach the operator through the reflection's `output_summary`,
+not through a `docs_audit:` Redis key: every return builds a summary string,
+the scheduler stores it on the `Reflection` record, and the reflections
+dashboard renders it (see [Operational Cheatsheet](#operational-cheatsheet)).
+
 ## Locking
 
 ```
@@ -586,8 +647,6 @@ docs_audit:running:global       — rotation reflection lock (TTL 1h)
 docs_audit:sweeper:running      — branch-sweeper lock (TTL 30min)
 docs_audit:issues_filed:{hash}  — per-finding dedup (TTL 30d)
 docs_audit:last_run             — rotation state hash
-docs_audit:last_completed_run_ts        — Phase 2 liveness signal
-docs_audit:last_completed_run_summary   — Phase 2 liveness JSON summary
 ```
 
 All locks use the established SETNX pattern: `r.set(key, "1", nx=True, ex=ttl)`.
@@ -668,13 +727,15 @@ Summary of what lives in `reflections/docs_auditor.py`:
   every other detector in this module.
 - **`vault_narratives_compared`** — a per-run count of narratives actually
   compared (secrets-guarded, missing, or markitdown-sidecar entries don't
-  count), threaded into `_write_liveness` via a new **explicit optional 5th
-  parameter** (`vault_narratives_compared: int | None = None`). The other four
-  existing call sites still pass exactly four positional args and are
-  unaffected — `_write_liveness` only includes the field in the liveness
-  summary when it is not `None`, so "detector ran, found zero drift" (`0`) is
-  distinguishable from "the field is absent because this call site never runs
-  the vault comparison."
+  count), appended as a trailing clause on the created-PR summary string
+  **unconditionally**, including when the count is `0`. No other summary
+  string carries the clause. Of the five "skipped" returns, two (the lock
+  guard and the dirty-tree guard) fire before the vault comparison ever
+  runs; the other three (no candidates, the pre-write PR guards, zero-diff)
+  fire after it and simply don't thread the count into their own summary
+  strings. Either way, "detector ran, found zero drift" (clause reads `0`)
+  stays distinguishable from "this run never reached the created-PR path"
+  (clause absent entirely).
 - **Advisory only.** The detector files GitHub issues; it never rewrites
   `site/*.html` or vault files. The existing markdown-only apply guard is
   unchanged.
@@ -714,20 +775,38 @@ now runs for real (advisory/report-only, same as before). Verify with
 
 `config/reflections.yaml` is vault-managed (symlink to `~/Desktop/Valor/reflections.yaml`).
 
+Nothing imports `reflections/docs_auditor.py` at module load time.
+`agent/reflection_scheduler.py`'s `_resolve_callable` resolves
+`reflections.docs_auditor.run_docs_auditor` dynamically
+(`importlib.import_module` + `getattr`) each time the reflection fires. The
+scheduler itself runs inside the standalone `python -m reflections`
+subprocess (`reflections/__main__.py`), supervised by its own launchd service
+(`com.valor.reflection-worker`) — a separate process from the bridge and
+worker. `./scripts/valor-service.sh restart` cycles only the bridge, worker,
+and web UI; it does not touch the reflection worker. The standing
+reflection-worker process keeps executing the pre-change module code until
+that service is reinstalled or restarted.
+
 ## Operational Cheatsheet
 
 ```bash
 # Inspect rotation state
 redis-cli HGETALL docs_audit:last_run
 
-# Phase 2 liveness signal — a secondary, per-machine surface. The durable
-# operator surfaces are the GitHub issue tracker and the reflections
-# dashboard's rendered "last run summary" (sourced from output_summary).
-redis-cli GET docs_audit:last_completed_run_ts
-redis-cli GET docs_audit:last_completed_run_summary
+# Run outcomes: check the reflections dashboard's "Last run summary" panel
+# for docs-auditor, or query the Reflection model directly. output_summary
+# is the durable surface; there is no Redis key to read.
 
 # Force-clear the lock if a run hung
 redis-cli DEL docs_audit:running:global
+
+# Manual cleanup after a "rotation aborted after writing ... manual cleanup
+# required" issue (#3050) — the automatic restore did not complete. Restore
+# to the ref named in the issue body, then discard exactly the files it names:
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout <starting_ref>
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout HEAD -- <files_touched...>
+# Verify — should print nothing:
+git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain -- <files_touched...>
 
 # Run /do-docs from a PR
 python -c "from reflections.docs_auditor import audit; \
@@ -743,10 +822,12 @@ neighborhood cap, zero-diff gate, auth probe degradation, memory-refresh
 hook, and the `/do-docs` thin-caller contract. `TestIsSecretsPath` and
 `TestVaultSiteDrift` cover the vault↔site/docs drift detector (mixed-case,
 near-miss, symlink-into-secrets, out-of-vault exclusion; compared-count
-correctness; issue-cap enforcement); `TestWriteLivenessVaultParam` covers
-the `_write_liveness` 4-arg/5-arg positional contract (`fixes_withheld` is a
-trailing keyword param, so that contract is unchanged); `TestVaultDeadCodeRemoved`
-asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone.
+correctness; issue-cap enforcement); `TestVaultClauseInSummary` covers the
+created-PR summary's `vault_narratives_compared` clause (unconditional,
+including `0`; absent from the "skipped" summaries); `TestVaultDeadCodeRemoved`
+asserts `DEFAULT_VAULT_WEIGHT`, `vault_weight`, and `_vault_field` are gone;
+`TestLivenessDeadCodeRemoved` asserts the retired liveness function and its
+two Redis-key constants are gone.
 
 The four gates are covered by `TestStaleTermDictionary` (cue tiers across
 backticked, cased, alias, and arrow forms; the channel stays
@@ -759,7 +840,7 @@ ambiguous-but-present pass, no re-validation of pre-existing refs — every case
 is expressed as a prose-anchored regex fix whose *replacement*, not its match,
 carries the path-shaped string, so gate 3's path-token suppression cannot eat
 the case before the invariant runs), and `TestWithheldBlocksStaleClose` (a
-bare-name withhold reaching the PR body, Telegram, and liveness).
+bare-name withhold reaching the PR body and Telegram).
 `TestWithheldRateNonRegression` self-baselines the narrow and widened
 `_PATH_REF_RE` arms in one run inside a disposable detached `git worktree`,
 asserting the widening adds no withholds. `TestDeletedTargetFiltering::
@@ -779,7 +860,7 @@ the `.py` and `.md` finding categories share one per-run budget.
 
 The git surface — staging, the scoped restore, the sweeper's close path, and
 the withheld-PR exemption — is real-git-only, in
-`tests/unit/reflections/test_docs_auditor_git_surface.py`: a real repository
+`tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: a real repository
 on disk with a real bare remote, and a synchronous `gh`-only dispatcher
 (`monkeypatch.setattr(docs_auditor.subprocess, "run", dispatcher)`) that
 delegates every non-`gh` command to the real `subprocess.run`. No blanket
@@ -794,6 +875,9 @@ pytest tests/unit/test_docs_auditor_substrate.py -v
 - [Reflections](reflections.md) — registry and scheduler design
 - [Vault↔Site/Docs Drift Audit](vault-drift-audit.md) — the curated
   `VAULT_SITE_MAPPING` drift detector, in full
+- [Reflection Telegram Routing](reflection-telegram-routing.md) — the
+  `resolve_host_eng_chat` ladder this module's `_resolve_notify_chat`
+  delegates to
 - `.claude/skills-global/do-docs/SKILL.md` — Caller B skill definition
 - `reflections/docs_auditor.py` — substrate source
 - Issue #1247 — design and rollout plan

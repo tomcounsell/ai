@@ -66,14 +66,18 @@ def _as_unix_ts(val: Any) -> float | None:
     """Coerce a datetime / int / float / ISO-string to a Unix timestamp.
 
     Mirrors ``utils.utc.to_unix_ts`` semantics (naive datetimes are treated
-    as UTC — Popoto strips tzinfo on save) without importing it: this module
-    stays stdlib-only so ``agent/crash_signature.py`` can import it where it
-    deliberately cannot import ``agent/session_health.py``. Returns ``None``
-    when the value cannot be coerced.
+    as UTC) without importing it: this module stays stdlib-only so
+    ``agent/crash_signature.py`` can import it where it deliberately cannot
+    import ``agent/session_health.py``. popoto 1.9.0 decodes every stored
+    datetime as aware UTC; the naive-tzinfo branches below exist for the
+    ISO-string and non-popoto ``datetime`` inputs this general-purpose
+    coercer also accepts. Returns ``None`` when the value cannot be coerced.
     """
     if val is None:
         return None
     if isinstance(val, datetime):
+        # Keep: this coercer accepts datetime | int | float | str from
+        # mixed callers, not exclusively popoto reads.
         if val.tzinfo is None:
             val = val.replace(tzinfo=UTC)
         return val.timestamp()
@@ -84,6 +88,7 @@ def _as_unix_ts(val: Any) -> float | None:
             dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return None
+        # Keep: an ISO string from a non-popoto source may carry no offset.
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
         return dt.timestamp()
@@ -106,8 +111,23 @@ def tool_activity_ts(session_id: str | None) -> float | None:
 
     This is the signal that replaces what the #1930 headless cutover dropped
     (``last_pty_activity_at``) for repos that do not carry this repo's
-    ``.claude/hooks`` — see
-    ``agent_session_queue._session_progress_ts``, its only production consumer.
+    ``.claude/hooks``.
+
+    Two production consumers, and the second one is why this function must stay
+    conservative:
+
+    - ``agent_session_queue._session_progress_ts`` — advisory progress reporting.
+    - ``SessionRunner._turn_idle_seconds`` (#3289) — feeds the per-turn IDLE
+      deadline, which on expiry SIGTERMs the turn's whole process group. The
+      runner takes the ``min`` of this marker's idle duration and its own
+      in-memory stdout idle duration. ``None`` drops this term out entirely and
+      leaves the stream-only value, so an unreadable marker never *shortens* a
+      deadline; what it forfeits is the only signal that sees tool calls made
+      from inside a nested in-process subagent, which is exactly the PM/Dev lane
+      where a healthy turn emits no top-level stdout for long stretches. A wrong
+      answer here is a killed healthy turn, so "no signal" must stay
+      indistinguishable from "never configured" and this function must keep
+      never raising.
 
     Never raises: a missing directory, unreadable file, or malformed payload
     reads as ``None`` (no signal), which leaves the deadline exactly as

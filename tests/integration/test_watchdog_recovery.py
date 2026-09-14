@@ -7,10 +7,16 @@ Acceptance criterion #6 (issue #1311):
 Strategy
 --------
 The worker watchdog detects a gone process by calling ``_get_worker_pid()``, which
-runs ``pgrep -f "python -m worker"``.  We therefore:
+delegates to ``tools.process_lookup.find_python_service_pids(module="worker",
+script_suffix="worker/__main__.py")``: that reads the whole process table with
+``ps -axww -o pid=,args=`` and matches the *tokenised* argv — a Python interpreter in
+``argv[0]`` plus either an adjacent ``-m worker`` token pair or an argv token that
+is a path ending in ``worker/__main__.py``.  Unlike ``pgrep``, it is ancestor-safe
+(#3164) and cannot be fooled by a process that merely mentions the pattern.  We
+therefore:
 
-1. Spawn a real subprocess whose command-line matches the pgrep pattern so that
-   ``_get_worker_pid()`` finds it.
+1. Spawn a real subprocess standing in for the worker (``_spawn_fake_worker``) and
+   hand ``check()`` a ``_get_worker_pid`` replacement scoped to that PID.
 2. Kill it abruptly with SIGKILL (unexpected exit, no graceful shutdown).
 3. Call ``check()`` immediately — within the test process — and assert the status
    is ``"down"`` (detected within milliseconds, well inside one-tick+10s grace).
@@ -22,7 +28,7 @@ Timing assertion
 ----------------
 The watchdog's ``StartInterval`` is 120 s.  The acceptance criterion requires
 detection within ``120s + 10s`` grace = 130 s.  Because ``check()`` is a
-synchronous function that calls ``pgrep`` and ``stat()`` with no sleep, detection
+synchronous function that calls ``ps`` and ``stat()`` with no sleep, detection
 occurs in < 1 s in practice.  We assert ``elapsed < 130`` to document the bound.
 
 No launchd dependency
@@ -48,13 +54,29 @@ Every kill in this file is safe by construction and does NOT get routed through
 - The single ``recover()``/``os.kill`` path (``test_recover_down_does_not_raise``)
   uses a hardcoded non-existent PID (99999999), never a runtime-derived one.
 
-``assert_not_live_worker`` is deliberately NOT applied to the spawned fake-worker
-PID: ``_spawn_fake_worker`` sets its argv to look like ``python -m worker`` on
-purpose (so ``pgrep`` finds it), which is exactly the shape the guard refuses.
-Guarding it would (correctly) raise on the intentionally worker-argv-shaped
-fixture. AC#2 is therefore satisfied by the additive guard + its unit test
-(``tests/unit/test_worker_guard.py``), per the plan's success-criteria note that
-an all-mock-scoped audit result needs no in-test guard call.
+Every fake-worker kill IS additionally routed through
+``tests._worker_guard.assert_not_live_worker`` (see ``_kill_fake_worker``), and it
+passes. The fixture only reassigns ``sys.argv`` from *inside* the process, which
+does not rewrite the OS-level argv, and the guard reads the kernel argv via
+``ps -ww -p <pid> -o command=``. What it sees is
+``<python> -c "import sys, time; sys.argv[0] = '-m'; ..."`` — no ``-m worker``
+token pair for the guard's "``-m`` + whitespace + ``worker``" regex, and no match in
+``find_python_service_pids`` either — so the guard does not fire on the fixture
+while still covering these call sites against a future refactor that drops a
+probe mock. AC#2 is satisfied by that call plus the guard's own unit test
+(``tests/unit/test_worker_guard.py``).
+
+Why the fake worker is invisible to the real lookup
+---------------------------------------------------
+Assigning ``sys.argv`` does not rewrite the OS-level argv, so the fake worker's
+kernel-visible command line stays ``<python> -c "import sys, time; ..."`` — no
+adjacent ``-m worker`` token pair and no ``worker/__main__.py`` path token. The
+tokenised lookup therefore never matches it, which is the same non-match the old
+``pgrep -f "python -m worker"`` produced (the payload does not contain that string
+contiguously either). Nothing here depends on it being matched: every assertion
+either patches ``_get_worker_pid`` via ``_pid_lookup_for`` or accepts both of the
+reachable unpatched states, so the assertions are unaffected by the #3164 switch
+from ``pgrep`` to ``ps``.
 """
 
 import subprocess
@@ -65,6 +87,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from monitoring.worker_watchdog import HEARTBEAT_THRESHOLD, _handle_missing_worker, check, recover
+from tests._worker_guard import assert_not_live_worker
 from tests.db_claim import subprocess_env
 
 pytestmark = [pytest.mark.integration, pytest.mark.macos_only]
@@ -80,17 +103,24 @@ MAX_DETECTION_LATENCY = WATCHDOG_TICK_SECONDS + GRACE_SECONDS  # 130 s
 
 
 def _spawn_fake_worker() -> subprocess.Popen:
-    """Spawn a process whose argv matches 'python -m worker' so pgrep finds it.
+    """Spawn a stand-in process that reports itself as ``python -m worker``.
 
-    We use ``python -c`` with ``sys.argv`` overwritten so that the spawned
-    process appears as ``python -m worker`` in the process table, which is
-    exactly what ``pgrep -f "python -m worker"`` matches.
+    We use ``python -c`` with ``sys.argv`` overwritten, so the process describes
+    itself as ``python -m worker`` from the inside. That does NOT rewrite the
+    OS-level argv, so neither the tokenised lookup in
+    ``tools.process_lookup.find_python_service_pids`` nor the ``pgrep -f`` probe
+    it replaced (#3164) resolves this PID from the process table. The tests that
+    need the watchdog to see it patch ``_get_worker_pid`` with
+    ``_pid_lookup_for(proc)``; the one that does not accepts either reachable
+    state.
     """
     return subprocess.Popen(
         [
             sys.executable,
             "-c",
-            # Replace argv[0] so pgrep -f 'python -m worker' matches.
+            # Self-report as 'python -m worker' from the inside only: the
+            # kernel argv stays `<python> -c "..."`, which _worker_guard's
+            # `-m\s+worker` regex does not match. See the module docstring.
             "import sys, time; sys.argv[0] = '-m'; sys.argv[1:] = ['worker']; time.sleep(300)",
         ],
         stdout=subprocess.DEVNULL,
@@ -99,10 +129,24 @@ def _spawn_fake_worker() -> subprocess.Popen:
     )
 
 
+def _kill_fake_worker(proc: subprocess.Popen) -> None:
+    """SIGKILL a fake worker, guarded by ``assert_not_live_worker`` first (#2147).
+
+    The PID is self-spawned and signalled by ``Popen`` handle, so it can never be
+    the launchd worker — but the guard is cheap and pins that invariant here
+    rather than in prose. It passes on this fixture: the kernel argv is
+    ``<python> -c "..."``, not ``python -m worker``.
+    """
+    assert_not_live_worker(proc.pid)
+    proc.kill()
+    proc.wait()
+
+
 def _pid_lookup_for(proc: subprocess.Popen):
     """Return a ``_get_worker_pid`` replacement scoped to a single spawned proc.
 
-    The real ``_get_worker_pid()`` does a *global* ``pgrep -if "python -m worker"``,
+    The real ``_get_worker_pid()`` scans the *whole* process table via
+    ``tools.process_lookup.find_python_service_pids(module="worker", ...)``,
     so on any machine where a real ``python -m worker`` is already running
     (e.g. the worker box, PID 94409 here) it matches the real worker and
     ``check()`` never returns ``"down"`` for our fabricated-then-killed worker.
@@ -134,14 +178,14 @@ class TestWatchdogDetectsUnexpectedExit:
         running FROM this checkout, so in any other clone/worktree its mtime
         is arbitrarily old and the unmocked read reports "stale" regardless
         of worker health. With the file absent, the reachable states are
-        "starting" (pgrep found a worker) or "down" — deterministic on every
+        "starting" (the lookup found a worker) or "down" — deterministic on every
         machine while still exercising the real branch logic.
         """
         import monitoring.worker_watchdog as wwd
 
         proc = _spawn_fake_worker()
         try:
-            time.sleep(0.3)  # let pgrep catch up
+            time.sleep(0.3)  # let the process table catch up
             with patch.object(wwd, "HEARTBEAT_FILE", tmp_path / "absent_heartbeat"):
                 status = check()
             assert status["status"] in ("starting", "down"), (
@@ -151,8 +195,7 @@ class TestWatchdogDetectsUnexpectedExit:
             if status["pid"] is not None:
                 assert isinstance(status["pid"], int)
         finally:
-            proc.kill()
-            proc.wait()
+            _kill_fake_worker(proc)
 
     def test_check_detects_down_after_unexpected_exit(self):
         """Core acceptance criterion: watchdog detects process exit < one tick + 10s grace.
@@ -163,11 +206,10 @@ class TestWatchdogDetectsUnexpectedExit:
         4. Confirm elapsed time is within one tick + 10s grace (130 s).
         """
         proc = _spawn_fake_worker()
-        time.sleep(0.3)  # let pgrep register the process
+        time.sleep(0.3)  # let the process table register the process
 
         # Ungraceful exit — simulate OOM kill / supervisor force-kill
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         t0 = time.monotonic()
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
@@ -189,8 +231,7 @@ class TestWatchdogDetectsUnexpectedExit:
         proc = _spawn_fake_worker()
         time.sleep(0.3)
 
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         t0 = time.monotonic()
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
@@ -198,7 +239,7 @@ class TestWatchdogDetectsUnexpectedExit:
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         assert status["status"] == "down"
-        # pgrep + stat should complete well under 5 seconds in any CI environment
+        # ps + stat should complete well under 5 seconds in any CI environment
         assert elapsed_ms < 5000, f"check() took {elapsed_ms:.0f} ms — unexpectedly slow"
 
     def test_recover_down_does_not_raise(self):
@@ -226,9 +267,10 @@ class TestWatchdogDetectsUnexpectedExit:
         """Simulate the full main()-equivalent tick: check → _handle_missing_worker().
 
         Uses a real unexpectedly-exited worker subprocess so the code path through
-        check() is real (pgrep), not mocked.  Then calls _handle_missing_worker()
-        — the actual active-recovery function introduced by issue #1311 — instead
-        of re-implementing dispatch logic inline.  This provides real regression
+        check() is real (the ps-based lookup), not mocked.  Then calls
+        _handle_missing_worker() — the actual active-recovery function introduced
+        by issue #1311 — instead of re-implementing dispatch logic inline.  This
+        provides real regression
         protection: if _handle_missing_worker() ever calls _kickstart_worker on a
         first-down-tick (an L1 violation), the mocked kickstart would record the call
         and the assertion would catch the regression.
@@ -236,8 +278,7 @@ class TestWatchdogDetectsUnexpectedExit:
         proc = _spawn_fake_worker()
         time.sleep(0.3)
 
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):
             status = check()
@@ -272,8 +313,7 @@ class TestWatchdogDetectsUnexpectedExit:
         exit_time = time.monotonic()
 
         # Simulate unexpected exit (e.g., OOM kill, uncaught exception → crash)
-        proc.kill()
-        proc.wait()
+        _kill_fake_worker(proc)
 
         # Watchdog runs check() on its tick — simulate that tick now
         with patch("monitoring.worker_watchdog._get_worker_pid", _pid_lookup_for(proc)):

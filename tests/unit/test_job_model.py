@@ -1016,25 +1016,12 @@ class TestScorePurity:
 
         assert [j.job_id for j in found] == [job.job_id]
 
-    def test_reattach_preserves_the_instant_and_is_idempotent(self, scratch_room_id):
-        """The override attaches the tzinfo the value already meant; it must
-        never re-stamp ``_now()`` — that would refresh recency on every
-        unrelated write and resurrect idle Jobs past rest-by-age."""
-        job = Job.mint(scratch_room_id, "check the deploy")
-        instant = job.last_active_at
-
-        job.last_active_at = instant.replace(tzinfo=None)
-        job.save()
-
-        assert job.last_active_at == instant
-        job.save()
-        assert job.last_active_at == instant
-
     def test_scoped_save_excluding_the_field_leaves_the_score_untouched(self, scratch_room_id):
         """``backfill_open_expectations_index`` saves
         ``update_fields=["has_open_expectations"]`` under a docstring invariant
-        that it never writes recency. The override must honor that scope rather
-        than reaching into the SortedField path behind its back."""
+        that it never writes recency. popoto's own field-scoped save honors
+        that scope: a save naming only ``has_open_expectations`` must not
+        touch the SortedField score path for ``last_active_at`` at all."""
         job = Job.mint(scratch_room_id, "owes a reply")
         [(_member, score_before)] = _scores(scratch_room_id)
 
@@ -1042,23 +1029,10 @@ class TestScorePurity:
         job.has_open_expectations = True
         job.save(update_fields=["has_open_expectations"])
 
-        assert job.last_active_at.tzinfo is None, "the guard let an out-of-scope write through"
+        assert job.last_active_at.tzinfo is None, (
+            "a field-scoped save touched an out-of-scope field"
+        )
         assert _scores(scratch_room_id) == [(_member, score_before)]
-
-    def test_scoped_save_naming_the_field_still_reattaches(self, scratch_room_id):
-        """The skew backfill's write path: a scoped save that *names*
-        ``last_active_at`` must reattach UTC, or it would write the very skew it
-        exists to repair."""
-        from datetime import UTC
-
-        job = Job.mint(scratch_room_id, "owes a reply")
-        [(member, score_before)] = _scores(scratch_room_id)
-
-        job.last_active_at = job.last_active_at.replace(tzinfo=None)
-        job.save(update_fields=["last_active_at"])
-
-        assert job.last_active_at.tzinfo is UTC
-        assert _scores(scratch_room_id) == [(member, score_before)]
 
 
 class TestGuardedRepair:
@@ -1143,49 +1117,10 @@ class TestGuardedRepair:
             monkeypatch.setattr(POPOTO_REDIS_DB, "exists", real_exists)
             POPOTO_REDIS_DB.srem(status_index_key, *stale_members)
 
-    def test_repair_renormalizes_scores_the_rebuild_skewed(self, scratch_room_id, monkeypatch):
-        """popoto's ``rebuild_indexes()`` re-scores every row via
-        ``field.on_save`` on naive-decoded instances — ``naive.timestamp()`` is
-        local time, bypassing the ``save()`` UTC-reattach — so on a non-UTC
-        host every rebuild re-skews every recency score the one-shot
-        migration repaired. ``repair_indexes`` must sweep the scores back to
-        each row's own UTC epoch afterwards.
-
-        On a UTC host the rebuild's skew is invisible (local == UTC), so the
-        skewed rebuild is simulated: the wrapped ``rebuild_indexes`` runs the
-        real rebuild, then corrupts the score by spike-2's measured UTC+07
-        offset — exactly what a rebuild on that host writes.
-        """
-        from popoto.redis_db import POPOTO_REDIS_DB
-
-        from utils.utc import to_unix_ts
-
-        job = Job.mint(scratch_room_id, "repair me")
-        partition = _partition_key(scratch_room_id)
-        member = job.db_key.redis_key
-        real_rebuild = Job.rebuild_indexes
-
-        def skewing_rebuild():
-            result = real_rebuild()
-            true_score = POPOTO_REDIS_DB.zscore(partition, member)
-            POPOTO_REDIS_DB.zadd(partition, {member: true_score - UTC_PLUS_7_REBUILD_SKEW_SECONDS})
-            return result
-
-        monkeypatch.setattr(Job, "rebuild_indexes", skewing_rebuild)
-
-        Job.repair_indexes()
-
-        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
-        assert POPOTO_REDIS_DB.zscore(partition, member) == pytest.approx(
-            to_unix_ts(fresh.last_active_at), abs=1.0
-        )
-
-    def test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs(
-        self, scratch_room_id, monkeypatch, caplog
-    ):
+    def test_renormalize_enumeration_failure_returns_zero(self, monkeypatch, caplog):
         """Fail-open contract: a broken enumeration returns (0, 0) rather than
-        raising into repair_indexes(), and repair_indexes still reaches
-        backfill_open_expectations_index()."""
+        raising. The migration is still a caller of this classmethod
+        directly, so its fail-open behavior stays covered on its own."""
         import logging
 
         from popoto.redis_db import POPOTO_REDIS_DB
@@ -1201,23 +1136,20 @@ class TestGuardedRepair:
         # from an empty db satisfying the assertion vacuously.
         assert "score renormalization SKIPPED -- enumeration failed" in caplog.text
 
-        # repair_indexes half: only the score sweep's enumeration fails (the
-        # raising patch is scoped inside the real renormalize call, so the
-        # rebuild and backfill keep a working query); the backfill spy proves
-        # the guard let repair_indexes reach it, and the drifted flag proves
-        # the index actually got stamped.
-        job = Job.mint(scratch_room_id, "stamp me despite the sweep failing")
+    def test_repair_indexes_reaches_backfill_after_rebuild(self, scratch_room_id, monkeypatch):
+        """``repair_indexes()`` wraps its whole body in a single bare
+        ``try:`` with no ``except`` before ``backfill_open_expectations_index()``,
+        so nothing between the rebuild and the backfill can swallow a failure
+        and still reach it — there is no hazard to anchor a fail-open
+        assertion to. This is a plain happy-path spy: it fails under the
+        Failure Path table's mutation (delete the
+        ``cls.backfill_open_expectations_index()`` call), which is the whole
+        proof that repair_indexes reaches its final step."""
+        job = Job.mint(scratch_room_id, "stamp me")
         job.add_expectation("expectation A")
         drifted = Job.query.get(id=job.id, room_id=scratch_room_id)
         drifted.has_open_expectations = False
         drifted.save(update_fields=["has_open_expectations"])
-
-        real_renormalize = Job.renormalize_last_active_scores
-
-        def failing_renormalize():
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(POPOTO_REDIS_DB, "sscan", boom)
-                return real_renormalize()
 
         backfill_calls = []
         real_backfill = Job.backfill_open_expectations_index
@@ -1226,7 +1158,6 @@ class TestGuardedRepair:
             backfill_calls.append(True)
             return real_backfill()
 
-        monkeypatch.setattr(Job, "renormalize_last_active_scores", failing_renormalize)
         monkeypatch.setattr(Job, "backfill_open_expectations_index", spying_backfill)
 
         Job.repair_indexes()

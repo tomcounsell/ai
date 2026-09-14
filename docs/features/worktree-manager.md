@@ -112,6 +112,20 @@ copy step exists to satisfy — the exact failure mode behind the June 2026 work
 Any future gitignored, install-time file that a worktree process needs to read should
 follow the same pattern: resolve to the owning checkout, don't duplicate.
 
+## Busy-scan lane match (issue #3176)
+
+`_scan_worktree_sessions` — the shared matcher behind the busy-check
+wrappers this document points to `session-isolation.md` for — reads two
+fields per row, in order: `exec_cwd` (execution-scoped, stamped by the
+executor before harness launch and reset on every continuation) first,
+`working_dir` (enqueue-scoped) as the fallback. This closes a blind spot
+where a slugless eng session synthesizes its lane at execution time: its
+stored `working_dir` still names the main checkout, so only `exec_cwd`
+records where it actually ran. `slug` is deliberately not a third arm — a
+MERGE-stage session for slug X runs on the main checkout and would block
+its own lane's removal on every merge. Full detail:
+[`session-isolation.md` § Worktree Busy Guard](session-isolation.md#worktree-busy-guard-issue-1357).
+
 ## Related
 
 - Issue [#1377](https://github.com/tomcounsell/ai/issues/1377) — bug

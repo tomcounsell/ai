@@ -17,6 +17,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.agent_session_queue import _push_agent_session, _session_notify_listener
+from tests.db_claim import claim_test_db
+
+
+class _EmptyQueryResult(list):
+    """Stand-in for an empty Popoto QueryBuilder result.
+
+    A plain `[]` iterates fine for every `AgentSession.query.filter(...)`
+    call site that just loops or wraps in `list(...)`, but `_push_agent_session`
+    also does `AgentSession.query.filter(...).count()` (no args) — the real
+    QueryBuilder.count() takes no arguments, while `list.count()` requires
+    exactly one. Overriding `count()` here keeps this fixture a valid stand-in
+    for both call shapes instead of only the iteration one.
+    """
+
+    def count(self) -> int:
+        return 0
 
 
 @pytest.fixture
@@ -25,9 +41,12 @@ def mock_agent_session_cls():
     with patch("agent.agent_session_queue.AgentSession") as mock_cls:
         mock_session = MagicMock()
         mock_session.agent_session_id = "test-session-notify-001"
-        mock_cls.query.filter.return_value = []
+        mock_cls.query.filter.return_value = _EmptyQueryResult()
         mock_cls.async_create = AsyncMock(return_value=mock_session)
         mock_cls.query.async_count = AsyncMock(return_value=1)
+        # _push_agent_session falls back to rows_for_session_id() to resolve
+        # the bound agent_session_id when no idempotency_key was supplied.
+        mock_cls.rows_for_session_id.return_value = [mock_session]
         yield mock_cls
 
 
@@ -35,10 +54,25 @@ class TestSessionNotifyPublish:
     """Verify _push_agent_session publishes to valor:sessions:new."""
 
     def test_publishes_to_notify_channel(self, mock_agent_session_cls):
-        """Calling _push_agent_session() should publish a notification within 1 second."""
+        """Calling _push_agent_session() should publish a notification within 1 second.
+
+        The channel name is db-scoped (#2147/#2163), so the mocked client must
+        expose a REAL db number: ``MagicMock().__int__()`` returns 1, which made
+        ``notify_channel_for`` derive ``...:db1`` from a mock's default integer
+        rather than from any database this process owns (#3250). Pinning
+        ``connection_kwargs`` to the claimed test db makes the expected channel
+        the one a real client on this process's db would produce.
+        """
         received: list[dict] = []
+        test_db = claim_test_db()
+        expected_channel = f"valor:sessions:new:db{test_db}"
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.connection_pool.connection_kwargs = {
+                "host": "localhost",
+                "port": 6379,
+                "db": test_db,
+            }
 
             def capture_publish(channel, payload):
                 received.append({"channel": channel, "payload": payload})
@@ -62,7 +96,7 @@ class TestSessionNotifyPublish:
 
             assert elapsed < 2.0, f"publish took too long: {elapsed:.2f}s"
             assert len(received) == 1, f"expected 1 publish call, got {len(received)}"
-            assert received[0]["channel"] == "valor:sessions:new"
+            assert received[0]["channel"] == expected_channel
             payload = json.loads(received[0]["payload"])
             assert payload["chat_id"] == "notify-chat-1"
             assert payload["session_id"] == "notify-test-sess"
@@ -87,7 +121,9 @@ class TestSessionNotifyPublish:
 
             # Session was created despite publish failure
             mock_agent_session_cls.async_create.assert_called_once()
-            assert isinstance(result, int)
+            depth, agent_session_id = result
+            assert isinstance(depth, int)
+            assert agent_session_id == "test-session-notify-001"
 
     def test_payload_contains_required_fields(self, mock_agent_session_cls):
         """Notification payload must include chat_id and session_id."""
@@ -158,10 +194,7 @@ class TestSessionNotifyListener:
 
         async def run_one_cycle():
             # Patch redis.Redis at the import site inside agent_session_queue
-            with (
-                patch("agent.agent_session_queue.json", wraps=json),
-                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto_redis),
-            ):
+            with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto_redis):
                 # We need to patch redis.Redis inside the function's local scope.
                 # The function does `import redis as _redis` and then calls
                 # `_redis.Redis(...)`, so we patch the module-level redis.Redis.

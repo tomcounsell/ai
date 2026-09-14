@@ -222,6 +222,8 @@ valor-telegram send --chat "Dev: Valor" "Reading the docs now, will come back wi
 
 See `docs/features/promise-gate.md` for the full architecture (LLM-first with regex fail-closed-only fallback, two-channel telemetry, mixed `session_id` provenance per CLI, latency budget, failure modes).
 
+`python -m tools.promise_gate_measurement` reports latency (elapsed and queue-wait) percentiles by audit source/transport from `logs/classification_audit.jsonl` plus `ask_coverage` contradiction flags from the separate `--ask-coverage-file` sample; it is the recorded entry criterion for the deferred #3035 phase-4 decision — see `docs/features/promise-gate.md` §Phase-4 measurement tool.
+
 ### Ask as a Poll (`valor-ask-poll`)
 
 Ask a blocked agent's question as a **native Telegram poll**, so the human unblocks it with one tap
@@ -340,6 +342,42 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
+### Improvement Controller (`valor-improve`) — planned, lane 3
+
+Not yet implemented. The entry point arrives with the improvement controller's
+lane-3 child issue; it is listed here so the surface is agreed before it is
+built rather than discovered afterwards. See
+[Improvement Controller](features/improvement-controller.md).
+
+```bash
+valor-improve case show --case ID     # the journal head, its revision, and the journal tail
+valor-improve case explain --case ID  # why this case exists, and on what evidence
+valor-improve propose                 # the only way a research session writes a proposed action
+valor-improve release compare         # a release against the incumbent it would replace
+valor-improve pause --case ID --reason TEXT   # break-glass. Never self-clearing
+valor-improve resume --case ID        # re-reads the head first; refuses a case with unreconciled intents
+valor-improve doctor                  # paused heads, stale intents, outstanding reservations
+valor-improve export / import         # move improvement records between machines
+valor-improve replay-projection       # rebuild a Popoto projection from the journal
+```
+
+Research sessions reach research state only through this CLI, which enforces
+journal authorization and never exposes a raw transition. `pause`, `resume`, and
+`doctor` are the break-glass path; the manual procedure lives in
+[Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
+
+**What is available today** is the evidence side, and it has no CLI: the
+`improvement-evidence-collect` reflection runs on a 900s tick and writes
+`ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
+Read it directly if you need to:
+
+```python
+from models.improvement_evidence import ImprovementEvidence
+
+rows = ImprovementEvidence.recent("valor", limit=50)
+corrections = [r for r in rows if r.kind == "correction"]
+```
+
 ### Agent Session Scheduler (`tools.agent_session_scheduler`)
 
 Agent-initiated queue operations. Schedule SDLC sessions, push arbitrary messages,
@@ -410,6 +448,12 @@ python -m tools.valor_session create --role eng --message "Plan issue #735"
 python -m tools.valor_session create --role eng --slug fix-the-bug --message "Fix the bug"
 # Explicit project key override (useful in scripts/CI where cwd may not match)
 python -m tools.valor_session create --role eng --slug ad-hoc-task --message "..." --project-key valor
+
+# Opt-in Codex dev lane (eng only, immutable after creation; see docs/features/codex-exec-dev-lane.md)
+python -m tools.valor_session create --role eng --slug codex-task --message "..." --dev-harness codex
+
+# One-way operator downgrade back to the Claude dev lane (refused while the lane lease is held)
+python -m tools.valor_session update-dev-harness --id <SESSION_ID> --to claude
 
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>
@@ -627,6 +671,23 @@ states = query_stage_states(issue_number=704)
 ```
 
 Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
+
+### Dead Letters (`tools.dead_letters`)
+
+Operator break-glass for the pipeline's dead-letter rows: what has been lost,
+and re-running the stages whose loss can be replayed. Deliberately not an MCP
+tool — replaying is a rare, destructive-adjacent action a human takes after
+reading the dashboard tile.
+
+```bash
+python -m tools.dead_letters list                      # row counts per stage
+python -m tools.dead_letters replay --stage extraction # re-run one stage's replayable rows
+python -m tools.dead_letters evict                     # trim each stage back to its cap
+```
+
+`replay --stage telegram_send` is refused: it needs a live Telethon client, and
+the bridge already replays that stage on every connect. See
+[Pipeline Dead Letters](features/pipeline-dead-letters.md).
 
 ## OfficeCLI
 

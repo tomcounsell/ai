@@ -22,6 +22,7 @@ from agent.session_state import (
     SessionHandle,
     _active_sessions,
 )
+from agent.side_effects import enqueue
 from agent.worktree_manager import (
     WORKTREES_DIR,
     validate_workspace,
@@ -120,6 +121,154 @@ def _runner_final_status(task_error, agent_session) -> str:
     if task_error or _is_non_clean_runner_exit(agent_session):
         return "failed"
     return "completed"
+
+
+def _finalize_if_still_running(
+    session_id: str, task, agent_session, reason: str, raised: bool = False
+) -> None:
+    """Finalize the authoritative row for ``session_id`` iff it is still ``running``.
+
+    The single finalize-guarantee mechanism for ``_execute_agent_session``.
+    Called from that function's ``finally``, so it covers both exits that
+    function owns -- normal return AND raise -- not just the normal-return
+    path the old in-``try`` guard reached (#3209).
+
+    Why finalizing the raise path here is safe, stated precisely because an
+    earlier revision of this docstring got it wrong twice. This guard is not a
+    duplicate write that merely lands earlier: on the raise path it is the
+    SOLE terminal writer. The worker's outer completion ``finally``
+    (``_worker_loop``, gated on
+    ``not session_completed and not finalized_by_execute``) is still entered,
+    because ``finalized_by_execute`` is set on the non-exceptional return and
+    on the deadline-kill/terminal path, never on a raise. But that block
+    re-reads the authoritative row before writing, and its
+    ``elif fresh.status in TERMINAL_STATUSES`` branch -- whose comment names
+    this finalize guard as one of the legitimate first writers -- logs at INFO
+    and performs no completion write at all. So the status this guard records
+    is the status the session ends on, and it also lands ahead of the
+    synthetic-slug worktree cleanup below, which refuses to reclaim a lane
+    whose row still reads ``running``.
+
+    That makes ``raised=True`` forcing ``failed`` below MORE load-bearing, not
+    less. The point is not agreement with a second writer about to say the
+    same thing -- there is no second writer. This is the only chance to record
+    the outcome honestly, so a ``completed`` written here for an executor that
+    unwound on an exception would stand unchallenged. See "Status honesty".
+
+    Divergent-terminal writes are no longer a worker-loop hazard regardless.
+    The worker's ``_complete_agent_session`` call is wrapped in an
+    ``except StatusConflictError`` that logs at INFO and must not propagate
+    (#3253, the third member of the #1803/#2088 family, closed by #3280).
+    Every cross-module reference in this docstring is anchored by symbol
+    rather than line number on purpose: the line numbers it used to carry all
+    rotted.
+
+    Cancellation is deliberately excluded by the caller, and there the owner
+    argument DOES hold: ``_agent_session_health_check`` cancels the task and
+    then decides the row's fate inside the same await, commonly requeueing it
+    to ``pending``. A finalize from here would land first and turn every
+    no-progress requeue into a swallowed ``StatusConflictError``, silently
+    retiring that retry loop. A cancelled row has a live owner mid-flight; a
+    raised row's owner has already run.
+
+    That carve-out is not airtight, and the gap is inherited rather than
+    introduced here. The #3176 pre-finalize guard further down this same
+    ``finally`` has no cancel carve-out, so for a synthetic ``dev-*`` lane a
+    cancelled exit still gets finalized before the health checker's requeue
+    lands. Keeping the carve-out here is still worth it -- it holds for every
+    non-synthetic session, which is the overwhelming majority -- but the
+    synthetic case is open in #3305, along with the matching ``raised``
+    divergence between the two guards.
+
+    The predicate is ``status == "running"``, never ``defer_reaction``. That is
+    what makes it safe on both ``_enqueue_nudge`` paths:
+
+    * Main path: ``transition_status(session, "pending")`` already moved THIS
+      row to ``pending``. ``get_authoritative_session`` prefers a ``running``
+      row and finds none, so it returns the ``pending`` row and this no-ops.
+      The nudge's authoritative write is never clobbered.
+    * Fallback path: entered ONLY because the re-read
+      ``get_authoritative_session(orig_session_id)`` returned ``None`` -- no row
+      for that ``session_id`` was visible at all. It then creates a fresh
+      ``pending`` record under that ``session_id`` via
+      ``continuation_agent_session_fields``. So the normal post-fallback state
+      is exactly one row, the ``pending`` continuation, and this no-ops. (A
+      transient index-visibility flap could leave an original row that the
+      nudge's re-read missed; if it becomes visible again as ``running``, this
+      finalizes that stranded original and still never touches the
+      continuation, which is a distinct record with its own
+      ``agent_session_id``.) Either way the nudge's write survives.
+
+    Fully synchronous on purpose. The reason is NOT statement ordering -- this
+    call and the worktree cleanup below are sequential statements in the same
+    coroutine, and an ``await`` between them would not reorder them. It is that
+    an ``await`` inside a ``finally`` that is unwinding an externally-requested
+    cancellation raises ``CancelledError`` at the suspension point and SKIPS the
+    rest of the ``finally``, including the cleanup. Keeping this call
+    synchronous is what guarantees the rest of the block runs.
+
+    Status honesty. ``_runner_final_status`` returns ``"completed"`` whenever
+    ``task.error`` is falsy and the runner exit was clean, and it has no notion
+    of the executor unwinding. So two cases bypass it and finalize ``failed``:
+
+    * ``raised=True`` -- the executor is unwinding on an exception. A session
+      whose executor raised did not complete. Recording ``completed`` there
+      would also disagree with the worker's own ``failed`` write in
+      ``agent_session_queue``'s outer ``finally``.
+    * ``task is None`` -- the body raised before ``BackgroundTask`` was
+      constructed, and ``_runner_final_status(None, None)`` would misreport a
+      crash-before-start as a success.
+
+    NOTE: ``finalize_session``'s checkpoint step runs two 5s-bounded ``git``
+    subprocesses on the event loop, and this guard now reaches them on the raise
+    path too. ``skip_checkpoint=True`` is deliberately NOT passed -- this guard
+    is the only finalizer that REACHES the checkpoint step on that path (the
+    worker's outer completion ``finally`` takes its already-terminal skip
+    branch and never calls ``finalize_session`` at all), so skipping the
+    checkpoint would drop the lane's branch state for exactly the sessions
+    whose lane most needs reclaiming. Making the checkpoint non-blocking is
+    tracked in #3306.
+    """
+    try:
+        from models.session_lifecycle import (  # noqa: PLC0415
+            StatusConflictError,
+            finalize_session,
+            get_authoritative_session,
+        )
+
+        auth = get_authoritative_session(session_id)
+        if auth is None or auth.status != "running":
+            return
+        if raised or task is None:
+            status = "failed"
+        else:
+            status = _runner_final_status(task.error, agent_session)
+        try:
+            finalize_session(auth, status, reason=reason)
+        except StatusConflictError as conflict:
+            # CAS conflict = another actor (complete_transcript, a concurrent
+            # finalize, the health checker) already finalized this row. That is
+            # success, not an error -- but log it, because a silent exit here
+            # was one of the two ways a deferred self-draft flush could vanish
+            # without a trace (#3053).
+            logger.info(
+                "[executor] Finalize guard: %s already finalized (%s)",
+                session_id,
+                conflict,
+            )
+            return
+        logger.info(
+            "[executor] Finalize guard finalized session %s → %s (%s)",
+            session_id,
+            status,
+            reason,
+        )
+    except Exception as err:
+        logger.warning(
+            "[executor] Finalize guard failed for %s: %s",
+            session_id,
+            err,
+        )
 
 
 def _resolve_session_model(session: AgentSession | None) -> str | None:
@@ -283,16 +432,6 @@ def _tick_issue_lock_renewal(
         )
 
 
-# -----------------------------------------------------------------------------
-# Post-session memory extraction scheduling (hotfix #1055)
-# -----------------------------------------------------------------------------
-# Keyed by session_id to deduplicate when _execute_agent_session runs twice for
-# the same session (health-check revival, retry, manual resume). dict (not set)
-# is required so duplicate schedules can be detected and skipped BEFORE a second
-# create_task fires.
-_pending_extraction_tasks: dict[str, asyncio.Task] = {}
-
-
 def _capture_turn_count(session_id: str) -> int | None:
     """Re-fetch the persisted ``turn_count`` for a session at schedule time (Fix 2, #1822).
 
@@ -334,106 +473,6 @@ def _is_conversational_session(session: AgentSession) -> bool:
         return bool(getattr(session, "initial_telegram_message", None))
     except Exception:  # noqa: BLE001 - origin read must never crash finalization
         return True
-
-
-def _schedule_post_session_extraction(
-    session_id: str,
-    response_text: str,
-    turn_count: int | None = None,
-    is_conversational: bool = True,
-) -> None:
-    """Fire-and-forget post-session memory extraction (hotfix #1055).
-
-    Synchronous — creates and registers an ``asyncio.create_task``; does NOT
-    await it. Preserves the #987 ordering invariant: extraction runs in the
-    background so the eng nudge fires promptly while extraction is still
-    pending.
-
-    **CRITICAL**: this function is declared ``def`` (not ``async def``) and
-    returns ``None``. Any ``await`` or ``asyncio.gather(...)`` on its result
-    would re-couple extraction latency to the PM nudge and regress #987 /
-    #1055. A review-time invariant guards against this.
-
-    Deduplicates by ``session_id``: if a non-done task is already registered
-    for this session, logs at INFO and returns. Prevents duplicate observation
-    saves and a race on ``clear_session(session_id)`` when
-    ``_execute_agent_session`` runs twice for the same session (health-check
-    revival, retry, manual resume).
-
-    Extraction failures (including the hard timeout in
-    ``agent/memory_extraction.py``) are swallowed inside the task wrapper and
-    never propagate out of this scheduler. ``CancelledError`` is re-raised so
-    ``drain_pending_extractions`` can cooperate with worker shutdown.
-    """
-    existing = _pending_extraction_tasks.get(session_id)
-    if existing is not None and not existing.done():
-        logger.info(
-            "[memory_extraction] Extraction already in-flight for %s, skipping duplicate",
-            session_id,
-        )
-        return
-
-    async def _wrapper() -> None:
-        try:
-            from agent.memory_extraction import run_post_session_extraction
-
-            await run_post_session_extraction(
-                session_id,
-                response_text,
-                turn_count=turn_count,
-                is_conversational=is_conversational,
-            )
-        except asyncio.CancelledError:
-            raise  # preserve cancellation semantics for shutdown drain
-        except Exception as e:
-            logger.debug(
-                "[memory_extraction] Background extraction failed for %s (non-fatal): %s",
-                session_id,
-                e,
-            )
-
-    task = asyncio.create_task(_wrapper(), name=f"post_session_extraction:{session_id}")
-    _pending_extraction_tasks[session_id] = task
-    task.add_done_callback(lambda t: _pending_extraction_tasks.pop(session_id, None))
-
-
-async def drain_pending_extractions(timeout: float = 5.0) -> None:
-    """Drain in-flight post-session extraction tasks on worker shutdown (hotfix #1055).
-
-    No-op if ``_pending_extraction_tasks`` is empty (first-deploy case / worker
-    that never ran a session).
-
-    Wiring: called from ``worker/__main__.py`` shutdown sequence AFTER the
-    worker-task wait (line ~408, ``await asyncio.gather(*pending, ...)``)
-    and BEFORE the health/notify/reflection cancels. At that ordering:
-
-    - All worker loops have drained → every extraction that will be scheduled
-      has been scheduled.
-    - The event loop is still running → pending extractions can complete or be
-      cancelled cleanly.
-    - Health/notify/reflection tasks are still live → we are ordered before
-      their cancellation, avoiding a mid-cancel scheduling race.
-
-    Common case (extraction near-complete): the 5s window lets the typical
-    1-5s extraction finish. Stall case (extraction wedged past the 35s hard
-    timeout internally): we accept losing this on shutdown; the internal
-    hard-timeout already caps worst-case latency.
-    """
-    if not _pending_extraction_tasks:
-        return  # First-deploy case — nothing to drain
-
-    pending = list(_pending_extraction_tasks.values())
-    logger.info("[memory_extraction] Draining %d pending extraction task(s)", len(pending))
-    done, still_pending = await asyncio.wait(pending, timeout=timeout)
-    for task in still_pending:
-        task.cancel()
-    if still_pending:
-        logger.warning(
-            "[memory_extraction] Cancelled %d extraction task(s) that did not complete "
-            "within %.1fs",
-            len(still_pending),
-            timeout,
-        )
 
 
 # Harness startup retry constants
@@ -586,8 +625,8 @@ def _on_calendar_heartbeat_done(task: asyncio.Task) -> None:
 def _schedule_calendar_heartbeat(slug: str, project: str | None = None) -> None:
     """Schedule an owned calendar-heartbeat task (issue #2590).
 
-    Synchronous fire-and-forget like ``_schedule_post_session_extraction``:
-    keeps a reference in ``_pending_calendar_tasks`` so the task can never be
+    Synchronous fire-and-forget: keeps a reference in
+    ``_pending_calendar_tasks`` so the task can never be
     garbage-collected mid-flight or orphaned past loop teardown, and attaches
     a done-callback that deregisters it and logs exceptions.
 
@@ -605,11 +644,14 @@ def _schedule_calendar_heartbeat(slug: str, project: str | None = None) -> None:
 async def drain_pending_calendar_heartbeats(timeout: float = 5.0) -> None:
     """Drain in-flight calendar heartbeats on worker shutdown (issue #2590).
 
-    No-op when nothing is pending. Called from ``worker/__main__.py`` shutdown
-    alongside ``drain_pending_extractions`` — same ordering rationale: worker
-    loops have drained, the event loop is still running, so pending heartbeats
-    can complete or be cancelled cleanly instead of being abandoned to
-    ``_cancel_all_tasks`` (the #2574 wedge mechanism).
+    No-op when nothing is pending. Called from ``worker/__main__.py``
+    shutdown after the worker-task wait and before the
+    health/notify/reflection cancels: worker loops have drained, the event
+    loop is still running, so pending heartbeats can complete or be
+    cancelled cleanly instead of being abandoned to ``_cancel_all_tasks``
+    (the #2574 wedge mechanism). Post-session extraction needs no such
+    drain any more — it is a durable ``SideEffectJob`` row, so a shutdown
+    mid-flight loses nothing.
     """
     if not _pending_calendar_tasks:
         return
@@ -1157,6 +1199,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
     _session_id_for_registry = session.agent_session_id
     if _session_id_for_registry:
         _active_sessions[_session_id_for_registry] = SessionHandle(task=None)
+    # Cancellation is the one exit whose terminal transition this function does
+    # NOT own; see the `except asyncio.CancelledError` below.
+    _cancelled_exit = False
+    # Set by the `except BaseException` below so the `finally`'s finalize guard
+    # knows it is unwinding on an exception and must record `failed`.
+    _raised_exit = False
+    # Bound partway through the body; pre-assigned so the `finally` can read it
+    # as a plain name on an early-raise exit. A future rename then fails loudly
+    # instead of silently degrading every exit to a `failed` finalize.
+    task = None
+    agent_session = None
     try:
         # T+0 heartbeat write: guarantee the very first health-check tick after
         # session start sees a fresh heartbeat. Uses the pre-loaded `session`
@@ -1307,6 +1360,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Synthetic slug shape: dev-{first 8 chars of agent_session_id} (the
         # ``dev-`` prefix is a stable historical literal the cleanup regex
         # below matches; only the session type is ``eng``).
+        #
+        # ``slug`` stays a local here and is never written back onto the
+        # hydrated ``AgentSession`` row: ``models/agent_session.py`` declares
+        # ``slug = KeyField(null=True)``, so assigning it on a saved instance
+        # writes a *new* row at a new Redis primary key and orphans the
+        # original at the ``slug=None`` key. The lane visibility this
+        # synthesis exists for is provided by stamping ``exec_cwd`` instead
+        # (see the session-phase save block below), which is a plain field.
         is_synthetic_slug = False
         if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
@@ -1491,7 +1552,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
         )
 
         # Update the AgentSession (already created at enqueue time) with session-phase fields
-        agent_session = None
         try:
             sessions = list(
                 AgentSession.query.filter(project_key=session.project_key, status="running")
@@ -1505,10 +1565,53 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 agent_session.branch_name = branch_name
                 # Persist task_list_id so hooks can resolve this session
                 agent_session.task_list_id = task_list_id
-                agent_session.save(update_fields=["updated_at", "branch_name", "task_list_id"])
+                # Stamp the resolved lane onto exec_cwd *before* the harness
+                # launches, not only after the runner's own first-spawn
+                # stamp (stamp_execution_spawn, cwd=self._working_dir). This
+                # narrows the window during which a synthetic-slug lane
+                # (resolved here, at execution time) is invisible to
+                # _scan_worktree_sessions -- which reads exec_cwd -- down to
+                # worktree-creation-through-this-save rather than
+                # worktree-creation-through-harness-startup. The runner
+                # re-stamps the identical value moments later alongside the
+                # pid fence; this write is plain and carries neither, so it
+                # is invisible to AgentSession.live_fence.
+                agent_session.exec_cwd = str(working_dir)
+                # Run-start reset (#3289). ``exit_reason`` is a persisted field
+                # written by the adapter's ``publish_exit_summary`` at the END
+                # of a run. Nothing cleared it, so a re-run of the same row --
+                # a reply to a session that previously errored or timed out --
+                # arrived from Redis already carrying the PREVIOUS run's exit
+                # reason. Every consumer of the field (``_session_failed_from_runner``,
+                # ``_runner_final_status``, the synthetic-slug cleanup skip below)
+                # reads it on paths that can be reached before this run writes
+                # its own value, so each of them could act on the prior run's
+                # outcome. Clearing it here makes the field run-scoped: absent
+                # means "this run has not reported an exit yet", which is
+                # exactly what every consumer's None-branch already assumes.
+                agent_session.exit_reason = None
+                agent_session.save(
+                    update_fields=[
+                        "updated_at",
+                        "branch_name",
+                        "task_list_id",
+                        "exec_cwd",
+                        "exit_reason",
+                    ]
+                )
                 agent_session.append_history("user", (session.message_text or "")[:200])
         except Exception as e:
-            logger.debug(f"AgentSession update failed (non-fatal): {e}")
+            # Two guarantees ride on this save and BOTH are lost when it
+            # raises: the exec_cwd stamp (a lane that stays invisible to the
+            # busy scan is exactly the condition it exists to prevent) and the
+            # run-start exit_reason reset (without it the field keeps the
+            # PREVIOUS run's outcome and every consumer reads a stale exit).
+            # Name both, so the log says what actually did not land.
+            logger.warning(
+                f"[lane-writeback] AgentSession run-start update failed "
+                f"(exec_cwd stamp AND exit_reason reset) for "
+                f"session={session.session_id} path={working_dir} (non-fatal): {e}"
+            )
 
         # Determine session type for routing decisions
         _session_type = getattr(agent_session, "session_type", None) if agent_session else None
@@ -2208,6 +2311,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # tools/agent_session_scheduler.py session_id resolution.
             "VALOR_SESSION_ID": session.session_id or "",
             "CLAUDE_CODE_TASK_LIST_ID": task_list_id or "",
+            # Lineage across the subprocess boundary (#3183 lane 5a). The
+            # correlation id already labels every log line on this side and
+            # rides back out on the outbox payload; without it in the env, the
+            # journey has a hole exactly where the work happens.
+            "VALOR_CORRELATION_ID": cid or "",
         }
         # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in
         # agent/hooks/pre_tool_use.py:97-99). Without it, PM Bash restrictions
@@ -2311,6 +2419,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
             resume=_resume_ctx,
         )
 
+        # Codex dev-lane preflight (plan #2001, Phase 3): flagged eng
+        # sessions validate binary/version/auth/sandbox/worktree BEFORE the
+        # top-level Claude runner starts. The top-level path still
+        # constructs Claude in every case (asserted by
+        # test_session_executor_runner_dispatch) — only flagged eng gets
+        # the Codex Dev tool, via the runner's conditional MCP config.
+        # Fail-fast: a missing provision raises with an actionable error
+        # instead of failing mid-turn inside the PM.
+        if getattr(agent_session, "dev_harness", None) == "codex":
+            from agent.codex_dev_config import preflight_codex_dev_lane
+
+            _codex_lane_error = preflight_codex_dev_lane(agent_session, str(working_dir))
+            if _codex_lane_error is not None:
+                raise RuntimeError(f"Codex dev lane preflight failed: {_codex_lane_error}")
+
         # The message the runner receives: the full-context turn input, so
         # resumed (reply-to) threads keep their conversation context. On a
         # resumed session this IS the reply/steer — the runner injects it as
@@ -2319,8 +2442,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # double-emit.
         _runner_message = _harness_input
 
+        # The runner's OWN report of how this run ended, captured the moment
+        # ``run()`` returns. This is the authoritative signal for the terminal
+        # cleanup branch below: the persisted ``agent_session.exit_reason`` is
+        # only reachable when the run-start lookup found a row, and that lookup
+        # legitimately misses (documented race below), which would otherwise
+        # make a genuinely timed-out turn look like a clean exit and DELETE its
+        # lane. ``run()`` swallows ``Exception`` into ``ExitReason.EXCEPTION``
+        # but does NOT catch cancellation, so a still-None value here means the
+        # unwind happened before/around the call, not that the run ended clean.
+        _runner_exit_reason = None
+
         async def do_work() -> str:
-            await _runner.run(_runner_message)
+            nonlocal _runner_exit_reason
+            _summary = await _runner.run(_runner_message)
+            _runner_exit_reason = getattr(_summary, "exit_reason", None)
             return ""
 
         # Pass working_dir so BackgroundTask._watchdog can detect a vanished
@@ -2428,13 +2564,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Bug A (issue #1730): complete_transcript is confirmed to fire on the
         # deferred-self-draft completion path (defer_reaction=False, since
         # _inject_self_draft_steering does NOT call _enqueue_nudge).  However, if
-        # complete_transcript itself throws, the session can ghost as ``running`` for
-        # up to the health-check TTL (32 min in the production timeline).  The
-        # defensive fallback below ensures a terminal finalize always lands on the
-        # COMPLETION/DELIVERY exit when complete_transcript fails.  Scoped to this
-        # exit only — the nudge / unconsumed-steering re-enqueue path is gated by
-        # chat_state.defer_reaction=True and the CancelledError path is health-checker-
-        # owned; neither is touched here.
+        # complete_transcript itself throws, the session would ghost as ``running``.
+        # There is no local fallback in this block -- the duplicate defensive one
+        # was removed (see the `except` below).  The `finally`'s
+        # `_finalize_if_still_running`, keyed on ``status == "running"``, is the
+        # sole owner of that path and catches it on the way out.
         if agent_session:
             try:
                 from bridge.session_transcript import complete_transcript
@@ -2459,13 +2593,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"session {session.session_id} (operation: finalize status to "
                     f"{_runner_final_status(task.error, agent_session)}): {e}"
                 )
-                # No fallback-finalize here: the unconditional completion-exit
-                # guard below (after this whole if/else block) re-reads the
-                # authoritative session and finalizes it if still `running`. It
-                # subsumes what used to be a duplicate defensive fallback in this
-                # except-only branch -- see the guard's comment for the full
-                # rationale (round-2 CONCERN 3: this exception-only branch never
-                # covered the `else:` / agent_session-is-None exit below anyway).
+                # No fallback-finalize here: the finalize guarantee in this
+                # function's `finally` (`_finalize_if_still_running`) re-reads
+                # the authoritative session and finalizes it if still `running`.
+                # It subsumes what used to be a duplicate defensive fallback in
+                # this except-only branch -- which never covered the `else:` /
+                # agent_session-is-None exit below anyway.
         else:
             # agent_session lookup returned None (race on status="running" filter,
             # e.g. after health-check recovery). Finalize using outer `session`
@@ -2502,97 +2635,54 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         e,
                     )
 
-        # Unconditional completion-exit finalize guard (Defect B, #2007).
+        # Enqueue post-session memory extraction as a durable SideEffectJob.
         #
-        # (a) Scope: this covers the non-deferred completion exit only, gated by
-        #     `not chat_state.defer_reaction` -- the nudge / unconsumed-steering
-        #     re-enqueue path (defer_reaction=True) is untouched, since
-        #     `_enqueue_nudge` already writes the authoritative post-nudge state
-        #     (status=pending) itself; finalizing here would clobber it.
+        # The row is written here and drained by the `side-effect-drain`
+        # reflection minutes later, in a different process. That is the whole
+        # point: the previous fire-and-forget task lived in this worker's
+        # memory, so a restart cancelled it, a failure vanished, and nothing
+        # could be retried. The row survives all three.
         #
-        # (b) Placement: this runs AFTER the entire `if agent_session: / else:`
-        #     block above closes -- deliberately NOT nested inside the
-        #     `if agent_session:` branch. A prior version of this fallback lived
-        #     only inside that branch's `except Exception` handler, which meant
-        #     the `else:` exit (agent_session lookup returned None, e.g. a race
-        #     on the status="running" filter -- see #917) had no re-read+finalize
-        #     backstop at all: if `complete_transcript` silently no-op'd there
-        #     instead of raising, the authoritative record stayed `running`
-        #     forever. Placing the guard after the whole if/else covers both exits.
-        #
-        # (c) Unconditional: this guard runs every time regardless of whether
-        #     `complete_transcript` succeeded, raised, or (in the `else` branch)
-        #     already ran its own fallback -- it re-reads the authoritative
-        #     record fresh and only acts if it is still `running`, making it a
-        #     safe no-op on the ordinary happy path. It subsumes the old
-        #     exception-only fallback that used to live inside the
-        #     `if agent_session:` branch (that one only fired when
-        #     `complete_transcript` itself raised); this is the single
-        #     finalize-guarantee mechanism for the completion exit now.
-        if not chat_state.defer_reaction:
-            try:
-                from models.session_lifecycle import (  # noqa: PLC0415
-                    StatusConflictError,
-                    finalize_session,
-                    get_authoritative_session,
-                )
-
-                _auth = get_authoritative_session(session.session_id)
-                if _auth is not None and _auth.status == "running":
-                    _guard_status = _runner_final_status(task.error, agent_session)
-                    finalize_session(
-                        _auth,
-                        _guard_status,
-                        reason="unconditional completion-exit finalize guard (#2007)",
-                    )
-                    logger.info(
-                        "[executor] Completion-exit guard finalized session %s → %s",
-                        session.session_id,
-                        _guard_status,
-                    )
-            except StatusConflictError as _guard_conflict:
-                # CAS conflict = another actor (complete_transcript, a concurrent
-                # finalize, the health-checker) already finalized this session.
-                # Treat as success -- do not re-raise. "Expected, do not treat
-                # as an error" is a reason to log at INFO, not a reason to log
-                # nothing (#3053 — this silent exit was one of the two ways a
-                # deferred self-draft flush could be skipped with no trace).
-                logger.info(
-                    "[executor] Completion-exit guard: %s already finalized (%s)",
-                    session.session_id,
-                    _guard_conflict,
-                )
-            except Exception as _guard_err:
-                logger.warning(
-                    "[executor] Completion-exit finalize guard failed for %s: %s",
-                    session.session_id,
-                    _guard_err,
-                )
-
-        # Schedule post-session memory extraction (hotfix #1055) — fire-and-forget.
-        #
-        # CRITICAL: synchronous call (no await, no gather). Any awaiting here would
-        # re-couple extraction latency to the PM nudge below, regressing the 6-hour
-        # stall observed in #1055 and the #987 ordering invariant.
+        # Still non-blocking, and for the same reason it always was: awaiting
+        # extraction here would re-couple its latency to the PM nudge below and
+        # regress the 6-hour stall of #1055 and the #987 ordering invariant.
+        # Enqueue is one Redis write.
         #
         # Runs AFTER both complete_transcript paths above (happy path at ~L1320
-        # and the #917 fallback at ~L1346). Extraction runs in the background;
-        # its completion or failure does not delay the eng nudge. See
-        # drain_pending_extractions() for shutdown wiring.
+        # and the #917 fallback at ~L1346).
         #
         # Fix 2 (#1822): capture the trivial-session gate signals synchronously
-        # HERE (before teardown clears the in-memory turn-count tracker) and pass
-        # them by value. turn_count is re-fetched from the persisted AgentSession
-        # (the in-scope session.turn_count is a stale instance); origin comes from
-        # the in-scope session's initial_telegram_message.
+        # HERE (before teardown clears the in-memory turn-count tracker) and
+        # snapshot them into payload_json. turn_count is re-fetched from the
+        # persisted AgentSession (the in-scope session.turn_count is a stale
+        # instance); origin comes from the in-scope session's
+        # initial_telegram_message. Reading either inside the drain minutes
+        # later would silently re-introduce the trivial-session bug these
+        # captures were added to fix, so the payload carries them by value.
         _ext_turn_count = _capture_turn_count(session.session_id)
         _ext_is_conversational = _is_conversational_session(session)
-        _schedule_post_session_extraction(
-            session.session_id,
-            task._result or "",
-            turn_count=_ext_turn_count,
-            is_conversational=_ext_is_conversational,
-        )
+        # The guard is mandatory and this is the only place the enqueue is
+        # guarded. `enqueue()` itself keeps raising on a Redis error — the
+        # migration back-enqueue and the "a duplicate create is worse than a
+        # visible failure" contract both depend on it propagating to THEIR
+        # callers. Here it must not: this statement sits inside
+        # `_execute_agent_session` with no enclosing try, so a raise would skip
+        # the error-case snapshot, the steering-queue rescue, and the
+        # reaction/nudge path all the way to the end of the function. A Redis
+        # error degrades to a lost extraction, never a lost teardown.
+        try:
+            enqueue(
+                "memory_extraction",
+                session.session_id,
+                session.project_key,
+                {
+                    "response_text": task._result or "",
+                    "turn_count": _ext_turn_count,
+                    "is_conversational": _ext_is_conversational,
+                },
+            )
+        except Exception as e:
+            logger.warning(f"SideEffectJob enqueue failed (non-fatal): {e}")
 
         # Save session snapshot for error cases
         if task.error:
@@ -2733,6 +2823,40 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 f"[{session.project_key}] Skipping session cleanup — "
                 f"continuation session enqueued (auto-continue {chat_state.auto_continue_count})"
             )
+    except asyncio.CancelledError:
+        # Cancellation has an owner that is still mid-flight when this clause
+        # runs. That is the distinction from the raise path below -- NOT that a
+        # raise has no owner at all. A raise is owned by the worker's outer
+        # `finally`, which has not run yet and will finalize the same row to the
+        # same `failed` status moments later; finalizing early there merely
+        # reorders two writes that agree. Here the owner's decision is still
+        # being made, so writing first would overrule it.
+        #
+        # The health checker cancels `handle.task` and then, inside the SAME
+        # await, decides the row's fate itself: `abandoned`, `failed`, or --
+        # the common case -- `transition_status(entry, "pending")` to requeue
+        # the session for another attempt (`_agent_session_health_check`'s
+        # recovery branches). `transition_status` rejects a terminal source
+        # status, so a finalize from here would race in first, turn that
+        # requeue into a swallowed StatusConflictError, and silently retire
+        # the health checker's entire retry loop. A worker-shutdown
+        # cancellation is owned the same way, by
+        # `_recover_interrupted_agent_sessions_startup`, which re-queues rows
+        # it finds `running`.
+        #
+        # So the row is left `running` on purpose here. Re-raise unchanged --
+        # this clause exists only to tell the `finally` which exit it is on.
+        _cancelled_exit = True
+        raise
+    except BaseException:
+        # A session whose executor raised did not complete. The `finally` cannot
+        # see that it is unwinding, and `_runner_final_status` has no notion of
+        # it either -- it returns `completed` whenever `task.error` is falsy and
+        # the runner exit was clean. This clause exists only to tell the
+        # `finally` which exit it is on, so the guard can write the honest
+        # terminal status. Re-raise unchanged.
+        _raised_exit = True
+        raise
     finally:
         # === Two-tier no-progress detector cleanup (#1036) ===
         # Always pop the registry entry, regardless of how the session body exited
@@ -2740,6 +2864,29 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # into _active_sessions across sessions on the same worker.
         if _session_id_for_registry:
             _active_sessions.pop(_session_id_for_registry, None)
+
+        # === Finalize guarantee (#2007, #3209) ===
+        # Runs on every exit this function owns -- normal return AND raise --
+        # and before the worktree cleanup below, which refuses to remove a lane
+        # whose row is still `running`. On the raise path this is the sole
+        # terminal writer: the worker's outer `finally` re-reads the row and
+        # takes its already-terminal skip branch rather than writing. That is
+        # why `raised` forces `failed` -- see `_finalize_if_still_running`.
+        # Cancellation is excluded because its owner is still
+        # deciding (see the `except asyncio.CancelledError` above).
+        # Keyed on `status == "running"`, so the nudge path's `pending` write
+        # survives untouched; see `_finalize_if_still_running` for why that
+        # holds on both `_enqueue_nudge` paths. `task` and `agent_session` are
+        # pre-assigned to `None` before the `try`, so both read as plain names
+        # here even on an early-raise exit.
+        if not _cancelled_exit:
+            _finalize_if_still_running(
+                session.session_id,
+                task,
+                agent_session,
+                reason="executor exit finalize guard (#3209)",
+                raised=_raised_exit,
+            )
 
         # === Synthetic-slug worktree cleanup (issue #1272) ===
         # Slugless eng sessions get a synthesized slug ``dev-{aid[:8]}`` and a
@@ -2756,13 +2903,150 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 and isinstance(_slug_for_cleanup, str)
                 and re.match(r"^dev-[0-9a-f]{8}$", _slug_for_cleanup)
             ):
+                from agent.session_runner.router import ExitReason  # noqa: PLC0415
                 from agent.worktree_manager import (  # noqa: PLC0415
                     cleanup_after_merge,
                     resolve_main_repo_root,
                 )
 
                 _wd = locals().get("working_dir")
+                # Exit reason for this run, runner-first. ``_runner_exit_reason``
+                # is captured straight off the ``RunSummary`` the runner returned,
+                # so it holds even when the run-start lookup missed and
+                # ``agent_session`` is None -- on that path the adapter has no row
+                # to write ``publish_exit_summary`` onto, and reading the row alone
+                # would classify a timed-out turn as a clean exit and DELETE the
+                # lane whose uncommitted work the preserve branch exists to save.
+                # The row is the fallback: it is what the adapter's
+                # ``publish_exit_summary`` wrote onto this very in-scope object,
+                # the same state the reaction branch and ``_runner_final_status``
+                # read, and it covers unwinds that never reached the capture. No
+                # Redis re-read here -- the terminal path must not depend on a
+                # fresh round-trip. Either source reads THIS run's outcome: the
+                # persisted field is cleared to None at run start (see the
+                # run-start reset above), so it cannot inherit a stale
+                # ``"turn_timeout"`` from the run before it.
+                # ``ExitReason`` is a ``StrEnum``, so this compares equal
+                # whether the value is the member or the wire string
+                # ``"turn_timeout"``.
+                # ``locals()`` because an early raise can unwind before either
+                # name is bound (the same reason ``working_dir`` is read this
+                # way above).
+                _runner_exit_reason_local = locals().get("_runner_exit_reason")
+                _agent_session_for_cleanup = locals().get("agent_session")
+                if _agent_session_for_cleanup is None:
+                    # The run-start lookup missed (see the race note above), so
+                    # nothing persisted this run's exit onto a row. Greppable by
+                    # name: the cleanup decision is running on the runner local
+                    # alone, and if that is unset too the lane WILL be deleted.
+                    logger.warning(
+                        "[synthetic-slug] cleanup decision without an AgentSession row "
+                        "for session=%s slug=%s — falling back to the runner's own "
+                        "exit_reason=%r",
+                        session.session_id,
+                        _slug_for_cleanup,
+                        _runner_exit_reason_local,
+                    )
+                _exit_reason_for_cleanup = (
+                    _runner_exit_reason_local
+                    if _runner_exit_reason_local is not None
+                    else getattr(_agent_session_for_cleanup, "exit_reason", None)
+                )
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
                 if _wd is not None:
+                    # Pre-finalize guard (#3176). Its one remaining job is
+                    # the CANCELLED exit: `_finalize_if_still_running` at the
+                    # top of this same `finally` already covers normal return
+                    # and raise, but the caller skips it under cancellation
+                    # (see its docstring), so on that exit alone the
+                    # authoritative row can still be "running" here. Every
+                    # other exit reaches this re-read already terminal, or
+                    # `pending` on the nudge re-enqueue below -- do NOT widen
+                    # the predicate off `status == "running"` on the strength
+                    # of the first half of that sentence. (One more way a
+                    # `running` row can reach here: a non-CAS failure inside
+                    # `_finalize_if_still_running`, which logs and returns.
+                    # This guard then writes without knowing the exit raised.
+                    # That divergence is #3305.) The busy scan
+                    # (agent/worktree_manager.py::_scan_worktree_sessions)
+                    # reads exec_cwd, so a still-running row would make
+                    # cleanup_after_merge's own busy check refuse the removal
+                    # -- permanently, since a synthetic `session/dev-*` branch
+                    # never satisfies sweep_worktrees' `merged_via_tree`
+                    # requirement. `status == "running"` is what makes running
+                    # this outside the `defer_reaction` conditional safe: every
+                    # path that hands the row to a continuation (the nudge
+                    # re-enqueue) already leaves it `pending` first, so this
+                    # guard no-ops there.
+                    #
+                    # Hoisted above the skip branches (#3289) so it runs on
+                    # EVERY terminal exit, not only the one that deletes the
+                    # worktree. Only the removal itself is conditional. The two
+                    # skips below do NOT share one exit shape. The turn-timeout
+                    # skip TYPICALLY fires on a clean return of `_runner.run()`,
+                    # where the completion-exit finalize already ran and the
+                    # `status == "running"` predicate makes this guard a no-op --
+                    # but it ALSO fires on a cancelled exit that unwound after
+                    # `publish_exit_summary` stamped the row, and there this guard
+                    # is the only finalizer left (see
+                    # `test_timeout_preserve_branch_still_finalizes_the_authoritative_row`).
+                    # The reap-failure skip fires on the raising/cancelled exit
+                    # this guard exists for. Leaving a row `running` with no live
+                    # process wedges the lane whether or not the directory
+                    # survives, so the guard cannot sit inside either branch.
+                    try:
+                        from models.session_lifecycle import (  # noqa: PLC0415
+                            StatusConflictError,
+                            finalize_session,
+                            get_authoritative_session,
+                        )
+
+                        _auth = get_authoritative_session(session.session_id)
+                        if _auth is not None and _auth.status == "running":
+                            # `task` is assigned partway through the body
+                            # (`task = BackgroundTask(...)`) and is not
+                            # guaranteed to exist here on an early-raise
+                            # exit -- resolve defensively and
+                            # short-circuit BEFORE _runner_final_status
+                            # is consulted. `_runner_final_status(None,
+                            # None)` returns "completed", which would
+                            # finalize a session that crashed before
+                            # starting a runner as a success; "failed" is
+                            # the honest status for that case.
+                            _task = locals().get("task")
+                            _agent_session = locals().get("agent_session")
+                            _guard_status = (
+                                _runner_final_status(_task.error, _agent_session)
+                                if _task is not None
+                                else "failed"
+                            )
+                            try:
+                                finalize_session(
+                                    _auth,
+                                    _guard_status,
+                                    reason="synthetic-cleanup pre-finalize",
+                                )
+                                logger.info(
+                                    "[synthetic-slug] Pre-finalize guard finalized "
+                                    "session %s → %s ahead of cleanup",
+                                    session.session_id,
+                                    _guard_status,
+                                )
+                            except StatusConflictError:
+                                # Someone else (the health checker, a
+                                # concurrent finalize) already finalized
+                                # this row. Not an error -- proceed to
+                                # cleanup, which will now see the
+                                # terminal status they wrote.
+                                pass
+                    except Exception as guard_err:
+                        logger.warning(
+                            "[synthetic-slug] Pre-finalize guard failed for %s "
+                            "(non-fatal, cleanup may be refused): %s",
+                            session.session_id,
+                            guard_err,
+                        )
+
                     # Reap-failed marker skip (Fix 3, issue #1938): the runner's
                     # ``_run_one_turn`` finally SYNCHRONOUSLY reaps + confirms its
                     # process group before this cleanup runs (finally-ordering
@@ -2782,13 +3066,40 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             _slug_for_cleanup,
                             _wd,
                         )
+                    elif _turn_timed_out:
+                        # Turn-timeout skip (#3289): the preempt watcher kills a
+                        # turn that blew its deadline and the user is told "the
+                        # work so far is saved". Deleting the worktree here would
+                        # make that sentence a lie -- every uncommitted change in
+                        # the lane would go with it, before the user could reply.
+                        # The turn ended, not the work: preserve the directory and
+                        # let the operator (or a resumed session) reclaim it.
+                        logger.warning(
+                            "[synthetic-slug] SKIPPING worktree cleanup for %s — turn "
+                            "ended on %s, so the worktree is preserved with its "
+                            "uncommitted work. Reclaim manually: `git worktree prune` "
+                            "+ remove the worktree dir %r.",
+                            _slug_for_cleanup,
+                            ExitReason.TURN_TIMEOUT,
+                            _wd,
+                        )
                     else:
                         _repo_for_cleanup = resolve_main_repo_root(_wd)
                         cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
-                        logger.info(
-                            f"[synthetic-slug] Cleaned up worktree+branch for "
-                            f"{_slug_for_cleanup}: {cleanup_result}"
-                        )
+                        if cleanup_result.get("blocked_by_session"):
+                            logger.warning(
+                                "[synthetic-slug] cleanup blocked for %s — session %s "
+                                "still holds the lane. Reclaim manually: `git worktree "
+                                "prune` + remove the worktree dir %r.",
+                                _slug_for_cleanup,
+                                cleanup_result["blocked_by_session"],
+                                _wd,
+                            )
+                        else:
+                            logger.info(
+                                f"[synthetic-slug] Cleaned up worktree+branch for "
+                                f"{_slug_for_cleanup}: {cleanup_result}"
+                            )
         except Exception as cleanup_err:
             # Cleanup failures must NEVER propagate as session failures.
             logger.warning(

@@ -198,9 +198,11 @@ def _as_unix_ts(val) -> float | None:
     """Coerce datetime / int / float / ISO-string to a Unix timestamp.
 
     Delegates to :func:`agent.session_runner.liveness._as_unix_ts` so the
-    naive-datetime-is-UTC convention (Popoto strips tzinfo on save) has one
-    definition. Falls back to a local implementation only if that import
-    fails, so this module stays usable standalone.
+    naive-datetime-is-UTC convention has one definition. popoto 1.9.0 decodes
+    every stored datetime as aware UTC; the naive-tzinfo fallback branches
+    below exist for the ISO-string and non-popoto ``datetime`` inputs this
+    coercer also accepts. Falls back to a local implementation only if the
+    delegate import fails, so this module stays usable standalone.
     """
     try:
         from agent.session_runner.liveness import _as_unix_ts as _impl  # noqa: PLC0415
@@ -211,6 +213,8 @@ def _as_unix_ts(val) -> float | None:
     if val is None:
         return None
     if isinstance(val, datetime):
+        # Keep: fallback path accepts datetime | int | float | str from
+        # mixed callers, not exclusively popoto reads.
         if val.tzinfo is None:
             val = val.replace(tzinfo=UTC)
         return val.timestamp()
@@ -221,6 +225,7 @@ def _as_unix_ts(val) -> float | None:
             dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
         except (TypeError, ValueError):
             return None
+        # Keep: an ISO string from a non-popoto source may carry no offset.
         return (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt).timestamp()
     return None
 

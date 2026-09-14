@@ -39,6 +39,10 @@ Public surface
 * ``PromiseVerdict`` — the verdict dataclass returned to call sites.
 * ``evaluate_promise(text, *, transport, session_id=None,
   classifier_verdict=None) -> PromiseVerdict`` — sync judgment function.
+* ``evaluate_promise_async(...) -> PromiseVerdict`` — the async core
+  ``evaluate_promise`` wraps. Use directly from an already-running event
+  loop (e.g. the drafter's main path) instead of the sync wrapper, which
+  falls back to the regex heuristic inside a running loop.
 * ``cli_check_or_exit(text, transport, session_id) -> None`` — the
   CLI helper. Calls ``evaluate_promise`` and on BLOCK prints the
   recovery template to stderr + ``sys.exit(1)``. There is **no
@@ -73,9 +77,30 @@ caller passes); ``valor_telegram.py`` and ``valor_email.py`` use synthetic IDs.
 
 Latency
 -------
-Budget: p50 < 500ms, p99 < 3s. SDK-level 3-second timeout via the
-RTR-correct pattern: ``async with semaphore_slot(): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:``.
+Budget for the LLM path: p50 <= 2500ms, p99 <= 5000ms (owner ruling
+2026-09-03; provisional/tunable, re-derive from post-merge audit JSONL
+with ``tools/promise_gate_measurement.py``). Measured 2026-09-07 on this
+code, one bucket: n=60 sequential calls over audit-log text previews
+(<= 200 chars, no semaphore contention, ``queue_wait_ms`` max 0.05):
+p50 1871ms / p95 2352ms / p99 2543ms / max 2705ms, 0 timeouts. The
+zero-LLM short path (<200 chars, non-SDLC, no artifacts) keeps its
+existing guarantee of p50 ~= 0ms and is unchanged by this budget.
+
+The budget is separate from the SDK-level timeout. The call follows the
+RTR-correct pattern ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT):
+async with anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT,
+max_retries=0) as client:``. That ``timeout=3.0`` becomes
+``httpx.Timeout(3.0)``, which bounds connect, read, write and pool
+acquire at 3 seconds **each**, not total wall time, so a single call can
+legitimately exceed 3 seconds without firing ``APITimeoutError``; the
+semaphore acquire is a further, separately bounded 3-second wait
+(``queue_wait_ms`` on the audit row). There is therefore no exact
+structural ceiling to quote; the p99 budget above is the enforced bound
+and the audit JSONL is the source of truth for whether it holds.
+``max_retries=0`` is load-bearing: the SDK default
+(``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts, which would
+silently multiply the per-phase bound into ~3 attempts plus backoff
+(~10s) on this call's now-inline delivery path.
 The other anthropic-client helper (the convenience one that
 constructs the client for you) is **not** used here — it does not
 accept a ``timeout`` argument and would silently violate the 3-second
@@ -91,6 +116,7 @@ risk drift.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -493,6 +519,28 @@ _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.
 _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
+# Longest text (characters) the LLM-primary path will send to the model.
+# ``draft_message``'s main path passes the full narration-stripped agent output,
+# which has no upper bound (outputs above FILE_ATTACH_THRESHOLD spill to a
+# file attachment but still reach this gate in full), so without a cap the
+# per-call token cost and latency are unbounded by construction. Over the cap
+# the gate skips the model and runs the regex heuristic, audited with the
+# ``_oversize`` source suffix so the skip is queryable. The default is
+# provisional/tunable (``PROMISE_GATE_LLM_MAX_INPUT_CHARS``): about twice the
+# Telegram message ceiling and well above any reply the drafter would deliver
+# as prose.
+_LLM_MAX_INPUT_CHARS_DEFAULT = 8000
+
+
+def _llm_max_input_chars() -> int:
+    raw = os.environ.get("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "")
+    try:
+        value = int(raw) if raw.strip() else _LLM_MAX_INPUT_CHARS_DEFAULT
+    except ValueError:
+        value = _LLM_MAX_INPUT_CHARS_DEFAULT
+    return value if value > 0 else _LLM_MAX_INPUT_CHARS_DEFAULT
+
+
 def _write_promise_audit(
     text: str,
     verdict: PromiseVerdict,
@@ -500,11 +548,18 @@ def _write_promise_audit(
     transport: str,
     session_id: str | None,
     source: str,
+    elapsed_ms: float | None = None,
+    queue_wait_ms: float | None = None,
 ) -> None:
     """Appends a JSONL entry to the classification audit log
     (``logs/classification_audit.jsonl``) with verdict-specific fields:
     ``{ts, kind: "promise_gate", text_preview, action, reason, class_,
-    transport, session_id, source}``.
+    transport, session_id, source}``, plus optional ``elapsed_ms`` /
+    ``queue_wait_ms`` latency fields (omitted when not measured — e.g. the
+    kill-switch and classifier-delegation short-circuits never call the LLM,
+    so there is nothing to time). Readers must tolerate rows written before
+    this instrumentation existed (no ``elapsed_ms``/``queue_wait_ms`` keys)
+    and legacy rows with no ``kind`` field at all.
     """
     try:
         from datetime import UTC, datetime
@@ -526,6 +581,10 @@ def _write_promise_audit(
             "session_id": session_id,
             "source": source,
         }
+        if elapsed_ms is not None:
+            entry["elapsed_ms"] = round(elapsed_ms, 2)
+        if queue_wait_ms is not None:
+            entry["queue_wait_ms"] = round(queue_wait_ms, 2)
         with open(_AUDIT_LOG_PATH, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
@@ -590,29 +649,57 @@ def _make_event(
 
 # === LLM async helper (RTR-correct SDK pattern) ===
 
+# Per-Task queue-wait measurement (Risk 1b). A ``ContextVar`` rather than a
+# module-level mutable is required for correctness under concurrent
+# fire-and-forget ``draft_message`` calls: ``asyncio.create_task`` copies the
+# current ``Context`` at task-creation time, so concurrent tasks never see
+# each other's writes, while calls within the SAME task (a plain ``await``
+# chain, as here) share one Context and the write is visible to the caller
+# after the callee returns.
+_queue_wait_ms: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "_promise_gate_queue_wait_ms", default=None
+)
+
 
 async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
     """Run the Haiku call for the LLM-primary path.
 
-    Returns the parsed verdict on success, or ``None`` on any failure
-    (no API key, SDK exception, parse failure, timeout). The caller
-    falls through to the heuristic on ``None``.
+    Returns the parsed verdict on success, or ``None`` on any failure that
+    is NOT a timeout (no API key, parse failure, non-timeout SDK exception).
+    The caller falls through to the heuristic on ``None``.
+
+    Raises:
+        anthropic.APITimeoutError: the SDK-level 3s call timeout fired.
+        asyncio.TimeoutError: the semaphore acquisition (queue wait) timed
+            out — see Risk 1b in the plan.
+        Both propagate to the caller rather than being swallowed here, so
+        the caller can discriminate "timeout" from "other failure" and
+        write ``source="promise_gate_timeout"`` instead of the generic
+        ``"promise_gate_heuristic"`` fallthrough source.
 
     SDK pattern follows ``bridge.read_the_room`` verbatim:
-    ``async with semaphore_slot(): async with
-    anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT) as client:``.
+    ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
+    anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
+    client:``. See the module docstring for why ``max_retries=0`` is
+    load-bearing for the stated 3-second worst case.
     Honors PR #1055 httpx-cleanup invariant. Coroutine-level timeouts
-    are forbidden — they leak httpx connections under cancellation.
+    around the API call are forbidden — they leak httpx connections under
+    cancellation. The ``semaphore_slot`` timeout is NOT a coroutine-level
+    timeout around the API call; it only bounds how long this call waits
+    for a semaphore slot, so it does not reintroduce the #1055 hazard.
     """
     api_key = get_anthropic_api_key()
     if not api_key:
         return None
 
+    acquire_start = time.monotonic()
     try:
-        async with semaphore_slot():
+        async with semaphore_slot(timeout=RTR_SDK_TIMEOUT):
+            _queue_wait_ms.set((time.monotonic() - acquire_start) * 1000)
             async with anthropic.AsyncAnthropic(
                 api_key=api_key,
                 timeout=RTR_SDK_TIMEOUT,
+                max_retries=0,
             ) as client:
                 message = await client.messages.create(
                     model=MODEL_FAST,
@@ -622,50 +709,99 @@ async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
                     tool_choice={"type": "tool", "name": "promise_verdict"},
                     messages=[{"role": "user", "content": text}],
                 )
-
-        # Parse the tool_use block.
-        content = getattr(message, "content", None) or []
-        for block in content:
-            if (
-                getattr(block, "type", None) == "tool_use"
-                and getattr(block, "name", None) == "promise_verdict"
-            ):
-                payload = getattr(block, "input", None) or {}
-                action = payload.get("action")
-                if action not in ("allow", "block"):
-                    return None
-                reason = str(payload.get("reason") or "")
-                class_ = payload.get("class_")
-                if not isinstance(class_, str) or not class_:
-                    class_ = None
-                return PromiseVerdict(
-                    action=action,
-                    reason=reason,
-                    class_=class_,
-                )
-        return None
-    except anthropic.APITimeoutError:
-        # Timeout is its own discriminator — caller maps to source="promise_gate_timeout".
-        return None
+    except (TimeoutError, anthropic.APITimeoutError):
+        # Timeout is its own discriminator: it propagates so the caller can
+        # audit source="promise_gate_timeout" instead of a generic fallthrough.
+        raise
     except Exception as e:
         logger.warning(f"promise_gate LLM call failed: {e!r}")
         return None
 
+    # Parse the tool_use block.
+    content = getattr(message, "content", None) or []
+    for block in content:
+        if (
+            getattr(block, "type", None) == "tool_use"
+            and getattr(block, "name", None) == "promise_verdict"
+        ):
+            payload = getattr(block, "input", None) or {}
+            action = payload.get("action")
+            if action not in ("allow", "block"):
+                return None
+            reason = str(payload.get("reason") or "")
+            class_ = payload.get("class_")
+            if not isinstance(class_, str) or not class_:
+                class_ = None
+            return PromiseVerdict(
+                action=action,
+                reason=reason,
+                class_=class_,
+            )
+    return None
 
-# === Public sync API ===
+
+async def _evaluate_promise_llm_or_heuristic(
+    text: str,
+) -> tuple[PromiseVerdict, str, float, float | None]:
+    """Attempt the LLM verdict, falling through to the heuristic on failure.
+
+    Shared by both the CLI-facing ``evaluate_promise_async`` and the
+    drafter's main-path ``_evaluate_drafter_promise`` (Task 5) so the
+    LLM-attempt / timeout-discrimination / heuristic-fallthrough logic is
+    written once.
+
+    Returns ``(verdict, source_suffix, elapsed_ms, queue_wait_ms)``.
+    ``source_suffix`` is one of ``"llm"``, ``"heuristic"``, ``"timeout"``,
+    ``"oversize"`` (text longer than ``PROMISE_GATE_LLM_MAX_INPUT_CHARS``;
+    the model is never called and the regex heuristic decides) —
+    callers prefix their own audit-source namespace (``"promise_gate_"`` for
+    the CLI path, ``"promise_gate_drafter_"`` for the drafter path).
+    ``queue_wait_ms`` is ``None`` whenever the semaphore-acquire line was
+    never reached (no API key configured, so ``_evaluate_promise_async``
+    short-circuits before attempting the call) or the LLM call raised
+    before setting it; otherwise it is the measured wait in milliseconds
+    (``0.0`` or more, including on an immediate acquire).
+    """
+    start = time.monotonic()
+    _queue_wait_ms.set(None)
+    if len(text) > _llm_max_input_chars():
+        verdict = _evaluate_promise_heuristic(text)
+        return verdict, "oversize", (time.monotonic() - start) * 1000, None
+    llm_verdict: PromiseVerdict | None = None
+    timeout_hit = False
+    try:
+        llm_verdict = await _evaluate_promise_async(text)
+    except (TimeoutError, anthropic.APITimeoutError):
+        timeout_hit = True
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"promise_gate LLM path raised: {e!r}")
+    elapsed_ms = (time.monotonic() - start) * 1000
+    queue_wait_ms = _queue_wait_ms.get()
+
+    if llm_verdict is not None:
+        return llm_verdict, "llm", elapsed_ms, queue_wait_ms
+
+    heuristic_verdict = _evaluate_promise_heuristic(text)
+    suffix = "timeout" if timeout_hit else "heuristic"
+    return heuristic_verdict, suffix, elapsed_ms, queue_wait_ms
 
 
-def evaluate_promise(
+# === Public async + sync API ===
+
+
+async def evaluate_promise_async(
     text: str | None,
     *,
     transport: str,
     session_id: str | None = None,
     classifier_verdict: Any = None,
 ) -> PromiseVerdict:
-    """Evaluate a draft for empty-promise / forward-deferral content.
+    """Evaluate a draft for empty-promise / forward-deferral content (async core).
 
-    Public sync API. Internally runs ``asyncio.run(_evaluate_promise_async)``
-    when the LLM path is taken.
+    Public async API for callers that already run on an event loop.
+    ``evaluate_promise`` (sync) runs the same steps from a plain sync
+    context; steps 1-3 are shared through ``_promise_preflight`` and the
+    step-4 audit/session-event tail through ``_record_promise_outcome``.
 
     Call ordering (cycle-3 C-CYCLE3-2 — observable from telemetry):
 
@@ -678,10 +814,12 @@ def evaluate_promise(
     3. **Classifier-verdict short-circuit** — when ``classifier_verdict``
        is provided (drafter path), derive verdict from it. Skip the LLM
        call. Write audit with ``source="promise_gate_drafter_delegation"``.
-    4. **CLI Haiku path** — call ``_evaluate_promise_async``. Write audit
-       with ``source="promise_gate_llm"`` on success,
-       ``"promise_gate_timeout"`` on SDK timeout, or
-       ``"promise_gate_heuristic"`` on heuristic fallthrough.
+    4. **CLI Haiku path** — call ``_evaluate_promise_async`` via the shared
+       ``_evaluate_promise_llm_or_heuristic`` helper. Write audit with
+       ``source="promise_gate_llm"`` on success, ``"promise_gate_timeout"``
+       on SDK/semaphore timeout, or ``"promise_gate_heuristic"`` on any
+       other heuristic fallthrough. ``elapsed_ms`` and ``queue_wait_ms``
+       are recorded on every Step-4 audit row.
 
     Args:
         text: The draft text to evaluate. ``None`` and whitespace-only
@@ -690,7 +828,7 @@ def evaluate_promise(
             ``"drafter"``. Logged in the audit JSONL.
         session_id: Optional session_id for audit JSONL (logged literally)
             and session_events emission (best-effort lookup via
-            ``AgentSession.query.get``; no-op on synthetic IDs). Never
+            ``AgentSession.get_by_id``; no-op on synthetic IDs). Never
             used for state-driven gate judgment.
         classifier_verdict: Optional pre-computed classification result.
             When provided, short-circuits the LLM call. Kept for backward
@@ -698,6 +836,28 @@ def evaluate_promise(
 
     Returns:
         ``PromiseVerdict``. Two-state action: ``"allow"`` or ``"block"``.
+    """
+    early = _promise_preflight(
+        text, transport=transport, session_id=session_id, classifier_verdict=classifier_verdict
+    )
+    if early is not None:
+        return early
+    outcome = await _evaluate_promise_llm_or_heuristic(text)
+    return _record_promise_outcome(text, outcome, transport=transport, session_id=session_id)
+
+
+def _promise_preflight(
+    text: str | None,
+    *,
+    transport: str,
+    session_id: str | None,
+    classifier_verdict: Any,
+) -> PromiseVerdict | None:
+    """Steps 1-3 of ``evaluate_promise_async``, shared with the sync wrapper.
+
+    Returns the verdict when one of the pre-LLM steps decides (empty input,
+    kill switch, classifier delegation), else ``None`` so the caller runs
+    step 4.
     """
     # Step 1: empty-input check (no audit).
     if text is None or not str(text).strip():
@@ -749,55 +909,29 @@ def evaluate_promise(
                 ),
             )
         return verdict
+    return None
 
-    # Step 4: CLI Haiku path with heuristic fallthrough.
-    llm_verdict: PromiseVerdict | None = None
-    timeout_hit = False
-    try:
-        # Detect timeout vs other failures: rerun with explicit detection.
-        llm_verdict = _run_async_safely(_evaluate_promise_async(text))
-    except _PromiseTimeoutError:
-        timeout_hit = True
-        llm_verdict = None
-    except Exception as e:  # pragma: no cover - defensive
-        logger.warning(f"promise_gate.evaluate_promise LLM path raised: {e!r}")
-        llm_verdict = None
 
-    if llm_verdict is not None:
-        # LLM-wins precedence (Blocker B3): heuristic only fires when
-        # llm_verdict is None.
-        _write_promise_audit(
-            text,
-            llm_verdict,
-            transport=transport,
-            session_id=session_id,
-            source="promise_gate_llm",
-        )
-        if llm_verdict.action == "block":
-            _emit_session_event_if_real(
-                session_id,
-                _make_event(
-                    "promise_gate.blocked",
-                    text=text,
-                    transport=transport,
-                    session_id=session_id,
-                    verdict=llm_verdict,
-                    source="promise_gate_llm",
-                ),
-            )
-        return llm_verdict
-
-    # Heuristic fallthrough.
-    heuristic_verdict = _evaluate_promise_heuristic(text)
-    source = "promise_gate_timeout" if timeout_hit else "promise_gate_heuristic"
+def _record_promise_outcome(
+    text: str,
+    outcome: tuple[PromiseVerdict, str, float, float | None],
+    *,
+    transport: str,
+    session_id: str | None,
+) -> PromiseVerdict:
+    """Step 4 tail: audit the LLM-or-heuristic outcome and emit session events."""
+    verdict, suffix, elapsed_ms, queue_wait_ms = outcome
+    source = f"promise_gate_{suffix}"
     _write_promise_audit(
         text,
-        heuristic_verdict,
+        verdict,
         transport=transport,
         session_id=session_id,
         source=source,
+        elapsed_ms=elapsed_ms,
+        queue_wait_ms=queue_wait_ms,
     )
-    if heuristic_verdict.action == "block":
+    if verdict.action == "block":
         _emit_session_event_if_real(
             session_id,
             _make_event(
@@ -805,11 +939,11 @@ def evaluate_promise(
                 text=text,
                 transport=transport,
                 session_id=session_id,
-                verdict=heuristic_verdict,
+                verdict=verdict,
                 source=source,
             ),
         )
-    if timeout_hit:
+    if suffix == "timeout":
         _emit_session_event_if_real(
             session_id,
             _make_event(
@@ -817,23 +951,54 @@ def evaluate_promise(
                 text=text,
                 transport=transport,
                 session_id=session_id,
-                verdict=heuristic_verdict,
+                verdict=verdict,
                 source=source,
             ),
         )
-    return heuristic_verdict
+    return verdict
 
 
-class _PromiseTimeoutError(Exception):
-    """Internal signal that the LLM SDK timed out (not a generic exception)."""
+def evaluate_promise(
+    text: str | None,
+    *,
+    transport: str,
+    session_id: str | None = None,
+    classifier_verdict: Any = None,
+) -> PromiseVerdict:
+    """Evaluate a draft for empty-promise / forward-deferral content.
+
+    Public sync API for the CLI senders (``tools/send_message.py``,
+    ``tools/valor_telegram.py``, ``tools/valor_email.py``). Runs the same
+    steps as ``evaluate_promise_async``; step 4's LLM call goes through
+    ``_run_async_safely`` (``asyncio.run``). When an event loop is already
+    running on the calling thread, ``asyncio.run`` cannot be used, so step 4
+    is the regex heuristic instead, audited as ``source="promise_gate_heuristic"``.
+    Always returns a ``PromiseVerdict``; it never returns ``None``.
+    """
+    early = _promise_preflight(
+        text, transport=transport, session_id=session_id, classifier_verdict=classifier_verdict
+    )
+    if early is not None:
+        return early
+    start = time.monotonic()
+    outcome = _run_async_safely(_evaluate_promise_llm_or_heuristic(text))
+    if outcome is None:
+        outcome = (
+            _evaluate_promise_heuristic(text),
+            "heuristic",
+            (time.monotonic() - start) * 1000,
+            None,
+        )
+    return _record_promise_outcome(text, outcome, transport=transport, session_id=session_id)
 
 
 def _run_async_safely(coro):
     """Run an async coroutine from a sync context without blowing up if a
     loop is already running.
 
-    On a running event loop (e.g. test harness), raises a controlled
-    ``RuntimeError`` that ``evaluate_promise`` treats as "LLM unavailable".
+    On a running event loop (a test harness or an async caller reaching the
+    sync API), closes ``coro`` and returns ``None``; ``evaluate_promise``
+    treats ``None`` as "LLM unavailable" and runs the heuristic.
     """
     try:
         return asyncio.run(coro)
@@ -843,7 +1008,7 @@ def _run_async_safely(coro):
             # asyncio.run raises BEFORE it ever touches `coro`, so the
             # eagerly-created coroutine is neither awaited nor closed. Close it
             # deterministically here — otherwise it leaks and CPython emits
-            # `coroutine '_evaluate_promise_async' was never awaited` at
+            # `coroutine '_evaluate_promise_llm_or_heuristic' was never awaited` at
             # GC/teardown, which wedges the full pytest suite (#2120, follow-up
             # to #2118). This branch is only reachable under a test harness /
             # async caller; production reaches _run_async_safely from a sync CLI
@@ -962,8 +1127,8 @@ def cli_check_or_exit(
 
     Exception-swallow semantics (cycle-3 C-CYCLE3-3): wraps the
     ``evaluate_promise`` call in ``try/except Exception``. On unexpected
-    exception (asyncio nested-loop, ImportError from a circular import,
-    AttributeError from a Popoto schema migration), logs a warning,
+    exception (ImportError from a circular import, AttributeError from a
+    Popoto schema migration), logs a warning,
     writes a fail-open audit JSONL entry with
     ``source="promise_gate_cli_exception"``, and **returns silently**
     (does NOT block delivery on infrastructure failure). Heuristic-
@@ -1006,6 +1171,7 @@ __all__ = [
     "PromiseVerdict",
     "PROMISE_GATE_SYSTEM_PROMPT",
     "evaluate_promise",
+    "evaluate_promise_async",
     "cli_check_or_exit",
     "_detect_empty_promise",  # bool wrapper over the heuristic; consumed by tests only
 ]

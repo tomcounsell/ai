@@ -63,7 +63,7 @@ site). See [Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data
 `scripts/log_rotate.py` counterpart.
 
 **Health Checks**:
-- Process running (`pgrep -f telegram_bridge.py`)
+- Process running — `is_bridge_running()` calls `tools.process_lookup.find_python_service_pids(script_suffix="bridge/telegram_bridge.py")` (#3164), not `pgrep`: BSD `pgrep` on macOS excludes the calling process and all of its ancestors from the match list unless `-a` is passed, which is not a portable fix (`-a` means "print the full command line" on Linux/procps). This lookup is ancestor-safe, so a bridge-hosted caller (an agent session) sees its own ancestor bridge correctly.
 - Logs fresh (written within 5 minutes)
 - No crash pattern detected
 - Zombie process detection (claude/pyright processes idle > 2 hours)
@@ -89,6 +89,8 @@ The `--check-only` output includes zombie count, PIDs, memory usage, and active 
 | 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
 | 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to `_recovery_exhausted()`, which logs `CRITICAL` and records `log_crash("Recovery exhausted")` |
 
+Levels 2-4's "Kill stale" step calls `kill_stale_processes()`, which deliberately stays on `pgrep -f telegram_bridge.py` rather than the ancestor-safe `tools.process_lookup` lookup used by the health check above (#3164). It SIGKILLs every match, so `pgrep`'s exclusion of the caller's own ancestors is load-bearing here, not a bug: an ancestor-safe lookup in this `os.kill` path would let a bridge-descended caller (an agent session) kill its own live ancestor bridge. Do not convert this call site.
+
 `recovery_level` has no level 5. Two independent signals are computed alongside `recovery_level`, both on `HealthStatus`:
 
 - **`human_alert_needed`** — set when `get_recent_crashes(1800)` (30 min window) returns `>= CRASH_STORM_THRESHOLD` (default 5, env-overridable) crashes. It is a **diagnostic flag only**: it drives the `--check-only` output line and nothing else. Nothing pushes a notification anywhere.
@@ -103,15 +105,16 @@ Zombie cleanup is integrated into recovery levels 2+ to free memory before resta
 
 Telethon can stop delivering `NewMessage` events silently — the bridge process is alive, TCP is connected (the reconciler's `get_dialogs()` succeeds), but the update loop has stopped firing. No error, no disconnect, no log. Messages are silently dropped until the bridge is restarted.
 
-Three liveness signals written to Redis, read by the watchdog on every 60-second tick:
+Four liveness signals written to Redis, read by the watchdog on every 60-second tick:
 
 | Redis Key | Writer | Meaning |
 |-----------|--------|---------|
 | `bridge:last_update_received` | NewMessage handler in `bridge/telegram_bridge.py`, before dedup | A Telethon update event was delivered to the bridge |
 | `bridge:last_probe_ok` | Reconciler in `bridge/reconciler.py`, after successful `get_dialogs()` | The Telegram API/TCP layer is reachable |
 | `bridge:last_missed_recovery` | Reconciler in `bridge/reconciler.py`, when a scan recovers ≥1 message | Telegram had messages the live update path never delivered |
+| `bridge:last_scan_outcome` | Reconciler in `bridge/reconciler.py`, after the per-chat loop finishes | JSON record of what that scan cycle did: chats attempted, chats faulted, and the run of consecutive all-faulted cycles |
 
-All three are managed by `bridge/liveness.py` (freeform Redis keys, not Popoto-managed; raw get/set is correct). Every writer is best-effort — any exception logs a WARNING and never raises, matching the safety contract from `bridge.dedup.record_last_event`.
+All four are managed by `bridge/liveness.py` (freeform Redis keys, not Popoto-managed; raw get/set is correct). Every writer is best-effort — any exception logs a WARNING and never raises, matching the safety contract from `bridge.dedup.record_last_event`.
 
 **Detection logic** (`assess_update_flow()` in `monitoring/bridge_watchdog.py`):
 
@@ -131,13 +134,11 @@ A SECONDARY accelerator applies the same shape at `UPDATE_STALENESS_WARN`, requi
 - **Measuring silence from process start.** Nothing seeds `bridge:last_update_received` on restart, so a verdict measured from the beacon alone survives the restart meant to cure it and re-fires on the first tick past the grace window — one SIGKILL every ~6 minutes (5-minute grace, 60-second tick), indefinitely. Taking the later of the beacon and process start means a restart clears the accusation and a real recurrence still re-fires after another full ceiling of silence.
 - **`last_probe_ok` as disconfirmation guard**: if the probe itself is stale, the bridge may be disconnected. A disconnect should be recovered by level 1 (process dead) or resolved by Telethon's reconnect — not treated as a wedge. Restarting on disconnect when Telethon is mid-reconnect would interrupt the reconnection attempt. The wedge detector only fires when probe is fresh.
 - **Startup grace window**: `bridge:last_update_received` is absent on cold start (bridge has not received any messages yet). The grace window prevents false wedge verdicts during startup before Telegram delivers the first event.
-- **What this detector cannot see, and why that trade is accepted.** Requiring positive evidence buys the end of the storm at the cost of a real blind spot.
+- **What this detector cannot see — now monitored separately.** Requiring positive evidence buys the end of the storm at the cost of a real blind spot in `assess_update_flow()` itself.
 
-  `record_probe_ok()` fires at `bridge/reconciler.py:149`, straight after `get_dialogs()` and **before** the per-chat scan loop at `:151`, whose body ends in `except Exception ... continue` (`:403-405`). So a **half-wedged client** — dialogs resolve, but every per-chat history fetch throws — keeps `last_probe_ok` fresh, recovers nothing, and stamps no evidence. The detector sees fresh probe + silence + no evidence, which is byte-identical to a quiet account, and stays quiet. `test_quiet_account_past_ceiling_is_not_wedged` passes on that state for exactly that reason.
+  `record_probe_ok()` fires straight after `get_dialogs()` and **before** the per-chat scan loop, whose body ends in `except Exception ... continue`. So a **half-wedged client** — dialogs resolve, but every per-chat history fetch throws — keeps `last_probe_ok` fresh, recovers nothing, and stamps no missed-recovery evidence. To the wedge rule that is byte-identical to a quiet account, and it stays quiet. `test_quiet_account_past_ceiling_is_not_wedged` passes on that state for exactly that reason.
 
-  No cleverer detector removes this. Any signal the wedged component itself produces is circular, and the only independent observer is the reconciler — when *it* is the thing failing, there is nothing left to ask. Some false negative is the unavoidable price of refusing to treat silence as evidence, and a blind spot in one failure mode is a better trade than a SIGKILL every six minutes across every quiet night. A restart in this state re-arms the same verdict six minutes later, so unless the restart happens to cure the fault it produces the storm rather than a fix.
-
-  What bounds the exposure: **nothing does, automatically.** Nothing monitors the scan loop, so the state persists for as long as the fault does — until some unrelated cause happens to restart the bridge, which is luck rather than a mechanism. The failure is loud but unwatched: `[reconciler] Error scanning %s` at ERROR with a traceback, once per chat per 180-second scan, which means the evidence is sitting in the logs the whole time with nothing reading it. Treat that as the honest status, not as a safety net. Turning that log signal into a monitored one is an open design question (whether persistent all-chat scan failure should re-enter the restart rule as positive evidence in its own right, or should only page) that deserves deliberate treatment.
+  No cleverer *wedge* rule removes this. Any signal the wedged component produces about itself is circular, and the missed-recovery key is the only non-circular evidence there is — when the reconciler is the failing part, that rule has nothing left to ask. So the rule keeps its blind spot, and the state is caught by a separate signal instead: **Reconciler scan-loop health**, below.
 
   The evidence floor in the bullet above narrows the admissible window further; in practice the cost is small. A genuinely wedged bridge that is still receiving traffic gets its evidence re-stamped by every 180-second scan, so the floor only discards the first stamp and evidence returns within a scan or two of the grace window closing. The floor delays nothing in the half-wedge case, where no stamp is ever written at all.
 
@@ -154,6 +155,27 @@ A SECONDARY accelerator applies the same shape at `UPDATE_STALENESS_WARN`, requi
 ```bash
 python monitoring/bridge_watchdog.py --check-only
 # Output includes: Update flow live: True/False
+#                  Reconciler scan health OK: True/False
+```
+
+#### Reconciler scan-loop health (alert only, no restart)
+
+`assess_scan_health()` in `monitoring/bridge_watchdog.py` closes the half-wedge blind spot above. The reconciler writes `bridge:last_scan_outcome` after its per-chat loop finishes, carrying `{ts, pid, attempted, faulted, consecutive_total_fault_cycles, sample_error}`. When the run of consecutive all-faulted cycles reaches `SCAN_TOTAL_FAULT_CYCLES` (default 5 ≈ 15 minutes), the watchdog appends the issue, flips `healthy` to False, logs it at ERROR, and sets `human_alert_needed`.
+
+**What that alert actually delivers: no notification.** Per the `human_alert_needed` entry above, the flag drives the `--check-only` output line and nothing else, and `--check-only` has no automated caller. So the delivered signal is one aggregated ERROR line per watchdog tick in the watchdog log, `healthy=False`, and a line in a CLI a human must run by hand. That is a real improvement over one `[reconciler] Error scanning` traceback per chat per scan, but **nobody is paged**. This is not an oversight in this check: the watchdog delivers nothing by design, because the crash-storm alert that once enqueued an AgentSession to send a Telegram message was removed after alerts stranded as permanently pending sessions — delivery depended on the bridge and worker being healthy during the exact incident being reported. Any delivery path has to be reachable with both of those down. Wiring one — shared by every check that sets `human_alert_needed`, with a cooldown so a persistent condition does not alert every tick — is tracked in [#3252](https://github.com/tomcounsell/ai/issues/3252).
+
+**What this check still does not cover.** A *partial* persistent fault — say 3 of 4 chats faulting every cycle, indefinitely — resets `consecutive_total_fault_cycles` to 0 on every cycle (some chat succeeded) and therefore never alerts. That matches #2691's all-chat framing and is a deliberate scope line, not an oversight: a per-chat fault that is genuinely local to one chat is common and benign. It does mean a steady partial degradation remains invisible here.
+
+**Why this is evidence and not silence.** `attempted > 0 and faulted == attempted` is a statement the scan wrote about work it actually did. "The scan never ran" has *no representation in the record* — it is the absence of a fresh one. The two cases are separated by the shape of the data, not by a timing inference at read time, so every missing / stale / wrong-pid / `attempted == 0` case returns healthy. The run counter is maintained by the writer, which is the only component that knows what a cycle is; the record carries the writing `pid`, so a run never carries across a restart.
+
+**Why it alerts instead of restarting.** The evidence clears the #2475 bar but fails a different one: **attribution**. It says per-chat history fetches are failing; it does not say *this bridge* is the broken party. Under a Telegram-side outage, an account-level `FLOOD_WAIT`, or a network partition, every chat faults for every client on the network at once — and `last_probe_ok` stays fresh *by construction*, because dialogs-resolve-but-fetches-fault is exactly the shape being detected, so the freshness gate that protects the wedge rule offers no protection here. Making this restart-eligible would turn any Telegram-side outage into a restart every 60-second tick for the outage's duration: the #2475 storm shape with a correlated external trigger, hammering Telegram's rate limiter precisely when Telegram is already degraded, to fix a fault that is not on this machine.
+
+Telling "our client is broken" from "Telegram is broken" needs an observer this bridge does not have — a second independent client, or a fleet-wide correlation signal. That is architecture, not a threshold, so restart-eligibility remains an open question for the owner (#3257) and this check only alerts.
+
+**Log signals**:
+```
+[ERROR] check_bridge_health: reconciler scan loop failing: every one of 4 chat(s) faulted for 5 consecutive scan cycles (threshold 5), first error: ConnectionError: iter_messages timed out — the missed-message evidence the wedge detector depends on cannot be produced while this holds. NOT auto-restarted: an all-chat fault is equally consistent with a Telegram-side outage, and restarting would not fix that (see #3257)
+[WARNING] [reconciler] Scan health: attempted=4 faulted=4 consecutive_total_fault_cycles=5
 ```
 
 **Auto-Revert** (Level 4):
@@ -453,6 +475,8 @@ A worker process can appear alive (PID exists, launchd does not restart it) but 
 | Worker PID absent | `down` | **Active recovery via 4-level escalation** — see below |
 | ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5** — see below |
 
+Both "Worker PID absent" above and the L2 verify step below resolve the PID via `_get_worker_pid()`, which calls `tools.process_lookup.find_python_service_pids(module="worker", script_suffix="worker/__main__.py")` — an ancestor-safe lookup, not `pgrep` (#3164).
+
 **Stale-heartbeat threshold:** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable. The ≥6× multiplier is the false-positive guard: the heartbeat is written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, so thread-pool exhaustion cannot starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy).
 
 **Heartbeat thread isolation:** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started at worker startup and is stopped via `_heartbeat_stop_event` on worker shutdown. The only way the heartbeat can go stale is if the worker process itself is hung.
@@ -463,11 +487,22 @@ When the watchdog detects `status == "stale"`, it calls `recover(status)`, which
 
 | Rung | Action | Poll timeout | Disposition |
 |------|--------|-------------|-------------|
+| W0 | `tools.process_lookup.is_own_ancestor(pid, on_unreadable=True)` | — | If the worker PID is (or may be) an ancestor of the process running the watchdog → log an error and **return without signalling**. The ladder never starts. |
 | W1 | `SIGTERM` | 5.0 s | If dead → done (launchd respawns) |
 | W2 | `SIGKILL` | 10.0 s | May queue against a U-state process; if dead → done |
 | W3 | `launchctl bootout gui/<uid>/com.valor.worker` | 10.0 s | Removes the launchd job so the kernel cleans the fd table on exit, allowing a hung blocking syscall in U-state to return and the process to exit; if dead → done |
 | W4 | Write `worker:watchdog:critical:{host}` (TTL 1 h) | — | CRITICAL log; operator alert. |
 | W5 | Final CRITICAL log; no further automated action | — | launchd will respawn the worker once the U-state process exits (the blocking syscall returns). Session sweep runs at next startup. |
+
+**W0, the self-ancestry refusal.** `_get_worker_pid()` is ancestor-safe (#3164), so a manual `python -m monitoring.worker_watchdog` run from *inside* a worker-hosted agent session is handed its own ancestor's PID — and W1/W2 would then SIGTERM and SIGKILL the caller mid-recovery. `recover()` therefore checks `is_own_ancestor` before rung W1 and logs:
+
+```
+recover(): worker PID <N> is an ancestor of this process — refusing to signal it, ...
+```
+
+That line is the expected, correct outcome, not a watchdog failure. **Operator remedy: run the watchdog from its launchd job (`com.valor.worker-watchdog`), not from inside a worker-hosted session.** The launchd tick runs at ppid 1 and is never a worker descendant, so W0 never fires there and the ladder behaves exactly as documented. The gate is passed `on_unreadable=True`, so an unreadable process table also refuses — this is a kill path, and deferring to the next tick is cheaper than a self-kill. The symmetric restart gate in `scripts/update/run.py` (see §20) takes the opposite polarity for the opposite reason.
+
+**Email bridge stop is gated the same way.** `scripts/update/service.py::stop_email()` resolves the PID via the same ancestor-safe lookup, so its direct-SIGTERM fallback (taken only when `scripts/valor-service.sh` is absent) also checks `is_own_ancestor(pid, on_unreadable=True)` and refuses rather than signalling its own ancestor; it still reports the true `is_email_running()` result, so a refused kill is never reported as a successful stop.
 
 **Check U-state critical signal:**
 ```bash
@@ -496,7 +531,7 @@ A Redis counter (`worker:watchdog:down_ticks:{hostname}`) tracks consecutive mis
 | Level | Trigger | Action |
 |-------|---------|--------|
 | L1 | First down tick (count == 1) | Log `Worker missing — giving launchd one tick to restart` and exit. Give launchd a chance. |
-| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then poll `pgrep` for up to 10s. On success, clear counter. |
+| L2 | Second consecutive down tick (count >= 2) | `launchctl kickstart -k gui/<uid>/com.valor.worker`, then `_verify_worker_alive()` polls `_get_worker_pid()` (the ancestor-safe lookup, not `pgrep`) for up to `VERIFY_GRACE_SECONDS`. On success, clear counter. |
 | L2.5 | L2 returned rc=113 / `Could not find service` AND `~/Library/LaunchAgents/com.valor.worker.plist` exists | `launchctl bootstrap gui/<uid> <plist>` to re-register the service in the gui domain, then retry kickstart and verify. On success, clear counter. Heals the case where the service was registered via `launchctl load`, leaving it invisible to `gui/<uid>/` queries. Plist-existence gate ensures uninstalled hosts fall through cleanly. |
 | L3 | L2/L2.5 verify failed | `launchctl enable gui/<uid>/com.valor.worker` (clears sticky-disable from `worker-disable`) + kickstart + verify. On success, clear counter. |
 | L4 | L3 verify failed AND count >= 3 | Log CRITICAL with hostname + tick count. Reason string includes `bootstrap+kickstart+enable all failed` when L2.5 was attempted, otherwise `kickstart+enable both failed`. Write `worker:watchdog:critical:{hostname}` Redis key (TTL 1h, JSON payload `{hostname, tick_count, last_attempt_at, reason}`). Counter persists; subsequent ticks repeat L4 idempotently. |
@@ -549,6 +584,8 @@ Four coordinated pieces verify that the running processes actually execute the p
 | `stale` | beacon belongs to the current image AND that relevant-range log is non-empty |
 | `unknown` | beacon missing/malformed, no PID, `process_start_ts` unavailable, an orphaned beacon (`beacon_ts <= process_start_ts`), or `boot_sha` unresolvable by git |
 
+"No PID" is the result of a PID *lookup*, not a fact about the process. `get_bridge_pid()`/`get_worker_pid()`/`get_email_pid()` (`scripts/update/service.py`) resolve via `tools.process_lookup.find_python_service_pids()`, an ancestor-safe lookup (#3164): BSD `pgrep` on macOS excludes the calling process and all of its ancestors from its match list, so a `python -m scripts.update.verify_release` invocation running as a bridge-hosted agent session previously could not see its own ancestor bridge and classified a healthy, correctly-beaconed bridge as `unknown` before the beacon was ever read (`_classify_process()` short-circuits to `unknown` as soon as `pid is None`). This lookup fixes that specific false `unknown`; it does not change the classifier's other `unknown` conditions.
+
 Staleness is positive-only and scoped to each process's own relevant path set (bridge: `bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml`; worker: `worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`), the same sets the restart gates diff, so classifier and restart gate agree by construction. A raw `boot_sha == HEAD` comparison is never used: docs-only or plan-migration commits advance HEAD past a healthy, correctly-un-restarted process, and a literal-equality check would false-fail on the majority of this repo's commit stream. `unknown` never fails a run and never triggers a restart. Only a positive, confirmed staleness escalates.
 
 **Bridge kickstart in `remote-update.sh`**: After the pull and the worker kickstart, the shell computes `NEED_BRIDGE_RESTART` from a `BEFORE_SHA..AFTER_SHA` diff of the bridge-relevant paths, gated on the bridge plist being installed on this machine (`[ -f "$BRIDGE_DST" ]`; a skills-only machine has no bridge plist and skips the block entirely). When true, it runs `launchctl kickstart -k {prefix}.bridge` as the **last** thing the script does. This is safe because the bridge holds no agent sessions (the worker is the sole session executor) and its Telethon `catch_up=True` scan backfills anything missed during the brief restart. It is the last act because the kickstart SIGKILLs the whole bridge launchd job, including `handle_update_command` and the `remote-update.sh` child it spawned, since they share the job's process group. Nothing in the shell runs after a successful kickstart. Both worker and bridge kickstart failures surface as a distinct `RESTART FAILED` line and a non-zero terminal exit (`RESTART_FAILED || VERIFY_FAILED`).
@@ -557,7 +594,7 @@ Staleness is positive-only and scoped to each process's own relevant path set (b
 
 Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "$LOCK_DIR"`), because the `trap cleanup_lock EXIT` that normally releases it never fires on SIGKILL. Without the explicit release, every bridge-relevant update would orphan the lock for up to 600 seconds, and any retry or the next cron cycle in that window would hit the "already running" skip branch with no pull and no verify.
 
-**Terminal verify runs every cycle**: `python -m scripts.update.verify_release` (`scripts/update/verify_release.py`) is the shell's terminal step on every invocation, including no-op cron cycles with no new commits. This re-classifies a starved or never-restarted process instead of only checking right after a restart. It is scoped to the worker only (`--skip-bridge`) when a bridge restart is queued this cycle, since the about-to-restart bridge is not escalated as stale. It takes a `--since <epoch>` restart moment and polls (bounded, 15 attempts x 2 seconds) for the worker beacon to freshen past it before classifying, because a `kickstart -k` returns before the freshly-spawned process has written its own beacon, so an immediate read would otherwise see the pre-restart beacon and misclassify `unknown`. Exit code 1 on any positive staleness, 0 otherwise (`unknown` prints a warning but does not fail the run).
+**Terminal verify runs every cycle**: `python -m scripts.update.verify_release` (`scripts/update/verify_release.py`) is the shell's terminal step on every invocation, including no-op cron cycles with no new commits. This re-classifies a starved or never-restarted process instead of only checking right after a restart. It is scoped to the worker only (`--skip-bridge`) when a bridge restart is queued this cycle, since the about-to-restart bridge is not escalated as stale. It takes a `--since <epoch>` restart moment and polls (bounded, 15 attempts x 2 seconds) for the worker beacon to freshen past it before classifying, because a `kickstart -k` returns before the freshly-spawned process has written its own beacon, so an immediate read would otherwise see the pre-restart beacon and misclassify `unknown`. Exit code 1 on any positive staleness, 0 otherwise (`unknown` prints a warning but does not fail the run). Because the PID lookup underneath (`get_bridge_pid()`/`get_worker_pid()`) is ancestor-safe (#3164), a cron-launched (launchd-parented) invocation and a bridge- or worker-hosted agent-session invocation now observe the same PID for the same live process. Before that fix these two caller contexts diverged: the cron path saw the PID and the bridge-hosted session path did not, because the session's own ancestor chain includes the bridge it is probing.
 
 **Report path splits on whether the bridge restarts this cycle** (the survivable-channel design: a bridge kickstart kills the process that ran `/update`, so it cannot always be the reporter):
 
@@ -567,7 +604,7 @@ Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "
 
 **`--full` verify** (`scripts/update/run.py::run_release_verify`): the synchronous `/update --full` path calls `verify_running_release()` as the terminal step of the `do_service_restart=True` branch, after `install_service`'s restart. Any in-role `stale` sets `result.success = False` (non-zero exit) and names both short-SHAs; `unknown` only warns. A clean pass that finds the bridge positively `matches` clears any earlier failure sentinel (below).
 
-**Worker self-heal before alerting**: the full path's Step 5 worker install (`service.install_worker`) is content-idempotent — it returns early without restarting when the plist is unchanged, which is the case for any code-only pull. So a manual `/update` run right after merging worker-relevant code does NOT restart the worker (unlike the cron path, `remote-update.sh`, which kickstarts on a worker-relevant diff *before* verifying). `run_release_verify` self-heals a `stale` worker in place before alerting: drain → `service.kickstart_worker()` (`launchctl kickstart -k`) → bounded poll (`WORKER_SELF_HEAL_POLL_ATTEMPTS` × `WORKER_SELF_HEAL_POLL_INTERVAL_S`, default 15 × 2s, env-overridable) for a worker beacon fresher than the restart moment. Outcomes: `healed` re-verifies (the worker is on new code — no alert); a busy-drain `deferred` warns only and drops the worker from alert consideration (never kill an in-flight PM turn — the 30-min cron restarts it next tick); `failed` (restart ran but no fresh beacon) falls through to the hard-fail + Sentry path, a genuine "worker won't come up on new code" signal. The bridge is never self-restarted here — a bridge kickstart would SIGKILL the `/update` process itself.
+**Worker self-heal before alerting**: the full path's Step 5 worker install (`service.install_worker`) is content-idempotent — it returns early without restarting when the plist is unchanged, which is the case for any code-only pull. So a manual `/update` run right after merging worker-relevant code does NOT restart the worker (unlike the cron path, `remote-update.sh`, which kickstarts on a worker-relevant diff *before* verifying). `run_release_verify` self-heals a `stale` worker in place before alerting: self-ancestry guard → drain → `service.kickstart_worker()` (`launchctl kickstart -k`) → bounded poll (`WORKER_SELF_HEAL_POLL_ATTEMPTS` × `WORKER_SELF_HEAL_POLL_INTERVAL_S`, default 15 × 2s, env-overridable) for a worker beacon fresher than the restart moment. The self-ancestry guard runs first and short-circuits before the multi-minute drain wait: `service.get_worker_pid()` is ancestor-safe (`tools/process_lookup.py`, #3164), so an `/update` run hosted by the worker gets back its own parent's PID, and `kickstart -k` on it would SIGKILL the update run mid-flight. `tools.process_lookup.is_own_ancestor` detects that and defers. This gate uses the **default** polarity — an unreadable process table answers "not an ancestor" and the restart proceeds — because a spurious refusal here would silently disable a legitimate recovery restart. The kill paths (worker-watchdog W0, `stop_email`) pass `on_unreadable=True` and refuse instead; see §18. Outcomes: `healed` re-verifies (the worker is on new code — no alert); `deferred` — either the self-ancestry guard fired or sessions in flight did not drain — warns only and drops the worker from alert consideration (never kill an in-flight PM turn, never kill the update run itself; the 30-min cron runs from launchd, is not a worker descendant, and restarts it next tick); `failed` (restart ran but no fresh beacon) falls through to the hard-fail + Sentry path, a genuine "worker won't come up on new code" signal. The bridge is never self-restarted here — a bridge kickstart would SIGKILL the `/update` process itself.
 
 **Out-of-band signals for a bridge that never comes back**: the report path above depends on the fresh bridge coming up. If it crash-loops or launchd fails to relaunch it, there is no live channel to report on. Two backstops, both read by `monitoring/bridge_watchdog.py::check_update_release_signals()` on its normal 60-second cycle:
 
@@ -876,9 +913,10 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 | File | Purpose |
 |------|---------|
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
-| `monitoring/bridge_watchdog.py` | External health monitor (bridge process); includes `assess_update_flow()` and wedged-update-loop recovery |
-| `bridge/liveness.py` | Liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()`, `record_missed_recovery()`, `get_last_missed_recovery()` |
+| `monitoring/bridge_watchdog.py` | External health monitor (bridge process); includes `assess_update_flow()` with wedged-update-loop recovery, and `assess_scan_health()` (alert only, no restart) |
+| `bridge/liveness.py` | Liveness signal writers/readers: `record_update_received()`, `get_last_update_received()`, `record_probe_ok()`, `get_last_probe_ok()`, `record_missed_recovery()`, `get_last_missed_recovery()`, `record_scan_outcome()`, `get_last_scan_outcome()` |
 | `monitoring/worker_watchdog.py` | External health monitor (worker process — heartbeat-based hung detection + active recovery via launchctl kickstart) |
+| `tools/process_lookup.py` | Ancestor-safe Python service PID lookup (`list_processes()`, `find_python_service_pids()`) plus `is_own_ancestor()`, the self-ancestry guard every restart/signal path must gate on. Consumers: `monitoring/bridge_watchdog.py::is_bridge_running()`, `monitoring/worker_watchdog.py` (`_get_worker_pid()` and `recover()`'s W0 gate), `scripts/update/service.py` (the three PID getters and `stop_email()`), `scripts/update/run.py::_self_heal_stale_worker`, `monitoring/health.py::check_telegram_connection`, `ui/app.py`'s email-bridge liveness probe, and `tests/_worker_guard.py`. Not used by `kill_stale_processes()` (see Component 3) |
 | `bridge/hibernation.py` | Auth-expiry hibernation: classifier, flag file, replay |
 | `scripts/auto-revert.sh` | Git revert and restart |
 | `data/recovery-in-progress` | Recovery lock file |

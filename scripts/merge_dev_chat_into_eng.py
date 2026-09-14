@@ -35,12 +35,15 @@ IMPORTANT:
 import argparse
 import logging
 import os
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tools.process_lookup import (  # noqa: E402 -- follows the sys.path insert
+    find_python_service_pids,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,7 +77,7 @@ def _check_worker_not_running() -> None:
 
     Two signals:
     1. last_worker_connected mtime is fresh (< WORKER_HEARTBEAT_THRESHOLD seconds ago)
-    2. pgrep -f 'python -m worker' returns a live PID
+    2. A live PID matching the worker's Python invocation is in the process table
     """
     heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
 
@@ -98,73 +101,65 @@ def _check_worker_not_running() -> None:
             "No worker heartbeat file found. Worker appears never started or already stopped."
         )
 
-    # Secondary check via pgrep
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "python -m worker"],
-            capture_output=True,
-            text=True,
+    # Secondary check via the ancestor-safe process-table lookup (#3187).
+    # This was `pgrep -f "python -m worker"`. BSD pgrep excludes the calling
+    # process AND all of its ancestors from the match list, so a migration run
+    # from inside a worker-hosted agent session read its own live worker as
+    # absent and this precondition passed while the worker was running.
+    # Both launch shapes are matched: `python -m worker` (how launchd starts it)
+    # and `python .../worker/__main__.py` (a direct start). The lookup returns
+    # [] when the process table cannot be read, which lands on the same "no
+    # match" branch the old FileNotFoundError path took.
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    # Verify each PID is alive
+    live_pids = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            live_pids.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if live_pids:
+        logger.error(
+            f"Worker process is still running (PID(s): {live_pids}). "
+            "Stop the worker before running this migration.\n"
+            "  Stop command: ./scripts/valor-service.sh worker-stop"
         )
-        if result.returncode == 0 and result.stdout.strip():
-            pids = result.stdout.strip().split()
-            live_pids = []
-            for pid_str in pids:
-                try:
-                    pid = int(pid_str)
-                    os.kill(pid, 0)
-                    live_pids.append(pid)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-            if live_pids:
-                logger.error(
-                    f"Worker process is still running (PID(s): {live_pids}). "
-                    "Stop the worker before running this migration.\n"
-                    "  Stop command: ./scripts/valor-service.sh worker-stop"
-                )
-                sys.exit(1)
-            else:
-                logger.info("pgrep found stale PIDs (already dead). Worker appears stopped.")
-        else:
-            logger.info("pgrep found no running worker process.")
-    except FileNotFoundError:
-        logger.warning("pgrep not found; skipping process-based liveness check.")
+        sys.exit(1)
+    elif pids:
+        logger.info("Process lookup found stale PIDs (already dead). Worker appears stopped.")
+    else:
+        logger.info("Process lookup found no running worker process.")
 
 
 def _check_email_bridge_not_running() -> None:
     """Guard: sys.exit(1) if email bridge appears to be live.
 
-    Checks pgrep for 'bridge.email_bridge' and fresh email:last_poll_ts Redis key.
+    Checks the process table for a live `python -m bridge.email_bridge` and a
+    fresh email:last_poll_ts Redis key.
     """
-    # Check via pgrep
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", "bridge.email_bridge"],
-            capture_output=True,
-            text=True,
+    # Check via the ancestor-safe process-table lookup (#3187). This was
+    # `pgrep -f bridge.email_bridge`, which hid an email bridge that happened to
+    # be an ancestor of the migration process.
+    pids = find_python_service_pids(module="bridge.email_bridge")
+    live_pids = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            live_pids.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if live_pids:
+        logger.error(
+            f"Email bridge process is still running (PID(s): {live_pids}). "
+            "Stop the email bridge before running this migration.\n"
+            "  Stop command: ./scripts/valor-service.sh email-stop"
         )
-        if result.returncode == 0 and result.stdout.strip():
-            pids = result.stdout.strip().split()
-            live_pids = []
-            for pid_str in pids:
-                try:
-                    pid = int(pid_str)
-                    os.kill(pid, 0)
-                    live_pids.append(pid)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-            if live_pids:
-                logger.error(
-                    f"Email bridge process is still running (PID(s): {live_pids}). "
-                    "Stop the email bridge before running this migration.\n"
-                    "  Stop command: ./scripts/valor-service.sh email-stop"
-                )
-                sys.exit(1)
-            else:
-                logger.info("pgrep found stale email bridge PIDs (already dead).")
-        else:
-            logger.info("No email bridge process found via pgrep.")
-    except FileNotFoundError:
-        logger.warning("pgrep not found; skipping pgrep-based email bridge check.")
+        sys.exit(1)
+    elif pids:
+        logger.info("Process lookup found stale email bridge PIDs (already dead).")
+    else:
+        logger.info("No email bridge process found in the process table.")
 
     # Check via email:last_poll_ts Redis key freshness
     try:

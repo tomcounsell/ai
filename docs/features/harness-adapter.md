@@ -32,7 +32,8 @@ telemetered fallback, and the `file_paths` (#1802) delivery slot — see
 | Module | Role |
 |--------|------|
 | `base.py` | The `HarnessAdapter` protocol plus the normalized `TurnRequest` / `TurnResult` / `TurnEvent` dataclasses. |
-| `claude.py` | `ClaudeHarnessAdapter` — the (today, only) concrete adapter for the `claude -p` CLI. Owns argv/env assembly, stream-json parsing, the stale-UUID and image-dimension retry fallbacks, and turn-input/health helpers, extracted byte-identically from the pre-extraction `agent/sdk_client.py` free functions. |
+| `claude.py` | `ClaudeHarnessAdapter` — the concrete adapter for the `claude -p` CLI, driving every top-level turn. Owns argv/env assembly, stream-json parsing, the stale-UUID and image-dimension retry fallbacks, and turn-input/health helpers, extracted byte-identically from the pre-extraction `agent/sdk_client.py` free functions. |
+| `codex.py` | `CodexHarnessAdapter` — the second concrete adapter, driving `codex exec --json` / `exec resume` as the opt-in dev-lane executor inside flagged eng sessions (issue #2001). Same protocol, Codex-specific argv/stdin, preflight, output-schema, and reaping knowledge. Deliberately unreachable from `HeadlessRoleDriver`, which stays statically Claude. See [Codex Exec Dev Lane](codex-exec-dev-lane.md). |
 | `events.py` | The fixed normalized `TurnEvent` type vocabulary, aligned with codex's `ThreadEvent` naming (`session.started`, `turn.spawned`, `item.stdout`, `turn.exited`, `turn.completed`). Deliberately minimal — see Rabbit Holes below. |
 
 `agent/sdk_client.py` re-exports the harness module's public names for its
@@ -158,10 +159,38 @@ now the function's unconditional body. Regression-tested by
         "route": {"type": "string", "enum": ["user", "complete", "continue"]},
         "message": {"type": "string"},
         "file_paths": {"type": "array", "items": {"type": "string"}},
+        "blocked_reason": {"type": "string"},
+        "ask_coverage": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string"},
+                    "disposition": {
+                        "type": "string",
+                        "enum": ["delivered", "blocked", "declined", "not_started"],
+                    },
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
     },
     "required": ["route", "message"],
 }
 ```
+
+`blocked_reason` (issue #2158) is the structured escape hatch that lets a PM
+finalize a non-terminal SDLC pipeline as `complete` when the work is
+genuinely blocked, abandoned, or superseded, without the runner's
+ledger-aware completion guard refusing and re-routing it. `ask_coverage`
+(issue #3027) forces the PM to enumerate the human ask's clauses and their
+dispositions on every turn so a dropped clause becomes visible instead of
+structurally undetectable. Both are optional and additive — turns that omit
+them behave exactly as before. `ask_coverage` is in phase A of a two-phase
+rollout: it is present in `properties` but deliberately **not** in
+`required` yet; tightening it to required is a separate follow-up gated on
+the `SCHEMA_ROUTING_FALLBACK_METRIC` staying flat over a soak window,
+tracked by #3035.
 
 Every top-level role turn requests this schema via `TurnRequest.json_schema`,
 which the adapter passes through to `--json-schema`. Per Task 2.1's empirical

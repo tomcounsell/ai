@@ -1150,7 +1150,7 @@ class TestTerminalFlushPromiseGate:
     def test_promise_flagged_deferred_draft_substituted_not_delivered(self, cleanup):
         """A promise-flagged deferred draft reaching the terminal flush is NOT
         delivered verbatim; the honest-fallback substitution ships instead."""
-        from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE
+        from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
 
         sid = f"{SID_PREFIX}promise-sub"
         cleanup.append(sid)
@@ -1214,19 +1214,42 @@ class TestTerminalFlushPromiseGate:
     def test_substitute_message_passes_the_heuristic(self):
         """The honest fallback must itself pass the promise heuristic — the
         substitution may never be a new empty promise."""
-        from agent.session_health import TERMINAL_PROMISE_FALLBACK_MESSAGE
+        from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
         from bridge.promise_gate import _evaluate_promise_heuristic
 
         assert _evaluate_promise_heuristic(TERMINAL_PROMISE_FALLBACK_MESSAGE).action == "allow"
+
+    def test_substitute_message_names_no_internal_mechanism(self):
+        """#3290: the fallback reaches the human in Telegram, so it must read as
+        Valor speaking, not as system narration.
+
+        The heuristic assertion above cannot catch this — the pre-#3290 wording
+        ("An outbound safety filter held back this session's final message")
+        passed the heuristic and was still raw narration that the principal
+        flagged as off-persona.
+
+        Word-boundary matching, not a raw substring check: "possession" and
+        "obsession" both contain "session", so a substring check would fail an
+        on-persona future rewrite for no jargon reason. The leading \b only
+        (no trailing \b) still catches inflections like "filtered", "sessions",
+        and "gated".
+        """
+        import re
+
+        from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
+
+        msg = TERMINAL_PROMISE_FALLBACK_MESSAGE
+        for term in ("filter", "session", "gate"):
+            assert not re.search(rf"\b{term}", msg, re.IGNORECASE), (
+                f"fallback names the internal mechanism {term!r}: {msg!r}"
+            )
 
     @pytest.mark.asyncio
     async def test_async_email_fallback_promise_substituted(self, cleanup):
         """The async email fallback (_deliver_deferred_self_draft_fallback) has
         the identical hole and is gated by the same helper."""
-        from agent.session_health import (
-            TERMINAL_PROMISE_FALLBACK_MESSAGE,
-            _deliver_deferred_self_draft_fallback,
-        )
+        from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
+        from agent.session_health import _deliver_deferred_self_draft_fallback
 
         sid = f"{SID_PREFIX}promise-async-email"
         cleanup.append(sid)

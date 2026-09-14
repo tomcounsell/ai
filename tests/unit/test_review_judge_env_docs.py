@@ -98,6 +98,17 @@ def test_documented_review_env_vars_have_a_settings_field():
     )
 
 
+def test_sdlc_review_judges_stays_retired():
+    """Pin the retirement (#2831) so the quorum-floor fix (#3197) cannot
+    quietly re-introduce SDLC_REVIEW_JUDGES as an untested single-judge
+    override. This is stronger than the positive predicate above (which
+    would also pass if the name came back WITH a settings field) — the
+    override is retired outright, not merely wired up."""
+    found = _scan(SCANNED_DOCS)
+    assert "SDLC_REVIEW_JUDGES" not in found
+    assert "SDLC_REVIEW_K" not in found
+
+
 def test_scanned_docs_exist():
     """Guard the guard: a rename must not make the check vacuously pass."""
     for path in SCANNED_DOCS:

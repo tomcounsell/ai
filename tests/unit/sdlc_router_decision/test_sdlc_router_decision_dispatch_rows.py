@@ -333,8 +333,16 @@ class TestRow10ReadyToMerge:
         }
         # WS3a (#2062): row 10 requires a recorded APPROVED verdict, mirroring
         # row 9 -- REVIEW==completed alone is no longer merge-ready.
-        meta = {"pr_number": 42, "latest_review_verdict": "APPROVED"}
-        result = decide_next_dispatch(states, meta)
+        # #3249/#3260: row 10 is a TERMINAL merge dispatch, so it now also
+        # requires positive evidence that the approval judged the live head --
+        # the latest_review_head_sha/pr_head_sha pair below.
+        head_sha = "c" * 40
+        meta = {
+            "pr_number": 42,
+            "latest_review_verdict": "APPROVED",
+            "latest_review_head_sha": head_sha,
+        }
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": head_sha})
         assert result.skill == SKILL_DO_MERGE
         assert result.row_id == "10"
 

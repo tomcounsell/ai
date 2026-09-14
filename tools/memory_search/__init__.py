@@ -19,11 +19,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _fetch_all_records(project_key: str) -> list:
-    """Fetch all memory records for a project key.
+def fetch_all_records(project_key: str) -> list:
+    """Fetch every memory record for a project key.
 
-    Shared helper used by inspect(stats=True) and status() to avoid
-    duplicating the Memory.query.filter(...) call.
+    Enumeration, not search. ``search()`` is a relevance-ranked top-N over a
+    query string: it early-returns empty on a blank query and has no ``source``
+    parameter, so it cannot enumerate a partition and anything built on it
+    silently under-reads. Callers that need the whole partition — the
+    ``inspect(stats=True)`` and ``status()`` rollups, and the #3177
+    memory-inspiration adapter — call this instead.
+
+    ``project_key`` is the only indexed partition (``KeyField``). ``source``,
+    ``agent_id`` beyond the key, and the rest are plain fields, so filtering on
+    them happens in Python after the fetch.
 
     Args:
         project_key: Project partition key.
@@ -321,7 +329,7 @@ def inspect(
         if stats:
             project_key = _resolve_project_key(project_key)
             # Aggregate stats across project
-            all_records = _fetch_all_records(project_key)
+            all_records = fetch_all_records(project_key)
 
             if not all_records:
                 return {
@@ -446,7 +454,7 @@ def status(
             return {"healthy": False, "error": f"Redis unreachable: {e}"}
 
         project_key = _resolve_project_key(project_key)
-        all_records = _fetch_all_records(project_key)
+        all_records = fetch_all_records(project_key)
 
         total = len(all_records)
 

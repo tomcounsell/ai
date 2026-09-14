@@ -100,6 +100,11 @@ class TestResumePublishesNotify:
         assert channel == _TEST_CHANNEL
         payload = json.loads(payload_json)
         assert payload == {
+            # Wire-schema version stamp every payload carries
+            # (bridge/wire_schemas.py::NotifyPayload). Readers accept any
+            # version; the writer emits 1 today, so pin it here the same way
+            # tests/unit/test_wire_schemas.py does.
+            "v": 1,
             "chat_id": "chat-9",
             "session_id": "notify-sess",
             "worker_key": "my-slug",

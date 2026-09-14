@@ -1,8 +1,9 @@
 """Bridge-level liveness signals for the stale-update-stream detector (#1712).
 
-Writes three liveness keys to Redis.  Two are **positive health** signals that
-record that something good *happened*, and one is **positive failure**
-evidence.  None of them let the watchdog infer failure from silence — the
+Writes four liveness keys to Redis.  Two are **positive health** signals that
+record that something good *happened*, one is **positive failure** evidence,
+and one is a **structured per-cycle outcome record** of the reconciler's
+per-chat scan.  None of them let the watchdog infer failure from silence — the
 anti-pattern rejected in issue #1172, and the one the wedge detector had
 re-inherited before #2475.
 
@@ -36,7 +37,34 @@ Keys:
   live path missed one.  A quiet account produces nothing to recover, which is
   exactly the desired silence (#2475).
 
-All three keys are **freeform** (not Popoto-managed), so raw Redis
+- ``bridge:last_scan_outcome``: a JSON record written by the reconciler at the
+  END of every scan that got past ``get_dialogs()``, describing what the
+  per-chat loop actually did (issue #2691).  ``bridge:last_probe_ok`` is
+  stamped *before* that loop, so a half-wedged client — dialog list resolves,
+  every per-chat ``iter_messages`` faults — keeps the probe fresh, recovers
+  nothing, stamps no missed-recovery evidence, and was previously invisible to
+  the watchdog while messages were lost.  This record closes that blind spot.
+
+  The record is **structurally** a positive statement, not an inferred one.
+  "The scan ran and every chat faulted" is ``attempted > 0 and
+  faulted == attempted`` on a record the scan itself wrote after finishing.
+  "The scan never ran" is the *absence* of a fresh record — there is no value
+  of this key that means it.  A reader therefore never has to derive one case
+  from the other by timing arithmetic; a missing or stale record is
+  inconclusive by construction and must never be treated as evidence.
+
+  ``consecutive_total_fault_cycles`` is maintained by the writer, which is the
+  only component that knows what a cycle is: it increments when this cycle was
+  a total fault, resets to 0 when any chat succeeded, and is left alone by a
+  cycle that attempted nothing.  A reader counting cycles from timestamps
+  would be re-deriving the reconciler's own cadence, so it does not.  The
+  record also carries the writing ``pid``; a run counter never carries across
+  a bridge restart, matching #2475's rule that a restart clears the accusation.
+  *Consecutive* is likewise enforced by the writer: a run extends only a
+  predecessor still contiguous with this cycle, so a run that stalled below the
+  alert threshold cannot be resumed hours later by one new fault cycle.
+
+All four keys are **freeform** (not Popoto-managed), so raw Redis
 ``get``/``set`` is correct here.  All other Redis writes in this codebase that
 touch Popoto-managed keys must go through the ORM.  See issue #1408 for the
 broader freeform-key convention used by ``bridge.dedup.record_last_event`` and
@@ -46,6 +74,7 @@ Every writer is best-effort: any exception logs a WARNING and never raises,
 matching the same safety contract as ``bridge.dedup.record_last_event``.
 """
 
+import json
 import logging
 import os
 import time
@@ -57,8 +86,24 @@ logger = logging.getLogger(__name__)
 _UPDATE_KEY = "bridge:last_update_received"
 _PROBE_KEY = "bridge:last_probe_ok"
 _MISSED_RECOVERY_KEY = "bridge:last_missed_recovery"
+_SCAN_OUTCOME_KEY = "bridge:last_scan_outcome"
 # Generous TTL — watchdog reads these frequently; keys must survive restarts.
 _TTL_SECONDS = 604800  # 7 days
+# Default for how recently the previous scan-outcome record must have been
+# written for this cycle to *continue* its run rather than start a new one. The
+# reconciler cycles every 180s, so this is a few intervals of slack.
+# GRAIN OF SALT: provisional/tunable. Read at call time via
+# _run_continuity_seconds() so SCAN_RUN_CONTINUITY_SECONDS is not frozen at
+# import.
+_RUN_CONTINUITY_SECONDS_DEFAULT = 900
+
+
+def _run_continuity_seconds() -> int:
+    """Return the run-contiguity window, honouring SCAN_RUN_CONTINUITY_SECONDS."""
+    try:
+        return int(os.environ.get("SCAN_RUN_CONTINUITY_SECONDS", _RUN_CONTINUITY_SECONDS_DEFAULT))
+    except ValueError:
+        return _RUN_CONTINUITY_SECONDS_DEFAULT
 
 
 def _get_redis() -> redis.Redis:
@@ -161,4 +206,107 @@ def get_last_missed_recovery(redis_client=None) -> float | None:
         return float(raw)
     except Exception as e:
         logger.warning("liveness: get_last_missed_recovery failed: %s", e)
+        return None
+
+
+def record_scan_outcome(
+    attempted: int,
+    faulted: int,
+    sample_error: str = "",
+    redis_client=None,
+) -> dict | None:
+    """Write ``bridge:last_scan_outcome`` for one completed reconciler scan.
+
+    Call this from the reconciler after the per-chat loop finishes, on every
+    cycle that got past ``get_dialogs()`` — including cycles where nothing was
+    attempted.  Never call it on a cycle that did not reach the loop: the
+    absence of a fresh record is precisely how a reader learns the scan did not
+    run, and a record written from outside the loop would destroy that
+    distinction (issue #2691).
+
+    ``attempted`` counts chats that entered the per-chat scan body; ``faulted``
+    counts those whose scan raised.  ``consecutive_total_fault_cycles`` is
+    carried forward from the previous record written by *this same process*:
+    incremented when this cycle was a total fault (``attempted > 0 and
+    faulted == attempted``), reset to 0 when any chat succeeded, and left
+    unchanged by a cycle that attempted nothing.  A record written by a
+    different pid restarts the run rather than continuing it.
+
+    The word *consecutive* is enforced by the writer, not assumed by the reader.
+    A run only extends a previous record that is still contiguous with this
+    cycle (``_run_continuity_seconds()``, a few reconciler intervals); a stale
+    predecessor starts a fresh run.  Without this, a run that stalled just below
+    the alert threshold could be resumed hours later by a single new fault
+    cycle, and long-dead evidence would corroborate a live one.
+
+    Returns the record that was written, or None on failure.  Best-effort: logs
+    a WARNING and never raises.
+    """
+    try:
+        r = redis_client if redis_client is not None else _get_redis()
+        pid = os.getpid()
+        now = time.time()
+
+        prev_run = 0
+        try:
+            prev = _read_scan_outcome(r)
+        except Exception as e:
+            # A corrupt stored value must never gate the write that would
+            # overwrite it, or the key stays corrupt until its TTL expires and
+            # the monitor goes silently dark.  Treat it as "no previous run".
+            logger.warning("liveness: discarding unreadable scan outcome: %s", e)
+            prev = None
+        if prev is not None and prev.get("pid") == pid:
+            prev_ts = prev.get("ts")
+            contiguous = (
+                isinstance(prev_ts, int | float) and (now - prev_ts) <= _run_continuity_seconds()
+            )
+            if contiguous:
+                prev_run = int(prev.get("consecutive_total_fault_cycles", 0))
+
+        if attempted <= 0:
+            run = prev_run
+        elif faulted == attempted:
+            run = prev_run + 1
+        else:
+            run = 0
+
+        record = {
+            "ts": now,
+            "pid": pid,
+            "attempted": int(attempted),
+            "faulted": int(faulted),
+            "consecutive_total_fault_cycles": run,
+            "sample_error": sample_error[:200],
+        }
+        r.set(_SCAN_OUTCOME_KEY, json.dumps(record), ex=_TTL_SECONDS)
+        return record
+    except Exception as e:
+        logger.warning("liveness: record_scan_outcome failed: %s", e)
+        return None
+
+
+def _read_scan_outcome(r) -> dict | None:
+    """Return the stored scan-outcome record, or None if absent/corrupt."""
+    raw = r.get(_SCAN_OUTCOME_KEY)
+    if raw is None:
+        return None
+    record = json.loads(raw)
+    if not isinstance(record, dict):
+        return None
+    return record
+
+
+def get_last_scan_outcome(redis_client=None) -> dict | None:
+    """Return the last reconciler scan-outcome record, or None.
+
+    Returns None when the key is missing (no scan has completed since the key
+    was last set, which a reader must treat as inconclusive — never as
+    evidence of failure) or the value is corrupt.  Never raises.
+    """
+    try:
+        r = redis_client if redis_client is not None else _get_redis()
+        return _read_scan_outcome(r)
+    except Exception as e:
+        logger.warning("liveness: get_last_scan_outcome failed: %s", e)
         return None

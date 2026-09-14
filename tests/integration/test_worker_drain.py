@@ -79,7 +79,7 @@ class TestWorkerDrainEventNotification:
             patch(
                 "agent.agent_session_queue._push_agent_session",
                 new_callable=AsyncMock,
-                return_value=1,
+                return_value=(1, "s1"),
             ),
             patch("agent.agent_session_queue._ensure_worker"),
         ):
@@ -109,7 +109,7 @@ class TestWorkerDrainEventNotification:
             patch(
                 "agent.agent_session_queue._push_agent_session",
                 new_callable=AsyncMock,
-                return_value=1,
+                return_value=(1, "s1"),
             ),
             patch("agent.agent_session_queue._ensure_worker"),
         ):

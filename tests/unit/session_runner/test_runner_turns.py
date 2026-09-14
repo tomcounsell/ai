@@ -34,7 +34,7 @@ from agent.session_runner.runner import (
     RUNNER_ERROR_USER_MESSAGE,
     STEER_ABORT_USER_MESSAGE,
     SessionRunner,
-    turn_timeout_for,
+    deadlines_for,
 )
 
 
@@ -481,10 +481,26 @@ async def test_boundary_steer_injected_into_first_message():
 
 def test_role_aware_turn_timeout():
     """Teammate turns are short; eng turns are generous (Dev work runs
-    inside the PM turn)."""
-    assert turn_timeout_for("teammate") < turn_timeout_for("eng")
-    assert turn_timeout_for(None) == turn_timeout_for("eng")
-    assert turn_timeout_for("teammate") > 0
+    inside the PM turn).
+
+    Rewritten against the two-deadline model (``deadlines_for``): the
+    relation that matters is the same one the single-timeout table asserted
+    — a teammate turn is bounded tighter than an eng turn on BOTH deadlines
+    — plus the model's own invariant that the absolute ceiling can never be
+    the tighter of the two.
+    """
+    teammate = deadlines_for("teammate")
+    eng = deadlines_for("eng")
+    default = deadlines_for(None)
+
+    assert teammate.idle_s < eng.idle_s
+    assert teammate.absolute_s < eng.absolute_s
+    assert default == eng
+    assert teammate.idle_s > 0
+    assert teammate.absolute_s > 0
+    # The ceiling is a backstop, never the operative limit.
+    assert eng.absolute_s > eng.idle_s
+    assert teammate.absolute_s >= teammate.idle_s
 
 
 # --------------------------------------------------------------------------

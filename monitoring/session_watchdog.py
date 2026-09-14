@@ -53,15 +53,16 @@ from models.session_event import format_event_lines
 def _to_timestamp(val) -> float | None:
     """Convert a datetime or float to a Unix timestamp.
 
-    Naive datetimes are assumed to represent UTC (matching how Popoto
-    SortedField stores them). This prevents local-time interpretation
-    on machines running in non-UTC timezones, which would otherwise
-    inflate durations by the UTC offset and trigger false LIFECYCLE_STALL
-    events for newly-created sessions.
+    Naive datetimes are assumed to represent UTC. This prevents local-time
+    interpretation on machines running in non-UTC timezones, which would
+    otherwise inflate durations by the UTC offset and trigger false
+    LIFECYCLE_STALL events for newly-created sessions (#777).
     """
     if val is None:
         return None
     if isinstance(val, datetime):
+        # Keep: a naive-string or float input on a non-UTC host is the
+        # producer this guard exists for (#777), not a popoto read.
         if val.tzinfo is None:
             val = val.replace(tzinfo=UTC)
         return val.timestamp()

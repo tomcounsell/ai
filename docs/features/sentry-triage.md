@@ -121,6 +121,8 @@ backlog approaches it.
 
 In live mode, the digest gets an explicit `[LIVE — Sentry state changes applied]` footer. In dry-run mode, it gets `[dry run — no Sentry state changes]` (mirroring the existing `[dry run — no GitHub issues filed]` line for tier C). The auto-actioned block sits between the per-tier counts and the C-tier highlight rows, separating "what we already handled" from "what still needs you".
 
+The digest spans every Sentry project in the org, not one repo, so it has no single project to route by. It pages the host checkout's own engineer group via `reflections.utilities.send_host_eng_telegram` / `resolve_host_eng_chat` — the same `PROJECT_ROOT`-narrowed fallback rule `docs_auditor` and `stall_advisory` use. A foreign or unregistered checkout suppresses the digest (logs a warning) rather than sending it to `Eng: Valor`. See [`reflection-telegram-routing.md`](reflection-telegram-routing.md).
+
 ## Environment gating (init side)
 
 Triage is the read/dismiss side. The **init** side — deciding whether an event is even captured, and under which `environment` tag — lives in `monitoring/sentry_config.py::configure_sentry()`, called once at startup by both the bridge (`bridge/telegram_bridge.py`) and the worker (`worker/__main__.py`). Two gates run in order:

@@ -8,7 +8,6 @@ contract (pr-changed-files mode).
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
@@ -338,6 +337,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -376,6 +376,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -1322,9 +1323,9 @@ class TestWithheldBlocksStaleClose:
     """A run that withheld a fix still requires a human merge, and the sweeper
     must not close or delete the branch of a PR carrying the withheld marker.
 
-    The withheld marker reaches the PR body, Telegram, and Redis liveness, and
-    the sweeper exempts a withheld-marker PR from stale-close (covered in the
-    real-git test file).
+    The withheld marker reaches the PR body and Telegram, and the sweeper
+    exempts a withheld-marker PR from stale-close (covered in the real-git
+    test file).
     """
 
     def test_pr_body_carries_marker_when_fixes_withheld(self, repo):
@@ -1347,7 +1348,7 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
             docs_auditor._push_branch_and_pr(
-                "slug", repo, ["docs/features/x.md"], withheld=withheld
+                "slug", repo, ["docs/features/x.md"], withheld=withheld, starting_ref="main"
             )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
@@ -1355,7 +1356,7 @@ class TestWithheldBlocksStaleClose:
         assert docs_auditor.WITHHELD_PR_MARKER in body
         assert "a/c.py" in body
 
-    def test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness(
+    def test_bare_name_withhold_propagates_to_pr_body_and_telegram(
         self, repo, auth_ok, patch_redis
     ):
         """The new bare-name withhold class must reach every operator surface.
@@ -1410,6 +1411,7 @@ class TestWithheldBlocksStaleClose:
                 repo,
                 ["docs/features/foo.md"],
                 withheld=audit_result["withheld"],
+                starting_ref="main",
             )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
@@ -1417,9 +1419,10 @@ class TestWithheldBlocksStaleClose:
         assert docs_auditor.WITHHELD_PR_MARKER in body
         assert "ghost_module.py" in body
 
-        # Surfaces 2 and 3 — the Telegram notification and Redis liveness.
+        # Surface 2 — the Telegram notification, and the returned summary.
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
@@ -1430,7 +1433,6 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness") as liveness,
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1440,7 +1442,7 @@ class TestWithheldBlocksStaleClose:
         assert result["status"] == "skipped"
         assert "1 fix(es) withheld" in notify.call_args.args[0]
         assert notify.call_args.kwargs["repo_root"] == repo
-        assert liveness.call_args.kwargs["fixes_withheld"] == 1
+        assert "1 fix(es) withheld" in result["summary"]
 
     def test_rotation_result_surfaces_withheld_count(self, repo, auth_ok, patch_redis):
         primary = repo / "docs" / "features" / "foo.md"
@@ -1457,6 +1459,7 @@ class TestWithheldBlocksStaleClose:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -1468,7 +1471,6 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor._file_issue_if_new", return_value=False) as file_issue,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1503,13 +1505,13 @@ class TestWithheldBlocksStaleClose:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
             patch("reflections.docs_auditor._file_issue_if_new", return_value=False) as file_issue,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness") as liveness,
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1522,7 +1524,7 @@ class TestWithheldBlocksStaleClose:
         assert "2 fix(es) withheld" in msg
         assert "docs_features_foo_md" in msg  # the rotation slug
         assert notify.call_args.kwargs["repo_root"] == repo
-        assert liveness.call_args.kwargs["fixes_withheld"] == 2
+        assert "2 fix(es) withheld" in result["summary"]
         # One issue filed per withheld entry (Q5 / B4), even on the no-PR path.
         assert file_issue.call_count == 2
 
@@ -1538,7 +1540,6 @@ class TestWithheldBlocksStaleClose:
             patch("reflections.docs_auditor.audit", return_value=audit_result),
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1745,13 +1746,13 @@ class TestTelegramSuppressionReachesSummary:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
             patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
             patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1767,6 +1768,7 @@ class TestTelegramSuppressionReachesSummary:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -1778,7 +1780,6 @@ class TestTelegramSuppressionReachesSummary:
             patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
             patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
             result = docs_auditor.run_docs_auditor()
 
@@ -1957,9 +1958,8 @@ class TestDirtyTreeGuard:
             patch("reflections.docs_auditor._file_issue_if_new") as file_issue,
         ):
             result = docs_auditor.run_docs_auditor()
-        # The guard now returns "skipped", matching the _write_liveness(...,
-        # "skipped", ...) call it sits beside (R5-1). It must stay quiet: the
-        # whole shared checkout is dirty here, which concurrent lanes routinely
+        # The guard returns "skipped" (R5-1) and must stay quiet: the whole
+        # shared checkout is dirty here, which concurrent lanes routinely
         # cause, so a filing guard would mint issues blaming the auditor for a
         # peer's uncommitted work (Q4 item 5).
         assert result["status"] == "skipped"
@@ -1979,6 +1979,7 @@ class TestPRCreationFailure:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -2003,6 +2004,7 @@ class TestPRCreationFailure:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
@@ -2045,6 +2047,7 @@ class TestHoistedPRGuards:
         """Drive a rotation with the two guards forced, returning (result, mocks)."""
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch(
@@ -2058,7 +2061,6 @@ class TestHoistedPRGuards:
             patch("reflections.docs_auditor.audit") as audit_mock,
             patch("reflections.docs_auditor._push_branch_and_pr") as push,
             patch("reflections.docs_auditor._update_rotation_hash") as rotation,
-            patch("reflections.docs_auditor._write_liveness") as liveness,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
         ):
             result = docs_auditor.run_docs_auditor()
@@ -2066,7 +2068,6 @@ class TestHoistedPRGuards:
             "audit": audit_mock,
             "push": push,
             "rotation": rotation,
-            "liveness": liveness,
             "notify": notify,
         }
 
@@ -2102,7 +2103,6 @@ class TestHoistedPRGuards:
 
         mocks["rotation"].assert_called_once()
         assert mocks["rotation"].call_args.args[1] == ["docs/features/foo.md"]
-        assert mocks["liveness"].call_args.args[1] == "skipped"
 
     def test_no_guard_lets_the_substrate_run(self, repo, auth_ok, patch_redis):
         primary = repo / "docs" / "features" / "foo.md"
@@ -2127,7 +2127,7 @@ class TestExplicitStagingSet:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch("reflections.docs_auditor.subprocess.run", side_effect=record):
-            assert docs_auditor._push_branch_and_pr("slug", repo, []) is None
+            assert docs_auditor._push_branch_and_pr("slug", repo, [], starting_ref="main") is None
 
         assert calls == []
 
@@ -2142,7 +2142,9 @@ class TestExplicitStagingSet:
             patch("reflections.docs_auditor.subprocess.run", side_effect=record),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
 
         add = next(c for c in calls if c[:2] == ["git", "add"])
         assert add == ["git", "add", "--", "docs/features/foo.md"]
@@ -2165,7 +2167,9 @@ class TestExplicitStagingSet:
             patch("reflections.docs_auditor.subprocess.run", side_effect=record),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, ["docs/features/foo.md"])
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
 
         assert ["git", "checkout", "HEAD", "--", "docs/features/foo.md"] in calls
         # Never a whole-tree operation — other lanes hold uncommitted work here.
@@ -3039,57 +3043,6 @@ class TestVaultSiteDrift:
             assert docs_auditor._resolve_vault_root("valor") == Path("/vault/valor")
 
 
-class TestWriteLivenessVaultParam:
-    def _summary(self, fake_redis) -> dict:
-        # Find the r.set call that persisted the summary JSON.
-        for c in fake_redis.set.call_args_list:
-            if c.args and c.args[0] == docs_auditor.REDIS_LAST_COMPLETED_SUMMARY_KEY:
-                return json.loads(c.args[1])
-        raise AssertionError("summary was not written")
-
-    def test_four_arg_call_omits_vault_count(self, fake_redis, patch_redis):
-        docs_auditor._write_liveness("slug", "ok", None, 3)
-        summary = self._summary(fake_redis)
-        assert "vault_narratives_compared" not in summary
-
-    def test_five_arg_call_includes_vault_count(self, fake_redis, patch_redis):
-        docs_auditor._write_liveness("slug", "ok", None, 3, 7)
-        summary = self._summary(fake_redis)
-        assert summary["vault_narratives_compared"] == 7
-
-    def test_five_arg_zero_is_emitted(self, fake_redis, patch_redis):
-        # 0 is distinct from None: a resolved-but-empty vault must be observable.
-        docs_auditor._write_liveness("slug", "ok", None, 0, 0)
-        summary = self._summary(fake_redis)
-        assert summary["vault_narratives_compared"] == 0
-
-    def test_withheld_count_absent_when_zero(self, fake_redis, patch_redis):
-        # A clean run must not carry the key at all — same shape as before.
-        docs_auditor._write_liveness("slug", "ok", None, 3)
-        assert "fixes_withheld" not in self._summary(fake_redis)
-
-    def test_withheld_count_emitted_when_nonzero(self, fake_redis, patch_redis):
-        # Redis is the only durable, queryable surface; a withheld run must not
-        # be byte-identical to a clean one there.
-        docs_auditor._write_liveness("slug", "ok", None, 3, fixes_withheld=2)
-        assert self._summary(fake_redis)["fixes_withheld"] == 2
-
-    def test_withheld_is_trailing_and_preserves_positional_contract(self):
-        import inspect
-
-        params = list(inspect.signature(docs_auditor._write_liveness).parameters)
-        # fixes_withheld must come last so existing 4-arg and 5-arg positional
-        # call sites keep their meaning.
-        assert params[-1] == "fixes_withheld"
-        assert params[:5] == [
-            "slug",
-            "status",
-            "pr_url",
-            "files_touched",
-            "vault_narratives_compared",
-        ]
-
-
 class TestVaultDeadCodeRemoved:
     def test_default_vault_weight_gone(self):
         assert not hasattr(docs_auditor, "DEFAULT_VAULT_WEIGHT")
@@ -3111,3 +3064,126 @@ class TestVaultDeadCodeRemoved:
         primary, _ = docs_auditor._select_primary_doc(repo, "valor")
         assert primary is not None
         assert str(primary).startswith("docs/features/")
+
+
+# ---------------------------------------------------------------------------
+# TestLivenessDeadCodeRemoved — #2743
+# ---------------------------------------------------------------------------
+
+
+class TestLivenessDeadCodeRemoved:
+    """The Redis liveness channel is gone; a revert must not silently bring it back."""
+
+    def test_write_liveness_gone(self):
+        assert not hasattr(docs_auditor, "_write_liveness")
+
+    def test_last_completed_ts_key_gone(self):
+        assert not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_TS_KEY")
+
+    def test_last_completed_summary_key_gone(self):
+        assert not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_SUMMARY_KEY")
+
+
+# ---------------------------------------------------------------------------
+# TestVaultClauseInSummary — #2743: vault_narratives_compared rehomed onto the
+# created-PR summary string, replacing the deleted Redis liveness payload.
+# ---------------------------------------------------------------------------
+
+
+class TestVaultClauseInSummary:
+    def test_created_pr_summary_carries_vault_count_including_zero(
+        self, repo, auth_ok, patch_redis
+    ):
+        """The clause is unconditional: even a resolved-but-empty vault (0) shows up."""
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok", files_touched=["docs/features/foo.md"], fixes_applied=1
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=True),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "vault 0 narratives compared" in result["summary"]
+
+    def test_vault_clause_absent_from_zero_diff_summary(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result("ok", files_touched=[], fixes_applied=0)
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=7),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._send_telegram_notification"),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "vault" not in result["summary"]
+
+    def test_vault_clause_absent_from_no_candidates_summary(self, repo, auth_ok, patch_redis):
+        # No docs/features/*.md exist in `repo`, so _select_primary_doc finds nothing.
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=3),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "vault" not in result["summary"]
+
+
+def test_worst_case_summary_stays_under_truncation_budget(repo, auth_ok, patch_redis):
+    """Pins Risk 1's truncation budget: agent/reflection_scheduler.py truncates
+    ``output_summary`` to 500 characters, so the worst-realistic created-PR
+    summary (many files, many fixes, a withheld note, a suppressed-Telegram
+    note, a real PR URL, and the vault clause) must stay comfortably under it.
+    """
+    primary = repo / "docs" / "features" / "foo.md"
+    primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+    files_touched = [f"docs/features/file_{i:02d}.md" for i in range(42)]
+    withheld = [{"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"}]
+    audit_result = docs_auditor._ok_result(
+        "ok",
+        files_touched=files_touched,
+        fixes_applied=137,
+        fixes_withheld=1,
+        withheld=withheld,
+    )
+    with (
+        patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+        patch("reflections.docs_auditor._current_ref", return_value="main"),
+        patch("reflections.docs_auditor._git_dirty", return_value=False),
+        patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+        patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+        patch("reflections.docs_auditor.audit", return_value=audit_result),
+        patch(
+            "reflections.docs_auditor._push_branch_and_pr",
+            return_value="https://github.com/tomcounsell/ai/pull/123456",
+        ),
+        patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+        patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+        patch("reflections.docs_auditor._update_rotation_hash"),
+    ):
+        result = docs_auditor.run_docs_auditor()
+
+    assert result["status"] == "ok"
+    assert "narratives compared" in result["summary"]
+    assert len(result["summary"]) < 500

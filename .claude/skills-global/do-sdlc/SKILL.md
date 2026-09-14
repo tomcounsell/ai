@@ -245,13 +245,13 @@ Guards are evaluated in the **pinned `GUARDS` list order** `[T, G1, G2, G3, G4, 
 | T: Terminal lane | `stage_states["MERGE"]` settled (`completed`/`skipped`) OR `pr_state == "MERGED"` | `Terminal` decision — a clean "nothing to dispatch" exit, distinct from `blocked`. Preempts every guard and the dispatch table. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | G1: Critique loop | Latest critique verdict contains `NEEDS REVISION` or `MAJOR REWORK` AND `last_dispatched_skill == /do-plan-critique` | `/do-plan` |
 | G2: Critique cycle cap | `critique_cycle_count >= MAX_CRITIQUE_CYCLES` (2) AND CRITIQUE is not completed | Escalate: `blocked` with reason `critique cycle cap reached` |
-| G3: PR lock | `pr_number` is set AND (`last_dispatched_skill` OR proposed dispatch) is `/do-plan` or `/do-plan-critique` | `/do-merge` (if REVIEW and DOCS complete), `/do-patch` (if review requested changes), else `/do-pr-review` |
+| G3: PR lock | `pr_number` is set AND (`last_dispatched_skill` OR proposed dispatch) is `/do-plan` or `/do-plan-critique` | Four-leg ladder: `/do-merge` (REVIEW and DOCS complete, verdict `APPROVED`, head verified fresh) → `/do-patch` (review requested changes, or REVIEW failed) → `/do-docs` (REVIEW completed with a head-fresh `APPROVED` verdict, AND DOCS not completed — #3227) → else `/do-pr-review` |
 | G4: Oscillation (universal) | `same_stage_dispatch_count >= 3` | Escalate: `blocked` with reason `stage oscillation — {skill} dispatched {N} times without state change` |
 | G9: Blocked-on-conflict | Recorded REVIEW verdict contains `BLOCKED_ON_CONFLICT` AND `pr_merge_state` not in the non-conflicting set (`CLEAN`, `HAS_HOOKS`, `UNSTABLE`, `BLOCKED`, `BEHIND`) AND the verdict is not stale (no `/do-patch` landed after it, #2796) | Escalate: `blocked` with reason naming the PR, the merge state, and the rebase — no SDLC skill resolves merge conflicts |
 | G8: Stage-advance verification | `context["stage_artifacts_verified"] is False` (a claimed stage artifact — PR, branch, plan commit — failed live verification) | Re-dispatch the skill owning `context["unverified_stage"]` |
 | G7: Plan-revising lock | `pr_number` is None AND `plan_revising == True` AND no `/do-plan` revision has landed since the latest CRITIQUE verdict (event-scoped, #2787 — NOT the sticky `revision_applied` boolean) | `/do-plan` (if `last_dispatched_skill == /do-plan-critique`); Escalate `blocked` (if no `/do-plan` in last `MAX_PLAN_REVISING_DISPATCHES + 1` turns) |
 | G5: Unchanged critique artifact | `_verdicts["CRITIQUE"]` has `artifact_hash` AND current plan file hash matches | Use cached verdict: `/do-plan` (NEEDS REVISION) or `/do-build` (READY TO BUILD, no concerns). Never re-dispatch `/do-plan-critique` on an unchanged plan. **Steps aside unconditionally on `READY TO BUILD (with concerns)`** so rows 2b/4b/4c own that state (#2787); the bound there is `MAX_CONCERN_RECRITIQUE_ROUNDS`, not G5. |
-| G6: Terminal merge ready | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` |
+| G6: Terminal merge ready | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` AND the REVIEW verdict's head is verified fresh against `context['pr_head_sha']` | `/do-merge {pr_number}` |
 
 **G4 is universal** — every stage, including DOCS and MERGE. Repeated dispatches without state
 change WILL trip it. G4 also precedes G8, so a persistently false artifact claim is re-dispatched
@@ -262,7 +262,26 @@ diffs (CI flips, new comments). G4 handles REVIEW non-determinism instead.
 
 **Open-PR step-asides.** Once `pr_number` is set, G1 and G5's revision branch defer to G3, the
 canonical open-PR plan-stage redirect — a stale pre-PR critique verdict must never route a shipped
-PR back to `/do-plan`. G7 is likewise gated on `pr_number is None`.
+PR back to `/do-plan`. G7 is likewise gated on `pr_number is None`. Every plan-stage dispatch row
+steps aside on the same shared condition, `_plan_stage_stood_down` — `pr_number` set, or BUILD at
+`in_progress`/`completed` — so a lane that has left the plan stage gets one answer from the
+PR-stage rows rather than a different one per row (#3249).
+
+**Terminal merge needs a verified-fresh head.** The three dispatches that terminate a lane in
+`/do-merge` — G3 leg 1, G6, and dispatch row 10 — each require positive evidence that the
+`APPROVED` verdict judged the PR's live head. An absent `context['pr_head_sha']` is not evidence:
+these sites decline rather than merge on it, and a merge-ready state with no head signal escalates
+to `Blocked(guard_id='NO_RULE')` by design. See
+[`docs/features/gh-stale-state-verdict-gate.md`](../../../docs/features/gh-stale-state-verdict-gate.md).
+
+**`Blocked(NO_RULE)` at `BUILD == completed` with no PR and no branch.** This is the one subcase
+where the plan-stage stand-down (above) leaves nothing to answer: `pr_number` is unset, `BUILD ==
+completed`, and `context['branch_exists']` is `False`. Row 5 (`_rule_branch_exists_no_pr`) needs a
+live branch and has none; rows 4a/4b/4c have already stood down on `BUILD == completed`. No rule
+owns the state, so it escalates. This is correct, not a bug: the plan was already accepted when
+the build was dispatched, so a missing branch means the build's output was lost or deleted, not
+that planning must restart — go find the branch rather than re-dispatching `/do-plan`. It is the
+minority subcase; the ordinary shape, a live branch, resumes through row 5.
 
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` when
 the verdict requires a revision pass, cleared by `/do-plan` after pushing the revision, and

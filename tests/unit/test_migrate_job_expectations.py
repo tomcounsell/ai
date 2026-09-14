@@ -134,12 +134,10 @@ class TestPromiseRewrite:
 
         # The second pass has no promises key to act on, so it must not
         # rewrite any goal — pinned with a save-spy, since a byte-identical
-        # rewrite would look the same from the outside. The one write the spy
-        # tolerates is the recency-score renormalization scoped exactly to
-        # ["last_active_at"]: the migration closes with Job.repair_indexes(),
-        # whose rebuild re-skews scores on a non-UTC host and whose
-        # renormalize sweep repairs them with that field-scoped save on every
-        # pass by design (#2636) — a goal rewrite can never take that shape.
+        # rewrite would look the same from the outside. The spy's
+        # ["last_active_at"]-scoped branch is dead tolerance: nothing in this
+        # migration issues that scoped save, so the spy tolerates nothing —
+        # a goal rewrite can never take that shape either way.
         saves = []
         orig_save = Job.save
         monkeypatch.setattr(

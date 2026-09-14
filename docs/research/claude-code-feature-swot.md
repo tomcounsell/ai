@@ -410,7 +410,6 @@ Operational (ready)          Configured (needs_setup)
 | Bridge | `com.valor.bridge` | `scripts/start_bridge.sh` | Always on |
 | Watchdog | `com.valor.bridge-watchdog` | `monitoring/bridge_watchdog.py` | Every 60s |
 | Issue Poller | `com.valor.issue-poller` | Issue polling script | Every 5min |
-| AutoExperiment | `com.valor.autoexperiment` | `scripts/autoexperiment.py` | Nightly |
 
 Reflections run in their own supervised launchd subprocess (`python -m reflections`, `com.valor.reflection-worker`), separate from the worker (`python -m worker`). See [Reflection Scheduler Subprocess](../features/reflection-scheduler-subprocess.md) and [Reflections](../features/reflections.md) for details.
 
@@ -431,7 +430,7 @@ Reflections are declared in `config/reflections.yaml` (a vault-symlinked registr
 
 | | Analysis |
 |---|---------|
-| **Strengths** | Watchdog ensures bridge resilience. Reflections automate maintenance. AutoExperiment enables self-improvement. Issue poller catches new work automatically. |
+| **Strengths** | Watchdog ensures bridge resilience. Reflections automate maintenance. Issue poller catches new work automatically. |
 | **Weaknesses** | No scheduled memory consolidation. No scheduled test suite runs. No scheduled dependency updates. Remote triggers underutilized. |
 | **Opportunities** | **Cron memory consolidation** — nightly dedup and merge similar memories. **Scheduled regression testing** — run full test suite nightly. **Dependency audit schedule** — weekly check for outdated packages. **Health check dashboards** — aggregate scheduled check results. |
 | **Threats** | Overlapping schedules consuming resources. Scheduled tasks failing silently. Launchd complexity for cross-machine deployment. |

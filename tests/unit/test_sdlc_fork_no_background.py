@@ -15,6 +15,8 @@ assertion guards a specific invariant:
    under `.claude/skills-global/` and `.claude/skills/`, plus do-build's
    multi-file dispatch/PR sub-files (WORKFLOW.md, PR_AND_CLEANUP.md), is found
    dynamically. A refactor that stops discovering the anchor skills fails loudly.
+   The roster-dispatching skills run inline instead and are guarded from the
+   other direction by `test_roster_skills_are_not_forks`.
 
 2. Exists & non-empty (`test_every_fork_skill_exists_and_nonempty`): a missing
    or empty fork skill file is a TEST FAILURE, never a silent skip.
@@ -77,8 +79,16 @@ REQUIRED_ANCHORS = (
     ".claude/skills-global/do-build/SKILL.md",
     ".claude/skills-global/do-sdlc/SKILL.md",
     ".claude/skills/sdlc/SKILL.md",
-    ".claude/skills-global/do-pr-review/SKILL.md",
     ".claude/skills-global/do-build/WORKFLOW.md",
+)
+
+# Skills that MUST stay inline because they dispatch a roster of subagents.
+# A fork's subagent sits at the harness spawn-depth limit, where the Agent tool
+# is withheld: do-plan-critique's critics (#3137) and do-pr-review's judges
+# (#3198) both silently collapsed to one sequential pass under a fork.
+MUST_NOT_BE_FORK = (
+    ".claude/skills-global/do-pr-review/SKILL.md",
+    ".claude/skills-global/do-plan-critique/SKILL.md",
 )
 
 
@@ -250,6 +260,29 @@ def test_all_fork_skills_discovered():
             f"Required fork-skill anchor not discovered: {anchor}. "
             f"Discovered set: {sorted(discovered_rel)}"
         )
+
+
+def test_roster_skills_are_not_forks():
+    """A skill that dispatches a roster of subagents must not declare `context: fork`.
+
+    The harness withholds the Agent tool from a subagent at its spawn-depth
+    limit, and a forked skill's subagent is an ordinary subagent. Under an SDLC
+    supervisor that already runs each stage inside its own Agent, a forked
+    roster skill reaches that limit and can spawn nobody -- the roster collapses
+    to one sequential pass while the artifact keeps the multi-agent format
+    (#3137 for critics, #3198 for judges). Re-adding the frontmatter key
+    reinstates that silent degradation, so it fails here.
+    """
+    offenders = []
+    for rel in MUST_NOT_BE_FORK:
+        path = REPO_ROOT / rel
+        assert path.exists(), f"Roster skill missing: {rel}"
+        if _has_fork_frontmatter(path):
+            offenders.append(rel)
+    assert not offenders, (
+        "Roster-dispatching skill(s) declare `context: fork`, which withholds "
+        "the Agent tool at spawn depth and silently collapses the roster: " + ", ".join(offenders)
+    )
 
 
 def test_every_fork_skill_exists_and_nonempty():

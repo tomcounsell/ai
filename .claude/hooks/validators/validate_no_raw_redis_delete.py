@@ -253,6 +253,14 @@ _POPOTO_CONTEXT = [
     "DeadLetter",
     "DedupRecord",
     "DocumentChunk",
+    "ImprovementCase",
+    "ImprovementCharter",
+    "ImprovementEvaluation",
+    "ImprovementEvidence",
+    "ImprovementExperiment",
+    "ImprovementInvestigation",
+    "ImprovementModelRevision",
+    "ImprovementRelease",
     "Job",
     "KnowledgeDocument",
     "LastProcessedRecord",
@@ -273,6 +281,8 @@ _POPOTO_CONTEXT = [
     # name only makes the guard fire more often, and dropping one is a
     # fail-open change with no evidence behind it.
     "SessionEvent",
+    "SideEffectJob",
+    "side_effect_job",
     "TaskTypeProfile",
     "TelegramMessage",
     "TeammateMetrics",

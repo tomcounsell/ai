@@ -710,7 +710,7 @@ in-code comment already rejected.
 ## Test Impact
 
 - [ ] `tests/unit/test_dedup.py` (or the bridge dedup tests) — UPDATE: add `claim_message` provisional-gate cases + `release_message_claim` DELETE; assert the gate TTL is in seconds (`CLAIM_TTL_SECONDS`, decoupled from the 2h membership); assert the existing membership behavior is unchanged (B1 coexists).
-- [ ] `tests/unit/bridge/test_dispatch.py` (dispatch wrapper tests) — UPDATE: assert `claim_message` gates enqueue; a lost claim skips enqueue; **fault injection (BLOCKER, Round 3):** when `enqueue_agent_session` raises, the claim key is DELETED before the exception propagates (no orphaned gate) and dedup stays unrecorded — assert the reconciler contract holds (message is re-enqueueable, not silently dropped) (B1).
+- [ ] `tests/unit/bridge/test_bridge_dispatch.py` (dispatch wrapper tests) — UPDATE: assert `claim_message` gates enqueue; a lost claim skips enqueue; **fault injection (BLOCKER, Round 3):** when `enqueue_agent_session` raises, the claim key is DELETED before the exception propagates (no orphaned gate) and dedup stays unrecorded — assert the reconciler contract holds (message is re-enqueueable, not silently dropped) (B1).
 - [ ] `tests/**/test_catchup*.py` and `tests/**/test_reconciler*.py` — UPDATE/ADD: assert the recovery enqueue sites also call `claim_message` (shared key) and skip enqueue on a lost claim; a message already claimed/recorded by the live path is not double-enqueued by a racing catchup/reconciler scan; assert an enqueue exception on the recovery path releases the gate so the next scan re-acquires (no permanent drop) (B1, Concern 1 + Round-3 BLOCKER). **Round-4 BLOCKER fault injection:** a SETNX claim LOSER on the recovery path does NOT call `record_message_processed`; and the winner-death case — winner acquires the claim then dies before `enqueue_agent_session_fn` (short TTL self-heals the gate) — asserts the loser did NOT persist durable dedup so `is_duplicate_message` stays `False` and the next reconciler scan re-enqueues the never-enqueued message (NOT silent-dropped).
 - [ ] `tests/**/test_*steering*.py` or a `health_check` steering test — ADD: assert the CLI-harness delivery path (`_handle_steering`, no active SDK client) re-deposits popped non-abort messages onto the Redis list via `_repush_messages` so they are NOT lost after A1 deletes the ListField method (Concern 1); a steer is delivered at the next turn boundary.
 - [ ] `tests/**/test_*steering*.py` and any test asserting `queued_steering_messages` / `agent_session.pop_steering_messages()` — REPLACE: rewrite against `agent/steering.py` LPOP; the ListField and its methods are deleted (A1). Grep `grep -rln "queued_steering_messages\|\.pop_steering_messages(\|\.push_steering_message(" tests/` to enumerate before deletion. ADD a single-consumer-invariant test (two concurrent drainers of one session_id → disjoint split, no dup/loss) that documents why the non-atomic drain is safe.
@@ -976,7 +976,7 @@ can land last or be dropped.
 ### 3. B1 — Atomic per-message claim (PR3)
 - **Task ID**: build-b1-claim
 - **Depends On**: none
-- **Validates**: tests/**/test_dedup.py, tests/**/test_dispatch.py (UPDATE)
+- **Validates**: tests/**/test_dedup.py, tests/**/test_bridge_dispatch.py (UPDATE)
 - **Assigned To**: claims-builder
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true

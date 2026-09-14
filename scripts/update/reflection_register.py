@@ -74,6 +74,9 @@ OWNING_PROJECT_KEY = "valor"
 CRASH_RECOVERY_NAME = "crash-recovery"
 CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 
+IMPROVEMENT_COLLECT_NAME = "improvement-evidence-collect"
+IMPROVEMENT_COLLECT_CALLABLE = "reflections.improvement_collect.run_improvement_collect"
+
 # Reflections whose callables have been deleted from the repo. Each name is
 # removed from the vault registry on /update (the reflection counterpart of
 # hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
@@ -88,6 +91,12 @@ MEMORY_DISTILL_BACKFILL_CALLABLE = "reflections.memory_management.run_memory_dis
 
 UPVOTE_PICKUP_NAME = "sdlc-upvote-pickup"
 UPVOTE_PICKUP_CALLABLE = "reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes"
+
+SIDE_EFFECT_DRAIN_NAME = "side-effect-drain"
+SIDE_EFFECT_DRAIN_CALLABLE = "reflections.housekeeping.side_effect_drain.run"
+
+DEAD_LETTER_REPLAY_NAME = "dead-letter-replay"
+DEAD_LETTER_REPLAY_CALLABLE = "reflections.housekeeping.dead_letter_replay.run"
 
 # Matches the leading whitespace of an existing ``reflections:`` list item so the
 # appended entry adopts the file's own indentation (the hand-authored registry
@@ -568,6 +577,75 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
         callable_path=CRASH_RECOVERY_CALLABLE,
         description="Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)",
         cadence="300s",
+        priority="normal",
+    )
+
+
+def register_side_effect_drain(project_dir: Path) -> RegisterResult:
+    """Ensure the ``side-effect-drain`` reflection is registered (#3183).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence. 60s cadence: post-session memory extraction
+    used to run in-process the moment a session ended, and a durable job row
+    should not cost the user minutes of latency to gain its durability.
+    """
+    return register_reflection(
+        project_dir,
+        name=SIDE_EFFECT_DRAIN_NAME,
+        callable_path=SIDE_EFFECT_DRAIN_CALLABLE,
+        description=(
+            "Run due SideEffectJob rows (post-session memory extraction), "
+            "back off failures, dead-letter what exhausts its attempts (#3183)"
+        ),
+        cadence="60s",
+        priority="normal",
+    )
+
+
+def register_dead_letter_replay(project_dir: Path) -> RegisterResult:
+    """Ensure the ``dead-letter-replay`` reflection is registered (#3183).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence. 300s cadence: replay is recovery rather than
+    delivery, and the pass also reconciles the per-stage eviction index.
+    """
+    return register_reflection(
+        project_dir,
+        name=DEAD_LETTER_REPLAY_NAME,
+        callable_path=DEAD_LETTER_REPLAY_CALLABLE,
+        description=(
+            "Replay replayable DeadLetter rows through their stage handlers "
+            "and evict per-stage overflow (#3183)"
+        ),
+        cadence="300s",
+        priority="normal",
+    )
+
+
+def register_improvement_collect(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-evidence-collect`` reflection is registered (#3177).
+
+    Thin wrapper over :func:`register_reflection` — same guards, same target
+    resolution, same idempotence. This is the tick that makes the improvement
+    loop notice anything: without it the correction detector, the
+    memory-inspiration adapter, and the expectation-coverage adapter have no
+    caller and ``ImprovementEvidence`` stays empty forever.
+
+    Registered regardless of ``ImprovementSettings.enabled``. The controller
+    stays off until it is switched on; evidence accumulates either way, so the
+    first thing the controller reads is history rather than nothing.
+
+    Machine pinning is inherited, not re-implemented: ``register_reflection``
+    already returns ``skipped`` when ``_this_machine_owns_valor`` is false.
+    """
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_COLLECT_NAME,
+        callable_path=IMPROVEMENT_COLLECT_CALLABLE,
+        description=(
+            "Collect improvement evidence from completed sessions and Tom-sourced memories (#3177)"
+        ),
+        cadence="900s",
         priority="normal",
     )
 

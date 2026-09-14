@@ -144,6 +144,28 @@ Sessions with status `dormant` are listed in the Name column, indicating the age
 Of the 9 non-terminal lifecycle states, most render with distinct glyphs in the row template (see [Session Lifecycle](session-lifecycle.md) for state semantics):
 `running`, `pending`, `dormant`, `active`, `waiting_for_children`, `paused`, `paused_circuit`, `superseded`. `paused_budget` (#1821) has no dedicated glyph yet and renders as plain status text. Terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`, `superseded`) collapse the row into the terminal-status presentation.
 
+## Pipeline Integrity Tiles
+
+`/_partials/pipeline-integrity/` (refreshed every 30s) answers two questions a
+log line cannot.
+
+**Dead letters by stage.** One count per terminal sink — every stage renders,
+including the ones at zero, because a stage that vanishes from the tile reads
+as a stage nobody watches. Counts come from the advisory
+`{project}:dead_letters:count` hash rather than a census, so the tile costs two
+Redis reads no matter how many rows exist. See
+[Pipeline Dead Letters](pipeline-dead-letters.md).
+
+**Lock degradation.** One row per coordination lock, showing its declared
+policy and how often Redis has failed it: `claim_pending_run` (fails closed —
+pickup stalls until Redis recovers), `claim_message` and `pop_lock` (fail open —
+work may be duplicated). Fail-closed sorts first. See
+[Bridge/Worker Architecture](bridge-worker-architecture.md#declared-policy-per-lock).
+
+Data: `ui/data/dead_letters.py`, `ui/data/locks.py`. Template:
+`ui/templates/_partials/pipeline_integrity.html`. Both degrade to zeros rather
+than erroring when Redis is unreachable.
+
 ## Liveness Signals
 
 The dashboard exposes session liveness as state-of-truth so operators can answer "is this session actually progressing right now, or is it claimed-running-but-dead (ghost)?" without leaving the dashboard.

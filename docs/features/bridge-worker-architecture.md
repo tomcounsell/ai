@@ -34,6 +34,13 @@ Telegram → Bridge (Telethon)
 
 The worker uses `TelegramRelayOutputHandler` to deliver session output to Telegram without importing any Telegram client code. This preserves the bridge/worker separation boundary: the worker writes to Redis, and the bridge reads from Redis and delivers via Telethon.
 
+Every outbox payload carries the session's `correlation_id` when it has one, so
+a delivered message can be tied back to the intake that produced it. The
+worker's own file log is JSON (`bridge.log_format.StructuredJsonFormatter`) for
+the same reason: `logs/worker.log` and `logs/bridge.log` join on
+`correlation_id`, `agent_session_id`, and `session_id`. stderr stays
+human-readable. See [Correlation IDs](correlation-ids.md).
+
 ### Output Handler Chain
 
 ```
@@ -114,7 +121,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
 | Redis key (system) | the per-project system Room's inbox list (`models/room.py::Room.inbox_key`, `{project_key}\|system`) — derived transport for chatless sessions; no relay drains it, the durable record IS the delivery |
 | Redis key (reaction, system transport) | none — a `system`-transport `react()` is dropped (DEBUG log + `FileOutputHandler` dual-write only), never written to the system Room's inbox |
-| Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) |
+| Telegram payload | `bridge.wire_schemas.OutboxPayload`: `{"v", "chat_id", "reply_to", "text", "session_id", "timestamp"}` plus `file_paths` and `correlation_id` when set -- built by `build_telegram_outbox_payload` (shared by `tools/send_message.py`) and validated by `process_outbox` on the way out. Keys left unset are omitted rather than written as nulls. See [Wire Schemas](wire-schemas.md) |
 | Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload. |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |
@@ -171,7 +178,8 @@ relay drops reaction payloads with a falsy `emoji`; both writes are fail-silent.
 8. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector)):
    - `bridge:last_update_received` — written by the `NewMessage` handler before dedup. This is a *traffic* signal: its silence is equally consistent with a wedged update loop and with nobody having sent anything, so on its own it is never a verdict
    - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect
-   - `bridge:last_missed_recovery` — written by the reconciler when a scan recovers a message the live path never delivered. This is the positive evidence a wedge verdict requires, and it has to come from here: the `NewMessage` handler writes both keys above, so neither can testify that the handler has stopped. The watchdog declares a wedge only when the probe is fresh, the live path has been silent for the ceiling *measured from the bridge process's start time*, and this key was stamped inside that window and after the process's startup grace. The known cost: a half-wedged client whose per-chat scans all throw keeps the probe fresh and stamps nothing, so it reads as a quiet account and never restarts — loud in the logs, unacted on.
+   - `bridge:last_missed_recovery` — written by the reconciler when a scan recovers a message the live path never delivered. This is the positive evidence a wedge verdict requires, and it has to come from here: the `NewMessage` handler writes both keys above, so neither can testify that the handler has stopped. The watchdog declares a wedge only when the probe is fresh, the live path has been silent for the ceiling *measured from the bridge process's start time*, and this key was stamped inside that window and after the process's startup grace. The known cost: a half-wedged client whose per-chat scans all throw keeps the probe fresh and stamps nothing, so it reads as a quiet account and never restarts.
+   - `bridge:last_scan_outcome` — written by the reconciler at the end of every cycle that got past `get_dialogs()`, carrying `attempted` / `faulted` / `consecutive_total_fault_cycles` and the writing pid. This is what makes the half-wedged state above *visible*: "the scan ran and every chat faulted" is an affirmative record, while "the scan never ran" is the absence of a fresh one, so the two stay distinguishable without inferring anything from silence. The watchdog reads it (`assess_scan_health`) and, after a run of total-fault cycles, logs at ERROR and sets `human_alert_needed`. It deliberately does **not** raise `recovery_level`: an all-chat fault is equally consistent with a Telegram-side outage, which a restart would not fix and would instead retry every watchdog tick. The state is therefore now loud and monitored, but still not auto-restarted (#3257).
 
 The mechanical catchup (`bridge/catchup.py`) and reconciler (`bridge/reconciler.py`) cover **ingestion gaps** — messages that never got a session enqueued. They cannot recover **response failures** (session enqueued, hung/killed, no reply) because the `DedupRecord` entry already exists. The [Agent-Judgment Catchup](agent-judgment-catchup.md) is the response-failure complement: it reads the actual chat thread (including Valor's own `out` replies), uses an LLM judge to classify unanswered messages, and enqueues recovery sessions. It runs out-of-band via `valor-catchup` and as the final best-effort step of `/update`.
 
@@ -408,6 +416,35 @@ A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query�
 - If lock is held: returns `None` immediately (caller will retry on next event-loop iteration)
 - Fail-open: if Redis is unreachable, `_acquire_pop_lock()` returns `True` so workers are not blocked
 - The two paths are **not re-entrant**: `_pop_agent_session()` acquires, does its work, and **releases** the lock before returning. The sync fallback branch only runs after `_pop_agent_session()` returns `None` (lock already released), so it acquires a fresh lock — no nesting.
+
+#### Declared policy per lock
+
+Three short-lived Redis locks gate the pipeline. Each states its policy in its
+own docstring, and each calls `agent/lock_policy.py::record_lock_degradation`
+on the branch where Redis failed it, so a degradation is counted rather than
+inferred from its consequences.
+
+| Lock | Policy | Why |
+|---|---|---|
+| `pop_lock` (`agent/session_pickup.py`) | fail **open** | Duplicate work beats a stalled queue. |
+| `claim_message` (`bridge/dedup.py`) | fail **open** | A Redis hiccup must not silently drop a message; the durable cursor-coupled dedup set is the fallback. |
+| `claim_pending_run` (`models/session_lifecycle.py`) | fail **closed** | Two `claude -p` processes on one worktree corrupt git state. |
+
+`claim_pending_run` returning `False` on a Redis error means a prolonged
+degradation stalls pickup rather than risking a duplicate harness on one
+checkout. There is deliberately **no break-glass override**: the pop lock
+retries on the next loop iteration anyway, and the counter makes the stall
+visible on the dashboard.
+
+The counter is `HINCRBY {project}:locks:degraded "{name}:{policy}"` through
+`utils.redis_client.text_redis()`, so the tile renders the count beside the
+policy it was taken under. It measures *degradation*, not fail-open
+specifically — a lock that fails closed is degraded too. The counter write
+swallows its own errors: observability must never be able to change a lock's
+answer.
+
+`/_partials/pipeline-integrity/` renders these counts beside the
+[dead-letter counts by stage](pipeline-dead-letters.md).
 
 ### CLI Session Isolation (`create_local()`)
 

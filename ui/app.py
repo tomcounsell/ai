@@ -369,6 +369,74 @@ def create_app() -> FastAPI:
             {"jobs": jobs},
         )
 
+    @app.get("/_partials/pipeline-integrity/", response_class=HTMLResponse)
+    def partial_pipeline_integrity(request: Request):
+        """HTMX partial: dead-letter counts by stage and lock-degradation counts."""
+        from ui.data.dead_letters import get_dead_letter_counts
+        from ui.data.locks import get_lock_policies
+
+        return templates.TemplateResponse(
+            request,
+            "_partials/pipeline_integrity.html",
+            {"dead_letters": get_dead_letter_counts(), "locks": get_lock_policies()},
+        )
+
+    @app.get("/_partials/improvement/coverage/", response_class=HTMLResponse)
+    def partial_improvement_coverage(request: Request, project_key: str = "valor"):
+        """HTMX partial: what the improvement loop is actually observing (#3177).
+
+        The denominator panel. Read it before the burden panel below — a count
+        of corrections means nothing without knowing how much was scanned.
+        """
+        from ui.data.improvement import get_coverage
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/coverage.html",
+            {"coverage": get_coverage(project_key=project_key)},
+        )
+
+    @app.get("/_partials/improvement/goals/", response_class=HTMLResponse)
+    def partial_improvement_goals(request: Request, project_key: str = "valor"):
+        """HTMX partial: the charter §11 readable record (#3255).
+
+        Which charter the work is ranked under, the §3 priorities, the open
+        cases and why each ranks where it does, and an explicit note for every
+        heading no lane writes yet. Empty sections name the lane that fills
+        them rather than showing a zero.
+        """
+        from ui.data.improvement import get_goals
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/goals.html",
+            {"goals": get_goals(project_key=project_key)},
+        )
+
+    @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
+    def partial_improvement_burden(request: Request, project_key: str = "valor"):
+        """HTMX partial: how often a human had to step in, and of what kind (#3177)."""
+        from ui.data.improvement import get_intervention_burden, get_provisional_assumptions
+
+        # The assumption read propagates its failures so the goals partial can
+        # tell "none" apart from "unreadable". This panel has no unavailable
+        # rendering, so it degrades to hiding the section rather than taking the
+        # whole burden panel down with it.
+        try:
+            assumptions = get_provisional_assumptions(project_key=project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement burden partial: assumption read failed: %s", exc)
+            assumptions = []
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/intervention_burden.html",
+            {
+                "burden": get_intervention_burden(project_key=project_key),
+                "assumptions": assumptions,
+            },
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""
@@ -715,14 +783,12 @@ def create_app() -> FastAPI:
         both keys are cleared by the bridge on the first successful poll/resolve
         after the outage.
         """
-        import subprocess
+        from tools.process_lookup import find_python_service_pids
 
-        proc_running = bool(
-            subprocess.run(
-                ["pgrep", "-f", "bridge.email_bridge"],
-                capture_output=True,
-            ).stdout.strip()
-        )
+        # Ancestor-safe lookup rather than `pgrep` (#3164): pgrep hides the
+        # caller's own ancestors, so a bridge-hosted UI reads a live service
+        # as down.
+        proc_running = bool(find_python_service_pids(module="bridge.email_bridge"))
 
         alert: str | None = None
         alert_detail: str | None = None

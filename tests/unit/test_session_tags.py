@@ -469,7 +469,10 @@ class TestAutoTagTaskType:
             session_id="tt-idem-1",
             classification_type="bug",
         )
-        # Manually set a task_type before calling auto_tag_session
+        # "rework-triggered" is a historical-only vocabulary value since #3177
+        # removed the rule that derived it. That makes it the ideal fixture
+        # here: nothing in _derive_task_type can produce it, so if the reload
+        # still shows it, the idempotence guard is what preserved it.
         session.task_type = "rework-triggered"
         session.save()
 
@@ -477,18 +480,4 @@ class TestAutoTagTaskType:
         reloaded = self._reload_session("tt-idem-1")
         assert reloaded is not None
         # Should still be "rework-triggered", not overwritten to "bug-fix"
-        assert reloaded.task_type == "rework-triggered"
-
-    def test_task_type_rework_triggered_flag(self):
-        """rework_triggered='true' → task_type='rework-triggered' (highest priority)."""
-        session = _create_session(
-            session_id="tt-rework-1",
-            classification_type="bug",  # would normally map to "bug-fix"
-        )
-        session.rework_triggered = "true"
-        session.save()
-
-        auto_tag_session("tt-rework-1")
-        reloaded = self._reload_session("tt-rework-1")
-        assert reloaded is not None
         assert reloaded.task_type == "rework-triggered"

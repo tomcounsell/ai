@@ -170,8 +170,9 @@ class TestPushAgentSessionPublish:
             )
             # Session was still created
             mock_agent_session.async_create.assert_called_once()
-            # Result is a count (not an exception)
-            assert isinstance(result, int)
+            # Result is (depth, agent_session_id), not an exception
+            depth, _agent_session_id = result
+            assert isinstance(depth, int)
 
 
 class TestEnqueueContinuationAsyncWrapping:
@@ -252,7 +253,9 @@ class TestEnqueueSessionTypeOmissionWarning:
             patch(
                 "agent.agent_session_queue._push_agent_session",
                 new_callable=AsyncMock,
-                return_value=1,
+                # (queue depth, agent_session_id): a bare int here raises
+                # "cannot unpack non-sequence int" at the call site (#3183).
+                return_value=(1, "0" * 32),
             ) as push,
             patch("agent.agent_session_queue._ensure_worker"),
         ):
@@ -334,8 +337,6 @@ class TestNotifyListenerNusubSelfCheck:
 
     def _run_listener_briefly(self, mock_conn, mock_popoto):
         """Run _session_notify_listener for a short time then cancel it."""
-        import json
-
         import redis as _redis_module
 
         from agent.agent_session_queue import _session_notify_listener
@@ -343,7 +344,6 @@ class TestNotifyListenerNusubSelfCheck:
         async def run():
             with (
                 patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
-                patch("agent.agent_session_queue.json", wraps=json),
                 patch.object(_redis_module, "Redis", return_value=mock_conn),
                 patch("time.sleep"),  # no real delays in NUMSUB retry loop
             ):
@@ -590,7 +590,6 @@ class TestNotifyListenerPreservesNoneSocketTimeout:
     window). This guards against a future regression reintroducing one."""
 
     def test_listener_connection_uses_socket_timeout_none(self):
-        import json
 
         import redis as _redis_module
 
@@ -619,7 +618,6 @@ class TestNotifyListenerPreservesNoneSocketTimeout:
         async def run():
             with (
                 patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
-                patch("agent.agent_session_queue.json", wraps=json),
                 patch.object(_redis_module, "Redis", side_effect=_redis_ctor),
                 patch("time.sleep"),
             ):

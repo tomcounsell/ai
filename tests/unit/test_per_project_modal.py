@@ -243,3 +243,31 @@ class TestModalPerProjectRendering:
         html = _render_modal(env, runs)
         for cls in ("badge-ok", "badge-error", "badge-disabled", "badge-skipped"):
             assert cls in html, f"missing {cls} in rendered modal"
+
+
+class TestModalLastRunSummaryRendering:
+    """The docs-auditor's replacement surface (#2743): a rotation's returned
+    ``summary`` string, stored on ``Reflection.last_run_summary.output_summary``,
+    must actually reach the rendered modal HTML — not just the code path that
+    builds the string. No ORM write and no Redis I/O: merge the one key the
+    render guard checks directly into the context this file's own
+    ``_base_reflection_ctx()`` already supplies.
+    """
+
+    def test_output_summary_with_vault_clause_renders(self, env: Environment) -> None:
+        summary = (
+            "docs-auditor: 3 files touched, 2 fixes, "
+            "PR=https://github.com/o/r/pull/1; vault 0 narratives compared"
+        )
+        ctx = _base_reflection_ctx()
+        ctx["last_run_summary"] = {"output_summary": summary}
+        tmpl = env.get_template("reflections/_partials/modal_content.html")
+        html = tmpl.render(r=ctx, recent_runs=[], sparkline=[], manual_command=None)
+
+        assert "vault 0 narratives compared" in html
+        assert "Last run summary" in html
+
+    def test_absent_last_run_summary_renders_no_summary_section(self, env: Environment) -> None:
+        """The render guard is unchanged: no summary key, no heading."""
+        html = _render_modal(env, [])
+        assert "Last run summary" not in html
