@@ -255,8 +255,9 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
 4. **`lifecycle.approve`**: requires `rollback_drill.result == "pass"` stamped after the last
    `rollback_plan` write, requires `approved_by` to be a non-empty name outside the agent-identity
    set, consults `promotion.promotion_gate` and records its answer on the release as
-   `promotion_gate`, stamps `approved_at` and `observation_window_ends_at = approved_at +
-   observation.window_days`, transitions to `approved`.
+   `promotion_gate`, stamps `approved_at` and a provisional `observation_window_ends_at =
+   approved_at + observation.window_days` (restamped from `exposed_at` at step 6), transitions to
+   `approved`.
 5. **`lifecycle.open_pr`**: assembles the PR body (verdict, effect, CI, correction, contract digest,
    charter digest, rollback plan, drill record, comparison if any) and runs `gh pr create` from
    `candidate_ref` through an injected runner; records `exposure.pr_number`. Merging is the
@@ -264,18 +265,36 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
 6. **`lifecycle.expose`**: resolves the PR's merge commit through `gh pr view --json mergeCommit,state`
    (injected runner), refuses when not merged, computes the **baseline** from
    `observation.metrics` over the `baseline_window_days` before now using `observation.measure`,
-   writes `exposure.merge_sha`, `exposed_at`, `outcome.baseline`, transitions to `observing`.
+   writes `exposure.merge_sha`, `exposed_at`, `outcome.baseline`, **restamps
+   `observation_window_ends_at = exposed_at + window_days`** (the window is measured from
+   exposure, so its end is anchored to exposure; the approve-time value is provisional) and appends
+   `{"event": "window_restamped", "from": <approve-time value>, "to": <new value>}` to
+   `outcome.history`, transitions to `observing`.
 7. **`lifecycle.close_window`**: refuses before `observation_window_ends_at` unless `--force` with a
-   recorded reason; measures the same metrics over `[exposed_at, observation_window_ends_at]`;
-   computes `window_shortfall_days`; writes `outcome.window`, `outcome.deltas` (raw counts and
-   denominators beside every rate), `outcome.detection_declined`, `outcome.verdict` in
-   `held | regressed | undetermined`, `outcome.claim_level_2_supported`, `outcome.falsifier`;
+   recorded reason; refuses with `verdict="undetermined", reason="EVIDENCE_EXPIRED"` when
+   `now - exposed_at > EVIDENCE_TTL_DAYS` (the evidence rows the window needs have expired, so a
+   count would be a gap reported as a number); measures the same metrics over
+   `[exposed_at, observation_window_ends_at]`; computes `window_shortfall_days = max(0,
+   window_days - (closed_at - exposed_at).days)`, zero on an on-time close and positive only under
+   `--force`; writes `outcome.window`, `outcome.deltas` (raw counts and denominators beside every
+   rate), `outcome.detection_declined`, `outcome.verdict` in `held | regressed | undetermined`
+   (with `outcome.reason` naming `EVIDENCE_TRUNCATED`, `EVIDENCE_EXPIRED`, `DETECTION_DECLINED`, or
+   `ZERO_DENOMINATOR` on `undetermined`), `outcome.claim_level_2_supported`, `outcome.falsifier`;
    transitions to `accepted` on `held`, stays `observing` otherwise with `outcome.rollback_recommended`.
 8. **`lifecycle.rollback`**: from `observing` or `accepted`, executes the rollback plan for real in a
    temporary worktree of `main` (`git revert -m 1 <merge_sha>` or plain revert, commit message
-   carrying `Refs #<issue>` for the hotfix guard), pushes through the injected runner, records
-   `outcome.rollback` with the revert SHA, the verification result, and `propagation:
-   "requires /update on fleet machines"`, transitions to `rolled_back`.
+   carrying `Refs #<issue>` for the hotfix guard), pushes through the injected runner
+   (`git push origin HEAD:main`, or `HEAD:<name>` under `--branch <name>`), and **transitions to
+   `rolled_back` only when the push returned 0 and `git ls-remote origin main` resolves to
+   `revert_sha`**. A refused push (branch protection, `.githooks/pre-push`, a moved head) appends
+   `{"event": "rollback_push_refused", "stderr": ..., "revert_sha": ...}` to `outcome.history`,
+   leaves the state unchanged, and raises `ReleaseRefused("ROLLBACK_PUSH_REFUSED")`; the revert
+   commit is reported so the operator can push it by hand or re-run with `--branch`. On success it
+   records `outcome.rollback` with the revert SHA, the verification result, and `propagation:
+   "requires /update on fleet machines"`. Rollback is the one deliberately pipeline-exempt path in
+   this lane: it is an incident surface, and a revert that waits on critique and review is a
+   rollback that arrives after the damage. `--branch` is the pipeline-shaped alternative for a
+   rollback that is not urgent; the CLI prints the `gh pr create` command for it.
 9. **Output**: `get_release_lineage` joins release → evaluation → experiment → case for the
    dashboard partial and `show`; `report.claim_report` reads accepted releases with
    `claim_level_2_supported` for level 2.
@@ -294,11 +313,13 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    finite batch`, `evaluator_version`), freezes it through lane 4's `freeze_protocol`, writes an
    `ImprovementExperiment(state="frozen", candidate_surfaces=["research_process"])` with the manifest
    citing `protocol_ref`, and returns the contract digest.
-4. **`compare.run`**: loads the experiment, verifies the contract digest, randomizes arm order
+4. **`compare.run`**: loads the experiment, verifies the contract digest, resolves the `ArmRunner`
+   (from `--arm-runner module:attr` by lazy import, else the registry), randomizes arm order
    (`arm_assignment_digest`), calls `ArmRunner.run` once per arm with the same opportunity ids and
    the same cap, receives per-opportunity validated gains and a `BudgetUse`, reads accounted spend
-   through `BudgetReader` (unit 3 from `InfrastructureReservation` rows tagged with the arm run id;
-   unit 1 from the seam, `None` until lane 3), and checks `budgets_comparable`.
+   through `BudgetReader` (unit 3 from `InfrastructureReservation` rows whose `resource` name
+   carries the `arm:<arm_run_id>:` prefix; unit 1 from the seam, `None` until lane 3), and checks
+   `budgets_comparable`.
 5. **Statistics**: paired deltas per opportunity (`gain_b - gain_a`, with a rejected or inconclusive
    arm result scored 0), `clustered_bootstrap_ci` clustered by `priority_area`, `evaluate_family` for
    the (single) primary endpoint, verdict `accept` when the lower bound clears the minimum
@@ -436,7 +457,10 @@ existing free JSON field; no new index), and `save()`s. Every public function ch
 preconditions first and raises `ReleaseRefused(code, detail)` from a closed vocabulary of codes
 (`EVALUATION_NOT_ACCEPT`, `CHARTER_DRIFT`, `SURFACE_DENIED`, `MANIFEST_LACKS_BASE_REVISION`,
 `CANDIDATE_REF_CONFLICT`, `DRILL_REQUIRED`, `DRILL_STALE`, `APPROVER_NOT_HUMAN`, `PR_NOT_MERGED`,
-`WINDOW_OPEN`, `WRONG_STATE`, `EVALUATOR_RELEASE_NEEDS_CALIBRATION`). Refusals never write.
+`WINDOW_OPEN`, `WINDOW_EXCEEDS_EVIDENCE_TTL`, `WRONG_STATE`, `EVALUATOR_RELEASE_NEEDS_CALIBRATION`,
+`ROLLBACK_PUSH_REFUSED`). Refusals never write state; the one exception is `ROLLBACK_PUSH_REFUSED`,
+which appends a history event naming the orphaned revert SHA before raising, because a revert
+commit that exists and never reached `main` is exactly the fact the record must carry.
 
 | From | Event | To | Guard |
 |---|---|---|---|
@@ -444,9 +468,9 @@ preconditions first and raises `ReleaseRefused(code, detail)` from a closed voca
 | `proposed` | `drill` | `proposed` | writes `rollback_drill`; no state change |
 | `proposed` | `approve` | `approved` | drill passed after last plan write; human approver; gate recorded |
 | `approved` | `open_pr` | `approved` | records `exposure.pr_number` |
-| `approved` | `expose` | `observing` | PR merged; baseline frozen; `exposed_at` |
-| `observing` | `close_window` | `accepted` on `held`, else stays | window elapsed or forced with reason |
-| `observing`, `accepted` | `rollback` | `rolled_back` | revert executed and verified |
+| `approved` | `expose` | `observing` | PR merged; baseline frozen; `exposed_at`; window end restamped from `exposed_at` |
+| `observing` | `close_window` | `accepted` on `held`, else stays | window elapsed or forced with reason; evidence inside TTL and untruncated |
+| `observing`, `accepted` | `rollback` | `rolled_back` | revert executed, verified, pushed, and confirmed on the remote by `ls-remote` |
 | `proposed`, `approved` | `withdraw` | `withdrawn` | reason recorded |
 
 **Proposal gates, in order.** (1) Evaluation exists, `state == "complete"`, `verdict == "accept"`.
@@ -471,25 +495,53 @@ neither exists. (6) `candidate_ref` resolves (`git rev-parse --verify`) through 
    created under `<retention root>/drills/<release id>/<timestamp>/` with `git worktree add
    --detach <path> <candidate_ref>` from the repo the CLI runs in.
 2. Records `base_revision` and `candidate_ref` SHAs, `git diff --stat base..candidate`.
-3. Executes `git revert --no-commit <base_revision>..<candidate_ref>`; on a conflict, records the
+3. Pre-revert range checks, each a recorded `fail` that stops the drill before any revert runs:
+   - `git merge-base --is-ancestor <base_revision> <candidate_ref>` nonzero →
+     `reason: BASE_NOT_ANCESTOR`. A candidate that rebased onto or merged newer `main` has a base
+     that is no longer in its history, and `<base>..<cand>` would then include unrelated `main`
+     commits; the drill refuses to revert what the release did not introduce.
+   - `git rev-list --merges <base_revision>..<candidate_ref>` non-empty →
+     `reason: MERGE_COMMITS_IN_RANGE`, listing the merge SHAs. `git revert --no-commit` on a
+     range aborts on a merge commit ("no -m option"), and reverting each with `-m 1` rehearses a
+     different operation from the one the plan declares; the operator re-proposes from a
+     linear candidate branch.
+   - `changed = git diff --name-only <base_revision> <candidate_ref>`; `undeclared = [p for p in
+     changed if not any(p == s or p.startswith(s.rstrip("/") + "/") for s in surfaces)]`;
+     non-empty → `reason: UNDECLARED_SURFACE_CHANGED`, `paths: undeclared`. This is the check
+     that makes the declared surfaces a claim the drill can falsify: a candidate that touches a
+     file the release did not declare fails here, which is the fixture
+     `test_drill_fails_when_undeclared_surface_differs` seeds (one extra file in the candidate
+     commit, absent from `--surfaces`).
+4. Executes `git revert --no-commit <base_revision>..<candidate_ref>`; on a conflict, records the
    conflicting paths and the result is `fail` with `reason: revert_conflict`.
-4. Asserts restoration: `git diff --quiet <base_revision> -- <surface>` for each declared surface,
+5. Asserts restoration: `git diff --quiet <base_revision> -- <surface>` for each declared surface,
    then `git diff --quiet <base_revision>` for the whole tree; any nonzero exit is `fail` with the
-   differing paths listed.
-5. Runs each `verify` command in the worktree with `timeout=TIMEOUTS.improvement_drill_verify_seconds`
+   differing paths listed. After a clean full-range revert of a linear range the tree equals the
+   base by construction, so this step is the sequence-completed invariant (it catches a revert
+   that stopped partway, a hook that rewrote a file, or a step executor bug), while step 3 is the
+   check that carries the declared-surface claim.
+6. Runs each `verify` command in the worktree with `timeout=TIMEOUTS.improvement_drill_verify_seconds`
    (a new `TimeoutSettings` field, default 300, catalogued per `docs/features/config-timeout-catalog.md`),
    recording exit code, wall seconds, and the last 2 KB of output.
-6. Removes the worktree (`git worktree remove --force`) in `finally`, and `git worktree prune`.
-7. Writes `rollback_drill = {drilled_at, base_revision, candidate_ref, steps: [...], restored,
-   result, exercised: ["revert", "tree_restoration", "verify"?], not_exercised: ["fleet_update",
-   "production_traffic", "merge_commit_revert"], seconds}` and `drill_log` (full transcript).
-   `not_exercised` is the honest list: a drill proves the revert restores the tree; it does not
-   prove the fleet picked it up.
+7. Removes the worktree (`git worktree remove --force`) in `finally`, and `git worktree prune`.
+8. Writes `rollback_drill = {drilled_at, base_revision, candidate_ref, steps: [...], restored,
+   result, reason?, paths?, exercised: ["range_checks", "revert", "tree_restoration", "verify"?],
+   not_exercised: ["fleet_update", "production_traffic", "merge_commit_revert"], seconds}` and
+   `drill_log` (full transcript). `not_exercised` is the honest list: a drill proves a range revert
+   on the candidate branch restores the tree; it does not prove the fleet picked it up, and it does
+   not rehearse the `-m 1` merge-commit revert that `rollback()` runs on `main`. The feature doc
+   states that the two operations differ and why the drill still stands as evidence (the same
+   step executor, the same restoration checks, the same declared surfaces).
 The real `rollback()` reuses the same step executor against a worktree of `main` with
 `git revert -m 1 <merge_sha>` when the merge commit has two parents and plain `git revert` when the
 PR was squash-merged, commits with `Roll back improvement release <id>: <reason> (Refs #3218)`
-so `.githooks/commit-msg` accepts it, and pushes through the runner. It records the same shape
-plus `revert_sha`, and `propagation: "requires /update on fleet machines"`.
+so `.githooks/commit-msg` accepts it, and pushes through the runner (`git push origin HEAD:main`,
+or `HEAD:<name>` under `--branch <name>`). The transition to `rolled_back` happens only after the
+push returns 0 and `git ls-remote origin main` (or the named branch) resolves to `revert_sha`; any
+other outcome is `ROLLBACK_PUSH_REFUSED` with the state unchanged and the orphaned `revert_sha`
+recorded in `outcome.history`. It records the same shape plus `revert_sha`, `pushed_to`, and
+`propagation: "requires /update on fleet machines"`. Under `--branch`, `propagation` also names
+the PR the operator must open, and the CLI prints the `gh pr create` command.
 
 **Promotion gate (`promotion.py`).**
 ```python
