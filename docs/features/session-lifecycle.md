@@ -575,6 +575,15 @@ rejects a terminal source status, so finalizing here would win the race and
 silently retire the retry loop. Worker-shutdown cancellation is owned the
 same way by `_recover_interrupted_agent_sessions_startup`.
 
+The exclusion holds for every session except a synthetic `dev-{aid8}` lane.
+There, the separate #3176 pre-finalize guard further down the same `finally`
+has no cancel carve-out and finalizes the row anyway, so the requeue loses the
+race and its `StatusConflictError` is swallowed at INFO — the lane is
+reclaimed rather than retried. That is long-standing behavior on both guards'
+part, and the carve-out still earns its keep by holding for every
+non-synthetic session; collapsing the two guards into one authority is tracked
+in #3305.
+
 ## Liveness Counter Re-Anchoring (issue #2716)
 
 The session watchdog advances a liveness tick counter on a session's

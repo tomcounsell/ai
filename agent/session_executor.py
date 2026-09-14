@@ -171,6 +171,15 @@ def _finalize_if_still_running(
     retiring that retry loop. A cancelled row has a live owner mid-flight; a
     raised row's owner has already run.
 
+    That carve-out is not airtight, and the gap is inherited rather than
+    introduced here. The #3176 pre-finalize guard further down this same
+    ``finally`` has no cancel carve-out, so for a synthetic ``dev-*`` lane a
+    cancelled exit still gets finalized before the health checker's requeue
+    lands. Keeping the carve-out here is still worth it -- it holds for every
+    non-synthetic session, which is the overwhelming majority -- but the
+    synthetic case is open in #3305, along with the matching ``raised``
+    divergence between the two guards.
+
     The predicate is ``status == "running"``, never ``defer_reaction``. That is
     what makes it safe on both ``_enqueue_nudge`` paths:
 
@@ -216,9 +225,9 @@ def _finalize_if_still_running(
     is the only finalizer that REACHES the checkpoint step on that path (the
     worker's outer completion ``finally`` takes its already-terminal skip
     branch and never calls ``finalize_session`` at all), so skipping the
-    checkpoint would
-    drop the lane's branch state for exactly the sessions whose lane most needs
-    reclaiming. Making the checkpoint non-blocking is a separate change.
+    checkpoint would drop the lane's branch state for exactly the sessions
+    whose lane most needs reclaiming. Making the checkpoint non-blocking is
+    tracked in #3306.
     """
     try:
         from models.session_lifecycle import (  # noqa: PLC0415
@@ -2945,12 +2954,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
                 if _wd is not None:
-                    # Pre-finalize guard (#3176). On every raising or
-                    # cancelled exit, the unconditional completion-exit
-                    # finalize guard above never ran (it sits inside
-                    # `if not chat_state.defer_reaction:` on the normal-return
-                    # path only), so the authoritative row can still be
-                    # "running" here. The busy scan
+                    # Pre-finalize guard (#3176). Its one remaining job is
+                    # the CANCELLED exit: `_finalize_if_still_running` at the
+                    # top of this same `finally` already covers normal return
+                    # and raise, but the caller skips it under cancellation
+                    # (see its docstring), so on that exit alone the
+                    # authoritative row can still be "running" here. On every
+                    # other exit this re-read finds a terminal row and no-ops.
+                    # The busy scan
                     # (agent/worktree_manager.py::_scan_worktree_sessions)
                     # reads exec_cwd, so a still-running row would make
                     # cleanup_after_merge's own busy check refuse the removal

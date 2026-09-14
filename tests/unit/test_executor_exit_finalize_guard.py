@@ -3,9 +3,13 @@
 The finalize guard used to sit in the ``try`` body behind
 ``if not chat_state.defer_reaction:``, so only a NORMAL RETURN reached it. A
 raise walked straight past it into the ``finally`` with the row still
-``running``, where nothing else would ever finalize it — a phantom-``running``
-row until the health-check sweep, and a lane whose worktree cleanup its own
-busy check then refuses.
+``running``. The worker's outer completion block did finalize it moments
+later, so the row was not stranded -- but that write lands AFTER the executor's
+own ``finally`` has already run. In a synthetic ``dev-*`` lane the cleanup
+therefore saw a still-``running`` row, its busy check refused the removal, and
+the lane leaked permanently: a ``session/dev-*`` branch never satisfies
+``sweep_worktrees``' ``merged_via_tree`` requirement, so nothing reclaims it
+later. Ordering, not absence, is what was broken.
 
 The guard now lives in the ``finally`` and is keyed on
 ``status == "running"``, not on ``defer_reaction``. These tests pin the four
