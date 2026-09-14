@@ -1,4 +1,4 @@
-"""Plan-stage stand-down tests for agent.sdlc_router (#3237, #3227).
+"""Plan-stage stand-down tests for agent.sdlc_router (#3237, #3227, #3249, #3260).
 
 Two symptoms of one shape: a plan-stage decision path that keeps answering for
 a lane whose real state has moved past the plan stage.
@@ -14,12 +14,21 @@ a lane whose real state has moved past the plan stage.
   docs pending fell to the ladder's default and re-dispatched ``/do-pr-review``
   forever. Row 9 would answer ``/do-docs`` but the guard runs first.
 
-The two fixes are independent: G3 keys on ``last_dispatched_skill`` /
-``proposed_skill``, not on whether row 2b fired, so the DOCS leg is reachable
-regardless of row 2b's stand-downs. Both of those channels are live routes to
-the leg and both are pinned below — the ``proposed_skill`` one directly, the
-``last_dispatched_skill`` one via row 2, whose missing ``pr_number`` step-aside
-is tracked as #3249.
+- #3249 (the sweep): every plan-stage row was supposed to carry that step-aside
+  and hand-copied it inconsistently — row 2 had none at all, rows 1/2c/3 checked
+  only ``pr_number``, and rows 4b/4c checked ``pr_number`` twice. They now share
+  one definition, ``_plan_stage_stood_down``.
+
+- #3260 (terminal merge): the three dispatches that end a lane in ``/do-merge``
+  (G3 leg 1, G6, row 10) require positive evidence that the ``APPROVED`` verdict
+  judged the live head, via ``_review_verdict_head_is_verified_fresh``. An absent
+  ``pr_head_sha`` is not evidence; that state escalates to
+  ``Blocked(guard_id='NO_RULE')``.
+
+G3 keys on ``last_dispatched_skill`` / ``proposed_skill``, not on whether any
+dispatch row fired, so the DOCS leg is reachable independently of the sweep.
+Both channels are live routes to the leg and both are pinned below, each
+exercised directly.
 """
 
 from __future__ import annotations

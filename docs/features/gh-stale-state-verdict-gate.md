@@ -109,6 +109,43 @@ would be speculative complexity the issue warns against):
   re-runs a stage rather than skipping a gate) and self-correcting; only a stale
   head SHA flips the verdict gate from fail-closed to fail-open.
 
+## Two predicates over the head signal (#3260)
+
+Resolving the head correctly is only half the gate; the other half is what a
+*missing* head signal means. The router splits that question in two, because the
+safe answer differs by consumer:
+
+| Predicate | Absent `pr_head_sha` | No recorded REVIEW verdict | Consumers |
+|-----------|----------------------|----------------------------|-----------|
+| `_review_verdict_head_is_stale` | `False` — **inert**, the row does not claim the state | `False` — the no-verdict recovery rows own it | non-terminal: G3 leg 3, dispatch row 8f |
+| `_review_verdict_head_is_verified_fresh` | `False` — **no evidence, no merge** | `False` | terminal only: G3 leg 1, G6, dispatch row 10 |
+
+The two return `False` on the same inputs but mean opposite things by it. For a
+row that re-dispatches `/do-pr-review`, "no signal" should not fire the row —
+something downstream will answer. For a dispatch that *ends the lane in a merge*,
+"no signal" must not be read as "fresh enough": a terminal site requires
+**positive evidence** that the `APPROVED` verdict judged the PR's live head.
+
+**All three terminal `/do-merge` dispatches carry it** — G3 leg 1, G6's
+fast-path, and dispatch row 10. Closing it at only one or two of them relocates
+the hole rather than closing it; row 10 in particular is the last rule in the
+table, so a gap there is reached by every state the guards decline.
+
+An absent `pr_head_sha` on an otherwise merge-ready lane therefore escalates to
+`Blocked(guard_id='NO_RULE')` **by design**: row 8f is inert on an absent key,
+row 9 declines once DOCS is complete, and row 10 now declines too, so no rule
+owns the state. That is the intended fail-closed landing — a human is asked
+rather than an unverified merge being taken. Row 8f was deliberately **not**
+widened to catch it; making the re-review row fire on an absent signal would
+trade a fail-closed halt for a silent re-review loop.
+
+In production the key is never actually absent: `tools/sdlc_next_skill.py::_build_context`
+sets `pr_head_sha` unconditionally whenever `pr_number` is set and a REVIEW
+verdict is recorded — a real SHA, or `""` plus `pr_head_sha_lookup_failed` on
+lookup failure. The empty-string sentinel is itself fail-closed and lands on row
+8f. Requiring presence costs live lanes nothing and closes the hole against
+non-CLI and future callers.
+
 ## Interaction with #2305
 
 #2305 closes a *second, independent* hole in the same gate:
@@ -134,3 +171,10 @@ Agent gating reads of a PR's head state must resolve through
   git-authoritative SHA when gh serves a stale one; `_check_verdict_freshness`
   **blocks** when the trailer predates the authoritative head (regression), and
   passes when they match.
+- `tests/unit/sdlc_router_decision/test_sdlc_router_decision_plan_rule_standdown.py` —
+  the two-predicate split: all three terminal sites decline on an absent
+  `pr_head_sha` (G3 leg 1, G6, and row 10 in isolation with G6 monkeypatched out
+  of `GUARDS`), the merge-ready absent-key state lands on
+  `Blocked(guard_id='NO_RULE')`, and the negative controls pin that a fresh head
+  still merges, the empty sentinel still lands on row 8f, and
+  `_review_verdict_head_is_stale` plus row 8f are unchanged.
