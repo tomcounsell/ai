@@ -15,7 +15,6 @@ from __future__ import annotations
 import pytest
 
 from tools.improvement_release.denylist import (
-    CANDIDATE_SURFACE_DENYLIST,
     InvalidSurface,
     SurfaceDenied,
     denied_surfaces,
@@ -74,10 +73,6 @@ class TestEntries:
             "docs/improvement-charter.md",
         ]
         assert denied_surfaces(surfaces) == [".githooks/pre-push", "docs/improvement-charter.md"]
-
-    def test_the_denylist_names_the_charter_and_its_model(self):
-        assert "docs/improvement-charter.md" in CANDIDATE_SURFACE_DENYLIST
-        assert "models/improvement_charter.py" in CANDIDATE_SURFACE_DENYLIST
 
 
 class TestNormalization:

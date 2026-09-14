@@ -106,20 +106,16 @@ class TestGateOnTheRealCharter:
 
 
 class TestPreconditionTwoIsCheckable:
-    def test_synthetic_charter_clears_only_precondition_2(self, amended_charter):
+    def test_gate_refuses_on_credential_separation_alone(self, amended_charter):
+        """A charter naming its reversible surfaces clears precondition 2 only."""
         gate = promotion_gate(PK)
 
+        assert gate.automated is False
         assert gate.unmet == (PRECONDITION_CREDENTIAL_SEPARATION,)
         detail = gate.detail[PRECONDITION_CHARTER_REVERSIBLE_SURFACES]
         assert detail["met"] is True
         assert detail["charter_digest"] == amended_charter.digest
         assert "reversible surfaces" in detail["heading"].lower()
-
-    def test_gate_refuses_on_credential_separation_alone(self, amended_charter):
-        gate = promotion_gate(PK)
-
-        assert gate.automated is False
-        assert gate.unmet == (PRECONDITION_CREDENTIAL_SEPARATION,)
         with pytest.raises(PromotionDisabled) as excinfo:
             promote_automatically("rel-456", project_key=PK)
         assert excinfo.value.gate.unmet == (PRECONDITION_CREDENTIAL_SEPARATION,)
