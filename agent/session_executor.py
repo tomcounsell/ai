@@ -2290,7 +2290,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # only reachable when the run-start lookup found a row, and that lookup
         # legitimately misses (documented race below), which would otherwise
         # make a genuinely timed-out turn look like a clean exit and DELETE its
-        # lane. ``run()`` never raises, so a still-None value here means the
+        # lane. ``run()`` swallows ``Exception`` into ``ExitReason.EXCEPTION``
+        # but does NOT catch cancellation, so a still-None value here means the
         # unwind happened before/around the call, not that the run ended clean.
         _runner_exit_reason = None
 
@@ -2828,13 +2829,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     # Hoisted above the skip branches (#3289) so it runs on
                     # EVERY terminal exit, not only the one that deletes the
                     # worktree. Only the removal itself is conditional. The two
-                    # skips below do NOT share one exit shape: the turn-timeout
-                    # skip fires on a CLEAN return of `_runner.run()` (where the
-                    # completion-exit finalize already ran and the
-                    # `status == "running"` predicate makes this guard a no-op),
-                    # while the reap-failure skip fires on the raising/cancelled
-                    # exit this guard exists for. Leaving a row `running` with no
-                    # live process wedges the lane whether or not the directory
+                    # skips below do NOT share one exit shape. The turn-timeout
+                    # skip TYPICALLY fires on a clean return of `_runner.run()`,
+                    # where the completion-exit finalize already ran and the
+                    # `status == "running"` predicate makes this guard a no-op --
+                    # but it ALSO fires on a cancelled exit that unwound after
+                    # `publish_exit_summary` stamped the row, and there this guard
+                    # is the only finalizer left (see
+                    # `test_timeout_preserve_branch_still_finalizes_the_authoritative_row`).
+                    # The reap-failure skip fires on the raising/cancelled exit
+                    # this guard exists for. Leaving a row `running` with no live
+                    # process wedges the lane whether or not the directory
                     # survives, so the guard cannot sit inside either branch.
                     try:
                         from models.session_lifecycle import (  # noqa: PLC0415
