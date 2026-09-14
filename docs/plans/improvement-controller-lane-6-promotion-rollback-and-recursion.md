@@ -80,8 +80,9 @@ be provably unworked, and the two arms' budgets have to be accounted in the same
 
 ## Freshness Check
 
-**Baseline commit:** `89f800876` (`main`, 2026-09-14). Build head: lane 4's `session/sdlc-3216` at
-`fe6f55072` (PR #3309, open), which is where `tools/improvement_eval/` and the `accept` verdict live.
+**Baseline commit:** `89f800876` (`main`, 2026-09-14). Build head: `origin/main` at `8dbc4e695`,
+which includes PR #3309 (lane 4, squash-merged as `5362c7fce`), where `tools/improvement_eval/` and
+the `accept` verdict live.
 **Issue filed at:** 2026-09-07T04:45:59Z
 **Disposition:** Minor drift
 
@@ -416,7 +417,7 @@ path first because it is what a human can exercise the day it lands.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Lane 4 merged or checked out as head | `git merge-base --is-ancestor $(git rev-parse origin/session/sdlc-3216) HEAD && echo ok` | `tools/improvement_eval/runner.py` and the `accept` verdict exist on the build head |
+| Lane 4 merged or checked out as head | `test -f tools/improvement_eval/runner.py && git merge-base --is-ancestor 5362c7fce HEAD && echo ok` | `tools/improvement_eval/runner.py` and the `accept` verdict exist on the build head; `5362c7fce` is PR #3309's squash-merge commit on `main` (the `session/sdlc-3216` branch is deleted) |
 | `git` and `gh` on PATH | `git --version && gh --version` | drill worktrees and PR resolution |
 | `gh` authenticated | `gh auth status` | `open_pr` and `expose` resolve PRs |
 | Artifact retention root writable | `.venv/bin/python -c "from models.verifying_artifact_store import _default_base_path; import os; p=_default_base_path(); os.makedirs(p, exist_ok=True); assert os.access(p, os.W_OK); print(p)"` | drill worktrees and drill logs live there |
