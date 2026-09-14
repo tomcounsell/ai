@@ -1126,11 +1126,49 @@ digest. Watermark writes happen only after a successful send.
 
 ## Update System
 
-(filled below)
+- `scripts/update/run.py` gains two registration steps beside `register_improvement_collect`:
+  `register_improvement_planner` (cadence from `settings.improvement.controller_tick_seconds`)
+  and `register_improvement_assumption_digest` (`cadence="259200s"`), each idempotent, each a
+  `RegisterResult` field on the run result dataclass, each inheriting `_this_machine_owns_valor`.
+  Task 5 owns the edit and the `tests/unit/test_reflection_register.py` parametrization.
+- `"sdlc-reflection"` joins `OBSOLETE_SERVICE_SUFFIXES` (`scripts/update/service.py:39-51`), so
+  `/update` boots out `com.valor.sdlc-reflection` and removes its plist on every fleet machine
+  that ever ran `install_sdlc_reflection.sh`, by exact label match as the sweep already does.
+- Two migrations registered in `MIGRATIONS` (Records, above), idempotent, recorded once in
+  `data/migrations_completed.json`.
+- Two new `ImprovementSettings` fields (`promise_detector_enabled`, `cheap_inference_model`),
+  both defaulting off, both declared in `.env.example` with `# @optional` and a
+  `Field(description=...)` sentence that clears `tests/unit/test_env_declaration_readers.py`. No
+  key is required at runtime.
+- No new dependencies. `gh` is already a runtime requirement of other reflections.
+- Fleet execution stays single-machine (the `valor` owner); the research session and the
+  evaluation run where the worker runs.
 
 ## Agent Integration
 
-(filled below)
+- **CLI**: six subcommand groups added to lane 3's `valor-improve` (`tools/improvement.py`):
+  `brief --case ID`; `ranking [--at DIGEST]`; `investigation open|record|resolve|list`;
+  `revise-model`; `experiment freeze|evaluate|show|repair`; `report --case ID`; plus `case open`
+  routed through the planner's `open_cases` function. Each subcommand is a thin wrapper over a
+  function in `tools/improvement_*.py`, and the research session reaches state through nothing
+  else. No new `pyproject.toml` entry: `valor-improve` is lane 3's entry point.
+- **Reflections**: two new function reflections (`improvement-planner-tick`,
+  `improvement-assumption-digest`) registered through `reflection_register.py`; the evidence
+  tick gains two adapters. Nothing agent-type, so no vault hand-edit.
+- **The research skill**: `.claude/skills/improve-research/SKILL.md` body rewritten to the
+  brief-first contract; project-only, never synced.
+- **The bridge imports nothing new and the poll registry is untouched.** The digest and the
+  amendment request are plain messages through `send_host_eng_telegram`; nothing binds to a
+  message id. The Verification row on `tools/ask_poll.py`, `bridge/poll_registry.py`, and
+  `bridge/answer_routing.py` asserts it.
+- **Integration tests**: `tests/integration/test_improvement_research_cycle.py` seeds evidence in
+  the claimed test database, runs the evidence tick and the planner tick, drives the research
+  steps through the Python functions the CLI wraps (with an injected judge transport and a fixture
+  `gh` runner), freezes an experiment in the envelope, runs `runner.evaluate` with lane 4's test
+  judges, applies the verdict, runs the tick again, and asserts the second snapshot's diff. A
+  second test seeds a `rejected` case and proves the tick refuses to re-open it. A third invokes
+  `valor-improve brief`, `ranking`, and `report` through the console entry point and asserts the
+  charter-first line, the printed order, and the three mandatory report sections.
 
 ## Documentation
 
@@ -1152,15 +1190,290 @@ digest. Watermark writes happen only after a successful send.
 
 ## Success Criteria
 
-(filled below)
+The issue's seven acceptance criteria, restated against charter v2 where the Freshness Check
+records an override, plus this plan's own.
+
+- [ ] One autonomous hypothesis inside the retrieval-parameter envelope is frozen under a contract
+  (digest stored before any arm runs) and measured by lane 4's harness with paired blinded
+  evaluation, producing `accept`, `reject`, `inconclusive`, or `infra_failure` with complete
+  lineage (case, investigations, model revision, experiment, evaluation, charter digest) readable
+  from the records alone
+- [ ] **The verdict changes the next selection, demonstrated**: two consecutive ranking snapshots
+  exist whose diff names the case under `left` (reject) or `moved` (inconclusive) with the
+  evaluation id as the reason, and a seeded `rejected` case is refused re-opening by the tick
+- [ ] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
+  to end in the real cycle, with claims carrying URLs and retrieval dates
+- [ ] The `resource_acquisition` investigation produces a prepared adapter and a written vault
+  request rendered in the digest, and places no credential; the anti-criterion row passes
+- [ ] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
+  `lesson` rows from merged PR bodies; `sdlc-reflection` is in the obsolete-service sweep
+- [ ] At least one provisional assumption is recorded with its charter passage, confidence,
+  consequence, and overturning observation, rendered on the goals partial and in a digest
+- [ ] The qualified-result report for the real cycle is generated from records, carries the three
+  mandatory sections, and is posted on #3217
+- [ ] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
+  kinds with their cardinality argument, and both migrations registered
+- [ ] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
+  dashboard's ranking partial and `valor-improve ranking` read the same artifact
+- [ ] The brief opens with the pinned charter verbatim; the research skill's first step prints it
+- [ ] The digest asks nothing, says silence validates nothing, and renders `resource_acquired`
+  rows and lane 7's overrun payload under their own headings
+- [ ] The `skill_acquisition` kind runs stages 1 through 3 in the real cycle and resolves stage 4
+  as a provisional assumption citing #3311
+- [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
+- [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
+  is exactly seven and carries no activity counter
+- [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-(filled below)
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER
+builds directly.
+
+### Team Members
+
+- **Builder (records and adapters)**
+  - Name: records-builder
+  - Role: Model changes, migrations, `EVIDENCE_KINDS`/`INVESTIGATION_KINDS`, the two observer
+    adapters, the `sdlc_reflection.py` retirement, settings fields
+  - Agent Type: builder
+  - Domain: Redis/Popoto data
+  - Resume: true
+
+- **Builder (planner and ranking)**
+  - Name: planner-builder
+  - Role: `reflections/improvement_plan.py`, `tools/improvement_ranking.py`, case opening, the
+    novelty check, the snapshot, the journal events, registration
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (investigations, brief, skill)**
+  - Name: research-builder
+  - Role: `tools/improvement_investigations.py`, `tools/improvement_brief.py`, the CLI
+    subcommands for both, the research skill rewrite, the resource-acquisition disposition logic
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (experiments and report)**
+  - Name: experiment-builder
+  - Role: `tools/improvement_experiment.py`, the arm-worker pass-throughs, `apply_verdict`,
+    `tools/improvement_report.py`, the CLI subcommands for both
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (digest and dashboard)**
+  - Name: surface-builder
+  - Role: `reflections/improvement_assumption_digest.py`, the three partials, `get_ranking`,
+    `get_hypotheses`, `get_rejected_approaches`, the goals partial correction
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (wave 1)**
+  - Name: records-validator
+  - Role: Verify records, migrations, adapters, retirement against Verification rows
+  - Agent Type: validator
+  - Resume: true
+
+- **Validator (wave 2)**
+  - Name: loop-validator
+  - Role: Verify planner, ranking, investigations, brief, experiments against Verification rows;
+    run the integration test
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: documentarian
+  - Role: Feature doc, feature-doc updates, tools reference, capability matrix, skill lines
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Final validator**
+  - Name: final-validator
+  - Role: Run every Verification row, confirm the real cycle's records and report, confirm the
+    Success Criteria
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
-(filled below)
+Task 0 is a gate, not work. Wave 1 (tasks 1 and 2) has no dependency on lane 3's surface beyond
+the evidence kind and can be validated while lane 3 is still in flight, but no task starts until
+task 0 passes.
+
+### 0. Prerequisites gate
+- **Task ID**: gate-prereqs
+- **Depends On**: none
+- **Assigned To**: lead
+- **Agent Type**: validator
+- **Parallel**: false
+- Run `python scripts/check_prerequisites.py docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`
+- Every row passes, or the build waits for the named merge. Correct any lane-3 module name in the
+  Prerequisites table in the first commit and record the correction in the PR body.
+
+### 1. Records, settings, and migrations
+- **Task ID**: build-records
+- **Depends On**: gate-prereqs
+- **Validates**: tests/unit/test_improvement_models.py, tests/unit/test_migrations.py,
+  tests/unit/test_env_declaration_readers.py
+- **Informed By**: spike-3 (eight kinds fit; the lifecycle does not; `stage` is unindexed)
+- **Assigned To**: records-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `INVESTIGATION_KINDS` to eight, `INVESTIGATION_STATES` to five, `stage` and the four new plain
+  fields on `ImprovementInvestigation`, three new plain fields on `ImprovementCase`, `lesson` and
+  `promise` on `EVIDENCE_KINDS` with the docstring argument, `VOCABULARY_MAXIMUMS` entry,
+  `FORBIDDEN_INDEX_NAMES` gains `stage`, `dedup_identity`, `evaluation_ids`
+- `ImprovementSettings.promise_detector_enabled` and `cheap_inference_model`, `.env.example`
+  declarations with `# @optional`
+- Migrations `improvement_investigation_stage_field` and `retire_sdlc_reflection`, registered
+- Module docstrings state every TTL and index decision
+
+### 2. Observer adapters and the retirement
+- **Task ID**: build-adapters
+- **Depends On**: build-records
+- **Validates**: tests/unit/test_improvement_evidence.py (new `TestCollectLessons`,
+  `TestCollectPromises`, `TestDetectorInputsHaveProductionWriters` additions),
+  tests/unit/test_sdlc_stubs.py, tests/unit/test_install_scripts_bootstrap.py
+- **Informed By**: spike-6 (outbound writers exist)
+- **Assigned To**: records-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `collect_lessons` with the seven prefixes and `STAGE_KEYWORDS` moved from the script; a
+  fixture `gh` runner in tests
+- `collect_promises` with the sampled cheap-model judge, lane 3's meter under purpose
+  `promise_detector`, the `enabled` and `promise_detector_enabled` gates, an injectable transport
+- Both adapters in the tick's tuple; the module docstring lists five and names each input's
+  production writer
+- Delete `scripts/sdlc_reflection.py`, `scripts/install_sdlc_reflection.sh`,
+  `com.valor.sdlc-reflection.plist`; add `"sdlc-reflection"` to `OBSOLETE_SERVICE_SUFFIXES` with
+  a comment; delete `TestCheckExistingReflectionPR`; remove the installer from both dicts in
+  `test_install_scripts_bootstrap.py`; remove the `/update` and `/setup` skill lines
+
+### 3. Validate wave 1
+- **Task ID**: validate-records
+- **Depends On**: build-adapters
+- **Assigned To**: records-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the record, migration, evidence, stubs, bootstrap, and env-reader test files
+- Run the Verification rows for kinds, retirement, obsolete sweep, no live reference, adapters wired
+- Mutation-check: revert the `VOCABULARY_MAXIMUMS` entry and confirm the gate fails; restore
+
+### 4. Investigations and the brief
+- **Task ID**: build-research
+- **Depends On**: build-records
+- **Validates**: tests/unit/test_improvement_investigations.py (create),
+  tests/unit/test_improvement_brief.py (create)
+- **Informed By**: spike-3 (`awaiting_authorization` only for amendments)
+- **Assigned To**: research-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `tools/improvement_investigations.py`: `open_investigation`, `record_claims` with the claim
+  rule, `resolve` with the assumption guard and the four refusal patterns, `transition_investigation`
+  advancing `stage` in order, the novelty check (`prior_answers`), the amendment-resolution hook
+  the tick calls on a new pinned digest
+- `tools/improvement_brief.py::build_brief` with the ordered sections and the caps
+- CLI subcommands `brief`, `investigation open|record|resolve|list`, `revise-model` (refuses an
+  empty `prediction`), `case open`
+- Rewrite `.claude/skills/improve-research/SKILL.md` to the brief-first contract, stating the
+  eight kinds, the claim rule, the assumption rule, and the six prohibitions in its own text
+- The resource-acquisition disposition vocabulary and the vault-request record shape
+
+### 5. Planner tick, ranking, and registration
+- **Task ID**: build-planner
+- **Depends On**: build-records
+- **Validates**: tests/unit/test_improvement_planner.py (create),
+  tests/unit/test_improvement_ranking.py (create), tests/unit/test_reflection_register.py
+- **Informed By**: spike-4 (snapshot via the verifying store's `save`), spike-5 (no evaluation in
+  the tick)
+- **Assigned To**: planner-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `tools/improvement_ranking.py`: `rank` with the five ordinal rules each pinned by a test,
+  the lexicographic order with `blocked`, `write_snapshot`, `load_snapshot`, `latest_snapshot`,
+  the diff
+- `reflections/improvement_plan.py`: `open_cases` with the identity rules and the novelty check,
+  `run_improvement_planner` with the four fail-soft steps, the `enabled` gate, the paused-head
+  refusal, the idempotent single proposal, the `apply_verdict` backstop
+- `register_improvement_planner` and `register_improvement_assumption_digest` in
+  `reflection_register.py` and `scripts/update/run.py`; parametrize the six registration tests
+- CLI `ranking [--at DIGEST]`
+
+### 6. Experiments, the arm pass-throughs, and the report
+- **Task ID**: build-experiments
+- **Depends On**: build-research, build-planner
+- **Validates**: tests/unit/test_improvement_experiment.py (create),
+  tests/unit/test_improvement_report.py (create), the arm worker's job-spec tests (extend)
+- **Informed By**: spike-1 (`build_known_item_set` on exported records), spike-2 (the envelope is
+  `{limit, rrf_k, min_rrf_score}`)
+- **Assigned To**: experiment-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `tools/improvement_experiment.py`: `ENVELOPES`, `validate_candidate`, `freeze_experiment`,
+  `evaluate_experiment` (reservation then `runner.evaluate`), `apply_verdict`, `repair`
+- `arm_worker.py::handle_job` and `retrieval.py::retrieve_ranked_ids` pass-throughs, absent keys
+  not forwarded
+- `tools/improvement_report.py::build_report` with the three mandatory derived sections
+- CLI `experiment freeze|evaluate|show|repair`, `report`
+
+### 7. Digest and dashboard
+- **Task ID**: build-surfaces
+- **Depends On**: build-planner, build-research
+- **Validates**: tests/unit/test_improvement_assumption_digest.py (create), tests/unit/test_ui_app.py
+- **Assigned To**: surface-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `reflections/improvement_assumption_digest.py` with the watermark rule, `on_escalation`, the
+  fixed closing line, the sections, `send_host_eng_telegram`
+- `get_ranking`, `get_hypotheses`, `get_rejected_approaches`; three templates; three inline
+  routes; three index links; the goals partial's placeholder text and position column
+- The exact-list test to seven names plus the no-activity-counter assertion
+
+### 8. Validate wave 2 and the integration test
+- **Task ID**: validate-loop
+- **Depends On**: build-experiments, build-surfaces
+- **Validates**: tests/integration/test_improvement_research_cycle.py (create)
+- **Assigned To**: loop-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Write and run the three integration tests named in Agent Integration
+- Run every Verification row that does not depend on the real cycle
+- Mutation-check each guard: disable the novelty check and confirm `rejected_is_not_reproposed`
+  fails; drop the charter from the brief and confirm `opens_with_charter` fails; add `?` to the
+  digest and confirm `asks_nothing` fails; widen the envelope and confirm the arm-worker row
+  fails; restore each
+
+### 9. The first real cycle
+- **Task ID**: run-cycle
+- **Depends On**: validate-loop
+- **Assigned To**: lead (on the owning machine)
+- **Agent Type**: builder
+- **Parallel**: false
+- Follow "Running the first real cycle" in Technical Approach, steps 1 through 7
+- Record which dispatch path ran (adapter or `valor-session create`) and every reason code seen
+- Post `valor-improve report --case ID` output on #3217 verbatim, with the claim "loop
+  operational" and nothing higher
+
+### 10. Documentation
+- **Task ID**: document-feature
+- **Depends On**: run-cycle
+- **Assigned To**: documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Every item in the Documentation section, including the capability matrix's lane-5 section
+  graded from the real cycle's records
+
+### 11. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: final-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row
+- Confirm each Success Criterion against the records, not the PR description
+- Confirm the PR body carries the red-state proof for every anti-criterion row
 
 ## Verification
 
@@ -1195,6 +1508,9 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Both migrations registered | `python -c "from scripts.update.migrations import MIGRATIONS; ks=' '.join(MIGRATIONS); assert 'retire_sdlc_reflection' in ks and 'improvement_investigation_stage' in ks, ks"` | exit code 0 |
 | Three improvement reflections registered from `run.py` | `grep -c "register_improvement_collect\|register_improvement_planner\|register_improvement_assumption_digest" scripts/update/run.py` | output > 2 |
 | Charter unwritten by this lane | `git diff --stat origin/main -- docs/improvement-charter.md models/improvement_charter.py \| wc -l` | match count == 0 |
+| `docs/sdlc/` files untouched by the retirement (eleven on main) | `python -c "import glob,sys; sys.exit(0 if len(glob.glob('docs/sdlc/*.md'))==11 else 1)"` | exit code 0 |
+| Existing auto-generated reflection notes preserved | `git diff --stat origin/main -- docs/sdlc/ \| wc -l` | match count == 0 |
+| Retrieval envelope refuses `retrieval_mode` | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "refuses_retrieval_mode" -q` | exit code 0 |
 | Plan critique verdict recorded | `grep -c "READY TO BUILD" docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md` | output > 0 |
 
 ## Critique Results
@@ -1207,4 +1523,43 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 
 ## Open Questions
 
-(filled below)
+Each question carries the disposition the build proceeds on if no answer arrives (charter §9:
+provisional assumptions, stated with their overturning observation). These are plan-scope
+questions to the pipeline's owner, which charter §9 permits; none is a research question the loop
+would ask.
+
+1. **The issue body versus charter v2.** The plan follows charter v2, the parent plan's lane-5
+   paragraph, and Tom's 2026-09-09 refresh comment where the issue body (v1) disagrees (Freshness
+   Check table). Confirm that reconciliation, in particular that the first experiment is the top
+   ranked *experimentable* case in the retrieval-parameter envelope rather than the issue's
+   journey-preservation change to planning and context assembly.
+   **Disposition:** proceed on charter v2; the issue's acceptance criteria are re-read against it
+   in Success Criteria. Overturned by: a comment on #3217 directing the v1 reading.
+
+2. **Deferring charter §5 stages 4 and 5 and the cheap-inference experiment to #3311.** This lane
+   has no agent-run arm and cannot honestly measure a skill's effect or a provider's suitability
+   on agent tasks. The parent plan's "Carried to child issues" line for lane 5 expects one complete
+   `skill_acquisition` cycle; this plan runs stages 1 through 3 and records stage 4 as a
+   provisional assumption.
+   **Disposition:** proceed with the deferral; #3311 is filed and cited. Overturned by: direction
+   to fold the agent-run arm into this lane, which would move the appetite past Large and is
+   recorded here as the cost.
+
+3. **Turning the promise detector on.** It spends unit-2 money on a fifteen-minute tick and is off
+   by default. The build tests it with an injected transport and does not enable it on the owning
+   machine.
+   **Disposition:** ship it off; the real cycle runs without it. Overturned by: an explicit
+   `IMPROVEMENT__PROMISE_DETECTOR_ENABLED=true` on the owning machine after reading the report.
+
+4. **Lane 3's actual surface.** The consumed contract is written as requirements because lane 3
+   has not planned. If lane 3 lands `propose` as CLI-only, the planner shells to it; if the journal
+   module is named differently, the Prerequisites row is corrected in the first commit.
+   **Disposition:** adapt to what merges; the contract is the requirement, not the name.
+   Overturned by: lane 3's plan declaring it will not provide one of the eight requirements, in
+   which case that requirement moves to Open Questions on #3215 before this build starts.
+
+5. **The first real cycle's dispatch path.** If lane 3's scheduler adapter is not enabled on the
+   owning machine when the build reaches task 9, the runbook falls back to `valor-session create`
+   for the research skill.
+   **Disposition:** either path is acceptable for a level-1 claim and the report records which
+   ran. Overturned by: direction that only adapter-dispatched runs count.
