@@ -98,6 +98,70 @@ message. A per-turn timeout is handled by the identical path
 partial work stays in the transcript and the session surfaces as
 needs-attention rather than silently discarding a long Dev build.
 
+### Activity-aware turn deadline (issue #3289)
+
+`_preempt_watcher` bounds a turn with **two independent deadlines**, resolved
+per session type by `deadlines_for(session_type) -> TurnDeadlines(idle_s,
+absolute_s)` (`agent/session_runner/runner.py`):
+
+- **Idle deadline — the operative limit.** `ENG_IDLE_TIMEOUT_S` (2400s,
+  `SESSION_RUNNER_ENG_IDLE_TIMEOUT_S`) preempts a turn only after that long
+  with **no observed activity**. Activity is the `min` of two idle durations
+  computed in `_turn_idle_seconds`, which is the same thing as the `max` of
+  two activity timestamps taken without ever subtracting across clocks:
+  - the runner's own in-memory monotonic stamp (`self._last_activity_mono`),
+    refreshed by every stdout stream event via `_on_stdout_event_liveness`;
+  - `agent.session_runner.liveness.tool_activity_ts(session_id)`, the
+    hook-edge marker that ticks on **every** tool call, including calls made
+    from inside an in-process foreground subagent — the case the parent
+    stream cannot see. A foreground `Task`/`Agent` call appears in the
+    parent's stream-json as exactly one `tool_use` and, much later, one
+    `tool_result`, with nothing in between; measured, 27% of such windows
+    produced zero parent-stream records for their entire duration. Without
+    this second signal, a healthy multi-hour Dev build reads as silent.
+- **Absolute ceiling — a runaway backstop, not the operative limit.**
+  `ENG_ABSOLUTE_TIMEOUT_S` (21600s, `SESSION_RUNNER_ENG_ABSOLUTE_TIMEOUT_S`)
+  bounds total turn wall-clock regardless of activity, for a subprocess that
+  streams forever. It is checked first in the watcher loop, ahead of the
+  idle deadline.
+- **Teammate sessions are unchanged.** `deadlines_for("teammate")` resolves
+  both `idle_s` and `absolute_s` to `TEAMMATE_TURN_TIMEOUT_S` (900s,
+  `SESSION_RUNNER_TEAMMATE_TURN_TIMEOUT_S`) — teammate turns never host a
+  foreground build, so one tight budget serves both roles and observable
+  teammate behavior is identical to the single-deadline model.
+- **The UNKNOWN contract.** When `tool_activity_ts` returns `None` (no hook
+  edge — e.g. a foreign repo's spawn, or a misconfigured session), the
+  watcher falls back to the stream-event stamp alone; a missing marker never
+  shortens the idle deadline, only ever leaves it at the stream-only value.
+  A marker stamped in the future (clock skew) clamps to 0.0 idle, i.e. "just
+  active." This mirrors the precedent in `tools/session_progress.py`, which
+  bans inferring a wedge from absence of a signal.
+- **Driver backstop.** The `HeadlessRoleDriver`'s own `asyncio.wait_for` is
+  derived from `max(idle_timeout_s, absolute_timeout_s)` — whichever deadline
+  the watcher could fire on last — plus grace and margin, so the watcher's
+  preempt always fires before the driver's own backstop.
+
+### The timeout notice names the deadline that fired
+
+Neither notice claims the work was "paused": the process group is SIGTERM'd
+then SIGKILL'd, so nothing is paused. Both say the work so far is saved and
+that a reply resumes the same session. They differ on the one clause the two
+deadlines disagree about:
+
+| Kill cause | Constant | What it tells the human |
+|---|---|---|
+| `timeout_idle` | `TIMEOUT_NEEDS_ATTENTION_MESSAGE` | stopped "after a long stretch with no activity" — literally the idle deadline's predicate |
+| `timeout_absolute` | `ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE` | stopped because the run "had been going for a very long time" |
+
+The absolute ceiling fires on a turn that kept BOTH activity signals fresh for
+the whole ceiling — the idle deadline could never have caught it — so claiming
+inactivity there would be false. The EXIT is the same either way:
+`_TurnHandle.kill_cause` carries the variant, both members of
+`TIMEOUT_KILL_CAUSES` record `turn_end_source="timeout"` and map to
+`ExitReason.TURN_TIMEOUT`, and the per-run notice dedupe
+(`timeout-notice-sent:{session_id}:{run_id}`) covers both — one timeout notice
+per run, whichever deadline produced it.
+
 ## Subprocess Lifecycle & Teardown Reap (issue #1938)
 
 The runner is the single owner of its subprocess's teardown. On **any** unwind
@@ -148,6 +212,15 @@ child. Reclaim the orphaned worktree manually once the child clears:
 git worktree prune
 rm -rf .worktrees/dev-<8hex>   # the path named in the WARNING
 ```
+
+**Turn timeout (issue #3289).** A synthetic-slug session whose run ends with
+`ExitReason.TURN_TIMEOUT` gets the same treatment, for a different reason: the
+timeout notice tells the user "the work so far is saved," and deleting the
+worktree here would make that sentence a lie — every uncommitted change in the
+lane would go with it before the user could reply. The executor's
+synthetic-slug cleanup checks `_turn_timed_out` and skips deletion, logging a
+WARNING with the worktree path. The turn ended, not the work; reclaim the
+directory manually the same way once the lane is done being resumed.
 
 ## Simple Resume (D3, four scalars)
 
@@ -384,11 +457,12 @@ signal and still fire.
 
 This is a **presence** check, not a freshness check — it does not by itself
 detect a mid-turn hang. A subprocess that streams `init` and then genuinely
-hangs is caught by the whole-turn deadline (the preempt watcher's
+hangs is caught by the idle deadline (the preempt watcher's
 `_kill_turn(cause="timeout")` and the driver's own `asyncio.wait_for`
 backstop), not by session-health — accepting a wider detection window (up to
-`turn_timeout_s`, 7200s for PM/eng turns) for that rare case in exchange for
-eliminating false zombie verdicts on legitimately toolless-streaming turns.
+`ENG_IDLE_TIMEOUT_S`, 2400s for PM/eng turns, see "Activity-aware turn
+deadline" above) for that rare case in exchange for eliminating false zombie
+verdicts on legitimately toolless-streaming turns.
 
 ## Exit Classification (`ExitReason`, issue #2004)
 

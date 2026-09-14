@@ -82,7 +82,7 @@ class stop firing" has one place to look, not as deletions #1926 performed.
 | `[pty-pool] slot stuck/spawn failed` (VALOR-BF/A4) | A PTY pool slot failing to spawn or getting stuck mid-spawn | No PTY pool exists; `claude -p` spawns a plain subprocess per turn |
 | `[granite-container] startup plateau` (VALOR-AX) | The granite container failing to reach a ready state within a startup window | The granite/PTY container substrate was deleted wholesale |
 | `[granite-exit-anomaly]` (VALOR-A3) | Anomalous exit codes from the granite PTY container process | Same — no granite container process exists post-teardown |
-| `[deadman] loop beacon stale` (VALOR-BE/BG) | The PTY read-loop's deadman beacon going stale (loop wedged without dying) | No PTY read loop exists; headless turns are bounded by `turn_timeout_for` instead |
+| `[deadman] loop beacon stale` (VALOR-BE/BG) | The PTY read-loop's deadman beacon going stale (loop wedged without dying) | No PTY read loop exists; headless turns are bounded by `deadlines_for` instead, which resolves a per-role idle deadline and absolute ceiling |
 | `[executor-guard] refusing empty container message` (VALOR-B5) | An empty message arriving on the granite container's inbound channel | No granite container inbound channel exists |
 | `granite_wedged` stall verdict, `GRANITE_WEDGED_PTY_STALE_SECS` / `GRANITE_WEDGED_READLOOP_FRESH_SECS` constants (`agent/session_stall_classifier.py`, issue #1768/#1924) | A granite PTY session wedged in a turn-0 loop, detected by watching `last_pty_read_loop_at` staying fresh while `last_pty_activity_at` went stale | A `claude -p` turn has no persistent screen to stall in a turn-0 loop on; see [Stall Recovery](features/stall-recovery.md#actionable-stall-reasons) |
 

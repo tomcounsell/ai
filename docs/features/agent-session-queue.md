@@ -80,12 +80,16 @@ and the thread counters are all preserved on every clone).
 
 `continuation_agent_session_fields` additionally resets `_EXECUTION_FENCE_RESET_FIELDS` —
 `exec_pid`, `pid_create_time`, `exec_cwd`, `exec_harness`, `spawn_history`, `active_run_id`,
-`owned_run_ids`, `worker_pid` — to each field's declared default. A continuation row is
+`owned_run_ids`, `worker_pid`, `exit_reason` — to each field's declared default. A continuation row is
 `pending` and therefore non-terminal, so it is visible to `find_live_session_by_pid`'s
 ownership scan; copying a fence onto it would make it claim a process that never ran for it,
 the forged-liveness failure the [execution fence](agent-session-fenced-execution-record.md)
-exists to prevent. That set is deliberately the fence and run identity, not a general
-freshness reset: the heartbeat and liveness timestamps carry through.
+exists to prevent. That set is deliberately the execution fence, run identity, and the
+run's own outcome (`exit_reason`), not a general freshness reset: the heartbeat and liveness
+timestamps carry through. `exit_reason` belongs there because it answers "how did THIS run
+end" — a continuation that has not run yet has no answer, and reading a previous run's value
+off the row is what #3289 closed. Nothing durable is lost: the outcome survives in the
+`exit_summary` `session_events` entry, which `clone_agent_session_fields` copies intact.
 
 The `status` field is copied by both for defense-in-depth, so orphan repair preserves the
 original status instead of defaulting to `"pending"`. Callers that intentionally override

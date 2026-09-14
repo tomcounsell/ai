@@ -1419,16 +1419,39 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # pid fence; this write is plain and carries neither, so it
                 # is invisible to AgentSession.live_fence.
                 agent_session.exec_cwd = str(working_dir)
+                # Run-start reset (#3289). ``exit_reason`` is a persisted field
+                # written by the adapter's ``publish_exit_summary`` at the END
+                # of a run. Nothing cleared it, so a re-run of the same row --
+                # a reply to a session that previously errored or timed out --
+                # arrived from Redis already carrying the PREVIOUS run's exit
+                # reason. Every consumer of the field (``_session_failed_from_runner``,
+                # ``_runner_final_status``, the synthetic-slug cleanup skip below)
+                # reads it on paths that can be reached before this run writes
+                # its own value, so each of them could act on the prior run's
+                # outcome. Clearing it here makes the field run-scoped: absent
+                # means "this run has not reported an exit yet", which is
+                # exactly what every consumer's None-branch already assumes.
+                agent_session.exit_reason = None
                 agent_session.save(
-                    update_fields=["updated_at", "branch_name", "task_list_id", "exec_cwd"]
+                    update_fields=[
+                        "updated_at",
+                        "branch_name",
+                        "task_list_id",
+                        "exec_cwd",
+                        "exit_reason",
+                    ]
                 )
                 agent_session.append_history("user", (session.message_text or "")[:200])
         except Exception as e:
-            # A lane that stays invisible to the busy scan is exactly the
-            # condition this write exists to prevent, so it must be loud and
-            # greppable rather than swallowed at debug level.
+            # Two guarantees ride on this save and BOTH are lost when it
+            # raises: the exec_cwd stamp (a lane that stays invisible to the
+            # busy scan is exactly the condition it exists to prevent) and the
+            # run-start exit_reason reset (without it the field keeps the
+            # PREVIOUS run's outcome and every consumer reads a stale exit).
+            # Name both, so the log says what actually did not land.
             logger.warning(
-                f"[lane-writeback] AgentSession exec_cwd update failed for "
+                f"[lane-writeback] AgentSession run-start update failed "
+                f"(exec_cwd stamp AND exit_reason reset) for "
                 f"session={session.session_id} path={working_dir} (non-fatal): {e}"
             )
 
@@ -2261,8 +2284,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # double-emit.
         _runner_message = _harness_input
 
+        # The runner's OWN report of how this run ended, captured the moment
+        # ``run()`` returns. This is the authoritative signal for the terminal
+        # cleanup branch below: the persisted ``agent_session.exit_reason`` is
+        # only reachable when the run-start lookup found a row, and that lookup
+        # legitimately misses (documented race below), which would otherwise
+        # make a genuinely timed-out turn look like a clean exit and DELETE its
+        # lane. ``run()`` swallows ``Exception`` into ``ExitReason.EXCEPTION``
+        # but does NOT catch cancellation, so a still-None value here means the
+        # unwind happened before/around the call, not that the run ended clean.
+        _runner_exit_reason = None
+
         async def do_work() -> str:
-            await _runner.run(_runner_message)
+            nonlocal _runner_exit_reason
+            _summary = await _runner.run(_runner_message)
+            _runner_exit_reason = getattr(_summary, "exit_reason", None)
             return ""
 
         # Pass working_dir so BackgroundTask._watchdog can detect a vanished
@@ -2722,13 +2758,142 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 and isinstance(_slug_for_cleanup, str)
                 and re.match(r"^dev-[0-9a-f]{8}$", _slug_for_cleanup)
             ):
+                from agent.session_runner.router import ExitReason  # noqa: PLC0415
                 from agent.worktree_manager import (  # noqa: PLC0415
                     cleanup_after_merge,
                     resolve_main_repo_root,
                 )
 
                 _wd = locals().get("working_dir")
+                # Exit reason for this run, runner-first. ``_runner_exit_reason``
+                # is captured straight off the ``RunSummary`` the runner returned,
+                # so it holds even when the run-start lookup missed and
+                # ``agent_session`` is None -- on that path the adapter has no row
+                # to write ``publish_exit_summary`` onto, and reading the row alone
+                # would classify a timed-out turn as a clean exit and DELETE the
+                # lane whose uncommitted work the preserve branch exists to save.
+                # The row is the fallback: it is what the adapter's
+                # ``publish_exit_summary`` wrote onto this very in-scope object,
+                # the same state the reaction branch and ``_runner_final_status``
+                # read, and it covers unwinds that never reached the capture. No
+                # Redis re-read here -- the terminal path must not depend on a
+                # fresh round-trip. Either source reads THIS run's outcome: the
+                # persisted field is cleared to None at run start (see the
+                # run-start reset above), so it cannot inherit a stale
+                # ``"turn_timeout"`` from the run before it.
+                # ``ExitReason`` is a ``StrEnum``, so this compares equal
+                # whether the value is the member or the wire string
+                # ``"turn_timeout"``.
+                # ``locals()`` because an early raise can unwind before either
+                # name is bound (the same reason ``working_dir`` is read this
+                # way above).
+                _runner_exit_reason_local = locals().get("_runner_exit_reason")
+                _agent_session_for_cleanup = locals().get("agent_session")
+                if _agent_session_for_cleanup is None:
+                    # The run-start lookup missed (see the race note above), so
+                    # nothing persisted this run's exit onto a row. Greppable by
+                    # name: the cleanup decision is running on the runner local
+                    # alone, and if that is unset too the lane WILL be deleted.
+                    logger.warning(
+                        "[synthetic-slug] cleanup decision without an AgentSession row "
+                        "for session=%s slug=%s — falling back to the runner's own "
+                        "exit_reason=%r",
+                        session.session_id,
+                        _slug_for_cleanup,
+                        _runner_exit_reason_local,
+                    )
+                _exit_reason_for_cleanup = (
+                    _runner_exit_reason_local
+                    if _runner_exit_reason_local is not None
+                    else getattr(_agent_session_for_cleanup, "exit_reason", None)
+                )
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
                 if _wd is not None:
+                    # Pre-finalize guard (#3176). On every raising or
+                    # cancelled exit, the unconditional completion-exit
+                    # finalize guard above never ran (it sits inside
+                    # `if not chat_state.defer_reaction:` on the normal-return
+                    # path only), so the authoritative row can still be
+                    # "running" here. The busy scan
+                    # (agent/worktree_manager.py::_scan_worktree_sessions)
+                    # reads exec_cwd, so a still-running row would make
+                    # cleanup_after_merge's own busy check refuse the removal
+                    # -- permanently, since a synthetic `session/dev-*` branch
+                    # never satisfies sweep_worktrees' `merged_via_tree`
+                    # requirement. `status == "running"` is what makes running
+                    # this outside the `defer_reaction` conditional safe: every
+                    # path that hands the row to a continuation (the nudge
+                    # re-enqueue) already leaves it `pending` first, so this
+                    # guard no-ops there.
+                    #
+                    # Hoisted above the skip branches (#3289) so it runs on
+                    # EVERY terminal exit, not only the one that deletes the
+                    # worktree. Only the removal itself is conditional. The two
+                    # skips below do NOT share one exit shape. The turn-timeout
+                    # skip TYPICALLY fires on a clean return of `_runner.run()`,
+                    # where the completion-exit finalize already ran and the
+                    # `status == "running"` predicate makes this guard a no-op --
+                    # but it ALSO fires on a cancelled exit that unwound after
+                    # `publish_exit_summary` stamped the row, and there this guard
+                    # is the only finalizer left (see
+                    # `test_timeout_preserve_branch_still_finalizes_the_authoritative_row`).
+                    # The reap-failure skip fires on the raising/cancelled exit
+                    # this guard exists for. Leaving a row `running` with no live
+                    # process wedges the lane whether or not the directory
+                    # survives, so the guard cannot sit inside either branch.
+                    try:
+                        from models.session_lifecycle import (  # noqa: PLC0415
+                            StatusConflictError,
+                            finalize_session,
+                            get_authoritative_session,
+                        )
+
+                        _auth = get_authoritative_session(session.session_id)
+                        if _auth is not None and _auth.status == "running":
+                            # `task` is assigned partway through the body
+                            # (`task = BackgroundTask(...)`) and is not
+                            # guaranteed to exist here on an early-raise
+                            # exit -- resolve defensively and
+                            # short-circuit BEFORE _runner_final_status
+                            # is consulted. `_runner_final_status(None,
+                            # None)` returns "completed", which would
+                            # finalize a session that crashed before
+                            # starting a runner as a success; "failed" is
+                            # the honest status for that case.
+                            _task = locals().get("task")
+                            _agent_session = locals().get("agent_session")
+                            _guard_status = (
+                                _runner_final_status(_task.error, _agent_session)
+                                if _task is not None
+                                else "failed"
+                            )
+                            try:
+                                finalize_session(
+                                    _auth,
+                                    _guard_status,
+                                    reason="synthetic-cleanup pre-finalize",
+                                )
+                                logger.info(
+                                    "[synthetic-slug] Pre-finalize guard finalized "
+                                    "session %s → %s ahead of cleanup",
+                                    session.session_id,
+                                    _guard_status,
+                                )
+                            except StatusConflictError:
+                                # Someone else (the health checker, a
+                                # concurrent finalize) already finalized
+                                # this row. Not an error -- proceed to
+                                # cleanup, which will now see the
+                                # terminal status they wrote.
+                                pass
+                    except Exception as guard_err:
+                        logger.warning(
+                            "[synthetic-slug] Pre-finalize guard failed for %s "
+                            "(non-fatal, cleanup may be refused): %s",
+                            session.session_id,
+                            guard_err,
+                        )
+
                     # Reap-failed marker skip (Fix 3, issue #1938): the runner's
                     # ``_run_one_turn`` finally SYNCHRONOUSLY reaps + confirms its
                     # process group before this cleanup runs (finally-ordering
@@ -2748,78 +2913,24 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             _slug_for_cleanup,
                             _wd,
                         )
+                    elif _turn_timed_out:
+                        # Turn-timeout skip (#3289): the preempt watcher kills a
+                        # turn that blew its deadline and the user is told "the
+                        # work so far is saved". Deleting the worktree here would
+                        # make that sentence a lie -- every uncommitted change in
+                        # the lane would go with it, before the user could reply.
+                        # The turn ended, not the work: preserve the directory and
+                        # let the operator (or a resumed session) reclaim it.
+                        logger.warning(
+                            "[synthetic-slug] SKIPPING worktree cleanup for %s — turn "
+                            "ended on %s, so the worktree is preserved with its "
+                            "uncommitted work. Reclaim manually: `git worktree prune` "
+                            "+ remove the worktree dir %r.",
+                            _slug_for_cleanup,
+                            ExitReason.TURN_TIMEOUT,
+                            _wd,
+                        )
                     else:
-                        # Pre-finalize guard (#3176): on every raising or
-                        # cancelled exit, the unconditional completion-exit
-                        # finalize guard above never ran (it sits inside
-                        # `if not chat_state.defer_reaction:` on the
-                        # normal-return path only), so the authoritative row
-                        # can still be "running" here. The busy scan
-                        # (agent/worktree_manager.py::_scan_worktree_sessions)
-                        # now reads exec_cwd, so a still-running row would
-                        # make cleanup_after_merge's own busy check refuse
-                        # this removal -- permanently, since a synthetic
-                        # `session/dev-*` branch never satisfies
-                        # sweep_worktrees' `merged_via_tree` requirement.
-                        # Finalize first so the removal below sees a clear
-                        # lane. `status == "running"` is what makes hoisting
-                        # this out of the `defer_reaction` conditional safe:
-                        # every path that hands the row to a continuation
-                        # (the nudge re-enqueue) already leaves it `pending`
-                        # first, so this guard no-ops there.
-                        try:
-                            from models.session_lifecycle import (  # noqa: PLC0415
-                                StatusConflictError,
-                                finalize_session,
-                                get_authoritative_session,
-                            )
-
-                            _auth = get_authoritative_session(session.session_id)
-                            if _auth is not None and _auth.status == "running":
-                                # `task` is assigned partway through the body
-                                # (`task = BackgroundTask(...)`) and is not
-                                # guaranteed to exist here on an early-raise
-                                # exit -- resolve defensively and
-                                # short-circuit BEFORE _runner_final_status
-                                # is consulted. `_runner_final_status(None,
-                                # None)` returns "completed", which would
-                                # finalize a session that crashed before
-                                # starting a runner as a success; "failed" is
-                                # the honest status for that case.
-                                _task = locals().get("task")
-                                _agent_session = locals().get("agent_session")
-                                _guard_status = (
-                                    _runner_final_status(_task.error, _agent_session)
-                                    if _task is not None
-                                    else "failed"
-                                )
-                                try:
-                                    finalize_session(
-                                        _auth,
-                                        _guard_status,
-                                        reason="synthetic-cleanup pre-finalize",
-                                    )
-                                    logger.info(
-                                        "[synthetic-slug] Pre-finalize guard finalized "
-                                        "session %s → %s ahead of cleanup",
-                                        session.session_id,
-                                        _guard_status,
-                                    )
-                                except StatusConflictError:
-                                    # Someone else (the health checker, a
-                                    # concurrent finalize) already finalized
-                                    # this row. Not an error -- proceed to
-                                    # cleanup, which will now see the
-                                    # terminal status they wrote.
-                                    pass
-                        except Exception as guard_err:
-                            logger.warning(
-                                "[synthetic-slug] Pre-finalize guard failed for %s "
-                                "(non-fatal, cleanup may be refused): %s",
-                                session.session_id,
-                                guard_err,
-                            )
-
                         _repo_for_cleanup = resolve_main_repo_root(_wd)
                         cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
                         if cleanup_result.get("blocked_by_session"):

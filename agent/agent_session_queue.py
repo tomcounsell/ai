@@ -127,9 +127,19 @@ PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 # fence exists to prevent, since a `pending` row is non-terminal and therefore
 # visible to find_live_session_by_pid's ownership scan.
 #
-# This set is deliberately the execution fence and run identity, NOT a general
-# freshness reset. The heartbeat and liveness timestamps carry, as they always
-# have; changing those has watchdog blast radius and is a separate decision.
+# This set is deliberately the execution fence, run identity, and the run's own
+# outcome, NOT a general freshness reset. The heartbeat and liveness timestamps
+# carry, as they always have; changing those has watchdog blast radius and is a
+# separate decision.
+#
+# ``exit_reason`` belongs here for the same reason (#3289): it names how ONE
+# execution ended, and the executor already clears it at run start so every
+# consumer can read "absent" as "this run has not exited yet". The continuation
+# path is the OTHER way a new run begins, so it clears the field on the declared
+# mechanism rather than relying on the run-start reset alone. Nothing durable is
+# lost -- the run's outcome lives permanently in its ``exit_summary``
+# ``session_events`` entry (``SessionRunnerAdapter.publish_exit_summary``),
+# which ``clone_agent_session_fields`` copies intact.
 _EXECUTION_FENCE_RESET_FIELDS = frozenset(
     {
         # The fenced execution record (docs/features/agent-session-fenced-execution-record.md).
@@ -138,6 +148,8 @@ _EXECUTION_FENCE_RESET_FIELDS = frozenset(
         "exec_cwd",  # Working dir that spawn ran in; resume is cwd-scoped.
         "exec_harness",  # Which harness ran it; the new run picks its own.
         "spawn_history",  # Append-only spawn timeline of the previous run.
+        # The previous execution's outcome.
+        "exit_reason",  # How the run that just ended exited; the new run has not exited.
         # Run identity.
         "active_run_id",  # Names the run that just ended, not the one being queued.
         "owned_run_ids",  # Runs the previous execution owned.

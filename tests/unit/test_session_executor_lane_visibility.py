@@ -223,8 +223,16 @@ class TestLaneWritebackFailure:
 
         assert FakeSessionRunner.instances, "session must still run despite the save failure"
         warnings = [m for m in _log_messages(caplog) if "[lane-writeback]" in m]
-        assert warnings, "expected a [lane-writeback] WARNING on the failed exec_cwd save"
+        assert warnings, "expected a [lane-writeback] WARNING on the failed run-start save"
         assert session.session_id in warnings[0]
+        # One save carries TWO guarantees and both are lost when it raises: the
+        # exec_cwd stamp and the run-start exit_reason reset. A message naming
+        # only exec_cwd sends the reader looking for the wrong regression.
+        assert "exec_cwd" in warnings[0]
+        assert "exit_reason" in warnings[0], (
+            "the lane-writeback WARNING does not say the run-start exit_reason "
+            f"reset was lost too: {warnings[0]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
