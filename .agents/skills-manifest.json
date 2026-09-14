@@ -364,12 +364,12 @@
       "scope": "global",
       "source": ".claude/skills-global/do-pr-review/SKILL.md",
       "source_files": {
-        ".claude/skills-global/do-pr-review/SKILL.md": "31855338a7f95e1b3d58c6fcc01b27b8572b9bdedda0b3b9455df07ed82b0af2",
+        ".claude/skills-global/do-pr-review/SKILL.md": "5aab12d593fea6a36a9914ac582aa1223829f7e611e9bb4d451bc84e6ecbae62",
         ".claude/skills-global/do-pr-review/sub-skills/checkout.md": "88be6746cd33c686f17574c1bfa839574fc3399445270b10c8b7bb739d670fa2",
-        ".claude/skills-global/do-pr-review/sub-skills/outcome-contract.md": "a1b6f59e0858a7baa1db25ee2bd6c79de19734217106fa00e60e4c74d15a5755",
-        ".claude/skills-global/do-pr-review/sub-skills/screenshot.md": "14112b5d5c1e8306fbc23b2d0b94abdd803d0a9275f9cf18a11439660399250f",
         ".claude/skills-global/do-pr-review/sub-skills/code-review.md": "98089466b80c169b82039e273e160ada22ba58908792b627e440211b7c2d99df",
-        ".claude/skills-global/do-pr-review/sub-skills/post-review.md": "a79c747cc6c9621fea9a3dafd4556ca029ef044bf09091e5d40f0b0d7a6e6083"
+        ".claude/skills-global/do-pr-review/sub-skills/outcome-contract.md": "597b3f000dbcfaba22c998ef76f383453f408d464e6d4b3ca670b03f806b11fa",
+        ".claude/skills-global/do-pr-review/sub-skills/post-review.md": "a79c747cc6c9621fea9a3dafd4556ca029ef044bf09091e5d40f0b0d7a6e6083",
+        ".claude/skills-global/do-pr-review/sub-skills/screenshot.md": "14112b5d5c1e8306fbc23b2d0b94abdd803d0a9275f9cf18a11439660399250f"
       },
       "target": ".agents/skills-global/do-pr-review",
       "resources": [
@@ -398,7 +398,7 @@
       "source": ".claude/skills-global/do-sdlc/SKILL.md",
       "source_files": {
         ".claude/skills-global/do-sdlc/RUN_IDENTITY.md": "7cffecc34eb5d87b2a4db734ae456a068442854d7d4d91face14951e012d46d0",
-        ".claude/skills-global/do-sdlc/SKILL.md": "b00a8d45c21062987b54d9ec863b96e0807e4eccab2c00f377cd00cb41e27a9c"
+        ".claude/skills-global/do-sdlc/SKILL.md": "3319c83ddc76dfd383762976187b76a77822b1dfed82d9165491da67d43df523"
       },
       "target": ".agents/skills-global/do-sdlc",
       "resources": [
