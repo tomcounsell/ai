@@ -109,6 +109,38 @@ mostly empty sections that name the lane which will fill each. The one thing it
 does change is that the settings and the feature doc stop describing decisions
 the charter withdrew.
 
+## Lane 3 — control journal, fenced dispatch, and the valor-improve CLI
+
+| Component | Implemented | Deployed | Measured | Effect |
+|---|---|---|---|---|
+| Control journal (`journal.py::transition`, one Lua `EVAL` per Decision 3) | yes | no caller in production yet (no case has been admitted) | no | unknown |
+| Lease protocol + interim `CaseLease` | yes | consumed by the tick, the reconcile pass, and the CLI's own writes | no | n/a (fences a controller that has never yet raced) |
+| Dispatch intents, six-state machine, lane-slot reservation | yes | no intent admitted yet | no | unknown |
+| `admitted` session status (lifecycle, ownership, dashboard) | yes | yes, the constant is live | no | n/a (no row has used it yet) |
+| Scheduler adapter (`improvement-controller-tick`) | yes | registered; gated off by `ImprovementSettings.enabled=False` default | **no** | unknown |
+| Reconcile reflection (`improvement-intent-reconcile`, 300s) | yes | registered, runs regardless of the enabled switch | no | unknown (nothing to reconcile yet) |
+| Unit-2 paid-inference meter (`tools/paid_inference_meter.py`) | yes | no reservation made in production yet | no | unknown |
+| Cross-vendor judge's `sdlc_review` receipt | yes | yes, fires on every judge run | **yes** (receipts accumulate on every SDLC review) | n/a (record-only, never gates) |
+| Vault writer (`tools/vault_write.py`) | yes | no write attempted in production yet | no | unknown |
+| `valor-improve` CLI, twelve subcommands | yes | binary materializes on the next `/update`'s `uv sync` | no | unknown |
+| `.claude/skills/improve-research/SKILL.md` | yes | no research session has run under it yet (lane 5) | no | unknown |
+| Dashboard control panel (`get_control_status`) | yes | yes, renders on the root dashboard | no | n/a (empty-namespace state until a case is admitted) |
+| Mutation review of every fence (Task 12) | yes, 12/12 mutations caught | one-time build-time exercise, not a running check | n/a | n/a |
+
+**The honest reading of this lane.** Every primitive in the plan's Data Flow is
+implemented and tested — including the four fault-injection scenarios the
+issue's acceptance criteria name (stale-generation rejection split by writer
+kind, a crash between admission and session creation, an unreleased lane slot
+on restart, and journal unavailability with `doctor` as the break-glass read)
+— but **nothing in this lane has run against a real research session**, because
+no research session exists yet: that is lane 5's plan. The scheduler adapter
+has admitted zero cases in production and the meter has settled zero dollars.
+This lane is infrastructure a later lane will exercise, not yet a measured
+effect. `#3220` (the production session-execution lease) is still open; this
+lane consumes its declared interface through the interim `CaseLease`, deletable
+in one commit the day `models/redis_lease.py` exists (hand-off posted on
+#3220).
+
 ## Retired instrumentation
 
 | Component | Status | Why |
@@ -153,9 +185,7 @@ calibration floor, on purpose.
 
 | Component | Owning lane | Blocked on |
 |---|---|---|
-| Control journal, Lua transition, dispatch intents, `admitted` status | 3 | #3183's create-or-bind seam and dead-letter record; #3183's lane 6 for the fencing lease |
-| `valor-improve` CLI, break-glass `pause`/`resume`/`doctor` | 3 | lane 3 |
-| Observer→planner loop, investigations, first journey-preservation experiment | 5 | lane 3 (the harness it drives is built) |
+| Observer→planner loop, investigations, first journey-preservation experiment | 5 | nothing (lanes 3 and 4 both shipped; see their sections above) |
 | Release records, exposure, rollback, recursive comparison | 6 | lane 5 |
 
 ## Five questions the plan asked, and where they stand

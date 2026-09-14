@@ -11,15 +11,19 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 
 ## What exists today
 
-Lanes 1, 2, 4, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
-verifying artifact store, three dashboard panels, and the evaluation harness
+Lanes 1, 2, 3, 4, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
+verifying artifact store, four dashboard panels, and the evaluation harness
 (`tools/improvement_eval/`, see [Improvement Evaluation](improvement-evaluation.md)).
 Unit 3 (USD 50 per week for infrastructure) has a
 meter with an admission gate, a teardown policy, a generated charter section 2 progress report, two new
 evidence kinds (`spend_receipt` and `resource_probe`), and an artifact retention root outside the
 checkout. The cloud sandbox itself is decided and unbuilt; see
-[Improvement Cloud Execution](improvement-cloud-execution.md). The control journal, the
-research sessions, and releases arrive with lanes 3, 5, and 6, each as its own child issue.
+[Improvement Cloud Execution](improvement-cloud-execution.md). Lane 3 ([#3215](https://github.com/tomcounsell/ai/issues/3215))
+shipped the control journal, dispatch intents, the `admitted` session status,
+the reconcile reflection, the unit-2 paid-inference meter, the vault writer,
+and the `valor-improve` CLI, the only door through which a research session
+proposes anything. The research sessions themselves and releases arrive with
+lanes 5 and 6, each as its own child issue.
 
 Read the capability matrix before believing anything is working. It grades each
 component on four separate axes (implemented, deployed, measured, effect) and
@@ -36,7 +40,8 @@ scoped skill; authority lives in code. Not built yet (lane 5).
 whose Lua transition script is the sole authority for research-state
 transitions, leases, dispatch intents, and budget reservations. The flat Popoto
 records below are its queryable projection, updated after the journal commits.
-Decisions read the journal head, never the projection. Not built yet (lane 3).
+Decisions read the journal head, never the projection. Shipped in lane 3
+(`tools/improvement_control/`).
 
 **Existing execution infrastructure.** Jobs, AgentSessions, the reflection
 scheduler, worktree and venv isolation, the SDLC pipeline, the content store,
@@ -180,10 +185,15 @@ boundaries are settings rather than assumptions because charter §8 requires the
 disclosed: a reservation that resets on an undisclosed boundary cannot be
 audited against what was actually spent.
 
-**Unit 3 has a meter; unit 2 awaits lane 3.** `tools/infrastructure_budget.py` admits and refuses
-against `weekly_infrastructure_usd` (see Unit-3 metering and teardown below). The paid-inference pool
-stays a declared limit with no meter behind it; `tools/paid_inference_meter.py` arrives with lane 3.
-Uncertain metering is not zero cost: missing metering settles at the forecast, never at zero.
+**Both units now have a meter.** `tools/infrastructure_budget.py` admits and refuses
+against `weekly_infrastructure_usd` (see Unit-3 metering and teardown below). `tools/paid_inference_meter.py`
+(lane 3) mirrors its shape for `daily_paid_inference_usd`: reserve-then-check in one Lua `EVAL` on a
+plain `improve:{project}:budget:unit2:{day_key}` key, settling from `response.usage.cost` when a call
+carries it (`metering="exact"`) or a dated price table otherwise (`metering="estimated"`). Only
+`purpose="rsi"` reservations count against the pool; `tools/cross_vendor_judge.py`'s ordinary review
+spend is receipted `purpose="sdlc_review"` and never gated. Uncertain metering is not zero cost: a
+reservation whose day window closes unsettled is receipted `metering="unknown"` by the reconcile pass,
+never defaulted to zero.
 
 **There is no fixed allocation across areas.** Ranking is by expected
 contribution to the north star (charter §3), recorded per case as
@@ -222,8 +232,10 @@ Popoto-managed keys" rule. Decision records (reservations, refusals, releases, s
 `InfrastructureReservation` Popoto rows read and written through the ORM; only the counter is raw, and
 only because atomicity requires it. Every reservation has a paired, idempotent release. The window key
 expires past the audit horizon (the 30-day evidence TTL plus one window of margin), never at the window
-length, since a counter expiring mid-window would reset headroom to full. When lane 3 lands, the counter
-and its scripts migrate into its control namespace as a named migration.
+length, since a counter expiring mid-window would reset headroom to full. **Lane 3 declined the migration**
+(its plan's No-Gos): moving a live counter mid-window buys a naming consistency and risks a double-count.
+Unit 3 stays on its own key; `valor-improve budget` reads it through `tools.infrastructure_budget.status_dict`
+beside units 1 and 2.
 
 **Admission refuses what it cannot forecast.** A `None`, empty, non-numeric, negative, NaN, or infinite
 rate is refused, never defaulted to zero. A credit with no expiry covers the current window only. A
@@ -294,24 +306,51 @@ as `sha256:<hex>`. The probe never raises and never emits a credential.
 
 ## Control namespace contract (lane 3)
 
-`improve:{project_key}:{case_id}:*`, with an explicit schema version, holding
-only what is research-specific: the case head, its revision, action IDs, and
-reservations.
+`improve:{project_key}:*`, with an explicit schema version (`tools/improvement_control/keys.py`),
+holding only what is research-specific: the case head and its journal, dispatch
+intents, lane-slot reservations, the case lease, and the unit-2 window.
 
-- `head` holds `{revision, state, epoch, owner, updated_at}`; `journal` is a
-  bounded list of `{revision, action_id, event, payload_digest, ts}`.
-- One Lua script `transition(expected_revision, epoch, action_id, event, payload_digest)`
-  verifies ownership and epoch, checks the expected revision, advances the head,
-  and appends. Rejections return a reason code; they never raise.
-- Leases, including the monotonic fencing generation and Redis-server-time
-  expiry, come from **#3183's lease module**. This system writes no second lease.
-  The accept rule at effect boundaries is `generation >= highest_accepted`,
-  because a strictly-greater rule refuses the holder's own second write.
-- Dispatch, budget authorization, and release each re-check the generation
-  inside the same script call that records the effect. A lease check followed by
-  an unguarded effect is not fencing.
-- Payloads are written to the content store and hashed before the transition
-  references their digest. An artifact with no committed event is an orphan.
+- `{case_id}:head` holds `{revision, state, epoch, highest_accepted, owner, updated_at,
+  paused, pause_reason}`; `{case_id}:journal` is a bounded list of
+  `{revision, action_id, event, payload_digest, generation, ts}`, `LTRIM`med to
+  `journal_max_entries`. `{case_id}:intents` is the per-case set of action ids
+  (the one index every reader — `resume --force`, `doctor`, `case explain`,
+  `get_control_status` — enumerates through; no reader ever runs `KEYS` or `SCAN`).
+  `{case_id}:intent:{action_id}` is one dispatch intent (Decision 13's six-state
+  machine: `admitted → materialized → running → settled`, with
+  `reconciliation_required` as a holding state whose only exit is `cancel`).
+- `tools/improvement_control/journal.py::transition()` is one Lua `EVAL` per Decision 3:
+  schema check, namespace/case pause, `generation >= highest_accepted`, `expected_revision
+  == revision`, and — when a research session presents its own `agent_session_id` — the
+  intent-binding compare (`intent.state == "running" and intent.agent_session_id ==
+  ARGV.agent_session_id`) inside the same call as the head advance. Every reason
+  (`SCHEMA_MISMATCH`, `PAUSED`, `STALE_GENERATION`, `REVISION_MISMATCH`, `INTENT_STATE`,
+  `SLOT_EXHAUSTED`, `UNAVAILABLE`, plus the Python-side `INVALID_ARGUMENT` and
+  `NOT_A_RESEARCH_SESSION`) is a return value; no caller sees an exception, and a
+  connection error becomes `UNAVAILABLE` rather than a fallback to the projection.
+- Leases: `tools/improvement_control/lease.py::LeaseProtocol` matches
+  [#3220](https://github.com/tomcounsell/ai/issues/3220)'s declared session-execution-lease
+  interface (`acquire`/`renew`/`release`, a monotonic generation, Redis-server-time expiry),
+  implemented as `CaseLease` — an interim module confined to the `improve:` prefix — until
+  #3220 lands, at which point `default_lease()` (the single swap point) repoints at
+  `models.redis_lease` and `CaseLease` is deleted. The hand-off is posted on #3220. The accept
+  rule `generation >= highest_accepted` lives in the journal, not the lease, so it holds
+  independent of which lease minted the generation.
+- **Two fences, one per kind of writer.** Controllers (the scheduler tick, the reconcile
+  pass, an operator's `pause`/`resume`, the CLI's own `propose` write) each acquire the case
+  lease and present the generation it minted; a stalled controller's late write is refused
+  `STALE_GENERATION`. A research session presents no generation at all — one copied at
+  dispatch time would be stale the moment the adapter's own next write lands — and is fenced
+  instead by its **intent binding**: `intent:{action_id}` in state `running` with
+  `agent_session_id` equal to the session's own id, checked inside the same `transition` call
+  as the head advance.
+- Every effect script re-checks the generation and revision fence and appends its own journal
+  entry in the same call. A lease check followed by an unguarded effect is not fencing; the
+  mutation-review round (lane 3's Task 12) confirmed a named test fails for each of the
+  generation, revision, `from_state`, and compare-and-delete checks across every script.
+- Payloads are written to the content store and hashed before `propose` references their
+  digest. A refused proposal's artifact is kept as `ImprovementEvidence(kind="other",
+  detail="intent_state:<reason>")` rather than lost.
 
 **The raw-Redis guard is a text heuristic, not a namespace check.** It fires when
 one command string contains both a Popoto-context substring and a block pattern,
@@ -329,15 +368,30 @@ The child session gate fires only when `parent_agent_session_id` is set, and the
 reflection scheduler already creates top-level sessions with no parent. Research
 sessions take that same path: **the gate is never engaged and never lifted**.
 Ownership belongs to the `ImprovementCase` and its Job, not to a parent executor
-session; sessions carry `research_case_id`, `experiment_id`, and `action_id` as
-provenance.
+session; sessions carry `research_case_id`, `experiment_id`, `action_id`, and
+`idempotency_key` as provenance in `extra_context` — deliberately never a
+`generation`, since one copied at dispatch time is stale by the adapter's own
+next write.
 
-Only the scheduler adapter submits research sessions, after validating charter,
-journal authorization, reservation, and allowed action type. A planning session
-proposes an action by writing a journal event; it cannot enqueue.
+Only `tools/improvement_control/scheduler_adapter.py::tick()` (the
+`improvement-controller-tick` reflection) admits and dispatches research sessions,
+after checking the case's `intents` set for a `reconciliation_required` wedge (before
+the slot count — a wedged case never consumes a slot), the allowed action type, the
+lane-slot count, and the generation/revision fence. It materializes through
+`_push_agent_session(idempotency_key=..., status="admitted", ...)` — the create-or-bind
+seam #3183 shipped, unchanged — and activates only once
+`agent.session_health.any_worker_alive()` is true, re-reading the row fresh and branching
+on what it actually finds (an `admitted` row flips to `pending` and publishes a wake; a
+`pending` row from a retry republishes without flipping; a terminal row settles through
+the same terminal hook the worker uses; a missing row is left for the reconcile pass). The
+publish (`agent.agent_session_queue.publish_session_notify`) runs strictly after the row is
+`pending`, so the worker's own pickup loop finds it within one notify hop.
 
-Lane 3 consumes #3183's idempotent create-or-bind seam on `_push_agent_session`
-and changes no queue signature.
+The only write a research session ever makes is `valor-improve propose`, which resolves
+its own row through `AGENT_SESSION_ID`, presents its intent binding, and writes one
+`action_proposed` journal event. `finalize_session` gains one post-transition hook (step 7,
+gated on `extra_context.action_id`, lazy-imported, exception-isolated) that releases the
+session's lane slot and settles its intent by outcome on every termination path.
 
 ## Artifacts
 
@@ -364,18 +418,19 @@ for the sandbox-local Redis topology and the export path behind it.
 
 ## Dashboard
 
-Three panels on the root dashboard.
+Four panels on the root dashboard.
 
 **Goals** is the charter §11 readable record: which charter version and digest
 the work is ranked under, the §3 early priorities marked as starting hypotheses
 rather than an allocation, open cases with their `priority_area` and
 `ranking_rationale`, and unresolved assumptions. Every heading no lane writes
 yet says so and names the lane that will fill it: acquired abilities and
-resource use come with lane 3, the evaluation panel with lane 3's operator
-surface (the harness itself writes `ImprovementEvaluation` rows today),
-rejected approaches with lane 5. Each section renders one of three distinguishable states: content,
-"nothing yet, written by lane N", or "unavailable" when the read failed. A bare
-zero would claim a measurement was taken.
+resource use are lane 3's, recorded as cases run (resource use also has its own
+panel now, Control, below); evaluations are lane 4's (the harness writes
+`ImprovementEvaluation` rows today; the panel itself is unwritten); rejected
+approaches are lane 5's. Each section renders one of three distinguishable
+states: content, "nothing yet, written by lane N", or "unavailable" when the
+read failed. A bare zero would claim a measurement was taken.
 
 The other two panels are backed by `ImprovementEvidence`.
 
@@ -388,54 +443,71 @@ count below it is a count of nothing, rather than showing a comforting zero.
 raw count beside every share. `unknown` is expected to be the largest bucket.
 An empty window reads as "nothing observed", never "nothing happened".
 
-`ui/data/improvement.py` exports exactly four getters, and a test pins that
+**Control** (lane 3, `get_control_status`) shows dispatch intents by state, lane-slot
+usage, paused heads, `reconciliation_required` wedges (each naming its clearing
+`valor-improve resume --force` invocation), and unit-2 spend for the window open now —
+read through `intents.list_intents` over each open case's own set, never a keyspace scan.
+
+`ui/data/improvement.py` exports exactly five getters, and a test pins that
 list as an exact list. **Experiment count and merged-patch count are activity, not improvement**,
 and there is deliberately no function here that returns them.
 
-Cases, hypotheses, rejected experiments, spend, release lineage, and the
-paused/inconclusive/reconciliation-required renderings arrive with the lane that
-first writes each one. Six permanently empty tiles is not a dashboard.
+Cases, hypotheses, rejected experiments, release lineage arrive with the lane that
+first writes each one (5 for cases and hypotheses, 6 for releases). Permanently empty
+tiles for content nothing writes yet is not a dashboard.
 
 ## Break-glass
 
-The CLI (`valor-improve`) arrives with lane 3. Until then there is no controller
-to unwedge: the only moving part is the evidence tick, and it fails soft.
-
-Once lane 3 lands, the procedure is:
+The CLI, `.venv/bin/valor-improve` (Decision 14: it lives in the venv only, never on
+system PATH), is the only door through which a research session — or an operator —
+touches the control namespace.
 
 **Is it a namespace outage or a wedged case?** Run `valor-improve doctor`. It
-prints every paused head, every stale intent, and every outstanding reservation,
-so you see the blast radius before touching anything.
+prints every paused head, every `reconciliation_required` intent, and every
+outstanding reservation, so you see the blast radius before touching anything.
+`namespace unreachable: <error>` with exit code 2 means the substrate itself is
+down; a clean namespace prints "no paused heads, no stale intents, no outstanding
+reservations" rather than a bare success with nothing after it.
 
-- **Every case paused at once, `doctor` cannot read the namespace**. That is a
-  Redis or connectivity problem, not a wedged case. Fix the substrate. The
-  controller pauses and reports rather than falling back to projection state,
-  by design: a decision made from a stale projection is worse than no decision.
-- **One case paused, others progressing**. That case is wedged. Read its head
-  and its journal tail before resuming; the journal is the record of what it was
-  trying to do.
+- **`doctor` cannot read the namespace**. That is a Redis or connectivity
+  problem, not a wedged case. Fix the substrate; `doctor` again once it is up —
+  every head reads as it was, since nothing was written from the projection.
+- **A `reconciliation_required` intent, head not paused (the common shape)**.
+  `mark_reconciliation_required` never writes the head, so this is the ordinary
+  wedge signature, not a paused case. Run `valor-improve case explain --case ID`
+  — it names the blocking action id and the exact clearing command.
 
 **Commands.**
 
 | Command | Effect |
 |---|---|
-| `valor-improve doctor` | Print paused heads, stale intents, outstanding reservations |
+| `valor-improve doctor` | Print paused heads, `reconciliation_required` intents, outstanding reservations |
 | `valor-improve case show --case ID` | The head, its revision, and the journal tail |
-| `valor-improve pause [--case ID] [--reason TEXT]` | Pause explicitly. A pause is never self-clearing |
-| `valor-improve resume [--case ID]` | Re-read the head and clear the pause. Refuses a case whose intents are still `reconciliation_required` unless `--force` |
+| `valor-improve case explain --case ID` | Why the case is where it is: state, pause reason, last event, every intent, whether the charter is pinned, and the blocking action ids with their clearing command |
+| `valor-improve pause [--case ID] [--reason TEXT]` | Pause explicitly (whole namespace when `--case` is omitted). A pause is never self-clearing |
+| `valor-improve resume --case ID [--force]` | Scans for `reconciliation_required` intents **before** consulting `paused` (Decision 9) — the ordering that makes the common unpaused wedge actually exit. Without `--force`, blocking intents print and exit 1 with no write. With `--force`, cancels each (`intent_cancelled` journaled), then clears a pause if one exists, else prints "not paused; cancelled N intent(s)" |
+| `valor-improve budget` | All three units — slots in use, unit-2 window, unit-3 window — with boundaries disclosed |
+| `valor-improve export [--root PATH]` / `import --archive PATH [--force]` | Dump/restore the namespace against lane 7's export-root contract |
+| `valor-improve replay-projection --case ID` | Reconcile `ImprovementCase` to the head, folding the journal tail as a cross-check (reported, never raised, when `LTRIM` has trimmed past what the fold can verify) |
 
 **Evidence to keep before resuming:** the journal tail, the `doctor` output, and
 the reservation state. `resume` advances the head; the pre-resume state is not
 recoverable from the projection.
 
 **Stale intents recover on their own cadence.** The `improvement-intent-reconcile`
-reflection scans for intents in `admitted` or `materialized` older than a
-lease-derived staleness threshold, CAS-transitions them to
-`reconciliation_required`, releases the reservation, and calls the existing
-`finalize_session()` to force the orphaned row terminal. It never mints a second
-identity, and it reads intents rather than a status map, so it does not depend
-on `RECOVERY_OWNERSHIP`, which is explicitly an informational constant, not
-used for runtime routing.
+reflection (300s, `tools/improvement_control/recovery.py::reconcile()`) is itself a
+controller: it acquires each case's own lease before touching its intents. `admitted`/
+`materialized` intents past `4 * lease_ttl_seconds` get their `stale_sweeps` counter
+incremented (a pass-owned counter, distinct from `record_materialized`'s `attempts`);
+at `max_dispatch_attempts` sweeps the intent moves to `reconciliation_required`, its
+slot releases, and a still-live bound row is forced `abandoned` through the existing
+`finalize_session()` (dead-lettered under the `improve_intent` stage). A `running`
+intent whose bound row is missing or already terminal is acted on the **first**
+qualifying sweep — no budget applies, since the session holding the slot is already
+gone. It never mints a second identity, and it reads intents rather than a status
+map, so it does not depend on `RECOVERY_OWNERSHIP`, which is explicitly an
+informational constant, not used for runtime routing. The same pass receipts any
+unit-2 reservation whose day window closed unsettled at `metering="unknown"`.
 
 ## Dependency on #3183
 
@@ -444,12 +516,14 @@ owns three primitives this system consumes rather than redesigns:
 
 | Primitive | Owner | Consumed by |
 |---|---|---|
-| Idempotent create-or-bind seam on `_push_agent_session` | #3183's current build | Lane 3 dispatch. `status="admitted"` is a caller argument, not a seam change |
-| Renewed execution lease with a fencing generation (`models/redis_lease.py`) | **#3183's lane 6, itself a child issue of #3183** | The control journal imports it wherever it needs a lease |
-| Generalized `DeadLetter` record with a `stage` field | #3183's current build | Exhausted improvement intents write `stage="improvement-intent"` |
+| Idempotent create-or-bind seam on `_push_agent_session` | #3183, PR #3229 (merged) | Lane 3 dispatch. `status="admitted"` is a caller argument, not a seam change |
+| Renewed execution lease with a fencing generation (`models/redis_lease.py`) | [#3220](https://github.com/tomcounsell/ai/issues/3220), a child issue of #3183 (**open**) | `LeaseProtocol`'s single swap point (`default_lease()`); until it lands, `CaseLease` is the interim implementation, confined to `improve:*` keys and deleted the moment `models/redis_lease.py` exists |
+| Generalized `DeadLetter` record with a `stage` field | #3183, PR #3229 (merged) | Exhausted improvement intents write `stage="improve_intent"` (reserved for this lane in `bridge/dead_letters.py`) |
 
-Lane 3 blocks on each until it lands. It opens no PR against
-`agent/agent_session_queue.py` and defines no second dead-letter sink.
+Lane 3 shipped against the two merged primitives and forked no second lease for the
+still-open third (see Break-glass and the Control namespace contract above for the
+hand-off). It opens no PR against `agent/agent_session_queue.py` and defines no second
+dead-letter sink.
 
 ## Retired
 
