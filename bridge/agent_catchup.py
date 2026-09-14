@@ -724,9 +724,9 @@ async def _enqueue_recovery(
     # issue #2494): written alongside the untouched recovery enqueue below,
     # mirroring live intake's append-precedes-dispatch order. NOT
     # authoritative — dispatch still routes from the enqueue;
-    # shadow_append_inbox never raises into the recovery path. `strip_private`
-    # mirrors live intake's `safe_text`: the inbox is a durable no-TTL list, so
-    # <private> content must never reach it on this path either.
+    # shadow_append_inbox never raises into the recovery path. Text is
+    # already stripped at intake; see "Private-tag stripping happens at
+    # intake" in docs/features/durability-model.md.
     #
     # NOTE: unlike the two mechanical scanners this site has no `claim_message`
     # gate, and the sweep by design targets messages the live handler DID
@@ -742,7 +742,7 @@ async def _enqueue_recovery(
         message_id=inbound.message_id,
         sender_id=inbound.sender_id,
         sender_name=inbound.sender_name,
-        text=strip_private(inbound.text),
+        text=inbound.text,
         date=inbound.date,
     )
 

@@ -449,16 +449,16 @@ async def scan_for_missed_messages(
                 # re-enqueue below, mirroring live intake's append-precedes-
                 # dispatch order. NOT authoritative — dispatch still routes
                 # from the re-enqueue; shadow_append_inbox never raises into
-                # the recovery path. `strip_private` mirrors live intake's
-                # `safe_text`: the inbox is a durable no-TTL list, so <private>
-                # content must never reach it on this path either.
+                # the recovery path. Text is already stripped at intake; see
+                # "Private-tag stripping happens at intake" in
+                # docs/features/durability-model.md.
                 shadow_append_inbox(
                     project,
                     chat_id=chat_id,
                     message_id=message.id,
                     sender_id=sender_id,
                     sender_name=sender_name,
-                    text=strip_private(text),
+                    text=text,
                     date=message.date,
                 )
 

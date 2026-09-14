@@ -11,11 +11,11 @@ Three invariants per scanner:
    ``chat_id``/``message_id`` shape as live intake).
 2. An inbox failure (``Room.resolve`` raising) NEVER prevents the re-enqueue —
    shadow mode has no durability responsibility; dispatch is untouched.
-3. ``<private>``-wrapped content never reaches the persisted entry. Live intake
-   persists ``strip_private(text)``; the inbox is a durable no-TTL list, so a
-   recovery path that persisted raw text would leak the documented user opt-out
-   into storage the live path keeps it out of. This assertion is what keeps the
-   two paths from drifting apart again.
+3. ``<private>``-wrapped content never reaches the persisted entry. Text is
+   stripped once, at intake (see "Private-tag stripping happens at intake" in
+   docs/features/durability-model.md), so these tests guard the inbox surface
+   specifically — they do not exercise the strip itself, which is covered by
+   ``tests/unit/test_recovery_strip_private.py``.
 
 Logging containment: importing ``bridge.telegram_bridge`` anywhere in the
 pytest process attaches a root RotatingFileHandler on ``logs/bridge.log``, so
@@ -184,8 +184,10 @@ class TestCatchupShadowAppend:
         entry = entries[0]
         assert entry["chat_id"] == str(dialog.id)
         assert entry["message_id"] == 801
+        assert entry["sender_id"] == 12345
         assert entry["sender_name"] == "TestUser"
         assert entry["text"] == "missed message"
+        assert entry["ts"] is not None
 
     @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_re_enqueue(
@@ -235,7 +237,10 @@ class TestReconcilerShadowAppend:
         entry = entries[0]
         assert entry["chat_id"] == str(dialog.id)
         assert entry["message_id"] == 901
+        assert entry["sender_id"] == 12345
+        assert entry["sender_name"] == "TestUser"
         assert entry["text"] == "recovered message"
+        assert entry["ts"] is not None
 
     @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_re_enqueue(
@@ -338,8 +343,10 @@ class TestAgentCatchupShadowAppend:
         entry = entries[0]
         assert entry["chat_id"] == str(chat.chat_id)
         assert entry["message_id"] == 42
+        assert entry["sender_id"] == 12345
         assert entry["sender_name"] == "TestUser"
         assert entry["text"] == "unanswered question?"
+        assert entry["ts"] is not None
 
     @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_recovery_enqueue(
