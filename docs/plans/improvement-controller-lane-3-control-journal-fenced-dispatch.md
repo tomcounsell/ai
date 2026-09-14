@@ -757,6 +757,29 @@ Critique round 4, 2026-09-14 (FULL depth; mode: sequential lenses, Agent tool un
 | NIT | Risk & Robustness | A crash between `transition_status(fresh, "pending")` and `publish_session_notify` leaves a `pending` row nobody was told about; the retry tick skips the publish for every non-admitted status, so the row waits for the stalled-pending sweep. | Taken. `activate` has an explicit `fresh.status == "pending"` branch that re-publishes without a flip and then records `running` (Data Flow step 8, Race 7, Task 6). `test_activate_publishes_notify_once_after_the_flip` keeps its exactly-once assertion on the admitted path; `test_activate_retry_republishes_a_pending_row` asserts the retry publishes once and records no `transition_status` call. Success Criterion updated. | `publish_session_notify` is notify-only and fail-quiet (`agent/agent_session_queue.py:967`), so re-publishing when `fresh.status == "pending"` costs nothing; keep `test_activate_publishes_notify_once_after_the_flip` asserting exactly once on the admitted path. |
 | NIT | History & Consistency | The Verification row "Two counters, two owners" pins `grep -c '"attempts"' tools/improvement_control/recovery.py` to `== 0`, while Task 7 tells the builder to state in `recovery.py` that `attempts` is never read or written there. A docstring that spells the field with double quotes fails a correct build, the same shape as the status-trio row fixed in round 3. | Taken: the row now greps the write, `grep -cE 'HINCRBY.*attempts' tools/improvement_control/recovery.py` == 0, and Task 7 tells the builder to keep the "attempts belongs elsewhere" remark in the module docstring rather than on the `HINCRBY` line. Cosmetic: the Freshness Check's `known_owners` citation corrected `:33` → `:30`. | Grep the write, not the word: `grep -cE 'HINCRBY[^\n]*attempts' tools/improvement_control/recovery.py` == 0, or tell the builder to use backticks in comments. |
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound
+(`concern_round_count = 3`, `MAX_CONCERN_RECRITIQUE_ROUNDS = 3`), so this
+note is written mechanically per the router's row-4c contract even though
+the round-4 table above shows all three round-4 rows (one CONCERN, two
+NITs) already marked "Taken" against the revised text.
+
+- **Resume/pause ordering on a `reconciliation_required` wedge** — the
+  round-4 CONCERN: nothing pauses the head when an intent moves to
+  `reconciliation_required`, so a `resume` that checks `paused` before
+  scanning for blocking intents would leave an unpaused wedge with no exit.
+  Accepted because: it was in fact resolved by the same revision that
+  produced this build (`revision_applied_at` postdates the verdict) —
+  Decision 9's `resume` body scans for `reconciliation_required` intents
+  first, cancels under `--force`, and consults `paused` last; Task 10 adds
+  `test_resume_force_clears_a_wedge_on_an_unpaused_head`. The builder
+  re-verifies this ordering when implementing Task 10 rather than treating
+  it as closed by documentation alone, since the CONCERN's own
+  "Implementation Note" cell still carries an untaken alternative
+  (pause-by-construction in `mark_reconciliation_required`) that a future
+  reviewer could still prefer.
+
 ---
 
 ## Open Questions
