@@ -82,6 +82,8 @@ NON_TERMINAL_STATUSES = frozenset(
         "paused_circuit",  # paused by api-health-gate when Anthropic circuit is OPEN
         "paused",  # paused mid-execution due to auth/API failure; resumed by session-resume-drip
         "paused_budget",  # paused by the per-tool budget backstop (#1821); human-only recovery
+        "admitted",  # created by the improvement scheduler adapter; inert until the
+        # adapter flips it to pending after a liveness check (#3215)
     }
 )
 
@@ -105,6 +107,11 @@ RECOVERY_OWNERSHIP: dict[str, str] = {
     # pending→denied→paused→pending runaway can form — tool_call_count /
     # total_cost_usd are cumulative and never reset, so an auto-drip would loop.
     "paused_budget": "human",
+    # A session created "admitted" by the improvement scheduler adapter is
+    # inert until that adapter's own liveness check flips it to "pending".
+    # Recovery is the improvement-intent-reconcile reflection, not the
+    # worker or the bridge watchdog -- neither knows this status exists.
+    "admitted": "reflection",
 }
 
 # All known statuses
