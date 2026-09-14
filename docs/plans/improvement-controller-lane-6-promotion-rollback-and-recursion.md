@@ -596,8 +596,9 @@ it normalizes both to per-day, sets `detection_declined = window.coverage_ticks_
 0.8 * baseline.coverage_ticks_per_day`, and returns `verdict`: `held` when the rate did not rise
 past the baseline plus its noise band and detection did not decline, `regressed` when the rate rose
 past the band, `undetermined` when either denominator is zero or detection declined. Evidence
-rows expire at 30 days (`models/improvement_evidence.py:68`); `EVIDENCE_TTL_DAYS = 30` in
-`observation.py` is pinned equal to the model's TTL by a test, and `close_window` returns
+rows expire at 30 days (`Meta.ttl = 86400 * 30`, `models/improvement_evidence.py:146`);
+`EVIDENCE_TTL_DAYS = 30` in `observation.py` is pinned equal to `ImprovementEvidence.Meta.ttl` by a
+test, and `close_window` returns
 `undetermined` with `reason="EVIDENCE_EXPIRED"` when `now - exposed_at > EVIDENCE_TTL_DAYS`,
 because a late operator-invoked close would otherwise count a window whose early rows are gone
 and report the gap as a number. The partial's window row surfaces both reasons. Charter §11's
@@ -813,7 +814,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 
 ### Risk 3: Budget accounting is incomplete and reads as matched
 **Impact:** Unit 1 is unmetered. If `None` were ever read as zero, two arms with wildly different paid-inference spend would look budget-matched and a level-3 claim would measure the budget.
-**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit1` is mutation-checked. The plan states plainly that until lane 3 meters unit 1, no level-3 claim can be made here, and the report says so in the `why_not` field.
+**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit1` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until lane 3 meters unit 1, no level-3 claim can be made here, and the report says so in the `why_not` field.
 
 ### Risk 4: Lane 5 defines its own process digest and the arms cannot be compared
 **Impact:** If lane 5 hashes something other than a `ResearchProcessSpec`, the incumbent digest on the current revision is opaque, and `--arm-a` cannot be reconstructed as a spec.
@@ -863,7 +864,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 **Trigger:** `baseline_window_days + window_days` approaches the 30-day evidence TTL.
 **Data prerequisite:** Baseline rows still present when the window closes.
 **State prerequisite:** none
-**Mitigation:** The baseline is measured and frozen onto `outcome.baseline` at `expose`, never recomputed; `close_window` reads only the window. The proposal gate caps `baseline_window_days + window_days` at 28 so even the baseline read at exposure is inside the TTL.
+**Mitigation:** The baseline is measured and frozen onto `outcome.baseline` at `expose`, never recomputed; `close_window` reads only the window. The proposal gate caps `baseline_window_days + window_days` at 28 so even the baseline read at exposure is inside the TTL. The cap protects an on-time close; a late close is a separate hazard, since nothing schedules `close_window` and an operator can run it weeks after the window ended, so `close_window` refuses to score a window once `now - exposed_at > EVIDENCE_TTL_DAYS` (`EVIDENCE_EXPIRED`) rather than counting a window whose early rows have expired. A capped read is the third hazard: `measure` reports `truncated` when the newest-first read of `READ_LIMIT` rows did not reach the window's start, and a truncated window is `undetermined` (`EVIDENCE_TRUNCATED`).
 
 ### Race 5: The charter is amended between proposal and approval
 **Location:** `lifecycle.approve`
@@ -1004,8 +1005,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: release-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Write `observation.py` (`OBSERVATION_METRICS`, `measure`, `compare_windows` with the Wilson band and the 0.8 coverage threshold) and `lineage.py` (`release_lineage`).
-- Tests: seeded evidence in two windows yields `held`, `regressed`, and `undetermined` on the three fixtures; zero denominator yields `None` rate; a raising read yields `unavailable`.
+- Write `observation.py` (`OBSERVATION_METRICS`, `EVIDENCE_TTL_DAYS = 30`, `measure` with the `truncated` flag, `compare_windows` with the Wilson band, the 0.8 coverage threshold, and the `EVIDENCE_TRUNCATED` branch) and `lineage.py` (`release_lineage`).
+- Tests: seeded evidence in two windows yields `held`, `regressed`, and `undetermined` on the three fixtures; zero denominator yields `None` rate; a raising read yields `unavailable`; a read that hits the limit inside the window yields `truncated=True` and `undetermined`; `EVIDENCE_TTL_DAYS` equals the model's TTL.
 
 ### 3. Lifecycle
 - **Task ID**: build-lifecycle
@@ -1015,8 +1016,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: release-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Write `lifecycle.py`: `ReleaseRefused` and the closed code vocabulary, `_transition` with re-read, `propose`, `approve`, `open_pr`, `expose`, `close_window`, `rollback`, `withdraw`, the injectable `Runner`.
-- Tests: one per refusal code; the happy path through `approved` with a recording runner; `expose` with canned `gh pr view` JSON freezes the baseline; `close_window` before the window end refuses `WINDOW_OPEN` and with `--force` records the reason; `approve` re-checks charter drift (Race 5); `test_close_window_never_calls_rollback`.
+- Write `lifecycle.py`: `ReleaseRefused` and the closed code vocabulary (including `ROLLBACK_PUSH_REFUSED` and `WINDOW_EXCEEDS_EVIDENCE_TTL`), `_transition` with re-read, `propose`, `approve`, `open_pr`, `expose` (restamping `observation_window_ends_at` from `exposed_at` with a `window_restamped` history event), `close_window` (`EVIDENCE_EXPIRED` check, `window_shortfall_days` from `exposed_at`), `rollback` (push, `ls-remote` confirmation, `--branch`), `withdraw`, the injectable `Runner`.
+- Tests: one per refusal code; the happy path through `approved` with a recording runner; `expose` with canned `gh pr view` JSON freezes the baseline and restamps the window end (`test_expose_restamps_window_end_from_exposed_at`); `close_window` before the window end refuses `WINDOW_OPEN`, with `--force` records the reason and a positive shortfall, on time records shortfall 0, past the TTL yields `EVIDENCE_EXPIRED`; `rollback` with a refused push and with a moved remote head both leave state unchanged; `approve` re-checks charter drift (Race 5); `test_close_window_never_calls_rollback`.
 
 ### 4. Drill and rollback execution
 - **Task ID**: build-drill
@@ -1025,9 +1026,9 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: drill-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Write `drill.py`: worktree creation under the retention root, the step executor (shared with `rollback`), revert, per-surface and whole-tree restoration checks, `verify` with the new `TimeoutSettings.improvement_drill_verify_seconds`, `finally` removal, `--sweep`, the record shape with `exercised`/`not_exercised`.
+- Write `drill.py`: worktree creation under the retention root, the step executor (shared with `rollback`), the three pre-revert range checks (`BASE_NOT_ANCESTOR`, `MERGE_COMMITS_IN_RANGE`, `UNDECLARED_SURFACE_CHANGED`), revert, per-surface and whole-tree restoration checks, `verify` with the new `TimeoutSettings.improvement_drill_verify_seconds`, `finally` removal, `--sweep`, the record shape with `exercised`/`not_exercised`.
 - Add the timeout field to `config/settings.py` and its row in `docs/features/config-timeout-catalog.md`.
-- Tests against a temporary git repository built by the test: pass; revert conflict; undeclared surface differs (whole-tree check bites); verify timeout; worktree removed on every path; refuses a checkout path; `drill_log` round-trips through the verifying store.
+- Tests against a temporary git repository built by the test: pass; revert conflict; base not an ancestor; merge commit in range; undeclared surface changed (pre-check bites, no revert ran); post-revert residue (whole-tree check bites); verify timeout; worktree removed on every path; refuses a checkout path; `drill_log` round-trips through the verifying store.
 
 ### 5. Process digest, freshness, budget, arms
 - **Task ID**: build-recursion-core
@@ -1037,7 +1038,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Write `process.py`, `freshness.py`, `budget.py` (`BudgetCap`, `BudgetUse`, `BudgetReader`, `LedgerBudgetReader`, `budgets_comparable`), `arms.py` (`ArmRunner`, `ArmResult`, `ReplayArmRunner`, `register_arm_runner`, `get_arm_runner`, `ArmRunnerAbsent`).
-- Tests: canonical digest independent of key order; invalid split refused; freshness excludes cases with an experiment, an investigation, or a prior comparison, with reasons; `LedgerBudgetReader` sums seeded `InfrastructureReservation` rows tagged by arm run id and returns `None` for unit 1; `budgets_comparable` on unknown, exceeded, mismatched, and ok.
+- Tests: canonical digest independent of key order; invalid split refused; empty split digests; lane 5 fixture digests identically through both functions (skipped by name until `tools/improvement_ranking.py` exists); freshness excludes cases with an experiment, an investigation, or a prior comparison, with reasons; `LedgerBudgetReader` sums seeded `InfrastructureReservation` rows whose `resource` carries the `arm:<arm_run_id>:` prefix (admitted through lane 7's `admit()` with a `ResourceDecl` named that way, never by writing `reason`), returns `None` on zero matched rows and `None` for unit 1; `budgets_comparable` on unknown, exceeded, mismatched, ok, and an explicit zero cap.
+- `ReplayArmRunner` admits its fixture spend through `admit()` under the arm-prefixed resource name so the ledger reader is exercised on the same path a production runner uses; `arms.py` also exposes `resolve_arm_runner(spec: str)` for the `--arm-runner module:attr` form.
 
 ### 6. Comparison and claim report
 - **Task ID**: build-comparison
@@ -1047,7 +1049,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: false
 - Write `compare.py` (`freeze`, `run`, `_write_revision`, `revision supersede` helper) importing `freeze_protocol`, `compute_contract_digest`, `clustered_bootstrap_ci`, `evaluate_family` from lane 4, and `report.py` (`claim_report`, `render`).
-- Tests: freeze refuses worked opportunities and zero opportunities; run refuses identical arms and an absent runner; equal-cap replay yields accept/reject/inconclusive on three fixtures with the interval and Holm recorded; unknown unit 1 yields inconclusive with `BUDGET_UNKNOWN:unit1`; an arm exception yields `infra_failure`; accept writes the revision new-then-supersede; two current revisions are reported as `REVISION_CONFLICT`; the report degrades per level and never contains a count.
+- Tests: freeze refuses worked opportunities and zero opportunities; run refuses identical arms and an absent runner, resolves `--arm-runner` by lazy import and refuses an unimportable or missing attribute with the error in `detail`; equal-cap replay yields accept/reject/inconclusive on three fixtures with the interval and Holm recorded; unknown unit 1 yields inconclusive with `BUDGET_UNKNOWN:unit1`; an arm that admitted nothing yields `BUDGET_UNKNOWN:unit3`; an arm exception yields `infra_failure`; accept writes the revision new-then-supersede; two current revisions are reported as `REVISION_CONFLICT`; the report degrades per level and never contains a count.
 
 ### 7. CLI, dashboard, end-to-end
 - **Task ID**: build-surface
@@ -1103,6 +1105,9 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Lane 4 harness untouched | `git diff --stat main -- tools/improvement_eval/ \| tail -1 \| grep -c 'changed'` | match count == 0 |
 | Process digest is deterministic and canonical | `.venv/bin/python -c "from tools.improvement_recursion.process import ResearchProcessSpec, research_process_digest as d; a = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'probe': 0.5, 'web_research': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); b = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'web_research': 0.5, 'probe': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); assert d(a) == d(b) and d(a).startswith('sha256:'); print('canonical')"` | output contains canonical |
 | Comparison refuses without an arm runner | `.venv/bin/python -c "from tools.improvement_recursion.arms import get_arm_runner, ArmRunnerAbsent\ntry:\n    get_arm_runner()\nexcept ArmRunnerAbsent as e:\n    print('ARM_RUNNER_ABSENT', e)"` | output contains ARM_RUNNER_ABSENT |
+| Comparison resolves a named arm runner by lazy import | `.venv/bin/python -c "from tools.improvement_recursion.arms import resolve_arm_runner, ReplayArmRunner; r = resolve_arm_runner('tools.improvement_recursion.arms:ReplayArmRunner'); assert isinstance(r, ReplayArmRunner); print('resolved')"` | output contains resolved |
+| Incident binary imports nothing from the research CLI at load | `.venv/bin/python -c "import sys; import tools.improvement_release.cli; assert not [m for m in sys.modules if m in ('tools.improvement', 'tools.improvement_ranking', 'tools.improvement_plan_arm')], 'research CLI imported at load'; print('decoupled')"` | output contains decoupled |
+| Evidence TTL constant matches the model | `.venv/bin/python -c "from tools.improvement_release.observation import EVIDENCE_TTL_DAYS; from models.improvement_evidence import ImprovementEvidence; assert EVIDENCE_TTL_DAYS * 86400 == ImprovementEvidence.Meta.ttl, (EVIDENCE_TTL_DAYS, ImprovementEvidence.Meta.ttl); print('ttl pinned')"` (`Meta.ttl = 86400 * 30`, `models/improvement_evidence.py:146`) | output contains ttl pinned |
 | Release states are six and include accepted | `.venv/bin/python -c "from models.improvement_release import RELEASE_STATES as S; assert len(S) == 6 and 'accepted' in S and S[0] == 'proposed', S; print('states ok')"` | output contains states ok |
 | Migration registered | `grep -c '"confirm_improvement_release_lane6_fields"' scripts/update/migrations.py` | output contains 1 |
 | Feature doc exists and is indexed | `test -f docs/features/improvement-release.md && grep -c 'improvement-release.md' docs/features/README.md` | output contains 1 |
