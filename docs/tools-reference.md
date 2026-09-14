@@ -412,7 +412,7 @@ valor-improve-release gate                        # the promotion gate: automate
 
 # Recursive comparison (claim level 3)
 valor-improve-release compare fresh --candidates c1 c2 c3          # split case ids into fresh and excluded, with reasons
-valor-improve-release compare freeze --arm-a a.json --arm-b b.json --opportunities c1 c3 --budget budget.json
+valor-improve-release compare freeze --arm-a a.json --arm-b b.json --opportunities c1 c3 --budget budget.json  # budget.json: {subscription_turns (unit 1, the lane slot), unit2_usd (paid inference), unit3_usd (infrastructure), wall_seconds}
 valor-improve-release compare run --experiment ID                  # run both arms with the registered ArmRunner
 valor-improve-release compare run --experiment ID --arm-runner tools.improvement_plan_arm:PlannerArmRunner  # lazy import
 valor-improve-release revision supersede --revision ID --reason TEXT   # the REVISION_CONFLICT remedy: two current revisions

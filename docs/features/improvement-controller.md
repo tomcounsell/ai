@@ -27,7 +27,8 @@ checkout. The cloud sandbox itself is decided and unbuilt; see
 [Improvement Cloud Execution](improvement-cloud-execution.md). The control journal and the
 research sessions arrive with lanes 3 and 5, each as its own child issue; lane 5's planner tick is
 the production `ArmRunner`, and lane 3's paid-inference meter is what lets a comparison account
-unit 1.
+unit 2 (the parent plan's Gap D numbering: unit 1 is the subscription lane slot, unit 2 daily paid
+inference, unit 3 weekly infrastructure).
 
 Read the capability matrix before believing anything is working. It grades each
 component on four separate axes (implemented, deployed, measured, effect) and

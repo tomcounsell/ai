@@ -443,7 +443,7 @@ timing.
 reason), `INCUMBENT_PROCESS_UNKNOWN` (`arm_a` omitted and no `current`
 revision carries a digest), and `REVISION_CONFLICT` before writing anything.
 It builds the protocol (`arms: {a, b}`, `opportunity_ids`,
-`opportunity_set_digest` over the sorted id list, `budget_cap` in four units,
+`opportunity_set_digest` over the sorted id list, `budget_cap` in four fields,
 `primary_endpoint: validated_gain`, `minimum_worthwhile_effect`,
 `stopping_rule: finite batch`, `evaluator_version`), freezes it through lane
 4's `freeze_protocol`, and writes an `ImprovementExperiment(state="frozen",
@@ -480,9 +480,12 @@ and `get_arm_runner`.
 
 ### Budget accounting
 
-`BudgetCap` and `BudgetUse` each carry four units: `unit1_usd` (paid
-inference), `unit3_usd` (infrastructure), `subscription_turns`, and
-`wall_seconds`. A `None` use means unknown, never zero. Dollars come from
+`BudgetCap` and `BudgetUse` each carry four fields, numbered as the parent
+plan's Gap D numbers the budget units: `subscription_turns` (unit 1, the
+subscription lane slot; a concurrency budget, accounted as the arm's reported
+turn count rather than money), `unit2_usd` (unit 2, daily paid inference),
+`unit3_usd` (unit 3, weekly infrastructure), and `wall_seconds` (elapsed
+time). A `None` use means unknown, never zero. Dollars come from
 records, never from the arm's own report: `LedgerBudgetReader.unit3_usd`
 sums `settled_usd` (else `amount_usd`) over `InfrastructureReservation` rows
 in `reserved` or `settled` whose `resource` starts with `arm:<arm_run_id>:`,
@@ -490,9 +493,9 @@ and answers `None` when zero rows match, so an arm that admitted nothing
 through the ledger is unknown rather than free. Turns and wall seconds come
 from the `ArmResult`, since no record outside the arm carries them.
 
-`unit1_usd` is unmetered until lane 3 lands its paid-inference meter;
-`LedgerBudgetReader.unit1_usd` answers `None`, so every comparison today
-carries `BUDGET_UNKNOWN:unit1` and no level-3 claim can be made. Charter §8:
+`unit2_usd` is unmetered until lane 3 lands its paid-inference meter;
+`LedgerBudgetReader.unit2_usd` answers `None`, so every comparison today
+carries `BUDGET_UNKNOWN:unit2` and no level-3 claim can be made. Charter §8:
 uncertain or missing metering is never zero cost.
 
 `budgets_comparable(a, b, cap, tolerance=0.10)` returns `(ok, reasons)`,
@@ -557,7 +560,7 @@ supported, evidence, confidence_interval, correction, falsifier, why_not}`:
 |---|---|---|
 | 1, a complete research cycle | An experiment has a complete evaluation and its case has left the open states | "no complete cycle recorded" |
 | 2, a released change held its measured effect through its observation window | An `accepted` release has `outcome.claim_level_2_supported == True`; the interval is `interval_of(evaluation, primary_endpoint)` | "no accepted release recorded", or the list of accepted releases with each one's reason |
-| 3, a changed research process produced greater validated gain per comparable budget on fresh opportunities | A `recursive-comparison/` evaluation has verdict `accept` and `budget_of(evaluation).comparable` is true | "no comparison recorded", or the newest comparison's refusal reasons (`BUDGET_UNKNOWN:unit1`, ...) and verdict |
+| 3, a changed research process produced greater validated gain per comparable budget on fresh opportunities | A `recursive-comparison/` evaluation has verdict `accept` and `budget_of(evaluation).comparable` is true | "no comparison recorded", or the newest comparison's refusal reasons (`BUDGET_UNKNOWN:unit2`, ...) and verdict |
 
 Each level is computed inside its own guard: a read failure logs a warning and
 yields `supported=False` with `why_not="could not be determined: <reason>"`
@@ -639,7 +642,7 @@ Rollback and observation plan files:
 Budget cap file for `compare freeze`:
 
 ```json
-{"unit1_usd": 5.0, "unit3_usd": 5.0, "subscription_turns": 40, "wall_seconds": 7200}
+{"unit2_usd": 5.0, "unit3_usd": 5.0, "subscription_turns": 40, "wall_seconds": 7200}
 ```
 
 The operator path, end to end: `propose` → `drill` → `approve` → `open-pr` →

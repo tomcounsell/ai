@@ -496,11 +496,12 @@ class TimeoutSettings(BaseModel):
         ge=1.0,
         le=3600.0,
         description=(
-            "Timeout (seconds) for each `verify` command a release's rollback "
-            "plan declares, run by tools/improvement_release/drill.py inside "
-            "the drill worktree and by lifecycle.rollback() against the real "
-            "revert (#3218, lane 6). A command that exceeds it is recorded as "
-            "a `fail` with `timeout` on the drill record rather than raising "
+            "Per-command timeout (seconds) for each `rollback_plan.verify` "
+            "command a release declares, applied by "
+            "tools/improvement_release/drill.py::run inside the drill "
+            "worktree (#3218, lane 6); lifecycle.rollback() runs no verify "
+            "commands. A command that exceeds it is recorded as a `fail` with "
+            "`reason: verify_timeout` on the drill record rather than raising "
             "past the worktree cleanup. Default 300s: the same ceiling as "
             "subprocess_default_s's `pytest tests/unit/` quality gate, since "
             "a verify step is typically a test run. Env: "

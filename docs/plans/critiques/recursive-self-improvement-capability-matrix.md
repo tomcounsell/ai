@@ -163,7 +163,7 @@ calibration floor, on purpose.
 | Candidate-surface denylist (`denylist.py`): charter, charter model, identity, this package, secrets files, git hooks; normalized paths, globs and escapes refused | yes | yes: consulted by every `propose` | **yes**: a Verification row runs it against the charter paths | n/a. It catches only what it names; a candidate editing `models/__init__.py` or the loader's owner check from another file passes it, and the loader's owner refusal and the pinned-digest gate are the other two guards |
 | Research process digest (`tools/improvement_recursion/process.py`): canonical bytes, one hashing routine shared with lane 5 | yes | no writer yet: lane 5 sets `research_process_digest` on revisions by importing this function; the cross-lane byte test skips until `tools/improvement_ranking.py` lands | no | n/a |
 | Freshness by record lookup (`freshness.py`) | yes | no | no | n/a |
-| Budget accounting (`budget.py`): four units, `LedgerBudgetReader` unit 3 by `arm:<run>:` prefix, `None` on zero rows, `budgets_comparable` | yes | no | **partly measurable**: unit 3 reads real ledger rows through the same `admit()`/`settle()` path a production arm takes. **Unit 1 is not metered**; `unit1_usd` answers `None` until lane 3, so every comparison today refuses a claim with `BUDGET_UNKNOWN:unit1` | n/a |
+| Budget accounting (`budget.py`): four units, `LedgerBudgetReader` unit 3 by `arm:<run>:` prefix, `None` on zero rows, `budgets_comparable` | yes | no | **partly measurable**: unit 3 reads real ledger rows through the same `admit()`/`settle()` path a production arm takes. **Unit 2 (paid inference) is not metered**; `unit2_usd` answers `None` until lane 3, so every comparison today refuses a claim with `BUDGET_UNKNOWN:unit2`; unit 1 is the subscription lane slot, accounted as `subscription_turns` | n/a |
 | Comparison (`compare.py`): frozen contract through lane 4's `freeze_protocol`, two arm seams (`--arm-runner` lazy import, in-process registry), seeded arm order, paired deltas clustered by `priority_area`, Holm, one evaluation in lane 4's string shapes, new-then-supersede revision write, `REVISION_CONFLICT` | yes | no | no: every run uses `ReplayArmRunner` fixtures. **The production `ArmRunner` is lane 5's** planner tick and does not exist; without it `compare run` is `ARM_RUNNER_ABSENT` or replays fixtures | unknown |
 | Claim report (`report.py`): three ladder levels, each degrading independently, interval, correction, falsifier, `why_not`; no counts | yes | yes: `valor-improve-release report` and the releases partial | **yes, trivially**: on the real project it reports all three levels unsupported (no complete cycle, no accepted release, no comparison) | n/a: the report says what is true, and today that is "unsupported" three times |
 | Dashboard releases partial and `get_release_lineage` (fifth getter, pinned list) | yes | yes | no | n/a |
@@ -176,7 +176,7 @@ has produced a real `accept` verdict: the control loop that would freeze one is
 lane 3's and the research process that would drive it is lane 5's. Three
 things are not implemented and the code says so: automated promotion (the
 gate refuses and names the two events that would change that, neither of
-which is this codebase's to produce), unit-1 paid-inference metering (lane
+which is this codebase's to produce), unit-2 paid-inference metering (lane
 3), and the production arm runner (lane 5). Every drill that has run was
 against a temporary repository in a test db, and its record names what it did
 not rehearse. No level-2 or level-3 claim is supported, and the report says
@@ -188,7 +188,7 @@ so.
 |---|---|---|
 | Control journal, Lua transition, dispatch intents, `admitted` status | 3 | #3183's create-or-bind seam and dead-letter record; #3183's lane 6 for the fencing lease |
 | `valor-improve` CLI, break-glass `pause`/`resume`/`doctor` | 3 | lane 3 |
-| Unit-1 paid-inference meter (`BudgetReader.unit1_usd` answers `None` until it exists) | 3 | lane 3 |
+| Unit-2 paid-inference meter (`BudgetReader.unit2_usd` answers `None` until it exists) | 3 | lane 3 |
 | Observer→planner loop, investigations, first journey-preservation experiment | 5 | lane 3 (the harness it drives is built) |
 | Production `ArmRunner` (the planner tick under a pinned process spec) and the writer of planner-tick `ImprovementModelRevision` rows | 5 | lane 5 |
 | Automated promotion | none | two events outside the codebase: credential separation from candidate execution, and a Tom-amended charter naming the reversible surfaces. The gate refuses until both |
