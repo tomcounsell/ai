@@ -72,11 +72,23 @@ async def test_txt_attachment_steering_enriches_and_ingests(tmp_path: Path, monk
     #    for our assertions but lets us read what `text` reached the queue.
     pushed: dict = {}
 
-    def _spy_push(session_id, text, sender_name, *, is_abort=False):
+    def _spy_push(
+        session_id,
+        text,
+        sender,
+        is_abort=False,
+        target_agent=None,
+        front=False,
+        room_id=None,
+        timestamp=None,
+    ):
+        # Mirrors push_steering_message's full signature (agent/steering.py) so
+        # production passing any current parameter never raises TypeError here.
         pushed["session_id"] = session_id
         pushed["text"] = text
-        pushed["sender_name"] = sender_name
+        pushed["sender_name"] = sender
         pushed["is_abort"] = is_abort
+        pushed["room_id"] = room_id
 
     monkeypatch.setattr(telegram_bridge, "push_steering_message", _spy_push)
 

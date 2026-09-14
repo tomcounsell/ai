@@ -16,137 +16,68 @@ Architecture:
 - Worker loop: one asyncio.Task per project, processes sessions sequentially
 - Revival detection: lightweight git state check, no SDK agent call
 - Output: OutputHandler protocol (Telegram callbacks or file logging)
+
+This module imports only what it uses. It is not a re-export hub: a symbol that
+lives in agent/session_health.py, agent/session_revival.py, agent/session_state.py
+or any other sibling is imported from that module, never through this one. Issue
+#2876 removed the 40 re-exports that used to sit at the top of this file, and
+tests/unit/test_no_reexport_hub.py fails if any come back.
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
 import subprocess
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from popoto.exceptions import ModelException
+from pydantic import ValidationError
 
-# Shared mutable session-tracking state — re-exported here for backward compatibility.
-import agent.session_state as _session_state  # noqa: F401 (also used for mutation sites)
-from agent.branch_manager import get_branch_state  # noqa: F401
+# Shared mutable session-tracking state. Imported as a module, not as names, so
+# the mutation sites below write through to the owning module rather than to a
+# local copy of each binding.
+import agent.session_state as _session_state
 from agent.output_handler import OutputHandler
-
-# Output routing — decision logic lives in output_router; re-exported here
-# for backward compatibility with callers that import from agent_session_queue.
-from agent.output_router import (
-    MAX_NUDGE_COUNT,  # noqa: F401
-    NUDGE_MESSAGE,  # noqa: F401
-    SendToChatResult,  # noqa: F401
-    determine_delivery_action,  # noqa: F401
-)
 
 # Off-loop Redis bulkhead seam for the drain-loop idle-check (issue #1826).
 from agent.redis_offload import offload_redis
-
-# Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
-from agent.session_completion import (  # noqa: F401
-    _CONTINUATION_PM_MAX_DEPTH,
-    _complete_agent_session,
-    _diagnose_missing_session,
-    _extract_issue_number,
-    _transition_parent,
-)
-
-# Session executor (CLI harness, nudge/re-enqueue, steer) — re-exported for backward compatibility.
-from agent.session_executor import (  # noqa: F401
-    _HARNESS_EXHAUSTION_MSG,
-    _HARNESS_NOT_FOUND_MAX_RETRIES,
-    _HARNESS_NOT_FOUND_PREFIX,
-    _calendar_heartbeat,
-    _enqueue_nudge,
-    _execute_agent_session,
-    _find_valor_calendar,
-    _handle_harness_not_found,
-    re_enqueue_session,
-    steer_session,
-)
-
-# Health monitoring — re-exported here for backward compatibility.
-from agent.session_health import (  # noqa: F401
-    AGENT_SESSION_HEALTH_CHECK_INTERVAL,
-    AGENT_SESSION_HEALTH_MIN_RUNNING,
-    HEARTBEAT_FRESHNESS_WINDOW,
-    HEARTBEAT_WRITE_INTERVAL,
-    MAX_RECOVERY_ATTEMPTS,
+from agent.session_completion import _complete_agent_session
+from agent.session_executor import _execute_agent_session
+from agent.session_health import (
     TASK_CANCEL_TIMEOUT,
-    _agent_session_health_check,
-    _agent_session_health_loop,
-    _agent_session_hierarchy_health_check,
     _apply_recovery_transition,
-    _cleanup_orphaned_claude_processes,
-    _dependency_health_check,
-    _has_progress,
     _is_ledger,
-    _reap_orphan_session_processes,
-    _recover_interrupted_agent_sessions_startup,
     _should_kill_no_progress,
-    _sweep_dead_worker_sessions,
-    _sweep_stranded_waiting_for_children_parents,
-    _tier2_reprieve_signal,
     _ts,
-    _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
-    register_worker_pid,
 )
 from agent.session_logs import save_session_snapshot
-
-# Session pickup (pop locking, startup steering drain, dependency checks) — re-exported here.
-from agent.session_pickup import (  # noqa: F401
-    _POP_LOCK_TTL_SECONDS,
-    _acquire_pop_lock,
-    _drain_startup_steering,
-    _maybe_inject_resume_hydration,
-    _pop_agent_session,
-    _pop_agent_session_with_fallback,
-    _release_pop_lock,
-    dependency_status,
-)
-
-# Revival detection — re-exported here for backward compatibility.
-from agent.session_revival import (  # noqa: F401
-    _COOLDOWN_FILE,
-    REVIVAL_COOLDOWN_SECONDS,
-    _load_cooldowns,
-    _save_cooldowns,
-    _session_branch_name,
-    check_revival,
-    cleanup_stale_branches,
-    cleanup_stale_branches_all_projects,
-    maybe_send_revival_prompt,
-    queue_revival_agent_session,
-    record_revival_cooldown,
-)
+from agent.session_pickup import _pop_agent_session, _pop_agent_session_with_fallback
+from agent.session_revival import _session_branch_name
 from agent.session_runner.liveness import (
     clear_hang_state,
     derive_sdk_ever_output,
     subprocess_hang_verdict,
     tool_activity_ts,
 )
-from agent.session_state import (  # noqa: F401
+from agent.session_state import (
     ReactionCallback,
     ResponseCallback,
     SendCallback,
-    SessionHandle,
     _active_events,
     _active_sessions,
     _active_workers,
     _reaction_callbacks,
     _response_callbacks,
     _send_callbacks,
-    _shutdown_requested,
-    _slot_registry,
     _starting_workers,
 )
+from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
@@ -196,9 +127,19 @@ PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 # fence exists to prevent, since a `pending` row is non-terminal and therefore
 # visible to find_live_session_by_pid's ownership scan.
 #
-# This set is deliberately the execution fence and run identity, NOT a general
-# freshness reset. The heartbeat and liveness timestamps carry, as they always
-# have; changing those has watchdog blast radius and is a separate decision.
+# This set is deliberately the execution fence, run identity, and the run's own
+# outcome, NOT a general freshness reset. The heartbeat and liveness timestamps
+# carry, as they always have; changing those has watchdog blast radius and is a
+# separate decision.
+#
+# ``exit_reason`` belongs here for the same reason (#3289): it names how ONE
+# execution ended, and the executor already clears it at run start so every
+# consumer can read "absent" as "this run has not exited yet". The continuation
+# path is the OTHER way a new run begins, so it clears the field on the declared
+# mechanism rather than relying on the run-start reset alone. Nothing durable is
+# lost -- the run's outcome lives permanently in its ``exit_summary``
+# ``session_events`` entry (``SessionRunnerAdapter.publish_exit_summary``),
+# which ``clone_agent_session_fields`` copies intact.
 _EXECUTION_FENCE_RESET_FIELDS = frozenset(
     {
         # The fenced execution record (docs/features/agent-session-fenced-execution-record.md).
@@ -207,6 +148,8 @@ _EXECUTION_FENCE_RESET_FIELDS = frozenset(
         "exec_cwd",  # Working dir that spawn ran in; resume is cwd-scoped.
         "exec_harness",  # Which harness ran it; the new run picks its own.
         "spawn_history",  # Append-only spawn timeline of the previous run.
+        # The previous execution's outcome.
+        "exit_reason",  # How the run that just ended exited; the new run has not exited.
         # Run identity.
         "active_run_id",  # Names the run that just ended, not the one being queued.
         "owned_run_ids",  # Runs the previous execution owned.
@@ -300,9 +243,12 @@ async def _push_agent_session(
     extra_context_overrides: dict | None = None,
     model: str | None = None,
     requires_real_chrome: bool = False,
+    idempotency_key: str | None = None,
+    status: str = "pending",
+    dev_harness: str | None = None,
     **_kwargs,
-) -> int:
-    """Create an agent session in Redis and return the pending queue depth for this chat.
+) -> tuple[int, str]:
+    """Create an agent session in Redis; return the queue depth and the session's id.
 
     Queue is keyed by chat_id so different chat groups for the same project
     can run in parallel. project_key is preserved on the model for config lookup.
@@ -321,6 +267,22 @@ async def _push_agent_session(
             session concurrently with another requires_real_chrome=True session
             (issue #1256, Decision 2). Default False keeps the existing
             non-serialized scheduling behavior for ordinary sessions.
+        idempotency_key: When set, this enqueue is single-winner under that
+            key: the first caller binds it to an ``agent_session_id`` and
+            creates the row; every later caller with the same key returns the
+            bound id without creating a second session. Callers that can be
+            retried (a reflection tick, a crash-retry of one) pass a key
+            derived from what makes the work the same work. None keeps the
+            unconditional create every other caller wants.
+        status: The status the row is created in. ``pending`` is the queue's
+            own entry state; a caller that admits work through a different
+            gate can name its own.
+
+    Returns:
+        ``(pending queue depth for this chat, agent_session_id)``. The id is
+        what an idempotent caller needs: on a lost race it is the id of the
+        session that already exists, so the caller can act on it rather than
+        discovering the duplicate later.
     """
     # Stopgap (#1633): refuse NEW parent-attached session creation at the
     # queue chokepoint. Covers every enqueue caller and fires before any
@@ -336,6 +298,22 @@ async def _push_agent_session(
         if not child_sessions_allowed():
             raise ChildSessionsDisabledError()
         logger.warning(BYPASS_WARNING)
+
+    # Codex dev-lane selection (plan #2001, Phase 3): creation-time-only,
+    # validated before any Redis write. Only eng sessions may be flagged;
+    # only "codex" is a valid non-None value. Fires before the
+    # stale-terminal reconcile and the create below, so the refused path
+    # has zero side effects.
+    if dev_harness is not None:
+        if dev_harness != "codex":
+            raise ValueError(
+                f"Unknown dev_harness value: {dev_harness!r}. Allowed: 'codex' or None."
+            )
+        if session_type != SessionType.ENG:
+            raise ValueError(
+                f"dev_harness='codex' requires an eng session (got {session_type!r}). "
+                "Teammate and top-level sessions remain Claude-only."
+            )
 
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
@@ -438,9 +416,39 @@ async def _push_agent_session(
     except Exception as e:
         logger.warning(f"Failed to reconcile stale terminal duplicates for {session_id}: {e}")
 
+    # Single-winner binding, after the stale-terminal reconcile and before the
+    # create (#3183 lane 5b). The key has to be bound before the row exists:
+    # bind it after, and two callers both find nothing and both create.
+    #
+    # A loser whose winner died between the SET NX and the create finds the key
+    # bound but no row, and creates it under the SAME preallocated id (Race 5).
+    # That is why `bind` hands back the id rather than the caller reading one
+    # off a row that may not be there.
+    bound_id: str | None = None
+    if idempotency_key:
+        from agent.enqueue_idempotency import bind
+
+        bound_id, won = await asyncio.to_thread(bind, idempotency_key)
+        if not won:
+            existing = await asyncio.to_thread(AgentSession.get_by_id, bound_id)
+            if existing:
+                logger.info(
+                    "Enqueue for session_id=%s bound to existing session %s (key=%s)",
+                    session_id,
+                    bound_id,
+                    idempotency_key,
+                )
+                depth = await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+                return depth, bound_id
+
     await AgentSession.async_create(
+        # `id=`, never `agent_session_id=`: AgentSession.__init__ pops the
+        # latter as the AutoKeyField's read name and drops it WITHOUT raising,
+        # which would leave the idempotency key pointing at a session that
+        # does not exist.
+        **({"id": bound_id} if bound_id else {}),
         project_key=project_key,
-        status="pending",
+        status=status,
         priority=priority,
         created_at=datetime.now(tz=UTC),
         session_id=session_id,
@@ -460,6 +468,9 @@ async def _push_agent_session(
         project_config=project_config or None,
         model=model or None,
         requires_real_chrome=requires_real_chrome,
+        dev_harness=dev_harness,
+        codex_turn_count=(0 if dev_harness == "codex" else None),
+        dev_lane_fence=(uuid.uuid4().hex if dev_harness == "codex" else None),
         thread_first_created_at=(thread_rollup or {}).get("thread_first_created_at"),
         thread_turn_count=(thread_rollup or {}).get("thread_turn_count", 0),
         thread_tool_call_count=(thread_rollup or {}).get("thread_tool_call_count", 0),
@@ -474,7 +485,7 @@ async def _push_agent_session(
             def _init_stage_states():
                 from agent.pipeline_state import PipelineStateMachine
 
-                sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+                sessions = AgentSession.rows_for_session_id(session_id, status="pending")
                 if sessions and not sessions[0].stage_states:
                     sm = PipelineStateMachine(sessions[0])
                     # PipelineStateMachine.__init__ already sets ISSUE=ready, rest=pending
@@ -489,7 +500,7 @@ async def _push_agent_session(
     try:
 
         def _log_lifecycle():
-            sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+            sessions = AgentSession.rows_for_session_id(session_id, status="pending")
             if sessions:
                 sessions[0].log_lifecycle_transition("pending", "agent session enqueued")
 
@@ -514,13 +525,13 @@ async def _push_agent_session(
             _wk = slug
         else:
             _wk = project_key
-        payload = json.dumps(
-            {
-                "chat_id": chat_id,
-                "session_id": session_id,
-                "worker_key": _wk,
-                "is_project_keyed": _wk == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=chat_id,
+                session_id=session_id,
+                worker_key=_wk,
+                is_project_keyed=_wk == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         await asyncio.to_thread(POPOTO_REDIS_DB.publish, channel, payload)
@@ -528,7 +539,13 @@ async def _push_agent_session(
     except Exception as e:
         logger.warning(f"Failed to publish session notification for {session_id}: {e}")
 
-    return await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+    depth = await AgentSession.query.async_count(chat_id=chat_id, status="pending")
+    if bound_id is None:
+        rows = await asyncio.to_thread(
+            lambda: AgentSession.rows_for_session_id(session_id, status=status)
+        )
+        bound_id = rows[0].agent_session_id if rows else ""
+    return depth, bound_id
 
 
 def resolve_branch_for_stage(slug: str | None, stage: str | None) -> tuple[str, bool]:
@@ -704,8 +721,7 @@ def restore_branch_state(session: AgentSession) -> bool:
         return False
 
 
-# Session pickup functions extracted to agent/session_pickup.py.
-# All symbols re-exported at the top of this module for backward compatibility.
+# Session pickup functions live in agent/session_pickup.py.
 
 
 async def _pending_depth(chat_id: str) -> int:
@@ -954,7 +970,7 @@ def publish_session_notify(session) -> None:
     Shared, ownership-safe, notify-only wake helper for any "construct an
     AgentSession, call .save(), then hand it to the worker" call site that
     is NOT `_push_agent_session()` (e.g. hibernation-notify sessions built by
-    `reflections/agents/circuit_health_gate.py` / `agent/sustainability.py`,
+    `reflections/agents/circuit_health_gate.py`,
     and the resume-to-pending path in `tools/valor_session.py`).
 
     Without this, a construct-and-save site's new/resumed session only gets
@@ -994,13 +1010,13 @@ def publish_session_notify(session) -> None:
 
         worker_key = session.worker_key
         project_key = getattr(session, "project_key", None)
-        payload = json.dumps(
-            {
-                "chat_id": getattr(session, "chat_id", None),
-                "session_id": getattr(session, "session_id", None),
-                "worker_key": worker_key,
-                "is_project_keyed": worker_key == project_key,
-            }
+        payload = wire_schemas.dump(
+            wire_schemas.NotifyPayload(
+                chat_id=getattr(session, "chat_id", None),
+                session_id=getattr(session, "session_id", None),
+                worker_key=worker_key,
+                is_project_keyed=worker_key == project_key,
+            )
         )
         channel = notify_channel_for(POPOTO_REDIS_DB)
         POPOTO_REDIS_DB.publish(channel, payload)
@@ -1079,19 +1095,11 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle", channel:
         await asyncio.sleep(NOTIFY_HEALTHCHECK_INTERVAL)
 
         try:
-            import redis as _redis
-            from popoto.redis_db import POPOTO_REDIS_DB
-
             from config.settings import settings
+            from utils.redis_client import derived_redis
 
-            kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
-            probe_conn = _redis.Redis(
-                host=kw.get("host", "localhost"),
-                port=kw.get("port", 6379),
-                db=kw.get("db", 0),
-                username=kw.get("username"),
-                password=kw.get("password"),
-                decode_responses=kw.get("decode_responses", False),
+            probe_conn = derived_redis(
+                decode_responses=False,
                 # Short-lived probe connection ONLY — never the listen()
                 # connection, whose socket_timeout=None is load-bearing.
                 socket_timeout=settings.timeouts.redis_socket_s,
@@ -1185,19 +1193,14 @@ async def _session_notify_listener() -> None:
             agent/session_health.py.
             """
             import redis as _redis
-            from popoto.redis_db import POPOTO_REDIS_DB
+
+            from utils.redis_client import derived_redis
 
             conn: _redis.Redis | None = None
             pubsub = None
             try:
-                kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
-                conn = _redis.Redis(
-                    host=kw.get("host", "localhost"),
-                    port=kw.get("port", 6379),
-                    db=kw.get("db", 0),
-                    username=kw.get("username"),
-                    password=kw.get("password"),
-                    decode_responses=kw.get("decode_responses", False),
+                conn = derived_redis(
+                    decode_responses=False,
                     # KEEP socket_timeout=None. Do NOT "helpfully" add a finite
                     # timeout here (see this function's docstring, above): a
                     # finite timeout on THIS connection previously caused
@@ -1263,19 +1266,33 @@ async def _session_notify_listener() -> None:
                     if message["type"] != "message":
                         continue
                     try:
-                        data = json.loads(message["data"])
-                        wk = data.get("worker_key") or data.get("chat_id")
-                        is_pk = data.get("is_project_keyed", False)
-                        session_id = data.get("session_id")
+                        data = wire_schemas.NotifyPayload.model_validate_json(message["data"])
+                        wk = data.worker_key or data.chat_id
                         if wk is not None:
                             logger.info(
                                 "Received session notify: worker_key=%s session_id=%s",
                                 wk,
-                                session_id,
+                                data.session_id,
                             )
-                            loop.call_soon_threadsafe(notify_queue.put_nowait, (wk, is_pk))
-                    except json.JSONDecodeError as e:
-                        logger.warning("Session notify: bad JSON payload: %s", e)
+                            loop.call_soon_threadsafe(
+                                notify_queue.put_nowait, (wk, data.is_project_keyed)
+                            )
+                    except ValidationError as e:
+                        # A wake this thread cannot parse is a lost wake: the
+                        # session waits for the 5-minute health sweep instead.
+                        # Keep the raw message so that is diagnosable (#3183).
+                        logger.warning("Session notify: payload failed validation: %s", e)
+                        try:
+                            from bridge import dead_letters
+
+                            dead_letters.record(
+                                "notify_parse",
+                                str(message.get("data")),
+                                f"session-notify payload failed validation: {e}",
+                                replayable=False,
+                            )
+                        except Exception as dl_exc:  # noqa: BLE001
+                            logger.debug("notify dead-letter write failed: %s", dl_exc)
                     except Exception as e:
                         logger.warning("Session notify: error processing message: %s", e)
             except Exception as e:
@@ -1392,7 +1409,7 @@ def register_callbacks(
                    callbacks are stored under a (project_key, transport) composite key,
                    allowing multiple transports to coexist for the same project.
                    When None (default), callbacks are stored under the plain project_key
-                   string key for backward compatibility.
+                   string key, which is what callers predating transports expect.
         handler: An OutputHandler instance. If provided, its send() and react()
                  methods are wrapped as send_callback and reaction_callback.
     """
@@ -1445,7 +1462,8 @@ def _check_restart_flag() -> bool:
     try:
         timestamp_str = flag_content.split()[0]
         flag_time = datetime.fromisoformat(timestamp_str)
-        # Ensure timezone-aware comparison
+        # Keep: the restart-flag file is written by a plain-text timestamp,
+        # not read from popoto, and may carry no offset.
         if flag_time.tzinfo is None:
             flag_time = flag_time.replace(tzinfo=UTC)
         flag_age = datetime.now(UTC) - flag_time
@@ -1572,12 +1590,12 @@ def _capture_thread_rollup(session_id: str) -> dict | None:
         or ``None`` if no terminal record exists for ``session_id``.
     """
     duplicates = [
-        s for s in AgentSession.query.filter(session_id=session_id) if s.status in TERMINAL_STATUSES
+        s for s in AgentSession.rows_for_session_id(session_id) if s.status in TERMINAL_STATUSES
     ]
     if not duplicates:
         return None
 
-    prior = max(duplicates, key=lambda s: s.created_at)
+    prior = duplicates[0]  # rows arrive newest-first
     return {
         "thread_first_created_at": prior.thread_first_created_at or prior.created_at,
         "thread_run_count": (prior.thread_run_count or 1) + 1,
@@ -1794,7 +1812,7 @@ async def enqueue_agent_session(
     if revival_context:
         log_large_field("revival_context", revival_context)
 
-    depth = await _push_agent_session(
+    depth, _agent_session_id = await _push_agent_session(
         project_key=project_key,
         session_id=session_id,
         working_dir=working_dir,
@@ -2278,6 +2296,27 @@ async def _worker_loop(
                     worker_key,
                     e,
                 )
+
+                # The reaper below deletes the corrupted row, so this is the
+                # last moment anything knows the row existed (#3183 lane 2).
+                # A corrupted record often carries no usable session_id, which
+                # is exactly why the row is unreplayable and why the exception
+                # text is the payload.
+                try:
+                    from bridge import dead_letters
+
+                    dead_letters.record(
+                        "session_corrupt_row",
+                        {"worker_key": worker_key, "error": repr(e)},
+                        f"corrupted AgentSession at the queue head for worker_key={worker_key}",
+                        replayable=False,
+                    )
+                except Exception as _dl_exc:  # noqa: BLE001 -- never re-kill the loop
+                    logger.debug(
+                        "[worker:%s] corrupted-pop dead-letter write failed: %s",
+                        worker_key,
+                        _dl_exc,
+                    )
 
                 # Best-effort head-of-queue cleanup via the existing ORM reaper.
                 # The return value is DELIBERATELY IGNORED: the reaper is
@@ -2905,7 +2944,9 @@ async def _worker_loop(
                             )
                             # Enqueue notification asynchronously (best-effort)
                             try:
-                                from agent.sustainability import send_hibernation_notification
+                                from reflections.agents.circuit_health_gate import (
+                                    send_hibernation_notification,
+                                )
 
                                 send_hibernation_notification("hibernating", project_key=_pk)
                             except Exception as _notif_err:
@@ -2989,8 +3030,31 @@ async def _worker_loop(
                     # session was set to "pending" by _enqueue_nudge(), or was
                     # deleted by the nudge fallback path, skip completion to avoid
                     # overwriting the nudge's status back to "completed".
+                    #
+                    # The `try` here guards the READ only (#3253) — it used to
+                    # also span the completion WRITE below, so a write-time
+                    # StatusConflictError was caught by this handler and then
+                    # blindly retried against unchanged state, raising the
+                    # same error a second time, uncaught. `_should_complete`
+                    # routes every branch (including the read-failure
+                    # fallback) through the single write site below instead.
+                    _should_complete = False
                     try:
                         fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
+                    except Exception as guard_err:
+                        # READ failure only. Falling through to the completion
+                        # write preserves the pre-existing fallback intent
+                        # ("completing session as fallback") without retrying
+                        # a failed write.
+                        logger.warning(
+                            "[worker:%s] Nudge guard read failed for %s: %s "
+                            "— completing as fallback",
+                            worker_key,
+                            session.agent_session_id,
+                            guard_err,
+                        )
+                        _should_complete = True
+                    else:
                         if not fresh:
                             logger.info(
                                 "[worker:%s] Session %s no longer exists in Redis "
@@ -3007,17 +3071,68 @@ async def _worker_loop(
                                 worker_key,
                                 session.agent_session_id,
                             )
+                        elif fresh.status in TERMINAL_STATUSES:
+                            # The authoritative row is already terminal — a
+                            # writer that owns the outcome (executor finalize
+                            # guard, transcript completion, or health checker)
+                            # already classified this session. Under the
+                            # kill-is-terminal invariant the first terminal
+                            # write wins, so `session_failed` (this worker's
+                            # local, after-the-fact opinion) must not attempt
+                            # to overwrite it. INFO, not WARNING: this is the
+                            # expected outcome of a concurrent writer, not an
+                            # alarm (docs/features/session-lifecycle.md:143).
+                            logger.info(
+                                "[worker:%s] Session %s already terminal in Redis "
+                                "(status=%r) — another writer owns the outcome; "
+                                "skipping completion (worker wanted %r)",
+                                worker_key,
+                                session.agent_session_id,
+                                fresh.status,
+                                "failed" if session_failed else "completed",
+                            )
                         else:
+                            _should_complete = True
+
+                    if _should_complete:
+                        try:
                             await _complete_agent_session(session, failed=session_failed)
-                    except Exception as guard_err:
-                        logger.warning(
-                            "[worker:%s] Nudge guard check failed for %s: %s "
-                            "— completing session as fallback",
-                            worker_key,
-                            session.agent_session_id,
-                            guard_err,
-                        )
-                        await _complete_agent_session(session, failed=session_failed)
+                        except StatusConflictError as conflict_err:
+                            # Expected, correct, defense-in-depth: a concurrent
+                            # writer reached a terminal status first (or the
+                            # CAS re-read saw a different row than our
+                            # redis_key lookup did). MUST NOT propagate —
+                            # escaping this `finally` kills _worker_loop and
+                            # strands every session for this worker_key
+                            # (#1803, #2088, #3253 — this is the third member
+                            # of that family).
+                            logger.info(
+                                "[worker:%s] Completion for %s lost to a "
+                                "concurrent terminal writer: %s",
+                                worker_key,
+                                session.agent_session_id,
+                                conflict_err,
+                            )
+                        except Exception as complete_err:
+                            # Containment backstop, deliberately `Exception`
+                            # and not `BaseException`: CancelledError and
+                            # KeyboardInterrupt must keep propagating so
+                            # worker shutdown still works (mirrors the
+                            # ModelException handler's design at
+                            # docs/features/agent-session-queue.md:148-150).
+                            # This closes the class rather than one instance
+                            # — no exception from the completion write can
+                            # strand the worker_key.
+                            logger.error(
+                                "[worker:%s] Completion write failed for %s (worker continues): %s",
+                                worker_key,
+                                session.agent_session_id,
+                                complete_err,
+                                exc_info=True,
+                            )
+                    # Exactly one `_complete_agent_session` call site remains
+                    # in this block; the read-failure fallback above reaches
+                    # it via `_should_complete` instead of a separate retry.
                 # Release the global concurrency slot after session is done.
                 # This is the normal (bound) release path — registry.release()
                 # is idempotent, so it silently no-ops if an out-of-band killer
@@ -3047,8 +3162,7 @@ async def _worker_loop(
         _active_events.pop(worker_key, None)
 
 
-# Revival detection functions extracted to agent/session_revival.py.
-# All symbols re-exported at the top of this module for backward compatibility.
+# Revival detection functions live in agent/session_revival.py.
 
 
 # === CLI Entry Point ===
@@ -3072,6 +3186,8 @@ def _cli_show_status() -> None:
     now_ts = time.time()
 
     def _to_ts_safe(val):
+        # Keep: general-purpose coercer accepting datetime | int | float from
+        # mixed callers, not exclusively popoto reads.
         if val is None:
             return 0.0
         if isinstance(val, datetime):

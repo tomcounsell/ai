@@ -153,16 +153,27 @@ class TestWriterCensus:
 
 # ── Materialize-before-sort census ────────────────────────────────────────────
 
-# (relative path, enclosing function, sorted name, minimum sort calls).
+# Every single-row read by session_id goes through the model's newest-wins
+# resolver (#3091): ``AgentSession.newest_for_session_id(...)`` or
+# ``rows_for_session_id(...)``, which materialize and order newest-first in one
+# place (ordering pinned by ``tests/unit/test_agent_session_newest_wins.py``).
+# The walker counts a name bound to either call as a newest-first selection of
+# that name; a direct ``<name>.sort(key=... created_at ...)`` still counts too
+# and is still held to the list(...) binding rule.
+RESOLVER_METHODS = frozenset({"newest_for_session_id", "rows_for_session_id"})
+
+# (relative path, enclosing function, selected name, minimum selections).
 # Each entry is a selection a Room is derived from.
 SORT_SITES = [
-    ("bridge/telegram_bridge.py", "handler", "sessions", 2),
-    ("bridge/telegram_bridge.py", "handler", "pending_sessions", 1),
-    ("bridge/telegram_bridge.py", "handler", "_live", 1),
-    ("bridge/telegram_bridge.py", "edit_handler", "sessions", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "live", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "pending", 1),
+    ("bridge/answer_routing.py", "resolve_answer_target", "guard", 1),
+    # The bridge's re-check that a resolved target is still live before acking.
+    ("bridge/telegram_bridge.py", "handler", "fresh_session", 1),
+    ("bridge/telegram_bridge.py", "edit_handler", "session", 1),
     ("bridge/telegram_bridge.py", "edit_handler", "edit_sessions", 1),
-    ("agent/health_check.py", "watchdog_hook", "sessions", 1),
-    ("agent/session_executor.py", "steer_session", "sessions", 1),
+    ("agent/health_check.py", "watchdog_hook", "s", 1),
+    ("agent/session_executor.py", "steer_session", "session", 1),
 ]
 
 
@@ -191,8 +202,32 @@ def _functions(tree: ast.Module) -> dict[str, list[ast.AST]]:
     return out
 
 
+def _is_resolver_call(value: ast.expr | None) -> bool:
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr in RESOLVER_METHODS
+    )
+
+
+def _resolver_bindings(fn: ast.AST) -> list[tuple[str, int]]:
+    """``(name, lineno)`` for every ``<name> = AgentSession.<resolver>(...)`` in ``fn``.
+
+    The resolver materializes and orders in one place, so a name bound this
+    way is a newest-first selection with nothing left for the caller to sort.
+    """
+    hits: list[tuple[str, int]] = []
+    for node in _own_nodes(fn):
+        if not isinstance(node, ast.Assign) or not _is_resolver_call(node.value):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                hits.append((target.id, node.lineno))
+    return hits
+
+
 def _created_at_sorts(fn: ast.AST) -> list[tuple[str, int]]:
-    """``(sorted_name, lineno)`` for every ``<name>.sort(key=... created_at ...)``."""
+    """``(sorted_name, lineno)`` for every direct created_at sort of a name in ``fn``."""
     hits: list[tuple[str, int]] = []
     for node in _own_nodes(fn):
         if not isinstance(node, ast.Call):
@@ -209,6 +244,12 @@ def _created_at_sorts(fn: ast.AST) -> list[tuple[str, int]]:
             continue
         hits.append((func.value.id, node.lineno))
     return hits
+
+
+def _parameters(fn: ast.AST) -> set[str]:
+    args = fn.args
+    named = (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg)
+    return {a.arg for a in named if a is not None}
 
 
 def _binding_before(fn: ast.AST, name: str, lineno: int) -> ast.expr | None:
@@ -231,7 +272,11 @@ def _is_list_call(value: ast.expr | None) -> bool:
 
 
 def _unmaterialized_sorts(tree: ast.Module) -> list[str]:
-    """Sorted names whose nearest binding is not a ``list(...)`` call."""
+    """Directly sorted names whose nearest binding is not a ``list(...)`` call.
+
+    Names bound to the resolver are never sorted by the caller, so they cannot
+    appear here; only a hand-rolled ``.sort`` on a QueryBuilder can.
+    """
     bad: list[str] = []
     for fn_name, fns in _functions(tree).items():
         for fn in fns:
@@ -243,17 +288,24 @@ def _unmaterialized_sorts(tree: ast.Module) -> list[str]:
 
 class TestRoomDerivationSortCensus:
     def test_room_derivation_sites_sort_before_selecting(self):
-        """Each Room-derivation selection is materialized, then sorted newest-first."""
+        """Each Room-derivation selection is newest-first: bound to the resolver,
+        or materialized and then sorted by created_at."""
         for rel, fn_name, var, min_sorts in SORT_SITES:
             tree = ast.parse((REPO_ROOT / rel).read_text())
             fns = _functions(tree).get(fn_name)
             assert fns, f"{rel}: function {fn_name!r} not found — did it get renamed?"
-            sorts = [s for fn in fns for s in _created_at_sorts(fn) if s[0] == var]
+            sorts = [
+                s
+                for fn in fns
+                for s in (*_created_at_sorts(fn), *_resolver_bindings(fn))
+                if s[0] == var
+            ]
             assert len(sorts) >= min_sorts, (
-                f"{rel}::{fn_name} must sort {var!r} newest-first by created_at before "
-                f"selecting a row to derive a Room from (expected >= {min_sorts} sort "
-                f"call(s), found {len(sorts)}). Without it a superseded or stale row can "
-                f"derive a Room the live session never drains."
+                f"{rel}::{fn_name} must select {var!r} newest-first (through "
+                f"AgentSession.newest_for_session_id / rows_for_session_id, or a "
+                f"created_at sort of a materialized list) before deriving a Room from "
+                f"it (expected >= {min_sorts}, found {len(sorts)}). Without it a "
+                f"superseded or stale row can derive a Room the live session never drains."
             )
             for fn in fns:
                 for name, lineno in _created_at_sorts(fn):
@@ -291,10 +343,34 @@ class TestRoomDerivationSortCensus:
         )
         assert _unmaterialized_sorts(ast.parse(good_src)) == []
 
+    def test_sort_census_counts_a_resolver_binding(self):
+        """Self-check for the resolver shape: a name bound to
+        ``AgentSession.newest_for_session_id(...)`` or ``rows_for_session_id(...)``
+        counts as a newest-first selection and needs no list(...) binding, while
+        a bare QueryBuilder sort next to it is still rejected."""
+        src = (
+            "def f(session_id):\n"
+            "    session = AgentSession.newest_for_session_id(session_id, status='running')\n"
+            "    rows = AgentSession.rows_for_session_id(session_id)\n"
+            "    other = AgentSession.query.filter(session_id=session_id)\n"
+            "    other.sort(key=lambda s: s.created_at or 0, reverse=True)\n"
+            "    return session, rows, other[0]\n"
+        )
+        (fn,) = _functions(ast.parse(src))["f"]
+        assert _resolver_bindings(fn) == [("session", 2), ("rows", 3)]
+        assert _created_at_sorts(fn) == [("other", 5)]
+        assert _unmaterialized_sorts(ast.parse(src)) == ["f:other:5"]
+
+        # A lookalike method name on the model does not count as the resolver.
+        lookalike = src.replace("newest_for_session_id", "newest_for_chat")
+        (fn2,) = _functions(ast.parse(lookalike))["f"]
+        assert _resolver_bindings(fn2) == [("rows", 3)]
+
     def test_no_unmaterialized_created_at_sort_in_the_touched_modules(self):
-        """Repo-wide backstop over the three modules this release edits."""
+        """Repo-wide backstop over the modules that derive a Room from a sort."""
         for rel in (
             "bridge/telegram_bridge.py",
+            "bridge/answer_routing.py",
             "agent/health_check.py",
             "agent/session_executor.py",
         ):

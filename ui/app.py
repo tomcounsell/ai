@@ -23,13 +23,24 @@ from jinja2 import Environment
 
 from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S, WORKER_DOWN_THRESHOLD_S
 from agent.session_pickup import _truthy  # canonical untyped-Popoto-bool coercion (#2439)
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).parent
 TEMPLATES_DIR = UI_DIR / "templates"
 STATIC_DIR = UI_DIR / "static"
+
+# Degraded-LLM-stack markers (#3001). `/dashboard.json` is served by a
+# separate uvicorn process, so an in-process flag in the bridge or worker can
+# never reach it — the marker file on disk is the transport, exactly like
+# `data/last_connected` for bridge health. The default must equal
+# `agent/llm/compat.py`'s `_MARKER_DIR` (both resolve to `<repo>/data`); a
+# test asserts that equality directly. Module-level so the dashboard test can
+# redirect it without touching the live `data/` a running bridge, worker, and
+# dashboard share.
+LLM_MARKER_DIR = Path(__file__).parent.parent / "data"
+LLM_MARKER_GLOB = "llm-stack-degraded*"
 
 
 def _filter_format_timestamp(ts: float | None) -> str:
@@ -358,6 +369,74 @@ def create_app() -> FastAPI:
             {"jobs": jobs},
         )
 
+    @app.get("/_partials/pipeline-integrity/", response_class=HTMLResponse)
+    def partial_pipeline_integrity(request: Request):
+        """HTMX partial: dead-letter counts by stage and lock-degradation counts."""
+        from ui.data.dead_letters import get_dead_letter_counts
+        from ui.data.locks import get_lock_policies
+
+        return templates.TemplateResponse(
+            request,
+            "_partials/pipeline_integrity.html",
+            {"dead_letters": get_dead_letter_counts(), "locks": get_lock_policies()},
+        )
+
+    @app.get("/_partials/improvement/coverage/", response_class=HTMLResponse)
+    def partial_improvement_coverage(request: Request, project_key: str = "valor"):
+        """HTMX partial: what the improvement loop is actually observing (#3177).
+
+        The denominator panel. Read it before the burden panel below — a count
+        of corrections means nothing without knowing how much was scanned.
+        """
+        from ui.data.improvement import get_coverage
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/coverage.html",
+            {"coverage": get_coverage(project_key=project_key)},
+        )
+
+    @app.get("/_partials/improvement/goals/", response_class=HTMLResponse)
+    def partial_improvement_goals(request: Request, project_key: str = "valor"):
+        """HTMX partial: the charter §11 readable record (#3255).
+
+        Which charter the work is ranked under, the §3 priorities, the open
+        cases and why each ranks where it does, and an explicit note for every
+        heading no lane writes yet. Empty sections name the lane that fills
+        them rather than showing a zero.
+        """
+        from ui.data.improvement import get_goals
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/goals.html",
+            {"goals": get_goals(project_key=project_key)},
+        )
+
+    @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
+    def partial_improvement_burden(request: Request, project_key: str = "valor"):
+        """HTMX partial: how often a human had to step in, and of what kind (#3177)."""
+        from ui.data.improvement import get_intervention_burden, get_provisional_assumptions
+
+        # The assumption read propagates its failures so the goals partial can
+        # tell "none" apart from "unreadable". This panel has no unavailable
+        # rendering, so it degrades to hiding the section rather than taking the
+        # whole burden panel down with it.
+        try:
+            assumptions = get_provisional_assumptions(project_key=project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement burden partial: assumption read failed: %s", exc)
+            assumptions = []
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/intervention_burden.html",
+            {
+                "burden": get_intervention_burden(project_key=project_key),
+                "assumptions": assumptions,
+            },
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""
@@ -388,6 +467,47 @@ def create_app() -> FastAPI:
         except OSError:
             pass
         return {"status": "error", "age_s": None}
+
+    def _get_llm_stack_health() -> dict:
+        """Read the degraded-LLM-stack markers written by the resolver (#3001).
+
+        Red while **any** marker survives, naming every degraded process.
+        Per-process files give each writer sole ownership of its own path:
+        after a pin fix the bridge re-resolves healthy and clears its marker
+        while a worker that deferred its restart still holds a degraded
+        memo — a shared marker would paint the board green over it.
+
+        Fail-quiet on ``OSError`` like its siblings: an unreadable marker
+        still names its process, and a health payload must never 500.
+        """
+        processes: list[str] = []
+        detail: list[dict] = []
+        try:
+            markers = sorted(LLM_MARKER_DIR.glob(LLM_MARKER_GLOB))
+        except OSError:
+            markers = []
+
+        for marker in markers:
+            _, _, proc = marker.name.partition(".")
+            proc = proc or marker.name
+            processes.append(proc)
+            entry = {"process": proc}
+            try:
+                payload = json.loads(marker.read_text())
+            except (OSError, ValueError):
+                entry["unreadable"] = True
+            else:
+                if isinstance(payload, dict):
+                    entry.update(payload)
+                else:
+                    entry["unreadable"] = True
+            detail.append(entry)
+
+        return {
+            "degraded": bool(processes),
+            "processes": processes,
+            "detail": detail,
+        }
 
     def _get_slot_reclaims_total() -> int:
         """Sum the per-project ``slot_reclaims`` Redis counters for projects
@@ -427,7 +547,8 @@ def create_app() -> FastAPI:
         recovery counters (``bridge_reclaims``, ``loop_wedged_detected``,
         ``bridge_contract_stale``), the Fix #6 budget counters
         (``tool_budget_tripped``, the #1886 per-deny ``tool_budget_denied_calls``,
-        ``tool_budget_resolution_errors``), and the last few
+        ``tool_budget_resolution_errors``, and the #2410 denominator
+        ``tool_budget_evaluated``), and the last few
         ``worker:watchdog:actions`` entries. Fail-quiet — never blocks the health
         payload; every field defaults to a safe zero/None on any Redis error.
         """
@@ -440,6 +561,7 @@ def create_app() -> FastAPI:
             "tool_budget_tripped": 0,
             "tool_budget_denied_calls": 0,
             "tool_budget_resolution_errors": 0,
+            "tool_budget_evaluated": 0,
             "injection_inspected": 0,
             "injection_flagged": 0,
             "injection_errors": 0,
@@ -480,6 +602,9 @@ def create_app() -> FastAPI:
             result["tool_budget_resolution_errors"] = _sum_project_counter(
                 "tool-budget:resolution_errors"
             )
+            # #2410: denominator for the three counters above. Without it a zero
+            # `tripped` cannot be distinguished from a backstop that was blind.
+            result["tool_budget_evaluated"] = _sum_project_counter("tool-budget:evaluated")
             # #1630: pre-execution injection-screen counters.
             result["injection_inspected"] = _sum_project_counter("injection-inspector:inspected")
             result["injection_flagged"] = _sum_project_counter("injection-inspector:flagged")
@@ -617,6 +742,33 @@ def create_app() -> FastAPI:
         except Exception:
             return {"status": "error", "logged_in": False, "auth_method": None}
 
+    def _get_poll_reconcile_health() -> dict:
+        """Liveness of the poll vote reconciliation loop (#2701).
+
+        The loop is the PRIMARY inbound mechanism for poll answers, and its
+        failure mode is invisible in the chat: a tap produces no Telegram
+        message, so if the loop dies every question simply goes unanswered and
+        every asking agent stays blocked with nothing to notice.
+
+        Its own ``poll_expired_unanswered`` warning cannot cover this — that is
+        emitted from *inside* the loop's scan, so if the loop is what died the
+        signal cannot fire. A detector that lives inside the thing it detects is
+        not a detector. Hence this external read of the heartbeat the loop
+        stamps every tick, mirroring the email-bridge heartbeat check above.
+
+        An absent heartbeat is "degraded", not "error": the loop is only
+        expected to be running where the bridge is.
+        """
+        try:
+            from bridge.poll_reconcile import heartbeat_age_s
+
+            age = heartbeat_age_s()
+        except Exception:
+            return {"status": "unknown", "age_s": None}
+        if age is None:
+            return {"status": "degraded", "age_s": None}
+        return {"status": "ok", "age_s": int(age)}
+
     def _get_email_health() -> dict:
         """Check email bridge health: process liveness first, then Redis heartbeat age.
 
@@ -631,14 +783,12 @@ def create_app() -> FastAPI:
         both keys are cleared by the bridge on the first successful poll/resolve
         after the outage.
         """
-        import subprocess
+        from tools.process_lookup import find_python_service_pids
 
-        proc_running = bool(
-            subprocess.run(
-                ["pgrep", "-f", "bridge.email_bridge"],
-                capture_output=True,
-            ).stdout.strip()
-        )
+        # Ancestor-safe lookup rather than `pgrep` (#3164): pgrep hides the
+        # caller's own ancestors, so a bridge-hosted UI reads a live service
+        # as down.
+        proc_running = bool(find_python_service_pids(module="bridge.email_bridge"))
 
         alert: str | None = None
         alert_detail: str | None = None
@@ -919,9 +1069,11 @@ def create_app() -> FastAPI:
         worker = _get_worker_health()
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
+        poll_reconcile = _get_poll_reconcile_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
         catchup = _get_catchup_health()
+        llm_stack = _get_llm_stack_health()
         # One scan feeds both views. Jobs group first because
         # `assemble_session_tree` nests children onto the same objects, and a
         # Job already lists every run it owns.
@@ -954,6 +1106,7 @@ def create_app() -> FastAPI:
                     "worker_tool_budget_resolution_errors": worker.get(
                         "tool_budget_resolution_errors"
                     ),
+                    "worker_tool_budget_evaluated": worker.get("tool_budget_evaluated"),
                     "worker_injection_inspected": worker.get("injection_inspected"),
                     "worker_injection_flagged": worker.get("injection_flagged"),
                     "worker_injection_errors": worker.get("injection_errors"),
@@ -971,6 +1124,8 @@ def create_app() -> FastAPI:
                     "email_last_seen_s": email["age_s"],
                     "email_alert": email.get("alert"),
                     "email_alert_detail": email.get("alert_detail"),
+                    "poll_reconcile": poll_reconcile["status"],
+                    "poll_reconcile_last_seen_s": poll_reconcile["age_s"],
                     "claude_auth": claude_auth["status"],
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
@@ -992,6 +1147,13 @@ def create_app() -> FastAPI:
                     "catchup_disabled_age_hours": catchup["age_hours"],
                     "catchup_disabled_warn_hours": catchup["warn_hours"],
                     "catchup_disabled_stale": catchup["stale"],
+                    # Additive-only (issue #3001): the LLM stack's standing
+                    # degraded signal. Red while any per-process marker
+                    # survives; `detail` carries both resolved versions, the
+                    # failing axis, and the captured exception type.
+                    "llm_stack_degraded": llm_stack["degraded"],
+                    "llm_stack_degraded_processes": llm_stack["processes"],
+                    "llm_stack_degraded_detail": llm_stack["detail"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 # Additive (issue #2519): the Job view. `sessions` keeps its
@@ -1015,6 +1177,7 @@ def create_app() -> FastAPI:
         worker = _get_worker_health()
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
+        poll_reconcile = _get_poll_reconcile_health()
         claude_auth = _get_claude_auth_health()
         archive = _get_archive_health()
         catchup = _get_catchup_health()
@@ -1035,6 +1198,7 @@ def create_app() -> FastAPI:
                 "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
                 "worker_tool_budget_denied_calls": worker.get("tool_budget_denied_calls"),
                 "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
+                "worker_tool_budget_evaluated": worker.get("tool_budget_evaluated"),
                 "worker_injection_flagged": worker.get("injection_flagged"),
                 "worker_injection_errors": worker.get("injection_errors"),
                 # Additive-only (issue #1828): out-of-process reflection scheduler.
@@ -1046,6 +1210,8 @@ def create_app() -> FastAPI:
                 "email_last_seen_s": email["age_s"],
                 "email_alert": email.get("alert"),
                 "email_alert_detail": email.get("alert_detail"),
+                "poll_reconcile": poll_reconcile["status"],
+                "poll_reconcile_last_seen_s": poll_reconcile["age_s"],
                 "claude_auth": claude_auth["status"],
                 "claude_auth_logged_in": claude_auth["logged_in"],
                 "claude_auth_method": claude_auth["auth_method"],

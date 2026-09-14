@@ -35,7 +35,7 @@ Fan-out does **not** activate for status queries (e.g., "what's the status of 77
 
 ### `tools/valor_session.py` — `wait-for-children` Subcommand
 
-New subcommand added to the `valor-session` CLI:
+The `valor-session` CLI exposes a `wait-for-children` subcommand:
 
 ```
 python -m tools.valor_session wait-for-children [--session-id SESSION_ID]
@@ -59,11 +59,11 @@ The in-repo engineer persona overlay includes a `## Multi-Issue Fan-Out` section
 
 ### `models/session_lifecycle.py` — `_finalize_parent_sync()`
 
-Unchanged by this feature. When each child session reaches a terminal state, `_finalize_parent_sync()` at line 518 checks whether all children are terminal and transitions the parent accordingly. The parent's `waiting_for_children` status is the signal that finalization should propagate.
+When each child session reaches a terminal state, `_finalize_parent_sync()` checks whether all children are terminal and transitions the parent accordingly. The parent's `waiting_for_children` status is the signal that finalization should propagate.
 
 ## Execution Model
 
-Children execute via `worker_key`-based routing (issue #1228 extended this for eng sessions). At PLAN/CRITIQUE stages, children with the same `project_key` serialize naturally via the project-keyed worker loop (introduced in PR #831). At BUILD/TEST/REVIEW/DOCS stages, children with distinct slugs each get their own slug-keyed worker loop and can execute in parallel, reducing total wall time from `sum(child_runtimes)` to `max(child_runtimes)` for worktree-stage work. No additional scheduling logic is needed — `AgentSession.worker_key` determines the routing automatically based on the child's current stage.
+Children execute via `worker_key`-based routing. At PLAN/CRITIQUE stages, children with the same `project_key` serialize naturally via the project-keyed worker loop. At BUILD/TEST/REVIEW/DOCS stages, children with distinct slugs each get their own slug-keyed worker loop and can execute in parallel, reducing total wall time from `sum(child_runtimes)` to `max(child_runtimes)` for worktree-stage work. No additional scheduling logic is needed — `AgentSession.worker_key` determines the routing automatically based on the child's current stage.
 
 ## Race Condition Safety
 
@@ -73,7 +73,7 @@ If a child completes before the parent finishes calling `wait-for-children`, `_f
 
 - If `valor_session create` fails mid-fan-out, the parent is not yet in `waiting_for_children`. The worker's existing health-check loop handles the stuck-active parent session.
 - If the parent is already in a terminal status when `wait-for-children` is called, the subcommand exits 1 without attempting a transition.
-- `_finalize_parent_sync()` has try/except logging at lines 540-548; no new exception paths are introduced.
+- `_finalize_parent_sync()` wraps its work in try/except logging; no new exception paths are introduced.
 
 ## Session Management
 

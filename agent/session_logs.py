@@ -2,8 +2,7 @@
 Per-session log snapshots at key lifecycle transitions.
 
 Canonical location for session snapshot logic. Used by both the standalone
-worker and the Telegram bridge. bridge/session_logs.py re-exports from here
-for backward compatibility.
+worker and the Telegram bridge.
 
 Saves structured snapshots to logs/sessions/{session_id}/ for debugging.
 Each snapshot captures session state at the moment of a pause, resume, or complete transition.

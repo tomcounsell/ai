@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Add project root to path for imports
@@ -23,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.update import (  # noqa: E402
     cal_integration,
+    codex_cli,
     deps,
     env_sync,
     gh_auth,
@@ -43,6 +45,7 @@ from scripts.update import (  # noqa: E402
     redis_replication,
     reflection_arm,
     reflection_register,
+    reflections_callables,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -51,6 +54,7 @@ from scripts.update import (  # noqa: E402
     warn_state,
     zshenv_sync,
 )
+from tools.process_lookup import is_own_ancestor  # noqa: E402
 
 
 @dataclass
@@ -67,6 +71,17 @@ class UpdateConfig:
     do_ollama: bool = False  # Only in full mode
     do_mcp: bool = False  # Only in full mode
     do_log_cleanup: bool = True  # Deletes oversized log backups — off under --verify
+
+    # The authoritative "--verify promises no changes" flag (issues #2898,
+    # #3026). Every step that mutates state outside this process must consult
+    # it. The per-behavior booleans above are about WHICH steps a mode runs;
+    # this one is about whether the run is allowed to leave a trace at all.
+    #
+    # It exists because the opt-out-per-behavior shape kept failing open: a
+    # newly added mutating step defaults to running, so --verify quietly broke
+    # its contract twice (warn_state persistence, then ~/.claude hardlinking
+    # and migrations) before anyone noticed.
+    read_only: bool = False
 
     # Options
     verbose: bool = False
@@ -117,6 +132,7 @@ class UpdateConfig:
             do_ollama=True,
             do_mcp=True,
             do_log_cleanup=False,  # --verify promises no changes; sweep deletes files
+            read_only=True,
             verbose=True,
         )
 
@@ -151,25 +167,56 @@ class UpdateResult:
     )
     memory_distill_backfill_register_result: reflection_register.RegisterResult | None = None
     sdlc_upvote_pickup_register_result: reflection_register.RegisterResult | None = None
+    side_effect_drain_register_result: reflection_register.RegisterResult | None = None
+    dead_letter_replay_register_result: reflection_register.RegisterResult | None = None
+    improvement_collect_register_result: reflection_register.RegisterResult | None = None
+    reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
+    registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
+    codex_cli_result: codex_cli.CodexCliResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
     # Untyped (`object`, not the concrete dataclass) so `run.py` never needs
-    # a module-level import of `scripts.update.redis_flush_guard_pth` or
-    # `scripts.update.redis_acl` -- both steps below import lazily so a
-    # missing module degrades to a warning, never an ImportError at
-    # `/update` start (#2645).
+    # a module-level import of `scripts.update.redis_flush_guard_pth` --
+    # this step imports lazily so a missing module degrades to a warning,
+    # never an ImportError at `/update` start (#2645).
     redis_flush_guard_install_results: object | None = None
-    redis_acl_result: object | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     log_cleanup_result: log_cleanup.LogCleanupResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Keys whose warn_state.should_emit call returned True THIS run (#2845).
+    # Subtracted from warn_state.active() when composing the `suppressed:`
+    # trailer, so a key does not simultaneously warn AND get called
+    # "unchanged since first warning" in the same run (Race 3's inverse
+    # hazard — should_emit writes its signature the instant it returns True).
+    warn_keys_emitted: set[str] = field(default_factory=set)
+
+
+def _append_warning(result: UpdateResult, text: str) -> None:
+    """Append a warning with embedded newlines collapsed to one physical line.
+
+    The summary render block below renders one `⚠️` bullet per `result.warnings` entry
+    (`status += f"\\n  ⚠️ {warn}"`) — a raw multi-line entry (an exception
+    `str()`, a wrapped multi-line diagnostic) would render its sentinel on
+    only the first physical line, dropping the rest. This is the exact
+    truncation `extract_update_warnings` exists to prevent, reproduced
+    through a different producer if any append site bypasses this helper
+    (#2845).
+    """
+    result.warnings.append(" ".join(text.split("\n")))
+
+
+def _append_error(result: UpdateResult, text: str) -> None:
+    """Append an error with embedded newlines collapsed — the same hole
+    exists on the failure path, and it is the path where the dropped tail
+    is a stack trace."""
+    result.errors.append(" ".join(text.split("\n")))
 
 
 # Log buffer for telegram mode (writes to file instead of stdout)
@@ -191,6 +238,135 @@ def log(msg: str, verbose: bool = True, always: bool = False) -> None:
 RECENT_ACTIVITY_WINDOW = (
     30 * 60
 )  # 30 minutes — session considered live if updated_at within this window
+
+
+def apply_registry_probe_verdict(
+    result: UpdateResult,
+    probe_gate: reflections_callables.RegistryProbeResult,
+    sentinel: Path,
+    v: bool = False,
+) -> bool:
+    """Turn a Step 4.65 probe verdict into warnings/errors on ``result``.
+
+    Returns ``True`` when the caller must suppress the service restart.
+
+    Extracted from Step 4.65 so the verdict routing is reachable by a test.
+    `run_update` is a two-thousand-line function that pulls git, installs
+    launchd services, and writes an iCloud vault; nothing drives it end to end,
+    which is why #3014 exists. That gap is tolerable for the restart-suppression
+    half, which the shell independently re-derives from the sentinel — but under
+    ``--verify`` there IS no sentinel and no shell, so the escalation below is
+    the only channel the verdict has, and an inverted predicate here would be
+    invisible. Hence a seam rather than a disclosed hole.
+
+    Three shapes, distinguished by WHY the sentinel does or does not agree:
+
+    1. Vacuous pass (``nothing_probed``). The gate proved nothing, so it must
+       not render as a clean green: without a ``⚠️`` bullet
+       ``extract_update_warnings`` finds nothing, no fix session is queued, and
+       the cycle reports ``update OK`` on a machine whose registry is missing
+       entirely. The restart is NOT suppressed — absence of a registry is no
+       evidence a callable will not import, and blocking on it would wedge the
+       cycle with no self-clearing path.
+    2. Ordinary failure. Suppresses the restart and warns, deliberately NOT
+       ``result.success = False``. Escalating here would destroy the mechanism
+       it looks like it duplicates: ``remote-update.sh`` is ``set -euo
+       pipefail`` and invokes ``run.py`` bare, so a non-zero exit aborts the
+       shell at that line and everything after it becomes unreachable — the
+       sentinel latch, the ``RESTART BLOCKED`` operator line, the
+       ``RESTART_FAILED`` accounting, and the bridge's deliberate exemption from
+       a registry fault. The shell already turns this fault into a non-zero
+       terminal exit by the designed route, whenever the worker was actually due
+       to restart: ``RESTART_FAILED=1`` is set inside ``if $NEED_RESTART && !
+       $REGISTRY_PROBE_OK``, so a registry broken out-of-band with no
+       worker-relevant commits still exits 0. Nothing is hidden — the
+       ``always=True`` FAIL log prints and the warning produces a ``⚠️`` bullet.
+    3. A failure the sentinel does not carry. The only in-process escalations,
+       and they split by why it is absent:
+       - ``sentinel_skipped`` (``--verify``): absent by design. There is no
+         shell half on this path — ``remote-update.sh`` runs ``run.py --cron``,
+         never ``--verify`` — so the "abort before the kickstart" reasoning does
+         not apply. What remains is that a human or agent running ``/update
+         --verify`` must not read a broken registry as a clean bill of health,
+         and one warning among many is not enough for that. So this is a hard
+         error and a non-zero exit: the loudest shape rather than the quietest.
+       - ``not sentinel_recorded``: absent by accident, the write or unlink did
+         not land. On the pass path a failed *clear* only over-blocks the next
+         cycle, so it stays a warning. On the failure path the shell reads
+         ``[ -f ]``, absence is its green light, and it restarts the worker
+         after this process has exited. Losing the shell's own ``RESTART
+         BLOCKED`` line to a ``set -e`` abort is the accepted cost: an abort
+         with no kickstart beats a green gate.
+
+    ``result.success`` is set directly rather than left to the ``if v:`` summary
+    block at the end of ``run_update``: that block is skipped under
+    ``--quiet``/``--json``, and these failures must exit non-zero on every
+    invocation shape. Matches the other hard-error sites in this file.
+    """
+    suppress_restart = False
+
+    if probe_gate.success and probe_gate.nothing_probed:
+        log(f"WARN: registry probe proved nothing — {probe_gate.detail}", v, always=True)
+        _append_warning(result, f"reflections registry probe proved nothing: {probe_gate.detail}")
+    elif probe_gate.success:
+        log(f"  registry probe: {probe_gate.detail}", v)
+    else:
+        log(
+            f"FAIL: reflections-registry callables did not import — skipping service restart\n"
+            f"  {probe_gate.detail}",
+            v,
+            always=True,
+        )
+        _append_warning(
+            result,
+            f"reflections registry callables unresolvable; service restart skipped: "
+            f"{probe_gate.detail}",
+        )
+        suppress_restart = True
+
+    if probe_gate.sentinel_skipped:
+        if not probe_gate.success:
+            # Two different trees are in play here, and the message keeps them
+            # apart rather than using one path to stand for both. `sentinel` is
+            # under `project_dir` — the tree the operator invoked `/update` in.
+            # The registry copy that actually failed may be in a DIFFERENT one:
+            # the probe falls back to the owning checkout when the current tree
+            # carries no `config/reflections.yaml`, which is what a `--verify`
+            # from a lane worktree hits. That path is not reconstructed here; it
+            # arrives already named inside `probe_gate.detail`, which on the
+            # probe's own resolve-failure path carries `FAIL: N of M registry
+            # copy(ies) did not resolve: <paths>` from stderr. Other shapes
+            # (timeout, missing script, bare exit code) name no copy, which is
+            # why the clause below points at the fault rather than at a path.
+            # Leading with `detail` is therefore what locates the fault; the
+            # sentinel clause only explains why there is no other channel.
+            _append_error(
+                result,
+                f"registry probe FAILED under --verify: {probe_gate.detail}. "
+                f"No sentinel was written at {sentinel} (--verify makes no "
+                f"changes, #3026), so this exit code is the whole verdict — the "
+                f"reflection worker is not safe to restart until the fault above "
+                f"is resolved.",
+            )
+            result.success = False
+    elif not probe_gate.sentinel_recorded:
+        if probe_gate.success:
+            _append_warning(
+                result,
+                f"registry probe passed but could not clear {sentinel}; "
+                f"the next update's restart will be blocked until it is removed",
+            )
+        else:
+            _append_error(
+                result,
+                f"registry probe FAILED and could not stamp {sentinel} — "
+                f"the shell half of /update would read the absent sentinel as a pass "
+                f"and restart the worker onto an unresolvable registry. "
+                f"Aborting instead: {probe_gate.detail}",
+            )
+            result.success = False
+
+    return suppress_restart
 
 
 def _cleanup_stale_sessions(
@@ -252,19 +428,19 @@ def _cleanup_stale_sessions(
 
     from agent.pid_fence import fence_is_live
     from agent.session_health import _is_ledger
-    from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
     from models.session_lifecycle import finalize_session
+    from utils.utc import to_unix_ts
 
     # Attempt to import the live-worker registry; fails gracefully if the queue
     # module is not initialized in this process (standalone subprocess invocation).
     try:
-        from agent.agent_session_queue import _active_workers as active_workers_registry
+        from agent.session_state import _active_workers as active_workers_registry
     except Exception:
         import logging
 
         logging.getLogger(__name__).warning(
-            "[update] Could not import _active_workers from agent_session_queue — "
+            "[update] Could not import _active_workers from agent.session_state — "
             "falling back to recency-threshold-only cleanup"
         )
         active_workers_registry = {}
@@ -567,6 +743,9 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     the staleness the verify already computed and fix it in the same run.
 
     Sequence (parity with ``install_worker``'s #2141 drain gate):
+    0. Self-ancestry guard — if the running worker is an ancestor of THIS
+       process, DEFER (#3164). ``kickstart -k`` would SIGKILL the update run
+       itself; the launchd-parented cron restarts it instead.
     1. Drain — wait for in-flight sessions to finish. If they don't drain in
        the window, DEFER (return ``"deferred"``): never kill a live PM turn;
        the 30-min cron will restart the worker on its next tick.
@@ -578,6 +757,28 @@ def _self_heal_stale_worker(project_dir: Path, since_ts: float, v: bool) -> str:
     Returns one of ``"healed"`` | ``"deferred"`` | ``"failed"``. Never raises.
     """
     import time as _time
+
+    # 0. Never restart the worker this process is running inside (#3164).
+    #
+    # `service.get_worker_pid` is ancestor-safe now, so a `/update` run hosted
+    # by the worker gets back its own parent's PID — and `kickstart -k` SIGKILLs
+    # that process group, taking the run down mid-flight and leaving the verify
+    # unfinished. `pgrep`'s ancestor exclusion used to make this unreachable by
+    # accident; it is now an explicit decision. DEFER: the 30-min update cron
+    # runs from launchd, is not a worker descendant, and restarts it cleanly.
+    #
+    # Ordered ahead of the drain gate deliberately. Draining is a bounded but
+    # multi-minute wait, and the answer here does not depend on it.
+    worker_pid = service.get_worker_pid()
+    if worker_pid is not None and is_own_ancestor(worker_pid):
+        log(
+            f"self-heal: worker pid {worker_pid} is an ancestor of this update run — "
+            "DEFERRING restart (a kickstart would kill this process); "
+            "the update cron will restart it from launchd next cycle",
+            v,
+            always=True,
+        )
+        return "deferred"
 
     # 1. Drain before restart (#2141). Drain-probe errors fail open (restart).
     try:
@@ -654,14 +855,15 @@ def run_release_verify(
                 )
             elif outcome == "deferred":
                 log(
-                    "worker self-heal: restart DEFERRED (sessions in flight did not drain) — "
-                    "the 30-min update cron will restart the worker next cycle",
+                    "worker self-heal: restart DEFERRED — the 30-min update cron will "
+                    "restart the worker next cycle (reason logged above: sessions in "
+                    "flight, or the worker is this run's own ancestor)",
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    "worker stale; self-heal restart deferred (sessions in flight) — "
-                    "cron will retry next update cycle"
+                _append_warning(
+                    result,
+                    "worker stale; self-heal restart deferred — cron will retry next update cycle",
                 )
                 # A deferral is not a failure: drop the worker from alert
                 # consideration so it neither hard-fails nor Sentry-alerts.
@@ -678,7 +880,7 @@ def run_release_verify(
         for name, info in release_check.items():
             if info.get("classification") == "unknown":
                 log(f"WARN: {name} release could not be confirmed (unknown)", v, always=True)
-                result.warnings.append(f"{name} release could not be confirmed")
+                _append_warning(result, f"{name} release could not be confirmed")
         release_stale = {
             name: info
             for name, info in release_check.items()
@@ -700,7 +902,7 @@ def run_release_verify(
             for name, info in release_stale.items()
         )
         log(f"ERROR: release verify FAILED @ {head_short}: {details}", v, always=True)
-        result.warnings.append(f"release verify FAILED: {details}")
+        _append_warning(result, f"release verify FAILED: {details}")
         result.success = False
         if "bridge" in release_stale:
             try:
@@ -742,10 +944,79 @@ def run_release_verify(
         log(f"WARN: release verify errored (inconclusive): {verify_err}", v, always=True)
 
 
+_NIGHTLY_TESTS_STALE_AFTER = timedelta(days=2)
+
+
+def _nightly_tests_staleness_warning(project_dir: Path) -> str | None:
+    """Warn when the nightly detector is installed but has not run recently.
+
+    This is the only check in the pipeline that observes the *absence* of a
+    run. The clock is ``now - max(plist_mtime, run_at)``, never file-absence:
+    the installer is idempotent and takes the "installed" leg on every
+    ``/update``, so an absence-keyed check would warn on the very run that
+    installs the detector and keep warning until a 03:00 night lands.
+
+    Gated on the caller only invoking this on the ``"installed"`` leg — a
+    plist booted out, a bootstrap that failed quietly, a machine asleep at
+    03:00, or the detector's own run-lock collision (returns 0 silently) all
+    look exactly like a green suite otherwise, and ``tools/doctor.py`` has no
+    coverage for any of them.
+    """
+    plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.nightly-tests.plist"
+    anchor: datetime | None = None
+    if plist_path.exists():
+        try:
+            anchor = datetime.fromtimestamp(plist_path.stat().st_mtime, UTC)
+        except OSError:
+            anchor = None
+
+    run_at: datetime | None = None
+    last_run_file = project_dir / "data" / "nightly_tests_last_run.json"
+    try:
+        state = json.loads(last_run_file.read_text())
+        raw_run_at = state.get("run_at")
+        run_at = datetime.fromisoformat(raw_run_at) if raw_run_at else None
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        run_at = None
+
+    newest = max([d for d in (anchor, run_at) if d is not None], default=None)
+    if newest is None or (datetime.now(UTC) - newest) >= _NIGHTLY_TESTS_STALE_AFTER:
+        return "Nightly tests: service installed but last run is 2+ days old (or never ran)"
+    return None
+
+
+def _format_auto_bump_rollback_message(bump: deps.AutoBumpResult) -> tuple[str, str]:
+    """Build the operator-facing log line and warning text for a rolled-back auto-bump.
+
+    A gate that could not be evaluated on this machine (the ``llm`` phase's
+    ``CompatResult.probe_skipped`` case: no Anthropic API key) is not an
+    incompatible pair, and must not read like one to the operator -- even
+    though both roll back. Split out of ``run_update`` so this text selection
+    is unit-testable without driving the rest of that function's real
+    system-touching steps.
+
+    Returns ``(log_line, warning_text)``.
+    """
+    phase = bump.failed_phase or "gate"
+    if bump.gate_unverifiable:
+        log_line = f"WARN: Auto-bump rolled back ({phase} gate unverifiable, not incompatible)"
+        warning_text = f"Auto-bump rolled back after {phase} phase was unverifiable (no API key)"
+    else:
+        log_line = f"WARN: Auto-bump rolled back ({phase} phase failed)"
+        warning_text = f"Auto-bump rolled back after {phase} phase failure"
+    return log_line, warning_text
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
     v = config.verbose
+
+    # Honor the read-only contract in the suppression-state module before any
+    # step can call should_emit (#2898). Set unconditionally, so a non-verify
+    # run in the same process re-enables persistence rather than inheriting a
+    # previous verify run's switch.
+    warn_state.set_read_only(config.read_only)
 
     # Step 1: Git pull
     if config.do_git_pull:
@@ -755,7 +1026,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not result.git_result.success:
             log(f"FAIL: {result.git_result.error}", v)
             result.success = False
-            result.errors.append(f"Git pull failed: {result.git_result.error}")
+            _append_error(result, f"Git pull failed: {result.git_result.error}")
             return result
 
         if result.git_result.commit_count == 0:
@@ -769,7 +1040,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if result.git_result.stash_restored:
                 log("Stashed and restored local changes", v)
             else:
-                result.warnings.append("Local changes stashed but failed to restore")
+                _append_warning(result, "Local changes stashed but failed to restore")
 
     # Report which layout ~/.claude/hooks is in (issue #2567). Two machines in
     # different layouts produce different runtime behavior from identical code,
@@ -788,10 +1059,19 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("hooks: ~/.claude/hooks is a real user directory", v)
 
     # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
-    log("Syncing .claude hardlinks...", v)
-    result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+    #
+    # Writes into ~/.claude and can migrate the hooks dir-symlink, so it is a
+    # real mutation of machine-global state and is off under --verify (#3026).
+    # An empty result stands in so the reporting below still runs and honestly
+    # reports zero rather than needing its own skip branch.
+    if config.read_only:
+        log("Skipping .claude hardlink sync — --verify makes no changes (#3026)", v, always=True)
+        result.hardlink_result = hardlinks.HardlinkSyncResult()
+    else:
+        log("Syncing .claude hardlinks...", v)
+        result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
 
-    if hooks_alias is not None:
+    if hooks_alias is not None and not config.read_only:
         # The predicate lives beside its emitter in hardlinks so the two cannot
         # drift; matching a bare "dir-symlink" substring here once reported a
         # hooks migration that the skills migration had actually performed.
@@ -814,7 +1094,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("hooks: sdlc_context deployed", v)
     else:
         log("hooks: MISSING sdlc_context (see #2561)", v, always=True)
-        result.warnings.append("hooks: MISSING sdlc_context (see #2561)")
+        _append_warning(result, "hooks: MISSING sdlc_context (see #2561)")
 
     if result.hardlink_result.created > 0:
         log(f"Created {result.hardlink_result.created} new hardlink(s)", v, always=True)
@@ -843,16 +1123,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         for action in result.hardlink_result.actions:
             if action.action == "error":
                 log(f"WARN: {action.error} ({action.dst})", v)
-                result.warnings.append(f"Hardlink step failed: {action.dst}")
+                _append_warning(result, f"Hardlink step failed: {action.dst}")
 
     # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
     healed_plists = service.heal_plist_paths(project_dir)
     if healed_plists:
         for label in healed_plists:
             log(f"Healed PATH in {label}.plist (added ~/.local/bin)", v, always=True)
-        result.warnings.append(
+        _append_warning(
+            result,
             f"Healed {len(healed_plists)} plist(s) missing ~/.local/bin in PATH — "
-            "services reloaded automatically"
+            "services reloaded automatically",
         )
 
     # Step 1.56: Remove launchd jobs for features that have been fully deleted
@@ -864,156 +1145,272 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     for label in obsolete_removed:
         log(f"Removed obsolete launchd job {label} (feature deleted from codebase)", v, always=True)
 
-    # Step 1.6: Verify .env symlink
-    log("Verifying .env symlink...", v)
-    result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
-    env_r = result.env_sync_result
-    if env_r.created:
-        log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
-    if env_r.error:
-        log(f"WARN: Env symlink: {env_r.error}", v)
-        result.warnings.append(f"Env symlink: {env_r.error}")
-
-    # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
-    # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
-    log("Verifying config/projects.json...", v)
-    projects_r = env_sync.sync_projects_json(project_dir)
-    if projects_r.created:
-        log("config/projects.json copied from vault (was symlink or stale)", v, always=True)
-    elif projects_r.ok:
-        log("config/projects.json OK (real file copy)", v)
-    if projects_r.error:
-        log(f"WARN: projects.json: {projects_r.error}", v, always=True)
-        result.warnings.append(f"projects.json: {projects_r.error}")
-
-    # Step 1.655: Ensure the crash-recovery reflection is registered in the
-    # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
-    # (critique NIT) so the appended entry propagates into the per-machine
-    # config/reflections.yaml on this same cycle. Guarded on vault presence +
-    # 'valor' ownership; idempotent no-op once the entry exists.
-    log("Ensuring crash-recovery reflection is registered...", v)
-    result.reflection_register_result = reflection_register.register_crash_recovery(project_dir)
-    rr = result.reflection_register_result
-    if rr.action == "registered":
-        log("crash-recovery reflection registered in vault reflections.yaml", v, always=True)
-    elif rr.action == "noop":
-        log("crash-recovery reflection already registered", v)
-    elif rr.action == "skipped":
-        log(f"crash-recovery registration skipped: {rr.detail}", v)
-    if not rr.success:
-        log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
-        result.warnings.append(f"crash-recovery registration: {rr.detail}")
-
-    # Step 1.656: Remove reflections whose callables no longer ship in the
-    # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
-    # scheduling an entry that can no longer import (#2376). Same ordering
-    # rationale as Step 1.655: runs BEFORE Step 1.66's vault→config copy so
-    # the removal propagates on this same cycle.
-    for removed_name in reflection_register.REMOVED_REFLECTIONS:
-        log(f"Ensuring {removed_name} reflection is removed...", v)
-        rm = reflection_register.remove_reflection(project_dir, name=removed_name)
-        result.reflection_removal_results.append(rm)
-        if rm.action == "removed":
-            log(f"{removed_name} reflection removed from vault reflections.yaml", v, always=True)
-        elif rm.action == "noop":
-            log(f"{removed_name} reflection already absent", v)
-        elif rm.action == "skipped":
-            log(f"{removed_name} removal skipped: {rm.detail}", v)
-        if not rm.success:
-            log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
-            result.warnings.append(f"{removed_name} removal: {rm.detail}")
-
-    # Step 1.657: Ensure the memory-distill-backfill reflection is registered
-    # (#2202) via the same generalized register path. Same ordering rationale
-    # as Steps 1.655/1.656: runs BEFORE Step 1.66's vault→config copy so the
-    # entry propagates into the per-machine config/reflections.yaml on this
-    # same cycle.
-    log("Ensuring memory-distill-backfill reflection is registered...", v)
-    result.memory_distill_backfill_register_result = (
-        reflection_register.register_memory_distill_backfill(project_dir)
-    )
-    mdr = result.memory_distill_backfill_register_result
-    if mdr.action == "registered":
+    # Steps 1.6-1.68 mutate machine-global state outside this checkout: the
+    # .env symlink, config/projects.json, three reflection registrations into
+    # the shared iCloud vault, the vault->config reflections copy, ~/.zshenv,
+    # and gh CLI auth. All are off under --verify (#3026).
+    #
+    # The reflection registrations are the sharpest case. Since #2855 the
+    # write-side resolver targets the vault unconditionally, so leaving these
+    # ungated would make --verify write ~/Desktop/Valor/reflections.yaml --
+    # a shared, iCloud-synced file -- where it previously only dirtied a
+    # repo-local copy. The read_only flag has to lead the fix, not trail it.
+    if config.read_only:
         log(
-            "memory-distill-backfill reflection registered in vault reflections.yaml",
+            "Skipping machine-global sync steps 1.6-1.68 "
+            "(.env, projects.json, reflection registration, zshenv, gh auth) "
+            "— --verify makes no changes (#3026)",
             v,
             always=True,
         )
-    elif mdr.action == "noop":
-        log("memory-distill-backfill reflection already registered", v)
-    elif mdr.action == "skipped":
-        log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
-    if not mdr.success:
-        log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
-        result.warnings.append(f"memory-distill-backfill registration: {mdr.detail}")
+    else:
+        # Step 1.6: Verify .env symlink
+        log("Verifying .env symlink...", v)
+        result.env_sync_result = env_sync.sync_env_from_vault(project_dir)
+        env_r = result.env_sync_result
+        if env_r.created:
+            log(".env symlink created → ~/Desktop/Valor/.env", v, always=True)
+        if env_r.error:
+            log(f"WARN: Env symlink: {env_r.error}", v)
+            _append_warning(result, f"Env symlink: {env_r.error}")
 
-    # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
-    # (#2717) via the same generalized register path. Same ordering
-    # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
-    # vault→config copy so the entry propagates into the per-machine
-    # config/reflections.yaml on this same cycle.
-    log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
-    result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
-        project_dir
-    )
-    upr = result.sdlc_upvote_pickup_register_result
-    if upr.action == "registered":
-        log(
-            "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
-            v,
-            always=True,
+        # Step 1.65: Ensure config/projects.json is a real file copy (never a symlink —
+        # launchd TCC blocks open() on iCloud-synced ~/Desktop paths).
+        log("Verifying config/projects.json...", v)
+        projects_r = env_sync.sync_projects_json(project_dir)
+        if projects_r.created:
+            log("config/projects.json copied from vault (was symlink or stale)", v, always=True)
+        elif projects_r.ok:
+            log("config/projects.json OK (real file copy)", v)
+        if projects_r.error:
+            log(f"WARN: projects.json: {projects_r.error}", v, always=True)
+            _append_warning(result, f"projects.json: {projects_r.error}")
+
+        # Step 1.655: Ensure the crash-recovery reflection is registered in the
+        # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
+        # (critique NIT) so the appended entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle. Guarded on vault presence +
+        # 'valor' ownership; idempotent no-op once the entry exists.
+        log("Ensuring crash-recovery reflection is registered...", v)
+        result.reflection_register_result = reflection_register.register_crash_recovery(project_dir)
+        rr = result.reflection_register_result
+        if rr.action == "registered":
+            log("crash-recovery reflection registered in vault reflections.yaml", v, always=True)
+        elif rr.action == "noop":
+            log("crash-recovery reflection already registered", v)
+        elif rr.action == "skipped":
+            log(f"crash-recovery registration skipped: {rr.detail}", v)
+        if not rr.success:
+            log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
+            _append_warning(result, f"crash-recovery registration: {rr.detail}")
+
+        # Step 1.656: Remove reflections whose callables no longer ship in the
+        # repo (reflection_register.REMOVED_REFLECTIONS) so no machine keeps
+        # scheduling an entry that can no longer import (#2376). Same ordering
+        # rationale as Step 1.655: runs BEFORE Step 1.66's vault→config copy so
+        # the removal propagates on this same cycle.
+        for removed_name in reflection_register.REMOVED_REFLECTIONS:
+            log(f"Ensuring {removed_name} reflection is removed...", v)
+            rm = reflection_register.remove_reflection(project_dir, name=removed_name)
+            result.reflection_removal_results.append(rm)
+            if rm.action == "removed":
+                log(
+                    f"{removed_name} reflection removed from vault reflections.yaml", v, always=True
+                )
+            elif rm.action == "noop":
+                log(f"{removed_name} reflection already absent", v)
+            elif rm.action == "skipped":
+                log(f"{removed_name} removal skipped: {rm.detail}", v)
+            if not rm.success:
+                log(f"WARN: {removed_name} removal: {rm.detail}", v, always=True)
+                _append_warning(result, f"{removed_name} removal: {rm.detail}")
+
+        # Step 1.657: Ensure the memory-distill-backfill reflection is registered
+        # (#2202) via the same generalized register path. Same ordering rationale
+        # as Steps 1.655/1.656: runs BEFORE Step 1.66's vault→config copy so the
+        # entry propagates into the per-machine config/reflections.yaml on this
+        # same cycle.
+        log("Ensuring memory-distill-backfill reflection is registered...", v)
+        result.memory_distill_backfill_register_result = (
+            reflection_register.register_memory_distill_backfill(project_dir)
         )
-    elif upr.action == "noop":
-        log("sdlc-upvote-pickup reflection already registered", v)
-    elif upr.action == "skipped":
-        log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
-    if not upr.success:
-        log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
-        result.warnings.append(f"sdlc-upvote-pickup registration: {upr.detail}")
+        mdr = result.memory_distill_backfill_register_result
+        if mdr.action == "registered":
+            log(
+                "memory-distill-backfill reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif mdr.action == "noop":
+            log("memory-distill-backfill reflection already registered", v)
+        elif mdr.action == "skipped":
+            log(f"memory-distill-backfill registration skipped: {mdr.detail}", v)
+        if not mdr.success:
+            log(f"WARN: memory-distill-backfill registration: {mdr.detail}", v, always=True)
+            _append_warning(result, f"memory-distill-backfill registration: {mdr.detail}")
 
-    # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
-    # symlink — the launchd worker's reflection scheduler reads it, and a
-    # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
-    log("Verifying config/reflections.yaml...", v)
-    result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
-    refl_r = result.reflections_sync_result
-    if refl_r.created:
-        log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
-    elif refl_r.ok:
-        log("config/reflections.yaml OK (real file copy)", v)
-    elif refl_r.skipped:
-        log("config/reflections.yaml: vault not found, using in-repo fallback", v)
-    if refl_r.error:
-        log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml: {refl_r.error}")
+        # Step 1.658: Ensure the sdlc-upvote-pickup reflection is registered
+        # (#2717) via the same generalized register path. Same ordering
+        # rationale as Steps 1.655/1.656/1.657: runs BEFORE Step 1.66's
+        # vault→config copy so the entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle.
+        log("Ensuring sdlc-upvote-pickup reflection is registered...", v)
+        result.sdlc_upvote_pickup_register_result = reflection_register.register_sdlc_upvote_pickup(
+            project_dir
+        )
+        upr = result.sdlc_upvote_pickup_register_result
+        if upr.action == "registered":
+            log(
+                "sdlc-upvote-pickup reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif upr.action == "noop":
+            log("sdlc-upvote-pickup reflection already registered", v)
+        elif upr.action == "skipped":
+            log(f"sdlc-upvote-pickup registration skipped: {upr.detail}", v)
+        if not upr.success:
+            log(f"WARN: sdlc-upvote-pickup registration: {upr.detail}", v, always=True)
+            _append_warning(result, f"sdlc-upvote-pickup registration: {upr.detail}")
 
-    # Step 1.67: Bootstrap cross-machine zshenv loader.
-    # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
-    # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
-    # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
-    log("Verifying ~/.zshenv → vault loader...", v)
-    result.zshenv_sync_result = zshenv_sync.sync_zshenv()
-    zr = result.zshenv_sync_result
-    if zr.vault_seeded:
-        log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
-    if zr.guard_added:
-        log("Added Valor source guard to ~/.zshenv", v, always=True)
-    if zr.error:
-        log(f"WARN: zshenv sync: {zr.error}", v, always=True)
-        result.warnings.append(f"zshenv sync: {zr.error}")
+        # Step 1.658b: Ensure the two ETL-pipeline reflections are registered
+        # (#3183) via the same generalized register path. Same ordering
+        # rationale as Steps 1.655-1.658: both run BEFORE Step 1.66's
+        # vault->config copy so the entries propagate into the per-machine
+        # config/reflections.yaml on this same cycle.
+        for _label, _register, _attr in (
+            (
+                "side-effect-drain",
+                reflection_register.register_side_effect_drain,
+                "side_effect_drain_register_result",
+            ),
+            (
+                "dead-letter-replay",
+                reflection_register.register_dead_letter_replay,
+                "dead_letter_replay_register_result",
+            ),
+        ):
+            log(f"Ensuring {_label} reflection is registered...", v)
+            _res = _register(project_dir)
+            setattr(result, _attr, _res)
+            if _res.action == "registered":
+                log(f"{_label} reflection registered in vault reflections.yaml", v, always=True)
+            elif _res.action == "noop":
+                log(f"{_label} reflection already registered", v)
+            elif _res.action == "skipped":
+                log(f"{_label} registration skipped: {_res.detail}", v)
+            if not _res.success:
+                log(f"WARN: {_label} registration: {_res.detail}", v, always=True)
+                _append_warning(result, f"{_label} registration: {_res.detail}")
 
-    # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
-    # Ensures all machines use the correct primary GitHub token consistently.
-    # Idempotent — safe to run on every update tick.
-    log("Configuring gh CLI auth...", v)
-    gh_auth_result = gh_auth.configure_gh_auth(project_dir)
-    if gh_auth_result.action == "configured":
-        log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
-    elif gh_auth_result.action == "skipped":
-        log(f"gh auth: skipped — {gh_auth_result.detail}", v)
-    elif not gh_auth_result.success:
-        log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
-        result.warnings.append(f"gh auth: {gh_auth_result.error}")
+        # Step 1.6585: Ensure the improvement-evidence-collect reflection is
+        # registered (#3177) via the same generalized register path. Same
+        # ordering rationale as Steps 1.655-1.658: runs BEFORE Step 1.66's
+        # vault→config copy so the entry propagates into the per-machine
+        # config/reflections.yaml on this same cycle. Without this tick nothing
+        # writes ImprovementEvidence and the improvement loop observes nothing.
+        log("Ensuring improvement-evidence-collect reflection is registered...", v)
+        result.improvement_collect_register_result = (
+            reflection_register.register_improvement_collect(project_dir)
+        )
+        icr = result.improvement_collect_register_result
+        if icr.action == "registered":
+            log(
+                "improvement-evidence-collect reflection registered in vault reflections.yaml",
+                v,
+                always=True,
+            )
+        elif icr.action == "noop":
+            log("improvement-evidence-collect reflection already registered", v)
+        elif icr.action == "skipped":
+            log(f"improvement-evidence-collect registration skipped: {icr.detail}", v)
+        if not icr.success:
+            log(f"WARN: improvement-evidence-collect registration: {icr.detail}", v, always=True)
+            _append_warning(result, f"improvement-evidence-collect registration: {icr.detail}")
+
+        # Step 1.659: Repoint reflection callables onto the modules that own them.
+        # Two migration families share one table: the `agent.sustainability.*` shim
+        # -> `reflections.agents.*` (#2875), and the `agent.agent_session_queue.*`
+        # re-export hub -> `agent.session_health` / `agent.session_revival` (#2876).
+        # `agent/sustainability.py` is deleted, so the registry must never reacquire
+        # those paths; this step rewrites any that it still carries, which is what
+        # keeps it alive after its own migration is done.
+        # Keep these strings family-agnostic: naming one family makes the log false
+        # on a machine where the other fires, and an operator verifying #2876's
+        # propagation gate reads exactly this output.
+        # config/reflections.yaml is gitignored, so this registry edit can only
+        # reach machines as tracked code that rewrites the file. Runs BEFORE Step
+        # 1.66's vault->config copy (same ordering rationale as Steps 1.655-1.658)
+        # so a vault rewrite propagates on this same cycle; the migration also
+        # rewrites the config copy directly, because Step 1.66 skips the copy when
+        # the config copy is not older than the vault. Idempotent no-op once done.
+        log("Ensuring reflection callables name their owning modules...", v)
+        result.reflections_callables_result = (
+            reflections_callables.run_reflections_callables_migration(project_dir)
+        )
+        rcr = result.reflections_callables_result
+        if rcr.action == "rewrote":
+            log(
+                f"reflection callables repointed onto their owning modules "
+                f"({rcr.rewrites_count} line(s) across {len(rcr.targets or [])} file(s))",
+                v,
+                always=True,
+            )
+        elif rcr.action == "noop":
+            log("reflection callables already name their owning modules", v)
+        if not rcr.success:
+            log(f"WARN: reflection callable migration: {rcr.error}", v, always=True)
+            _append_warning(result, f"reflection callable migration: {rcr.error}")
+            # Warning only HERE, but not fail-open overall: Step 4.65's probe
+            # independently checks whether the registry actually imports, and it
+            # is that probe — not this rewriter's exit status — that suppresses
+            # the service restart. A rewrite failure over a registry that was
+            # already clean is genuinely harmless and stays a warning; one that
+            # leaves the deleted shim named is caught downstream.
+
+        # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
+        # symlink — the launchd worker's reflection scheduler reads it, and a
+        # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
+        log("Verifying config/reflections.yaml...", v)
+        result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
+        refl_r = result.reflections_sync_result
+        if refl_r.created:
+            log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
+        elif refl_r.ok:
+            log("config/reflections.yaml OK (real file copy)", v)
+        elif refl_r.skipped:
+            log("config/reflections.yaml: vault not found, using in-repo fallback", v)
+        if refl_r.error:
+            log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
+            _append_warning(result, f"reflections.yaml: {refl_r.error}")
+
+        # Step 1.67: Bootstrap cross-machine zshenv loader.
+        # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
+        # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
+        # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
+        log("Verifying ~/.zshenv → vault loader...", v)
+        result.zshenv_sync_result = zshenv_sync.sync_zshenv()
+        zr = result.zshenv_sync_result
+        if zr.vault_seeded:
+            log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
+        if zr.guard_added:
+            log("Added Valor source guard to ~/.zshenv", v, always=True)
+        if zr.error:
+            log(f"WARN: zshenv sync: {zr.error}", v, always=True)
+            _append_warning(result, f"zshenv sync: {zr.error}")
+
+        # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
+        # Ensures all machines use the correct primary GitHub token consistently.
+        # Idempotent — safe to run on every update tick.
+        log("Configuring gh CLI auth...", v)
+        gh_auth_result = gh_auth.configure_gh_auth(project_dir)
+        if gh_auth_result.action == "configured":
+            log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
+        elif gh_auth_result.action == "skipped":
+            log(f"gh auth: skipped — {gh_auth_result.detail}", v)
+        elif not gh_auth_result.success:
+            log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
+            _append_warning(result, f"gh auth: {gh_auth_result.error}")
 
     # Step 1.69: Check Google Workspace CLI (`gws`) auth state.
     # Detection only — the OAuth consent flow is human-gated and browser-based,
@@ -1022,14 +1419,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     gws_auth_result = gws_auth.configure_gws_auth(project_dir)
     if gws_auth_result.action == "already_ok":
         log(f"gws auth: {gws_auth_result.detail}", v)
+        # Resolution: clear any stored signature and emit one resolved note.
+        if warn_state.should_emit("gws-auth", "", project_dir):
+            log("gws auth: resolved", v, always=True)
     elif gws_auth_result.action == "skipped":
         log(f"gws auth: skipped — {gws_auth_result.detail}", v)
     elif gws_auth_result.action == "needs_auth":
-        log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
-        result.warnings.append(f"gws auth: {gws_auth_result.detail}")
+        # Human-gated (browser OAuth consent, #2329-shaped): one emission
+        # per state transition rather than every 30-minute cycle (#2845).
+        # The signature is the auth-method string, so a change in the
+        # method re-warns.
+        signature = f"needs_auth:{gws_auth_result.detail}"
+        if warn_state.should_emit("gws-auth", signature, project_dir):
+            log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
+            _append_warning(result, f"gws auth: {gws_auth_result.detail}")
+            result.warn_keys_emitted.add("gws-auth")
     elif not gws_auth_result.success:
         log(f"WARN: gws auth: {gws_auth_result.error}", v, always=True)
-        result.warnings.append(f"gws auth: {gws_auth_result.error}")
+        _append_warning(result, f"gws auth: {gws_auth_result.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
@@ -1037,7 +1444,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if result.hook_audit.issues:
         for issue in result.hook_audit.issues:
             log(f"WARN: [{issue.skill}] {issue.detail}", v, always=True)
-            result.warnings.append(f"Hook issue in {issue.skill}: {issue.issue_type}")
+            _append_warning(result, f"Hook issue in {issue.skill}: {issue.issue_type}")
     else:
         log(f"Skill hooks OK ({result.hook_audit.skills_scanned} skills scanned)", v)
 
@@ -1045,7 +1452,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     pending = git.check_upgrade_pending(project_dir)
     if pending.pending:
         log(f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v)
-        result.warnings.append(f"Critical upgrade pending: {pending.reason}")
+        _append_warning(result, f"Critical upgrade pending: {pending.reason}")
 
     # Step 2.6: Determine whether this machine is the lockfile maintainer.
     # `projects.json` assigns each project to exactly one machine via the
@@ -1121,7 +1528,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
             else:
                 log(f"WARN: Dep sync failed: {result.dep_result.error}", v, always=True)
-                result.warnings.append(f"Dep sync failed: {result.dep_result.error}")
+                _append_warning(result, f"Dep sync failed: {result.dep_result.error}")
 
             # Verify critical versions
             result.version_info = deps.verify_critical_versions(project_dir)
@@ -1132,7 +1539,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                         f"WARN: {vi.package} version mismatch: {vi.version} != {vi.expected}",
                         v,
                     )
-                    result.warnings.append(f"{vi.package} version mismatch")
+                    _append_warning(result, f"{vi.package} version mismatch")
         else:
             log("No dependency changes, skipping sync", v)
 
@@ -1149,7 +1556,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # would find "no venv yet" and skip, leaving the freshly created venv
     # unguarded until the next `/update` (Risk 1). Idempotent + non-fatal:
     # log, warn, continue -- same contract as Step 3.13/3.14.
-    log("Installing Redis flush-guard .pth into repo venvs...", v)
+    log("Installing startup .pth shims (Redis flush guard, checkout pin) into repo venvs...", v)
     try:
         from scripts.update import redis_flush_guard_pth
 
@@ -1166,8 +1573,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}"
+                _append_warning(
+                    result,
+                    f"Redis flush guard not installed in {venv_label}: {venv_result.get('reason')}",
                 )
     except Exception as _rfg_exc:
         log(
@@ -1175,7 +1583,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             v,
             always=True,
         )
-        result.warnings.append(f"Redis flush guard install: unexpected error: {_rfg_exc}")
+        _append_warning(result, f"Redis flush guard install: unexpected error: {_rfg_exc}")
 
     # Step 3.5: Auto-bump critical deps from PyPI.
     #
@@ -1195,100 +1603,126 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
         for b in bump.bumps:
             if b.bumped:
-                log(f"  {b.package}: {b.old_version} -> {b.new_version}", v, always=True)
+                # `restore_failed` blocks the commit below regardless of
+                # which set bumped cleanly (deps.py's set loop only stops
+                # AFTER the failing set, so an earlier set's clean bump is
+                # still reported here) -- say so inline, not just in the
+                # adjacent restore-failed warning, so the two lines don't
+                # read in tension.
+                suffix = " (not committed)" if bump.restore_failed else ""
+                log(f"  {b.package}: {b.old_version} -> {b.new_version}{suffix}", v, always=True)
             elif b.error:
                 log(f"  {b.package}: skip ({b.error})", v)
             else:
                 log(f"  {b.package}: {b.old_version} (up to date)", v)
 
-        if bump.any_bumped:
-            if bump.rolled_back:
-                log(
-                    "WARN: Auto-bump rolled back (smoke test or sync failed)",
-                    v,
-                    always=True,
+        if bump.rolled_back:
+            log_line, warning_text = _format_auto_bump_rollback_message(bump)
+            log(log_line, v, always=True)
+            log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
+            _append_warning(result, warning_text)
+
+        if bump.restore_failed:
+            # The rollback's own re-sync failed, so the venv does NOT match
+            # the restored pyproject.toml. Nothing may be committed this run.
+            log("WARN: Auto-bump rollback could not restore dependencies", v, always=True)
+            _append_warning(
+                result,
+                "pyproject.toml and uv.lock restored from the pre-bump snapshot; "
+                "the venv re-sync failed, so nothing was committed this run",
+            )
+
+        # A member is `bumped` only once its whole coupled set survived every
+        # gate, so this branch never names a pin that was rolled back.
+        if bump.any_bumped and not bump.restore_failed:
+            log("Smoke test passed after bump", v, always=True)
+            # Commit the pyproject.toml change
+            try:
+                bumped_pkgs = [
+                    f"{b.package} {b.old_version}->{b.new_version}" for b in bump.bumps if b.bumped
+                ]
+                msg = (
+                    f"Bump deps: {', '.join(bumped_pkgs)}\n\n"
+                    "No-issue: automated coupled-set dependency bump, gated on "
+                    "llm/import/pytest checks in auto_bump_deps"
                 )
-                log(f"  Detail: {bump.smoke_output or bump.sync_error}", v)
-                result.warnings.append("Auto-bump rolled back after test failure")
-            elif bump.smoke_passed:
-                log("Smoke test passed after bump", v, always=True)
-                # Commit the pyproject.toml change
+                # Stage both pyproject.toml and uv.lock — the lockfile was
+                # regenerated by the unfrozen sync inside auto_bump_deps,
+                # and follower machines (`uv sync --frozen`) need it on
+                # origin to install the new pins.
+                deps.run_cmd(
+                    ["git", "add", "pyproject.toml", "uv.lock"],
+                    cwd=project_dir,
+                )
+                deps.run_cmd(
+                    ["git", "commit", "-m", msg],
+                    cwd=project_dir,
+                )
                 try:
-                    bumped_pkgs = [
-                        f"{b.package} {b.old_version}->{b.new_version}"
-                        for b in bump.bumps
-                        if b.bumped
-                    ]
-                    msg = f"Bump deps: {', '.join(bumped_pkgs)}"
-                    # Stage both pyproject.toml and uv.lock — the lockfile was
-                    # regenerated by the unfrozen sync inside auto_bump_deps,
-                    # and follower machines (`uv sync --frozen`) need it on
-                    # origin to install the new pins.
                     deps.run_cmd(
-                        ["git", "add", "pyproject.toml", "uv.lock"],
+                        ["git", "push"],
                         cwd=project_dir,
                     )
-                    deps.run_cmd(
-                        ["git", "commit", "-m", msg],
-                        cwd=project_dir,
-                    )
+                    log(f"Committed and pushed: {msg}", v, always=True)
+                except Exception:
+                    # Push rejected — another machine may have pushed the same bump.
+                    # Pull rebase and re-push; if our changes are already present,
+                    # reset to origin/main (no warning needed).
                     try:
+                        # Fetch + rebase onto the NAMED ref, not FETCH_HEAD
+                        # (#2650): `git pull --rebase` resolves its onto-
+                        # target through .git/FETCH_HEAD, which every
+                        # worktree of the repo shares, so a peer lane's
+                        # concurrent fetch can retarget our rebase.
                         deps.run_cmd(
-                            ["git", "push"],
+                            ["git", "fetch", "origin", "main"],
                             cwd=project_dir,
                         )
-                        log(f"Committed and pushed: {msg}", v, always=True)
-                    except Exception:
-                        # Push rejected — another machine may have pushed the same bump.
-                        # Pull rebase and re-push; if our changes are already present,
-                        # reset to origin/main (no warning needed).
-                        try:
-                            # Fetch + rebase onto the NAMED ref, not FETCH_HEAD
-                            # (#2650): `git pull --rebase` resolves its onto-
-                            # target through .git/FETCH_HEAD, which every
-                            # worktree of the repo shares, so a peer lane's
-                            # concurrent fetch can retarget our rebase.
+                        deps.run_cmd(
+                            ["git", "rebase", "origin/main"],
+                            cwd=project_dir,
+                        )
+                        # Check if our commit is still ahead of origin
+                        ahead = deps.run_cmd(
+                            ["git", "rev-list", "--count", "origin/main..HEAD"],
+                            cwd=project_dir,
+                            check=False,
+                        ).stdout.strip()
+                        if ahead and int(ahead) > 0:
                             deps.run_cmd(
-                                ["git", "fetch", "origin", "main"],
+                                ["git", "push"],
                                 cwd=project_dir,
                             )
+                            log(f"Committed and pushed (after rebase): {msg}", v, always=True)
+                        else:
+                            # Remote already has the same bump — reset local commit
                             deps.run_cmd(
-                                ["git", "rebase", "origin/main"],
+                                ["git", "reset", "--hard", "origin/main"],
                                 cwd=project_dir,
                             )
-                            # Check if our commit is still ahead of origin
-                            ahead = deps.run_cmd(
-                                ["git", "rev-list", "--count", "origin/main..HEAD"],
-                                cwd=project_dir,
-                                check=False,
-                            ).stdout.strip()
-                            if ahead and int(ahead) > 0:
-                                deps.run_cmd(
-                                    ["git", "push"],
-                                    cwd=project_dir,
-                                )
-                                log(f"Committed and pushed (after rebase): {msg}", v, always=True)
-                            else:
-                                # Remote already has the same bump — reset local commit
-                                deps.run_cmd(
-                                    ["git", "reset", "--hard", "origin/main"],
-                                    cwd=project_dir,
-                                )
-                                log(
-                                    f"Dep bump already on remote, skipping push: {msg}",
-                                    v,
-                                    always=True,
-                                )
-                        except Exception as e2:
-                            log(f"WARN: Failed to push dep bump: {e2}", v)
-                            result.warnings.append("Dep bump succeeded but commit/push failed")
-                except Exception as e:
-                    log(f"WARN: Failed to commit bump: {e}", v)
-                    result.warnings.append("Dep bump succeeded but commit/push failed")
+                            log(
+                                f"Dep bump already on remote, skipping push: {msg}",
+                                v,
+                                always=True,
+                            )
+                    except Exception as e2:
+                        log(f"WARN: Failed to push dep bump: {e2}", v)
+                        _append_warning(result, "Dep bump succeeded but commit/push failed")
+            except Exception as e:
+                log(f"WARN: Failed to commit bump: {e}", v)
+                _append_warning(result, "Dep bump succeeded but commit/push failed")
 
     # Step 3.6: Run pending data migrations (after git pull, before service restart)
-    log("Checking pending migrations...", v)
-    result.migration_result = migrations.run_pending_migrations(project_dir)
+    #
+    # Migrations rewrite persistent data and are irreversible, which makes them
+    # the single least appropriate thing for a mode advertised as safe to run
+    # from a scratch worktree (#3026). Off under --verify.
+    if config.read_only:
+        log("Skipping pending migrations — --verify makes no changes (#3026)", v, always=True)
+        result.migration_result = migrations.MigrationResult()
+    else:
+        log("Checking pending migrations...", v)
+        result.migration_result = migrations.run_pending_migrations(project_dir)
     mig = result.migration_result
     if mig.ran:
         for name in mig.ran:
@@ -1297,51 +1731,70 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if mig.failed:
         for err in mig.errors:
             log(f"  FAIL: {err}", v, always=True)
-            result.errors.append(f"Migration failed: {err}")
+            _append_error(result, f"Migration failed: {err}")
     if not mig.ran and not mig.failed:
         log("No pending migrations", v)
 
     # Step 3.65: Migrate reflections.yaml (interval: -> every:) on every pull.
     # Idempotent — issue #1273 unified Reflection grammar. Runs after Step 3
     # `uv sync` so the migration's schema-validation phase can import croniter.
-    log("Migrating reflections.yaml schedule grammar...", v)
-    result.reflections_yaml_result = reflections_yaml.run_reflections_yaml_migration(project_dir)
-    ry = result.reflections_yaml_result
-    if ry.success:
-        if ry.action == "rewrote":
-            log(
-                f"  reflections.yaml: rewrote {ry.rewrites_count} interval line(s) -> every:",
-                v,
-                always=True,
-            )
-        elif ry.action == "noop":
-            log("  reflections.yaml: already migrated", v)
-        elif ry.action == "skipped":
-            log(
-                f"  reflections.yaml: skipped ({ry.error or 'target missing'})",
-                v,
-            )
+    # Rewrites the reflections.yaml in the iCloud vault — off under --verify
+    # (#3026). "Idempotent" is not the same as "no changes": it still writes.
+    if config.read_only:
+        log(
+            "Skipping reflections.yaml grammar migration — --verify makes no changes (#3026)",
+            v,
+            always=True,
+        )
     else:
-        log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml migration: {ry.error}")
+        log("Migrating reflections.yaml schedule grammar...", v)
+        result.reflections_yaml_result = reflections_yaml.run_reflections_yaml_migration(
+            project_dir
+        )
+        ry = result.reflections_yaml_result
+        if ry.success:
+            if ry.action == "rewrote":
+                log(
+                    f"  reflections.yaml: rewrote {ry.rewrites_count} interval line(s) -> every:",
+                    v,
+                    always=True,
+                )
+            elif ry.action == "noop":
+                log("  reflections.yaml: already migrated", v)
+            elif ry.action == "skipped":
+                log(
+                    f"  reflections.yaml: skipped ({ry.error or 'target missing'})",
+                    v,
+                )
+        else:
+            log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
+            _append_warning(result, f"reflections.yaml migration: {ry.error}")
 
     # Step 3.66: Arm the merged-branch-cleanup plan-migration backstop
     # (issue #1900, Tier 0). Runs after the reflections.yaml copy (Step 1.66)
     # and grammar migration (Step 3.65) so it flips the CURRENT vault + repo
     # copies. Guarded on the vault file existing and this machine owning the
     # 'valor' project -- a no-op everywhere else.
-    log("Arming plan-migration backstop reflection...", v)
-    result.reflection_arm_result = reflection_arm.arm_merged_branch_cleanup(project_dir)
-    ar = result.reflection_arm_result
-    if ar.action == "armed":
-        log(f"  merged-branch-cleanup: {ar.detail}", v, always=True)
-    elif ar.action == "noop":
-        log(f"  merged-branch-cleanup: {ar.detail}", v)
-    elif ar.action == "skipped":
-        log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
-    if not ar.success:
-        log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
-        result.warnings.append(f"merged-branch-cleanup arm: {ar.detail}")
+    # Flips the current vault + repo reflections copies — off under --verify (#3026).
+    if config.read_only:
+        log(
+            "Skipping plan-migration backstop arming — --verify makes no changes (#3026)",
+            v,
+            always=True,
+        )
+    else:
+        log("Arming plan-migration backstop reflection...", v)
+        result.reflection_arm_result = reflection_arm.arm_merged_branch_cleanup(project_dir)
+        ar = result.reflection_arm_result
+        if ar.action == "armed":
+            log(f"  merged-branch-cleanup: {ar.detail}", v, always=True)
+        elif ar.action == "noop":
+            log(f"  merged-branch-cleanup: {ar.detail}", v)
+        elif ar.action == "skipped":
+            log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
+        if not ar.success:
+            log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
+            _append_warning(result, f"merged-branch-cleanup arm: {ar.detail}")
 
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)
@@ -1354,7 +1807,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"OfficeCLI {oc.action}: {oc.version}", v, always=True)
     else:
         log(f"WARN: OfficeCLI {oc.action}: {oc.error}", v)
-        result.warnings.append(f"OfficeCLI: {oc.error}")
+        _append_warning(result, f"OfficeCLI: {oc.error}")
 
     # Step 3.8: Rodney binary install/update (happy path testing)
     log("Checking Rodney...", v)
@@ -1367,7 +1820,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Rodney {rr.action}: {rr.version}", v, always=True)
     else:
         log(f"WARN: Rodney {rr.action}: {rr.error}", v)
-        result.warnings.append(f"Rodney: {rr.error}")
+        _append_warning(result, f"Rodney: {rr.error}")
 
     # Step 3.9: npm global tools (excalidraw-export, etc.)
     log("Checking npm tools...", v)
@@ -1383,7 +1836,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("  WARN: npm not available — skipping npm tools", v)
             else:
                 log(f"  WARN: {npm_r.name}: {npm_r.error}", v)
-                result.warnings.append(f"npm:{npm_r.name}: {npm_r.error}")
+                _append_warning(result, f"npm:{npm_r.name}: {npm_r.error}")
+
+    # Step 3.95: Codex CLI (opt-in dev lane, plan #2001 Task 4b). Disabled by
+    # default (CODEX__INSTALL_ENABLED=0): reports the installed version, if
+    # any, and touches nothing.
+    log("Checking Codex CLI...", v)
+    result.codex_cli_result = codex_cli.install_or_update()
+    cr = result.codex_cli_result
+    if cr.success:
+        if cr.action == "disabled":
+            log(f"  codex opt-in off{(' (' + cr.version + ' present)') if cr.version else ''}", v)
+        elif cr.action == "skipped":
+            log(f"  codex {cr.version} (up to date)", v)
+        else:
+            log(f"  codex {cr.action}: {cr.version}", v, always=True)
+    else:
+        log(f"  WARN: codex {cr.action}: {cr.error}", v)
+        _append_warning(result, f"codex:{cr.error}")
 
     # Step 3.10: sentry-cli install/update
     log("Checking sentry-cli...", v)
@@ -1396,7 +1866,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"sentry-cli {sr.action}: {sr.version}", v, always=True)
     else:
         log(f"WARN: sentry-cli {sr.action}: {sr.error}", v)
-        result.warnings.append(f"sentry-cli: {sr.error}")
+        _append_warning(result, f"sentry-cli: {sr.error}")
 
     # Step 3.11: Kokoro TTS model + voices download.
     # Idempotent: skipped when both files are already present in the cache
@@ -1414,7 +1884,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Kokoro models downloaded ({kr.models_dir})", v, always=True)
     else:
         log(f"WARN: Kokoro download: {kr.error}", v)
-        result.warnings.append(f"Kokoro: {kr.error}")
+        _append_warning(result, f"Kokoro: {kr.error}")
 
     # Step 3.12: ffmpeg — Kokoro encodes WAV -> OGG/Opus via ffmpeg. Without
     # it on PATH the local TTS backend reports unavailable and voice synthesis
@@ -1430,7 +1900,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"ffmpeg installed ({fr.path})", v, always=True)
     else:
         log(f"WARN: ffmpeg: {fr.error}", v)
-        result.warnings.append(f"ffmpeg: {fr.error}")
+        _append_warning(result, f"ffmpeg: {fr.error}")
 
     # Step 3.13: Redis durability configuration.
     # Pins AOF persistence (appendonly yes, appendfsync everysec) and eviction
@@ -1454,60 +1924,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
             if rp.warning:
                 log(f"WARN: Redis durability: {rp.warning}", v, always=True)
-                result.warnings.append(f"Redis durability: {rp.warning}")
+                _append_warning(result, f"Redis durability: {rp.warning}")
         elif rp.action == "skipped":
             log(f"Redis durability: skipped — {rp.error}", v)
         else:
             log(f"WARN: Redis durability: {rp.error}", v, always=True)
-            result.warnings.append(f"Redis durability: {rp.error}")
+            _append_warning(result, f"Redis durability: {rp.error}")
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
-        result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
-
-    # Step 3.135: Redis ACL planner, REPORT-ONLY (#2645, D8/Risk 8).
-    # Immediately after Step 3.13 durability, before Step 3.14 replication.
-    # Calls apply_redis_acl() with NO ARGUMENTS -- never apply=True, never a
-    # forwarded params.apply, never any global apply flag. `/update` must
-    # NEVER mutate the live Redis ACL; the apply is a human-signed runbook
-    # step (docs/features/redis-flush-hardening.md) -- an unattended ACL
-    # mutation landing silently in an unrelated PR is exactly the failure
-    # Risk 8 exists to prevent. A regression test asserts this call site
-    # passes no `apply` argument, so keep the call literally
-    # `apply_redis_acl()`. Imported lazily so a missing module (this file
-    # can land before scripts/update/redis_acl.py does) degrades to a
-    # logged skip, never an ImportError at `/update` start. Same non-fatal
-    # contract as 3.13/3.14: log, warn, continue.
-    log("Checking Redis ACL drift (report-only)...", v)
-    try:
-        from scripts.update import redis_acl
-
-        result.redis_acl_result = redis_acl.apply_redis_acl()
-        ra = result.redis_acl_result
-        if ra.success:
-            if ra.drift:
-                log(
-                    "Redis ACL: drift detected — planned commands: "
-                    + "; ".join(ra.planned_commands),
-                    v,
-                    always=True,
-                )
-                result.warnings.append(
-                    "Redis ACL drift detected — see docs/features/redis-flush-hardening.md "
-                    "for the apply runbook"
-                )
-            else:
-                log("Redis ACL: no drift", v)
-            if ra.warning:
-                log(f"WARN: Redis ACL: {ra.warning}", v, always=True)
-                result.warnings.append(f"Redis ACL: {ra.warning}")
-        else:
-            log(f"WARN: Redis ACL check: {ra.error}", v, always=True)
-            result.warnings.append(f"Redis ACL check: {ra.error}")
-    except ImportError:
-        log("Redis ACL: module not present yet, skipping", v)
-    except Exception as _acl_exc:
-        log(f"WARN: Redis ACL step failed unexpectedly: {_acl_exc}", v, always=True)
-        result.warnings.append(f"Redis ACL: unexpected error: {_acl_exc}")
+        _append_warning(result, f"Redis durability: unexpected error: {_rp_exc}")
 
     # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
     # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this
@@ -1526,15 +1951,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"Redis replication: {rr.action}", v)
             if rr.warning:
                 log(f"WARN: Redis replication: {rr.warning}", v, always=True)
-                result.warnings.append(f"Redis replication: {rr.warning}")
+                _append_warning(result, f"Redis replication: {rr.warning}")
         elif rr.action == "skipped":
             log(f"Redis replication: skipped — {rr.error}", v)
         else:
             log(f"WARN: Redis replication: {rr.error}", v, always=True)
-            result.warnings.append(f"Redis replication: {rr.error}")
+            _append_warning(result, f"Redis replication: {rr.error}")
     except Exception as _rr_exc:
         log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
-        result.warnings.append(f"Redis replication: unexpected error: {_rr_exc}")
+        _append_warning(result, f"Redis replication: unexpected error: {_rr_exc}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a
@@ -1554,7 +1979,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Generation model OK ({ollama_model}): {gen_detail}", v)
         else:
             log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
-            result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
+            _append_warning(result, f"generation model {ollama_model}: {gen_detail}")
         # Cloud-signin precondition: a cloud tag needs the host signed in.
         # Ollama persists signin via SSH keypair at ~/.ollama/id_ed25519 —
         # there is no ":cloud" model entry in `ollama list`.
@@ -1571,14 +1996,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     "Run: ollama signin"
                 )
                 log(f"WARN: {msg}", v, always=True)
-                result.warnings.append(msg)
+                _append_warning(result, msg)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
     machine_check = verify.check_machine_identity(project_dir)
     if machine_check.get("error"):
         log(f"WARN: {machine_check['error']}", v, always=True)
-        result.warnings.append(machine_check["error"])
+        _append_warning(result, machine_check["error"])
     elif machine_check.get("projects"):
         log(
             f"Machine: {machine_check['hostname']} -> "
@@ -1592,9 +2017,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             v,
             always=True,
         )
-        result.warnings.append(
+        _append_warning(
+            result,
             f"No projects in config for machine '{machine_check.get('hostname')}'. "
-            "Check 'machine' field in ~/Desktop/Valor/projects.json"
+            "Check 'machine' field in ~/Desktop/Valor/projects.json",
         )
 
     # Step 4.5: Telegram auth check (warn only — bridge is optional, worker runs without it)
@@ -1610,7 +2036,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(f"Telegram auth: {telegram_check.error}")
+            _append_warning(result, f"Telegram auth: {telegram_check.error}")
 
     # Step 4.6: Validate projects.json — green-light gate for service restart.
     # If the iCloud-synced config maps any contact to multiple machines (or
@@ -1633,12 +2059,110 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(
-                f"projects.json invalid; bridge restart skipped: {result.projects_json_check.error}"
+            _append_warning(
+                result,
+                "projects.json invalid; bridge restart skipped: "
+                f"{result.projects_json_check.error}",
             )
             # Suppress restart for the rest of this run. The existing bridge
             # process keeps running on the previously validated config.
             config = replace(config, do_service_restart=False)
+
+    # Step 4.65: Reflections-registry import probe — green-light gate for the
+    # in-process service restart below and, via the sentinel, for
+    # `remote-update.sh`'s worker kickstart. See the #3029 note further down for
+    # the restart it does NOT reach.
+    #
+    # Why a gate at all: while `agent/sustainability.py` existed it was the
+    # backstop, so a registry still naming the shim imported anyway. #2875
+    # deleted it. Restarting the worker against a registry whose callables do
+    # not import means five self-healing reflections raise ImportError inside
+    # `reflection_scheduler.run_reflection`'s broad `except`, which records
+    # `state.last_error` and keeps ticking with no alert.
+    #
+    # Why the probe and not `reflections_callables_result.success`: that flag
+    # only means "the Step 1.659 rewriter did not error". It is True for
+    # `action="noop"`, which also covers *no registry present* and covers a
+    # registry whose shim reference the line-anchored rewrite regex never
+    # matched (a flow-style `{callable: agent.sustainability.x}` entry returns
+    # early, BEFORE the import verification, and reports a clean noop). The
+    # probe checks the actual property the restart needs: every `callable:` in
+    # every existing registry copy imports with `agent.sustainability` banned.
+    # Under `--verify` the flag is not merely weak but absent: Step 1.659 sits
+    # inside the `read_only` skip block, so `reflections_callables_result` is
+    # None there and the probe is the only signal that exists at all.
+    #
+    # Why the probe still RUNS under `read_only` but writes no sentinel: the
+    # import check itself is pure — it shells out to
+    # `scripts/verify_registry_without_shim.py`, which only imports — so the
+    # diagnostic costs --verify nothing. The sentinel is the mutation, and it is
+    # passed `record_sentinel=not config.read_only` for two reasons. First,
+    # `data/registry-probe-failed` is machine-global state and #3026 makes
+    # `--verify` promise to leave none. Second and sharper: the sentinel's PASS
+    # path is an `unlink`, and `--verify` runs outside `remote-update.sh`'s
+    # lockfile, so a passing --verify from a scratch worktree could delete a
+    # failing verdict that script had just stamped — and absence is its green
+    # light. The shell's mtime freshness bound does not cover that direction; it
+    # only discards sentinels that are too OLD. Suppressing the I/O closes it.
+    # The cost is that a --verify probe failure has no sentinel to carry the
+    # verdict, so it is escalated straight to `result.errors` below instead.
+    #
+    # Why NOT gated on `config.do_service_restart`: `UpdateConfig.cron()` sets
+    # that False, yet the cron path restarts the worker anyway — in the SHELL,
+    # after this process exits (`scripts/remote-update.sh` runs `run.py --cron`
+    # and then `launchctl kickstart -k`, gated only on the diff touching
+    # `agent/`). Gating the check itself on `do_service_restart` therefore made
+    # it inert on the one path this change actually deploys through. So the
+    # probe always runs; `run_registry_probe` stamps `data/registry-probe-
+    # failed`, which `remote-update.sh` consults before its own kickstart, and
+    # a failure additionally suppresses the in-process restart below (same
+    # posture as Steps 4.6/4.7).
+    #
+    # What `do_service_restart=False` does and does not buy. The intended
+    # effect: it skips Step 5's in-process `service.install_*` calls, including
+    # `install_reflection_worker`, which is the one that reloads the registry.
+    #
+    # Collateral, because every remaining reader of the flag sits after this
+    # step: Step 4.7 stops validating the sdlc-tool wrapper, Steps 4.8/4.9 pass
+    # `write=False` to the memory and BYOB MCP registrars so they report drift
+    # instead of self-healing it, and the terminal `run_catchup_step` is skipped.
+    # All three are the same "we are not bringing services up on this run"
+    # posture the flag already means, and Steps 4.6/4.7 flip it for their own
+    # faults with the identical reach, so the fault does not widen — but the
+    # reach is the flag's, not this step's, and is stated here rather than
+    # implied.
+    #
+    # It does NOT universally mean "nothing restarts" — on `--full` with commits
+    # pulled, Step 5's `elif` branch calls `git.set_restart_requested()` and the
+    # worker self-exits into a launchd relaunch, ungated. That is harmless here
+    # because `com.valor.worker` never loads the reflections registry; the
+    # process that does is `com.valor.reflection-worker`, and its (re)install is
+    # exactly what this flag suppresses.
+    #
+    # Known gap, tracked as #3029: `install_reflection_worker` is the ONLY site
+    # that restarts `com.valor.reflection-worker`, and it sits under
+    # `do_service_restart`, which `UpdateConfig.cron()` sets False. On the
+    # routine cron path the registry is therefore migrated and probed green
+    # while the live scheduler — which calls `load()` once at start and never
+    # reloads — keeps whatever it read at process start. The probe gate is
+    # correct about what it blocks; it just has no restart to gate there.
+    log("Probing reflections-registry callables for importability...", v)
+    result.registry_probe_result = reflections_callables.run_registry_probe(
+        project_dir, record_sentinel=not config.read_only
+    )
+    probe_gate = result.registry_probe_result
+    # Routing lives in `apply_registry_probe_verdict` (module level, tested
+    # directly); see its docstring for the three shapes and each one's fail
+    # direction. It reports whether the restart must be suppressed rather than
+    # editing `config`, because `config` is a local rebind here that a helper
+    # cannot perform.
+    if apply_registry_probe_verdict(
+        result,
+        probe_gate,
+        project_dir / reflections_callables.PROBE_SENTINEL,
+        v,
+    ):
+        config = replace(config, do_service_restart=False)
 
     # Step 4.7: Validate sdlc-tool wrapper — green-light gate for service restart.
     # The wrapper resolves SDLC tool dispatch from any cwd; if it's missing or
@@ -1657,41 +2181,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 v,
                 always=True,
             )
-            result.warnings.append(
-                f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
+            _append_warning(
+                result, f"sdlc-tool invalid; bridge restart skipped: {result.sdlc_tool_check.error}"
             )
             config = replace(config, do_service_restart=False)
-
-    # Step 4.75: Surface stale legacy GRANITE_* env keys (plan #1924). The
-    # settings group renamed to SESSION_RUNNER__* when the PTY substrate was
-    # deleted; pydantic ignores unknown keys silently, so a stale vault/plist
-    # override would otherwise be a silent no-op on this machine forever.
-    # Non-blocking: warn loudly here and let settings import warn at runtime.
-    # (The former Step 4.75 granite-classifier green-light gate was deleted
-    # with the PTY substrate — classifier gating, if bridge routing needs
-    # one, is issue #1923's scope.)
-    try:
-        from config.settings import stale_granite_env_keys
-
-        _stale_granite = stale_granite_env_keys(project_dir / ".env")
-        if _stale_granite:
-            _stale_msg = (
-                "stale legacy GRANITE_* env keys (ignored since plan #1924's "
-                f"PTY teardown): {', '.join(_stale_granite)} — rename to "
-                "SESSION_RUNNER__* or delete from ~/Desktop/Valor/.env and "
-                "the launchd plists"
-            )
-            log(f"WARN: {_stale_msg}", v, always=True)
-            result.warnings.append(_stale_msg)
-    except Exception as _stale_exc:
-        log(f"WARN: stale GRANITE_* env-key scan failed: {_stale_exc}", v)
 
     # Step 4.76: Retire superseded Ollama models. The gemma4:e2b rm is
     # irreversible per-machine, so it is gated on BOTH (a) the granite
     # classifier model being PRESENT on this machine (presence check only —
-    # the former Step 4.75 restart-blocking smoke gate died with the PTY
-    # substrate, plan #1924; never delete gemma while its replacement
-    # classifier is absent), AND (b) the spike-1 parity marker
+    # the restart-blocking classifier smoke gate that used to run here died
+    # with the PTY substrate, plan #1924; never delete gemma while its
+    # replacement classifier is absent), AND (b) the spike-1 parity marker
     # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response,
     # needs gemma resident — never delete it out from under shadow-mode). If
     # either is missing, the machine keeps its superseded models until both
@@ -1747,10 +2247,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log(f"  {mcp_memory_result.message}", v)
     if not mcp_memory_result.ok:
         if _mcp_memory_write:
-            result.warnings.append(f"memory MCP: {mcp_memory_result.message}")
+            _append_warning(result, f"memory MCP: {mcp_memory_result.message}")
         else:
             # --verify mode: report drift but do not warn aggressively
-            result.warnings.append(f"memory MCP drift: {mcp_memory_result.message}")
+            _append_warning(result, f"memory MCP drift: {mcp_memory_result.message}")
 
     # Optional Ollama ping for the title-gen worker — non-fatal.
     if config.do_ollama:
@@ -1776,22 +2276,36 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     log(f"  {mcp_byob_result.message}", v)
     if not mcp_byob_result.ok:
         if _mcp_byob_write:
-            result.warnings.append(f"BYOB MCP: {mcp_byob_result.message}")
+            _append_warning(result, f"BYOB MCP: {mcp_byob_result.message}")
         else:
             # --verify mode: report drift but do not warn aggressively
-            result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
+            _append_warning(result, f"BYOB MCP drift: {mcp_byob_result.message}")
 
-    # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
-    # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
-    # All logic lives in scripts/update/persona_drift.py so unit tests exercise the real code.
-    log("Checking PM persona overlay drift...", v)
-    _persona_warnings = persona_drift.check_pm_persona_drift(project_dir)
+    # Step 4.10: Check persona overlay drift between in-repo templates and private
+    # vault overlays (engineer + teammate — see persona_drift.PERSONA_OVERLAY_PAIRS).
+    # Surface only — never auto-merges. Fails gracefully if a vault file is absent
+    # (fresh machine). All logic lives in scripts/update/persona_drift.py so unit
+    # tests exercise the real code.
+    log("Checking persona overlay drift...", v)
+    _persona_warnings = persona_drift.check_all_persona_drift(project_dir)
     if _persona_warnings:
-        for _w in _persona_warnings:
-            log(f"  {_w}", v)
-            result.warnings.append(_w)
+        # Human-gated (#2893): the vault overlay is a standing per-machine
+        # customization that no /update cycle can reconcile, so this collapses
+        # to one emission per state transition. The joined warning text is the
+        # signature, so a changed diff size re-warns.
+        signature = f"unresolved:{' | '.join(_persona_warnings)}"
+        if warn_state.should_emit("persona-drift", signature, project_dir):
+            for _w in _persona_warnings:
+                log(f"  {_w}", v)
+                _append_warning(result, _w)
+            result.warn_keys_emitted.add("persona-drift")
     else:
-        log("  PM persona overlay: in sync (or files absent)", v)
+        # Resolved — clear stored state (and emit one resolved note) so a
+        # future regression warns again instead of staying silent.
+        if warn_state.should_emit("persona-drift", "", project_dir):
+            log("  Persona overlay drift: resolved", v, always=True)
+            result.warn_keys_emitted.add("persona-drift")
+        log("  Persona overlays: in sync (or files absent)", v)
 
     # Step 4.95: Check that each active project repo has a '## Running' README section.
     # Warn only — never blocks the update. Guides devs to document startup commands
@@ -1804,7 +2318,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         for warn in rc.warnings:
             log(f"WARN: {warn}", v, always=True)
-            result.warnings.extend(rc.warnings)
+            _append_warning(result, warn)
 
     # Step 4.96: Sweep oversized rotated log backups (*.log.N past a 100 MB
     # hard cap). Complements the 30-min log-rotate LaunchAgent, which only
@@ -1820,7 +2334,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if lc.warnings:
             for warn in lc.warnings:
                 log(f"WARN: {warn}", v, always=True)
-                result.warnings.append(warn)
+                _append_warning(result, warn)
         elif lc.removed:
             freed_mb = lc.freed_bytes / (1024 * 1024)
             log(
@@ -1842,13 +2356,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if service.install_caffeinate():
                 log("Caffeinate installed", v)
             else:
-                result.warnings.append("Failed to install caffeinate")
+                _append_warning(result, "Failed to install caffeinate")
 
         # Install main service (handles both bridge and update cron)
         if service.install_service(project_dir):
             log("Services installed/restarted", v)
         else:
-            result.warnings.append("Service install may have failed")
+            _append_warning(result, "Service install may have failed")
 
         # Wait for bridge to start after launchctl unload+load cycle.
         # Polling window: 10 x 2s = 20s covers ThrottleInterval (10s)
@@ -1875,7 +2389,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append("Bridge not running after restart")
+                _append_warning(result, "Bridge not running after restart")
         else:
             log("Bridge: skipped (no projects assigned to this machine)", v)
             result.caffeinate_status = service.get_caffeinate_status()
@@ -1886,13 +2400,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("Web UI restarted (port 8500)", v)
         else:
             log("WARN: Web UI failed to start", v, always=True)
-            result.warnings.append("Web UI failed to start")
+            _append_warning(result, "Web UI failed to start")
 
         # Check update cron
         if service.is_update_cron_installed():
             log("Update cron installed", v)
         else:
-            result.warnings.append("Update cron not installed")
+            _append_warning(result, "Update cron not installed")
 
         # Install/reload standalone worker service
         if (project_dir / "com.valor.worker.plist").exists():
@@ -1940,13 +2454,28 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 v,
                                 always=True,
                             )
-                            result.warnings.append(
+                            _append_warning(
+                                result,
                                 "Worker started but heartbeat pending — "
-                                "dashboard may show stale status briefly"
+                                "dashboard may show stale status briefly",
                             )
                         else:
                             # Kickstart fallback: force-start the service if launchd
                             # didn't auto-start after bootout+bootstrap.
+                            #
+                            # No `is_own_ancestor` gate here, unlike the sibling
+                            # kickstart in `_self_heal_stale_worker`: this branch is
+                            # reached ONLY when `service.get_worker_pid()` returned
+                            # no PID — either no live worker, or a process table
+                            # that could not be read (`list_processes()` returns []
+                            # on any `ps` failure). There is therefore no PID in
+                            # hand to gate on. Safe in both cases because this is
+                            # `kickstart -k`, which asks launchd to kill-and-restart
+                            # its own job by label rather than signalling a PID this
+                            # run chose. That positional invariant is load-bearing
+                            # (#3164) — do not hoist this call out of the `else`,
+                            # where a live `worker_pid` IS in hand and skipping the
+                            # gate would let the run SIGKILL its own parent worker.
                             import subprocess
 
                             uid = os.getuid()
@@ -1992,9 +2521,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                     v,
                                     always=True,
                                 )
-                                result.warnings.append(
+                                _append_warning(
+                                    result,
                                     "Worker not running after install and"
-                                    " kickstart retry (30s window)"
+                                    " kickstart retry (30s window)",
                                 )
                                 result.success = False
             else:
@@ -2008,8 +2538,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append(
-                    "Worker install failed — worker not running (see update logs)"
+                _append_warning(
+                    result, "Worker install failed — worker not running (see update logs)"
                 )
                 result.success = False
 
@@ -2030,19 +2560,32 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     v,
                     always=True,
                 )
-                result.warnings.append("Reflection-worker service install failed")
+                _append_warning(result, "Reflection-worker service install failed")
 
-        # Install nightly-tests launchd service on bridge machines.
-        # The install script self-gates on has_bridge_role() — it skips
-        # gracefully and removes stale plists on non-bridge machines.
-        if has_bridge:
-            if service.install_nightly_tests(project_dir):
-                log("Nightly tests service installed/verified", v)
-            else:
-                log("WARN: Nightly tests service install failed or not supported", v, always=True)
-                result.warnings.append("Nightly tests service install failed")
+        # Install nightly-tests launchd service. UNCONDITIONAL (NOT under
+        # `if has_bridge:`) — running the test suite requires a checkout and a
+        # worker, not a Telegram bridge (issue #2823). The install script
+        # self-gates on a worktree refusal plus has_worker_role() and reports
+        # its outcome as a three-way result rather than a bool, so a role-gate
+        # skip is never conflated with an install failure.
+        #
+        # Warnings go through _append_warning (#2845/#2892), never
+        # result.warnings.append: a raw multi-line entry renders its sentinel
+        # on only the first physical line and silently drops the rest.
+        nightly_outcome = service.install_nightly_tests(project_dir)
+        if nightly_outcome == "installed":
+            log("Nightly tests service installed/verified", v)
+            staleness_warning = _nightly_tests_staleness_warning(project_dir)
+            if staleness_warning:
+                _append_warning(result, staleness_warning)
+        elif nightly_outcome == "skipped":
+            log("Nightly tests: no regression coverage on this machine (install skipped)", v)
+            _append_warning(
+                result, "Nightly tests: no regression coverage on this machine (install skipped)"
+            )
         else:
-            log("Nightly tests: skipped (no projects assigned to this machine)", v)
+            log("WARN: Nightly tests service install failed or not supported", v, always=True)
+            _append_warning(result, "Nightly tests service install failed")
 
         # Ensure email bridge is running if this machine has projects AND IMAP is configured.
         # If the machine has no projects, stop any stray email bridge process.
@@ -2056,7 +2599,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log(f"Email bridge started (PID: {service.get_email_pid()})", v, always=True)
                 else:
                     log("WARN: Email bridge failed to start", v, always=True)
-                    result.warnings.append("Email bridge configured but failed to start")
+                    _append_warning(result, "Email bridge configured but failed to start")
         else:
             if service.is_email_running():
                 if not has_projects:
@@ -2072,7 +2615,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log("Email bridge stopped", v, always=True)
                 else:
                     log("WARN: Email bridge failed to stop", v, always=True)
-                    result.warnings.append("Email bridge should not run here but failed to stop")
+                    _append_warning(result, "Email bridge should not run here but failed to stop")
             elif not has_projects:
                 log("Email bridge: skipped (no projects assigned to this machine)", v)
             else:
@@ -2085,15 +2628,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("Log-rotate LaunchAgent installed", v)
         else:
             log("WARN: Log-rotate LaunchAgent install failed", v, always=True)
-            result.warnings.append("Log-rotate LaunchAgent install failed")
+            _append_warning(result, "Log-rotate LaunchAgent install failed")
 
         # Best-effort cleanup of the stale /etc/newsyslog.d/valor.conf from
         # machines updated before this migration. Uses sudo -n so it never
         # prompts; a warning is logged if sudo isn't cached.
         if not service.remove_newsyslog_config():
-            result.warnings.append(
+            _append_warning(
+                result,
                 "Stale /etc/newsyslog.d/valor.conf still present — will cause "
-                "double-rotation until manually removed"
+                "double-rotation until manually removed",
             )
 
         # Terminal release verify (issue #1898): full-mode only — the
@@ -2110,7 +2654,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Then stale running/pending sessions are killed. Terminal sessions are
     # preserved for reflections to analyze.
     try:
-        from agent.agent_session_queue import cleanup_corrupted_agent_sessions
+        from agent.session_health import cleanup_corrupted_agent_sessions
 
         # Returns dict {"corrupted": int, "orphans": int} as of issue #1271.
         cleanup_result = cleanup_corrupted_agent_sessions()
@@ -2253,6 +2797,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             check_ollama_model=config.do_ollama,
         )
 
+        # Report the LLM stack compat verdict every run, pass or fail (#2541
+        # style), so a silently stale venv is visible. This is a lookup by
+        # name in the `valor_tools` list `verify_environment` already
+        # returned — the generic warning loop below never reads `detail`,
+        # and re-calling `verify` would run the compat subprocess twice.
+        compat = next(
+            (t for t in result.verification.valor_tools if t.name == "llm-stack-compat"),
+            None,
+        )
+        if compat is not None:
+            log(f"  llm-stack-compat: {compat.detail}", v, always=True)
+
         # Report system tools
         # claude CLI is optional — bridge uses SDK directly
         optional_tools = {"claude"}
@@ -2262,7 +2818,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if not tool.available and tool.error:
                 log(f"    {tool.error}", v, always=True)
                 if tool.name not in optional_tools:
-                    result.warnings.append(f"{tool.name}: {tool.error}")
+                    _append_warning(result, f"{tool.name}: {tool.error}")
 
         # Report valor tool checks (env-completeness, etc.)
         #
@@ -2272,43 +2828,105 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         # Re-warning every 30 min is pure spam, so these two are suppressed to a
         # single emission per state transition (warn_state, #2329/#2328). The
         # ToolCheck.error already carries the exact human steps (see verify.py).
-        human_gated_tools = {"google-token", "sms_reader"}
+        # env-completeness joins by set membership (#2845): it is already a
+        # `valor_tools` member, so it needs no call-site wiring — the loop's
+        # `signature = f"unresolved:{tool.error}"` already encodes the gap's
+        # content (a newly-missing required key re-warns), and this loop
+        # already records the key into `result.warn_keys_emitted`. Without
+        # this, every interactive `/update` on a machine with an incomplete
+        # vault (this checkout's own machine included) enqueues a fix
+        # session for a condition this plan defines as permanent-and-correct.
+        # NOTE: `should_emit` writes state under `--verify` too, so a
+        # diagnostic run consumes the emission the next cron cycle would have
+        # made. Pre-existing since #2329 for the two incumbents; tracked as
+        # #2898 rather than widened or fixed here.
+        human_gated_tools = {"google-token", "sms_reader", "env-completeness"}
         for tool in result.verification.valor_tools:
             if not tool.available and tool.error:
                 if tool.name in human_gated_tools:
                     signature = f"unresolved:{tool.error}"
                     if warn_state.should_emit(tool.name, signature, project_dir):
                         log(f"  ACTION REQUIRED — {tool.name}: {tool.error}", v, always=True)
-                        result.warnings.append(f"{tool.name}: {tool.error}")
+                        _append_warning(result, f"{tool.name}: {tool.error}")
+                        result.warn_keys_emitted.add(tool.name)
                     # else: already warned for this exact state — stay silent.
                     continue
                 log(f"  WARN: {tool.name}: {tool.error}", v, always=True)
-                result.warnings.append(f"{tool.name}: {tool.error}")
-            elif tool.name in human_gated_tools:
+                _append_warning(result, f"{tool.name}: {tool.error}")
+            elif tool.name in human_gated_tools and not (tool.version or "").startswith("skipped"):
                 # Resolved — clear stored state (and emit one resolved note) so a
                 # future regression warns again instead of staying silent.
+                #
+                # Gated on the check having actually PASSED, not merely on
+                # `available=True`: check_env_completeness reaches this
+                # branch on its transient-vault-outage skip paths too
+                # (`version="skipped (.env not found)"`), and clearing state
+                # there would re-arm the whole missing-key respam on the
+                # next healthy run — the .env symlink into the iCloud vault
+                # genuinely goes missing transiently (#2845).
                 if warn_state.should_emit(tool.name, "", project_dir):
-                    log(f"  {tool.name}: resolved (human grant now present)", v, always=True)
+                    log(f"  {tool.name}: resolved", v, always=True)
+                    result.warn_keys_emitted.add(tool.name)
 
-        # Migrate legacy Desktop/claude_code paths in settings.json
-        log("Migrating settings.json paths...", v)
-        settings_migration = verify.migrate_settings_json_paths()
-        if settings_migration.get("migrated"):
-            log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
+        # Migrate legacy Desktop/claude_code paths in settings.json.
+        # Rewrites a settings.json outside this checkout — off under --verify (#3026).
+        if config.read_only:
+            log(
+                "  Settings: skipped path migration — --verify makes no changes (#3026)",
+                v,
+                always=True,
+            )
         else:
-            log(f"  Settings: {settings_migration.get('reason')}", v)
-
-        # Sync Claude OAuth credentials
-        log("Syncing Claude OAuth credentials...", v)
-        oauth_sync = verify.sync_claude_oauth(project_dir)
-        if oauth_sync.get("synced"):
-            if oauth_sync.get("refreshed_from_live"):
-                log("  OAuth: refreshed source from live token", v)
+            log("Migrating settings.json paths...", v)
+            settings_migration = verify.migrate_settings_json_paths()
+            if settings_migration.get("migrated"):
+                log(f"  Settings: {settings_migration.get('reason')}", v, always=True)
             else:
-                log(f"  OAuth: {oauth_sync.get('reason')}", v)
+                log(f"  Settings: {settings_migration.get('reason')}", v)
+
+            # Pin every machine to the 'latest' Claude Code channel — 'stable'
+            # lags many releases behind, starving the fleet of silent-exit fixes
+            # and blocking newer model ids (#project_claude_cli_silent_exit).
+            channel = verify.ensure_claude_update_channel()
+            if channel.get("changed"):
+                log(f"  Settings: {channel.get('reason')}", v, always=True)
+            else:
+                log(f"  Settings: {channel.get('reason')}", v)
+
+        # Sync Claude OAuth credentials.
+        # Writes a credential file outside this checkout — off under --verify (#3026).
+        if config.read_only:
+            log(
+                "  OAuth: skipped credential sync — --verify makes no changes (#3026)",
+                v,
+                always=True,
+            )
         else:
-            log(f"  OAuth: {oauth_sync.get('reason')}", v)
-            result.warnings.append(f"OAuth sync: {oauth_sync.get('reason')}")
+            log("Syncing Claude OAuth credentials...", v)
+            oauth_sync = verify.sync_claude_oauth(project_dir)
+            if oauth_sync.get("synced"):
+                if oauth_sync.get("refreshed_from_live"):
+                    log("  OAuth: refreshed source from live token", v)
+                else:
+                    log(f"  OAuth: {oauth_sync.get('reason')}", v)
+                # Resolved — clear stored state (and emit one resolved note) so a
+                # future regression warns again instead of staying silent.
+                if warn_state.should_emit("oauth-sync", "", project_dir):
+                    log("  OAuth sync: resolved", v, always=True)
+                    result.warn_keys_emitted.add("oauth-sync")
+            else:
+                # Human-gated (#2893): the source credential at
+                # ~/Desktop/Valor/claude_oauth_config.json is per-machine and only a
+                # human can provision it — structurally the same shape as
+                # google-token. One emission per state transition; the reason string
+                # is the signature, so a different failure mode re-warns. The
+                # verbose log stays outside the gate: it is diagnostic detail, not
+                # summary output, so it cannot respam the cron channel.
+                log(f"  OAuth: {oauth_sync.get('reason')}", v)
+                signature = f"unresolved:{oauth_sync.get('reason')}"
+                if warn_state.should_emit("oauth-sync", signature, project_dir):
+                    _append_warning(result, f"OAuth sync: {oauth_sync.get('reason')}")
+                    result.warn_keys_emitted.add("oauth-sync")
 
         # Report SDK auth
         auth = result.verification.sdk_auth
@@ -2318,14 +2936,14 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("  SDK auth: API key", v)
         else:
             log("  SDK auth: NOT CONFIGURED", v)
-            result.warnings.append("SDK auth not configured")
+            _append_warning(result, "SDK auth not configured")
 
         # Report gitignore issues (un-gitignored embeddings, etc.)
         if result.verification.gitignore_issues:
             for issue in result.verification.gitignore_issues:
                 msg = f"{issue.repo}: {issue.file_path} ({issue.size_mb}MB) not in .gitignore"
                 log(f"  WARN: {msg}", v, always=True)
-                result.warnings.append(msg)
+                _append_warning(result, msg)
 
     # Step 7: Calendar integration
     if config.do_calendar:
@@ -2335,7 +2953,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         model_errors = verify.verify_models(project_dir)
         for model_error in model_errors:
             log(f"WARN: {model_error}", v, always=True)
-            result.warnings.append(model_error)
+            _append_warning(result, model_error)
 
         # Global hook
         result.calendar_hook = cal_integration.ensure_global_hook(project_dir)
@@ -2346,12 +2964,17 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("Calendar hook OK", v)
         else:
             log(f"WARN: Calendar hook issue: {result.calendar_hook.error}", v)
-            result.warnings.append(f"Calendar hook: {result.calendar_hook.error}")
+            _append_warning(result, f"Calendar hook: {result.calendar_hook.error}")
 
         # Calendar config
         result.calendar_config = cal_integration.generate_calendar_config(project_dir)
         if result.calendar_config.success:
-            warn_state.should_emit("calendar-config", "", project_dir)  # clear on resolve
+            # clear on resolve — defensive no-op on `warn_keys_emitted` (an
+            # empty signature always clears state, so `active()` cannot
+            # hold this key afterward), instrumented anyway per the flat
+            # "every should_emit site that returns True" rule (#2845).
+            if warn_state.should_emit("calendar-config", "", project_dir):
+                result.warn_keys_emitted.add("calendar-config")
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
                 status = "OK" if mapping.accessible else "INACCESSIBLE"
@@ -2364,7 +2987,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             signature = f"unresolved:{result.calendar_config.error}"
             if warn_state.should_emit("calendar-config", signature, project_dir):
                 log(f"WARN: Calendar config: {result.calendar_config.error}", v, always=True)
-                result.warnings.append(f"Calendar config: {result.calendar_config.error}")
+                _append_warning(result, f"Calendar config: {result.calendar_config.error}")
+                result.warn_keys_emitted.add("calendar-config")
 
     # Step 8: MCP servers
     if config.do_mcp:
@@ -2483,6 +3107,13 @@ def main() -> int:
             status = f"update failed at {sha}"
             for err in result.errors:
                 status += f"\n  - {err}"
+            # Three failure modes (release-verify FAILED, worker-not-running,
+            # worker-install-failed) append ONLY to result.warnings and never
+            # to result.errors — without this, the fix session queued by the
+            # `failed` short-circuit gets an empty warning list on exactly
+            # the runs that most need one (#2845).
+            for warn in result.warnings:
+                status += f"\n  ⚠️ {warn}"
         elif result.warnings:
             detail = f"updated to {sha}" if commits > 0 else f"up to date at {sha}"
             w_count = len(result.warnings)
@@ -2492,6 +3123,30 @@ def main() -> int:
                 status += f"\n  ⚠️ {warn}"
         else:
             status = "update successful"
+
+        # Suppressed-condition trailer (Risk 4): whatever warn_state.active()
+        # holds, minus the keys that emitted THIS run (Race 3's inverse
+        # hazard — should_emit writes its signature the instant it returns
+        # True, so raw active() would call a key "unchanged since first
+        # warning" on the very run it first warned). Composed here, after
+        # every should_emit call for the run has completed and OUTSIDE the
+        # if/elif/else above — the modal suppressed case is the `else`
+        # branch (nothing else wrong), and nesting inside `elif
+        # result.warnings:` would make the trailer silently disappear on
+        # exactly the run Risk 4 exists to cover.
+        suppressed = {
+            k: v
+            for k, v in warn_state.active(args.project_dir).items()
+            if k not in result.warn_keys_emitted
+        }
+        if suppressed:
+            names = ", ".join(sorted(suppressed))
+            trailer = (
+                f"{warn_state.SUPPRESSED_PREFIX} {names} — "
+                "details: python -m scripts.update.warn_state"
+            )
+            log(trailer, always=True)  # -> _log_buffer -> data/update.txt
+            status += "\n" + trailer  # -> stdout -> status_lines -> Telegram
 
         # One-time valor-ingest backfill reminder, fired on the run that
         # actually installed the [knowledge] extra. Gated by a per-machine
@@ -2510,8 +3165,12 @@ def main() -> int:
                     # Flag-file failure is not worth blocking the run.
                     pass
 
-        # Only attach log file if there were problems; clean success = simple message
-        if not result.success or result.warnings:
+        # Only attach log file if there were problems; clean success = simple message.
+        # Widened to `suppressed` (the emitted-subtracted map) so the file
+        # exists on a clean-except-suppressed run too — otherwise data/update.txt
+        # is absent on exactly the run Risk 4 exists to cover, and the
+        # second trailer emission (above) has nowhere to land.
+        if not result.success or result.warnings or suppressed:
             log_file = args.project_dir / "data" / "update.txt"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.write_text("\n".join(_log_buffer) + "\n")
@@ -2550,4 +3209,23 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Configure the root logger at the entry point (issue #2678).
+    #
+    # This module's three logging.getLogger(__name__).warning() calls were
+    # formatted only as an accidental import side effect: run.py imported
+    # log_cleanup, which imported scripts.log_rotate, which called
+    # basicConfig() at module scope. #2643 moved that call into log_rotate's
+    # own __main__ guard, so without this run.py's warnings would fall through
+    # to logging.lastResort and print bare, unprefixed, untimestamped.
+    #
+    # Mirrors scripts/log_rotate.py's format and stream deliberately: both are
+    # /update entry points and their output interleaves in logs/update.log.
+    # stderr keeps them off stdout, which --json mode reserves for its payload.
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     sys.exit(main())

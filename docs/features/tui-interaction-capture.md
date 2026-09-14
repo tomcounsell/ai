@@ -1,6 +1,6 @@
 # TUI Interaction Capture
 
-Captures human-in-the-loop interaction patterns from local Claude Code TUI sessions and distills one retrievable subconscious-memory observation per session. Pillar 3 of epic #1536.
+Captures human-in-the-loop interaction patterns from local Claude Code TUI sessions and distills one retrievable subconscious-memory observation per session.
 
 ## What It Does
 
@@ -8,7 +8,7 @@ When a developer drives Claude Code at the terminal, the decisions they make are
 
 **Scope:** local Claude Code TUI sessions only. Bridge-driven eng/granite sessions are explicitly out of scope because there is no human in the TUI for those sessions.
 
-**This pillar is capture-and-store only.** Auto-emulation behavior (teaching autonomous sessions to mimic captured patterns) is a future pillar of epic #1536.
+**This feature is capture-and-store only.** Auto-emulation behavior (teaching autonomous sessions to mimic captured patterns) is a separate future pillar.
 
 ## Capture Surface
 
@@ -23,7 +23,7 @@ Both operations are fail-silent: every code path is wrapped in `try/except Excep
 
 ## Interaction Event Types
 
-The capture module emits two new telemetry event types that ride the existing `record_telemetry_event` JSONL recorder without modifying it. A third signal type (tool approvals) is tallied at summarize time from pre-existing `tool_use` events rather than requiring a new event.
+The capture module emits two telemetry event types that ride the `record_telemetry_event` JSONL recorder without modifying it. A third signal type (tool approvals) is tallied at summarize time from pre-existing `tool_use` events rather than requiring a new event.
 
 ### `slash_command`
 
@@ -176,12 +176,7 @@ Both `capture_prompt_event` and `summarize_and_store` wrap their entire bodies i
 ## Related
 
 - [Subconscious Memory](subconscious-memory.md) — the Memory model this feature writes to; recall, category weights, and consolidation
-- [Session Telemetry](session-telemetry.md) — the JSONL recorder this feature extends with two new event types
+- [Session Telemetry](session-telemetry.md) — the JSONL recorder this feature extends with two event types
 - [Claude Code Memory](claude-code-memory.md) — the broader hook pipeline in which this feature participates
-- [Stall Advisory Classifier](stall-advisory-classifier.md) — Pillar 1 of #1536; also reads session telemetry
-- [Crash-signature auto-resume](crash-signature-auto-resume.md) — Pillar 2 of #1536
-
-## Tracking
-
-- Issue: [#1540](https://github.com/tomcounsell/ai/issues/1540) (Pillar 3 of epic #1536)
-- Plan: `docs/plans/tui-interaction-capture.md`
+- [Stall Advisory Classifier](stall-advisory-classifier.md) — also reads session telemetry
+- [Crash-signature auto-resume](crash-signature-auto-resume.md)

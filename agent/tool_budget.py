@@ -138,7 +138,7 @@ def _project_key_env() -> str:
     """Project-scoped Redis key prefix from env, falling back to ``valor``.
 
     Used when no session is resolvable (the resolution-error path) — mirrors
-    ``reflections/agents/session_recovery_drip._get_project_key``.
+    ``reflections.redis_access.get_project_key``.
     """
     v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
     return v or "valor"
@@ -172,6 +172,28 @@ def record_resolution_error(project_key: str, err: object, *, surface: str = "ho
         POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:resolution_errors")
     except Exception as e:
         logger.warning("[tool-budget] failed to increment resolution_errors counter: %s", e)
+
+
+def record_evaluation(project_key: str) -> None:
+    """Count one budget evaluation that actually saw a session (#2410).
+
+    This is the DENOMINATOR for the other three counters. Without it,
+    ``tripped == 0`` is ambiguous: it reads identically whether the cap is
+    never hit or the backstop was blind for most calls. ``resolution_errors``
+    alone cannot disambiguate — 200 blind calls is noise against a million
+    evaluations and total blindness against three hundred.
+
+    Incremented only on the post-resolution path, so
+    ``resolution_errors / (evaluated + resolution_errors)`` is the blind rate
+    and ``denied_calls / evaluated`` is the true deny rate. Fail-quiet: a
+    counter must never brick a tool call.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:evaluated")
+    except Exception as e:
+        logger.warning("[tool-budget] failed to increment evaluated counter: %s", e)
 
 
 def record_budget_trip(session, verdict: BudgetVerdict) -> None:
@@ -217,6 +239,27 @@ def record_budget_trip(session, verdict: BudgetVerdict) -> None:
             POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:denied_calls")
         except Exception as e:
             logger.warning("[tool-budget] failed to increment denied_calls counter: %s", e)
+
+        # Lane A instrumentation (plan #3081): mirror EVERY deny onto the
+        # session-telemetry JSONL stream — before the per-session dedup gate,
+        # matching denied_calls — so tools.belt_baseline can count PreToolUse
+        # denials (with the session's call/cost readings at deny time) from the
+        # stream alone. This single tap covers BOTH PreToolUse surfaces, since
+        # both actuate their budget deny through record_budget_trip. Its own
+        # isolated try/except: a telemetry blip must not swallow the counters,
+        # WARNING log, flag write, or auto-pause below.
+        try:
+            from agent.session_telemetry import record_pre_tool_use_denial
+
+            record_pre_tool_use_denial(
+                session_id,
+                cause="tool_budget",
+                reason=verdict.reason,
+                tool_call_count=getattr(session, "tool_call_count", None),
+                total_cost_usd=getattr(session, "total_cost_usd", None),
+            )
+        except Exception as e:
+            logger.warning("[tool-budget] denial telemetry tap failed (non-fatal): %s", e)
 
         # Dedup the SIDE EFFECTS (not the block) to once per session.
         # #1873 item 3: an id-less session (no session_id AND no agent_session_id)

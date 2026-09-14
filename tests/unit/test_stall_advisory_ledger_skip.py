@@ -46,7 +46,7 @@ def test_ledger_session_excluded_from_stall_classification():
         patch("agent.session_stall_classifier.classify_session_stall", _spy_classify),
         patch("agent.session_telemetry.read_session_timeline", lambda sid: []),
         # Force recovery context unavailable so the test never touches prod Redis.
-        patch("reflections.stall_advisory._get_redis", side_effect=RuntimeError("no redis")),
+        patch("reflections.stall_advisory.get_redis", side_effect=RuntimeError("no redis")),
     ):
         result = run_stall_advisory()
 
@@ -72,7 +72,7 @@ def test_all_ledgers_yields_no_classification():
         patch("models.agent_session.AgentSession.query", mock_query),
         patch("agent.session_stall_classifier.classify_session_stall", _spy_classify),
         patch("agent.session_telemetry.read_session_timeline", lambda sid: []),
-        patch("reflections.stall_advisory._get_redis", side_effect=RuntimeError("no redis")),
+        patch("reflections.stall_advisory.get_redis", side_effect=RuntimeError("no redis")),
     ):
         result = run_stall_advisory()
 

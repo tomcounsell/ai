@@ -17,8 +17,27 @@ Event schema (v1-internal contract):
     turn_end            — from stream-json result event
     tool_use            — name + best-effort duration
     token_usage         — raw per-turn usage dict + total_cost_usd
+    tool_cost           — per-tool context-cost attribution for one harness
+                          turn (plan #3081 Lane A): {tool: {calls,
+                          input_tokens, output_tokens, total_tokens}} plus
+                          method/initial_context_tokens/tool_surface_size/
+                          dropped_samples. Approximate by design — see
+                          agent/tool_cost_attribution.py
+    pre_tool_use_denial — a PreToolUse hook denied a tool call; records cause
+                          plus the session's call/cost readings at deny time
+    belt_enforce_skew   — WARNING-level Race 3 stamp mismatch emitted by the
+                          belt resolver (see BELT_ENFORCE_SKEW_EVENT); carries
+                          host + prior-stamp vs resolved enforce-state
     idle_gap            — synthetic; emitted when inter-event gap > IDLE_GAP_THRESHOLD
-    status_transition   — session state machine transition
+    status_transition   — session state machine transition; carries a
+                          ``tool_cost`` session-level summary (None on
+                          pre-belt records and tool-less sessions)
+    codex_dev_turn      — one Codex dev-lane turn (plan #2001 Task 4b):
+                          harness/model-version/turns/usage/outcome dimensions
+                          for the PM-visible completion attribution; emitted
+                          per executed turn plus guard/failure outcomes, and
+                          backfilled from the Task 3 lane file. Never carries
+                          prompts, credentials, or raw stderr.
     telemetry_truncated — cap reached; no further events written for this session
     slash_command       — a TUI prompt starting with '/'; records command name
     human_steering      — substantive mid-run human prompt (ordinal > 0); records ordinal + snippet
@@ -48,6 +67,19 @@ logger = logging.getLogger(__name__)
 IDLE_GAP_THRESHOLD: float = 60.0  # seconds between events before emitting synthetic idle_gap
 MAX_EVENTS_PER_SESSION: int = 10_000  # per-session event cap (hard stop after truncation marker)
 MAX_OPEN_HANDLES: int = 50  # maximum simultaneously open JSONL file handles
+
+# Race 3 fleet-skew event type (plan #3081). Shared contract between the belt
+# resolver's turn-start stamp comparison (which emits it) and
+# tools.belt_skew_report (which aggregates it across sessions). Pinned by
+# tests/unit/test_session_telemetry.py — do not rename casually.
+BELT_ENFORCE_SKEW_EVENT: str = "belt_enforce_skew"
+
+# Codex dev-lane turn event type (plan #2001 Task 4b). Emitted per executed
+# Codex turn (and per guard/failure outcome) with the harness/model/turns/
+# usage dimensions behind the PM-visible completion attribution; backfilled
+# from the Task 3 lane file for pre-4b probe turns. Pinned by
+# tests/unit/test_session_telemetry.py — do not rename casually.
+CODEX_DEV_TURN_EVENT: str = "codex_dev_turn"
 
 # Resolved once on first use via _get_telemetry_dir()
 _TELEMETRY_DIR_RELATIVE = Path(__file__).parent.parent / "logs" / "session_telemetry"
@@ -253,6 +285,137 @@ def record_telemetry_event(session_id: str, event: dict) -> None:
             session_id,
             exc,
         )
+
+
+def record_pre_tool_use_denial(
+    session_id: str,
+    *,
+    cause: str,
+    tool_name: str | None = None,
+    reason: str | None = None,
+    tool_call_count: int | None = None,
+    total_cost_usd: float | None = None,
+) -> None:
+    """Record a PreToolUse denial on the session's telemetry stream.
+
+    ``cause`` names the denying guard (e.g. ``"tool_budget"``,
+    ``"foreground_guard"``) so ``tools.belt_baseline`` can count denials by
+    cause — and task 4's belt-relevant baseline can exclude causes a belt
+    cannot affect. ``tool_call_count`` / ``total_cost_usd`` are the session's
+    context-cost readings at deny time; ``None`` fields are omitted from the
+    payload. Fail-quiet: NEVER raises.
+    """
+    try:
+        event: dict = {"type": "pre_tool_use_denial", "cause": cause}
+        if tool_name is not None:
+            event["tool_name"] = tool_name
+        if reason is not None:
+            event["reason"] = reason
+        if tool_call_count is not None:
+            event["tool_call_count"] = tool_call_count
+        if total_cost_usd is not None:
+            event["total_cost_usd"] = total_cost_usd
+        record_telemetry_event(session_id, event)
+    except Exception as exc:
+        logger.warning(
+            "record_pre_tool_use_denial dropped denial event for session %s: %r",
+            session_id,
+            exc,
+        )
+
+
+def record_codex_dev_turn(
+    session_id: str,
+    *,
+    thread_id: str | None,
+    turn_count: int | None,
+    outcome: str,
+    usage: dict | None,
+    model_version: str | None,
+    wall_clock_ms: int | None,
+) -> None:
+    """Record one Codex dev-lane turn on the session's telemetry stream.
+
+    The machine-readable twin of the PM-visible completion attribution
+    (plan #2001 Task 4b): harness/model-version/turns/usage/outcome
+    dimensions per executed turn, plus guard-exhausted / preflight-failed /
+    spawn-failed / native-failure / fence-mismatch outcomes, so the owner
+    can compare Codex vs Claude turns on cost, latency, and quality.
+
+    Privacy: carries usage totals only — never prompts, credentials, or
+    raw stderr. Fail-quiet: NEVER raises.
+    """
+    try:
+        record_telemetry_event(
+            session_id,
+            {
+                "type": CODEX_DEV_TURN_EVENT,
+                "harness": "codex",
+                "thread_id": thread_id,
+                "turn_count": turn_count,
+                "outcome": outcome,
+                "usage": usage,
+                "model_version": model_version,
+                "wall_clock_ms": wall_clock_ms,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 -- telemetry never masks turn outcomes
+        logger.debug(
+            "record_codex_dev_turn dropped dev-turn event for session %s: %r",
+            session_id,
+            exc,
+        )
+
+
+def backfill_codex_lane(session_id: str, lane_path: str | Path) -> int:
+    """Ingest a Task 3 ``log_codex_turn`` JSONL lane file as telemetry backfill.
+
+    Task 3 is the schema of record (``thread_id``, ``turn_count``,
+    ``outcome``, ``usage``, ``wall_clock_ms``); this task defines no new
+    per-turn fields. Each well-formed line becomes one
+    ``codex_dev_turn`` event with ``backfilled: True`` so pre-4b probe
+    turns are comparable with post-4b turns rather than lost. Malformed
+    lines are skipped; a missing file backfills zero. Returns the number
+    of events emitted. Fail-quiet: NEVER raises.
+    """
+    emitted = 0
+    try:
+        path = Path(lane_path)
+        if not path.exists():
+            return 0
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping malformed codex lane line in %s", path.name)
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                try:
+                    record_telemetry_event(
+                        session_id,
+                        {
+                            "type": CODEX_DEV_TURN_EVENT,
+                            "harness": "codex",
+                            "thread_id": record.get("thread_id"),
+                            "turn_count": record.get("turn_count"),
+                            "outcome": record.get("outcome"),
+                            "usage": record.get("usage"),
+                            "model_version": None,
+                            "wall_clock_ms": record.get("wall_clock_ms"),
+                            "backfilled": True,
+                        },
+                    )
+                    emitted += 1
+                except Exception as exc:  # noqa: BLE001 -- one bad line skips, rest continue
+                    logger.warning("Skipping unloadable codex lane line in %s: %r", path.name, exc)
+    except Exception as exc:  # noqa: BLE001 -- backfill never raises
+        logger.debug("backfill_codex_lane failed for session %s: %r", session_id, exc)
+    return emitted
 
 
 def read_session_timeline(session_id: str, limit: int | None = None) -> list[dict]:

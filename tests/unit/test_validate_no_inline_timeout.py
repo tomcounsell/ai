@@ -214,3 +214,92 @@ class TestCliDirectInvocation:
         with pytest.raises(SystemExit) as exc_info:
             mod._run_cli([str(f)])
         assert exc_info.value.code == 0
+
+
+class TestAddedLinesScoping:
+    """#2779: the guard reports only literals the commit ADDS.
+
+    Scanning the whole staged file froze every file that already contained a
+    bare timeout literal — an unrelated edit elsewhere in such a file could not
+    be committed at all. These tests pin both halves: still-fires on added
+    lines, silent on pre-existing ones.
+    """
+
+    def test_still_fires_when_the_literal_is_on_an_added_line(self):
+        mod = import_validator()
+        content = "import subprocess\nsubprocess.run(cmd, timeout=10)\n"
+        violations = mod.find_violations(content, "example.py", {2})
+        assert len(violations) == 1, "a newly-added bare literal must still block"
+        assert "example.py:2" in violations[0]
+
+    def test_silent_when_the_literal_predates_the_edit(self):
+        mod = import_validator()
+        content = "import subprocess\nsubprocess.run(cmd, timeout=10)\nx = 1\n"
+        # The commit touches line 3 only; the literal on line 2 is pre-existing.
+        assert mod.find_violations(content, "example.py", {3}) == []
+
+    def test_added_and_preexisting_literals_report_only_the_added_one(self):
+        mod = import_validator()
+        content = (
+            "import subprocess\nsubprocess.run(old, timeout=10)\nsubprocess.run(new, timeout=99)\n"
+        )
+        violations = mod.find_violations(content, "example.py", {3})
+        assert len(violations) == 1
+        assert "example.py:3" in violations[0]
+        assert "timeout=99" in violations[0]
+
+    def test_none_scopes_to_whole_file_for_the_cli_path(self):
+        mod = import_validator()
+        content = "import subprocess\nsubprocess.run(cmd, timeout=10)\n"
+        assert len(mod.find_violations(content, "example.py", None)) == 1
+
+    def test_empty_added_set_reports_nothing(self):
+        """An unreadable diff yields an empty set and must fail OPEN, never
+        manufacture a block on lines the author never wrote."""
+        mod = import_validator()
+        content = "import subprocess\nsubprocess.run(cmd, timeout=10)\n"
+        assert mod.find_violations(content, "example.py", set()) == []
+
+
+class TestStagedAddedLinesHunkParsing:
+    """`_staged_added_lines` must map -U0 hunk headers to staged line numbers."""
+
+    def _parse(self, monkeypatch, diff_text):
+        mod = import_validator()
+
+        class _Result:
+            returncode = 0
+            stdout = diff_text
+
+        monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Result())
+        return mod._staged_added_lines("any.py")
+
+    def test_single_hunk_single_added_line(self, monkeypatch):
+        diff = "--- a/any.py\n+++ b/any.py\n@@ -10 +10 @@\n+new line\n"
+        assert self._parse(monkeypatch, diff) == {10}
+
+    def test_multi_line_hunk_advances_the_cursor(self, monkeypatch):
+        diff = "--- a/any.py\n+++ b/any.py\n@@ -0,0 +5,3 @@\n+a\n+b\n+c\n"
+        assert self._parse(monkeypatch, diff) == {5, 6, 7}
+
+    def test_removed_lines_do_not_advance_the_cursor(self, monkeypatch):
+        diff = "--- a/any.py\n+++ b/any.py\n@@ -3,2 +3,1 @@\n-gone\n-also gone\n+kept\n"
+        assert self._parse(monkeypatch, diff) == {3}
+
+    def test_several_hunks_accumulate(self, monkeypatch):
+        diff = "--- a/any.py\n+++ b/any.py\n@@ -1 +1 @@\n+first\n@@ -20,0 +21,2 @@\n+x\n+y\n"
+        assert self._parse(monkeypatch, diff) == {1, 21, 22}
+
+    def test_plus_plus_plus_header_is_not_counted_as_an_added_line(self, monkeypatch):
+        diff = "--- a/any.py\n+++ b/any.py\n@@ -1 +1 @@\n+only\n"
+        assert self._parse(monkeypatch, diff) == {1}
+
+    def test_git_failure_returns_empty_set(self, monkeypatch):
+        mod = import_validator()
+
+        class _Result:
+            returncode = 128
+            stdout = ""
+
+        monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Result())
+        assert mod._staged_added_lines("any.py") == set()

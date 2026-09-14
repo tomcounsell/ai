@@ -1,5 +1,13 @@
 # Durability Model: Room / Job / AgentSession
 
+> **Naming collision:** the web dashboard (`localhost:8500/`) also has a
+> top-level list it calls "Jobs" (`ui/data/jobs.py::JobGroup`). That is an
+> unpersisted, render-time grouping of `AgentSession` runs — not this `Job`.
+> The two share no identifier. The dashboard's session detail modal resolves
+> and shows *this* `Job` separately, only for the one session open in the
+> modal; see [Dashboard §Jobs Table](dashboard.md#jobs-table) and
+> [§Modal Job block](dashboard.md#modal-job-block).
+
 The single place that answers **"a message or an obligation is durable because X."**
 Shipped incrementally by `docs/plans/durability-room-job-agentrun.md`
 (issue #2494): Milestone 1 (fenced execution record), Milestone 2 (Room +
@@ -76,36 +84,28 @@ is never re-fetched — the Room genuinely has fewer live Jobs, or an index
 repair is mid-flight. Any failure logs a warning and fails open to `[]`,
 which the router treats as "no candidates" and mints.
 
-### `last_active_at` score purity (`Job.save()`)
+### `last_active_at` score purity
 
 The sorted-set score behind `recent_for_room` must be a pure UTC epoch.
-popoto decodes a stored datetime without tzinfo, so a reloaded Job carries a
-naive `last_active_at`; `Job.save()` re-attaches UTC to a naive value before
-every write funnels into popoto's own scoring, making every score correct by
-construction. This is **instant-preserving, not a re-stamp** — it never
-assigns "now", only tzinfo, so an unrelated save (an expectation write, a
-goal version) cannot resurrect an idle Job's recency. The reattach is scoped
-to when `last_active_at` is actually being written: a save whose
-`update_fields` excludes it (`Job.backfill_open_expectations_index`'s
-`has_open_expectations`-only write) leaves the field, and the score, alone.
+Since popoto#519/1.8.2, `SortedFieldMixin.convert_to_numeric` normalizes a
+naive `datetime` to UTC *inside the score function itself* before deriving
+the epoch, so the score is a pure function of the stored value whichever way
+it decodes; since popoto#537/1.9.0, `_decode_datetime` also returns aware
+UTC for a legacy offset-free row. `Job` inherits `Model.save` unchanged —
+neither layer needs a model-level reattach, because popoto guarantees the
+invariant on both the write and read path.
 
-Skew accumulated by any Job re-saved before this override shipped is swept
-by the `backfill_job_last_active_scores` migration
-(`scripts/update/migrations.py`), which runs on every machine's `/update`.
-For each Job it compares the stored sorted-set score against the UTC epoch
-the hash value implies; a row outside a 1-second tolerance is re-read fresh
-and repaired with a field-scoped `save(update_fields=["last_active_at"])` —
-the same clobber-proof idiom as `backfill_open_expectations_index`, so a
-concurrent expectation write is never overwritten. The migration is
-idempotent (a repaired row is in-tolerance on the next pass, so a re-run
-costs reads only) and fleet-convergent (every machine shares the same Redis,
-so re-running it anywhere converges scores written by a peer still on
-pre-override code). The sweep's single implementation is
-`Job.renormalize_last_active_scores()`, which `Job.repair_indexes()` also
-runs after every index rebuild — popoto's `rebuild_indexes()` re-scores
-naive-decoded instances in local time, bypassing the `save()` reattach, so
-the repair path re-normalizes what the rebuild would otherwise re-skew on a
-non-UTC host.
+Skew written before popoto 1.8.2 made this guarantee true was swept once,
+fleet-wide, by the `backfill_job_last_active_scores` migration
+(`scripts/update/migrations.py`), which has already run on every machine and
+stays recorded in `MIGRATIONS`. For each Job it compared the stored
+sorted-set score against the UTC epoch the hash value implies; a row outside
+a 1-second tolerance was re-read fresh and repaired with a field-scoped
+`save(update_fields=["last_active_at"])` — the same clobber-proof idiom as
+`backfill_open_expectations_index`, so a concurrent expectation write was
+never overwritten. The sweep's implementation,
+`Job.renormalize_last_active_scores()`, survives as the migration's
+implementation; it has no recurring caller.
 
 ## Goals and expectations (the single obligation primitive)
 
@@ -175,11 +175,54 @@ Rules, in flow order:
 7. **Reconciler**: open outbound expectations whose owners are gone are
    recovered by `reflections/expectation_reconciler.py` — see
    [`expectation-reconciler.md`](expectation-reconciler.md).
+8. **A corrupt goal fails closed on every write** (#2862). The `goal` bytes
+   are the only copy of a Job's obligation history, so two categories of
+   bad shape get two handlers. A null field or a wrong-shaped JSON value is
+   something our own writer can leave behind: `_goal_data()` coerces it to
+   empty and it stays writable. Bytes that do not decode at all (or a
+   non-string value) are corruption: `Job.goal_is_corrupt()` is true, reads
+   still answer empty so unrelated callers keep working, but every read
+   logs at ERROR and sends one Sentry event per process per Job, and every
+   mutator (`add_expectation`, `discharge_expectation`,
+   `append_goal_version`, and the `_write_goal_data` chokepoint itself)
+   raises `CorruptGoalError` instead of persisting `{"versions": [],
+   "expectations": []}` over the original bytes. The Job is **pinned
+   visible** until a human repairs it: `sweep_to_rest` never rests it, the
+   daily `has_open_expectations` backfill never re-derives its flag from
+   the empty parse, `with_open_expectations()` /
+   `at_rest_with_open_expectations()` retain it (the stored flag is the
+   last known truth and an empty parse cannot disprove it), the reconciler
+   reports it as a `corrupt-goal: <job_id>` finding, the at-rest alarm
+   names the corruption, and `job_tool show` exposes `goal_corrupt: true`.
 
 `tools/job_tool.py` enforces **Room scope at the tool layer**: every Job
 lookup filters on the calling session's own `room_id`, so cross-Room Jobs
 are structurally unaddressable (prompt-level constraints drift; tool-level
 ones don't).
+
+## Private-tag stripping happens at intake
+
+`<private>...</private>` is the user's inline opt-out from durable storage
+(`agent/private_tag.py`; the memory-side contract lives in
+[`subconscious-memory.md`](subconscious-memory.md)). The ruling for where
+`strip_private` applies is the simple one: **every path that reads inbound
+message text strips it at the point of first read, before anything is
+logged or persisted.** Live and recovery are the same rule; "recovery" is
+never a reason to hold raw text longer.
+
+| Path | Strip point |
+|------|-------------|
+| Live intake (`bridge/telegram_bridge.py`) | `safe_text = strip_private(text)` right after `message.text` is read; `safe_text` feeds bridge.log, Memory, `TelegramMessage`, and `AgentSession.message_text` via `safe_clean_text` |
+| Startup catchup (`bridge/catchup.py`) | `text = strip_private(message.text or "")` at the top of the per-message loop |
+| Periodic reconciler (`bridge/reconciler.py`) | same, at the top of the per-message loop |
+| Agent-judgment catchup (`bridge/agent_catchup.py`) | `read_thread` strips when it builds each `ThreadMessage`, so the judge transcript, the recovery log line, and the enqueued `message_text` all descend from one stripped read |
+| Reply-chain prehydration | `format_reply_chain` output is stripped before it is spliced into `message_text` (both hydration sites) |
+
+Stripping at intake means the two durable stores a recovery pass touches,
+`bridge.log` (the recovery log line) and `AgentSession.message_text` (the
+enqueue call), can only ever see stripped text; there is no later boundary
+to remember. `tests/unit/test_recovery_strip_private.py` drives each scanner
+with a private-tagged payload and asserts the span reaches neither store.
 
 ## Reactions are durable
 
@@ -203,9 +246,14 @@ registered in `_run_guarded_repairs()` so that repair path actually runs, and
 carry a `_GUARDED_ELSEWHERE` entry in `scripts/popoto_index_cleanup.py` so the
 generic `rebuild_indexes()` sweep skips them instead; both register a
 `ModelDriftSpec` in `agent/index_drift.py` (drift detection never silently
-narrows). Listing a model in `_GUARDED_ELSEWHERE` without registering it in
-`_run_guarded_repairs()` leaves it with no index hygiene at all — the gap
-that produced #2640. `Job` carries two IndexedFields, both low-cardinality:
+narrows). A `_GUARDED_ELSEWHERE` entry needs either a registry entry in
+`_run_guarded_repairs()` or a named caller elsewhere. `Room` and `Job` take
+the registry route. `AgentSession` takes the other: its guarded
+`repair_indexes()` runs from worker Step 2
+(`session_health.cleanup_corrupted_agent_sessions`) and from the hourly
+`agent-session-cleanup` reflection. `Job` once sat in the frozenset with
+neither, the gap that produced #2640. `Job` carries two IndexedFields, both
+low-cardinality:
 `status` (active/at-rest) and the derived boolean `has_open_expectations`
 (Schema Gate Amendment 2, #2708); no index holds a pid, uuid, or timestamp. The
 reply index is a plain string KV — no hash, no class set, no secondary index —
@@ -219,3 +267,20 @@ excludes IndexedFields from the plain HSET mapping and maintains them through
 an atomic Lua EVAL instead, so a save whose entire field list is IndexedFields
 sends no `goal` bytes at all — a maintenance pass on this path can never
 overwrite a concurrently-written `goal` (#2647).
+
+The same clobber-proof idiom governs the lifecycle transitions themselves:
+`Job.touch()`, `Job.mark_at_rest()`, and `Job.revive()` each save only the
+fields they mutate (`["last_active_at"]`, `["status"]`, and
+`["status", "last_active_at"]` respectively), so an in-flight expectation
+write on the same Job is never clobbered by a routing decision or a rest
+sweep (#2860). `mark_at_rest()` deliberately omits `last_active_at` from its
+`update_fields` — resting a Job by age never refreshes its recency. A side
+effect of scoping these three writes is that they no longer incidentally
+re-run `on_save` for `has_open_expectations` (or, for `touch`/`revive`,
+`last_active_at`) the way a full-hash save did. Self-heal for the two
+fields is asymmetric, not by any lifecycle transition either way:
+`has_open_expectations` drift is still healed by
+`backfill_open_expectations_index()`, called from every
+`repair_indexes()`; `last_active_at` skew was healed once, fleet-wide, by
+the completed `backfill_job_last_active_scores` migration, and
+`renormalize_last_active_scores()` has had no recurring caller since.

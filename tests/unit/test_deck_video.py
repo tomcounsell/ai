@@ -292,7 +292,7 @@ def test_composite_receives_total_runtime(monkeypatch, tmp_path):
 def test_export_pngs_passes_html_flag(monkeypatch, tmp_path):
     """The Marp export must pass --html, which enables raw HTML tags.
 
-    Every slide archetype in the Cuttlefish theme is built from <div>/<span>
+    Every slide archetype in the Yudame House theme is built from <div>/<span>
     markup. Raw HTML is on by default in the current Marp CLI, so dropping the
     flag looks harmless until that default flips and every exported frame comes
     out with its layout silently stripped. Assert the flag rather than trusting

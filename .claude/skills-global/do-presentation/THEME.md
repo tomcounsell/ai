@@ -1,4 +1,4 @@
-# Theme: Cuttlefish
+# Theme: Yudame House
 
 One theme. Every deck uses it. It is the house design system from `yudame.ai` — black on cream,
 Lora serif headings, Inter body, IBM Plex Mono labels, and a single red used the way an architect
@@ -16,7 +16,7 @@ most once per slide as a rule, a dot, a marked figure, or one word. Cross-refere
 and an 8px technical grid, never from boxes and shadows: every slide opens with a 1px rule carrying a
 mono eyebrow left and the deck slug right, corners are square, and drawings sit inside a
 graph-paper `.figure` panel with registration marks in all four corners and a mono `FIG. 01` footer.
-Data appears as ruled `.data` tables with a warm-gray uppercase mono header and hairline rows, or as
+Data appears as ruled tables with a warm-gray uppercase mono header and hairline rows, or as
 one large `IBM Plex Mono` tabular figure over a mono caption. Charts are flat black bars on a hairline
 baseline with the one key bar in red, values labeled directly on the bars, no gridlines, no axis, no
 legend. Section breaks are cream, not black: a large muted mono numeral, a Lora title, one red rule.
@@ -35,6 +35,7 @@ palettes, gridlines, axis lines or legends; stock photography; font sizes outsid
 | `--ink` | `#1A1A1A` | Headings |
 | `--ink-body` | `#2D2D2D` | Body text |
 | `--ink-gray` | `#5A5A5A` | Labels, captions |
+| `--ink-muted` | `#8A8A8A` | Section numeral. The lightest ink that clears 3:1 |
 | `--rule-dark` | `#3A3A3A` | Structural rules, panel borders |
 | `--rule-mid` | `#C4C4C4` | Masthead and band hairlines |
 | `--rule-light` | `#E5E5E5` | Table rows, grid lines |
@@ -47,8 +48,10 @@ palettes, gridlines, axis lines or legends; stock photography; font sizes outsid
 Fonts: `Lora` 500 (serif, all headings) · `Inter` 300/400/500 (body) · `IBM Plex Mono` 400/500
 (labels, figures, data).
 
-Sizes for a 1280×720 slide: cover 68px · statement 46px · h1 40px · h2 30px · h3 22px · body 22px ·
-small 18px · mono label 13px · mono micro 11px · big number 132px. Nothing else.
+Sizes for a 1280×720 slide. Content type: cover 68 · section title 52 · statement 46 · h1 40 ·
+h2 30 · h3 22 · body 22 · card 18. Display: big number 132 · section numeral 96. Utility: rose
+plate 24 · plate 20 · table cell 17 · code block 15 · mono label 13 · table header 12 · mono
+micro 11. Every size the theme uses is in that list; reach for an existing one before adding.
 
 ## Accent discipline
 
@@ -59,23 +62,33 @@ provisional. A deck can run ten slides with no red and lose nothing.
 
 ## Slide archetypes
 
-Marp classes. Use `<!-- _class: name -->` at the top of a slide.
+Three archetypes are Marp slide classes, set with `<!-- _class: name -->`. The other three need no
+class: they are compositions of the inline components, and the default slide styling already carries
+them. Do not invent a `_class` for those — an undefined class is a silent no-op that reads in the
+source as though it were doing something.
 
 | Class | Slide | Anatomy |
 |---|---|---|
 | `cover` | Title | Mono eyebrow (audience/client) top · Lora title center · red rule · `.stamp` metadata band bottom |
 | `section` | Section break | Large muted mono numeral · Lora title · one red rule |
 | `statement` | Single claim | One Lora sentence, 12 words maximum, 60% of the slide left empty |
-| *(none)* | Concept | Mono eyebrow · Lora action title · Inter body or `.cols` |
-| `figure` | Diagram | Full-width `.figure` panel with graph-paper grid, corner marks, mono footer |
-| `data` | Table or number | `.data` ruled table, or one `.big` figure over a mono caption |
+| none | Concept | Mono eyebrow · Lora action title · Inter body or `.cols` |
+| none | Diagram | Mono eyebrow · action title · a `.figure` div: graph-paper grid, corner marks, `.figure__meta` title block |
+| none | Table or number | Mono eyebrow · action title · a markdown table, or one `.big` figure over a mono caption |
 
 Inline components: `.eyebrow` `.cols` `.cols-3` `.plate` `.card` `.note` `.rose` `.stamp` `.big`
 `.figure` `.figure__meta` `.rule-red`.
 
 ## The Marp style block
 
-Paste this verbatim into the deck's front matter under `style: |`. Change values in `:root` only.
+Paste this into the deck's front matter under `style: |`, then set exactly one thing: the deck slug
+in the masthead rule (`section::before { content: "…" }`). Everything else is verbatim, `:root`
+included.
+
+**Choose the slug yourself when you start writing the deck.** It is chrome, not content, and needs
+no approval: a short uppercase line naming the project and the deck's purpose, roughly two to five
+words, for example `CYNDRA · ONBOARDING REVIEW` or `Q4 PLATFORM REVIEW`. Interpuncts separate parts.
+Pick one and move on.
 
 ```css
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500;600&family=Lora:ital,wght@0,400;0,500;1,400;1,500&display=swap');
@@ -84,6 +97,7 @@ Paste this verbatim into the deck's front matter under `style: |`. Change values
   --bg: #FAF9F6;      --bg-panel: #FFFFFF;  --bg-warm: #F5F4F1;
   --ink: #1A1A1A;     --ink-body: #2D2D2D;  --ink-gray: #5A5A5A;
   --rule-dark: #3A3A3A; --rule-mid: #C4C4C4; --rule-light: #E5E5E5;
+  --ink-muted: #8A8A8A;   /* lightest ink that clears 3:1 on the cream ground */
   --red: #B91C1C;     --red-deep: #7F1D1D;  --rose: #FECACA;
   --cobalt: #1E3A8A;  --ochre: #92400E;
   --serif: 'Lora', Georgia, serif;
@@ -177,9 +191,12 @@ section.cover .lede {
 section.section {
   display: flex; flex-direction: column; justify-content: center;
 }
+/* Numeral is --ink-muted, not --rule-mid. A rule colour behind 96px type gives
+   1.66:1 against the cream, under even the 3:1 large-text floor, and the
+   section number tells the reader where they are. --ink-muted clears it. */
 section.section .num {
   font-family: var(--mono); font-size: 96px; font-weight: 400;
-  color: var(--rule-mid); line-height: 1; margin-bottom: 18px;
+  color: var(--ink-muted); line-height: 1; margin-bottom: 18px;
 }
 section.section h1 { font-size: 52px; margin: 0; }
 
@@ -337,18 +354,6 @@ section pre code .hljs-comment,
 section pre code .hljs-quote { color: var(--ink-gray) !important; font-style: italic; }
 ```
 
-## Per-deck slug
-
-The masthead reads `data-slug` off each slide. Set it once per slide with a Marp directive:
-
-```markdown
-<!-- _backgroundColor: #FAF9F6 -->
-<section data-slug="…">
-```
-
-Simpler in practice: replace `content: attr(data-slug)` with the literal deck slug when you write
-the style block, for example `content: "CYNDRA · ONBOARDING REVIEW";`. One edit, whole deck.
-
 ## Charts
 
 Flat vertical or horizontal bars in `--ink`, the one key bar in `--red`, values labeled directly on
@@ -357,10 +362,13 @@ No gridlines, no y-axis, no legend, no second accent. If the chart needs a legen
 the marks directly instead. For anything beyond a bar comparison, read the `dataviz` skill and
 carry these palette constraints into it.
 
-## When the deck is about someone else's product
+## There is one theme
 
-Cuttlefish is the house theme and the default for every deck. The one override: a deck whose subject
-*is* a specific product with its own strong brand, presented to that product's own audience. Then
-swap the `:root` values (ground, ink, accent, three font families) for theirs and leave the
-structure alone. Keep the light ground, the single-accent discipline, and the square corners
-regardless. Never mix two brands' colors in one deck.
+Yudame House is it. Every deck, every audience, every repo. Do not detect a design system, do not
+restyle per deck, do not offer the user a choice, and do not treat the values in `:root` as
+adjustable. A deck about another company's product still ships in Yudame House, because the deck is
+a Yudame artifact regardless of its subject. Their brand shows up in a logo, never in the slide's
+colors or type.
+
+Holding the theme constant is the whole point. A deck that looks like every other deck is
+recognisable as ours on sight, which is worth more than any per-deck tailoring.

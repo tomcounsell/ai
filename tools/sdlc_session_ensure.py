@@ -614,8 +614,7 @@ def _acquire_run_lock_and_bind(
     try:
         from models.agent_session import AgentSession
 
-        fresh_rows = list(AgentSession.query.filter(session_id=session_id))
-        fresh = fresh_rows[0] if fresh_rows else None
+        fresh = AgentSession.newest_for_session_id(session_id)
         readback_run_id = getattr(fresh, "active_run_id", None) if fresh is not None else None
     except Exception as e:
         release_issue_lock(issue_number, candidate)
@@ -902,7 +901,7 @@ def ensure_session(
 
         # Check if a session with this exact ID already exists (idempotent)
         try:
-            existing_by_id = list(AgentSession.query.filter(session_id=local_session_id))
+            existing_by_id = AgentSession.rows_for_session_id(local_session_id)
             if existing_by_id:
                 run_id, err = _acquire_run_lock_and_bind(
                     issue_number, existing_by_id[0], reuse_run_id=reuse_run_id

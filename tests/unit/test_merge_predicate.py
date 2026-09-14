@@ -202,7 +202,7 @@ def test_resolver_query_guard_degrades_to_no_signal(ledger_factory, monkeypatch)
 def wire_predicate(monkeypatch):
     """Stub the gh/substrate seams and record which issue groups (b)/(c) see.
 
-    Returns the list that ``_check_docs_stage``/``_check_verdict_freshness``
+    Returns the list that ``_check_stage_markers``/``_check_verdict_freshness``
     record their ``issue_number`` argument into.
     """
 
@@ -228,7 +228,7 @@ def wire_predicate(monkeypatch):
         monkeypatch.setattr(mp, "_substrate_present", lambda root: substrate)
         monkeypatch.setattr(mp, "_gh_pr_view", _fake_pr_view)
         monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: target_repo)
-        monkeypatch.setattr(mp, "_check_docs_stage", _fake_docs)
+        monkeypatch.setattr(mp, "_check_stage_markers", _fake_docs)
         monkeypatch.setattr(mp, "_check_verdict_freshness", _fake_verdict)
         return recorded_issues
 
@@ -633,3 +633,50 @@ def test_merge_predicate_head_sha_reader_import_stays_in_function():
             # Any occurrence must be indented (i.e. inside a function body).
             assert line != line.lstrip(), f"module-level tools import: {line!r}"
     assert not hasattr(mp, "head_sha_of_record")
+
+
+# ---------------------------------------------------------------------------
+# _derive_slug — the docs/features fallback's slug derivation (#2891)
+# ---------------------------------------------------------------------------
+#
+# A head ref that is not `session/`-prefixed keeps its prefix, so its slug
+# carries a `/` -- e.g. `fix/router-blocked-on-conflict` -- and the DOCS
+# fallback leg probes `docs/features/fix/router-blocked-on-conflict.md`, a
+# nested path that can never exist. The slug must degrade to "" for any
+# slash-bearing remainder so the leg emits the honest "no usable slug" refusal
+# instead of naming a specific absent file.
+
+
+def test_derive_slug_slash_bearing_non_session_head_ref_yields_no_slug():
+    """PR #2797's head ref: no slug, so the DOCS fallback refuses honestly."""
+    assert mp._derive_slug("fix/router-blocked-on-conflict") == ""
+
+
+def test_derive_slug_session_prefix_stripped():
+    """The session/ convention still yields the flat remainder as the slug."""
+    assert mp._derive_slug("session/foo-bar") == "foo-bar"
+
+
+def test_derive_slug_session_nested_remainder_yields_no_slug():
+    """A nested session branch (remainder still slash-bearing) is unusable too."""
+    assert mp._derive_slug("session/foo/bar") == ""
+
+
+def test_derive_slug_no_slug_refs():
+    """main/master/HEAD/empty/None can never be a usable slug."""
+    for head_ref in ("main", "master", "HEAD", "", None):
+        assert mp._derive_slug(head_ref) == ""
+
+
+def test_docs_stage_slash_bearing_head_ref_emits_honest_no_slug_refusal(monkeypatch):
+    """Regression pin for #2891: a non-session/ head ref must refuse with the
+    generic "no usable slug" message, never probe a nested docs/features path."""
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_docs_marker(
+        {"DOCS": "ready"}, "fix/router-blocked-on-conflict", REPO_ROOT, failed, notes
+    )
+    assert len(failed) == 1
+    assert "no usable slug for the docs/features fallback" in failed[0]
+    assert "docs/features/fix/router-blocked-on-conflict.md absent" not in failed[0]
+    assert notes == []

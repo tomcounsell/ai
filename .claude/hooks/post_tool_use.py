@@ -492,14 +492,13 @@ def _update_agent_session(hook_input: dict) -> None:
             # paths that still create local-* records.
             local_sid = f"local-{session_id}"
             try:
-                matches = list(AgentSession.query.filter(session_id=local_sid))
+                matches = AgentSession.rows_for_session_id(local_sid)
             except Exception:
                 matches = []
             if not matches:
                 return
             agent_session = matches[0]
 
-        agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
         # Liveness (issue #1843, Gap A): clear the in-flight tool name and
         # refresh the timestamp, mirroring record_tool_boundary's Post=clear
@@ -568,11 +567,31 @@ def main():
 
     append_to_log(session_dir, "tool_use.jsonl", entry)
 
-    # Memory recall -- query subconscious memory and inject thoughts
+    # Memory recall -- query subconscious memory and inject thoughts.
+    #
+    # The payload MUST be nested under ``hookSpecificOutput``. A bare
+    # top-level ``{"additionalContext": ...}`` is not a recognized shape on
+    # any hook event: the harness parses the JSON, finds no key it acts on,
+    # and discards it silently -- exit 0, no warning, nothing injected.
+    #
+    # Verified end to end on this harness with a scratch PostToolUse hook and
+    # a nonce the model was asked to echo:
+    #   {"hookSpecificOutput": {"hookEventName": "PostToolUse",
+    #                           "additionalContext": "<nonce>"}}  -> delivered
+    #   {"additionalContext": "<nonce>"}                          -> discarded
+    #
+    # Matches the shape used for PostToolUse in agent/health_check.py and the
+    # SDK's PostToolUseHookSpecificOutput TypedDict.
     additional_context = _run_memory_recall(hook_input)
     if additional_context:
-        # Output hook response with additionalContext for thought injection
-        response = json.dumps({"additionalContext": additional_context})
+        response = json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": additional_context,
+                }
+            }
+        )
         print(response)
 
 

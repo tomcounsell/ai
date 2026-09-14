@@ -115,7 +115,7 @@ Crash isolation is preserved — the converter call is wrapped in try/except and
 The vault is fed from several sources. Each writer drops files under `~/work-vault/`; the watcher coalesces them in its 2-second debounce window and runs the converter:
 
 - **Manual ingest CLI** — `valor-ingest <source>` (one-off) or `valor-ingest --scan <dir>` (backfill). Primary entry point for explicit user-driven imports.
-- **Telegram steering attachments** (issue #1215) — when a file lands in a chat with a live session, `bridge/telegram_bridge.py:_ack_steering_routed` schedules a fire-and-forget `_ingest_attachments` task that copies the downloaded file into `~/work-vault/telegram-attachments/` with the disambiguated name `{YYYYMMDD_HHMMSS}_{sender}_{message_id}_{basename}`. The copy runs **after** the steering push so a slow filesystem write never blocks delivery. See [Telegram Integration → Inbound attachments](telegram.md#inbound-attachments--steering-enrichment--auto-ingest).
+- **Telegram steering attachments** (issue #1215) — when a file lands in a chat with a live session, `bridge/telegram_bridge.py:_ack_steering_routed` schedules a fire-and-forget `_ingest_attachments` task that copies the downloaded file into `~/work-vault/telegram-attachments/` with the disambiguated name `{YYYYMMDD_HHMMSS}_{sender}_{message_id}_{basename}`. The copy runs **after** the steering push so a slow filesystem write never blocks delivery. See [Telegram Inbound Attachments](telegram-inbound-attachments.md).
 - **Telegram new-session deferred enrichment** — `bridge/enrichment.py:enrich_message` already downloads media for new sessions. The steering-side helper above closes the gap so live-session attachments get the same vault treatment.
 
 ## Loop Prevention
@@ -169,7 +169,6 @@ The Haiku vision test is a **hard gate** when the key is present — a failure m
 
 ## See Also
 
-- [Plan document](../plans/markitdown-ingestion.md) — design decisions, spike results, risk analysis
 - [Docs Auditor substrate](docs-auditor.md) — consumes the `generated_by` sidecar skip-signal (replaced the deleted `/do-xref-audit` skill)
 - [`update` SKILL.md](../../.claude/skills/update/SKILL.md) — mirrors the Telegram summary backfill reminder for human invocations
 - [Subconscious Memory](subconscious-memory.md) — recall pipeline now covers converted binary formats

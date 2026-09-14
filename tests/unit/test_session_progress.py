@@ -487,40 +487,11 @@ def test_json_output_is_serializable(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_valor_cli_registers_the_progress_verb():
-    from tools.valor_cli import KNOWN_SUBCOMMANDS, _build_parser
-
-    assert "progress" in KNOWN_SUBCOMMANDS
-    args = _build_parser().parse_args(["progress", "abc123", "--window", "60", "--json"])
-    assert args.command == "progress"
-    assert args.id == "abc123"
-    assert args.window == 60.0
-    assert args.json is True
-
-
-def test_valor_cli_rejects_negative_window_at_parse_time(capsys):
-    """A negative ``--window`` has no honest reading (round-2 finding, half fixed).
-
-    Before this, a negative window sailed through to ``compute_verdict`` and
-    the reason line reported a threshold the caller never passed, e.g.
-    "older than the -5s window". Reject it in the parser itself so the
-    error is immediate and unambiguous, and never reaches session lookup.
-    """
-    from tools.valor_cli import _build_parser
-
-    with pytest.raises(SystemExit) as exc_info:
-        _build_parser().parse_args(["progress", "abc123", "--window", "-5"])
-    assert exc_info.value.code == 2
-    assert "--window must be >= 0" in capsys.readouterr().err
-
-
 def test_valor_session_rejects_negative_window_at_parse_time(monkeypatch, capsys):
     """Same guard, other entry point: ``valor-session progress --window -5``.
 
-    Pins parity with ``tools/valor_cli.py`` — both parsers share
-    ``tools.session_progress.window_arg_type`` so a negative value fails
-    identically (and before any session lookup) no matter which CLI is
-    invoked.
+    The parser uses ``tools.session_progress.window_arg_type`` so a negative
+    value fails before any session lookup.
     """
     from tools import valor_session
 
@@ -551,17 +522,6 @@ def test_window_arg_type_rejects_nonfinite_values(bad_value):
 
 
 @pytest.mark.parametrize("bad_value", ["nan", "inf", "1e400"])
-def test_valor_cli_rejects_nonfinite_window_at_parse_time(bad_value, capsys):
-    """Same round-4 finding, exercised through the ``valor`` CLI parser."""
-    from tools.valor_cli import _build_parser
-
-    with pytest.raises(SystemExit) as exc_info:
-        _build_parser().parse_args(["progress", "abc123", "--window", bad_value])
-    assert exc_info.value.code == 2
-    assert "--window must be >= 0" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("bad_value", ["nan", "inf", "1e400"])
 def test_valor_session_rejects_nonfinite_window_at_parse_time(bad_value, monkeypatch, capsys):
     """Same round-4 finding, other entry point: ``valor-session progress --window nan``."""
     from tools import valor_session
@@ -573,22 +533,6 @@ def test_valor_session_rejects_nonfinite_window_at_parse_time(bad_value, monkeyp
         valor_session.main()
     assert exc_info.value.code == 2
     assert "--window must be >= 0" in capsys.readouterr().err
-
-
-def test_valor_cli_dispatches_progress_to_valor_session(monkeypatch):
-    from tools import valor_cli, valor_session
-
-    seen = {}
-
-    def fake(args):
-        seen["id"] = args.id
-        seen["window"] = args.window
-        seen["json"] = args.json
-        return 0
-
-    monkeypatch.setattr(valor_session, "cmd_progress", fake)
-    assert valor_cli.main(["progress", "sess-x", "--window", "5"]) == 0
-    assert seen == {"id": "sess-x", "window": 5.0, "json": False}
 
 
 def test_valor_session_registers_progress_in_its_dispatch():

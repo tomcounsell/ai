@@ -22,6 +22,7 @@ from tests.db_claim import (
     claimed_test_dbs,
     release_test_db_claim,
 )
+from tests.marker_map import resolve_marker
 
 # --- Un-awaited-coroutine leak guardrail (#2120) --------------------------
 # A test that hands an eagerly-created coroutine to a seam that drops it (never
@@ -106,14 +107,14 @@ os.environ["SENTRY_DSN"] = ""
 # claude-haiku-4-5 request via `agent.llm.run_typed`. Every `send()` test whose
 # drafted text happens to be a short question therefore makes a live, billed
 # API call. Measured before this guard: one run of
-# tests/unit/test_output_handler.py issued 5 requests to /v1/messages
+# tests/unit/output_handler/ issued 5 requests to /v1/messages
 # (reproducible even under `env -u ANTHROPIC_API_KEY`, because importing
 # bridge.telegram_bridge calls load_dotenv() and repopulates the key from the
 # real .env).
 #
 # The multi-second network await is also a yield point inside `send()`, between
 # the drafter call and the Redis self-draft budget bump. That reordered the
-# interleaving in `test_output_handler.py::TestDrafterFailureRecovery::
+# interleaving in `test_output_handler_drafter.py::TestDrafterFailureRecovery::
 # test_self_draft_attempts_bound_terminates_loop`, which gathers two concurrent
 # `send()` calls and asserts exactly two atomic bumps -- taking it from
 # deterministic-green to 6 failures in 12 runs on the review machine. That flake
@@ -268,9 +269,43 @@ _install_redis_flush_ownership_guard()
 # collection and therefore before EVERY fixture, autouse or installed-plugin.
 # "Claimed" is the only state a test can observe, and the same hook exports
 # POPOTO_TEST_DB so popoto's plugin is pointed at this process's own db from its
-# very first flush -- no commit window in which the guard is live and the plugin
-# still targets its db-15 default (db 15 is the top slot of the claim pool, so
-# every flush of it was a cross-process wipe).
+# very first flush. Since popoto 1.9.0 that export IS the plugin's opt-in: the
+# plugin swaps and flushes nothing unless POPOTO_TEST_DB or the popoto_test_db
+# ini option names a db, so it can only ever flush the db this process claimed.
+
+
+# --- Process-wide REDIS_URL export (#2805) ---------------------------------
+def _export_claimed_redis_url() -> None:
+    """Publish THIS process's claimed db as the process-wide ``REDIS_URL``.
+
+    A module-level seam rather than an inline assignment so that tests which
+    call ``pytest_configure()`` directly against a synthetic claim registry can
+    stub it out (via ``monkeypatch.setattr``) and never write a foreign db into
+    the live session env -- see ``_reset_claim_state`` in
+    ``test_conftest_isolation_guards.py`` (#2805 Risk 1).
+
+    Why this line exists: every consumer that resolves ``os.environ["REDIS_URL"]``
+    lazily -- inside a function body, at call time -- now sees this process's
+    claimed test db instead of falling through to the hardcoded production
+    default (``redis://localhost:6379/0``). That includes a plain
+    ``subprocess.run(...)`` with no ``env=`` (the child inherits ``os.environ``
+    by construction) and every in-process production module that reads
+    ``REDIS_URL`` per call rather than at import time.
+
+    Honest limitation: this is NOT defense-in-depth for THIS process's own
+    popoto client. popoto's ``pytest11`` plugin resolves ``REDIS_URL`` and
+    builds ``POPOTO_REDIS_DB`` before ``tests/conftest.py`` is even imported,
+    so the parent process's in-process popoto client is unaffected by this line
+    -- it is already pointed at the claimed db via the existing
+    ``POPOTO_TEST_DB`` export and the autouse ``redis_test_db`` fixture swap.
+
+    Hostname is deliberately ``127.0.0.1``, not ``localhost``: this matches
+    what ``tests.db_claim.subprocess_env`` has always passed to children, so
+    the two paths agree rather than silently diverging on host spelling.
+    """
+    os.environ["REDIS_URL"] = db_claim.redis_test_url()
+
+
 def pytest_configure(config):
     """Claim this process's test db, and point popoto's plugin at it (#2628)."""
     is_worker = getattr(config, "workerinput", None) is not None
@@ -287,6 +322,7 @@ def pytest_configure(config):
         pytest.exit(str(exc), returncode=3)
         return
     os.environ["POPOTO_TEST_DB"] = str(db)
+    _export_claimed_redis_url()
     if is_worker:
         # xdist does not surface a worker's pytest_report_header to the terminal,
         # so provenance travels back through workeroutput instead (see
@@ -621,60 +657,6 @@ def shared_module_identity_guard(request):
         )
 
 
-# Cache of popoto modules that hold a `POPOTO_REDIS_DB` symbol. Built lazily
-# and refreshed only when sys.modules grows OR a cached module identity has
-# changed, so we don't walk all of sys.modules per test (was ~1500 entries ×
-# thousands of tests). See _popoto_modules_with_redis_db for why both triggers
-# are required.
-_POPOTO_MODULE_CACHE: dict[str, object] = {}
-_POPOTO_MODULE_CACHE_LEN: int = -1
-
-
-def _popoto_modules_with_redis_db():
-    """Return the list of popoto submodules holding a `POPOTO_REDIS_DB` symbol.
-
-    The cache is rebuilt when EITHER of two independent staleness signals
-    fires:
-
-    1. `len(sys.modules) != _POPOTO_MODULE_CACHE_LEN` -- catches brand-new,
-       lazily-imported db-holder modules that were never cached before. A
-       pure identity check over already-cached names cannot see these: if a
-       module hasn't been cached yet, there's no entry to compare identity
-       against, so an `any()` over the existing cache is vacuously False.
-
-    2. `any(sys.modules.get(name) is not mod for name, mod in cache.items())`
-       -- catches an equal-count eviction-then-reimport, where a module
-       object is replaced under the SAME name (e.g. `mock_claude_sdk_cleanup`
-       evicts `agent.*` from sys.modules between tests, and a later import
-       creates a new module object with the same dotted name). `len` alone
-       is non-monotonic under this eviction/reimport cycle -- it can produce
-       an EQUAL total module count with a DIFFERENT (stale) module object
-       cached under an unchanged name, so a len-only cache would silently
-       keep serving a module whose `POPOTO_REDIS_DB` binding was never
-       repointed to the test db, causing writes to land on db=0 while other
-       code paths derive db=1 from the canonical `rdb.POPOTO_REDIS_DB` --
-       a "split-brain" (see tests/integration/test_tool_budget_enforcement.py
-       flake and issue #2037).
-
-    Neither signal alone is sufficient -- they are OR'd together.
-    """
-    import sys as _sys
-
-    global _POPOTO_MODULE_CACHE, _POPOTO_MODULE_CACHE_LEN
-    cur_len = len(_sys.modules)
-    stale = cur_len != _POPOTO_MODULE_CACHE_LEN or any(
-        _sys.modules.get(name) is not mod for name, mod in _POPOTO_MODULE_CACHE.items()
-    )
-    if stale:
-        _POPOTO_MODULE_CACHE = {
-            name: mod
-            for name, mod in _sys.modules.items()
-            if mod is not None and name.startswith("popoto") and hasattr(mod, "POPOTO_REDIS_DB")
-        }
-        _POPOTO_MODULE_CACHE_LEN = cur_len
-    return list(_POPOTO_MODULE_CACHE.values())
-
-
 # ---------------------------------------------------------------------------
 # Per-process test-DB claim (issue #2060)
 # ---------------------------------------------------------------------------
@@ -849,71 +831,170 @@ def no_calendar_subprocess_in_tests():
         _executor._calendar_heartbeat = original
 
 
+def _assert_client_matches_claim_registry(client, expected_host: str, expected_port: int) -> None:
+    """Fail loudly if the client is not on the server the claim registry keys.
+
+    The claim registry that guarantees db uniqueness is machine-global and keyed
+    by port (``/tmp/valor-pytest-db-claims-{port}``). If a client ever ends up on
+    a DIFFERENT server than the registry names, the flock that is supposed to
+    make this process's db exclusive is protecting a database on a server nobody
+    is writing to, and the writes land somewhere unprotected — which is #2799
+    exactly, and where the "private redis" runs were flushing production db N.
+
+    Host/port now flow from one resolver, so divergence is prevented by
+    construction; this assertion exists so that if a future edit reintroduces a
+    bare client, the suite says so on the first test instead of silently
+    operating on the wrong server.
+    """
+    kwargs = client.connection_pool.connection_kwargs
+    actual_host, actual_port = kwargs.get("host"), kwargs.get("port")
+    if (actual_host, actual_port) != (expected_host, expected_port):
+        raise RuntimeError(
+            "Test Redis client is not on the server the db-claim registry is keyed to: "
+            f"client={actual_host}:{actual_port} registry={expected_host}:{expected_port}. "
+            "The flock guaranteeing this process's db is exclusive protects the registry's "
+            "server, so writes to any other server are unprotected (#2799). Resolve the "
+            "client through tests.db_claim.redis_test_host()/redis_test_port()."
+        )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _popoto_pool_install(_popoto_test_db):
+    """Point popoto's canonical client at the claim registry's server, once (#2771).
+
+    Ownership is split by fact, and this fixture owns exactly one of them:
+
+    * ``tests/db_claim.py`` owns the db NUMBER and the SERVER (host/port).
+    * popoto's bundled ``pytest11`` plugin owns APPLYING the db number — it reads
+      the ``POPOTO_TEST_DB`` that ``pytest_configure`` exports and calls its own
+      ``_swap_db``. Declaring ``_popoto_test_db`` as a dependency orders this
+      fixture after that swap by construction rather than by collection accident.
+    * this fixture owns APPLYING the server. It cannot be delegated to
+      ``_swap_db``: that helper preserves whatever host/port the pool already
+      carries, and that pool was built at popoto import time from the ambient
+      ``REDIS_URL``. Under ``REDIS_PORT=641x`` the claim registry is keyed to the
+      private port while the client sits on 6379 — the run opts OUT of the
+      machine-global pool and flushes production db N (#2799).
+
+    The swap is IN PLACE on the existing client object: only
+    ``client.connection_pool`` is reassigned, never ``rdb.POPOTO_REDIS_DB``.
+    Popoto submodules capture the symbol with ``from ..redis_db import
+    POPOTO_REDIS_DB`` at import time, so replacing the object strands every one
+    of those bindings on a stale client — the #2037 split-brain. Mutating the
+    object every binding already points at makes them all follow for free, and
+    is why no submodule re-pointing walk exists any more.
+
+    The pool is rebuilt rather than adjusted because ``max_connections`` is a
+    POOL constructor argument and is absent from ``connection_kwargs``: anything
+    that rebuilds from those kwargs — including popoto's own ``_swap_db``, which
+    runs before this fixture — silently downgrades a ``BlockingConnectionPool``
+    to a plain unbounded ``ConnectionPool``. Reconstructing popoto's own pool
+    type restores the connection ceiling the suite is supposed to run under.
+
+    SELECT is still not used: with a connection pool a recycled connection
+    defaults back to db 0, and the next ``flushdb()`` wipes production.
+    """
+    import popoto.redis_db as rdb
+    import redis
+
+    test_db = claim_test_db()
+    test_host = db_claim.redis_test_host()
+    test_port = int(db_claim.redis_test_port())
+
+    client = rdb.POPOTO_REDIS_DB
+    old_pool = client.connection_pool
+    old_kwargs = dict(old_pool.connection_kwargs)
+
+    # Idempotence guard. Host/port are type-normalized on both sides: a pool
+    # built from a URL carries ``port`` as int while ``redis_test_port()``
+    # returns a str, and comparing those raw would rebuild the pool on every
+    # call instead of recognising the steady state.
+    already_installed = (
+        isinstance(old_pool, redis.BlockingConnectionPool)
+        and str(old_kwargs.get("host")) == str(test_host)
+        and int(old_kwargs.get("port") or 0) == test_port
+        and int(old_kwargs.get("db") or 0) == test_db
+    )
+    if already_installed:
+        yield
+        return
+
+    new_pool_kwargs = {
+        "host": test_host,
+        "port": test_port,
+        "db": test_db,
+        "socket_timeout": 5,
+        "socket_connect_timeout": 5,
+        # Read from popoto rather than hardcoded: it honours
+        # POPOTO_SYNC_MAX_CONNECTIONS. #2770 is the upstream coordination point
+        # if this name ever moves.
+        "max_connections": getattr(rdb, "_SYNC_MAX_CONNECTIONS", 128),
+    }
+    # An authenticated REDIS_URL must keep working; mirror what _swap_db carries.
+    for auth_key in ("password", "username"):
+        if old_kwargs.get(auth_key) is not None:
+            new_pool_kwargs[auth_key] = old_kwargs[auth_key]
+
+    new_pool = redis.BlockingConnectionPool(**new_pool_kwargs)
+    client.connection_pool = new_pool
+    # Disconnecting immediately is safe ONLY because this runs in pytest's
+    # synchronous session-setup phase, with no test body executing and therefore
+    # no checked-out connection in flight. disconnect() tears down every
+    # connection the pool hosts, so a caller mid-command would get a broken
+    # socket. Never move this into a test body or an async context.
+    old_pool.disconnect()
+
+    yield
+
+    # Session finalizer, and the only place the pool this fixture installed is
+    # unwound. Runs after the last test's teardown, again with nothing in
+    # flight. Not client.close(): the client does not own its pool (it was built
+    # with redis.Redis(connection_pool=...)), and the object is shared.
+    client.connection_pool = old_pool  # session-finalizer-only
+    new_pool.disconnect()
+
+
 @pytest.fixture(autouse=True)
-def redis_test_db(request):
-    """Switch popoto to a dedicated test Redis client for ALL tests.
+def redis_test_db(_popoto_pool_install):
+    """Per-test Redis hygiene on popoto's canonical client (#2771).
 
     autouse=True ensures this runs for every test, even those that don't
     explicitly request the fixture. This prevents accidental writes to db=0
     if a test imports a popoto model without requesting isolation.
 
-    The db number is this PROCESS's flock claim (tests/db_claim.py), established
-    in ``pytest_configure`` before any fixture runs. It is never derived from the
-    xdist worker id: that is unique within one run but not across the several
-    pytest processes this machine runs at once, which is how one run's flushdb()
-    used to wipe another's data mid-test (#2060, #2628).
+    This fixture does NO pool work. Which server and which db the client is on
+    is settled once per session by ``_popoto_pool_install``; all that is left
+    per test is the flush pair and the registry assertion.
 
-    CRITICAL: We replace the POPOTO_REDIS_DB object with a new Redis client
-    pointed at the test db, rather than using SELECT on the production connection.
-    SELECT is unsafe with connection pools — if the pool recycles a connection,
-    the new connection defaults back to db=0 and flushdb() wipes production data.
+    The db number is this PROCESS's flock claim (tests/db_claim.py), exported as
+    ``POPOTO_TEST_DB`` in ``pytest_configure`` and applied by popoto's own
+    plugin. It is never derived from the xdist worker id: that is unique within
+    one run but not across the several pytest processes this machine runs at
+    once, which is how one run's flushdb() used to wipe another's data mid-test
+    (#2060, #2628).
 
-    Also resets the async Redis connection to use the same db, since popoto v1.0.0b2
-    maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
+    The registry assertion stays function-scoped on purpose. It is the check
+    that catches drift introduced DURING a test — a test that rebinds the global
+    or swaps the pool fails on the very next test rather than silently flushing
+    an unprotected server (#2799).
+
+    ``rdb._POPOTO_ASYNC_REDIS_DB`` is deliberately untouched. The plugin nulls it
+    at setup and teardown of every test so that ``get_async_redis_db()`` builds
+    the async client lazily INSIDE the test's own event loop, mirroring the
+    canonical sync client's kwargs. Binding it here — synchronously, in fixture
+    setup — produces a client attached to the wrong loop, which is the one thing
+    the plugin's reset exists to prevent.
     """
     import popoto.redis_db as rdb
-    import redis
-    import redis.asyncio as aioredis
 
-    # Per-PROCESS unique test db (issue #2060). Replaces the old per-worker
-    # ``gw{N}->db{N+1}`` / master->db1 derivation, which collided across
-    # concurrent pytest processes and let one process's flushdb() wipe another's
-    # data mid-test. ``claim_test_db`` is memoized per process, so every test in
-    # this process uses the same claimed db.
-    test_db = claim_test_db()
+    client = rdb.POPOTO_REDIS_DB
+    test_host = db_claim.redis_test_host()
+    test_port = int(db_claim.redis_test_port())
+    _assert_client_matches_claim_registry(client, test_host, test_port)
 
-    # Save original connections
-    original_sync = rdb.POPOTO_REDIS_DB
-    original_async = getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None)
-
-    # Create a NEW Redis client pointed at the test db (not SELECT on the pool)
-    test_client = redis.Redis(db=test_db)
-    rdb.POPOTO_REDIS_DB = test_client
-    test_client.flushdb()
-
-    # Popoto submodules use `from ..redis_db import POPOTO_REDIS_DB`, which
-    # captures the binding at import time. Assigning rdb.POPOTO_REDIS_DB above
-    # does not update those local bindings, so we must patch every popoto
-    # module that has a local POPOTO_REDIS_DB symbol. Without this, sync
-    # reads/writes route to whichever db was active at import (often
-    # production), and async vs. sync reads diverge.
-    _patched_popoto_modules: list[tuple[object, object]] = []
-    for _mod in _popoto_modules_with_redis_db():
-        _patched_popoto_modules.append((_mod, _mod.POPOTO_REDIS_DB))
-        _mod.POPOTO_REDIS_DB = test_client
-
-    # Reset async Redis connection to point at the same test db.
-    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=test_db)
-
+    client.flushdb()
     yield
-
-    # Flush test db and restore original production connections
-    test_client.flushdb()
-    test_client.close()
-    rdb.POPOTO_REDIS_DB = original_sync
-    rdb._POPOTO_ASYNC_REDIS_DB = original_async
-    for _mod, _orig in _patched_popoto_modules:
-        _mod.POPOTO_REDIS_DB = _orig
+    client.flushdb()
 
 
 # ---------------------------------------------------------------------------
@@ -1022,115 +1103,21 @@ def create_test_session(**kwargs):
 # e2e, tools, performance, ai_judge).  Run a specific feature's tests with:
 #     pytest -m sdlc
 #     pytest -m "messaging or sessions"
+#
+# FEATURE_MAP and the resolution function live in tests/marker_map.py, the
+# single point of truth shared with tests/unit/test_feature_map_markers.py
+# (the marker-regression guard, #3010). Import it back here rather than
+# re-inlining the loop, so the guard and this hook can never disagree.
 # ---------------------------------------------------------------------------
-FEATURE_MAP = {
-    "bridge": "messaging",
-    "messenger": "messaging",
-    "telegram": "messaging",
-    "duplicate_delivery": "messaging",
-    "transcript": "messaging",
-    "dedup": "messaging",
-    "markdown": "messaging",
-    "media_handling": "messaging",
-    "routing": "messaging",
-    "pm_channels": "messaging",
-    "unthreaded": "messaging",
-    "file_extraction": "messaging",
-    "message_pipeline": "messaging",
-    "reply_delivery": "messaging",
-    "pipeline": "sdlc",
-    "sdlc": "sdlc",
-    "observer": "sdlc",
-    "stop_hook": "sdlc",
-    "stop_reason": "sdlc",
-    "post_tool_use": "sdlc",
-    "pre_tool_use": "sdlc",
-    "skill_outcome": "sdlc",
-    "skills_audit": "sdlc",
-    "steering": "sdlc",
-    "cross_repo_build": "sdlc",
-    "session_status": "sessions",
-    "session_stuck": "sessions",
-    "session_watchdog": "sessions",
-    "stall_detection": "sessions",
-    "pending_stall": "sessions",
-    "pending_recovery": "sessions",
-    "escape_hatch": "sessions",
-    "lifecycle": "sessions",
-    "session_continuity": "sessions",
-    "goal_gates": "sessions",
-    "open_question": "sessions",
-    "agent_session": "sessions",
-    # Execution-fence family (#2494 / #2518): the (pid, create_time) identity
-    # guard and the reapers that consume it. Placed after "agent_session" so
-    # ``agent_session_*`` filenames keep their existing marker.
-    "fence": "sessions",
-    "orphan_reap": "sessions",
-    "agent_session_hierarchy": "jobs",
-    "agent_session_scheduler": "jobs",
-    "agent_session_queue": "jobs",
-    "agent_session_health": "jobs",
-    "enqueue": "jobs",
-    "reflection": "reflections",
-    "config": "config",
-    "context_modes": "context",
-    "session_tags": "context",
-    "auto_continue": "classifiers",
-    "intake_classifier": "classifiers",
-    "work_request_classifier": "classifiers",
-    "message_quality": "classifiers",
-    "stage_aware_auto_continue": "classifiers",
-    "validate_commit": "validation",
-    "validate_verification": "validation",
-    "validate_test_impact": "validation",
-    "validate_sdlc": "validation",
-    "verification_parser": "validation",
-    "features_readme": "validation",
-    "build_validation": "validation",
-    "checkpoint": "validation",
-    "docs_auditor": "validation",
-    "branch_manager": "git",
-    "worktree_manager": "git",
-    "git_state": "git",
-    "workspace_safety": "git",
-    "symlinks": "git",
-    "sdk_client": "sdk",
-    "sdk_permissions": "sdk",
-    "workflow_sdk": "sdk",
-    "code_impact": "impact",
-    "doc_impact": "impact",
-    "cross_repo_gh": "impact",
-    "cross_wire": "impact",
-    "model_relationships": "models",
-    "redis_models": "models",
-    "summarizer": "summarizer",
-    "telemetry": "monitoring",
-    "health_check": "monitoring",
-    "bridge_watchdog": "monitoring",
-    "connectivity": "monitoring",
-    "silent_failures": "monitoring",
-    "remote_update": "config",
-    "benchmarks": "monitoring",
-    "classifier": "classifiers",
-    "code_execution": "tools",
-    "link_analysis": "tools",
-    "doc_summary": "tools",
-    "image_analysis": "tools",
-    "search": "tools",
-    "test_judge": "tools",
-    "ai_judge": "tools",
-    "telegram_history": "tools",
-}
 
 
 def pytest_collection_modifyitems(items):
     """Auto-apply feature markers based on test file name."""
     for item in items:
-        filename = item.nodeid.split("::")[0].split("/")[-1].replace("test_", "").replace(".py", "")
-        for pattern, marker_name in FEATURE_MAP.items():
-            if pattern in filename:
-                item.add_marker(getattr(pytest.mark, marker_name))
-                break
+        filename = item.nodeid.split("::")[0].split("/")[-1]
+        marker_name, _key = resolve_marker(filename)
+        if marker_name is not None:
+            item.add_marker(getattr(pytest.mark, marker_name))
 
 
 @pytest.fixture

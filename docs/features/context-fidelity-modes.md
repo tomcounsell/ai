@@ -1,7 +1,6 @@
 # Context Fidelity Modes
 
 **Module:** `agent/context_modes.py`
-**Issue:** [#329](https://github.com/tomcounsell/ai/issues/329)
 
 ## Overview
 

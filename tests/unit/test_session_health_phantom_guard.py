@@ -378,7 +378,7 @@ class TestCleanupCorruptedAgentSessions:
 
 class TestSweepIsTtlAndUpdatedAtNeutral:
     def test_ttl_restored_and_updated_at_byte_identical_across_a_sweep(self):
-        """The single most important test in this file (#2698).
+        """The single most important test in this file: the keepalive is policy.
 
         Two healthy rows -- one terminal, one non-terminal, because a sweep
         that only ever sees terminal rows would say nothing about the

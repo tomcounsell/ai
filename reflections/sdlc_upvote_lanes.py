@@ -278,8 +278,8 @@ def _non_terminal_session_for(slug: str, project_key: str):
 def _recent_terminal_failed_session(slug: str, project_key: str, backoff_s: int):
     from datetime import UTC, datetime, timedelta
 
-    from bridge.utc import to_unix_ts
     from models.agent_session import AgentSession
+    from utils.utc import to_unix_ts
 
     cutoff_ts = (datetime.now(tz=UTC) - timedelta(seconds=backoff_s)).timestamp()
     for row in AgentSession.query.filter(slug=slug):

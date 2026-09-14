@@ -110,6 +110,7 @@ from reflections.utilities import (  # noqa: F401
     _lock_says_live,
     machine_owns_project,
     run_per_project_audit,
+    send_eng_telegram,
 )
 from tools.lane_identity import adopt_lane_slug
 
@@ -295,9 +296,27 @@ def _list_open_lane_prs(cwd: str) -> list[dict[str, Any]]:
     ]
 
 
-def _issue_is_open(cwd: str, number: int) -> bool | None:
-    """True if issue is open, False if closed, None if lookup failed/unknown."""
-    proc = _run_gh(["issue", "view", str(number), "--json", "state"], cwd=cwd)
+def _issue_is_open(cwd: str, number: int, target_repo: str | None = None) -> bool | None:
+    """True if issue is open, False if closed, None if lookup failed/unknown.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from a cwd that is
+    not the issue's own checkout) it answers about a *different* repository's
+    issue #N and exits 0 (issue #2889). This gate feeds the stall action
+    ladder, so a wrong-repo answer could dispatch work against a foreign
+    issue. The caller threads the project's resolved repo slug -- the same
+    ``target_repo`` the issue resolution ladder was scoped by -- and when
+    nothing resolves, the argv degrades to the prior unscoped shape.
+    """
+    args = [
+        "issue",
+        "view",
+        str(number),
+        *(["--repo", target_repo] if target_repo else []),
+        "--json",
+        "state",
+    ]
+    proc = _run_gh(args, cwd=cwd)
     if proc is None or proc.returncode != 0:
         return None
     try:
@@ -732,6 +751,7 @@ def _escalation_message(
 def _escalate_once(
     *,
     project: str,
+    project_dict: dict,
     slug: str,
     sha: str,
     pr_number: Any,
@@ -739,17 +759,22 @@ def _escalate_once(
     age_hours: int,
     attempts: int,
     reason: str,
-) -> str | None:
+) -> tuple[bool, str | None]:
     """Page a human at most once per ``(slug, head-sha)``.
 
-    Returns the message that was sent, or None when nothing was sent — either
-    because the human was already told about this head sha, or because Redis
-    was unavailable for the ``SET NX`` guard (under-alert during a flap beats
-    spam during one).
+    Returns ``(sent, message)``:
+      - sentinel already burned or Redis unreadable for the ``SET NX`` guard
+        → ``(False, None)`` — nothing to report, nothing to count
+        (under-alert during a flap beats spam during one, unchanged).
+      - a page was sent → ``(True, message)``.
+      - the sentinel claimed but ``send_eng_telegram`` resolved no ``Eng:``
+        group for this project → ``(False, "alert-suppressed: ...")`` — the
+        caller threads this into ``findings`` without counting a page that
+        never sent.
     """
     if not _escalation_set(slug, sha):
         logger.info("sdlc_progress: escalation already recorded for %s@%s", slug, sha[:8])
-        return None
+        return False, None
     message = _escalation_message(
         project=project,
         slug=slug,
@@ -759,30 +784,22 @@ def _escalate_once(
         attempts=attempts,
         reason=reason,
     )
-    _send_alert(message)
-    return message
+    sent = _send_alert(project_dict, message)
+    if sent:
+        return True, message
+    return False, f"alert-suppressed: no Eng: group for {project} ({slug}@{sha[:8]})"
 
 
-def _send_alert(message: str) -> None:
-    """Best-effort Telegram alert. All failures swallowed and logged.
+def _send_alert(project_dict: dict, message: str) -> bool:
+    """Page ``project_dict``'s own ``Eng:`` group. All transport failures
+    swallowed and logged.
 
     Caller contract: fires ONLY from the escalation path, and only after
-    ``_escalation_set`` returned True.
+    ``_escalation_set`` returned True. Returns ``False`` only when no
+    ``Eng:`` group resolved for the project — see
+    ``reflections.utilities.send_eng_telegram``'s contract.
     """
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("sdlc_progress: valor-telegram not on PATH; skipping alert")
-    except subprocess.TimeoutExpired:
-        logger.warning("sdlc_progress: valor-telegram timed out")
-    except Exception as exc:
-        logger.warning("sdlc_progress: valor-telegram failed: %s", exc)
+    return send_eng_telegram(project_dict, message, logger_prefix="sdlc_progress")
 
 
 # --- The steer-target ladder ------------------------------------------------
@@ -791,47 +808,77 @@ def _send_alert(message: str) -> None:
 def _pick_steer_target(project_key: str, lane_slug: str | None = None) -> tuple[str, Any]:
     """Return ``(kind, session)`` with kind in steer | resume | create | unknown.
 
-    Rung 1 prefers a live (non-terminal, non-ledger) eng session for the
-    project. Rung 2 falls back to a resumable eng session that carries a
-    ``claude_session_uuid`` (required by ``resume_session``). Otherwise the
-    caller creates one.
+    Rung 1 takes a live (non-terminal, non-ledger) eng session for the lane.
+    Rung 2 falls back to a resumable eng session for the lane that carries a
+    ``claude_session_uuid`` (required by ``resume_session``) and did not
+    already fail. Otherwise the caller creates one.
 
-    Within BOTH buckets, a session whose ``slug`` matches ``lane_slug`` wins
-    over a merely-more-recent one. This is not cosmetic: ``resume_session``
-    transitions the row in place and the worker runs it in that row's own
-    ``working_dir``, so resuming a session belonging to another lane makes work
-    for issue A land as commits on lane B's branch. Only when no
-    same-lane candidate exists does most-recently-updated decide.
+    The lane match is a FILTER on both buckets, not a preference: a row is
+    eligible only when its ``slug`` is non-``None`` and equal to ``lane_slug``.
+    This is not cosmetic. ``resume_session`` transitions the row in place and
+    the worker runs it in that row's own ``working_dir``, so acting on a
+    session belonging to another lane makes work for issue A land as commits on
+    lane B's branch — and acting on a *slugless* row drops an unprompted
+    message into a human conversation thread (#3270). Recency only ranks rows
+    the filter already admitted; with no same-lane candidate the caller creates
+    a fresh session, which is the recoverable outcome.
+
+    Rung 1 falls through to rung 2, never straight to ``create``: a lane with
+    no live session may still have a perfectly good resumable one.
+
+    ``failed`` is excluded from rung 2 only. A row that failed once fails the
+    same way again, so re-resuming it on a timer is a loop, not a recovery.
+    The check has no place in rung 1 — ``failed`` is terminal and can never
+    reach the live bucket.
 
     ``("unknown", None)`` means the session query itself failed — the caller
     declines to act rather than guessing.
     """
     try:
         from agent.session_health import _is_ledger
-        from bridge.utc import to_unix_ts
         from models.agent_session import AgentSession
         from models.session_lifecycle import NON_TERMINAL_STATUSES, RESUMABLE_STATUSES
+        from utils.utc import to_unix_ts
 
         rows = list(AgentSession.query.filter(project_key=project_key, session_type="eng"))
     except Exception as exc:
         logger.warning("sdlc_progress: target query failed for %s: %s", project_key, exc)
         return ("unknown", None)
 
-    def _rank(row) -> tuple[int, float]:
-        """Same-lane first, then most recently updated."""
-        same_lane = 1 if (lane_slug and getattr(row, "slug", None) == lane_slug) else 0
-        return (same_lane, to_unix_ts(getattr(row, "updated_at", None)) or 0.0)
+    # A falsy ``lane_slug`` admits NOTHING, so this returns ``("create", None)``
+    # without scanning a row. That is the intended fail-closed direction: with
+    # no lane to match, #3270's defect was picking the most-recently-updated
+    # eng row, which was routinely a slugless human conversation thread.
+    # Creating a fresh session is always safe; resuming a stranger's is not.
+    # Hoisted above the loop because it is loop-invariant -- and kept BELOW the
+    # query so a Redis failure still reports ``("unknown", None)`` rather than
+    # being masked as "no candidates".
+    if not lane_slug:
+        return ("create", None)
+
+    def _same_lane(row) -> bool:
+        """Eligibility for BOTH rungs: this row belongs to this lane, period."""
+        slug = getattr(row, "slug", None)
+        return slug is not None and slug == lane_slug
+
+    def _rank(row) -> float:
+        """Most recently updated, among rows the lane filter already admitted."""
+        return to_unix_ts(getattr(row, "updated_at", None)) or 0.0
 
     live: list[Any] = []
     resumable: list[Any] = []
     for row in rows:
         try:
-            if _is_ledger(row):
+            if _is_ledger(row) or not _same_lane(row):
                 continue
             status = getattr(row, "status", None)
             if status in NON_TERMINAL_STATUSES:
                 live.append(row)
-            elif status in RESUMABLE_STATUSES and getattr(row, "claude_session_uuid", None):
+            elif (
+                status in RESUMABLE_STATUSES
+                and status != "failed"
+                and getattr(row, "claude_session_uuid", None)
+            ):
                 resumable.append(row)
         except Exception as exc:  # pragma: no cover — defensive per-row guard
             logger.debug("sdlc_progress: target selection skipped a row: %r", exc)
@@ -872,7 +919,7 @@ def _row_is_nonterminal(session_id: str) -> bool:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
 
-        fresh = AgentSession.query.filter(session_id=session_id).first()
+        fresh = AgentSession.newest_for_session_id(session_id)
         if fresh is None:
             return False
         return getattr(fresh, "status", None) not in TERMINAL_STATUSES
@@ -1029,10 +1076,10 @@ def _check_project_stalls(project: dict) -> dict:
     creates_this_tick = 0
     # Same per-call, non-atomic status as `creates_this_tick`. `actions_this_tick`
     # is the secondary count bound; `targets_this_tick` is the PRIMARY burst
-    # guard -- `_pick_steer_target` queries project-wide with same-lane only a
-    # ranking preference, so several newly-visible lanes with no same-lane
-    # session all select the SAME eng session, which a count cap alone would
-    # happily steer three times in one tick with three different issues.
+    # guard -- `_pick_steer_target` queries project-wide and filters by lane, so
+    # two newly-visible lanes resolving to the same slug still select the SAME
+    # eng session, which a count cap alone would happily steer twice in one tick
+    # with two different issues.
     actions_this_tick = 0
     targets_this_tick: set[str] = set()
 
@@ -1111,7 +1158,7 @@ def _check_project_stalls(project: dict) -> dict:
                 findings.append(f"gate-unknown: issue-unresolved {slug}")
             continue
 
-        issue_open = _issue_is_open(wd, issue_num)
+        issue_open = _issue_is_open(wd, issue_num, target_repo)
         if issue_open is False:
             continue
         if issue_open is None:
@@ -1139,8 +1186,9 @@ def _check_project_stalls(project: dict) -> dict:
             continue
 
         def _escalate(reason: str, attempts: int) -> None:
-            msg = _escalate_once(
+            sent, msg = _escalate_once(
                 project=project_key,
+                project_dict=project,
                 slug=slug,
                 sha=sha,
                 pr_number=pr.get("number"),
@@ -1150,8 +1198,9 @@ def _check_project_stalls(project: dict) -> dict:
                 reason=reason,
             )
             if msg:
-                counts["escalated"] += 1
                 findings.append(msg)
+            if sent:
+                counts["escalated"] += 1
 
         if not resume_enabled:
             _escalate("auto-resume disabled (SDLC_STALL_RESUME_ENABLED=false)", 0)

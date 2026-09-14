@@ -39,7 +39,8 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from config.settings import settings
+from reflections.redis_access import get_project_key, get_redis
+from reflections.utilities import send_host_eng_telegram
 
 logger = logging.getLogger("reflections.stall_advisory")
 
@@ -55,25 +56,6 @@ _CONSEC_KEY_TTL_SECS = 700
 # TTL on the per-session kill-attempt budget counter (~24h) so a long-lived
 # wedge does not exhaust its budget forever from an old incident.
 _BUDGET_KEY_TTL_SECS = 86400
-
-
-# ---------------------------------------------------------------------------
-# Module-local Redis / project-key helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_redis():
-    """Return the shared Popoto Redis connection (plain-key access)."""
-    from agent.sustainability import _get_redis as _su_get_redis
-
-    return _su_get_redis()
-
-
-def _get_project_key() -> str:
-    """Return the project-scoped Redis key prefix (e.g. ``valor``)."""
-    from agent.sustainability import _get_project_key as _su_get_project_key
-
-    return _su_get_project_key()
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +125,8 @@ def run_stall_advisory(params: dict | None = None) -> dict:
     r = None
     project_key = None
     try:
-        r = _get_redis()
-        project_key = _get_project_key()
+        r = get_redis()
+        project_key = get_project_key()
     except Exception as exc:
         logger.debug("stall_advisory: recovery context unavailable: %r", exc)
 
@@ -329,7 +311,7 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
 
         fresh_status = None
         try:
-            fresh = AgentSession.query.filter(session_id=session_id).first()
+            fresh = AgentSession.newest_for_session_id(session_id)
             if fresh is not None:
                 fresh_status = fresh.status
         except Exception as exc:
@@ -374,8 +356,10 @@ def _maybe_recover(session, verdict, settings, r, project_key, run_state) -> str
         run_state["killed"] += 1
 
         # Re-enqueue genuinely-unanswered human messages via valor-catchup.
-        # Mirror _send_alert's subprocess error handling. Catchup failure is
-        # logged + counted but never fatal — the wedged session is already dead.
+        # Swallow FileNotFoundError/TimeoutExpired/general failures the same
+        # way the shared Telegram transport helpers in reflections/utilities.py
+        # do. Catchup failure is logged + counted but never fatal — the wedged
+        # session is already dead.
         catchup_ok = False
         try:
             proc = subprocess.run(
@@ -471,18 +455,12 @@ def _reset_consec(r, project_key, session_id) -> None:
 
 
 def _send_alert(message: str) -> None:
-    """Best-effort Telegram alert. All failures swallowed and logged."""
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("stall_advisory: valor-telegram not on PATH; skipping alert")
-    except subprocess.TimeoutExpired:
-        logger.warning("stall_advisory: valor-telegram timed out")
-    except Exception as exc:
-        logger.warning("stall_advisory: valor-telegram failed: %s", exc)
+    """Best-effort Telegram alert to this checkout's own Eng: group.
+
+    ``run_stall_advisory`` never calls ``load_local_projects()`` (spike-2):
+    it classifies sessions globally via ``AgentSession.query.filter(...)``,
+    with no single project in scope, so the destination is this host's own
+    engineer group via ``send_host_eng_telegram`` rather than a per-project
+    ``Eng:`` lookup.
+    """
+    send_host_eng_telegram(message, logger_prefix="stall_advisory")

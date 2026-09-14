@@ -35,16 +35,85 @@ Design notes:
       at runtime requires a process restart (this matches the rest of
       ``FeatureSettings``, which is startup-config).
     * ``_semaphore`` is a module-level private for test monkeypatching.
+
+Import-safety contract (#3001):
+    Module scope here is **stdlib and our own code only**. Every
+    third-party LLM-stack symbol (``anthropic``, ``pydantic_ai.*``) is
+    imported inside :func:`_load_stack`, the single memoized loader for
+    the whole package, so ``import agent.anthropic_client`` and
+    ``import agent.llm`` succeed on a machine whose installed stack is
+    broken or missing. The failure then surfaces at the call path, where
+    it can be reported, instead of felling every importer of
+    ``bridge.telegram_bridge``.
+
+    The loader lives here rather than in ``agent/llm/wrapper.py`` because
+    ``wrapper`` already imports this module at module scope; putting it
+    the other way round would need a deferred import to break the cycle.
+    ``wrapper`` re-imports it into its own namespace, so
+    ``monkeypatch.setattr(wrapper_mod, "_load_stack", ...)`` remains the
+    test seam.
+
+    The loader is deliberately whole-stack with no per-symbol option
+    menu: an ``anthropic`` ImportError takes the local (Ollama) leg down
+    with it, which is exactly today's behaviour and therefore a
+    no-regression residual, not a new fault.
 """
 
 from __future__ import annotations
 
 import asyncio
-
-import anthropic
+import functools
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from config.settings import settings
 from utils.api_keys import get_anthropic_api_key
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
+    import anthropic
+
+
+@dataclass(frozen=True)
+class LLMStack:
+    """The third-party LLM stack, resolved lazily by :func:`_load_stack`.
+
+    Attribute names mirror the symbols' import names exactly so a reader
+    can map each field back to its ``from ... import ...`` line.
+    """
+
+    anthropic: Any
+    Agent: Any
+    AnthropicModel: Any
+    OpenAIChatModel: Any
+    AnthropicProvider: Any
+    OllamaProvider: Any
+
+
+@functools.cache
+def _load_stack() -> LLMStack:
+    """Import and memoize the third-party LLM stack.
+
+    Called from call paths only -- never at module scope. Raises whatever
+    the import raises (typically :class:`ImportError`); failures are not
+    memoized, so a caller that repairs the environment gets a fresh
+    attempt.
+    """
+    import anthropic
+    from pydantic_ai import Agent
+    from pydantic_ai.models.anthropic import AnthropicModel
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.anthropic import AnthropicProvider
+    from pydantic_ai.providers.ollama import OllamaProvider
+
+    return LLMStack(
+        anthropic=anthropic,
+        Agent=Agent,
+        AnthropicModel=AnthropicModel,
+        OpenAIChatModel=OpenAIChatModel,
+        AnthropicProvider=AnthropicProvider,
+        OllamaProvider=OllamaProvider,
+    )
+
 
 # Module-level semaphore — slot count read once at import time from
 # ``settings.features.anthropic_concurrency``. Tests monkeypatch this attr
@@ -71,9 +140,10 @@ class _AnthropicGuard:
         self._acquired = False
 
     async def __aenter__(self) -> anthropic.AsyncAnthropic:
+        stack = _load_stack()
         await _semaphore.acquire()
         self._acquired = True
-        self._client = anthropic.AsyncAnthropic(api_key=get_anthropic_api_key())
+        self._client = stack.anthropic.AsyncAnthropic(api_key=get_anthropic_api_key())
         return self._client
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -92,13 +162,31 @@ class _SemaphoreOnlyGuard:
     anthropic.AsyncAnthropic(timeout=...) as client:`` for hotfix #1055
     httpx cleanup). The caller constructs the client; this guard just
     gates concurrency.
+
+    ``timeout`` (optional, default ``None``) bounds how long ``__aenter__``
+    will wait for a slot. ``None`` preserves the original unbounded
+    ``await _semaphore.acquire()`` behavior for existing callers (RTR,
+    memory extraction) that never opted into a bound. A caller that passes
+    ``timeout=`` gets ``asyncio.wait_for(_semaphore.acquire(), timeout=...)``
+    instead, raising ``TimeoutError`` (``asyncio.TimeoutError``, an alias
+    since 3.11) on expiry — ``bridge.promise_gate`` does this (Risk 1b: the
+    process-wide semaphore, default 5 slots, is shared with RTR, router
+    classification, and memory extraction, so an unbounded wait would make
+    the gate's "worst case is the SDK's 3s timeout" claim false under
+    contention). ``asyncio.Semaphore.acquire()`` does not consume a slot
+    when cancelled while waiting, so a ``wait_for`` timeout here leaves the
+    semaphore's internal count untouched — no leaked slot.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, timeout: float | None = None) -> None:
         self._acquired = False
+        self._timeout = timeout
 
     async def __aenter__(self) -> None:
-        await _semaphore.acquire()
+        if self._timeout is not None:
+            await asyncio.wait_for(_semaphore.acquire(), timeout=self._timeout)
+        else:
+            await _semaphore.acquire()
         self._acquired = True
         return None
 
@@ -120,7 +208,7 @@ def anthropic_slot() -> _AnthropicGuard:
     return _AnthropicGuard()
 
 
-def semaphore_slot() -> _SemaphoreOnlyGuard:
+def semaphore_slot(timeout: float | None = None) -> _SemaphoreOnlyGuard:
     """Return a fresh context manager that acquires the slot without a client.
 
     Use when a call site needs its own ``AsyncAnthropic`` construction
@@ -131,5 +219,10 @@ def semaphore_slot() -> _SemaphoreOnlyGuard:
         async with semaphore_slot():
             async with anthropic.AsyncAnthropic(timeout=30.0) as client:
                 msg = await client.messages.create(...)
+
+    ``timeout``, if given, bounds the acquisition itself (not the API
+    call) via ``asyncio.wait_for``; on expiry ``__aenter__`` raises
+    ``TimeoutError``. Default ``None`` preserves the unbounded wait for
+    existing callers. See ``_SemaphoreOnlyGuard`` for the rationale.
     """
-    return _SemaphoreOnlyGuard()
+    return _SemaphoreOnlyGuard(timeout=timeout)

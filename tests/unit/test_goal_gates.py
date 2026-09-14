@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from agent.goal_gates import (
     GATE_STAGES,
@@ -120,7 +120,7 @@ class TestCheckBuildGate:
 class TestCheckTestGate:
     def test_session_history_has_test_completed(self):
         session = MagicMock()
-        session.get_history_list.return_value = [
+        session.session_events = [
             "[stage] TEST COMPLETED",
             "Some other entry",
         ]
@@ -130,7 +130,7 @@ class TestCheckTestGate:
 
     def test_session_history_case_insensitive(self):
         session = MagicMock()
-        session.get_history_list.return_value = [
+        session.session_events = [
             "[Stage] test Completed successfully",
         ]
         result = check_test_gate("slug", session=session)
@@ -138,7 +138,7 @@ class TestCheckTestGate:
 
     def test_session_history_no_test(self):
         session = MagicMock()
-        session.get_history_list.return_value = [
+        session.session_events = [
             "[stage] BUILD COMPLETED",
         ]
         result = check_test_gate("slug", session=session)
@@ -169,13 +169,15 @@ class TestCheckTestGate:
 
     def test_session_history_exception_handled(self):
         session = MagicMock()
-        session.get_history_list.side_effect = RuntimeError("Redis down")
+        # session_events is a plain attribute now, so the failure has to come
+        # from the attribute access itself to exercise the gate's try/except.
+        type(session).session_events = PropertyMock(side_effect=RuntimeError("Redis down"))
         result = check_test_gate("slug", session=session)
         assert result.satisfied is False
 
     def test_session_history_non_string_entries(self):
         session = MagicMock()
-        session.get_history_list.return_value = [
+        session.session_events = [
             42,
             None,
             {"key": "value"},
@@ -308,7 +310,7 @@ class TestCheckGate:
 
     def test_dispatches_to_test_with_session(self):
         session = MagicMock()
-        session.get_history_list.return_value = ["[stage] TEST COMPLETED"]
+        session.session_events = ["[stage] TEST COMPLETED"]
         result = check_gate("TEST", "slug", ".", session=session)
         assert result.satisfied is True
 

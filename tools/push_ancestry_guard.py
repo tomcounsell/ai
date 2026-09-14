@@ -141,10 +141,20 @@ def _pushes_to_main(argv: list[str], stdin_text: str) -> str | None:
     """Return the local SHA being pushed to ``refs/heads/main``, or None if none.
 
     Reads the git pre-push stdin protocol (``<local ref> <local sha> <remote ref>
-    <remote sha>`` per line). When stdin is empty (explicit skill call), falls back
-    to the current HEAD as the pushed SHA (the skill only calls this right before a
-    ``git push origin main``).
+    <remote sha>`` per line).
+
+    Empty stdin means git had nothing to send — an up-to-date push — and is NOT
+    a push to main. Issue #2800: this used to fall back to HEAD, so a no-op
+    feature-branch push was judged as a push of HEAD to main and refused, in
+    direct contradiction of this guard's promise never to impede a feature
+    branch. The hook's ``printf '%s\\n'`` also turns empty into a lone newline,
+    so "no lines" and "empty" must both be treated as nothing-to-push.
+
+    A caller that genuinely wants HEAD judged as a main push must say so with
+    ``--assume-head``. Intent is declared, never inferred from an absence.
     """
+    if "--assume-head" in argv:
+        return _head_sha()
     for line in stdin_text.splitlines():
         parts = line.split()
         if len(parts) == 4:
@@ -154,9 +164,6 @@ def _pushes_to_main(argv: list[str], stdin_text: str) -> str | None:
                 if set(local_sha) == {"0"}:
                     return None
                 return local_sha
-    # No stdin protocol lines: explicit call. Treat HEAD as the pushed sha.
-    if not stdin_text.strip():
-        return _head_sha()
     return None
 
 
@@ -206,8 +213,11 @@ def check(pushed_sha: str) -> int:
                 f"push to main carries the ancestry of OPEN PR #{number} "
                 f"(head {head_oid[:12]}, branch '{pr.get('headRefName')}'). A plain push must "
                 "not register an open PR's branch as its merge — run `gh pr merge --squash` "
-                f"through the gate, or write 'override: <reason>' to "
-                f"data/merge_authorized_{number} to break glass.",
+                "through the gate.\n"
+                "There is a break-glass override for this gate. It is a human "
+                "decision and is deliberately not documented here: an agent that "
+                "reads a remedy out of a refusal message and applies it has not "
+                "made that decision, it has bypassed it (issue #2800).",
             )
     return 0
 

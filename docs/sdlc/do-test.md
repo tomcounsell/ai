@@ -16,6 +16,17 @@ before merge (the nightly regression run is the post-merge backstop). So:
   (`docs/features/test-baseline-verification.md`): pre-existing failures are
   reported, PR-introduced failures block and route to `/do-patch`.
 
+**No code gates on a full-suite result, deliberately (#2376, #2823).** The
+TEST stage records only `{passed, failed}` — nothing tracks *what was
+collected*, so a targeted `-k one_test` run and a genuine full-suite run are
+indistinguishable downstream. That is intentional: a merge-time full-suite
+gate wedged routinely and was removed wholesale (`docs/sdlc/do-merge.md`).
+The compensating control is the nightly regression run
+(`docs/features/nightly-regression-tests.md`), which collects the default
+collection nightly on any worker-role machine and gates its own trust in the
+result via `validate_run_integrity()` before diffing or dispatching — it
+does not replace this stage's own full-suite requirement above.
+
 ## Baseline Comparability: Record the Checkout, Not Just the Count
 
 "Reproduce it on main" assumes the two runs differ only in the code. Two
@@ -79,7 +90,7 @@ Repo-specific mappings, applied before the generic `foo/bar.py -> tests/*/test_b
 
 ## Redis Isolation
 
-Unit tests must never touch production Redis. Use `REDIS_TEST_DB` or a test-specific key prefix. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
+Unit tests must never touch production Redis. `tests/conftest.py::pytest_configure` claims a private db from the pool `[1..15]` per pytest process and exports it as both `POPOTO_TEST_DB` and `REDIS_URL` (#2805) — no test-specific key prefix is needed for isolation. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
 
 Violating this rule corrupts production session data.
 
@@ -89,7 +100,7 @@ Integration tests that validate LLM outputs must use an AI judge (Haiku/Sonnet),
 
 ## Test Database State
 
-Before running integration tests, verify the bridge and worker are not running tests against the same Redis instance. Use `REDIS_TEST_DB=1` or a separate test-mode `.env`.
+Before running integration tests, verify the bridge and worker are not running tests against the same Redis instance. The pytest process's own claimed db is correct by construction (`POPOTO_TEST_DB` / `REDIS_URL`, see Redis Isolation above); a live bridge or worker process outside pytest still needs its own separate test-mode `.env` to avoid db0.
 
 ## Quality Gates
 

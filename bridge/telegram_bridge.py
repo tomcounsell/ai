@@ -31,22 +31,40 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from bridge.utc import to_unix_ts, utc_iso, utc_now
 from config.machine import get_machine_name
 from config.settings import settings
+from utils.utc import to_unix_ts, utc_iso, utc_now
 
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
 # by install_service() — skip dotenv entirely to avoid macOS TCC hangs on the
 # iCloud-synced ~/Desktop/Valor/.env that .env symlinks to.
-if not os.environ.get("VALOR_LAUNCHD"):
+# Pre-config launcher flag (#2866 triage): this read decides whether .env is
+# loaded at all, so it cannot itself come from config.settings, and launchd sets
+# it per-process — all three exemption tests hold.
+if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     env_path = Path(__file__).parent.parent / ".env"
     load_dotenv(env_path)
     load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
 
 # Initialize Sentry error tracking (skip gracefully if DSN not configured)
+from agent.llm.compat import SENTINEL as LLM_STACK_SENTINEL  # noqa: E402
 from bridge.hibernation import is_hibernating  # noqa: E402
 from monitoring.sentry_config import configure_sentry, filter_sentry_noise  # noqa: E402
+
+
+def _carries_llm_stack_sentinel(event) -> bool:
+    """Does this event carry the degraded-LLM-stack sentinel token (#3001)?
+
+    Hibernation means "we cannot reach Telegram", which is exactly when a
+    broken LLM stack most needs to be visible somewhere else. The degraded
+    alert is one of only three transports and the only remote one, so it is
+    exempt from the hibernation drop below.
+    """
+    try:
+        return LLM_STACK_SENTINEL in str(event.get("message") or "")
+    except Exception:
+        return False
 
 
 def _sentry_before_send(event, hint):
@@ -61,11 +79,16 @@ def _sentry_before_send(event, hint):
          active sessions`` fanout, #2372). The shared filter also pins known
          per-loop logger clusters to a stable fingerprint.
 
+    Case 1 has one exemption: an event carrying the ``LLM_STACK_COMPAT``
+    sentinel passes even while hibernating (#3001). Hibernation is a
+    persistent flag, not a brief window, so dropping the degraded alert
+    through it would silently delete the channel.
+
     Safety net: if is_hibernating() itself raises, pass the event through unchanged
     so we never silently lose novel errors due to a bug in the filter.
     """
     try:
-        if is_hibernating():
+        if is_hibernating() and not _carries_llm_stack_sentinel(event):
             logger.debug("Sentry event dropped: bridge is hibernating")
             return None
     except Exception:  # noqa: S110 -- filter must never suppress events
@@ -96,6 +119,7 @@ from bridge.context import (  # noqa: E402
     matched_context_patterns,
     references_prior_context,
     resolve_root_session_id,
+    telegram_media_descriptor,
 )
 from bridge.dispatch import (  # noqa: E402
     dispatch_telegram_session,
@@ -139,7 +163,7 @@ from bridge.routing import (  # noqa: E402
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
-from config.enums import PersonaType, SessionType  # noqa: E402
+from config.enums import PersonaType  # noqa: E402
 
 # Maximum age (seconds) of a pending session that can absorb follow-up messages.
 # Messages arriving within this window attach to the pending session via the
@@ -152,7 +176,7 @@ def _pending_session_age_seconds(created_at, now_ts: float) -> float:
 
     ``AgentSession.created_at`` is a datetime (Popoto SortedField, naive on
     read); raw ``now_ts - created_at`` raises TypeError (#2458 D2). Coerce
-    through ``bridge.utc.to_unix_ts`` (naive treated as UTC). A missing or
+    through ``utils.utc.to_unix_ts`` (naive treated as UTC). A missing or
     uncoercible created_at returns +inf so the session falls outside any
     merge window instead of crashing the intake classifier.
     """
@@ -315,7 +339,8 @@ def _read_last_connected() -> datetime | None:
         from datetime import UTC
 
         ts = datetime.fromisoformat(raw)
-        # Ensure timezone-aware
+        # Keep: the last-connected file is a plain text timestamp, not a
+        # popoto read, and may carry no offset.
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         # Clamp future timestamps to now
@@ -573,28 +598,44 @@ logging.basicConfig(
 # bridge.*, tools.*, etc.) inherit it automatically. Without this, only
 # the bridge.telegram_bridge module logger would write to bridge.log.
 root_logger = logging.getLogger()
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_DIR / "bridge.log",
-    maxBytes=10 * 1024 * 1024,  # 10MB per file
-    backupCount=5,
-)
-file_handler.setLevel(logging.DEBUG)
-# Use JSON formatter for structured logging (parseable by log aggregation tools)
-# Falls back to plain text if the module can't be imported
-try:
-    from bridge.log_format import StructuredJsonFormatter
+# Never build or attach the production file handler inside a pytest process
+# (#2854). This module-scope setup runs on import, so any test importing this
+# module (directly or transitively) was routing every logger's records into
+# logs/bridge.log, including test fixtures' deliberate failure-branch ERRORs,
+# which then read as daily production failures. "pytest" is in sys.modules
+# during collection and test phases alike; PYTEST_CURRENT_TEST is exported by
+# pytest into the process environment, so a bridge subprocess spawned BY a
+# test inherits it and also skips the handler (a test-spawned bridge should
+# not write the operator's production log). Only a process started outside
+# any pytest run — neither "pytest" in sys.modules nor PYTEST_CURRENT_TEST in
+# its environment — attaches it, which is the intended production behavior.
+# Constructing the handler is also skipped so a test run never even creates
+# the file.
+_UNDER_PYTEST = "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ
+if not _UNDER_PYTEST:
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_DIR / "bridge.log",
+        maxBytes=10 * 1024 * 1024,  # 10MB per file
+        backupCount=5,
+    )
+    file_handler.setLevel(logging.DEBUG)
+    # Use JSON formatter for structured logging (parseable by log aggregation
+    # tools); falls back to plain text if the module can't be imported
+    try:
+        from bridge.log_format import StructuredJsonFormatter
 
-    file_handler.setFormatter(StructuredJsonFormatter())
-except ImportError:
-    file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
-file_handler.addFilter(InternalDebugFilter())
-# Guard against double-import adding the handler twice (e.g. __main__ + bridge.telegram_bridge)
-if not any(
-    isinstance(h, logging.handlers.RotatingFileHandler)
-    and getattr(h, "baseFilename", None) == str(LOG_DIR / "bridge.log")
-    for h in root_logger.handlers
-):
-    root_logger.addHandler(file_handler)
+        file_handler.setFormatter(StructuredJsonFormatter())
+    except ImportError:
+        file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
+    file_handler.addFilter(InternalDebugFilter())
+    # Guard against double-import adding the handler twice
+    # (e.g. __main__ + bridge.telegram_bridge)
+    if not any(
+        isinstance(h, logging.handlers.RotatingFileHandler)
+        and getattr(h, "baseFilename", None) == str(LOG_DIR / "bridge.log")
+        for h in root_logger.handlers
+    ):
+        root_logger.addHandler(file_handler)
 
 # Module logger for this file. It inherits the root logger's file handler,
 # so we only need to set its level to DEBUG for verbose local output.
@@ -1031,6 +1072,42 @@ async def _ack_steering_routed(
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     push_steering_message(session_id, text, sender_name, is_abort=is_abort, room_id=room_id)
 
+    # An answer typed into the chat closes the question just as a tap does. The
+    # registry is otherwise written only by the vote path, so a prose answer
+    # would leave the row open for its full TTL and the nudge loop would take
+    # `pause_open_question` every turn — auto-continue silently off for a day.
+    #
+    # The semantics are ANY inbound steering message, not "a message that looks
+    # like an answer": there is no reliable classifier for that, and the failure
+    # directions are asymmetric. Closing on unrelated chatter costs the pause
+    # branch (`agent/session_executor.py`) for a question still on screen — the
+    # session is nudged onward, and a later tap still routes, because
+    # `translate_poll_vote` keys on `lookup_poll` and never on `poll_steered`.
+    # That routing is via the `events.Raw` fast path specifically: closing the row
+    # `SREM`s it from POLL_OPEN_INDEX, so the reconcile loop no longer re-yields it
+    # and is not a fallback here. Failing to close costs a day of lost
+    # auto-continue. Documented in docs/features/telegram-poll-questions.md.
+    #
+    # Offloaded: this is a Redis scan on the bridge's event loop — and guarded
+    # for the same reason as the sibling call in `resume_completed_session`.
+    # `mark_session_polls_steered` never raises, but `asyncio.to_thread` can on a
+    # closing loop, and this site is the hotter of the two: it sits on the
+    # LIVE / PENDING / LIVE_GUARD routes, which set no
+    # `_steering_session_enqueued` sentinel, so a raise here falls through to the
+    # final enqueue and delivers the #997 duplicate. Best-effort bookkeeping must
+    # not break the routing it hangs off.
+    from bridge.poll_registry import mark_session_polls_steered
+
+    try:
+        await asyncio.to_thread(mark_session_polls_steered, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "mark_session_polls_steered failed for session_id=%s: %s",
+            session_id,
+            exc,
+            exc_info=True,
+        )
+
     # #2694: the context-recall advisory rides as its own steering message,
     # never appended to the human's text — abort detection matches the human's
     # string EXACTLY (agent/steering.py), so concatenating an advisory onto a
@@ -1226,6 +1303,17 @@ async def main():
             problematic_agent_files,
         )
 
+    # LLM-stack compat (#3001): force the degraded flag to resolve now, so a
+    # broken anthropic + pydantic-ai pair alarms at boot instead of at the
+    # first non-harness call. Deliberately NOT fatal — degraded is not down.
+    # The bridge comes up, Telegram intake continues, AgentSessions keep
+    # enqueueing; only non-harness LLM calls fail fast with the typed
+    # LLMStackIncompatible. Exiting here would trade a silent LLM outage for
+    # a total outage plus a launchd crash-loop.
+    from agent.llm.compat import resolve_degraded_flag
+
+    resolve_degraded_flag("bridge")
+
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
@@ -1254,6 +1342,37 @@ async def main():
     # sdlc-1297: media download moved to the bridge handler synchronously; the
     # worker no longer needs a Telethon client reference. Module-level client
     # registration on bridge.enrichment is removed.
+
+    @client.on(events.Raw)
+    async def poll_update_handler(update):
+        """Fast path for poll votes (#2701). The repo's first events.Raw handler.
+
+        A tap produces NO Telegram message — only an `updateMessagePoll`
+        broadcast carrying aggregate counts. This handler is a LATENCY WIN over
+        the reconciliation loop, never the mechanism: `UpdateMessagePoll` has no
+        peer and no msg_id, so `translate_poll_vote` still has to go through the
+        registry, and it is idempotent so both callers can observe the same vote.
+
+        `poll_update_observed` is how the un-gated push question gets answered in
+        production rather than by opening a second updates-enabled client on the
+        bridge's auth key. **If that signal never appears, this handler is dead
+        weight and should be deleted in a follow-up — a scope reduction, not a
+        bug.**
+
+        Must never raise into Telethon's update loop.
+        """
+        try:
+            from telethon.tl.types import UpdateMessagePoll
+
+            if not isinstance(update, UpdateMessagePoll):
+                return
+            logger.info("poll_update_observed poll_id=%s", update.poll_id)
+
+            from bridge.poll_vote import translate_poll_vote
+
+            await translate_poll_vote(client, update.poll_id)
+        except Exception as e:
+            logger.warning(f"poll_update_handler failed (non-fatal): {e}")
 
     @client.on(events.NewMessage)
     async def handler(event):
@@ -1541,6 +1660,11 @@ async def main():
         # set ``media_download_error`` to ``"timeout after Xs (retried)"`` so
         # downstream can distinguish "first attempt was unlucky" from
         # "we tried twice and the file is just too big".
+        # #3136: the descriptor for the file on THIS message, built by the
+        # same producer the reply-chain resolver uses, so the agent sees one
+        # marker shape for a file whether it arrived by Telegram or email.
+        # Merged into extra_context at both enqueue sites below.
+        _attachment_ctx: dict = {}
         if message.media and stored_msg_id is not None:
             _media_type_for_download = get_media_type(message) or "media"
             _local_path, _download_error = await _download_media_with_retry(
@@ -1612,6 +1736,15 @@ async def main():
                     )
             except Exception as e:
                 logger.warning(f"[media] failed to persist media_local_path: {e}")
+
+            try:
+                _descriptor = telegram_media_descriptor(
+                    message, local_path=_local_path, download_error=_download_error
+                )
+                if _descriptor:
+                    _attachment_ctx = {"attachments": [_descriptor]}
+            except Exception as e:
+                logger.warning(f"[media] attachment descriptor skipped (non-fatal): {e}")
 
         # Extract and store links from whitelisted senders
         if sender_username and sender_username.lower() in LINK_COLLECTORS:
@@ -1827,7 +1960,7 @@ async def main():
         # === Session queue with per-session branching ===
         import re as _re
 
-        from agent.agent_session_queue import (
+        from agent.session_revival import (
             maybe_send_revival_prompt,
             queue_revival_agent_session,
         )
@@ -1883,30 +2016,21 @@ async def main():
             # (#997: duplicate session on reply-chain timeout or unexpected exception).
             _steering_session_enqueued = False
             try:
-                from models.agent_session import AgentSession
+                from bridge.answer_routing import (
+                    AnswerTargetKind,
+                    resolve_answer_target,
+                    resume_completed_session,
+                )
                 from models.room import room_id_for_session
 
-                # Check both "running" and "active" statuses -- "running" is the
-                # primary status during agent execution (set by _pop_agent_session), while
-                # "active" is set later by _execute_agent_session for auto-continue deferral.
-                # Both represent "agent is currently working" for steering purposes.
-                # `query.filter` returns a QueryBuilder, not a list — materialize it
-                # before sorting, or `.sort` raises AttributeError straight into the
-                # Telethon handler (there is no enclosing guard on this path). Sort
-                # newest-first so the Room is derived from the live row.
-                matching_session = None
-                for check_status in ("running", "active"):
-                    sessions = list(
-                        AgentSession.query.filter(session_id=session_id, status=check_status)
-                    )
-                    if sessions:
-                        sessions.sort(
-                            key=lambda s: (s.created_at is not None, s.created_at), reverse=True
-                        )
-                        matching_session = sessions[0]
-                        break
+                # State read only. The ladder that used to be inlined here now
+                # lives in bridge/answer_routing.py so a poll vote can reach the
+                # same three destinations a typed reply does. Every side effect
+                # below — the acks, the dedup short-circuit, the reply-chain
+                # hydration, react_if_worker_down — stays here, in the caller.
+                _target = resolve_answer_target(session_id)
 
-                if matching_session:
+                if _target.kind == AnswerTargetKind.LIVE:
                     # Route to steering queue instead of session queue.
                     # _ack_steering_routed auto-detects abort keywords.
                     await _ack_steering_routed(
@@ -1918,213 +2042,163 @@ async def main():
                         text=clean_text,
                         log_context=(
                             f"[{project_name}] Steered message into "
-                            f"{matching_session.status} session "
+                            f"{_target.matched_status} session "
                             f"{session_id}"
                         ),
-                        room_id=room_id_for_session(matching_session),
+                        room_id=room_id_for_session(_target.session),
                     )
                     return
-                else:
-                    # No running/active session found -- check for pending.
-                    # For explicit reply-to messages the user's intent is unambiguous:
-                    # they want to add to that specific session regardless of how long
-                    # it has been waiting. Skip the age window check here -- that guard
-                    # only applies to non-reply coalescing (handled below).
-                    pending_sessions = list(
-                        AgentSession.query.filter(session_id=session_id, status="pending")
+
+                if _target.kind == AnswerTargetKind.PENDING:
+                    # For explicit reply-to messages the user's intent is
+                    # unambiguous: they want to add to that specific session
+                    # regardless of how long it has been waiting. The age window
+                    # check applies only to non-reply coalescing, handled below.
+                    await _ack_steering_routed(
+                        client,
+                        event,
+                        message,
+                        session_id=session_id,
+                        sender_name=sender_name,
+                        text=clean_text,
+                        log_context=(
+                            f"[{project_name}] Steered reply-to into "
+                            f"pending session {session_id} "
+                            f"(age={_target.pending_age_s:.1f}s)"
+                        ),
+                        room_id=room_id_for_session(_target.session),
                     )
-                    if pending_sessions:
-                        pending_sessions.sort(
-                            key=lambda s: (s.created_at is not None, s.created_at), reverse=True
-                        )
-                        pending_session = pending_sessions[0]
-                        age = _pending_session_age_seconds(pending_session.created_at, time.time())
-                        await _ack_steering_routed(
-                            client,
-                            event,
-                            message,
-                            session_id=session_id,
-                            sender_name=sender_name,
-                            text=clean_text,
-                            log_context=(
-                                f"[{project_name}] Steered reply-to into "
-                                f"pending session {session_id} (age={age:.1f}s)"
-                            ),
-                            room_id=room_id_for_session(pending_session),
+                    return
+
+                if _target.kind == AnswerTargetKind.LIVE_GUARD:
+                    # A live session now exists — steer into it instead.
+                    await _ack_steering_routed(
+                        client,
+                        event,
+                        message,
+                        session_id=session_id,
+                        sender_name=sender_name,
+                        text=clean_text,
+                        log_context=(
+                            f"[{project_name}] Steered reply-to-completed into "
+                            f"live {_target.matched_status} session {session_id}"
+                        ),
+                        room_id=room_id_for_session(_target.session),
+                    )
+                    return
+
+                if _target.kind == AnswerTargetKind.COMPLETED:
+                    # Early short-circuit: if this exact (chat_id, msg_id) was
+                    # already processed, bail out BEFORE fetching the reply
+                    # chain. Saves a Telegram API call for duplicates and
+                    # tightens the window for Race 2 (concurrent rapid-fire
+                    # replies resolving to the same completed session).
+                    # Plan IN-4.
+                    from bridge.dedup import is_duplicate_message
+
+                    if await is_duplicate_message(event.chat_id, message.id):
+                        logger.debug(
+                            f"[{project_name}] Resume-completed branch: "
+                            f"message {message.id} already processed, "
+                            f"skipping re-enqueue"
                         )
                         return
 
-                    # Check for completed session — re-enqueue with prior context.
-                    # Guard: re-check for live sessions first (handles concurrent message
-                    # delivery races and repeated replies to already-resumed sessions).
-                    completed_sessions = AgentSession.query.filter(
-                        session_id=session_id, status="completed"
-                    )
-                    if completed_sessions:
-                        # Belt-and-suspenders: a concurrent reply may have already
-                        # created a pending/running record between the checks above.
-                        live_guard = None
-                        for _guard_status in ("pending", "running", "active"):
-                            _live = list(
-                                AgentSession.query.filter(
-                                    session_id=session_id, status=_guard_status
-                                )
-                            )
-                            if _live:
-                                _live.sort(
-                                    key=lambda s: (s.created_at is not None, s.created_at),
-                                    reverse=True,
-                                )
-                                live_guard = _live[0]
-                                break
-                        if live_guard:
-                            # A live session now exists — steer into it instead.
-                            await _ack_steering_routed(
-                                client,
-                                event,
-                                message,
-                                session_id=session_id,
-                                sender_name=sender_name,
-                                text=clean_text,
-                                log_context=(
-                                    f"[{project_name}] Steered reply-to-completed into "
-                                    f"live {live_guard.status} session {session_id}"
+                    # resolve_answer_target already picked the most-recent
+                    # completed record (NOT completed_sessions[0] — the wrong
+                    # record silently degrades the context_summary preamble).
+                    completed = _target.session
+
+                    # Hydrate reply-thread context synchronously with a
+                    # short timeout. A failure or timeout is a WARNING --
+                    # we fall back to the summary-only preamble and still
+                    # enqueue the session. Plan Change A, IN-6 (sync path
+                    # because augmented_text is built at enqueue time).
+                    reply_chain_context: str | None = None
+                    if message.reply_to_msg_id:
+                        try:
+                            chain = await asyncio.wait_for(
+                                fetch_reply_chain(
+                                    client,
+                                    event.chat_id,
+                                    message.reply_to_msg_id,
                                 ),
-                                room_id=room_id_for_session(live_guard),
+                                timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
                             )
-                            return
-
-                        # Early short-circuit: if this exact (chat_id, msg_id) was
-                        # already processed, bail out BEFORE fetching the reply
-                        # chain. Saves a Telegram API call for duplicates and
-                        # tightens the window for Race 2 (concurrent rapid-fire
-                        # replies resolving to the same completed session).
-                        # Plan IN-4.
-                        from bridge.dedup import is_duplicate_message
-
-                        if await is_duplicate_message(event.chat_id, message.id):
-                            logger.debug(
-                                f"[{project_name}] Resume-completed branch: "
-                                f"message {message.id} already processed, "
-                                f"skipping re-enqueue"
+                            if chain:
+                                reply_chain_context = format_reply_chain(chain)
+                                # sdlc-1179 B1: a legacy reply chain may contain
+                                # <private> markers persisted before this PR.
+                                # Strip before splicing into augmented_text.
+                                reply_chain_context = strip_private(reply_chain_context)
+                        except TimeoutError:
+                            logger.warning(
+                                "RESUME_REPLY_CHAIN_FAIL timeout "
+                                f"session_id={session_id} "
+                                f"chat_id={event.chat_id} "
+                                f"reply_to_msg_id={message.reply_to_msg_id}"
                             )
-                            return
-
-                        # Use the most-recent completed record for the best context_summary.
-                        def _completed_created_at(s):
-                            ts = getattr(s, "created_at", None)
-                            if ts is None:
-                                return 0
-                            if hasattr(ts, "timestamp"):
-                                return ts.timestamp()
-                            return float(ts)
-
-                        completed = max(completed_sessions, key=_completed_created_at)
-
-                        # Hydrate reply-thread context synchronously with a
-                        # short timeout. A failure or timeout is a WARNING --
-                        # we fall back to the summary-only preamble and still
-                        # enqueue the session. Plan Change A, IN-6 (sync path
-                        # because augmented_text is built at enqueue time).
-                        reply_chain_context: str | None = None
-                        if message.reply_to_msg_id:
-                            try:
-                                chain = await asyncio.wait_for(
-                                    fetch_reply_chain(
-                                        client,
-                                        event.chat_id,
-                                        message.reply_to_msg_id,
-                                    ),
-                                    timeout=_REPLY_CHAIN_FETCH_TIMEOUT_S,
-                                )
-                                if chain:
-                                    reply_chain_context = format_reply_chain(chain)
-                                    # sdlc-1179 B1: a legacy reply chain may contain
-                                    # <private> markers persisted before this PR.
-                                    # Strip before splicing into augmented_text.
-                                    reply_chain_context = strip_private(reply_chain_context)
-                            except TimeoutError:
-                                logger.warning(
-                                    "RESUME_REPLY_CHAIN_FAIL timeout "
-                                    f"session_id={session_id} "
-                                    f"chat_id={event.chat_id} "
-                                    f"reply_to_msg_id={message.reply_to_msg_id}"
-                                )
-                            except Exception as rc_exc:
-                                logger.warning(
-                                    "RESUME_REPLY_CHAIN_FAIL exception "
-                                    f"session_id={session_id} "
-                                    f"chat_id={event.chat_id} "
-                                    f"reply_to_msg_id={message.reply_to_msg_id} "
-                                    f"error={rc_exc!r}"
-                                )
-
-                        # sdlc-1179 B1: both inputs to augmented_text are
-                        # pre-stripped (safe_clean_text is built from safe_text,
-                        # reply_chain_context was passed through strip_private
-                        # immediately after format_reply_chain returned).
-                        augmented_text = _build_completed_resume_text(
-                            completed,
-                            safe_clean_text,
-                            reply_chain_context=reply_chain_context,
-                        )
-                        # Compute working_dir inline (not yet defined at this point in the handler)
-                        _completed_working_dir = ""
-                        if project:
-                            _completed_working_dir = project.get(
-                                "working_directory",
-                                DEFAULTS.get("working_directory", ""),
+                        except Exception as rc_exc:
+                            logger.warning(
+                                "RESUME_REPLY_CHAIN_FAIL exception "
+                                f"session_id={session_id} "
+                                f"chat_id={event.chat_id} "
+                                f"reply_to_msg_id={message.reply_to_msg_id} "
+                                f"error={rc_exc!r}"
                             )
-                        if not _completed_working_dir:
-                            _completed_working_dir = str(Path(__file__).parent.parent)
-                        # Plan Change A: pass telegram_message_key so the
-                        # worker's deferred enrichment can hydrate media,
-                        # YouTube, and link summaries. The reply-chain step is
-                        # idempotent against the header this handler already
-                        # prepended (see agent_session_queue enrichment).
-                        # Plan IN-1: when the handler successfully hydrated the
-                        # reply chain, stamp an explicit reply_chain_hydrated
-                        # flag on extra_context. The deferred enrichment
-                        # consults this flag first (primary guard) and falls
-                        # back to the REPLY_THREAD_CONTEXT_HEADER substring
-                        # check (defensive). Belt-and-suspenders.
-                        # #1630: seed with the injection banner (if flagged), then
-                        # merge the reply-chain flag additively.
-                        _completed_extra_overrides: dict | None = dict(_injection_ctx) or None
-                        if reply_chain_context:
-                            _completed_extra_overrides = {
-                                **(_completed_extra_overrides or {}),
-                                "reply_chain_hydrated": True,
-                            }
-                        # #1312: signal ⚠ if this machine's worker is not alive.
-                        # The wrap precedes enqueue; the enqueue below is
-                        # unconditional (no work is dropped when the worker is down).
-                        await react_if_worker_down(client, event.chat_id, message.id, session_id)
-                        await dispatch_telegram_session(
-                            project_key=project_key,
-                            session_id=session_id,
-                            working_dir=_completed_working_dir,
-                            message_text=augmented_text,
-                            sender_name=sender_name,
-                            chat_id=telegram_chat_id,
-                            telegram_message_id=message.id,
-                            chat_title=chat_title,
-                            priority="normal",
-                            sender_id=sender_id,
-                            telegram_message_key=stored_msg_id,
-                            project_config=project,
-                            extra_context_overrides=_completed_extra_overrides,
-                            session_type=getattr(completed, "session_type", None)
-                            or SessionType.ENG,
-                            message_ts=message.date,
-                        )
-                        _steering_session_enqueued = True
-                        logger.info(
-                            f"[{project_name}] Resumed completed session "
-                            f"{session_id} with prior context "
-                            f"(reply_chain={'yes' if reply_chain_context else 'no'})"
-                        )
-                        return
+
+                    # Plan Change A: pass telegram_message_key so the worker's
+                    # deferred enrichment can hydrate media, YouTube, and link
+                    # summaries. The reply-chain step is idempotent against the
+                    # header this handler already prepended.
+                    # Plan IN-1: when the handler successfully hydrated the reply
+                    # chain, stamp an explicit reply_chain_hydrated flag on
+                    # extra_context. The deferred enrichment consults this flag
+                    # first (primary guard) and falls back to the
+                    # REPLY_THREAD_CONTEXT_HEADER substring check (defensive).
+                    # #1630: seed with the injection banner (if flagged), then
+                    # merge the reply-chain flag additively.
+                    _completed_extra_overrides: dict | None = {
+                        **_injection_ctx,
+                        **_attachment_ctx,
+                    } or None
+                    if reply_chain_context:
+                        _completed_extra_overrides = {
+                            **(_completed_extra_overrides or {}),
+                            "reply_chain_hydrated": True,
+                        }
+                    # #1312: signal ⚠ if this machine's worker is not alive. The
+                    # wrap precedes enqueue; the enqueue below is unconditional
+                    # (no work is dropped when the worker is down). Stays in the
+                    # caller — it needs the inbound message.id, which a vote has
+                    # no equivalent of.
+                    await react_if_worker_down(client, event.chat_id, message.id, session_id)
+                    # sdlc-1179 B1: both inputs to the resume text are
+                    # pre-stripped (safe_clean_text is built from safe_text,
+                    # reply_chain_context went through strip_private immediately
+                    # after format_reply_chain returned).
+                    await resume_completed_session(
+                        completed=completed,
+                        text=safe_clean_text,
+                        sender_name=sender_name,
+                        telegram_chat_id=telegram_chat_id,
+                        telegram_message_id=message.id,
+                        chat_title=chat_title,
+                        sender_id=sender_id,
+                        project=project,
+                        project_key=project_key,
+                        telegram_message_key=stored_msg_id,
+                        reply_chain_context=reply_chain_context,
+                        extra_context_overrides=_completed_extra_overrides,
+                        message_ts=message.date,
+                    )
+                    _steering_session_enqueued = True
+                    logger.info(
+                        f"[{project_name}] Resumed completed session "
+                        f"{session_id} with prior context "
+                        f"(reply_chain={'yes' if reply_chain_context else 'no'})"
+                    )
+                    return
             except (ConnectionError, OSError) as e:
                 # Redis/DB connection errors -- log at ERROR with traceback
                 logger.error(
@@ -2296,25 +2370,16 @@ async def main():
 
                     if intent == "interjection":
                         # Re-check session status (Race 1 mitigation: session may
-                        # have completed during classification). Materialize before
-                        # sorting — `query.filter` returns a QueryBuilder with no
-                        # `.sort`, and this path has no enclosing guard.
+                        # have completed during classification). Newest row per
+                        # status, so a superseded duplicate cannot win.
                         from models.room import room_id_for_session
 
                         fresh_session = None
                         for check_status in ("running", "active", "pending"):
-                            sessions = list(
-                                AgentSession.query.filter(
-                                    session_id=target_session.session_id,
-                                    status=check_status,
-                                )
+                            fresh_session = AgentSession.newest_for_session_id(
+                                target_session.session_id, status=check_status
                             )
-                            if sessions:
-                                sessions.sort(
-                                    key=lambda s: (s.created_at is not None, s.created_at),
-                                    reverse=True,
-                                )
-                                fresh_session = sessions[0]
+                            if fresh_session is not None:
                                 break
 
                         if fresh_session:
@@ -2432,7 +2497,7 @@ async def main():
             try:
                 from models.agent_session import AgentSession
 
-                existing_sessions = list(AgentSession.query.filter(session_id=session_id))
+                existing_sessions = AgentSession.rows_for_session_id(session_id)
                 if existing_sessions and existing_sessions[0].classification_type:
                     classification_result["type"] = existing_sessions[0].classification_type
                     logger.info(
@@ -2548,7 +2613,7 @@ async def main():
         )
         # #1630: seed with the injection banner (if flagged); the reply-chain
         # flag below merges additively.
-        extra_overrides: dict | None = dict(_injection_ctx) or None
+        extra_overrides: dict | None = {**_injection_ctx, **_attachment_ctx} or None
         # #2694: attach the context-recall advisory for the new_work branch (a
         # running session never re-reads extra_context, which is why the
         # interjection branch uses steering instead). Guarded on truthiness so
@@ -2748,9 +2813,7 @@ async def main():
             # Newest-first: this query has no status filter, so a superseded row
             # for the same session_id can appear beside the live one and would
             # derive a Room the live session never drains.
-            sessions = list(AgentSession.query.filter(session_id=session_id))
-            sessions.sort(key=lambda s: (s.created_at is not None, s.created_at), reverse=True)
-            session = sessions[0] if sessions else None
+            session = AgentSession.newest_for_session_id(session_id)
         except Exception as e:
             logger.debug(f"[edit] Session lookup failed (non-fatal): {e}")
             session = None
@@ -2802,10 +2865,7 @@ async def main():
 
                 # Newest-first before the Python-side status filter: unfiltered
                 # query, so a superseded row can sit beside the live one.
-                edit_sessions = list(AgentSession.query.filter(session_id=new_session_id))
-                edit_sessions.sort(
-                    key=lambda s: (s.created_at is not None, s.created_at), reverse=True
-                )
+                edit_sessions = AgentSession.rows_for_session_id(new_session_id)
                 active_edit = next(
                     (s for s in edit_sessions if s.status in ("pending", "running", "active")),
                     None,
@@ -3064,8 +3124,8 @@ async def main():
             )
 
     # Register session queue callbacks for each project
-    from agent.agent_session_queue import cleanup_stale_branches
     from agent.agent_session_queue import register_callbacks as register_queue_callbacks
+    from agent.session_revival import cleanup_stale_branches
 
     for _pkey, _pconfig in CONFIG.get("projects", {}).items():
         _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
@@ -3406,6 +3466,21 @@ async def main():
         logger.info("PM Telegram relay started")
     except Exception as e:
         logger.error(f"Failed to start PM Telegram relay: {e}")
+
+    # Poll vote reconciliation (#2701). THE PRIMARY inbound mechanism for poll
+    # answers — the events.Raw handler above is only a latency win layered on
+    # it. UpdateMessagePoll carries no peer and no message id, so it cannot
+    # route a vote on its own; this loop reads the registry and confirms through
+    # GetPollResultsRequest, which also makes votes survive a bridge restart.
+    # The loop body lives in bridge/poll_reconcile.py; this only starts it.
+    try:
+        from bridge.poll_reconcile import poll_reconcile_loop
+
+        # The loop logs its own start line; a second one here made it appear
+        # twice per bridge start.
+        _background_tasks.append(asyncio.create_task(poll_reconcile_loop(client)))
+    except Exception as e:
+        logger.error(f"Failed to start poll reconciliation loop: {e}")
 
     # Heartbeat: log periodically so the external watchdog sees fresh logs
     # (watchdog kills the bridge if logs are stale for 5 minutes)

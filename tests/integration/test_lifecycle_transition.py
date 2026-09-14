@@ -15,6 +15,7 @@ import pytest
 
 # claude_agent_sdk mock is centralized in conftest.py
 from models.agent_session import AgentSession
+from models.session_event import format_event_lines
 
 # ── AgentSession.log_lifecycle_transition() ──────────────────────────────────
 
@@ -32,7 +33,7 @@ class TestLogLifecycleTransition:
         )
         s.log_lifecycle_transition("running", "worker picked up")
 
-        history = s._get_history_list()
+        history = format_event_lines(s.session_events)
         assert len(history) >= 1
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert len(lifecycle_entries) == 1
@@ -49,7 +50,7 @@ class TestLogLifecycleTransition:
         )
         s.log_lifecycle_transition("completed", "transcript completed: completed")
 
-        history = s._get_history_list()
+        history = format_event_lines(s.session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert any("transcript completed" in entry for entry in lifecycle_entries)
 
@@ -86,7 +87,7 @@ class TestLogLifecycleTransition:
         s.log_lifecycle_transition("completed", "done")
 
         # Verify lifecycle entry was appended (duration is in the log, not a field)
-        history = s._get_history_list()
+        history = format_event_lines(s.session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert len(lifecycle_entries) >= 1
         assert "completed" in lifecycle_entries[-1]
@@ -103,7 +104,7 @@ class TestLogLifecycleTransition:
         s.status = None
         s.log_lifecycle_transition("active", "recovery")
 
-        history = s._get_history_list()
+        history = format_event_lines(s.session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert len(lifecycle_entries) >= 1
         assert "none" in lifecycle_entries[0]
@@ -173,7 +174,7 @@ class TestSessionTranscriptLifecycleLogging:
         # Verify the lifecycle transition was logged
         sessions = list(AgentSession.query.filter(session_id="st-lc-test-1"))
         assert len(sessions) == 1
-        history = sessions[0]._get_history_list()
+        history = format_event_lines(sessions[0].session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert len(lifecycle_entries) >= 1
         assert "active" in lifecycle_entries[0]
@@ -195,7 +196,7 @@ class TestSessionTranscriptLifecycleLogging:
         # Verify lifecycle transition was logged for completion
         sessions = list(AgentSession.query.filter(session_id="st-lc-test-2"))
         assert len(sessions) == 1
-        history = sessions[0]._get_history_list()
+        history = format_event_lines(sessions[0].session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         # Should have at least 2: one from start, one from complete
         assert len(lifecycle_entries) >= 2
@@ -227,7 +228,7 @@ class TestSessionTranscriptLifecycleLogging:
         # Verify history was preserved
         sessions = list(AgentSession.query.filter(session_id="st-lc-test-3"))
         assert len(sessions) == 1
-        history = sessions[0]._get_history_list()
+        history = format_event_lines(sessions[0].session_events)
         assert len(history) >= 1
 
 
@@ -254,7 +255,7 @@ class TestJobQueueLifecycleLogging:
 
         sessions = list(AgentSession.query.filter(session_id="jq-lc-test-1"))
         assert len(sessions) == 1
-        history = sessions[0]._get_history_list()
+        history = format_event_lines(sessions[0].session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert len(lifecycle_entries) >= 1
         assert any("pending" in entry for entry in lifecycle_entries)
@@ -286,7 +287,7 @@ class TestJobQueueLifecycleLogging:
                 running_session = s
                 break
         assert running_session is not None
-        history = running_session._get_history_list()
+        history = format_event_lines(running_session.session_events)
         lifecycle_entries = [h for h in history if "[lifecycle]" in h]
         assert any("running" in entry for entry in lifecycle_entries)
 

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 # macOS Messages database path
 MESSAGES_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"

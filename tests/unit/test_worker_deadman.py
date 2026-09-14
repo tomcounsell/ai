@@ -309,7 +309,7 @@ class TestDeadmanWriteFailure:
             patch.object(wm, "WORKER_DEADMAN_STALENESS_THRESHOLD", 90),
             patch.object(wm, "WORKER_DEADMAN_STARTUP_GRACE_MAX", 300),
             patch("agent.session_state.get_loop_tick", fake_get_loop_tick),
-            patch("agent.agent_session_queue._write_worker_heartbeat", bad_write),
+            patch("agent.session_health._write_worker_heartbeat", bad_write),
             patch("time.monotonic", return_value=now),
         ):
             with caplog.at_level(logging.WARNING, logger="worker"):

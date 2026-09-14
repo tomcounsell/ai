@@ -845,19 +845,6 @@ window.VALOR_GRAPH = {
    "complexity": "complex"
   },
   {
-   "id": "file:bridge/session_router.py",
-   "type": "file",
-   "name": "session_router.py",
-   "filePath": "bridge/session_router.py",
-   "summary": "Routes an inbound message to a matching existing agent session based on thread, reply, and project scoping rules.",
-   "tags": [
-    "service",
-    "router",
-    "session-management"
-   ],
-   "complexity": "moderate"
-  },
-  {
    "id": "file:config/models.py",
    "type": "file",
    "name": "models.py",
@@ -1330,22 +1317,6 @@ window.VALOR_GRAPH = {
     "snapshot"
    ],
    "complexity": "moderate"
-  },
-  {
-   "id": "function:bridge/session_router.py:find_matching_session",
-   "type": "function",
-   "name": "find_matching_session",
-   "filePath": "bridge/session_router.py",
-   "lineRange": [
-    27,
-    180
-   ],
-   "summary": "Finds an existing agent session matching an inbound message by thread, reply, and project scope.",
-   "tags": [
-    "router",
-    "session-management"
-   ],
-   "complexity": "complex"
   },
   {
    "id": "function:config/models.py:ensure_generation_model",
@@ -5629,10 +5600,10 @@ window.VALOR_GRAPH = {
    "complexity": "complex"
   },
   {
-   "id": "file:bridge/utc.py",
+   "id": "file:utils/utc.py",
    "type": "file",
    "name": "utc.py",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "summary": "Shared timezone helpers giving the whole codebase timezone-aware UTC clocks, ISO strings, and robust conversion to Unix timestamps.",
    "tags": [
     "utility",
@@ -5644,10 +5615,10 @@ window.VALOR_GRAPH = {
    "languageNotes": "Centralizes timezone-aware datetime handling to avoid naive-datetime bugs across modules."
   },
   {
-   "id": "function:bridge/utc.py:to_unix_ts",
+   "id": "function:utils/utc.py:to_unix_ts",
    "type": "function",
    "name": "to_unix_ts",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "lineRange": [
     38,
     64
@@ -5661,10 +5632,10 @@ window.VALOR_GRAPH = {
    "complexity": "moderate"
   },
   {
-   "id": "function:bridge/utc.py:to_local",
+   "id": "function:utils/utc.py:to_local",
    "type": "function",
    "name": "to_local",
-   "filePath": "bridge/utc.py",
+   "filePath": "utils/utc.py",
    "lineRange": [
     19,
     30
@@ -22196,20 +22167,6 @@ window.VALOR_GRAPH = {
    "weight": 0.8
   },
   {
-   "source": "file:bridge/session_router.py",
-   "target": "function:bridge/session_router.py:find_matching_session",
-   "type": "contains",
-   "direction": "forward",
-   "weight": 1.0
-  },
-  {
-   "source": "file:bridge/session_router.py",
-   "target": "function:bridge/session_router.py:find_matching_session",
-   "type": "exports",
-   "direction": "forward",
-   "weight": 0.8
-  },
-  {
    "source": "file:config/models.py",
    "target": "function:config/models.py:ensure_generation_model",
    "type": "contains",
@@ -22533,27 +22490,6 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/read_the_room.py",
-   "target": "file:utils/api_keys.py",
-   "type": "imports",
-   "direction": "forward",
-   "weight": 0.7
-  },
-  {
-   "source": "file:bridge/session_router.py",
-   "target": "file:agent/anthropic_client.py",
-   "type": "imports",
-   "direction": "forward",
-   "weight": 0.7
-  },
-  {
-   "source": "file:bridge/session_router.py",
-   "target": "file:config/models.py",
-   "type": "imports",
-   "direction": "forward",
-   "weight": 0.7
-  },
-  {
-   "source": "file:bridge/session_router.py",
    "target": "file:utils/api_keys.py",
    "type": "imports",
    "direction": "forward",
@@ -23632,7 +23568,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:agent/branch_manager.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25655,7 +25591,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/escape_hatch.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25690,7 +25626,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/session_transcript.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25759,29 +25695,29 @@ window.VALOR_GRAPH = {
    "weight": 0.6
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_unix_ts",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_unix_ts",
    "type": "contains",
    "direction": "forward",
    "weight": 1.0
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_unix_ts",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_unix_ts",
    "type": "exports",
    "direction": "forward",
    "weight": 0.8
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_local",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_local",
    "type": "contains",
    "direction": "forward",
    "weight": 1.0
   },
   {
-   "source": "file:bridge/utc.py",
-   "target": "function:bridge/utc.py:to_local",
+   "source": "file:utils/utc.py",
+   "target": "function:utils/utc.py:to_local",
    "type": "exports",
    "direction": "forward",
    "weight": 0.8
@@ -25823,7 +25759,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/alerts.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -25865,7 +25801,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/bridge_watchdog.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26033,7 +25969,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/resource_monitor.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26054,7 +25990,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:monitoring/session_tracker.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26201,7 +26137,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/image_gen/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26250,7 +26186,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/selfie/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26278,7 +26214,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/sms_reader/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26362,7 +26298,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/test_scheduler/__init__.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -26474,7 +26410,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/valor_telegram.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -27230,7 +27166,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:bridge/telegram_bridge.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -27734,7 +27670,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:agent/messenger.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -28833,7 +28769,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:tools/valor_calendar.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -29764,7 +29700,7 @@ window.VALOR_GRAPH = {
   },
   {
    "source": "file:ui/app.py",
-   "target": "file:bridge/utc.py",
+   "target": "file:utils/utc.py",
    "type": "imports",
    "direction": "forward",
    "weight": 0.7
@@ -36044,7 +35980,6 @@ window.VALOR_GRAPH = {
     "file:bridge/knowledge_watcher.py",
     "file:bridge/promise_gate.py",
     "file:bridge/read_the_room.py",
-    "file:bridge/session_router.py",
     "file:bridge/session_logs.py",
     "file:bridge/dispatch.py",
     "file:bridge/message_drafter.py",
@@ -36057,7 +35992,7 @@ window.VALOR_GRAPH = {
     "file:bridge/dedup.py",
     "file:bridge/escape_hatch.py",
     "file:bridge/session_transcript.py",
-    "file:bridge/utc.py",
+    "file:utils/utc.py",
     "file:bridge/dead_letters.py",
     "file:bridge/response.py",
     "file:bridge/telegram_bridge.py",
@@ -36527,11 +36462,10 @@ window.VALOR_GRAPH = {
   {
    "order": 2,
    "title": "Telegram Ingestion Bridge",
-   "description": "The runtime spine begins here. The Telethon bridge connects to Telegram, receives incoming events, and hands each one off: dispatch.py claims the message and enqueues an AgentSession for the worker, while session_router.py decides whether the message resumes an existing session (by thread or reply) or starts a fresh one. The bridge is deliberately I/O-only. It knows nothing about the SDLC pipeline, keeping ingestion decoupled from execution.",
+   "description": "The runtime spine begins here. The Telethon bridge connects to Telegram, receives incoming events, and hands each one off: dispatch.py claims the message and enqueues an AgentSession for the worker, while job_router.py, the single routing authority, decides whether the message binds to an existing Job or mints a new one. The bridge is deliberately I/O-only. It knows nothing about the SDLC pipeline, keeping ingestion decoupled from execution.",
    "nodeIds": [
     "file:bridge/telegram_bridge.py",
-    "file:bridge/dispatch.py",
-    "file:bridge/session_router.py"
+    "file:bridge/dispatch.py"
    ]
   },
   {

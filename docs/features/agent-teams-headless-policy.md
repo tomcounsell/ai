@@ -1,6 +1,6 @@
 # Agent Teams: Enabled Interactive, Disabled Headless
 
-**Status:** Shipped (July 2026)
+**Status:** Shipped
 **Decision owner:** Valor
 **Review trigger:** Claude Code agent teams graduating from experimental
 (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) to GA-default — see
@@ -43,11 +43,10 @@ architecture in four documented ways:
    human watching the approval seam, and each teammate is another
    full-permission, full-token-cost instance.
 
-Empirically (Claude Code v2.1.204, July 2026), a headless `-p` session asked
-to "spawn a teammate" silently degrades to a regular subagent and no team
-forms — so today's pipeline behavior is safe *by accident*. This policy makes
-it safe *by contract*: experimental-feature behavior in print mode is
-undocumented and version-dependent.
+Empirically (Claude Code v2.1.204), a headless `-p` session asked to "spawn a
+teammate" silently degrades to a regular subagent and no team forms, so the
+pipeline's safety otherwise rests on undocumented, version-dependent print-mode
+behavior. This policy makes it safe *by contract*.
 
 ## Why the disable rides `--settings`, not the environment
 
@@ -70,8 +69,8 @@ Verified empirically on v2.1.204:
 definition:
 
 1. **Role sessions (PM/dev/teammate):** `generate_hook_settings()` writes the
-   per-session `--settings` file every role turn already uses (hook edge
-   channel, plan #1842) and now includes the `env` override block.
+   per-session `--settings` file every role turn uses and includes the `env`
+   override block.
 2. **All other harness consumers (drafter, probes, drafter-review):**
    `get_response_via_harness()` in `agent/session_runner/harness/claude.py`
    injects `--settings '{"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":

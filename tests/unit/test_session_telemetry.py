@@ -217,6 +217,60 @@ class TestTUIInteractionEventTypes:
 
 
 # ---------------------------------------------------------------------------
+# PreToolUse denial events (plan #3081, Lane A)
+# ---------------------------------------------------------------------------
+
+
+class TestPreToolUseDenialEvent:
+    def test_denial_event_written_with_cause_and_counters(self, tmp_telemetry):
+        """record_pre_tool_use_denial stamps cause + call/cost readings."""
+        session_id = "test-denial-001"
+        telemetry_mod.record_pre_tool_use_denial(
+            session_id,
+            cause="tool_budget",
+            reason="per-session tool-call budget reached (999/1000)",
+            tool_call_count=999,
+            total_cost_usd=12.5,
+        )
+
+        events = read_session_timeline(session_id)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["type"] == "pre_tool_use_denial"
+        assert ev["cause"] == "tool_budget"
+        assert ev["tool_call_count"] == 999
+        assert ev["total_cost_usd"] == 12.5
+        assert "budget" in ev["reason"]
+
+    def test_denial_event_omits_absent_fields(self, tmp_telemetry):
+        """None fields are dropped from the payload, not written as null."""
+        session_id = "test-denial-002"
+        telemetry_mod.record_pre_tool_use_denial(session_id, cause="foreground_guard")
+        ev = read_session_timeline(session_id)[0]
+        assert ev["cause"] == "foreground_guard"
+        assert "tool_call_count" not in ev
+        assert "total_cost_usd" not in ev
+        assert "reason" not in ev
+
+    def test_denial_never_raises(self, tmp_telemetry):
+        """A broken recorder never propagates out of the denial helper."""
+        with patch.object(telemetry_mod, "record_telemetry_event", side_effect=OSError("boom")):
+            assert telemetry_mod.record_pre_tool_use_denial("s", cause="tool_budget") is None
+
+
+# ---------------------------------------------------------------------------
+# Belt skew event-type contract (plan #3081, Race 3)
+# ---------------------------------------------------------------------------
+
+
+def test_belt_enforce_skew_event_type_pinned():
+    """The Race 3 skew event type string is a shared contract with the belt
+    resolver (task 2) and tools.belt_skew_report — pinned here so a drive-by
+    rename breaks loudly."""
+    assert telemetry_mod.BELT_ENFORCE_SKEW_EVENT == "belt_enforce_skew"
+
+
+# ---------------------------------------------------------------------------
 # Idle gap detection
 # ---------------------------------------------------------------------------
 
@@ -388,6 +442,60 @@ class TestLifecycleIntegration:
         assert event_arg["to"] == "running"
         assert event_arg["kill"] is None
 
+    def test_status_transition_stamps_tool_cost_summary(self):
+        """A stage transition carries the session-level tool_cost summary when
+        the harness has persisted a cumulative snapshot (plan #3081 Lane A)."""
+        import json as _json
+
+        from models.session_lifecycle import transition_status
+
+        session = _make_session(session_id="test-lc-toolcost-001")
+        session.tool_cost_json = _json.dumps(
+            {
+                "method": "assistant-usage-delta/v1",
+                "per_tool": {
+                    "Bash": {
+                        "calls": 4,
+                        "input_tokens": 280,
+                        "output_tokens": 20,
+                        "total_tokens": 300,
+                    }
+                },
+                "tool_call_count": 4,
+            }
+        )
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch("agent.session_telemetry.record_telemetry_event") as mock_record,
+        ):
+            mock_cas.return_value = None
+            session.save = MagicMock()
+            transition_status(session, "running", reason="test", emit_telemetry=True)
+
+        _, event_arg = mock_record.call_args[0]
+        assert event_arg["tool_cost"]["tool_calls"] == 4
+        assert event_arg["tool_cost"]["top_tools"] == [["Bash", 300]]
+
+    def test_status_transition_tool_cost_none_without_snapshot(self):
+        """Pre-belt records (no tool_cost_json) stamp tool_cost as None — an
+        explicit absence, never a zeroed row posing as a measurement."""
+        from models.session_lifecycle import transition_status
+
+        session = _make_session(session_id="test-lc-toolcost-002")
+        session.tool_cost_json = None
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch("agent.session_telemetry.record_telemetry_event") as mock_record,
+        ):
+            mock_cas.return_value = None
+            session.save = MagicMock()
+            transition_status(session, "running", reason="test", emit_telemetry=True)
+
+        _, event_arg = mock_record.call_args[0]
+        assert event_arg["tool_cost"] is None
+
     def test_emit_telemetry_false_suppresses(self):
         """transition_status with emit_telemetry=False does not call record_telemetry_event."""
         from models.session_lifecycle import transition_status
@@ -517,3 +625,107 @@ class TestFinalizeSession:
         st.finalize_session("does-not-exist-xyz999")
         st.finalize_session("")
         st.finalize_session(None)
+
+
+# ---------------------------------------------------------------------------
+# Codex dev-lane telemetry (plan #2001 Task 4b)
+# ---------------------------------------------------------------------------
+
+
+class TestRecordCodexDevTurn:
+    def test_dev_turn_event_shape(self, tmp_telemetry):
+        """The machine-readable twin of the PM attribution: harness, model
+        version, turns, usage, outcome — and nothing else sensitive."""
+        import agent.session_telemetry as st
+
+        st.record_codex_dev_turn(
+            "test-codex-001",
+            thread_id="thread-abc",
+            turn_count=2,
+            outcome="ok",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            model_version="0.154.0",
+            wall_clock_ms=1200,
+        )
+        events = read_session_timeline("test-codex-001")
+        assert len(events) == 1
+        event = events[0]
+        assert event["type"] == st.CODEX_DEV_TURN_EVENT == "codex_dev_turn"
+        assert event["harness"] == "codex"
+        assert event["thread_id"] == "thread-abc"
+        assert event["turn_count"] == 2
+        assert event["outcome"] == "ok"
+        assert event["usage"] == {"input_tokens": 10, "output_tokens": 5}
+        assert event["model_version"] == "0.154.0"
+        assert event["wall_clock_ms"] == 1200
+
+    def test_dev_turn_carries_no_prompt_or_secret_surface(self, tmp_telemetry):
+        """Usage totals only: no instruction, prompt, key, token, or stderr."""
+        import agent.session_telemetry as st
+
+        st.record_codex_dev_turn(
+            "test-codex-002",
+            thread_id="t",
+            turn_count=1,
+            outcome="native-failure",
+            usage={},
+            model_version="0.154.0",
+            wall_clock_ms=5,
+        )
+        (event,) = read_session_timeline("test-codex-002")
+        for forbidden in ("instruction", "prompt", "api_key", "stderr", "token"):
+            assert forbidden not in event
+
+    def test_dev_turn_never_raises(self, monkeypatch):
+        """A broken telemetry substrate never masks the turn outcome."""
+        import agent.session_telemetry as st
+
+        monkeypatch.setattr(
+            st, "record_telemetry_event", lambda *a, **k: (_ for _ in ()).throw(OSError("disk"))
+        )
+        st.record_codex_dev_turn(
+            "test-codex-003",
+            thread_id="t",
+            turn_count=1,
+            outcome="ok",
+            usage={},
+            model_version="v",
+            wall_clock_ms=1,
+        )
+
+
+class TestBackfillCodexLane:
+    def test_backfill_ingests_ok_lines(self, tmp_path, tmp_telemetry):
+        """Pre-4b probe turns become comparable codex_dev_turn events."""
+        import agent.session_telemetry as st
+
+        lane = tmp_path / "sess.jsonl"
+        lane.write_text(
+            '{"thread_id": "t1", "turn_count": 1, "outcome": "ok", '
+            '"usage": {"input_tokens": 3}, "wall_clock_ms": 100}\n'
+            '{"thread_id": "t1", "turn_count": 2, "outcome": "guard-exhausted", '
+            '"usage": null, "wall_clock_ms": 5}\n'
+        )
+        assert st.backfill_codex_lane("test-codex-004", lane) == 2
+        events = read_session_timeline("test-codex-004")
+        assert [e["turn_count"] for e in events] == [1, 2]
+        assert all(e["backfilled"] is True for e in events)
+        assert all(e["type"] == "codex_dev_turn" for e in events)
+        assert events[1]["outcome"] == "guard-exhausted"
+
+    def test_backfill_skips_malformed_lines(self, tmp_path, tmp_telemetry):
+        import agent.session_telemetry as st
+
+        lane = tmp_path / "sess.jsonl"
+        lane.write_text(
+            "not json\n"
+            '{"thread_id": "t1", "turn_count": 1, "outcome": "ok", '
+            '"usage": {}, "wall_clock_ms": 1}\n'
+            "[1, 2, 3]\n"
+        )
+        assert st.backfill_codex_lane("test-codex-005", lane) == 1
+
+    def test_backfill_missing_file_returns_zero(self, tmp_path, tmp_telemetry):
+        import agent.session_telemetry as st
+
+        assert st.backfill_codex_lane("test-codex-006", tmp_path / "absent.jsonl") == 0

@@ -3,7 +3,7 @@
 Tests the guard_g7_plan_revising function in isolation and through
 decide_next_dispatch().
 
-The existing router decision tests live in test_sdlc_router_decision.py.
+The existing router decision tests live in the sdlc_router_decision/ package.
 This file focuses exclusively on the G7 guard added for issue #1302.
 """
 
@@ -16,6 +16,7 @@ from agent.sdlc_router import (
     SKILL_DO_BUILD,
     SKILL_DO_DOCS,
     SKILL_DO_MERGE,
+    SKILL_DO_PATCH,
     SKILL_DO_PLAN,
     SKILL_DO_PLAN_CRITIQUE,
     SKILL_DO_PR_REVIEW,
@@ -30,6 +31,7 @@ from agent.sdlc_router import (
     compute_same_stage_count,
     decide_next_dispatch,
     evaluate_guards,
+    guard_g2_critique_cycle_cap,
     guard_g5_artifact_hash_cache,
     guard_g7_plan_revising,
     record_dispatch,
@@ -1080,7 +1082,7 @@ class TestG7Gate6FallthroughRequiresG5ShortCircuit:
         states, meta, context = self._repro()
         # G5 in isolation must defer (its short-circuit fires).
         assert guard_g5_artifact_hash_cache(states, meta, context) is None
-        # The full guard chain (G1-G8) must not dispatch /do-build either —
+        # The full guard chain (G1-G9) must not dispatch /do-build either —
         # confirming no other guard picks up the slack G5 just gave up.
         guard_result = evaluate_guards(states, meta, context)
         assert not (isinstance(guard_result, Dispatch) and guard_result.skill == SKILL_DO_BUILD)
@@ -1111,10 +1113,13 @@ class TestG6NotCrossedByReorder:
             pr_merge_state="CLEAN",
             ci_all_passing=True,
             latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
         )
         # G7 defers at Gate 1 because pr_number is set.
         assert guard_g7_plan_revising(states, meta, {}) is None
-        result = decide_next_dispatch(states, meta, {})
+        # #3249/#3260: G6 is a terminal merge dispatch, so it needs positive
+        # evidence that the APPROVED verdict judged the live head.
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_MERGE
         assert result.row_id == "G6"
@@ -1133,20 +1138,212 @@ class TestEmptyStateRegression:
 
 
 class TestGuardsListOrder:
-    """Pin the exact GUARDS list order established by #1871."""
+    """Pin the exact GUARDS list order established by #1871.
+
+    G9 (#2796) is inserted immediately AFTER G4 so an already-oscillating lane
+    keeps G4's existing precedence — no state that escalates today changes its
+    guard_id — while a newly-conflicted lane escalates at G9 on turn 1, before
+    it can burn a patch/review cycle.
+    """
 
     def test_guards_pinned_order(self):
         names = [g.__name__ for g in GUARDS]
         assert names == [
-            "guard_g1_critique_loop",
+            # T (#2894, #2817) runs first: a finished lane has no correct
+            # dispatch, so no other guard's verdict is worth computing.
+            "guard_terminal_lane",
+            # G2 before G1 (#2885 via #3065): G1 dispatches /do-plan on every
+            # revision-demanding verdict, so with G1 first the cycle cap can
+            # never fire. G2 is None below the cap, so precedence is unchanged
+            # until the bound is spent.
             "guard_g2_critique_cycle_cap",
+            "guard_g1_critique_loop",
             "guard_g3_pr_lock",
             "guard_g4_oscillation",
+            "guard_g9_blocked_on_conflict",
             "guard_g8_artifact_verification",
             "guard_g7_plan_revising",
             "guard_g5_artifact_hash_cache",
             "guard_g6_terminal_merge_ready",
         ]
+
+
+class TestG2RevisionRoundCap:
+    """#2885 via #3065: G2 must bound the NEEDS REVISION <-> revise loop.
+
+    The skill-driven loop marks CRITIQUE ``completed`` every round while
+    recording NEEDS REVISION, and ``critique_cycle_count`` stays 0 (its only
+    incrementer is ``fail_stage``, which that flow never calls). G2 now also
+    reads ``revision_round_count`` and trips on a still-revising verdict even
+    with CRITIQUE completed.
+    """
+
+    def _states(self, critique="completed"):
+        return {"PLAN": "completed", "CRITIQUE": critique}
+
+    def test_trips_at_cap_despite_completed_marker(self):
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = guard_g2_critique_cycle_cap(self._states(), meta, {})
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G2"
+
+    def test_below_cap_stands_down(self):
+        meta = _base_meta(
+            revision_round_count=1,
+            latest_critique_verdict="NEEDS REVISION",
+        )
+        assert guard_g2_critique_cycle_cap(self._states(), meta, {}) is None
+
+    def test_accepted_verdict_stands_down_even_with_spent_count(self):
+        """A lane whose loop terminated (verdict accepted) must not re-block."""
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="READY TO BUILD",
+        )
+        assert guard_g2_critique_cycle_cap(self._states(), meta, {}) is None
+
+    def test_g2_precedes_g1_end_to_end(self):
+        """Through decide_next_dispatch: at the cap the router escalates
+        instead of letting G1 dispatch /do-plan for a tenth round."""
+        meta = _base_meta(
+            revision_round_count=9,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G2"
+
+    def test_below_cap_g1_still_routes_to_plan(self):
+        meta = _base_meta(
+            revision_round_count=1,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "G1"
+
+
+class TestCrashedPlanStageRecovery:
+    """#3078: PLAN="in_progress" after a dead plan subagent must route, not wedge.
+
+    Replays the #2771 wedge: two consecutive /do-plan subagents died
+    mid-flight, leaving the ledger asserting PLAN=in_progress with no plan
+    doc on disk. The router returned Blocked('no matching dispatch rule') and
+    the lane's only exits were outside the pipeline's contract.
+    """
+
+    def test_in_progress_no_doc_redispatches_plan(self):
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=False)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN
+        assert result.row_id == "1"
+
+    def test_in_progress_doc_on_disk_advances_to_critique(self):
+        """Died after writing the doc but before marking completed — the doc
+        is the artifact critique reads, so the lane advances."""
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=True, latest_critique_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+        assert result.row_id == "2"
+
+    def test_no_doc_and_no_issue_number_stays_blocked(self):
+        """Without an issue_number the absence of a plan doc is unverifiable
+        (#1640 evidence discipline) — refuse to guess."""
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=None, plan_exists=False, latest_critique_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+
+    def test_open_pr_defers_to_pr_stage_rows(self):
+        states = {"PLAN": "in_progress"}
+        meta = _base_meta(issue_number=2771, plan_exists=False, pr_number=42)
+        result = decide_next_dispatch(states, meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id in ("1", "2"))
+
+
+class TestCrashedPatchStageRecovery:
+    """Row 8g: a dispatched /do-patch that died before its marker must route.
+
+    Replays the #2754 wedge (2026-09-02): /do-patch wrote its dispatch record
+    then crashed. The recorded CHANGES REQUESTED verdict became classified
+    stale (staleness compares against the patch DISPATCH, not a landed
+    patch), row 8 stepped aside, 8b needed PATCH=completed, 8c/8d/8e needed
+    an absent verdict, 8f/9/10/G6 needed APPROVED — NO_RULE.
+    """
+
+    def _states(self):
+        return {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "CRITIQUE": "completed",
+            "BUILD": "completed",
+            "TEST": "ready",
+            "PATCH": "pending",
+            "REVIEW": "pending",
+            "_verdicts": {
+                "REVIEW": {
+                    "verdict": "CHANGES REQUESTED",
+                    "recorded_at": "2026-09-02T07:43:32",
+                }
+            },
+            "_sdlc_dispatches": [
+                {
+                    "skill": SKILL_DO_PATCH,
+                    "at": "2026-09-02T09:36:50",
+                    "stage_snapshot": {},
+                }
+            ],
+        }
+
+    def _meta(self, **overrides):
+        base = dict(
+            pr_number=3077,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            last_dispatched_skill=SKILL_DO_PATCH,
+            latest_review_verdict="CHANGES REQUESTED",
+            latest_critique_verdict="READY TO BUILD (NO CONCERNS)",
+        )
+        base.update(overrides)
+        return _base_meta(**base)
+
+    def test_crashed_patch_redispatches_patch(self):
+        result = decide_next_dispatch(self._states(), self._meta(), {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PATCH
+        assert result.row_id == "8g"
+
+    def test_completed_patch_defers_to_8b(self):
+        states = self._states()
+        states["PATCH"] = "completed"
+        result = decide_next_dispatch(states, self._meta(), {})
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+        assert result.row_id == "8b"
+
+    def test_no_recorded_verdict_does_not_match_8g(self):
+        """Absent verdict belongs to rows 8c/8d/8e — 8g must stand down."""
+        states = self._states()
+        del states["_verdicts"]
+        meta = self._meta(latest_review_verdict=None)
+        result = decide_next_dispatch(states, meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id == "8g")
+
+    def test_last_dispatch_not_patch_does_not_match_8g(self):
+        meta = self._meta(last_dispatched_skill=SKILL_DO_PR_REVIEW)
+        result = decide_next_dispatch(self._states(), meta, {})
+        assert not (isinstance(result, Dispatch) and result.row_id == "8g")
 
 
 # ---------------------------------------------------------------------------
@@ -1199,8 +1396,11 @@ class TestRow10VerdictGate:
             pr_number=1897,
             last_dispatched_skill=SKILL_DO_DOCS,
             latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
         )
-        result = decide_next_dispatch(states, meta, {})
+        # #3249/#3260: row 10 is terminal, so the approval must be shown to have
+        # judged the live head before it may merge.
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
         assert result == Dispatch(
             skill=SKILL_DO_MERGE,
             reason="Execute programmatic merge gate",
@@ -1225,8 +1425,13 @@ class TestRow10VerdictGate:
         from agent.sdlc_router import _rule_ready_to_merge
 
         states = dict(_ALL_COMPLETED)
-        meta = _base_meta(pr_number=1897, latest_review_verdict="APPROVED")
-        assert _rule_ready_to_merge(states, meta, {}) is True
+        meta = _base_meta(
+            pr_number=1897,
+            latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
+        )
+        # #3249/#3260: the live-head evidence pair is part of row 10's contract.
+        assert _rule_ready_to_merge(states, meta, {"pr_head_sha": _SHA_A}) is True
 
 
 class TestRow8eNoVerdictRecovery:

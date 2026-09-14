@@ -61,7 +61,7 @@ def _append_inbound_chat_log(
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             logger.debug(
                 "append_inbound_chat_log: session %s not found after enqueue (non-fatal)",

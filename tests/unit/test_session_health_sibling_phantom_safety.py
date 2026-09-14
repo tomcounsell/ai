@@ -5,9 +5,9 @@ worse, mutate a phantom) if orphan ``$IndexF`` members are present:
 
 1. ``_recover_interrupted_agent_sessions_startup`` — destructive (session_health.py)
 2. ``_agent_session_health_check`` — destructive (session_health.py)
-3. ``session_recovery_drip`` — read-ish (sustainability.py)
-4. ``session_count_throttle`` — read-only (sustainability.py)
-5. ``failure_loop_detector`` — read-only (sustainability.py)
+3. ``session_recovery_drip`` — read-ish (reflections/agents/session_recovery_drip.py)
+4. ``session_count_throttle`` — read-only (reflections/agents/session_count_throttle.py)
+5. ``failure_loop_detector`` — read-only (reflections/agents/failure_loop_detector.py)
 
 Each test seeds a phantom in the relevant status/project index bucket, adds
 one live record so the function has something real to see, invokes the
@@ -66,7 +66,7 @@ def _seed_phantom(project_key: str = "valor", status: str = "pending") -> str:
 
 @pytest.fixture(autouse=True)
 def _force_project_key(monkeypatch):
-    """Make sure sustainability's default project_key matches what we seed.
+    """Make sure the reflections' default project_key matches what we seed.
 
     Uses the canonical ``valor`` namespace (issue #1171) — was previously
     ``default`` before the project_key fallback was unified.
@@ -142,7 +142,7 @@ class TestAgentSessionHealthCheck:
 
 
 # ---------------------------------------------------------------------------
-# sustainability.py sibling guards
+# reflections/agents/ sibling guards
 # ---------------------------------------------------------------------------
 
 
@@ -151,8 +151,8 @@ class TestSessionRecoveryDrip:
         """session_recovery_drip filters phantoms in paused_circuit / paused queries."""
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        from agent.sustainability import session_recovery_drip
         from models.agent_session import AgentSession
+        from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         # Set recovery flag so the function does work rather than early-returning.
         POPOTO_REDIS_DB.set("default:recovery:active", "1", ex=60)
@@ -183,8 +183,8 @@ class TestSessionRecoveryDrip:
 class TestSessionCountThrottle:
     def test_survives_phantom_in_project(self):
         """session_count_throttle filters phantoms when counting session starts."""
-        from agent.sustainability import session_count_throttle
         from models.agent_session import AgentSession
+        from reflections.agents.session_count_throttle import run as session_count_throttle
 
         live = AgentSession(session_id="live-4", project_key="valor", status="pending")
         live.save()
@@ -205,8 +205,8 @@ class TestSessionCountThrottle:
 class TestFailureLoopDetector:
     def test_survives_phantom_in_project(self):
         """failure_loop_detector filters phantoms when scanning for failed sessions."""
-        from agent.sustainability import failure_loop_detector
         from models.agent_session import AgentSession
+        from reflections.agents.failure_loop_detector import run as failure_loop_detector
 
         live = AgentSession(session_id="live-5", project_key="valor", status="failed")
         live.save()

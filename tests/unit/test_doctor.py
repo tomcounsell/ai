@@ -770,50 +770,84 @@ class TestCheckRedisFlushGuard:
         assert str(venv) in result.message
 
 
-class TestCheckRedisAcl:
-    def _run(self, acl_result):
-        from tools.doctor import _check_redis_acl
-
-        with patch("scripts.update.redis_acl.apply_redis_acl", return_value=acl_result):
-            return _check_redis_acl()
-
-    def test_fails_on_drift_and_points_at_the_runbook_not_update(self):
-        result = self._run(
-            SimpleNamespace(success=True, drift=True, planned_commands=["a", "b"], error=None)
-        )
-        assert result.passed is False
-        assert "2 command(s) planned" in result.message
-        # /update cannot fix ACL drift by design; the apply is human-signed.
-        assert "runbook" in result.fix
-        assert "/update" not in result.fix
-
-    def test_passes_when_there_is_no_drift(self):
-        result = self._run(
-            SimpleNamespace(success=True, drift=False, planned_commands=[], error=None)
-        )
-        assert result.passed is True, result.message
-        assert "no drift" in result.message
-
-    def test_an_unreachable_redis_is_a_skip_not_a_failure(self):
-        result = self._run(
-            SimpleNamespace(
-                success=False, drift=False, planned_commands=[], error="connection refused"
-            )
-        )
-        assert result.passed is True, result.message
-        assert "skipped" in result.message
-
-
 class TestRedisChecksAreRegistered:
     """Both checks correct in isolation is worth nothing if neither runs.
 
-    Deleting them from `get_checks()` left the whole doctor suite green before
-    this case existed.
+    Deleting a check from `get_checks()` (or breaking the `checks.insert`
+    anchor `_check_gws_auth` is registered against) left the whole doctor
+    suite green before this case existed.
     """
 
     def test_both_redis_checks_are_in_get_checks(self):
-        from tools.doctor import _check_redis_acl, _check_redis_flush_guard
+        from tools.doctor import _check_gws_auth, _check_redis_flush_guard
 
         registered = get_checks()
         assert _check_redis_flush_guard in registered
-        assert _check_redis_acl in registered
+        assert _check_gws_auth in registered
+
+
+class TestCheckGwsAuth:
+    """`_check_gws_auth` (#2845) — the retrieval half of the `gws-auth`
+    warn_state suppression: lazy-import the `scripts.update.*` module, degrade
+    a missing module or an unreachable service to `passed=True`, never crash."""
+
+    def _run(self, gws_result=None, side_effect=None):
+        from tools.doctor import _check_gws_auth
+
+        with patch(
+            "scripts.update.gws_auth.configure_gws_auth",
+            return_value=gws_result,
+            side_effect=side_effect,
+        ):
+            return _check_gws_auth()
+
+    def test_needs_auth_fails(self):
+        result = self._run(
+            SimpleNamespace(
+                success=True,
+                action="needs_auth",
+                detail="gws auth setup --login   (or: gws auth setup && gws auth login)",
+                error=None,
+            )
+        )
+        assert result.passed is False
+        assert "gws auth setup" in result.message
+        assert result.fix is not None
+
+    def test_already_ok_passes(self):
+        result = self._run(
+            SimpleNamespace(success=True, action="already_ok", detail="authenticated", error=None)
+        )
+        assert result.passed is True
+        assert "authenticated" in result.message
+
+    def test_skipped_is_a_passing_skip(self):
+        result = self._run(
+            SimpleNamespace(success=True, action="skipped", detail="gws not on PATH", error=None)
+        )
+        assert result.passed is True
+        assert "skipped" in result.message
+
+    def test_raising_call_is_a_passing_skip(self):
+        """`configure_gws_auth()` itself raising — the call-level except."""
+        result = self._run(side_effect=RuntimeError("gws binary crashed"))
+        assert result.passed is True
+        assert "could not run" in result.message
+
+    def test_raising_import_is_a_passing_skip(self):
+        """A missing `scripts.update.gws_auth` module — the import-level
+        except. A machine without the module degrades, never crashes."""
+        import sys
+
+        from tools.doctor import _check_gws_auth
+
+        with patch.dict(sys.modules, {"scripts.update.gws_auth": None}):
+            result = _check_gws_auth()
+        assert result.passed is True
+        assert "not available yet" in result.message
+
+    def test_check_gws_auth_absent_from_quick_checks(self):
+        from tools.doctor import _check_gws_auth
+
+        assert _check_gws_auth not in get_checks(quick=True)
+        assert _check_gws_auth in get_checks(quick=False)

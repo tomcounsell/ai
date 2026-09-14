@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent.agent_session_queue import MAX_NUDGE_COUNT, SendToChatResult
+from agent.output_router import MAX_NUDGE_COUNT, SendToChatResult
 from models.agent_session import AgentSession
 
 

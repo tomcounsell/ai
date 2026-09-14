@@ -64,17 +64,107 @@ _reflection_pool = ThreadPoolExecutor(
 )
 
 
+# Candidate sets for which the exhausted-candidates diagnostic has already been
+# emitted. Keyed on the joined candidate tuple, so a *different* exhausted set
+# still logs its own line, while the eight-plus call sites that re-resolve within
+# one process share a single message. Deliberately not an lru_cache on the
+# resolver: load_registry() re-resolves per call and tests mutate REFLECTIONS_YAML,
+# so the resolver itself must stay uncached.
+_exhausted_warned: set[str] = set()
+
+
+def _owning_checkout_root() -> Path | None:
+    """Locate the root of the checkout that owns this one, or None.
+
+    In a linked git worktree, ``<repo_root>/.git`` is a *file* holding a single
+    ``gitdir: <path>`` line pointing at ``<primary>/.git/worktrees/<name>``. That
+    directory usually holds a ``commondir`` file (typically ``../..``) which
+    resolves to the primary ``.git``. In the primary checkout, ``.git`` is a
+    directory and there is no owning checkout, so this returns None.
+
+    The two branches are **asymmetric** and must not be given a uniform
+    ``.parent``: with ``commondir`` present the resolved path is the primary
+    ``.git`` so we take its ``.parent``; with ``commondir`` missing,
+    ``parents[2]`` of the gitdir already *is* the checkout root for git's fixed
+    ``<primary>/.git/worktrees/<name>`` layout, so no ``.parent`` is applied.
+
+    The ``gitdir:`` link is assumed **absolute**. Git writes it that way by
+    default, but ``git worktree add --relative-paths`` and the
+    ``worktree.useRelativePaths`` config write a relative link. Resolving a
+    relative link would silently anchor it to the *process CWD* rather than to
+    the worktree root and yield a wrong root, so a relative link returns None and
+    takes the same unfamiliar-layout path as a malformed one.
+
+    This is resolved from git's on-disk worktree metadata rather than by invoking
+    the git CLI: ``REGISTRY_PATH`` is computed at import time inside a launchd
+    worker, and a blocking child process on that path is precisely the class of
+    hazard the surrounding launchd guards exist to prevent.
+
+    Performs **no** registry ``exists()`` check — it does not know what a
+    registry is. The caller owns that, so the candidate path stays nameable in
+    the exhausted-candidates diagnostic even when it turns out to be absent.
+    """
+    try:
+        repo_root = Path(__file__).parent.parent
+        dot_git = repo_root / ".git"
+        if dot_git.is_dir():
+            return None
+        if not dot_git.is_file():
+            return None
+
+        gitdir_text = ""
+        for line in dot_git.read_text().splitlines():
+            if line.startswith("gitdir:"):
+                gitdir_text = line.split(":", 1)[1].strip()
+                break
+        if not gitdir_text:
+            return None
+        # Guard before any commondir read or parents[] indexing (see docstring).
+        if not Path(gitdir_text).is_absolute():
+            return None
+
+        gitdir = Path(gitdir_text)
+        commondir_file = gitdir / "commondir"
+        if commondir_file.is_file():
+            commondir_text = commondir_file.read_text().strip()
+            if commondir_text:
+                common = (gitdir / Path(commondir_text)).resolve()
+                return common.parent
+
+        # No commondir: rely on git's fixed <primary>/.git/worktrees/<name> layout.
+        # Guard the index explicitly — a short gitdir: would raise IndexError, which
+        # the broad except below would swallow into the silent fallback this guard
+        # exists to keep legible.
+        if len(gitdir.parents) > 2:
+            return gitdir.parents[2]
+        return None
+    except Exception:
+        return None
+
+
 # Path to the reflections registry.
-# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml → config/
+# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
+# this checkout's config/ → the owning checkout's config/
 def _resolve_registry_path() -> Path:
     """Resolve the reflections YAML path using vault-first fallback logic.
 
     Priority:
     1. REFLECTIONS_YAML env var (explicit override, e.g., for testing)
     2. ~/Desktop/Valor/reflections.yaml (iCloud-synced vault, private config)
-    3. config/reflections.yaml (in-repo fallback, always present)
+       — skipped entirely under VALOR_LAUNCHD (macOS TCC hazard, see below)
+    3. config/reflections.yaml in *this* checkout. Gitignored and materialized
+       only at install time, so it is **absent in worktrees**.
+    4. config/reflections.yaml in the checkout that owns this worktree, located
+       via ``_owning_checkout_root()``. This is the level that makes the registry
+       readable from ``.worktrees/{slug}/`` under VALOR_LAUNCHD.
+
+    When every candidate is exhausted, one error naming all four slots is logged
+    (de-duplicated per candidate set) and the level-3 path is returned unchanged,
+    so no new exception escapes at import time.
     """
     import os
+
+    candidates: list[str] = []
 
     env_path = os.environ.get("REFLECTIONS_YAML")
     if env_path:
@@ -82,17 +172,50 @@ def _resolve_registry_path() -> Path:
         if p.exists():
             return p
         logger.warning("REFLECTIONS_YAML env var points to non-existent path: %s", env_path)
+    candidates.append(f"REFLECTIONS_YAML={env_path or '<unset>'}")
 
     # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced Desktop
     # path entirely. macOS TCC blocks stat()/open() on ~/Desktop files from launchd
     # agents — even exists() hangs indefinitely and blocks the asyncio event loop.
-    # install_worker.sh copies reflections.yaml → config/reflections.yaml at install time.
+    # install_reflection_worker.sh / install_email_bridge.sh / env_sync.py::sync_reflections_yaml
+    # copy reflections.yaml → config/reflections.yaml at install time.
     if not os.environ.get("VALOR_LAUNCHD"):
         vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
+        candidates.append(str(vault_path))
         if vault_path.exists():
             return vault_path
+    else:
+        candidates.append("<vault skipped: VALOR_LAUNCHD>")
 
-    return Path(__file__).parent.parent / "config" / "reflections.yaml"
+    local_path = Path(__file__).parent.parent / "config" / "reflections.yaml"
+    candidates.append(str(local_path))
+    if local_path.exists():
+        return local_path
+
+    # Fourth level: the owning checkout's install-time copy. The locator answers
+    # only "which checkout owns this one?"; the existence check is owned here so
+    # the candidate stays nameable in the diagnostic below even when absent.
+    owning_root = _owning_checkout_root()
+    if owning_root is not None:
+        primary_candidate = owning_root / "config" / "reflections.yaml"
+        candidates.append(str(primary_candidate))
+        if primary_candidate.exists():
+            return primary_candidate
+    else:
+        candidates.append("<owning checkout not resolvable>")
+
+    key = "|".join(candidates)
+    if key not in _exhausted_warned:
+        _exhausted_warned.add(key)
+        logger.error(
+            "Reflections registry not found; every candidate exhausted: %s. "
+            "Returning %s, which does not exist. Run /update on this machine to "
+            "materialize the install-time copy.",
+            ", ".join(candidates),
+            local_path,
+        )
+
+    return local_path
 
 
 REGISTRY_PATH = _resolve_registry_path()
@@ -210,9 +333,11 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
     """Load and validate the reflections registry from YAML.
 
     Args:
-        path: Path to the YAML file. Defaults to vault-first resolution:
-              REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
-              config/reflections.yaml.
+        path: Path to the YAML file. Defaults to ``_resolve_registry_path()``;
+              see that function's docstring for the authoritative ordering of
+              its resolution levels, including the owning-checkout level that
+              covers worktrees (issue #2734). Deliberately not re-enumerated
+              here — the duplicate went stale once already.
 
     Returns:
         List of validated ReflectionEntry objects. Invalid entries are
@@ -319,7 +444,11 @@ def _resolve_callable(dotted_path: str) -> Any:
     """Resolve a dotted Python path to a callable.
 
     Args:
-        dotted_path: e.g. "agent.agent_session_queue._agent_session_health_check"
+        dotted_path: e.g. "agent.session_health._agent_session_health_check".
+            Name the module that defines the callable. A path through a module
+            that merely imports it resolves only for as long as that import
+            survives, and a resolution failure here is swallowed per-tick by
+            run_reflection's broad except — a dead job with a green worker.
 
     Returns:
         The callable object.
@@ -363,6 +492,51 @@ def _latest_run_timestamp(name: str) -> float | None:
         return None
 
 
+def _effective_last_run(entry: ReflectionEntry, state: Reflection) -> float | None:
+    """The last-run timestamp to schedule from, or None for "never run".
+
+    Two recoveries live here, and both must be applied identically wherever a
+    due time is computed — ``is_reflection_due`` and ``reflection_due_epoch``
+    disagreeing would give a reflection one answer for "is it due" and a
+    different one for "which window is this", which is exactly what an
+    idempotency key must not have.
+
+    1. Popoto hands back the Field descriptor rather than ``None`` when the
+       value is unset, so a non-numeric ``ran_at`` reads as absent.
+    2. A blank ``every:`` record (``ran_at`` lost during an index-rebuild
+       race) would otherwise look like "never run" and burst-fire on every
+       tick; the true last run is recovered from ReflectionRun history.
+       Scoped to ``every:`` because ``cron:`` anchors on ``now`` (never
+       immediately-due on a blank record) and ``at:`` is a one-shot.
+    """
+    ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+    if (
+        ran_at is None
+        and entry.schedule
+        and entry.schedule.partition(":")[0].strip().lower() == "every"
+    ):
+        ran_at = _latest_run_timestamp(entry.name)
+    return ran_at
+
+
+def reflection_due_epoch(entry: ReflectionEntry, state: Reflection, now: float) -> float | None:
+    """The due time this tick is firing for, or None when there is no schedule.
+
+    This is the value an agent reflection's idempotency key is derived from,
+    and it MUST be read in the tick loop beside ``is_reflection_due`` — before
+    anything calls ``state.mark_started()``. ``mark_started`` writes
+    ``ran_at = time.time()``, so computing the due time any later reads an
+    input that has already been clobbered, and a crash-retry of the same tick
+    would then key on a different window and enqueue a second session.
+    """
+    if not entry.schedule:
+        return None
+    try:
+        return compute_next_due(entry.schedule, last_run=_effective_last_run(entry, state), now=now)
+    except ValueError:
+        return None
+
+
 def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> bool:
     """Check if a reflection is due to run.
 
@@ -379,18 +553,9 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     Returns:
         True if the reflection should be enqueued.
     """
-    # Guard against Popoto returning the Field descriptor when value is None.
-    ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
+    ran_at = _effective_last_run(entry, state)
 
     if entry.schedule:
-        # Burst-fire guard: a blank ``every:`` record (ran_at lost during an
-        # index-rebuild race) would be treated as "never run" and fire on every
-        # tick. Recover the true last-run from ReflectionRun history so the job
-        # stays suppressed until its real interval elapses. Scoped to ``every:``
-        # because ``cron:`` anchors on ``now`` (never immediately-due on a blank
-        # record) and ``at:`` is a one-shot.
-        if ran_at is None and entry.schedule.partition(":")[0].strip().lower() == "every":
-            ran_at = _latest_run_timestamp(entry.name)
         try:
             next_due = compute_next_due(entry.schedule, last_run=ran_at, now=now)
         except ValueError as e:
@@ -465,7 +630,9 @@ def _get_memory_rss() -> int | None:
         return None
 
 
-async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
+async def run_reflection(
+    entry: ReflectionEntry, state: Reflection, due_epoch: float | None = None
+) -> None:
     """Execute a single reflection and update its state.
 
     Includes memory instrumentation (before/after RSS snapshots) and
@@ -474,6 +641,11 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
     Args:
         entry: The registry entry describing the reflection
         state: The Redis state record to update
+        due_epoch: The due time this run is firing for, read by the tick loop
+            BEFORE ``mark_started()`` clobbers ``ran_at``. Agent reflections
+            derive their idempotency key from it. None (the default) keeps the
+            non-idempotent behaviour for a scheduleless or manually triggered
+            run, and for every caller that does not pass it.
     """
     logger.info("[reflection] Starting: %s (%s)", entry.name, entry.execution_type)
     state.mark_started()
@@ -503,7 +675,7 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
             # Agent-type reflections are enqueued to the session queue
             # instead of executed directly
             result = await asyncio.wait_for(
-                _enqueue_agent_reflection(entry),
+                _enqueue_agent_reflection(entry, due_epoch=due_epoch),
                 timeout=timeout,
             )
 
@@ -512,7 +684,12 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
         # return None (or non-dict). Guard with isinstance to keep legacy
         # callables fully backward-compatible.
         projects_list = result.get("projects") if isinstance(result, dict) else None
-        state.mark_completed(duration, projects=projects_list)
+        summary_str = result.get("summary") if isinstance(result, dict) else None
+        state.mark_completed(
+            duration,
+            projects=projects_list,
+            output_summary=str(summary_str)[:500] if summary_str else None,
+        )
         logger.info(
             "[reflection] Completed: %s (%.1fs)",
             entry.name,
@@ -572,20 +749,30 @@ async def run_reflection(entry: ReflectionEntry, state: Reflection) -> None:
                 )
 
 
-async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
+async def _enqueue_agent_reflection(entry: ReflectionEntry, due_epoch: float | None = None) -> None:
     """Enqueue an agent-type reflection as a PM session in the session queue.
 
     Agent-type reflections use the `command` field as a natural-language prompt
     sent to a PM session. The session runs asynchronously; this function returns
     once the session is enqueued (not when it completes).
 
+    The session id is minted from the wall clock, so two ticks inside one due
+    window used to enqueue two sessions for the same work. With ``due_epoch``
+    the enqueue is single-winner under
+    ``reflection:{name}:{due window}``: the second tick binds to the first
+    session instead of creating another. The window is floored to the 60s tick
+    period so sub-tick jitter cannot put two ticks in different windows.
+
     Args:
         entry: The registry entry with the command (prompt) to enqueue.
+        due_epoch: The due time this run is firing for. None leaves the
+            enqueue non-idempotent, which is right for a scheduleless or
+            manually triggered reflection: there is no window to key on.
     """
     import os
 
     from agent.agent_session_queue import _push_agent_session
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     if not entry.command:
         logger.error("[reflection] Agent reflection '%s' has no command", entry.name)
@@ -617,7 +804,10 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
     ts_suffix = str(int(utc_now().timestamp() * 1000))
     session_id = f"0_{ts_suffix}"
 
-    await _push_agent_session(
+    idempotency_key = (
+        f"reflection:{entry.name}:{int(due_epoch) // 60 * 60}" if due_epoch is not None else None
+    )
+    _depth, agent_session_id = await _push_agent_session(
         project_key=project_key,
         session_id=session_id,
         working_dir=str(project_root),
@@ -626,12 +816,45 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
         chat_id="0",
         telegram_message_id=0,
         session_type="eng",
+        idempotency_key=idempotency_key,
     )
     logger.info(
-        "[reflection] Enqueued agent reflection '%s' as session %s",
+        "[reflection] Enqueued agent reflection '%s' as session %s (agent_session=%s, key=%s)",
         entry.name,
         session_id,
+        agent_session_id,
+        idempotency_key,
     )
+
+
+def _registry_signature(path: Path) -> tuple[int, int] | None:
+    """``(st_mtime_ns, st_size)`` of the registry file, or None when it is absent.
+
+    A single ``stat()``; never opens the file, so it is safe under the same
+    launchd constraints ``load_registry`` documents.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _unresolvable_callables(entries: list[ReflectionEntry]) -> list[str]:
+    """Names of function-type entries whose ``callable`` does not resolve.
+
+    Each failure reads ``name (dotted.path: error)``. Agent-type entries carry
+    a prompt rather than a callable and are never listed.
+    """
+    failures: list[str] = []
+    for entry in entries:
+        if entry.execution_type != "function":
+            continue
+        try:
+            _resolve_callable(entry.callable)
+        except Exception as e:
+            failures.append(f"{entry.name} ({entry.callable}: {e})")
+    return failures
 
 
 class ReflectionScheduler:
@@ -647,10 +870,79 @@ class ReflectionScheduler:
         self._entries: list[ReflectionEntry] = []
         self._running_tasks: dict[str, asyncio.Task] = {}
         self._started = False
+        # The file the current entries came from and its (mtime_ns, size) at
+        # that moment; ``reload_if_changed`` compares against these each tick.
+        self._loaded_path: Path | None = None
+        self._loaded_signature: tuple[int, int] | None = None
 
     def load(self) -> None:
-        """Load/reload the registry from disk."""
-        self._entries = load_registry(self._registry_path)
+        """Load the registry from disk, unconditionally."""
+        path = self._registry_path or _resolve_registry_path()
+        self._entries = load_registry(path)
+        self._loaded_path = path
+        self._loaded_signature = _registry_signature(path)
+
+    def reload_if_changed(self) -> bool:
+        """Reload the registry when the file it was loaded from has changed (#3029).
+
+        Called at the top of every tick. The routine ``/update`` cron cycle
+        rewrites ``config/reflections.yaml`` (Step 1.659 migrates callables,
+        ``sync_reflections_yaml`` refreshes it from the vault) and restarts
+        nothing: only a ``--full`` update cycles ``com.valor.reflection-worker``.
+        Without this, the live scheduler keeps whatever it read at process
+        start. When #2875 removed the legacy import shim, a pre-migration
+        process raised ``ImportError`` on every tick of every reflection until
+        something happened to restart it.
+
+        Change detection is one ``stat()`` on the loaded path: ``(st_mtime_ns,
+        st_size)``. A registry that was absent at load time is re-resolved each
+        tick so it is picked up when the install-time copy materializes.
+
+        A changed file is validated before it replaces anything: every
+        function-type entry's callable must resolve. A rewrite whose callables
+        do not import (an unmigrated vault copy that iCloud materialized
+        mid-cycle and ``sync_reflections_yaml`` copied over the probed bytes)
+        is logged and refused, and the previously loaded entries stay in force
+        until the file changes again. That keeps the reload from re-opening
+        the ordering hole the Step 4.65 probe closes for the install path.
+        Startup has no prior set to keep, so ``load()`` stays unvalidated.
+
+        Returns True when the entries were replaced. A scheduler that never
+        called ``load()`` tracks no file and is left alone: callers that inject
+        ``_entries`` directly own them.
+        """
+        if self._loaded_path is None:
+            return False
+        path = self._loaded_path
+        if not path.exists():
+            path = self._registry_path or _resolve_registry_path()
+        signature = _registry_signature(path)
+        if path == self._loaded_path and signature == self._loaded_signature:
+            return False
+
+        candidate = load_registry(path)
+        # Record the signature before validating so a refused rewrite is not
+        # re-validated (and re-logged) on every tick until the next change.
+        self._loaded_path = path
+        self._loaded_signature = signature
+
+        unresolvable = _unresolvable_callables(candidate)
+        if unresolvable:
+            logger.error(
+                "[reflection] Registry %s changed but %d callable(s) do not resolve; "
+                "keeping the %d previously loaded reflection(s): %s",
+                path,
+                len(unresolvable),
+                len(self._entries),
+                "; ".join(unresolvable),
+            )
+            return False
+
+        self._entries = candidate
+        logger.info(
+            "[reflection] Registry %s changed, reloaded %d reflection(s)", path, len(candidate)
+        )
+        return True
 
     async def tick(self) -> int:
         """Run one scheduler tick: check all reflections and enqueue due ones.
@@ -658,6 +950,11 @@ class ReflectionScheduler:
         Returns:
             Number of reflections enqueued this tick.
         """
+        try:
+            self.reload_if_changed()
+        except Exception as e:
+            logger.error("[reflection] Registry reload check failed: %s", e, exc_info=True)
+
         now = time.time()
         enqueued = 0
         # Count of function-type reflections dispatched this tick.  We cap at
@@ -700,6 +997,12 @@ class ReflectionScheduler:
                 if not is_reflection_due(entry, state, now):
                     continue
 
+                # Read the due window HERE, before anything calls
+                # mark_started(): that write clobbers `ran_at`, and a due time
+                # computed after it would put a crash-retry of this same tick
+                # in a different window (#3183 lane 5b).
+                due_epoch = reflection_due_epoch(entry, state, now)
+
                 # Execute or enqueue
                 if entry.execution_type == "function":
                     # Per-tick cap: defer excess function-type reflections to the
@@ -715,7 +1018,7 @@ class ReflectionScheduler:
                     logger.info("[reflection] %s is due, executing", entry.name)
                     # Run function-type reflections as background tasks
                     task = asyncio.create_task(
-                        run_reflection(entry, state),
+                        run_reflection(entry, state, due_epoch=due_epoch),
                         name=f"reflection-{entry.name}",
                     )
                     self._running_tasks[entry.name] = task
@@ -730,7 +1033,7 @@ class ReflectionScheduler:
                 else:
                     logger.info("[reflection] %s is due, executing", entry.name)
                     # Agent-type reflections are enqueued to session queue
-                    await run_reflection(entry, state)
+                    await run_reflection(entry, state, due_epoch=due_epoch)
 
                 enqueued += 1
 

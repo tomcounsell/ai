@@ -20,6 +20,7 @@ Reflection callables return ``{"status": ..., "findings": [...], "summary": str}
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -32,10 +33,19 @@ from pathlib import Path
 
 from config.machine import get_machine_display_name
 from config.settings import settings
+from reflections.utilities import (
+    FALLBACK_ENG_CHAT,  # noqa: F401 -- re-exported for docs_auditor.FALLBACK_ENG_CHAT readers
+    load_local_projects,
+    resolve_host_eng_chat,
+)
 
 logger = logging.getLogger("reflections.docs_auditor")
 
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# FALLBACK_ENG_CHAT now lives in reflections/utilities.py (#3072); re-exported
+# here (via the import above) so any external reader of
+# docs_auditor.FALLBACK_ENG_CHAT still resolves.
 
 # ---------------------------------------------------------------------------
 # Module-level configuration
@@ -65,6 +75,16 @@ VAULT_SITE_MAPPING: dict[str, tuple[str, str | None]] = {
     "Personas/Philip Pullman – Head of Product.md": ("site/runtime.html", None),
 }
 
+# Doc trees the auditor never audits: plan documents are point-in-time working
+# records, not descriptions of the current status quo, so their stale paths and
+# superseded prose are correct-as-written and any finding against them is noise.
+#
+# Both live plans and the shipped-plan archive qualify. The archive is listed
+# explicitly because it deliberately sits OUTSIDE the `docs/plans/` prefix
+# (#2878) -- a prefix test on `docs/plans/` alone would readmit all 547
+# archived plans to the audit surface.
+NON_AUDITED_DOC_PREFIXES = ("docs/plans/", "docs/archive/plans-completed/")
+
 # Hard caps and tunables.
 NEIGHBORHOOD_CAP = 20
 VAULT_DRIFT_ISSUE_CAP = 5
@@ -74,11 +94,30 @@ STUB_DOC_LINE_THRESHOLD = 5
 STALE_BRANCH_AGE_DAYS = 7
 STALE_PR_AGE_DAYS = 14
 
+# Per-run cap shared by audit()'s advisory issue-filing loop and the rotation
+# withheld-fix filing loop. A separate budget from the vault-drift cap defined
+# just above, which bounds only _run_vault_drift_detection's own pre-rotation
+# loop — the two are deliberately never merged (R5-2), so the true
+# module-wide ceiling for one rotation run is this cap (advisory) + the
+# vault-drift cap + this cap again (withheld) = 15 issues, plus at most one
+# operational-failure filing.
+ISSUE_FILING_PER_RUN_CAP = 5
+
+# Finding categories whose underlying condition can recur after a human closes
+# the issue that reported it — a recurring Redis/vault comparison or a run
+# outcome, never a durable property of the tree. `_file_issue_if_new` selects
+# `states="open"` for these so a closed issue never silences a fresh
+# occurrence; every other category is "all", matched once, ever.
+_RECURRING_CONDITION_CATEGORIES = frozenset({"vault-drift", "operational-failure"})
+
 # Marker stamped into a docs-audit PR body when the existence invariant withheld
-# any fix on the run that opened it. The rotation path is the one path with no
-# human review — it opens the PR and the branch sweeper can auto-merge it — so
-# `_pr_is_auto_merge_eligible` refuses any PR carrying this marker. A withheld
-# fix means the auditor wanted to write something wrong; that needs a human read.
+# any fix on the run that opened it. Every docs-audit PR requires a human
+# merge (`/do-merge`) — the rotation path opens no code path that lands a
+# commit unreviewed — and the sweeper reads this marker to exempt a withheld
+# PR from its stale-close at STALE_PR_AGE_DAYS, since closing it would
+# discard fixes that already passed the existence invariant. A withheld fix
+# means the auditor wanted to write something wrong; that needs a human read
+# before the surviving fixes are merged.
 #
 # This is a *conditional* instance of the "review requirement" option that #2726
 # defers — it applies only on the withheld path, leaves clean-run commit/staging
@@ -87,19 +126,17 @@ STALE_PR_AGE_DAYS = 14
 # owner rules with the shipped partial gate in view, not against a blank slate.
 #
 # NOTE: The marker lives in the PR body with no cross-check, so a human
-# `gh pr edit` that rewrites the body re-enables auto-merge. A
-# `do-not-auto-merge` label would be sturdier, but the label does not exist in
-# this repo and `gh pr create --label` fails outright when it is missing — a
-# worse failure than the human-only path this guards. No automation here runs
-# `gh pr edit`.
+# `gh pr edit` that rewrites the body loses the sweeper's stale-close
+# exemption. A `do-not-close` label would be sturdier, but the label does not
+# exist in this repo and `gh pr create --label` fails outright when it is
+# missing — a worse failure than the human-only path this guards. No
+# automation here runs `gh pr edit`.
 WITHHELD_PR_MARKER = "<!-- docs-auditor:fixes-withheld -->"
 
-# Redis key namespace for state/locks/liveness.
+# Redis key namespace for state/locks.
 REDIS_LAST_RUN_HASH = "docs_audit:last_run"
 REDIS_RUNNING_KEY = "docs_audit:running:global"
 REDIS_SWEEPER_RUNNING_KEY = "docs_audit:sweeper:running"
-REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
-REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
 REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
 
@@ -292,6 +329,11 @@ def _resolve_neighborhood(
         except ValueError:
             continue
         rel_str = str(rel)
+        # Same exclusion the inbound branch makes: a plan is a point-in-time
+        # record, and a feature doc linking one must not readmit it to the
+        # audited neighborhood (#3133).
+        if rel_str.startswith(NON_AUDITED_DOC_PREFIXES):
+            continue
         if rel_str not in seen:
             seen.add(rel_str)
             neighborhood.append(rel)
@@ -309,7 +351,7 @@ def _resolve_neighborhood(
         )
         for line in result.stdout.splitlines():
             line = line.strip()
-            if not line or "docs/plans/" in line:
+            if not line or any(p in line for p in NON_AUDITED_DOC_PREFIXES):
                 continue
             if line not in seen:
                 seen.add(line)
@@ -353,7 +395,7 @@ def _resolve_pr_changed_files(repo_root: Path) -> list[Path]:
             line = line.strip()
             if not line:
                 continue
-            if line.endswith(".md") and not line.startswith("docs/plans/"):
+            if line.endswith(".md") and not line.startswith(NON_AUDITED_DOC_PREFIXES):
                 files.append(Path(line))
         return files[:NEIGHBORHOOD_CAP]
     except Exception as e:
@@ -521,29 +563,33 @@ def _detect_stale_term_fixes(content: str) -> list[tuple[re.Pattern[str], str]]:
 # invariant (#2759) — the #2711 corruption shape minus its directory prefix.
 _PATH_REF_RE = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.(?:py|md)")
 
-# Basename -> number of owning paths, built once per repo root from the git index.
+# Basename -> the paths that own it, built once per repo root from the git index.
 # Keyed on the resolved ``repo_root`` so distinct checkouts (and distinct test
 # ``tmp_path`` roots) never share an index. Cleared at the top of every ``audit()``
 # run so a long-lived process does not answer from a stale snapshot.
-_BASENAME_INDEX_CACHE: dict[Path, dict[str, int]] = {}
+_BASENAME_INDEX_CACHE: dict[Path, dict[str, list[str]]] = {}
 
 
-def _repo_basename_index(repo_root: Path) -> dict[str, int]:
-    """Map every tracked-or-untracked file's basename to how many paths own it.
+def _repo_paths_by_basename(repo_root: Path) -> dict[str, list[str]]:
+    """Map every tracked-or-untracked file's basename to the paths that own it.
 
     Built from ``git ls-files --cached --others --exclude-standard``: one
     subprocess, ``.gitignore`` respected for free, and files added but not yet
     committed still counted (a doc may reference a file added in the same change).
 
+    The single scan behind both name oracles — bare-name resolution
+    (``_repo_basename_index``) and suffix resolution (``_suffix_owners``) — so the
+    two can never disagree about what the repo contains.
+
     On any subprocess failure the index degrades to empty and a warning is logged;
-    bare-name resolution then falls back to the doc-relative check alone.
+    name resolution then falls back to the direct on-disk checks alone.
     """
     key = repo_root.resolve()
     cached = _BASENAME_INDEX_CACHE.get(key)
     if cached is not None:
         return cached
 
-    index: dict[str, int] = {}
+    index: dict[str, list[str]] = {}
     try:
         proc = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
@@ -554,8 +600,8 @@ def _repo_basename_index(repo_root: Path) -> dict[str, int]:
         )
         if proc.returncode != 0:
             logger.warning(
-                "docs_auditor: git ls-files failed in %s (rc=%s): %s — bare-name "
-                "existence falls back to doc-relative resolution only",
+                "docs_auditor: git ls-files failed in %s (rc=%s): %s — name "
+                "existence falls back to direct on-disk resolution only",
                 key,
                 proc.returncode,
                 (proc.stderr or "").strip(),
@@ -564,17 +610,84 @@ def _repo_basename_index(repo_root: Path) -> dict[str, int]:
             for line in proc.stdout.splitlines():
                 name = line.rsplit("/", 1)[-1]
                 if name:
-                    index[name] = index.get(name, 0) + 1
+                    index.setdefault(name, []).append(line)
     except (OSError, subprocess.SubprocessError) as e:
         logger.warning(
-            "docs_auditor: git ls-files errored in %s: %s — bare-name existence "
-            "falls back to doc-relative resolution only",
+            "docs_auditor: git ls-files errored in %s: %s — name existence "
+            "falls back to direct on-disk resolution only",
             key,
             e,
         )
 
     _BASENAME_INDEX_CACHE[key] = index
     return index
+
+
+def _repo_basename_index(repo_root: Path) -> dict[str, int]:
+    """Map every tracked-or-untracked file's basename to how many paths own it."""
+    return {name: len(paths) for name, paths in _repo_paths_by_basename(repo_root).items()}
+
+
+def _suffix_owners(ref: str, repo_root: Path) -> list[str]:
+    """Repo paths whose trailing path components are exactly ``ref``.
+
+    A multi-segment reference is often written package-relative rather than rooted
+    at the repo root — ``hook_utils/hook_target.py`` names a module that lives at
+    ``.claude/hooks/hook_utils/hook_target.py`` (#2936). Resolving such a ref
+    against ``repo_root`` alone reads it as deleted.
+
+    The match is anchored on **path-component boundaries**: a path owns ``ref``
+    only if it equals ``ref`` or ends with ``"/" + ref``, so ``utils/target.py``
+    never resolves via ``myutils/target.py``.
+    """
+    basename = ref.rsplit("/", 1)[-1]
+    return [
+        path
+        for path in _repo_paths_by_basename(repo_root).get(basename, [])
+        if path == ref or path.endswith("/" + ref)
+    ]
+
+
+def _installed_package_target_exists(ref: str) -> bool:
+    """Whether ``ref`` names a real file inside an installed (site-packages) package.
+
+    Prose legitimately cites upstream dependency source while explaining upstream
+    behavior — ``popoto/redis_db.py`` names a real module even though no repo path
+    owns it (#3133). This is a **second resolution root** for the deleted-target
+    detector, consulted only after the repo root and the suffix index both come up
+    empty; it never widens ``git ls-files``.
+
+    The first path component must be an importable top-level package whose
+    location resolves under ``site-packages`` (or ``dist-packages``). The
+    location requirement is what keeps this fail-closed: an editable install of a
+    first-party package resolves *outside* site-packages, so a branch-deleted
+    first-party module can never be vouched for by the primary checkout's
+    editable path entry. Any resolution error keeps the current behavior
+    (report).
+    """
+    first, _, rest = ref.partition("/")
+    if not rest or not first.isidentifier():
+        return False
+    try:
+        spec = importlib.util.find_spec(first)
+    except (ImportError, ValueError):
+        return False
+    if spec is None:
+        return False
+    roots: list[Path] = []
+    if spec.submodule_search_locations:
+        roots.extend(Path(p) for p in spec.submodule_search_locations)
+    elif spec.origin:
+        roots.append(Path(spec.origin).parent)
+    for root in roots:
+        try:
+            if "site-packages" not in root.parts and "dist-packages" not in root.parts:
+                continue
+            if (root / rest).is_file():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _absent_new_path_refs(
@@ -589,7 +702,10 @@ def _absent_new_path_refs(
 
     Resolution order:
 
-    - A ref containing ``/`` resolves against ``repo_root`` alone, exactly as before.
+    - A ref containing ``/`` resolves first against ``repo_root``, then by
+      component-anchored suffix match over the ``git ls-files`` index (#2936),
+      because a multi-segment ref is often written package-relative
+      (``hook_utils/hook_target.py``) rather than rooted at the repo root.
     - A **bare** ref (no ``/``, #2759) resolves first against the doc's own directory
       (``repo_root / doc_path.parent / ref``), because a bare name in prose is most
       often a sibling; then against the ``git ls-files`` basename index.
@@ -603,8 +719,19 @@ def _absent_new_path_refs(
     absent: list[str] = []
     for ref in sorted(set(_PATH_REF_RE.findall(candidate)) - original_refs):
         if "/" in ref:
-            if not (repo_root / ref).exists():
+            if (repo_root / ref).exists():
+                continue
+            owners = _suffix_owners(ref, repo_root)
+            if not owners:
                 absent.append(ref)
+            elif len(owners) > 1:
+                logger.debug(
+                    "docs_auditor: nested ref %r in %s resolves by suffix to %d paths — "
+                    "ambiguous but present, allowed through",
+                    ref,
+                    doc_path,
+                    len(owners),
+                )
             continue
         if (repo_root / doc_path.parent / ref).exists():
             continue
@@ -770,20 +897,73 @@ def _apply_fixes_to_file(
 
 
 # Path components that are obvious illustrative stand-ins, not real module names.
+# `filename`/`path`/`name` are the link-specific stand-ins the `.md` branch
+# surfaces (spike-6); `_is_placeholder_path` is shared by both branches.
 _PLACEHOLDER_PATH_COMPONENTS = frozenset(
-    {"foo", "bar", "baz", "qux", "quux", "example", "your-module", "mymodule", "sample"}
+    {
+        "foo",
+        "bar",
+        "baz",
+        "qux",
+        "quux",
+        "example",
+        "your-module",
+        "mymodule",
+        "sample",
+        "filename",
+        "path",
+        "name",
+    }
 )
 
-# Heading keywords whose presence means the doc is deliberately recording a deletion.
-_DELETION_HEADING_KEYWORDS = ("migration", "removed", "deleted", "deprecated")
+# Heading-keyword stems whose presence means the doc is deliberately recording a
+# deletion. Stems, not exact inflections, so "## Dead SDK Path Deletion" and
+# "## Hook Cleanup" both match without listing every inflected form.
+_DELETION_HEADING_KEYWORDS = (
+    "delet",
+    "remov",
+    "deprecat",
+    "migrat",
+    "cleanup",
+    "obsolete",
+    "retire",
+)
 
-# Prose cues that a nearby line is documenting a deletion rather than a live reference.
-_DELETION_PROSE_CUES = (
-    "deleted module",
-    "no longer in the codebase",
-    "no longer exists",
-    "previously in",
+# Word-anchored prose cues that a nearby line is documenting a deletion rather
+# than a live reference. Individual words/short phrases, not full sentences —
+# real corpus prose reads "deleted (250 lines)" or "no longer needed", not the
+# single fixed phrase "deleted module". Compiled once, in the shape of
+# `_MIGRATION_CUE_WORD_RE`, so a bare substring test cannot fire inside an
+# unrelated longer word.
+_DELETION_PROSE_CUE_WORDS = (
+    "deleted",
+    "removed",
+    "no longer",
+    "previously",
     "formerly",
+    "deprecated",
+)
+_DELETION_PROSE_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _DELETION_PROSE_CUE_WORDS) + r")\b"
+)
+
+# Word-anchored cues that a match's own line is a *live* claim, not a deletion
+# record — cancels the deletion-narrative suppression when present. Keyword-only
+# and evaluated only when the caller opts in via `live_claim_veto=True` (see
+# `_is_documented_deletion`): the detector's cost for a wrong suppression is a
+# missed report, while the write path's cost for a wrong un-suppression is an
+# unreviewed rewrite of narrative prose, so only the detector opts in.
+_LIVE_CLAIM_VETO_WORDS = (
+    "remain",
+    "remains",
+    "still",
+    "defined in",
+    "lives in",
+    "currently",
+    "implemented in",
+)
+_LIVE_CLAIM_VETO_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _LIVE_CLAIM_VETO_WORDS) + r")\b"
 )
 
 
@@ -793,16 +973,19 @@ def _is_placeholder_path(path: str) -> bool:
     A path is a placeholder when any of its components is a well-known stand-in
     (``foo``, ``bar``, ``example`` ...) or a single lowercase letter directory.
     Empty or single-segment paths return False (the detector regex guarantees a
-    ``dir/file.py`` shape, so this only guards malformed/odd input).
+    ``dir/file.{py,md}`` shape, so this only guards malformed/odd input).
     """
     if not path or "/" not in path:
         return False
     components = path.split("/")
     for i, component in enumerate(components):
-        # For the final component, compare the file stem (strip the .py suffix)
-        # so ``agent/docs_handler/foo.py`` is caught on its ``foo`` stem.
+        # For the final component, compare the file stem (strip a .py or .md
+        # suffix) so ``agent/docs_handler/foo.py`` is caught on its ``foo``
+        # stem, and so is ``docs/features/name.md``.
         is_last = i == len(components) - 1
-        candidate = component[:-3] if is_last and component.endswith(".py") else component
+        candidate = component
+        if is_last and (candidate.endswith(".py") or candidate.endswith(".md")):
+            candidate = candidate[:-3]
         lowered = candidate.lower()
         if lowered in _PLACEHOLDER_PATH_COMPONENTS:
             return True
@@ -845,41 +1028,163 @@ def _build_line_context(content: str) -> tuple[list[bool], list[str]]:
 
 
 def _is_documented_deletion(
-    line_idx: int, lines: list[str], in_fence: list[bool], heading_for_line: list[str]
+    line_idx: int,
+    lines: list[str],
+    in_fence: list[bool],
+    heading_for_line: list[str],
+    *,
+    live_claim_veto: bool = False,
 ) -> bool:
     """Return True if a match at ``line_idx`` is an illustrative or documented deletion.
 
-    Three conservative cues (any one suppresses the finding):
-    1. The match falls inside a fenced code block (illustrative example).
-    2. The nearest preceding heading names a deletion (migration/removed/
-       deleted/deprecated).
-    3. The match's line or an immediately adjacent line carries a deletion-prose
-       cue ("deleted module", "no longer exists", ...).
+    Three conservative cues (any one suppresses the finding), evaluated in
+    order:
+    1. The match falls inside a fenced code block (illustrative example) —
+       always wins; a fenced block is illustrative no matter what it says.
+    2. The nearest preceding heading names a deletion, matched on a stem
+       (``delet``, ``remov``, ``deprecat``, ``migrat``, ``cleanup``,
+       ``obsolete``, ``retire``) rather than an exact inflection.
+    3. The match's line or a line within 2 lines carries a word-anchored
+       deletion-prose cue (``deleted``, ``removed``, ``no longer``, ...).
+
+    ``live_claim_veto`` (keyword-only, default ``False``) cancels tiers 2 and 3
+    when the match's own line carries a live-claim cue (``remains``, ``still``,
+    ``defined in``, ...) — evaluated **after** the fence tier (a fenced block
+    stays illustrative regardless) and **before** the heading/prose tiers, so
+    a line like *"`fail_stage()` remains defined in `agent/hooks/gone.py`"*
+    under a ``## Migration`` heading is still reported. Off by default and
+    opt-in only from ``_detect_deleted_target_issues`` — see that function and
+    ``_make_stale_term_replacer``, which never sets it, for why: this
+    predicate's ``True`` means "suppress" at both call sites, but suppression
+    costs differently on each. Widening what the *detector* suppresses costs a
+    missed report; widening what the *write path* suppresses costs an
+    auditor-authored rewrite of narrative prose on every PR — the exact
+    behavior #2739 exists to gate.
 
     Inline single-backtick code is NOT suppressed — that is how genuine
     references are written.
     """
     if line_idx < len(in_fence) and in_fence[line_idx]:
         return True
+    if (
+        live_claim_veto
+        and line_idx < len(lines)
+        and _LIVE_CLAIM_VETO_RE.search(lines[line_idx].lower())
+    ):
+        return False
     if line_idx < len(heading_for_line):
         heading = heading_for_line[line_idx]
         if any(kw in heading for kw in _DELETION_HEADING_KEYWORDS):
             return True
-    for adj in (line_idx - 1, line_idx, line_idx + 1):
+    for adj in (line_idx - 2, line_idx - 1, line_idx, line_idx + 1, line_idx + 2):
         if 0 <= adj < len(lines):
-            lowered = lines[adj].lower()
-            if any(cue in lowered for cue in _DELETION_PROSE_CUES):
+            if _DELETION_PROSE_CUE_RE.search(lines[adj].lower()):
                 return True
     return False
+
+
+# Markdown link syntax: `[label](target)`. Anchor/query stripping and scheme
+# detection happen after the match, in `_resolve_md_link_target`.
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+def _in_md_link_scope(doc_path: Path) -> bool:
+    """Whether ``doc_path`` is in scope for the ``.md`` broken-link branch.
+
+    Scope is ``docs/`` minus ``docs/plans/completed/`` and ``docs/plans/done/``
+    — archived plans deliberately record history and are not a live surface a
+    human reviews for broken links. Everything outside ``docs/`` (including
+    ``.claude/``) is out of scope for this branch; the ``.py`` branch has no
+    such restriction because it runs over whatever neighborhood the caller
+    already resolved.
+    """
+    parts = doc_path.parts
+    if not parts or parts[0] != "docs":
+        return False
+    if len(parts) >= 3 and parts[1] == "plans" and parts[2] in ("completed", "done"):
+        return False
+    return True
+
+
+def _resolve_md_link_target(raw_target: str, doc_path: Path, repo_root: Path) -> Path | None:
+    """Resolve a markdown link target to a repo-relative ``Path``, or ``None``.
+
+    Anchors and queries are stripped before resolution — ``./gone.md#section``
+    resolves as ``gone.md``, so the title (and dedup key) stay stable regardless
+    of which section a link points at. Resolution is **doc-relative**: a
+    leading ``/`` resolves against the repo root, everything else resolves
+    against the containing document's own directory — the frame markdown
+    renderers actually use (the #2725 / #2741 regression this branch exists to
+    keep fixed). Returns ``None`` for a non-``.md`` target, or one that
+    normalizes outside the repo root.
+    """
+    target = raw_target.split("#", 1)[0].split("?", 1)[0].strip()
+    if not target or not target.endswith(".md"):
+        return None
+    root = repo_root.resolve()
+    if target.startswith("/"):
+        candidate = (root / target.lstrip("/")).resolve()
+    else:
+        candidate = (root / doc_path.parent / target).resolve()
+    try:
+        return candidate.relative_to(root)
+    except ValueError:
+        return None
+
+
+def _match_inside_code_span(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` lies wholly inside an inline `` `code span` ``.
+
+    Scanning is confined to the match's own line, mirroring
+    ``_match_inside_path_token``. A markdown link inside a code span is a
+    literal illustration of syntax, not a live reference — the deliberate
+    asymmetry with the ``.py`` branch, which requires backticks to be a
+    reference at all.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+    rel_start, rel_end = start - line_start, end - line_start
+    return any(
+        bm.start() <= rel_start and rel_end <= bm.end() for bm in re.finditer(r"`[^`]*`", line)
+    )
 
 
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
     """File issues for references to deleted targets.
 
-    Suppresses three classes of false positive before emitting a finding:
-    placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
-    code blocks, and paths under a deletion-recording heading or deletion prose.
-    Every suppressed match is logged at DEBUG so operators can audit the filter.
+    Two reference shapes, sharing one deletion-narrative hatch
+    (``_is_documented_deletion``):
+
+    * Backticked ``.py`` paths, e.g. `` `agent/gone.py` `` — repo-wide, no
+      scope restriction beyond what the caller's neighborhood resolved.
+      Suppresses two further classes beyond the two shared below:
+      package-relative paths that resolve by component-anchored suffix (#2936),
+      and citations of installed-dependency source that resolve under
+      site-packages via ``_installed_package_target_exists`` (#3133).
+    * Markdown-link ``.md`` targets, e.g. ``[label](gone.md)`` — scoped to
+      ``docs/`` minus ``docs/plans/completed/`` and ``docs/plans/done/`` (see
+      ``_in_md_link_scope``). Resolved **doc-relative**, not repo-root-relative
+      (the #2725 / #2741 frame rule): a target that exists at the repo root but
+      not doc-relative is still reported. A markdown link inside a code span is
+      not a reference — the deliberate asymmetry with the ``.py`` branch, which
+      requires backticks to *be* one.
+
+    Both branches suppress the same two classes of false positive:
+    placeholder/example paths and matches inside fenced illustrative code
+    blocks, plus matches under a deletion-recording heading or deletion prose
+    — the latter via ``_is_documented_deletion(..., live_claim_veto=True)``,
+    the only caller that passes the veto (it is a detector, never the write
+    path). Every suppressed match is logged at DEBUG so operators can audit
+    the filter.
+
+    The ``.md`` branch only ever *reports* a broken link; it never rewrites
+    the doc, and no auto-repairing replacement is coming back — an auditor
+    deleting lines from a human's index file on its own judgment is exactly
+    the unreviewed-write class #2739 exists to gate.
     """
     findings: list[dict] = []
     lines = content.splitlines()
@@ -900,7 +1205,9 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             )
             continue
         line_idx = content.count("\n", 0, m.start())
-        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+        if _is_documented_deletion(
+            line_idx, lines, in_fence, heading_for_line, live_claim_veto=True
+        ):
             logger.debug(
                 "docs_auditor: suppressed deleted-target finding for %s in %s "
                 "(fenced block or documented deletion)",
@@ -910,6 +1217,32 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
             continue
         if (repo_root / path).exists():
             continue
+        # A reference need not be rooted at the repo root to be correct: prose names
+        # a module package-relative (`hook_utils/hook_target.py`) as often as it
+        # names it from the top. Any component-anchored suffix owner means the
+        # target is real, and — as on the write path — one or more owners resolves
+        # the name; ambiguity was never the failure mode this detector guards (#2936).
+        owners = _suffix_owners(path, repo_root)
+        if owners:
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(resolves by suffix to %s)",
+                path,
+                doc_path,
+                ", ".join(owners),
+            )
+            continue
+        # Third and last resolution root: an installed dependency. A citation of
+        # upstream source (`popoto/redis_db.py`) has no repo owner but names a
+        # real module (#3133).
+        if _installed_package_target_exists(path):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(resolves inside an installed package)",
+                path,
+                doc_path,
+            )
+            continue
         findings.append(
             {
                 "title": f"Doc references deleted target: {path} (in {doc_path})",
@@ -917,6 +1250,46 @@ def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path)
                 "category": "deleted-target",
             }
         )
+
+    if _in_md_link_scope(doc_path):
+        for m in _MD_LINK_RE.finditer(content):
+            raw_target = m.group(1).strip()
+            if not raw_target or raw_target.startswith("#") or _URI_SCHEME_RE.match(raw_target):
+                continue
+            if _match_inside_code_span(content, m.start(), m.end()):
+                continue
+            rel = _resolve_md_link_target(raw_target, doc_path, repo_root)
+            if rel is None:
+                continue
+            rel_str = str(rel)
+            if _is_placeholder_path(rel_str):
+                logger.debug(
+                    "docs_auditor: suppressed broken-md-link finding for placeholder path %s in %s",
+                    rel_str,
+                    doc_path,
+                )
+                continue
+            line_idx = content.count("\n", 0, m.start())
+            if _is_documented_deletion(
+                line_idx, lines, in_fence, heading_for_line, live_claim_veto=True
+            ):
+                logger.debug(
+                    "docs_auditor: suppressed broken-md-link finding for %s in %s "
+                    "(fenced block or documented deletion)",
+                    rel_str,
+                    doc_path,
+                )
+                continue
+            if (repo_root / rel).exists():
+                continue
+            findings.append(
+                {
+                    "title": f"Doc references missing link target: {rel_str} (in {doc_path})",
+                    "body": f"`{doc_path}` links to `{rel_str}` which does not exist in the repo.",
+                    "category": "broken-md-link",
+                }
+            )
+
     return findings
 
 
@@ -1000,8 +1373,8 @@ def _filing_machine_name() -> str:
     return get_machine_display_name()
 
 
-def _open_issue_exists(title: str, repo_root: Path) -> bool:
-    """Return True if an open `documentation` issue already has this exact title.
+def _issue_exists(title: str, repo_root: Path, *, states: str = "all") -> bool:
+    """Return True if an issue with this exact title already exists.
 
     This is the authoritative cross-machine dedup gate: local Redis dedup keys
     are per-machine and invisible across hosts, so two machines would otherwise
@@ -1010,10 +1383,28 @@ def _open_issue_exists(title: str, repo_root: Path) -> bool:
     an exact normalized-title comparison in Python (the title already encodes
     both the path and the doc, making it a natural composite key).
 
+    ``states`` defaults to ``"all"`` — most findings this module files (a
+    broken doc reference, an orphan plan, a stub doc) are a claim about the
+    tree's current state, and a human who reads one, rules on it, and closes
+    it without editing the doc has made a durable decision; matching only
+    ``"open"`` issues would re-file that exact finding a month later once the
+    per-machine Redis dedup key expires. ``states="open"`` is for the two
+    *recurring-condition* categories (see ``_RECURRING_CONDITION_CATEGORIES``)
+    whose underlying comparison can genuinely recur after a close: closing one
+    of those would otherwise silence the condition forever.
+
+    ``--limit 100`` is not decoration: ``gh issue list`` defaults to 30, and
+    under ``--state all`` a repo with more than 30 issues matching the search
+    term can push the exact title off the first page, which is a silent
+    fail-open that files a duplicate. No label filter — the label a triager
+    applied at filing time can be edited later, and the authoritative match
+    below is the exact title compare, not the label.
+
     Fails open: on any `gh` failure, non-zero exit, or malformed output, log a
     WARNING and return False so a genuine finding is never silently dropped —
     the worst case is the duplicate this gate was meant to prevent, which the
-    Redis fast-path still suppresses on the next run.
+    Redis fast-path still suppresses on the next run (for ``states="all"``
+    callers; the recurring-condition callers skip that fast-path by design).
     """
     normalized_query = _normalize_title(title)
     try:
@@ -1023,9 +1414,9 @@ def _open_issue_exists(title: str, repo_root: Path) -> bool:
                 "issue",
                 "list",
                 "--state",
-                "open",
-                "--label",
-                "documentation",
+                states,
+                "--limit",
+                "100",
                 "--search",
                 title,
                 "--json",
@@ -1065,26 +1456,42 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
     """File a GitHub issue via gh CLI, deduped by title. Returns True if filed.
 
     Two-tier dedup: a local Redis fast-path (per-machine cache) gates the
-    expensive live-tracker query, and `_open_issue_exists` is the authoritative
+    expensive live-tracker query, and `_issue_exists` is the authoritative
     cross-machine gate. Local Redis alone is insufficient because each machine
     keeps its own Redis, so the same finding would be filed once per machine.
+
+    The fast-path is gated on the finding's category. For a recurring-condition
+    category (``_RECURRING_CONDITION_CATEGORIES``) the 30-day Redis key would
+    otherwise suppress a genuine recurrence of the same condition for up to a
+    month after a human closed the issue the first time — the fast-path never
+    reaches `_issue_exists`, so its `states="open"` selection would be inert for
+    that whole window. Gating only the *read* is sufficient: `dedup_key` has
+    exactly one reader (this `exists` check) and two writers (both below), so
+    once the read is off for a category the key is never consulted for it
+    again — the two `set()` calls stay unconditional as a fail-open cap during
+    a `gh` outage (R8-1).
     """
     title = finding.get("title", "").strip()
     if not title:
         return False
+    states = "open" if finding.get("category") in _RECURRING_CONDITION_CATEGORIES else "all"
     title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()[:16]
     dedup_key = f"{REDIS_ISSUE_DEDUP_PREFIX}:{title_hash}"
     redis_client = None
     try:
         redis_client = _get_redis()
-        # Fast-path: if this machine already filed it, skip the tracker query entirely.
-        if redis_client.exists(dedup_key):
+        # Fast-path: if this machine already filed it, skip the tracker query
+        # entirely — but only for a once-ever category. A recurring-condition
+        # category must always reach `_issue_exists(states="open")`, or a
+        # closed issue for a condition that has genuinely returned stays
+        # silenced by this per-machine cache for up to 30 days.
+        if states == "all" and redis_client.exists(dedup_key):
             return False  # already filed
     except Exception:
         redis_client = None  # If Redis is unavailable, attempt to file without dedup
 
     # Authoritative cross-machine gate: another machine may have already filed this.
-    if _open_issue_exists(title, repo_root):
+    if _issue_exists(title, repo_root, states=states):
         # Record the local fast-path key so subsequent runs skip the tracker query.
         if redis_client is not None:
             try:
@@ -1140,26 +1547,67 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Telegram notification (mirrors _send_log_review_telegram pattern)
+# Telegram notification (destination resolved from the audited repo root)
 # ---------------------------------------------------------------------------
 
 
-def _send_telegram_notification(message: str) -> None:
-    """Best-effort Telegram notification. Swallows all subprocess failures."""
+def _resolve_notify_chat(repo_root: Path) -> str | None:
+    """Map the audited repo root to a ``--chat`` destination, or ``None``.
+
+    Delegates to ``reflections.utilities.resolve_host_eng_chat`` (#3072),
+    which carries the full ladder and reasoning this function used to own.
+    Passes this module's own bindings through explicitly — read here, in a
+    body that lives in ``docs_auditor``, so
+    ``patch("reflections.docs_auditor.load_local_projects", ...)`` and
+    ``patch("reflections.docs_auditor.PROJECT_ROOT", ...)`` both still land on
+    the value actually used.
+    """
+    return resolve_host_eng_chat(
+        repo_root, load_projects=load_local_projects, project_root=PROJECT_ROOT
+    )
+
+
+def _send_telegram_notification(message: str, *, repo_root: Path | None = None) -> bool:
+    """Best-effort Telegram notification, addressed by the audited repo root.
+
+    Resolves the destination via ``_resolve_notify_chat((repo_root or
+    PROJECT_ROOT).resolve())`` — computed here, not defaulted in the
+    signature, so a test that patches the module-level ``PROJECT_ROOT``
+    global is honored at call time rather than at import time.
+
+    Returns ``False`` **only** when no destination resolved — no subprocess
+    is invoked in that case. Every other path, including a swallowed
+    ``FileNotFoundError``/``TimeoutExpired``/``Exception`` or a non-zero
+    ``valor-telegram`` exit code, returns ``True``: a destination was
+    resolved and a send was attempted, so the caller's "no Eng: group
+    configured" finding text stays accurate only for the ``False`` case.
+    """
+    root = (repo_root or PROJECT_ROOT).resolve()
+    chat = _resolve_notify_chat(root)
+    if chat is None:
+        return False
     try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
+        proc = subprocess.run(
+            ["valor-telegram", "send", "--chat", chat, message],
             capture_output=True,
             text=True,
             timeout=settings.timeouts.git_subprocess_s,
             check=False,
         )
+        if proc.returncode != 0:
+            logger.warning(
+                "docs_auditor: valor-telegram exited %s for chat %s: %s",
+                proc.returncode,
+                chat,
+                (proc.stderr or "")[:200],
+            )
     except FileNotFoundError:
         logger.warning("docs_auditor: valor-telegram not on PATH; skipping Telegram notify")
     except subprocess.TimeoutExpired:
         logger.warning("docs_auditor: valor-telegram send timed out")
     except Exception as e:
         logger.warning(f"docs_auditor: valor-telegram send failed: {e}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1625,14 @@ def audit(
 ) -> dict:
     """Unified docs-auditor entrypoint. Synchronous.
 
+    **This function never commits.** It writes fixes to the working tree, fires
+    the memory-refresh hook on what it wrote, and returns ``files_touched``. The
+    tree is left dirty and the **caller owns the commit**, because every write
+    the auditor makes has to pass a named review gate before it becomes a
+    permanent record: the ``/do-docs`` skill reads the diff for
+    ``pr-changed-files``, and the rotation reflection's gate is the pull request
+    ``run_docs_auditor`` opens.
+
     Args:
         primary_path: Repo-relative path to the primary doc to audit. When
             ``scope_mode == "pr-changed-files"`` this is ignored.
@@ -1188,9 +1644,27 @@ def audit(
 
     Returns:
         Dict with ``status``, ``files_touched``, ``fixes_applied``,
-        ``issues_filed``, ``pr_url``.
+        ``issues_filed``, ``pr_url``, ``fixes_withheld``, ``withheld``.
+
+        Callers must branch on ``fixes_withheld > 0`` rather than trust
+        ``status``: a run that withheld every fix still reports success.
+
+        ``status == "error"`` with a non-empty ``files_touched`` means "wrote,
+        then failed": an exception raised after the write loop (most likely
+        from the advisory issue-filing calls) is caught here and returned as a
+        result carrying the write ledger, instead of propagating and
+        discarding it. The caller must restore the paths named in
+        ``files_touched`` rather than leave them dirty. An exception raised
+        **above** this guard — inside ``_resolve_neighborhood`` or
+        ``_resolve_pr_changed_files``, before any write has happened — still
+        propagates; the caller must be exception-safe as well as status-aware.
+
+        Second-order effect: the module's ``__main__`` block calls
+        ``audit(...)`` and prints the result as JSON. An internal failure under
+        ``scope_mode="pr-changed-files"`` that used to exit non-zero with a
+        traceback now exits 0 with a ``status="error"`` dict.
     """
-    # The bare-name existence oracle is a per-*run* snapshot: a long-lived process
+    # The name existence oracle is a per-*run* snapshot: a long-lived process
     # must not answer from an index built before the last commit (#2759).
     _BASENAME_INDEX_CACHE.clear()
 
@@ -1231,70 +1705,86 @@ def audit(
     issue_findings: list[dict] = []
     withheld: list[dict] = []
 
-    for path in files:
-        full = root / path
-        if not full.exists():
-            continue
-        try:
-            content = full.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
+    # This block runs after the write loop has a chance to append to `touched`,
+    # so any exception in here — including the advisory issue-filing calls, the
+    # most likely source — must not discard the write ledger the caller needs to
+    # restore. A caller reads `status == "error"` with a non-empty
+    # `files_touched` as "wrote, then failed; must restore".
+    try:
+        for path in files:
+            full = root / path
+            if not full.exists():
+                continue
+            try:
+                content = full.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
 
-        # Auto-fix detectors — anchored stale terms are the only fix channel.
-        regex_fixes = _detect_stale_term_fixes(content)
+            # Auto-fix detectors — anchored stale terms are the only fix channel.
+            regex_fixes = _detect_stale_term_fixes(content)
 
-        # Apply-mode writes are markdown-only (#2058). The detector above is
-        # markdown-regex based (bare-term renames), so a committed non-.md file
-        # that lands in the same PR — e.g. a site/*.html doc page — must never be
-        # auto-rewritten inside tags, attributes, or inline <script>. Reporting
-        # still runs; only the write-back is guarded.
-        if regex_fixes and apply_mode == "apply" and str(path).endswith(".md"):
-            applied, rejected = _apply_fixes_to_file(path, root, regex_fixes)
-            withheld.extend(rejected)
-            if applied > 0:
-                total_fixes += applied
-                touched.append(str(path))
+            # Apply-mode writes are markdown-only (#2058). The detector above is
+            # markdown-regex based (bare-term renames), so a committed non-.md file
+            # that lands in the same PR — e.g. a site/*.html doc page — must never be
+            # auto-rewritten inside tags, attributes, or inline <script>. Reporting
+            # still runs; only the write-back is guarded.
+            if regex_fixes and apply_mode == "apply" and str(path).endswith(".md"):
+                applied, rejected = _apply_fixes_to_file(path, root, regex_fixes)
+                withheld.extend(rejected)
+                if applied > 0:
+                    total_fixes += applied
+                    touched.append(str(path))
 
-        # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
-        # deleted-target reference has no rename to correct to. These are
-        # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
-        # every PR's docs stage, so filing advisory issues there re-files the
-        # same unfixable findings per-PR (and re-files any that were closed
-        # without fixing the doc, since the dedup gate only sees open issues),
-        # which is the documentation-label duplicate flood. Auto-fix detectors
-        # above still run per-PR; only issue-filing is gated to rotation.
+            # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
+            # deleted-target reference has no rename to correct to. These are
+            # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
+            # every PR's docs stage, so filing advisory issues there re-files the
+            # same unfixable findings per-PR, which is the documentation-label
+            # duplicate flood. Auto-fix detectors above still run per-PR; only
+            # issue-filing is gated to rotation.
+            if scope_mode == "rotation":
+                issue_findings.extend(_detect_deleted_target_issues(path, content, root))
+                stub = _detect_stub_doc(path, content)
+                if stub is not None:
+                    issue_findings.append(stub)
+
+        # Orphan plans (repo-wide, run once)
         if scope_mode == "rotation":
-            issue_findings.extend(_detect_deleted_target_issues(path, content, root))
-            stub = _detect_stub_doc(path, content)
-            if stub is not None:
-                issue_findings.append(stub)
+            issue_findings.extend(_detect_orphan_plan_issues(root))
 
-    # Orphan plans (repo-wide, run once)
-    if scope_mode == "rotation":
-        issue_findings.extend(_detect_orphan_plan_issues(root))
+        # File issues (deduped); only when applying in rotation scope.
+        # Hard per-run cap prevents flood: rotation allows up to 5.
+        per_run_cap = ISSUE_FILING_PER_RUN_CAP if scope_mode == "rotation" else 3
+        if apply_mode == "apply" and scope_mode == "rotation":
+            for finding in issue_findings:
+                if issues_filed >= per_run_cap:
+                    logger.warning(
+                        "docs_auditor: per-run cap (%d) reached for scope=%s — "
+                        "%d finding(s) suppressed; re-run to file remaining",
+                        per_run_cap,
+                        scope_mode,
+                        len(issue_findings) - issues_filed,
+                    )
+                    break
+                if _file_issue_if_new(finding, root):
+                    issues_filed += 1
+    except Exception as e:
+        logger.warning(f"docs_auditor: audit write/issue-filing loop failed: {e}")
+        return _ok_result(
+            "error",
+            files_touched=touched,
+            fixes_applied=total_fixes,
+            issues_filed=issues_filed,
+            fixes_withheld=len(withheld),
+            withheld=withheld,
+            extras={"reason": str(e)},
+        )
 
-    # File issues (deduped); only when applying in rotation scope.
-    # Hard per-run cap prevents flood: rotation allows up to 5.
-    per_run_cap = 5 if scope_mode == "rotation" else 3
-    if apply_mode == "apply" and scope_mode == "rotation":
-        for finding in issue_findings:
-            if issues_filed >= per_run_cap:
-                logger.warning(
-                    "docs_auditor: per-run cap (%d) reached for scope=%s — "
-                    "%d finding(s) suppressed; re-run to file remaining",
-                    per_run_cap,
-                    scope_mode,
-                    len(issue_findings) - issues_filed,
-                )
-                break
-            if _file_issue_if_new(finding, root):
-                issues_filed += 1
-
-    # Caller B (pr-changed-files): commit to current branch and fire memory
-    # refresh hook here so the /do-docs skill stays a thin caller. Caller A
-    # (rotation) handles its own commit/push/hook in run_docs_auditor.
+    # Caller B (pr-changed-files): fire the memory-refresh hook on the applied
+    # set. The hook operates on applied paths and needs no commit — the working
+    # tree stays dirty for the /do-docs skill's review gate. Caller A (rotation)
+    # handles its own branch/commit/push/hook in run_docs_auditor.
     if scope_mode == "pr-changed-files" and apply_mode == "apply" and touched:
-        _commit_current_branch(root, touched)
         try:
             refresh_docs_in_memory(touched)
         except Exception as e:
@@ -1308,32 +1798,6 @@ def audit(
         fixes_withheld=len(withheld),
         withheld=withheld,
     )
-
-
-def _commit_current_branch(repo_root: Path, touched: list[str]) -> None:
-    """Stage and commit substrate-applied changes on the current branch.
-
-    Best-effort: errors are logged not raised. Used by Caller B (/do-docs)
-    so the skill itself does not need to invoke git after the substrate.
-    """
-    try:
-        subprocess.run(
-            ["git", "add"] + touched,
-            capture_output=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-            check=False,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", f"Docs: cascade fixes ({len(touched)} files)"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-            check=False,
-        )
-    except Exception as e:
-        logger.warning(f"docs_auditor: current-branch commit failed: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1456,32 +1920,167 @@ def _record_daily_pr(repo_root: Path) -> None:
         logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
 
 
+def _current_ref(repo_root: Path) -> str | None:
+    """Return the ref the checkout is currently on, or None if it cannot be read."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            return None
+        return (result.stdout or "").strip() or None
+    except Exception as e:
+        logger.warning(f"docs_auditor: current-ref read failed: {e}")
+        return None
+
+
+def _restore_checkout(
+    repo_root: Path, starting_ref: str, branch: str | None, files_touched: list[str]
+) -> bool:
+    """Return the checkout to ``starting_ref`` and discard only the auditor's own paths.
+
+    Scoped by construction: no ``checkout -f``, no ``reset --hard``, no ``clean``.
+    The auditor runs in the shared main checkout where other lanes routinely hold
+    uncommitted work, so a whole-tree force-restore would destroy it. Foreign dirt
+    *outside* ``files_touched`` is preserved by design.
+
+    ``git checkout HEAD -- <paths>`` is deliberate and the ``HEAD`` is load-bearing:
+    the bare ``git checkout -- <paths>`` restores the worktree from the **index**,
+    which on the staged-then-commit-failed path still holds the auditor's own
+    content. The ``HEAD`` form resets index *and* worktree for those paths only.
+
+    ``branch=None`` means no branch was created — the ``rev-parse`` /
+    ``git branch -D`` block is skipped entirely rather than looked up and missed.
+
+    Returns True only when the postcondition holds: HEAD is back on
+    ``starting_ref`` **and** no ``files_touched`` path is dirty in either column of
+    ``git status --porcelain``.
+    """
+    ok = True
+    try:
+        checkout = subprocess.run(
+            ["git", "checkout", starting_ref],
+            capture_output=True,
+            text=True,
+            timeout=settings.timeouts.git_subprocess_s,
+            cwd=str(repo_root),
+        )
+        if checkout.returncode != 0:
+            ok = False
+            logger.error(
+                f"docs_auditor: restore failed to check out {starting_ref}: "
+                f"{(checkout.stderr or '').strip()}"
+            )
+
+        if files_touched:
+            discard = subprocess.run(
+                ["git", "checkout", "HEAD", "--", *files_touched],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+            if discard.returncode != 0:
+                ok = False
+                logger.error(
+                    "docs_auditor: restore failed to discard auditor paths: "
+                    f"{(discard.stderr or '').strip()}"
+                )
+
+        # Delete the created branch if it exists. `branch is None` means no
+        # branch was ever created, so skip the lookup entirely.
+        if branch is not None:
+            exists = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+            if exists.returncode == 0:
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                    cwd=str(repo_root),
+                )
+
+        # Postcondition (a): back on the starting ref.
+        if _current_ref(repo_root) != starting_ref:
+            ok = False
+            logger.error(f"docs_auditor: restore left the checkout off {starting_ref}")
+
+        # Postcondition (b): no files_touched path dirty in either column. This is
+        # deliberately NOT `not _git_dirty(repo_root)` — foreign dirt outside
+        # files_touched is expected to survive.
+        if files_touched:
+            scoped = subprocess.run(
+                ["git", "status", "--porcelain", "--", *files_touched],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+                cwd=str(repo_root),
+            )
+            if (scoped.stdout or "").strip():
+                ok = False
+                logger.error(
+                    "docs_auditor: restore left auditor paths dirty: "
+                    f"{(scoped.stdout or '').strip()}"
+                )
+    except Exception as e:
+        logger.error(f"docs_auditor: restore error: {e}")
+        return False
+    return ok
+
+
 def _push_branch_and_pr(
-    slug: str, repo_root: Path, withheld: list[dict] | None = None
+    slug: str,
+    repo_root: Path,
+    files_touched: list[str],
+    withheld: list[dict] | None = None,
+    *,
+    starting_ref: str,
 ) -> str | None:
     """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
 
-    Always returns the repo to the main branch afterward, even on error.
-    Skips PR creation if an open PR for the same slug already exists or if
-    the daily cap (1 PR per calendar day) has been reached.
+    ``files_touched`` is the exact set of repo-relative paths the substrate wrote,
+    and it is the **only** thing staged: the commit is built from
+    ``git add -- <files_touched>``, never a whole-tree sweep. An empty list means
+    the auditor wrote nothing, so no branch is created and no commit is run.
+
+    ``starting_ref`` is owned by the caller, captured before the substrate write —
+    this function no longer reads it itself. That is the only point at which the
+    ref is guaranteed to name the pre-write state; reading it here, after the
+    tree is already dirty, could no longer distinguish "before" from "during".
+
+    On every exit path the checkout is returned to the ref it started on and the
+    auditor's own paths are discarded, scoped to ``files_touched`` — see
+    ``_restore_checkout``. A failed restore is reported: the function returns None
+    even if the PR was created, so the caller escalates rather than recording a
+    clean run over a wedged checkout.
+
+    The daily-cap and open-PR guards do **not** live here. They run in
+    ``run_docs_auditor``'s preflight, before the substrate writes anything, so a
+    guard can no longer fire after the shared checkout has already been dirtied.
 
     ``withheld`` is the run's existence-invariant rejections. When non-empty the
-    PR body lists them and carries ``WITHHELD_PR_MARKER``, which disqualifies the
-    PR from the sweeper's auto-merge path.
+    PR body lists them and carries ``WITHHELD_PR_MARKER``, which exempts the PR
+    from the sweeper's stale-close so the surviving fixes are not discarded
+    before a human reviews them.
     """
+    if not files_touched:
+        logger.info("docs_auditor: no files touched, skipping branch/commit/PR")
+        return None
+
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
+    url: str | None = None
     try:
-        # Guard: daily cap
-        if _daily_pr_cap_reached(repo_root):
-            logger.info("docs_auditor: daily PR cap reached, skipping PR creation")
-            return None
-
-        # Guard: open PR already exists for this slug
-        if _has_open_pr_for_slug(slug, repo_root):
-            logger.info(f"docs_auditor: open PR already exists for {slug}, skipping")
-            return None
-
         subprocess.run(
             ["git", "checkout", "-b", branch],
             capture_output=True,
@@ -1491,7 +2090,7 @@ def _push_branch_and_pr(
             check=True,
         )
         subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "--", *files_touched],
             capture_output=True,
             timeout=settings.timeouts.git_subprocess_s,
             cwd=str(repo_root),
@@ -1524,8 +2123,8 @@ def _push_branch_and_pr(
                 f"\n\n{WITHHELD_PR_MARKER}\n"
                 f"⚠️ **{len(withheld)} fix(es) withheld** by the existence invariant — "
                 "the auditor tried to introduce a path that is absent from the working "
-                "tree. Not eligible for auto-merge; review the surviving fixes before "
-                f"merging.\n\n{rejected}"
+                "tree. Review the surviving fixes before merging.\n\n"
+                f"{rejected}"
             )
         pr_result = subprocess.run(
             [
@@ -1543,66 +2142,22 @@ def _push_branch_and_pr(
             cwd=str(repo_root),
             check=False,
         )
-        url = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
-        if url and url.startswith("http"):
+        candidate = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
+        if candidate and candidate.startswith("http"):
             _record_daily_pr(repo_root)
-            return url
-        return None
+            url = candidate
     except subprocess.CalledProcessError as e:
         logger.warning(f"docs_auditor: branch/push/PR failed: {e}")
-        return None
     except Exception as e:
         logger.warning(f"docs_auditor: branch/push/PR error: {e}")
-        return None
     finally:
-        # Always return to main so the next run starts from a clean base.
-        subprocess.run(
-            ["git", "checkout", "main"],
-            capture_output=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(repo_root),
-        )
+        # Verified, scoped restore — runs on every exit path.
+        restored = _restore_checkout(repo_root, starting_ref, branch, files_touched)
 
-
-def _write_liveness(
-    slug: str,
-    status: str,
-    pr_url: str | None,
-    files_touched: int,
-    vault_narratives_compared: int | None = None,
-    fixes_withheld: int = 0,
-) -> None:
-    """Persist liveness signals for PM monitoring (Phase 2).
-
-    ``vault_narratives_compared`` is emitted into the summary only when not None
-    (i.e. only from the rotation call site that actually ran the vault drift
-    comparison), so "detector ran, found zero drift" is distinguishable from
-    "narrative→page mapping is silently empty/broken".
-
-    ``fixes_withheld`` is emitted only when non-zero, mirroring the same pattern.
-    This is the only durable, queryable surface the rotation produces — the
-    scheduler consumes just ``projects`` from a function reflection's return, so
-    without this a withheld run would be byte-identical to a clean one in Redis.
-    Both extras are keyword params with defaults, so the positional 4-arg/5-arg
-    call contract asserted by ``TestWriteLivenessVaultParam`` is unchanged.
-    """
-    try:
-        r = _get_redis()
-        ts = time.time()
-        r.set(REDIS_LAST_COMPLETED_TS_KEY, str(ts))
-        summary = {
-            "slug": slug,
-            "pr_url": pr_url,
-            "files_touched": files_touched,
-            "status": status,
-        }
-        if vault_narratives_compared is not None:
-            summary["vault_narratives_compared"] = vault_narratives_compared
-        if fixes_withheld:
-            summary["fixes_withheld"] = fixes_withheld
-        r.set(REDIS_LAST_COMPLETED_SUMMARY_KEY, json.dumps(summary))
-    except Exception as e:
-        logger.warning(f"docs_auditor: liveness write failed: {e}")
+    if not restored:
+        logger.error("docs_auditor: shared checkout restore failed, reporting failure")
+        return None
+    return url
 
 
 def _update_rotation_hash(project_key: str, paths: list[str]) -> None:
@@ -1790,8 +2345,9 @@ def _run_vault_drift_detection(project_key: str) -> int:
     the whole block is wrapped so ``run_docs_auditor`` continues on the repo-doc
     rotation. Vault-drift ``gh issue create`` volume is bounded by
     ``VAULT_DRIFT_ISSUE_CAP``, checked before every filing. Returns the count of
-    narratives actually compared (0 when the vault is unresolvable/empty), which is
-    threaded into the liveness payload.
+    narratives actually compared (0 when the vault is unresolvable/empty), which
+    is folded into the created-PR summary string that the scheduler stores as
+    ``output_summary`` and the reflections dashboard renders.
     """
     try:
         vault_root = _resolve_vault_root(project_key)
@@ -1815,6 +2371,89 @@ def _run_vault_drift_detection(project_key: str) -> int:
         return 0
 
 
+def _abort_after_write(slug: str, starting_ref: str, files_touched: list[str], reason: str) -> dict:
+    """Restore the shared checkout and escalate after a write-then-abort.
+
+    Called from both abort routes inside `run_docs_auditor`'s widened
+    write-through-push region: an `audit()`-returned `status == "error"`, and
+    an exception raised anywhere else in that region. `starting_ref` is a
+    parameter, not a closure read — it is a `run_docs_auditor` local, so a
+    module-level body referencing it bare would raise `NameError` on its
+    first call. Both call sites `return` this function's result; the two
+    abort routes share this one body so they cannot drift apart.
+
+    Restores via `_restore_checkout(PROJECT_ROOT, starting_ref, None,
+    files_touched)` — `branch=None` because the widened region aborts before
+    `_push_branch_and_pr` ever creates one, so there is no branch to delete.
+    Skips the restore and the escalation entirely when `files_touched` is
+    empty: a run that wrote nothing left no dirt, so there is nothing to
+    clean up and nothing to report.
+
+    The escalation's TITLE — not only its body — carries the observed restore
+    outcome, because `_file_issue_if_new` dedups on the exact title string
+    and never compares bodies. A single title would let an open, benign
+    "restored cleanly" issue silently mask a later run's failed restore, the
+    one case this escalation exists to catch. Category `operational-failure`
+    (already in `_RECURRING_CONDITION_CATEGORIES`), keyed by slug alone — no
+    run id, no date — so a failure that repeats every run files exactly once,
+    matching the R5-1 escalation's own design.
+
+    `summary` and `findings` carry `reason` verbatim: `agent/reflection_scheduler.py`
+    reads only `result.get("projects")` from this dict, so this is the only
+    diagnostic surface the failure has.
+    """
+    restored = True
+    if files_touched:
+        restored = _restore_checkout(PROJECT_ROOT, starting_ref, None, files_touched)
+
+    outcome = "restore succeeded" if restored else "restore FAILED"
+    summary = (
+        f"docs-auditor error ({slug}): aborted after writing {len(files_touched)} "
+        f"file(s) — {reason} ({outcome})"
+    )
+    findings = [f"docs-auditor: rotation aborted after writing for {slug}: {reason}"]
+    if files_touched:
+        findings.append(f"docs-auditor: {outcome} for {len(files_touched)} file(s)")
+
+    if files_touched:
+        cleanup_cmd = (
+            'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout '
+            f"{starting_ref}\n"
+            'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" checkout HEAD -- '
+            f"{' '.join(files_touched)}"
+        )
+        if restored:
+            title = f"docs-auditor: rotation aborted after writing for {slug}"
+            outcome_line = (
+                "The shared checkout was restored automatically — no manual "
+                "cleanup should be needed. Filed for visibility only."
+            )
+        else:
+            title = (
+                f"docs-auditor: rotation aborted after writing for {slug} — manual cleanup required"
+            )
+            outcome_line = (
+                "The automatic restore did NOT complete successfully. Manual "
+                "cleanup of the shared checkout is required."
+            )
+        body = (
+            f"Rotation wrote {len(files_touched)} file(s) for `{slug}` and then aborted "
+            f"before opening a PR: {reason}\n\n"
+            f"Files touched: {', '.join(files_touched)}\n\n"
+            f"{outcome_line}\n\n"
+            "Manual cleanup command:\n\n"
+            f"```\n{cleanup_cmd}\n```\n\n"
+            'Verify with `git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain '
+            f"-- {' '.join(files_touched)}` — it should print nothing."
+        )
+        _file_issue_if_new(
+            {"title": title, "body": body, "category": "operational-failure"},
+            PROJECT_ROOT,
+        )
+
+    return {"status": "error", "findings": findings, "summary": summary}
+
+
 def run_docs_auditor() -> dict:
     """Daily rotation reflection callable.
 
@@ -1822,15 +2461,17 @@ def run_docs_auditor() -> dict:
       1. Auth probe (cheap, no side effects)
       2. SETNX lock acquire (global)
       3. Dirty-tree guard
-      4. Rotation pick
-      5. Run substrate
+      4. Rotation pick, then the daily-cap and open-PR guards (pre-write)
+      4c. Capture starting_ref (pre-write) — skip with no stamp if unreadable
+      5. Run substrate — from here through step 7, any exception restores the
+         checkout (scoped to the paths it wrote) and escalates via
+         `_abort_after_write` instead of leaving the shared checkout dirty
       6. Zero-diff gate
       7. (If diff) push branch + PR
       8. Memory refresh hook (fire-and-forget)
       9. Telegram notification
       10. Update rotation hash
-      11. Liveness signal
-      12. Lock release (try/finally)
+      11. Lock release (try/finally)
     """
     findings: list[str] = []
 
@@ -1846,7 +2487,7 @@ def run_docs_auditor() -> dict:
     # 2. Lock
     if not _acquire_lock(REDIS_RUNNING_KEY, LOCK_TTL_SECONDS):
         return {
-            "status": "ok",
+            "status": "skipped",
             "findings": ["docs-auditor already running, skipped"],
             "summary": "docs-auditor skipped: locked",
         }
@@ -1854,11 +2495,15 @@ def run_docs_auditor() -> dict:
     project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
 
     try:
-        # 3. Dirty-tree guard
+        # 3. Dirty-tree guard. Deliberately files nothing: `_git_dirty` tests the
+        # whole shared main checkout, where concurrent lanes routinely hold
+        # uncommitted work as a matter of routine, so a filing guard would mint
+        # issues blaming the auditor for a peer's dirt. The escalation belongs on
+        # the failure path below, which knows it caused the dirt — this guard,
+        # which cannot know, stays quiet (Q4 item 5).
         if _git_dirty(PROJECT_ROOT):
-            _write_liveness("(dirty)", "skipped", None, 0)
             return {
-                "status": "ok",
+                "status": "skipped",
                 "findings": ["docs-auditor skipped: working tree dirty"],
                 "summary": "docs-auditor skipped: dirty_tree",
             }
@@ -1871,95 +2516,278 @@ def run_docs_auditor() -> dict:
         # 4. Rotation pick
         primary, _last_run = _select_primary_doc(PROJECT_ROOT, project_key)
         if primary is None:
-            _write_liveness("(no-candidates)", "skipped", None, 0)
             return {
-                "status": "ok",
+                "status": "skipped",
                 "findings": ["No candidate docs found"],
                 "summary": "docs-auditor skipped: no candidates",
             }
 
         slug = _path_to_slug(primary)
 
-        # 5. Substrate
-        result = audit(
-            primary_path=primary,
-            scope_mode="rotation",
-            apply_mode="apply",
-            project_key=project_key,
-            repo_root=PROJECT_ROOT,
-        )
-
-        files_touched: list[str] = result.get("files_touched", [])
-        # Existence-invariant rejections. This is the one caller with no human in
-        # the loop — it opens a PR the sweeper may auto-merge — so the withheld
-        # count must reach every surface this function produces, not just a log
-        # line: findings, summary, Telegram, the PR body (auto-merge gate) and
-        # the Redis liveness summary, which is the only durable queryable one.
-        # Telegram has two mutually exclusive senders, and a run can also reach
-        # neither. Three cases: files were touched — step 9 sends the pass
-        # summary; nothing was touched but fixes were withheld — the zero-diff
-        # early return sends the withheld alert, the loudest case and one step 9
-        # can never reach; nothing was touched and nothing was withheld — a clean
-        # zero-diff run, which stays silent.
-        withheld: list[dict] = result.get("withheld", [])
-        fixes_withheld: int = result.get("fixes_withheld", 0)
-        withheld_note = (
-            f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
-        )
-
-        # 6. Zero-diff gate
-        if not files_touched or _git_diff_quiet(PROJECT_ROOT):
+        # 4b. PR guards — hoisted here from _push_branch_and_pr so they fire
+        # strictly BEFORE the substrate writes to the shared main checkout. They
+        # sit after the dirty-tree guard, after _run_vault_drift_detection (which
+        # its own comment declares runs unconditionally), and after `slug` is
+        # computed, which _has_open_pr_for_slug needs. A fired guard performs no
+        # working-tree write and no git operation — but it MUST still stamp the
+        # rotation hash for the picked doc, exactly as the zero-diff path does.
+        # Without the stamp, _select_primary_doc re-picks the same
+        # least-recently-audited doc on every subsequent run for as long as the
+        # guard fires, and a withheld PR (which the sweeper never closes) would
+        # pin the rotation on one doc permanently while reporting "skipped".
+        guard_reason: str | None = None
+        if _daily_pr_cap_reached(PROJECT_ROOT):
+            guard_reason = "daily PR cap reached"
+        elif _has_open_pr_for_slug(slug, PROJECT_ROOT):
+            guard_reason = f"open PR already exists for {slug}"
+        if guard_reason is not None:
+            logger.info(f"docs_auditor: {guard_reason}, skipping before any write")
             _update_rotation_hash(project_key, [str(primary)])
-            _write_liveness(slug, "skipped", None, 0, fixes_withheld=fixes_withheld)
-            if fixes_withheld:
-                _send_telegram_notification(
-                    f"docs-auditor pass for {slug}: zero-diff, no PR"
-                    f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                    "nothing was written and no PR was opened to review them"
-                )
             return {
-                "status": "ok",
-                "findings": [f"docs-auditor: zero-diff for {primary}{withheld_note}"],
-                "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
+                "status": "skipped",
+                "findings": [f"docs-auditor skipped: {guard_reason}"],
+                "summary": f"docs-auditor skipped ({slug}): {guard_reason}",
             }
 
-        # 7. Memory refresh hook (fire-and-forget) — fired after commit
-        # 8. Push branch + PR
-        pr_url = _push_branch_and_pr(slug, PROJECT_ROOT, withheld=withheld)
+        # Ref capture — taken before the first write, so a restore afterward
+        # always names the pre-write state rather than a ref a peer moved the
+        # checkout to later. Unlike the cap/open-PR guards above, this
+        # condition is doc-independent: it blocks every doc equally, so it
+        # cannot pin the rotation on one doc, and stamping the rotation hash
+        # here would advance the rotation past a doc that was never audited.
+        # Deliberately does not stamp.
+        starting_ref = _current_ref(PROJECT_ROOT)
+        if starting_ref is None:
+            logger.error("docs_auditor: cannot read starting ref, refusing to write")
+            return {
+                "status": "skipped",
+                "findings": ["docs-auditor skipped: cannot read starting ref"],
+                "summary": "docs-auditor skipped: no_starting_ref",
+            }
 
+        # Bound before the widened try below so an exception raised by
+        # `audit()` above its own write-ledger guard (_resolve_neighborhood /
+        # _resolve_pr_changed_files, before `touched` exists) leaves this name
+        # bound to `[]` rather than unbound. Without this, the handler would
+        # raise `UnboundLocalError` and destroy the real cause on the only
+        # diagnostic surface this failure has.
+        files_touched: list[str] = []
+
+        # The widened region: opens immediately before the substrate call and
+        # closes immediately after the push assignment. Any exception in here
+        # — including one raised by `audit()` after it has already written —
+        # restores the checkout and escalates via `_abort_after_write`, never
+        # falls through silently. The `if pr_url is None:` R5-1 block below is
+        # deliberately OUTSIDE this try: by the time it is reached,
+        # `_push_branch_and_pr`'s own `finally` has already restored the
+        # checkout, so a handler here would file a false "aborted after
+        # writing" issue over an already-clean tree.
+        try:
+            # 5. Substrate
+            result = audit(
+                primary_path=primary,
+                scope_mode="rotation",
+                apply_mode="apply",
+                project_key=project_key,
+                repo_root=PROJECT_ROOT,
+            )
+
+            files_touched = result.get("files_touched", [])
+            if result.get("status") == "error":
+                return _abort_after_write(
+                    slug,
+                    starting_ref,
+                    files_touched,
+                    result.get("reason", "audit returned error"),
+                )
+
+            # Existence-invariant rejections. This is the one caller with no
+            # human review before the PR opens — every rotation PR still
+            # requires a human merge, but the withheld count must reach every
+            # surface this function produces so the human reviewing it sees
+            # it, not just a log line: findings, the returned summary,
+            # Telegram, and the PR body.
+            # Telegram has two mutually exclusive senders, and a run can also
+            # reach neither. Three cases: files were touched — step 9 sends
+            # the pass summary; nothing was touched but fixes were withheld —
+            # the zero-diff early return sends the withheld alert, the
+            # loudest case and one step 9 can never reach; nothing was
+            # touched and nothing was withheld — a clean zero-diff run, which
+            # stays silent.
+            withheld: list[dict] = result.get("withheld", [])
+            fixes_withheld: int = result.get("fixes_withheld", 0)
+            withheld_note = (
+                f"; {fixes_withheld} fix(es) withheld (target-absent)" if fixes_withheld else ""
+            )
+
+            # Q5 (B4): file one issue per withheld entry so a human is pointed
+            # at the specific substitution the existence invariant rejected,
+            # not just a log line. Deduped per-defect by
+            # `_file_issue_if_new`'s title-based gate. Bounded at the module's
+            # shared per-run cap (NEW-4 / R3-3) — a withheld flood must not
+            # spend a different budget than the advisory loop's.
+            if withheld:
+                for i, w in enumerate(withheld):
+                    if i >= ISSUE_FILING_PER_RUN_CAP:
+                        logger.warning(
+                            "docs_auditor: withheld-fix per-run cap (%d) reached — "
+                            "%d finding(s) suppressed",
+                            ISSUE_FILING_PER_RUN_CAP,
+                            len(withheld) - ISSUE_FILING_PER_RUN_CAP,
+                        )
+                        break
+                    # `old` is a regex source (rf"\b{re.escape(old_term)}\b"),
+                    # not the substitution term itself — unwrap it before it
+                    # becomes the dedup key (R5-3), or the title carries a
+                    # literal `\b` into `gh issue list --search`.
+                    term = re.sub(
+                        r"\\(.)",
+                        r"\1",
+                        w.get("old", "").removeprefix(r"\b").removesuffix(r"\b"),
+                    )
+                    _file_issue_if_new(
+                        {
+                            "title": (
+                                f"docs-auditor: withheld fix in {w.get('doc')} "
+                                f"({term} -> {w.get('new')})"
+                            ),
+                            "body": (
+                                f"The docs auditor tried to rewrite `{term}` to "
+                                f"`{w.get('new')}` in `{w.get('doc')}`, but the rewrite "
+                                "would have introduced a path that does not exist in "
+                                f"the working tree ({w.get('reason', 'target-absent')}), "
+                                "so it was withheld and the file was left unchanged."
+                            ),
+                            "category": "withheld-fix",
+                        },
+                        PROJECT_ROOT,
+                    )
+
+            # 6. Zero-diff gate
+            if not files_touched or _git_diff_quiet(PROJECT_ROOT):
+                _update_rotation_hash(project_key, [str(primary)])
+                # Initialized unconditionally (mirroring withheld_note above):
+                # the summary f-string below interpolates this on every
+                # zero-diff return, including the clean path where the notify
+                # call never runs. Assigning it only inside the
+                # `if fixes_withheld:` guard would raise NameError on that
+                # common path, which the enclosing `except Exception` would
+                # silently convert into {"status": "error"}.
+                suppressed_note = ""
+                zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
+                if fixes_withheld:
+                    sent = _send_telegram_notification(
+                        f"docs-auditor pass for {slug}: zero-diff, no PR"
+                        f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
+                        "nothing was written and no PR was opened to review them",
+                        repo_root=PROJECT_ROOT,
+                    )
+                    if not sent:
+                        suppressed_note = (
+                            f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
+                        )
+                        zero_diff_findings.append(
+                            f"docs-auditor: Telegram notification suppressed — no Eng: "
+                            f"group for {PROJECT_ROOT}"
+                        )
+                return {
+                    "status": "skipped",
+                    "findings": zero_diff_findings,
+                    "summary": (
+                        f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"
+                    ),
+                }
+
+            # 7. Push branch + PR. The guards moved to the preflight, so a
+            # None here unambiguously means the branch/commit/push/PR or the
+            # restore failed — never "a guard declined". That routes to
+            # status="error": no success Telegram, no rotation-hash stamp
+            # (the doc was written but not audited to completion, so
+            # re-picking it next run is correct).
+            pr_url = _push_branch_and_pr(
+                slug, PROJECT_ROOT, files_touched, withheld=withheld, starting_ref=starting_ref
+            )
+        except Exception as e:
+            return _abort_after_write(slug, starting_ref, files_touched, str(e))
+
+        if pr_url is None:
+            findings.append(
+                f"docs-auditor: rotation wrote {len(files_touched)} file(s) for {slug} "
+                "but produced no PR"
+            )
+            # R5-1: a wedged shared checkout must escalate through a real channel
+            # before this returns, not just log a warning nobody reads — the
+            # `status="error"` alone reaches nobody, since
+            # agent/reflection_scheduler.py:639-640 reads only `projects` from
+            # this dict. Slug-keyed only, no run id or date, so a failure that
+            # repeats every run files once. Deliberately silent on which step
+            # failed and on whether the scoped restore succeeded — neither fact
+            # reaches this branch (`_push_branch_and_pr` returns `str | None`),
+            # and a body that asserts a restore outcome it never observed is
+            # worse than one that omits it.
+            _file_issue_if_new(
+                {
+                    "title": f"docs-auditor: rotation failed to produce a PR for {slug}",
+                    "body": (
+                        f"Rotation wrote {len(files_touched)} file(s) for `{slug}` but the "
+                        "branch/push/PR sequence did not produce a PR URL.\n\n"
+                        f"Files touched: {', '.join(files_touched)}\n\n"
+                        "If the shared checkout is left dirty, clean it up with:\n\n"
+                        "```\n"
+                        'git -C "${AI_REPO_ROOT:-$HOME/src/ai}" status --porcelain '
+                        "-- docs .claude\n"
+                        "```\n\n"
+                        "See the `docs_auditor: branch/push/PR …` warning in the reflection "
+                        "log for the step that failed."
+                    ),
+                    "category": "operational-failure",
+                },
+                PROJECT_ROOT,
+            )
+            return {
+                "status": "error",
+                "findings": findings,
+                "summary": (
+                    f"docs-auditor error ({slug}): {len(files_touched)} file(s) written, "
+                    f"no PR created{withheld_note}"
+                ),
+            }
+
+        # 8. Memory refresh hook (fire-and-forget) — fired after commit
         try:
             refresh_docs_in_memory(files_touched)
         except Exception as e:
             logger.warning(f"docs_auditor: refresh_docs_in_memory hook failed: {e}")
 
-        # 9. Telegram notification
+        # 9. Telegram notification. Every rotation PR requires a human merge —
+        # `/do-merge` — and is closed unmerged at STALE_PR_AGE_DAYS if nobody
+        # acts, which is the intended "nobody cared" outcome, not a failure mode.
         msg = (
             f"docs-auditor pass for {slug}: "
             f"{len(files_touched)} files, {result.get('fixes_applied', 0)} fixes"
             + (
-                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                "PR is not auto-merge eligible"
+                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; see the "
+                "filed issue(s) for details"
                 if fixes_withheld
                 else ""
             )
-            + (f"\nPR: {pr_url}" if pr_url else "")
+            + f"\nPR: {pr_url}"
+            + f"\nReview required — closed unmerged after {STALE_PR_AGE_DAYS} days if unreviewed."
         )
-        _send_telegram_notification(msg)
+        # Initialized unconditionally even though the sender is called
+        # unconditionally on this path — mirrors the zero-diff path's
+        # initialize-first rule so neither branch can leave this name unbound.
+        suppressed_note = ""
+        sent = _send_telegram_notification(msg, repo_root=PROJECT_ROOT)
+        if not sent:
+            suppressed_note = f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
+            findings.append(
+                f"docs-auditor: Telegram notification suppressed for PR {pr_url} — "
+                f"no Eng: group for {PROJECT_ROOT}"
+            )
 
         # 10. Update rotation hash for all touched files
         _update_rotation_hash(project_key, files_touched)
-
-        # 11. Liveness signal (threads the vault-drift compared count — the only
-        # call site that ran the vault comparison; the other 3 stay 4-arg — plus
-        # the withheld count, so Redis distinguishes a withheld run from a clean one).
-        _write_liveness(
-            slug,
-            "ok",
-            pr_url,
-            len(files_touched),
-            vault_narratives_compared,
-            fixes_withheld=fixes_withheld,
-        )
 
         findings.append(
             f"Touched {len(files_touched)} files; {result.get('fixes_applied', 0)} fixes applied"
@@ -1967,21 +2795,20 @@ def run_docs_auditor() -> dict:
         if fixes_withheld:
             findings.append(
                 f"{fixes_withheld} fix(es) withheld by the existence invariant "
-                "(target-absent); PR is not auto-merge eligible"
+                "(target-absent); see the filed issue(s) for details"
             )
             findings.extend(
                 f"withheld: {w.get('doc')} {w.get('old')!r} -> {w.get('new')!r}" for w in withheld
             )
-        if pr_url:
-            findings.append(f"PR: {pr_url}")
+        findings.append(f"PR: {pr_url}")
 
         return {
             "status": "ok",
             "findings": findings,
             "summary": (
                 f"docs-auditor: {len(files_touched)} files touched, "
-                f"{result.get('fixes_applied', 0)} fixes{withheld_note}, "
-                f"PR={pr_url or 'none'}"
+                f"{result.get('fixes_applied', 0)} fixes{withheld_note}{suppressed_note}, "
+                f"PR={pr_url}; vault {vault_narratives_compared} narratives compared"
             ),
         }
 
@@ -1993,7 +2820,7 @@ def run_docs_auditor() -> dict:
             "summary": f"docs-auditor error: {e}",
         }
     finally:
-        # 12. Lock release
+        # 11. Lock release
         _release_lock(REDIS_RUNNING_KEY)
 
 
@@ -2002,98 +2829,16 @@ def run_docs_auditor() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
-    """Return True if a docs-audit PR meets the conservative auto-merge bar.
-
-    Heuristics (all must pass):
-    - Only ``docs/`` files changed (no code, no config)
-    - ≤ 5 files changed
-    - ≤ 50 net lines changed (additions + deletions)
-    - No reviews, review requests, or comments
-    - PR is between 1 and 7 days old (not brand-new, not stale)
-    - The opening run withheld no fixes (no ``WITHHELD_PR_MARKER`` in the body)
-    """
-    try:
-        meta_res = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                str(pr_number),
-                "--json",
-                "files,reviews,reviewRequests,comments,createdAt,additions,deletions,body",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            cwd=str(PROJECT_ROOT),
-        )
-        if meta_res.returncode != 0:
-            return False
-        meta = json.loads(meta_res.stdout or "{}")
-
-        # Withheld fixes disqualify: the run that opened this PR proposed at least
-        # one rewrite to a nonexistent path, so its surviving output is suspect.
-        #
-        # KNOWN ESCALATION GAP — tracked by #2729:
-        # this disqualification is permanent, so a withheld PR nobody reviews
-        # falls through to the sweeper's stale-close at STALE_PR_AGE_DAYS —
-        # closed with --delete-branch, discarding the fixes that *did* pass the
-        # invariant, and the next rotation onto the same slug re-proposes,
-        # re-opens and re-closes it forever. Nothing pages a human: the only
-        # record is a `findings` entry, and the scheduler reads only `projects`
-        # from a function reflection. Still strictly safer than auto-merging
-        # suspect output. Ownership of the escalation (exempt from stale-close,
-        # or notify before closing) is deliberately out of scope here and needs
-        # an owner ruling; see #2729.
-        if WITHHELD_PR_MARKER in (meta.get("body") or ""):
-            logger.info(
-                "docs_auditor: PR #%d not auto-merge eligible — run withheld fixes", pr_number
-            )
-            return False
-
-        # No reviewer activity
-        if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
-            return False
-
-        # File count and path guard
-        files = meta.get("files", [])
-        if not files or len(files) > 5:
-            return False
-        for f in files:
-            path = f.get("path", "")
-            if not (path.startswith("docs/") or path in ("README.md", "CLAUDE.md")):
-                return False
-
-        # Diff size guard
-        net_lines = meta.get("additions", 0) + meta.get("deletions", 0)
-        if net_lines > 50:
-            return False
-
-        # Age guard: 1–7 days
-        created_raw = meta.get("createdAt", "")
-        if not created_raw:
-            return False
-        age_days = (
-            datetime.now(UTC) - datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-        ).days
-        if age_days < 1 or age_days > 7:
-            return False
-
-        return True
-    except Exception as e:
-        logger.warning(f"docs_auditor: auto-merge eligibility check failed for #{pr_number}: {e}")
-        return False
-
-
 def run_docs_branch_sweeper() -> dict:
     """Sweep stale ``docs-audit/*`` branches and PRs.
 
     Conservative: only touches ``docs-audit/*`` branches, never any other
-    prefix and never branches with reviewer activity.
-
-    Also auto-merges PRs that pass the conservative eligibility check (docs-only,
-    small diff, no reviewer activity, 1–7 days old).
+    prefix. Every ``docs-audit/*`` PR requires a human merge; this sweeper only
+    closes ones nobody reviewed within ``STALE_PR_AGE_DAYS`` — except a PR
+    carrying ``WITHHELD_PR_MARKER``, which it never closes or deletes, because
+    the withheld fixes it holds already have their own escalation issue and
+    closing the PR would discard the surviving fixes that passed the existence
+    invariant.
     """
     if not _acquire_lock(REDIS_SWEEPER_RUNNING_KEY, SWEEPER_LOCK_TTL_SECONDS):
         return {
@@ -2105,7 +2850,6 @@ def run_docs_branch_sweeper() -> dict:
     findings: list[str] = []
     branches_deleted = 0
     prs_closed = 0
-    prs_merged = 0
 
     try:
         # List remote branches under docs-audit/
@@ -2145,7 +2889,7 @@ def run_docs_branch_sweeper() -> dict:
                         "--state",
                         "all",
                         "--json",
-                        "number,state,createdAt",
+                        "number,state,createdAt,body",
                     ],
                     capture_output=True,
                     text=True,
@@ -2233,29 +2977,36 @@ def run_docs_branch_sweeper() -> dict:
                 if not pr_num:
                     continue
 
-                # Auto-merge eligible PRs before stale-close check
-                if _pr_is_auto_merge_eligible(pr_num):
-                    try:
-                        merge_res = subprocess.run(
-                            ["gh", "pr", "merge", str(pr_num), "--squash", "--delete-branch"],
-                            capture_output=True,
-                            text=True,
-                            timeout=settings.timeouts.git_subprocess_s,
-                            cwd=str(PROJECT_ROOT),
-                            check=False,
+                # A withheld PR is exempt from stale-close: closing it would
+                # discard fixes that already passed the existence invariant.
+                # The escalation issue is distinct from `_file_issue_if_new`'s
+                # per-defect withheld-fix titles, since a same-title filing is
+                # a guaranteed no-op — this names the PR, not the substitution.
+                # The exemption is unconditional; the *filing* waits for the
+                # same staleness threshold that would have closed a plain PR,
+                # so the title's "still unreviewed" claim is true at the moment
+                # it is made. Filing on sight would title a minutes-old PR as
+                # stale, and the dedup key is once-ever, so the wrong wording
+                # would be the permanent record.
+                # NOTE (#3049): the exemption never expires and the escalation
+                # above fires once-ever, so there is no re-nag and no ceiling on
+                # simultaneously-open withheld PRs. Left as-is pending an owner
+                # ruling on aging-out — see #3049.
+                if WITHHELD_PR_MARKER in (pr.get("body") or ""):
+                    if age_days >= STALE_PR_AGE_DAYS:
+                        _file_issue_if_new(
+                            {
+                                "title": f"docs-auditor: withheld PR #{pr_num} still unreviewed",
+                                "body": (
+                                    f"PR #{pr_num} (branch `{branch}`) is {age_days} day(s) old "
+                                    "and carries withheld fixes that need a human review before "
+                                    "merge. The sweeper will not close it or delete its branch."
+                                ),
+                                "category": "withheld-pr",
+                            },
+                            PROJECT_ROOT,
                         )
-                        if merge_res.returncode == 0:
-                            prs_merged += 1
-                            findings.append(
-                                f"Auto-merged PR #{pr_num} (branch={branch}, {age_days}d)"
-                            )
-                            continue
-                        else:
-                            logger.warning(
-                                f"sweeper: auto-merge failed for #{pr_num}: {merge_res.stderr}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"sweeper: auto-merge error for #{pr_num}: {e}")
+                    continue
 
                 if age_days >= STALE_PR_AGE_DAYS:
                     try:
@@ -2272,8 +3023,7 @@ def run_docs_branch_sweeper() -> dict:
                         logger.warning(f"sweeper: gh pr close failed for #{pr_num}: {e}")
 
         summary = (
-            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, "
-            f"{prs_closed} PRs closed, {prs_merged} PRs auto-merged"
+            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, {prs_closed} PRs closed"
         )
         logger.info(summary)
         return {"status": "ok", "findings": findings, "summary": summary}
@@ -2289,6 +3039,10 @@ def run_docs_branch_sweeper() -> dict:
 if __name__ == "__main__":
     # Allow `python -m reflections.docs_auditor` to print a JSON result for the
     # ``/do-docs`` skill bash block. Args via env: SCOPE_MODE, APPLY_MODE.
+    #
+    # This runs no git of its own and **leaves a dirty working tree**: the fixes
+    # `audit()` applied are unstaged on exit, and reviewing and committing them
+    # is the caller's job.
     scope = os.environ.get("DOCS_AUDIT_SCOPE", "pr-changed-files")
     apply = os.environ.get("DOCS_AUDIT_APPLY", "apply")
     project = os.environ.get("VALOR_PROJECT_KEY", "valor")

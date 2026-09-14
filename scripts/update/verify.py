@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ from pathlib import Path
 
 from config.models import OLLAMA_CLASSIFIER_MODEL
 from scripts.update.service import is_bridge_running
+from tools.process_lookup import find_command_pids
 
 logger = logging.getLogger(__name__)
 
@@ -206,55 +208,6 @@ def check_python_alias() -> ToolCheck:
         )
     except Exception as e:
         return ToolCheck(name="python", available=False, error=f"python --version failed: {e}")
-
-
-def check_valor_alias_shadow(zshrc_path: Path | None = None) -> ToolCheck:
-    """Warn when a stale `alias valor=...` in ~/.zshrc shadows .venv/bin/valor.
-
-    An old `alias valor="cd ... && ./scripts/telegram_run.sh"` predates the
-    venv `valor` entry point; the script it pointed at is gone, so typing
-    `valor` in an interactive shell errors instead of running the binary.
-
-    Warn-only by design (issue #1619): machines are heterogeneous and we
-    never auto-edit user rc files, so this check must never block /update.
-    No subprocess, no interactive shell — reads the rc file directly so it
-    stays deterministic under launchd.
-    """
-    path = zshrc_path if zshrc_path is not None else Path.home() / ".zshrc"
-
-    try:
-        content = path.read_text()
-    except FileNotFoundError:
-        return ToolCheck(
-            name="valor-alias",
-            available=True,
-            version="skipped (~/.zshrc not found)",
-        )
-    except (PermissionError, OSError):
-        return ToolCheck(
-            name="valor-alias",
-            available=True,
-            version="skipped (~/.zshrc unreadable)",
-        )
-
-    # `\s*=` must immediately follow `valor` so valor-session= etc. never match.
-    alias_re = re.compile(r"^\s*alias\s+valor\s*=")
-    for lineno, line in enumerate(content.splitlines(), start=1):
-        if line.lstrip().startswith("#"):
-            continue
-        if alias_re.search(line):
-            return ToolCheck(
-                name="valor-alias",
-                available=False,
-                error=(
-                    f"stale `valor` alias shadows .venv/bin/valor — "
-                    f"~/.zshrc line {lineno}: {line.strip()} | "
-                    f"Fix: delete line {lineno} from ~/.zshrc, "
-                    f"then run: source ~/.zshrc"
-                ),
-            )
-
-    return ToolCheck(name="valor-alias", available=True, version="no shadowing alias")
 
 
 def check_system_tools() -> list[ToolCheck]:
@@ -453,31 +406,6 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
         )
     )
 
-    # valor — the agent-session wrapper CLI (PR #1612). Same venv-bin
-    # check as valor-email: the entry point only exists after `uv sync`
-    # re-installs the project, so a stale venv is the common failure.
-    venv_valor = project_dir / ".venv" / "bin" / "valor"
-    valor_found = False
-    valor_err = None
-    if venv_valor.exists():
-        try:
-            result = run_cmd([str(venv_valor), "--help"], timeout=10)
-            valor_found = result.returncode == 0
-            if not valor_found:
-                valor_err = result.stderr.strip() or None
-        except Exception as e:
-            valor_err = str(e)
-    else:
-        valor_err = "Not in .venv/bin (run `uv sync` or `pip install -e .`)"
-
-    results.append(
-        ToolCheck(
-            name="valor",
-            available=valor_found,
-            error=valor_err if not valor_found else None,
-        )
-    )
-
     return results
 
 
@@ -524,12 +452,12 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
         "use_api_billing": False,
     }
 
-    # Check Claude Desktop
-    try:
-        ps_result = run_cmd(["pgrep", "-f", "Claude.app"], timeout=5)
-        result["claude_desktop_running"] = ps_result.returncode == 0
-    except Exception:
-        pass
+    # Check Claude Desktop. Ancestor-safe (#3265): the desktop app spawns the
+    # agent sessions that run /update, so `pgrep -f` reported "not running" for
+    # a live Claude.app in exactly the case this check is consulted from.
+    # `find_command_pids` rather than `find_python_service_pids` because
+    # Claude.app is not a CPython invocation and has no argv grammar to parse.
+    result["claude_desktop_running"] = bool(find_command_pids("Claude.app"))
 
     # Check .env for API key and billing preference. The .env symlinks to
     # ~/Desktop/Valor/.env (iCloud + TCC-protected); read can raise PermissionError
@@ -670,6 +598,52 @@ def migrate_settings_json_paths() -> dict[str, str | bool]:
         settings_path.write_text(updated)
         result["migrated"] = True
         result["reason"] = "Replaced Desktop/claude_code with Desktop/Valor in settings.json"
+    except OSError as e:
+        result["reason"] = f"Failed to write settings.json: {e}"
+
+    return result
+
+
+def ensure_claude_update_channel() -> dict[str, str | bool]:
+    """Pin ~/.claude/settings.json to the 'latest' Claude Code update channel.
+
+    The 'stable' channel lags 'latest' by many releases (2.1.236 vs 2.1.260 on
+    2026-09-04), which both starved this machine of the long-running silent-exit
+    fixes and blocked newer model ids that require a newer CLI. This is the
+    fleet-wide counterpart to the local channel switch: every machine's /update
+    lands on 'latest' so the medicine propagates. See ai repo memory
+    project_claude_cli_silent_exit_findings.
+
+    Idempotent: a no-op once the channel already reads 'latest'.
+
+    Returns dict with: changed (bool), reason (str).
+    """
+    import json
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    result: dict[str, str | bool] = {"changed": False, "reason": ""}
+
+    if not settings_path.exists():
+        result["reason"] = "No ~/.claude/settings.json found"
+        return result
+
+    try:
+        settings = json.loads(settings_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        result["reason"] = f"Failed to read/parse settings.json: {e}"
+        return result
+
+    if settings.get("autoUpdatesChannel") == "latest":
+        result["reason"] = "Already on 'latest' channel"
+        return result
+
+    previous = settings.get("autoUpdatesChannel", "<unset>")
+    settings["autoUpdatesChannel"] = "latest"
+
+    try:
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        result["changed"] = True
+        result["reason"] = f"Set autoUpdatesChannel: {previous} -> latest"
     except OSError as e:
         result["reason"] = f"Failed to write settings.json: {e}"
 
@@ -871,7 +845,7 @@ def _check_bridge_heartbeat(project_dir: Path, max_age_seconds: int = 300) -> st
             ["tail", "-50", str(log_path)],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=5,  # timeout-guard: allow — local one-off tailing a log file
         )
         lines = tail.stdout.strip().splitlines()
     except Exception:
@@ -1045,15 +1019,45 @@ def check_google_token(project_dir: Path) -> ToolCheck:
 _KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")
 _SECTION_RE = re.compile(r"^#\s*={10,}")  # section separator lines (# ===...)
 
+# Two independent sigils a key's comment block may carry (#2845):
+# `@optional` — the required/optional axis. Unmarked means required, the
+#   fail-closed default (forgetting the marker costs a spurious warning;
+#   a wrong marker silences a real secret forever).
+# `@passthrough <binary>` — an external binary (op, headscale) reads this
+#   key straight out of the environment; no tracked Python names it. A
+#   passthrough key is still required — the two axes are independent.
+_OPTIONAL_SIGIL_RE = re.compile(r"^@optional$")
+_PASSTHROUGH_SIGIL_RE = re.compile(r"^@passthrough\s+(\S+)$")
 
-def _parse_env_example(path: Path) -> list[tuple[str, str]]:
-    """Return list of (key, description) pairs from a .env.example file.
+# check_env_completeness rendering caps: at most this many missing keys
+# named inline (a `(+N more)` suffix covers the rest), and each individual
+# description capped to this many characters — the key cap alone bounds how
+# many descriptions appear, not how long any one of them is.
+_INLINE_KEY_CAP = 5
+_DESCRIPTION_CHAR_CAP = 80
 
-    Description is the last non-blank, non-separator comment line immediately
-    above the key declaration. Blank lines reset the comment accumulator.
+# The command the `(+N more)` suffix points at. It must name a surface that
+# actually renders the FULL set: `check_env_completeness` is the only
+# producer of the missing-key report and its `error` is what every consumer
+# prints verbatim, so pointing at anything that re-runs the check (`--verify`
+# included) reproduces the identical capped string and strands the remaining
+# keys (#2845 review). `_main()` below is that surface.
+_FULL_REPORT_COMMAND = "python -m scripts.update.verify"
+
+
+def _parse_env_example(path: Path) -> list[tuple[str, str, bool, str | None]]:
+    """Return (key, description, optional, passthrough) tuples from .env.example.
+
+    Description is the FIRST non-empty, non-sigil comment line in the key's
+    comment block — the topic sentence, not a wrapped fragment's tail (for
+    single-line comments, the common case, this is identical to "last").
+    Both sigil lines are excluded from description candidates. Blank lines,
+    non-comment lines, and `# ====` separators reset the comment
+    accumulator, exactly as before — a documentation block must end with a
+    blank line or it bleeds its sigils onto the next declaration.
     """
     lines = path.read_text().splitlines()
-    result = []
+    result: list[tuple[str, str, bool, str | None]] = []
     comment_block: list[str] = []
     for line in lines:
         stripped = line.strip()
@@ -1064,9 +1068,20 @@ def _parse_env_example(path: Path) -> list[tuple[str, str]]:
             comment_block.append(stripped.lstrip("#").strip())
         elif m := _KEY_RE.match(stripped):
             key = m.group(1)
-            # Use last non-empty comment line as the description
-            description = next((c for c in reversed(comment_block) if c), "")
-            result.append((key, description))
+            optional = False
+            passthrough: str | None = None
+            description = ""
+            for comment in comment_block:
+                if _OPTIONAL_SIGIL_RE.match(comment):
+                    optional = True
+                    continue
+                passthrough_match = _PASSTHROUGH_SIGIL_RE.match(comment)
+                if passthrough_match:
+                    passthrough = passthrough_match.group(1)
+                    continue
+                if comment and not description:
+                    description = comment
+            result.append((key, description, optional, passthrough))
             comment_block = []
         else:
             comment_block = []  # blank line resets comment accumulation
@@ -1085,12 +1100,36 @@ def _parse_env_keys(path: Path) -> set[str]:
     return keys
 
 
+def _classify_env_keys(
+    declared: list[tuple[str, str, bool, str | None]], present: set[str]
+) -> tuple[set[str], set[str], set[str]]:
+    """Split declarations into (required, missing-required, unset-optional).
+
+    The single owner of the required/optional axis. Both the capped summary
+    and the uncapped report call it, because those two surfaces are exactly
+    the pair that must agree: the summary tells the operator to go read the
+    report, so a fork here would send them to a document that disagrees with
+    the warning that sent them.
+    """
+    declared_keys = {k for k, _d, _o, _p in declared}
+    optional_keys = {k for k, _d, o, _p in declared if o}
+    required_keys = declared_keys - optional_keys
+    return required_keys, required_keys - present, optional_keys - present
+
+
 def check_env_completeness(project_dir: Path) -> ToolCheck:
-    """Check that .env contains all keys declared in .env.example.
+    """Check that .env contains all REQUIRED keys declared in .env.example.
+
+    A declaration marked `@optional` (in-code default, not a credential) is
+    excluded from the missing-key report but its unset count still rides
+    along in both return branches — filtered, not silently dropped. A
+    `@passthrough <binary>` declaration is still required (an external
+    binary reads it straight out of the environment); the marker only
+    exempts it from the reader-recurrence guard.
 
     Returns a single ToolCheck:
-    - available=True, version="all N vars present" when .env has all declared keys
-    - available=False, error="N missing: KEY1 (desc); KEY2 (desc)" when gaps exist
+    - available=True, version="all N required vars present (M optional unset)"
+    - available=False, error="N missing: KEY1 (desc); KEY2 (desc) (M optional unset)"
     - available=True, version="skipped (.env not found)" when .env doesn't exist
     - available=True, version="skipped (read error)" on OSError
     """
@@ -1115,22 +1154,35 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             )
 
         present = _parse_env_keys(env_file)
-        declared_keys = {k for k, _ in declared}
-        missing_keys = declared_keys - present
+        required_keys, missing_keys, optional_unset_keys = _classify_env_keys(declared, present)
+        optional_unset = len(optional_unset_keys)
 
         if not missing_keys:
             return ToolCheck(
                 name="env-completeness",
                 available=True,
-                version=f"all {len(declared_keys)} vars present",
+                version=(
+                    f"all {len(required_keys)} required vars present "
+                    f"({optional_unset} optional unset)"
+                ),
             )
 
-        desc_map = dict(declared)
-        parts = [
-            f"{k} ({desc_map.get(k, 'no description')})" if desc_map.get(k) else k
-            for k in sorted(missing_keys)
-        ]
-        error = f"{len(missing_keys)} missing: {'; '.join(parts)}"
+        desc_map = {k: d for k, d, _o, _p in declared}
+        sorted_missing = sorted(missing_keys)
+        shown = sorted_missing[:_INLINE_KEY_CAP]
+        parts = []
+        for k in shown:
+            desc = desc_map.get(k, "")
+            if desc:
+                if len(desc) > _DESCRIPTION_CHAR_CAP:
+                    desc = desc[:_DESCRIPTION_CHAR_CAP].rstrip() + "…"
+                parts.append(f"{k} ({desc})")
+            else:
+                parts.append(k)
+        if len(sorted_missing) > _INLINE_KEY_CAP:
+            remaining = len(sorted_missing) - _INLINE_KEY_CAP
+            parts.append(f"(+{remaining} more — run {_FULL_REPORT_COMMAND} for the full list)")
+        error = f"{len(missing_keys)} missing: {'; '.join(parts)} ({optional_unset} optional unset)"
         return ToolCheck(name="env-completeness", available=False, error=error)
 
     except OSError:
@@ -1139,6 +1191,149 @@ def check_env_completeness(project_dir: Path) -> ToolCheck:
             available=True,
             version="skipped (read error)",
         )
+
+
+def render_env_completeness_report(project_dir: Path) -> str:
+    """Render the FULL missing-key report — no key cap, no description cap.
+
+    The capped `ToolCheck.error` above is what rides the cron summary and the
+    Telegram reply, where an 89-key dump would be unreadable. This is the
+    surface its `(+N more)` suffix points at, so every key it elides is
+    reachable by one documented command. Keep the two in the same module: a
+    second renderer living elsewhere is the producer/consumer drift that
+    produced this issue's Defect 2.
+    """
+    env_example = project_dir / ".env.example"
+    env_file = project_dir / ".env"
+
+    if not env_example.exists():
+        return "skipped: .env.example not found"
+    if not env_file.exists():
+        return "skipped: .env not found"
+
+    try:
+        declared = _parse_env_example(env_example)
+        present = _parse_env_keys(env_file)
+    except OSError as e:
+        # The capped summary degrades to `skipped (read error)` on this path;
+        # the remediation surface it points at must not hand the operator a
+        # traceback instead.
+        return f"skipped: read error ({e})"
+
+    required_keys, missing_keys, optional_unset_keys = _classify_env_keys(declared, present)
+    missing = sorted(missing_keys)
+    optional_missing = sorted(optional_unset_keys)
+    desc_map = {k: d for k, d, _o, _p in declared}
+
+    lines = [
+        f"env-completeness: {len(required_keys)} required declared, "
+        f"{len(missing)} missing, {len(optional_missing)} optional unset",
+        "",
+    ]
+    if missing:
+        lines.append(f"MISSING REQUIRED ({len(missing)}):")
+        lines.extend(f"  {k}" + (f" — {desc_map[k]}" if desc_map.get(k) else "") for k in missing)
+    else:
+        lines.append("MISSING REQUIRED: none")
+    if optional_missing:
+        lines.extend(["", f"OPTIONAL UNSET ({len(optional_missing)}):"])
+        lines.extend(
+            f"  {k}" + (f" — {desc_map[k]}" if desc_map.get(k) else "") for k in optional_missing
+        )
+    return "\n".join(lines)
+
+
+def _main() -> int:
+    """`python -m scripts.update.verify` — the uncapped env-completeness report.
+
+    Echoes the directory it resolved first, mirroring
+    `warn_state._main()` and for the same reason: a `--project-dir` aimed at
+    another populated checkout would otherwise render a complete, confident,
+    wrong report with nothing on screen to say so.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Print the full .env completeness report (no key or description cap)."
+    )
+    parser.add_argument("--project-dir", type=Path, default=Path(__file__).resolve().parents[2])
+    args = parser.parse_args()
+    print(f"project-dir: {args.project_dir}")
+    print(render_env_completeness_report(args.project_dir))
+    return 0
+
+
+LLM_STACK_COMPAT_CHECK = "llm-stack-compat"
+
+
+def check_llm_stack_compat(project_dir: Path) -> ToolCheck:
+    """Report whether the installed anthropic + pydantic-ai pair is usable.
+
+    Runs unconditionally on every `/update`, which is the point: follower
+    machines never auto-bump, so this and the startup hook are the only
+    things standing between them and a stack that cannot make a call.
+
+    The verdict comes from `python -m agent.llm.compat --json` **inside the
+    target venv** — never from an in-process import, which would report on
+    the update process's own pre-sync modules. No `--allow-network`: the
+    signature check is local, sub-second, and unbilled.
+
+    The failure reason goes in `.error`, not only `.detail`. `run.py`'s
+    `valor_tools` loop is literally `if not tool.available and tool.error:`,
+    so an empty `.error` makes an incompatible stack produce no log line, no
+    warning, and nothing for `extract_update_warnings` to surface — a check
+    that ships dead.
+    """
+    name = LLM_STACK_COMPAT_CHECK
+    python_path = project_dir / ".venv" / "bin" / "python"
+
+    if not python_path.exists():
+        return ToolCheck(
+            name=name,
+            available=False,
+            error="No .venv/bin/python — cannot check the LLM stack",
+            detail="unknown (no venv)",
+        )
+
+    try:
+        proc = run_cmd(
+            [str(python_path), "-m", "agent.llm.compat", "--json"],
+            cwd=project_dir,
+            timeout=60,
+        )
+    except Exception as e:
+        return ToolCheck(
+            name=name,
+            available=False,
+            error=f"compat check did not run: {e}",
+            detail="unknown (check did not run)",
+        )
+
+    try:
+        verdict = json.loads(proc.stdout)
+    except (ValueError, TypeError):
+        tail = (proc.stderr or proc.stdout or "").strip()[-500:] or "no output"
+        return ToolCheck(
+            name=name,
+            available=False,
+            error=f"compat check produced no verdict: {tail}",
+            detail="unknown (no verdict)",
+        )
+
+    versions = (
+        f"anthropic {verdict.get('anthropic_version')} "
+        f"/ pydantic-ai {verdict.get('pydantic_ai_version')}"
+    )
+    compatible = bool(verdict.get("compatible"))
+    reason = verdict.get("reason") or "incompatible LLM stack (no reason reported)"
+
+    return ToolCheck(
+        name=name,
+        available=compatible,
+        version=versions,
+        error=None if compatible else reason,
+        detail=versions if compatible else f"{versions} — INCOMPATIBLE: {reason}",
+    )
 
 
 def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
@@ -1152,7 +1347,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_telegram_session(project_dir))
     result.valor_tools.append(check_google_token(project_dir))
     result.valor_tools.append(check_env_completeness(project_dir))
-    result.valor_tools.append(check_valor_alias_shadow())
+    result.valor_tools.append(check_llm_stack_compat(project_dir))
 
     if check_ollama_model:
         from config.settings import settings as _settings
@@ -1385,3 +1580,7 @@ def check_machine_identity(project_dir: Path) -> dict:
         "bridge_projects": bridge_projects,
         "config_path": str(config_path),
     }
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

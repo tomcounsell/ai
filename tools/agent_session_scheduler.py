@@ -34,20 +34,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from agent.constants import WORKER_DOWN_THRESHOLD_S
+from agent.worktree_manager import WORKTREES_DIR
 from config.enums import SessionType
 from models.reflection import Reflection
 from models.session_lifecycle import NON_TERMINAL_STATUSES
+from tools._sdlc_utils import _resolve_target_repo_fallback
 
 
 def _to_ts(val):
     """Convert datetime or float to Unix timestamp.
 
-    Delegates to ``bridge.utc.to_unix_ts`` which treats naive datetimes as UTC
-    (Popoto strips tzinfo on save). Directly calling ``val.timestamp()`` on a
-    naive datetime would interpret it as machine-local time and silently offset
-    every derived age by the machine's UTC offset.
+    Delegates to ``utils.utc.to_unix_ts`` which treats naive datetimes as
+    UTC. Directly calling ``val.timestamp()`` on a naive datetime would
+    interpret it as machine-local time and silently offset every derived age
+    by the machine's UTC offset.
     """
-    from bridge.utc import to_unix_ts
+    from utils.utc import to_unix_ts
 
     return to_unix_ts(val)
 
@@ -104,7 +106,7 @@ def _get_scheduling_depth() -> int:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             return int(sessions[0].scheduling_depth or 0)
     except Exception:  # noqa: S110 -- depth defaults to 0
@@ -141,10 +143,29 @@ def _check_rate_limit(project_key: str) -> bool:
 
 
 def _validate_issue(issue_number: int) -> dict | None:
-    """Validate GitHub issue exists and return its details."""
+    """Validate GitHub issue exists and return its details.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` resolves GH_REPO from the
+    environment before cwd, so under a foreign GH_REPO (or from the wrong
+    checkout) it would answer about a different repository's issue #N and
+    exit 0 (issue #2889). This gates whether an autonomous session is
+    scheduled on an issue, so a wrong-repo lookup could schedule unattended
+    work against the wrong repository. The resolved slug mirrors
+    ``tools/sdlc_stage_query.py``'s ladder (GH_REPO env first, else
+    ``gh repo view --json nameWithOwner`` from the working-tree root).
+    """
     try:
+        repo = _resolve_target_repo_fallback()
         result = subprocess.run(
-            ["gh", "issue", "view", str(issue_number), "--json", "title,state,body,url"],
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                *(["--repo", repo] if repo else []),
+                "--json",
+                "title,state,body,url",
+            ],
             capture_output=True,
             text=True,
             timeout=15,  # timeout-guard: allow
@@ -411,7 +432,16 @@ def cmd_schedule(args: argparse.Namespace) -> int:
                 inherited_correlation_id = parent_session.correlation_id
             if parent_session.classification_type:
                 inherited_classification_type = parent_session.classification_type
-            if parent_session.working_dir:
+            # Do not inherit a parent working_dir that points inside a lane
+            # worktree (#3176). A scheduled child synthesizes its own slug
+            # and provisions its own worktree; inheriting a parent's lane
+            # path makes it skip that provisioning (the path already looks
+            # like a worktree) and then fail verify_worktree_branch against
+            # another session's live lane. This is pre-existing and
+            # independent of the busy-guard fix: `valor-session create`
+            # already sets working_dir to `.worktrees/{slug}` for slugged
+            # sessions today.
+            if parent_session.working_dir and WORKTREES_DIR not in parent_session.working_dir:
                 working_dir = parent_session.working_dir
             # Inherit priority from parent unless explicitly overridden
             if not args.priority and parent_session.priority:
@@ -439,7 +469,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         # Transition parent to waiting_for_children if not already
         if parent_session and parent_session.status != "waiting_for_children":
             try:
-                from agent.agent_session_queue import _transition_parent
+                from agent.session_completion import _transition_parent
 
                 _transition_parent(parent_session, "waiting_for_children")
                 logger.info(f"Parent {parent_id} transitioned to waiting_for_children")
@@ -1031,6 +1061,14 @@ def _find_process_by_session_id(session_id: str) -> int | None:
 
     Uses pgrep -f to find processes whose arguments contain the session_id.
     Returns the PID if found, None otherwise.
+
+    Deliberately stays on ``pgrep`` rather than ``tools.process_lookup``
+    (#3187): the only caller signals the PID it gets back, and the target is a
+    session process that may well host the caller. BSD ``pgrep``'s exclusion of
+    the caller's ancestors is the protection there, not the defect it is
+    everywhere else — see ``monitoring/bridge_watchdog.py::kill_stale_processes``
+    for the rule. The explicit non-self check below is not sufficient on its
+    own; it skips only this process, not the chain above it.
     """
     if not session_id:
         return None

@@ -189,7 +189,7 @@ class TestEnqueueContinuationFallback:
 
     def test_diagnose_missing_session_returns_dict(self):
         """Verify _diagnose_missing_session returns diagnostic info."""
-        from agent.agent_session_queue import _diagnose_missing_session
+        from agent.session_completion import _diagnose_missing_session
 
         result = _diagnose_missing_session("nonexistent-session-id-12345")
         assert isinstance(result, dict)
@@ -287,8 +287,15 @@ class TestAgentSessionContinuationContract:
         phantoms = sorted(_EXECUTION_FENCE_RESET_FIELDS - _non_autokey_model_fields())
         assert not phantoms, f"reset set names non-existent field(s): {phantoms}"
 
-    def test_reset_set_is_the_fence_and_run_identity(self):
-        """Pinned explicitly: widening this set is a decision, not a refactor."""
+    def test_reset_set_is_the_fence_run_identity_and_the_run_outcome(self):
+        """Pinned explicitly: widening this set is a decision, not a refactor.
+
+        ``exit_reason`` joined the set in #3294: it names how ONE execution
+        ended, so a continuation row inheriting it would report the previous
+        run's outcome as its own. Nothing durable is lost -- the outcome lives
+        in the run's ``exit_summary`` ``session_events`` entry, which the clone
+        copies intact.
+        """
         from agent.agent_session_queue import _EXECUTION_FENCE_RESET_FIELDS
 
         assert set(_EXECUTION_FENCE_RESET_FIELDS) == {
@@ -300,6 +307,7 @@ class TestAgentSessionContinuationContract:
             "active_run_id",
             "owned_run_ids",
             "worker_pid",
+            "exit_reason",
         }
 
     def test_continuation_covers_the_same_fields_as_clone(self):
@@ -343,6 +351,25 @@ class TestAgentSessionContinuationContract:
         assert fields["total_cost_usd"] == 1.25
         assert fields["session_id"] == "fake-session"
 
+    def test_continuation_clears_exit_reason_but_clone_keeps_it(self):
+        """A continuation is a NEW run and has not exited yet (#3294).
+
+        Every consumer reads ``exit_reason`` as "how THIS run ended" -- the
+        synthetic-slug cleanup skip in the executor decides whether to delete a
+        lane's uncommitted work on it. Carrying the previous run's value onto a
+        `pending` row that has never executed is the same forged-record failure
+        as carrying ``exec_pid``. The clone path, which recreates the SAME live
+        row under a new key, must still preserve it.
+        """
+        from agent.agent_session_queue import (
+            clone_agent_session_fields,
+            continuation_agent_session_fields,
+        )
+
+        session = _FakeSession()
+        assert clone_agent_session_fields(session)["exit_reason"] == "turn_timeout"
+        assert continuation_agent_session_fields(session)["exit_reason"] is None
+
 
 class _FakeSession:
     """Stands in for an AgentSession with a live fence, no Redis required.
@@ -360,6 +387,7 @@ class _FakeSession:
         "active_run_id": "run-abc",
         "owned_run_ids": "run-abc",
         "worker_pid": 999,
+        "exit_reason": "turn_timeout",
         "issue_number": 2563,
         "total_cost_usd": 1.25,
         "session_id": "fake-session",

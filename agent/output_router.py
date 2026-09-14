@@ -86,6 +86,7 @@ def determine_delivery_action(
     session_type: str | None = None,
     classification_type: str | None = None,
     last_compaction_ts: float | None = None,
+    has_open_question: bool = False,
 ) -> str:
     """Pure function: decide what send_to_chat should do with agent output.
 
@@ -95,6 +96,11 @@ def determine_delivery_action(
         "nudge_rate_limited"        — backoff then nudge (rate limited)
         "nudge_empty"               — nudge (empty output)
         "nudge_continue"            — nudge (PM/SDLC session, continue pipeline)
+        "pause_open_question"       — deliver without nudging: the session has an
+                                      outstanding question in front of a human and
+                                      must wait for the answer rather than be
+                                      re-enqueued to guess at it. See the
+                                      ``has_open_question`` arg below.
         "defer_post_compact"        — skip this tick entirely; a compaction just
                                       completed and we want the SDK to finish
                                       before we nudge. The executor MUST NOT
@@ -107,6 +113,13 @@ def determine_delivery_action(
         "deliver_already_completed" — deliver without nudge (session already done)
 
     Args:
+        has_open_question: Whether this session is waiting on a question it has
+            already put in front of a human — today, an unanswered
+            ``telegram:poll:{poll_id}`` registry row naming this session.
+            **The caller reads that; this function performs no I/O**, exactly as
+            it performs no ``AgentSession`` read for ``last_compaction_ts``.
+            Defaults to ``False``, so every existing caller and every session
+            with no outstanding question keeps its previous behavior unchanged.
         last_compaction_ts: Unix timestamp of the most recent compaction for
             this session, read from ``AgentSession.last_compaction_ts``. When
             set and within ``POST_COMPACT_NUDGE_GUARD_SECONDS`` of ``now``,
@@ -152,6 +165,20 @@ def determine_delivery_action(
     # can then acquire the slot.  Issue #1004.
     if session_status == "waiting_for_children":
         return "deliver"
+    # A session that has already asked the human something must WAIT for the
+    # answer, not be nudged past it.
+    #
+    # This guards a defect wider than any one feature: the eng+sdlc branch
+    # immediately below is unconditional and sits ahead of every `stop_reason`
+    # branch, so an sdlc eng session that poses a question — as a Telegram poll
+    # or as plain prose — is auto-nudged onward with NUDGE_MESSAGE and proceeds
+    # on a guess. Placement is load-bearing: this sits AFTER the terminal,
+    # completion-sent, post-compaction, watchdog, rate-limit, empty-output and
+    # nudge-cap guards (a session that is dying, wedged, rate-limited or at its
+    # cap must still take those paths) and BEFORE the eng+sdlc line, which is
+    # the only thing it overrides.
+    if has_open_question:
+        return "pause_open_question"
     # PM sessions running SDLC work continue through pipeline stages via
     # nudge. Final delivery is handled out-of-band by the completion-turn
     # runner — see `_deliver_pipeline_completion` in `agent/session_completion.py`.
@@ -173,6 +200,7 @@ def route_session_output(
     classification_type: str | None = None,
     is_teammate: bool = False,
     last_compaction_ts: float | None = None,
+    has_open_question: bool = False,
 ) -> tuple[str, int]:
     """Determine delivery action with persona-aware nudge cap.
 
@@ -184,6 +212,11 @@ def route_session_output(
             caller is responsible for reading ``AgentSession.last_compaction_ts``
             from Redis and passing the value through; this wrapper does not
             read the AgentSession itself. See issue #1127.
+        has_open_question: Forwarded to ``determine_delivery_action``. Same
+            contract as ``last_compaction_ts`` — the caller performs the read
+            (``bridge.poll_registry.session_has_open_poll``) and passes the
+            result through; neither this wrapper nor the decision function
+            touches Redis. See issue #2701.
 
     Returns:
         (action, effective_nudge_cap) — the action string and the nudge cap used
@@ -206,5 +239,6 @@ def route_session_output(
         session_type=session_type,
         classification_type=classification_type,
         last_compaction_ts=last_compaction_ts,
+        has_open_question=has_open_question,
     )
     return action, effective_cap

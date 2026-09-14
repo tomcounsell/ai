@@ -15,7 +15,6 @@ from telethon.errors import FloodWaitError
 
 from bridge.telegram_relay import (
     DELIVERED_NO_ID,
-    KNOWN_MESSAGE_TYPES,
     MAX_RELAY_RETRIES,
     OUTBOX_KEY_PATTERN,
     RELAY_BATCH_SIZE,
@@ -48,7 +47,25 @@ class TestRelayConstants:
         assert MAX_RELAY_RETRIES == 3
 
     def test_known_message_types(self):
-        assert KNOWN_MESSAGE_TYPES == {None, "reaction", "custom_emoji_message"}
+        """The accepted set now lives on the wire schema's `type` Literal.
+
+        `None` must stay a member: an ordinary text message carries no `type`
+        key, and it is the highest-volume path in the system.
+        """
+        from typing import get_args
+
+        from bridge.wire_schemas import OutboxPayload
+
+        accepted = set(get_args(get_args(OutboxPayload.model_fields["type"].annotation)[0]))
+        assert accepted == {"reaction", "custom_emoji_message", "poll"}
+        assert OutboxPayload.model_validate_json('{"text": "hi"}').type is None
+
+    def test_poll_is_a_known_type(self):
+        """#2701: an unknown type is dead-lettered with no retry, which for a
+        poll would be a stuck agent."""
+        from bridge.wire_schemas import OutboxPayload
+
+        assert OutboxPayload(type="poll").type == "poll"
 
 
 class TestSendQueuedMessage:
@@ -339,7 +356,7 @@ class TestRecordSentMessage:
         mock_session.record_pm_message = MagicMock()
 
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = [mock_session]
+            mock_as.newest_for_session_id.return_value = mock_session
             _record_sent_message("test-session", 42)
 
         mock_session.record_pm_message.assert_called_once_with(42)
@@ -347,14 +364,14 @@ class TestRecordSentMessage:
     def test_handles_missing_session(self):
         """Should not crash when session is not found."""
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = []
+            mock_as.newest_for_session_id.return_value = None
             # Should not raise
             _record_sent_message("nonexistent-session", 42)
 
     def test_handles_query_exception(self):
         """Should not crash on Redis errors."""
         with patch("models.agent_session.AgentSession") as mock_as:
-            mock_as.query.filter.side_effect = Exception("Redis down")
+            mock_as.newest_for_session_id.side_effect = Exception("Redis down")
             # Should not raise
             _record_sent_message("test-session", 42)
 
@@ -403,6 +420,9 @@ class TestDeadLetterMessage:
             chat_id=12345,
             reply_to=67890,
             text="Failed message",
+            reason="max retries exceeded",
+            attempts=0,
+            project_key=None,
         )
 
     @pytest.mark.asyncio
@@ -1045,6 +1065,9 @@ class TestDeadLetterGuard:
             chat_id=-1003900483201,
             reply_to=None,
             text="message to supergroup",
+            reason="max retries exceeded",
+            attempts=0,
+            project_key=None,
         )
 
     @pytest.mark.asyncio
@@ -1438,6 +1461,24 @@ class TestZeroPeerGuard:
         mock_react.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_reaction_path_clears_on_none_emoji(self):
+        """``emoji: None`` is a clear, not a malformed payload; it reaches Telegram."""
+        message = {
+            "chat_id": "-1003900483201",
+            "reply_to": 42,
+            "emoji": None,
+            "session_id": "s",
+        }
+
+        mock_react = AsyncMock(return_value=True)
+        with patch("bridge.response.set_reaction", mock_react):
+            result = await _send_queued_reaction(MagicMock(), message)
+
+        assert result is True
+        mock_react.assert_called_once()
+        assert mock_react.call_args.args[3] is None
+
+    @pytest.mark.asyncio
     async def test_custom_emoji_path_still_sends_for_valid_peer(self):
         message = {"chat_id": "12345", "reply_to": None, "emoji": "🎉", "session_id": "s"}
         sent = MagicMock()
@@ -1508,3 +1549,520 @@ class TestZeroPeerGuard:
                 f"relay and utils.peer disagree on {odd!r}: "
                 f"relay sent={sent}, utils.peer={deliverable_telegram_peer(odd)}"
             )
+
+
+class TestPollDispatch:
+    """#2701: the `type: "poll"` outbox variant.
+
+    Every assertion here is about a property that is invisible on reading the
+    code in order — write ordering, which branch deletes what, and which thread
+    a call lands on.
+    """
+
+    @staticmethod
+    def _payload(**overrides):
+        payload = {
+            "type": "poll",
+            "chat_id": "-1003449100931",
+            "reply_to": None,
+            "question": "Which approach?",
+            "options": ["A", "B", "Other: wait for followup message"],
+            "session_id": "sess-1",
+            "poll_id_hint": "a" * 32,
+        }
+        payload.update(overrides)
+        return payload
+
+    @pytest.mark.asyncio
+    async def test_provisional_row_is_written_before_the_eligibility_check(self):
+        """The LPOP-to-registry window is a silent total-loss gap.
+
+        `process_outbox` has already consumed the work item atomically by the
+        time this branch runs, so until a row exists the question has no durable
+        record anywhere — orphan adoption would have nothing to adopt and
+        `poll_expired_unanswered` no row to fire on. Asserted on call ORDER with
+        a recording stub, not on timing.
+        """
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        calls = []
+
+        def _register(*_a, **_kw):
+            calls.append("register_pending_poll")
+            return True
+
+        def _eligible(*_a, **_kw):
+            calls.append("poll_eligible")
+            return PollEligibility(ok=True, reason="eligible")
+
+        async def _send(*_a, **_kw):
+            calls.append("send_poll")
+            return (111, 222)
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", side_effect=_register),
+            patch("bridge.poll_gating.poll_eligible", side_effect=_eligible),
+            patch("bridge.response.send_poll", side_effect=_send),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert calls[0] == "register_pending_poll", calls
+        assert calls.index("register_pending_poll") < calls.index("poll_eligible")
+        assert calls.index("poll_eligible") < calls.index("send_poll")
+
+    @pytest.mark.asyncio
+    async def test_ineligible_session_delivers_text_and_sends_no_poll(self):
+        """Never drop. A prose question is a cosmetic loss; a lost one is a stuck agent."""
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        mock_redis = MagicMock()
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll") as mock_delete,
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+        ):
+            result = await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        # DELIVERED_NO_ID, not None: the prose fallback is already queued, so
+        # the payload is consumed. A None here makes `process_outbox` re-queue
+        # the original poll, which declines again and delivers a second copy.
+        from bridge.telegram_relay import DELIVERED_NO_ID
+
+        assert result is DELIVERED_NO_ID
+        send_poll.assert_not_called()
+        # The provisional row is removed so a declined send never ages into a
+        # spurious orphan-adoption candidate.
+        mock_delete.assert_called_once_with("a" * 32)
+        mock_redis.rpush.assert_called_once()
+        requeued = json.loads(mock_redis.rpush.call_args[0][1])
+        assert requeued["type"] is None
+        assert "Which approach?" in requeued["text"]
+        assert requeued["_relay_attempts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_poll_id_hint_logs_error_and_delivers_text(self):
+        """A payload without the correlation key is a producer bug.
+
+        Sending anyway would put a poll on screen that no vote could ever be
+        routed to — worse than prose.
+        """
+        from bridge.telegram_relay import _send_queued_poll
+
+        mock_redis = MagicMock()
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+        ):
+            result = await _send_queued_poll(
+                MagicMock(),
+                self._payload(poll_id_hint=None),
+                "telegram:outbox:sess-1",
+            )
+
+        from bridge.telegram_relay import DELIVERED_NO_ID
+
+        assert result is DELIVERED_NO_ID
+        send_poll.assert_not_called()
+        requeued = json.loads(mock_redis.rpush.call_args[0][1])
+        assert requeued["type"] is None
+        assert "Which approach?" in requeued["text"]
+
+    @pytest.mark.asyncio
+    async def test_retry_finds_already_sent_poll_and_does_not_resend(self):
+        """Telegram accepting the send and the client THEN raising is ordinary.
+
+        `poll_id_hint` is minted per payload, not per attempt, so a naive retry
+        would put two polls on screen decoding to the same hint — turning the
+        orphan-adoption ambiguity bail (a safety guard) into the systematic
+        outcome of a routine retry, and leaving the question permanently
+        unroutable.
+        """
+        from bridge.telegram_relay import _send_queued_poll
+
+        send_poll = AsyncMock()
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch(
+                "bridge.telegram_relay._find_already_sent_poll",
+                new_callable=AsyncMock,
+                return_value=(1408, 99887766),
+            ),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True) as promote,
+            patch("bridge.response.send_poll", send_poll),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            result = await _send_queued_poll(
+                MagicMock(),
+                self._payload(_relay_attempts=1),
+                "telegram:outbox:sess-1",
+            )
+
+        assert result == 1408
+        send_poll.assert_not_called()  # exactly one SendMediaRequest total
+        promote.assert_called_once_with("a" * 32, 99887766, msg_id=1408)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_does_not_run_the_already_sent_lookup(self):
+        """The lookup costs a history scan; it is only worth it on a retry."""
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        lookup = AsyncMock(return_value=None)
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._find_already_sent_poll", lookup),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=(1, 2)),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        lookup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_failure_keeps_the_provisional_row(self):
+        """The row is what the retry lookup and orphan adoption need.
+
+        A `None` from `send_poll` does NOT mean nothing reached Telegram — the
+        client may have raised after the wire. Deleting the row here would
+        discard the only evidence of that.
+        """
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll") as mock_delete,
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=None),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            result = await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert result is None  # distinguishable, so the bounded retry engages
+        mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_eligibility_recheck_never_runs_on_the_event_loop_thread(self):
+        """`poll_eligible` does an unindexed AgentSession scan.
+
+        Running it inline would stall every other bridge coroutine for seconds
+        per poll send. This is a correctness assertion about WHICH THREAD the
+        scan executes on — deliberately not a duration assertion.
+        """
+        import threading
+
+        from bridge.poll_gating import PollEligibility
+        from bridge.telegram_relay import _send_queued_poll
+
+        loop_thread = threading.current_thread()
+        recorded = {}
+
+        def _eligible(*_a, **_kw):
+            recorded["thread"] = threading.current_thread()
+            return PollEligibility(ok=True, reason="eligible")
+
+        with (
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_gating.poll_eligible", side_effect=_eligible),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=(1, 2)),
+            patch("bridge.poll_registry.promote_pending_poll", return_value=True),
+            patch("bridge.telegram_relay._get_redis_connection", return_value=MagicMock()),
+        ):
+            await _send_queued_poll(MagicMock(), self._payload(), "telegram:outbox:sess-1")
+
+        assert recorded["thread"] is not loop_thread
+
+
+class TestDeclinedPollIsDeliveredOnce:
+    """A declined poll must reach the human exactly once.
+
+    The unit tests above exercise `_send_queued_poll` in isolation and so cannot
+    see this: the defect lives in the *interaction* with `process_outbox`, where
+    a `None` return means "retry" and re-queues the original poll payload. Both
+    decline branches push the prose fallback before returning, so a retry
+    declines again for the same reason and enqueues another copy — up to
+    MAX_RELAY_RETRIES, plus one more from the terminal branch. Asserted at the
+    `process_outbox` seam on purpose.
+    """
+
+    @staticmethod
+    def _run(payload):
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:sess-1"]
+        # One poll payload, then the queue drains. Anything the relay re-queues
+        # lands in `rpush`, which is what the assertions read.
+        mock_redis.lpop.side_effect = [json.dumps(payload), None]
+        return mock_redis
+
+    @staticmethod
+    def _requeued(mock_redis):
+        return [json.loads(call[0][1]) for call in mock_redis.rpush.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_ineligible_poll_is_not_requeued_as_a_poll(self):
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll"),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == [None], requeued
+        assert requeued[0]["text"].startswith("Which approach?")
+
+    @pytest.mark.asyncio
+    async def test_hintless_poll_is_not_requeued_as_a_poll(self):
+        mock_redis = self._run(TestPollDispatch._payload(poll_id_hint=None))
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == [None], requeued
+
+    @pytest.mark.asyncio
+    async def test_genuine_send_failure_still_retries(self):
+        """The sentinel must not swallow a real failure.
+
+        `send_poll` returning None is a distinguishable failure whose provisional
+        row deliberately survives; that payload still belongs in the retry path.
+        """
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=True, reason="eligible"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock, return_value=None),
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        requeued = self._requeued(mock_redis)
+        assert [p["type"] for p in requeued] == ["poll"], requeued
+        assert requeued[0]["_relay_attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_decline_whose_fallback_push_fails_still_retries(self):
+        """The sentinel must not report a delivery that never reached the outbox.
+
+        The ineligible branch deletes the provisional row before pushing the prose
+        fallback, so on a swallowed `rpush` failure the question would have no
+        outbox entry, no pending row and no dead letter. The branch reports the
+        decline as delivered only when the push landed.
+        """
+        from bridge.poll_gating import PollEligibility
+
+        mock_redis = self._run(TestPollDispatch._payload())
+        # First rpush is the prose fallback and fails; the second is the retry
+        # re-queue this test exists to prove still happens.
+        mock_redis.rpush.side_effect = [RuntimeError("redis blip"), 1]
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.poll_registry.register_pending_poll", return_value=True),
+            patch("bridge.poll_registry.delete_pending_poll"),
+            patch(
+                "bridge.poll_gating.poll_eligible",
+                return_value=PollEligibility(ok=False, reason="not_eng_session"),
+            ),
+            patch("bridge.response.send_poll", new_callable=AsyncMock) as send_poll,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            await process_outbox(MagicMock())
+
+        send_poll.assert_not_called()
+        requeued = [json.loads(c[0][1]) for c in mock_redis.rpush.call_args_list[1:]]
+        assert [p["type"] for p in requeued] == ["poll"], requeued
+        assert requeued[0]["_relay_attempts"] == 1
+
+
+class TestPollDeadLetterAndFallback:
+    """#2701 Risk 5: a dropped question is a stuck agent."""
+
+    @pytest.mark.asyncio
+    async def test_poll_is_not_discarded_as_ephemeral(self):
+        """Reactions are ephemeral and discardable. A question is not."""
+        from bridge.telegram_relay import _dead_letter_message
+
+        with patch("bridge.dead_letters.persist_failed_delivery") as persist:
+            await _dead_letter_message(
+                {
+                    "type": "poll",
+                    "chat_id": "-1003449100931",
+                    "question": "Which approach?",
+                    "options": ["A", "B"],
+                },
+                reason="max retries exceeded",
+            )
+
+        persist.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_survives_the_chat_id_and_text_gate(self):
+        """A poll payload has no `text` key.
+
+        Keeping "poll" out of the ephemeral discard tuple is NOT sufficient on
+        its own — the persistence branch is gated on `if chat_id and text`, so a
+        text-less payload falls through both branches into silence. The question
+        must be supplied as the dead-letter text. Asserted separately from the
+        ephemeral check because they are two independent guards.
+        """
+        from bridge.telegram_relay import _dead_letter_message
+
+        with patch("bridge.dead_letters.persist_failed_delivery") as persist:
+            await _dead_letter_message(
+                {
+                    "type": "poll",
+                    "chat_id": "-1003449100931",
+                    "question": "Which approach?",
+                    "options": ["A", "B"],
+                },
+                reason="max retries exceeded",
+            )
+
+        persisted_text = persist.call_args.kwargs.get("text") or persist.call_args[0][1]
+        assert "Which approach?" in persisted_text
+        assert "1. A" in persisted_text
+
+    def test_text_payload_never_re_enters_the_poll_branch(self):
+        """The re-enqueue cannot loop.
+
+        `process_outbox` is `while processed < RELAY_BATCH_SIZE` over `r.lpop`
+        of the same key, so a same-cycle rpush is consumed on a later cycle —
+        and the payload it pushes is plain text with `type: None`.
+        """
+        from bridge.telegram_relay import _poll_text_payload
+
+        payload = _poll_text_payload(
+            {
+                "chat_id": "-100",
+                "question": "Q?",
+                "options": ["a", "b"],
+                "reply_to": 5,
+                "session_id": "s",
+                "_relay_attempts": 3,
+            }
+        )
+        assert payload["type"] is None
+        assert payload["type"] not in ("poll",)
+        assert payload["_relay_attempts"] == 0  # its own retry budget
+        assert payload["reply_to"] == 5
+        assert payload["text"] == "Q?\n\n1. a\n2. b"
+
+
+class TestOutboxParseDeadLetters:
+    """An entry the relay cannot dispatch is preserved, not discarded (#3183).
+
+    Both branches have already LPOPped the entry, so `continue` used to lose
+    it with only a warning. The raw string now lands on a dead letter, which
+    is the only thing that makes the loss diagnosable after the fact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_outbox_parse_dead_letters_malformed_and_unknown_type(self):
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        unknown_type = json.dumps({"chat_id": "1", "text": "x", "type": "nope"})
+        mock_redis.lpop.side_effect = ["{not json at all", unknown_type, None]
+
+        recorded = []
+
+        async def _arecord(*args, **kwargs):
+            recorded.append((args, kwargs))
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.dead_letters.arecord", new=_arecord),
+        ):
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 0
+        assert len(recorded) == 2, "one row per lost entry"
+        stages = [args[0] for args, _ in recorded]
+        assert stages == ["outbox_parse", "outbox_parse"]
+
+        payloads = [args[1] for args, _ in recorded]
+        assert payloads[0] == "{not json at all", "the raw string is the evidence"
+        assert payloads[1] == unknown_type
+        assert all(kwargs["replayable"] is False for _, kwargs in recorded), (
+            "an entry that failed validation cannot be meaningfully re-sent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_plain_text_message_still_dispatches(self):
+        """The `type`-less payload is the highest-volume path in the system.
+
+        A Literal without `| None` on the wire model would dead-letter every
+        ordinary reply.
+        """
+        mock_redis = MagicMock()
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [
+            json.dumps({"chat_id": "1", "text": "hello", "session_id": "s"}),
+            None,
+        ]
+
+        recorded = []
+
+        async def _arecord(*args, **kwargs):
+            recorded.append(args)
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch("bridge.dead_letters.arecord", new=_arecord),
+            patch(
+                "bridge.telegram_relay._send_queued_message", new_callable=AsyncMock
+            ) as mock_send,
+            patch("bridge.telegram_relay._record_sent_message"),
+        ):
+            mock_send.return_value = 99
+            sent = await process_outbox(MagicMock())
+
+        assert sent == 1
+        assert recorded == []

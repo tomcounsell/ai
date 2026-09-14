@@ -115,7 +115,7 @@ def _run_cleanup(sessions, *, live_ct, age_minutes=120):
     ):
         mock_as_class.query.filter.side_effect = mock_filter
 
-        import agent.agent_session_queue as queue_module
+        import agent.session_state as queue_module
 
         original = getattr(queue_module, "_active_workers", {})
         try:
@@ -380,7 +380,7 @@ class TestMixedBatchCounting:
             ),
         ):
             mock_as_class.query.filter.side_effect = mock_filter
-            import agent.agent_session_queue as queue_module
+            import agent.session_state as queue_module
 
             original = getattr(queue_module, "_active_workers", {})
             try:

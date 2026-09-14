@@ -2,13 +2,13 @@
 
 Automatic classification and routing of incoming work requests to determine whether they should be processed as SDLC pipeline work (from the ai/ repo) or as conversational responses (from the target project directory).
 
-## Problem
+## Purpose
 
-Previously, all agent sessions ran from a single working directory regardless of whether the request was development work or a simple question. This meant:
-
-1. SDLC pipeline commands couldn't access the orchestrator skills and dispatch logic in `ai/`
-2. Conversational questions loaded unnecessary SDLC context
-3. No automated way to distinguish "build this feature" from "what does this function do?"
+The routing system classifies incoming work requests so SDLC pipeline work runs
+from the `ai/` repo root (where the orchestrator skills and dispatch logic live)
+and conversational questions run from the target project directory (without SDLC
+context). This distinguishes "build this feature" from "what does this function
+do?".
 
 ## Solution
 
@@ -24,7 +24,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`), which replaced the previous Ollama-first/Haiku-fallback pair
+   - Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`)
    - Typed `RoutingDecision` output model enforces one of `sdlc`, `collaboration`, `other`, or `question` directly (no first-token text parse)
    - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)
    - Any classification failure defaults to `question` (safe fallback)
@@ -46,7 +46,7 @@ For SDLC-routed requests, a `TARGET_REPO` context block is injected into the sys
 
 ### System Prompt Ordering
 
-The system prompt was reordered to prioritize SDLC workflow instructions:
+The system prompt prioritizes SDLC workflow instructions:
 
 1. SDLC workflow rules (MUST language, negative examples)
 2. Persona segments (identity, work-patterns, tools)
@@ -66,8 +66,6 @@ When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `
 
 `build_harness_turn_input()` (`agent/sdk_client.py`) injects a `GITHUB: org/repo` line into the enriched message text for cross-repo SDLC requests (classification is "sdlc", project key is not "valor", and project mode is not "pm"). Skills include instructions to parse this line and add `--repo org/repo` flags to `gh` commands.
 
-**Retired (#2000):** a `GH_REPO` subprocess environment-variable injection previously existed on `ValorAgent._create_options()` (the now-deleted SDK path). Confirmed at deletion time to have zero live occurrences anywhere outside that class — it was never wired into the CLI-harness path this system actually runs on, so the `GITHUB:` message header above has always been the sole live mechanism, not a secondary safety net.
-
 Skills with `--repo` instructions: `/sdlc`, `/do-issue`, `/do-plan`, `/do-pr-review`, `/do-docs`, `/do-patch`.
 
 ### Verification
@@ -86,6 +84,6 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 ## Related
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
-- [Message Drafter](message-drafter.md) -- Process narration stripping added alongside routing
+- [Message Drafter](message-drafter.md) -- Process narration stripping
 - [Eng Session Architecture](eng-session-architecture.md) -- Session routing and orchestration
 - [PM Routing: Collaboration](pm-routing-collaboration.md) -- Four-way classification extending this two-way system

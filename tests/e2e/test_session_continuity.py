@@ -65,7 +65,7 @@ class TestSessionCreation:
         # Pass the writer's declared default explicitly to assert the contract:
         # whatever start_transcript ends up persisting with no caller hint MUST
         # equal DEFAULT_PROJECT_KEY (i.e. "valor"). If the constant ever drifts
-        # away from the reader fallback at agent.sustainability._get_project_key,
+        # away from the reader fallback at reflections.redis_access.get_project_key,
         # this test fails alongside test_default_project_key_consistency.
         start_transcript(
             session_id=session_id,

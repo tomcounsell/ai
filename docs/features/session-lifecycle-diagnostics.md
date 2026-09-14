@@ -4,7 +4,7 @@ Structured logging at every AgentSession state transition, with stall detection 
 
 ## Overview
 
-Every AgentSession status change now emits a structured `LIFECYCLE` log entry to `bridge.log`, including the old and new status, duration in previous state, session ID, and context. This makes it possible to trace the full lifecycle of any session from the logs alone.
+Every AgentSession status change emits a structured `LIFECYCLE` log entry to `bridge.log`, including the old and new status, duration in previous state, session ID, and context. This makes it possible to trace the full lifecycle of any session from the logs alone.
 
 A stall detector runs alongside the existing session watchdog, flagging sessions that have been in a transitional state (pending, running, active) longer than expected.
 
@@ -19,7 +19,7 @@ The `AgentSession.log_lifecycle_transition()` method is called at every status c
 | `models/session_lifecycle.finalize_session()` | →completed/failed/killed/abandoned/cancelled | All terminal transitions |
 | `models/session_lifecycle.transition_status()` | →pending/running/active/dormant/waiting_for_children/superseded | All non-terminal transitions |
 
-All lifecycle logging is now centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers no longer need to call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
+All lifecycle logging is centralized in `models/session_lifecycle.py`. The `finalize_session()` and `transition_status()` functions call `session.log_lifecycle_transition()` internally, so callers do not call it directly. See [Session Lifecycle](session-lifecycle.md) for the full module documentation.
 
 Each call:
 1. Emits a structured INFO log: `LIFECYCLE session=X transition=old→new session_id=Y project=Z duration_in_prev_state=Ns context="..."`
@@ -35,7 +35,7 @@ Filter all lifecycle events: `grep LIFECYCLE logs/bridge.log`
 
 ### Stall Detection
 
-Added to the existing session watchdog loop. Every 5 minutes, `check_stalled_sessions()` queries all sessions in transitional states and checks time-in-state against thresholds:
+`check_stalled_sessions()` runs in the session watchdog loop. Every 5 minutes it queries all sessions in transitional states and checks time-in-state against thresholds:
 
 | Status | Threshold | Rationale |
 |--------|-----------|-----------|
@@ -48,12 +48,12 @@ For active sessions, `updated_at` is checked first — if recent activity exists
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
 - The stalled session info is returned for potential alerting
-- **User-visible liveness counter** (#2716): for sessions with an originating Telegram message, `_publish_liveness_ticks()` advances a wall-clock tick counter on that message via `telegram:outbox:{session_id}`, and forces a progress message at the ceiling. It is a duration signal, not a stall signal — it asserts only that the watchdog has eyes on the session. See [Session Liveness Tick Counter](session-liveness-tick-counter.md).
-- **Pending stalls** (#342, #402): `_recover_stalled_pending()` kills the stuck worker via `_kill_stalled_worker()`, applies exponential backoff, and re-enqueues via `_enqueue_stall_retry()`. After `STALL_MAX_RETRIES` exhausted, the session is abandoned with a Telegram notification. See [stall-retry.md](stall-retry.md) for full details.
+- **User-visible liveness counter**: for sessions with an originating Telegram message, `_publish_liveness_ticks()` advances a wall-clock tick counter on that message via `telegram:outbox:{session_id}`, and forces a progress message at the ceiling. It is a duration signal, not a stall signal — it asserts only that the watchdog has eyes on the session. See [Session Liveness Tick Counter](session-liveness-tick-counter.md).
+- **Pending stalls**: `_recover_stalled_pending()` kills the stuck worker via `_kill_stalled_worker()`, applies exponential backoff, and re-enqueues via `_enqueue_stall_retry()`. After `STALL_MAX_RETRIES` exhausted, the session is abandoned with a Telegram notification. See [stall-retry.md](stall-retry.md) for full details.
 
-### Stale Save Guard (#342)
+### Stale Save Guard
 
-The `_execute_agent_session()` epilogue in `agent/agent_session_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
+The `_execute_agent_session()` epilogue in `agent/agent_session_queue.py` skips saving the in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). `_enqueue_continuation()` deletes and recreates the session, so saving would resurrect a ghost record in Redis and make the pending continuation invisible to the worker. The guard skips the save and logs a debug message explaining why.
 
 ### CLI Status Report
 
@@ -99,9 +99,9 @@ Constants in `monitoring/session_watchdog.py`:
 | `tests/unit/test_recovery_respawn_safety.py` | Terminal-status safety across every recovery mechanism |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
 
-## Error Summary Enforcement (#434)
+## Error Summary Enforcement
 
-When sessions fail, the `summary` field on `AgentSession` is now populated with error context from the exception that caused the failure. This ensures the reflections system (`reflections/session_intelligence.py`) receives actionable data instead of empty strings.
+When sessions fail, the `summary` field on `AgentSession` is populated with error context from the exception that caused the failure. This ensures the reflections system (`reflections/session_intelligence.py`) receives actionable data instead of empty strings.
 
 **Failure paths that capture error summaries:**
 
@@ -114,9 +114,9 @@ When sessions fail, the `summary` field on `AgentSession` is now populated with 
 
 Summaries are truncated to 500 characters at capture time. The `AgentSession.summary` field supports up to 50,000 characters, but concise one-line summaries are preferred since full tracebacks are available in `bridge.log`.
 
-## Crash-Path Diagnostic Snapshot (#626)
+## Crash-Path Diagnostic Snapshot
 
-When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block saves a diagnostic snapshot **before** calling `_complete_agent_session()`. A nudge guard then re-reads the session from Redis: if the session status is `"pending"` (nudge enqueued) or the session no longer exists (nudge fallback recreated it), completion is skipped to avoid overwriting the nudge. Otherwise, `_complete_agent_session()` proceeds normally. See [Session Lifecycle](session-lifecycle.md) for the full zombie loop prevention design.
+When a session terminates (whether by failure, cancellation, or normal completion), the worker `finally` block saves a diagnostic snapshot **before** calling `_complete_agent_session()`. A nudge guard then re-reads the session from Redis: if the session status is `"pending"` (nudge enqueued) or the session is absent (nudge fallback recreated it), completion is skipped to avoid overwriting the nudge. Otherwise, `_complete_agent_session()` proceeds normally. See [Session Lifecycle](session-lifecycle.md) for the full zombie loop prevention design.
 
 ### What Gets Captured
 
@@ -137,20 +137,18 @@ The `save_session_snapshot()` call records:
 
 ### Task Await (Exception Propagation)
 
-The `_execute_agent_session()` function previously used a `while task.is_running` / `sleep(2)` polling loop to wait for the background task. Exceptions that escaped `BackgroundTask._run_work` were silently swallowed because the polling loop only checked `is_running`, not the task's exception state.
-
-The fix replaces the polling loop with `await task._task`, which directly awaits the asyncio future. Any exception that escapes `_run_work` propagates immediately to the caller, where it is caught and stored in `task._error` for downstream handling.
+The `_execute_agent_session()` function awaits the background task directly via `await task._task` rather than a `while task.is_running` / `sleep(2)` polling loop. A polling loop checks only `is_running`, not the task's exception state, so exceptions escaping `BackgroundTask._run_work` would be silently swallowed. Awaiting the asyncio future directly propagates any exception from `_run_work` immediately to the caller, where it is caught and stored in `task._error` for downstream handling.
 
 ### Troubleshooting
 
 **Session dies with no trace in logs or snapshots**
 
-Before #626, if a session crashed after `_complete_agent_session()` ran but before any snapshot was saved, the session vanished. The crash snapshot in the `finally` block now runs before completion, ensuring at least one diagnostic record exists for every terminated session.
+The crash snapshot in the `finally` block runs before completion, ensuring at least one diagnostic record exists for every terminated session — including a session that crashes after `_complete_agent_session()` runs but before any snapshot is saved.
 
 ### Files
 
-| File | Change |
-|------|--------|
+| File | Purpose |
+|------|---------|
 | `agent/agent_session_queue.py` | Crash snapshot in finally, task await, lifecycle logging |
 | `agent/health_check.py` | `_tool_counts`, the authoritative per-session tool counter |
 | `tests/unit/test_crash_snapshot.py` | Tests for snapshot saving on all termination paths |
@@ -163,5 +161,3 @@ Before #626, if a session crashed after `_complete_agent_session()` ran but befo
 - [AgentSession Model](agent-session-model.md) — Unified session lifecycle model
 - [Agent Session Queue Reliability](agent-session-queue.md) — Queue-level reliability fixes
 - [Session Lifecycle](session-lifecycle.md) — Session state machine, zombie loop prevention
-- Issue #216 — Original tracking issue
-- Issue #626 — Silent session death fixes

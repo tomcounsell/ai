@@ -25,12 +25,21 @@ from pathlib import Path
 from agent.sdlc_router import DISPATCH_RULES, GUARDS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SKILL_MD = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
-DO_SDLC_MD = REPO_ROOT / ".claude" / "skills-global" / "do-sdlc" / "SKILL.md"
+# After the sdlc → do-sdlc consolidation (#2930), the router contract (Step 4
+# dispatch + Step 3.5 guard table) lives in the single merged body; the thin
+# /sdlc shim (.claude/skills/sdlc/SKILL.md) only points at it and carries no
+# dispatch table or guard rows of its own. The parity checks therefore read
+# the merged body.
+SKILL_MD = REPO_ROOT / ".claude" / "skills-global" / "do-sdlc" / "SKILL.md"
+DO_SDLC_MD = SKILL_MD
 
-# Every skill body that is told how to interpret the router's JSON. Both consume
-# `sdlc-tool next-skill`, so both must describe shapes the router can emit.
-ROUTER_CONSUMER_SKILLS = (SKILL_MD, DO_SDLC_MD)
+# Every skill body that is told how to interpret the router's JSON. Both the
+# merged body and the /sdlc shim consume `sdlc-tool next-skill`, so both must
+# describe shapes the router can emit.
+ROUTER_CONSUMER_SKILLS = (
+    SKILL_MD,
+    REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +148,9 @@ def test_dispatch_rules_cover_expected_row_ids():
     it actively weakened the "never merge unfinished work" invariant. Merge
     enforcement lives in the merge-guard hook via ``tools.merge_predicate``;
     rows 9/10 and G6 remain scheduling-only.
+
+    Row 8g (re-dispatch a /do-patch that died before completing its stage)
+    was added by 3c689f211 (Refs #3065).
     """
     expected = {
         "1",
@@ -158,6 +170,7 @@ def test_dispatch_rules_cover_expected_row_ids():
         "8d",
         "8e",
         "8f",
+        "8g",
         "9",
         "10",
     }
@@ -251,6 +264,37 @@ def test_guard_row_ids_in_python():
     assert not missing, (
         f"Guard IDs in SKILL.md without matching callables in GUARDS: {missing}\n"
         f"Available GUARDS: {sorted(guard_names)}"
+    )
+
+
+_GUARD_FN_NAME_RE = re.compile(r"^guard_(g\d+)_")
+
+
+def test_every_guard_has_skill_md_row():
+    """Reverse direction of test_guard_row_ids_in_python (#2796 tech debt round
+    1). The forward test only proves every guard_id *mentioned in SKILL.md* has
+    a Python callable — it says nothing about a guard landing in ``GUARDS``
+    with no SKILL.md row at all, which is exactly what happened when G9 was
+    added: the guard shipped, the pinned order and Step 3.5 table were never
+    updated, and this suite stayed green because nothing checked the other
+    direction. Without this assertion a future guard can land undocumented
+    again with no test noticing."""
+    md = SKILL_MD.read_text(encoding="utf-8")
+    guard_rows = parse_guard_rows(md)
+    documented_ids = {r["guard_id"].upper() for r in guard_rows}
+
+    missing = []
+    for guard in GUARDS:
+        match = _GUARD_FN_NAME_RE.match(guard.__name__.lower())
+        if not match:
+            continue
+        guard_id = match.group(1).upper()
+        if guard_id not in documented_ids:
+            missing.append(guard_id)
+
+    assert not missing, (
+        f"Guards in GUARDS without a matching row in SKILL.md Step 3.5: {missing}\n"
+        f"Documented guard IDs: {sorted(documented_ids)}"
     )
 
 

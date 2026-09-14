@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.notification_copy import TERMINAL_PROMISE_FALLBACK_MESSAGE
 from agent.session_pickup import _truthy
 from agent.session_runner.liveness import derive_sdk_ever_output, subprocess_hang_verdict
 from agent.session_stall_classifier import (
@@ -637,8 +638,9 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     # first tick after a resume. No anchor at all ⇒ evaluate (legacy fallback,
     # matching #1979); boundary ``last_tool_use_at == anchor`` counts as
     # current-run via ``>=``.
+    last_at_ts = _ts(last_at)
     anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
-    if anchor is not None and _ts(last_at) < anchor:
+    if anchor is not None and last_at_ts < anchor:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
@@ -655,8 +657,7 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         if raised > budget:
             budget = raised
             declared_note = f" (declared {int(capped)}s + {TOOL_TIMEOUT_DECLARED_GRACE_SEC}s grace)"
-    last_at_aware = last_at if last_at.tzinfo else last_at.replace(tzinfo=UTC)
-    age = (datetime.now(tz=UTC) - last_at_aware).total_seconds()
+    age = datetime.now(tz=UTC).timestamp() - last_at_ts
     if age <= budget:
         return None
     reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s{declared_note}"
@@ -920,6 +921,16 @@ async def _check_jobs_at_rest_with_open_expectations() -> int:
 
         for job in _Job.at_rest_with_open_expectations():
             flagged += 1
+            if job.goal_is_corrupt():
+                logger.error(
+                    "[at-rest-expectation] Job %s (room=%s) is at rest with a CORRUPT "
+                    "goal: its open-expectation flag is the last known truth and "
+                    "cannot be re-derived. Writes are refused until the stored bytes "
+                    "are repaired; needs a human (#2862).",
+                    job.job_id,
+                    job.room_id,
+                )
+                continue
             open_entries = job.open_expectations()
             logger.error(
                 "[at-rest-expectation] INVARIANT VIOLATION: Job %s (room=%s) "
@@ -1601,8 +1612,7 @@ def _never_started_past_grace(
             # Legacy / phantom record — no running_seconds, safe default.
             return False
 
-        started_aware = started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-        running_seconds = (now - started_aware).total_seconds()
+        running_seconds = now.timestamp() - _ts(started_ref)
 
         threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
         return running_seconds > threshold
@@ -1737,8 +1747,7 @@ def _has_progress(entry: AgentSession) -> bool:
     for progress_attr in ("last_tool_use_at", "last_turn_at"):
         ts = getattr(entry, progress_attr, None)
         if isinstance(ts, datetime):
-            ts_aware = ts if ts.tzinfo else ts.replace(tzinfo=UTC)
-            if (now_utc - ts_aware).total_seconds() < SDK_PROGRESS_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(ts) < SDK_PROGRESS_FRESHNESS_WINDOW:
                 return True
 
     # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed
@@ -1757,8 +1766,7 @@ def _has_progress(entry: AgentSession) -> bool:
     if not sdk_ever_output:
         hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
-            hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
-            if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+            if now_utc.timestamp() - _ts(hb) < HEARTBEAT_FRESHNESS_WINDOW:
                 # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
                 # fast-path when the session is never-started past grace.
                 # Threads the shared trusted clock (now=now_utc, issue #1905)
@@ -1791,10 +1799,7 @@ def _has_progress(entry: AgentSession) -> bool:
                     # ``created_at`` introduction or phantom record) →
                     # preserve fast-path.
                     return True
-                started_aware = (
-                    started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
-                )
-                running_seconds = (now_utc - started_aware).total_seconds()
+                running_seconds = now_utc.timestamp() - _ts(started_ref)
                 if running_seconds < STARTUP_GRACE_SECONDS:
                     # Inside the startup grace window (or clock-skew negative
                     # running_seconds) → preserve fast-path. The
@@ -1839,8 +1844,7 @@ def _has_progress(entry: AgentSession) -> bool:
         _hb_own = getattr(entry, "last_heartbeat_at", None)
         _own_progress_fresh = False
         if isinstance(_hb_own, datetime):
-            _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
-            _hb_age = (now_utc - _hb_own_aware).total_seconds()
+            _hb_age = now_utc.timestamp() - _ts(_hb_own)
             if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
                 _own_progress_fresh = True
         # If heartbeat is stale or absent, fall through — do NOT return True.
@@ -2522,17 +2526,6 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     )
 
 
-# Honest substitution delivered in place of a promise-flagged deferred draft on
-# terminal paths (issue #2423). At terminal-flush time there is no live agent to
-# self-draft a rewrite, so the flush substitutes rather than suppresses (suppression
-# would reintroduce the #1796 swallowed-reply class). This text must itself pass
-# the promise heuristic — it states a fact and asks, promising nothing.
-TERMINAL_PROMISE_FALLBACK_MESSAGE = (
-    "I couldn't complete that follow-up before this session ended — "
-    "please send the request again if you still need it."
-)
-
-
 def _gate_terminal_promise(message: str, *, transport: str, session_id: str | None) -> str:
     """Promise-gate the exact text a terminal flush is about to deliver (#2423).
 
@@ -2592,7 +2585,7 @@ def _gate_terminal_promise(message: str, *, transport: str, session_id: str | No
         return message
 
 
-def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
+def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> bool:
     """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
 
     This is the synchronous flush invoked from the ``finalize_session``
@@ -2638,11 +2631,20 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             ``"failed"``, ``"abandoned"``).  Forwarded from
             ``finalize_session`` so the email gate can restrict delivery to
             the ``completed`` path only.
+
+    Returns:
+        ``True`` only when this call actually delivered the deferred reply
+        (wrote it to an outbox queue). ``False`` on every early-return path —
+        nothing pending, transport/status gate declined, SETNX dedup already
+        held, or an internal failure caught by the outer handler. Callers
+        that only need "did this call cause a delivery" (e.g. the backstop
+        sweep's WARNING/counter gating) should treat any non-``True`` result
+        as "not delivered this call."
     """
     try:
         session_id = getattr(session, "session_id", None)
         if not session_id:
-            return
+            return False
 
         # Authoritative read: the defer-time persist may post-date the caller's
         # in-memory copy, so read extra_context from a fresh re-read.
@@ -2651,7 +2653,13 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         extra_ctx = getattr(source, "extra_context", None) or {}
 
         if not extra_ctx.get("deferred_self_draft_pending"):
-            return
+            # Not silent (#3053): makes "flush ran, nothing pending" distinguishable
+            # from "flush never ran" in the logs.
+            logger.debug(
+                "[session-health] flush_deferred_self_draft_sync: nothing pending for %s",
+                session_id,
+            )
+            return False
 
         # Transport / status gate — evaluated BEFORE the dedup SETNX so the key
         # is not burned on ineligible paths (e.g. email + failed).
@@ -2660,7 +2668,16 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             # Email: only proceed on the completed path.  The async fallback
             # helper (_deliver_deferred_self_draft_fallback) owns failed/abandoned.
             if status != "completed":
-                return
+                # Not silent (#3053): names the transport/status combination that
+                # deliberately defers to the async fallback helper.
+                logger.debug(
+                    "[session-health] flush_deferred_self_draft_sync: transport=%s "
+                    "status=%s not eligible for %s, deferring to async fallback",
+                    transport,
+                    status,
+                    session_id,
+                )
+                return False
         # telegram / None transport: proceed unconditionally (async helper
         # early-returns for telegram, so no double-send risk).
 
@@ -2678,7 +2695,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                 "[session-health] self-draft completed flush already sent for %s — skipping",
                 session_id,
             )
-            return
+            return False
 
         project_key = getattr(source, "project_key", None) or "unknown"
 
@@ -2825,6 +2842,85 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             transport or "telegram",
             len(attached),
         )
+        delivered = True
+
+        # Stamp response_delivered_at (#3270). This flush is the path PM/eng
+        # replies actually take, and until now it wrote the outbox payload
+        # without recording that the human had been answered. The only two
+        # other writers (agent/session_executor.py under `action == "deliver"`,
+        # agent/session_completion.py gated on `delivery_attempted`) are
+        # unreachable from here, so #918's duplicate-delivery guard
+        # `_delivery_belongs_to_current_run` read None and returned False for
+        # every deferred-self-draft delivery — and the #944 orphan net requeued
+        # rows that had already replied, once per tick.
+        #
+        # Narrow save: a bare save() here would be a full popoto HSET of a
+        # possibly-stale instance, i.e. a silent lifecycle write.
+        #
+        # ALSO mutate the caller's in-memory `session` object, for the same
+        # reason the extra_context clear below does: `finalize_session` runs a
+        # full `session.save()` on its own `session` parameter immediately
+        # after this flush returns, which writes back whatever that object
+        # still holds. Without the mirror the stamp is erased microseconds
+        # after it lands, on the very save that finalizes the transition.
+        try:
+            _stamp_at = datetime.now(tz=UTC)
+            _stamp_target = get_authoritative_session(session_id) or source
+            _stamp_target.response_delivered_at = _stamp_at
+            _stamp_target.save(update_fields=["response_delivered_at", "updated_at"])
+            if session is not None and session is not _stamp_target:
+                session.response_delivered_at = _stamp_at
+        except Exception as _stamp_err:
+            logger.warning(
+                "[session-health] failed to stamp response_delivered_at for %s after "
+                "successful flush (non-fatal; the #918 delivery guard stays blind for "
+                "this row): %s",
+                session_id,
+                _stamp_err,
+            )
+
+        # Post-delivery flag clear (#3053 correction — the flush is NOT
+        # self-clearing via #2489; that clear covers only the redraft-success
+        # path in TelegramRelayOutputHandler.send(), never this flush). Without
+        # this, a delivered row stays visible to the backstop sweep's predicate
+        # forever inside its lookback window, re-firing the sweep's WARNING and
+        # counter every tick, and can be re-delivered outright once the row
+        # outlives the SETNX dedup TTL. Re-read-then-RMW on the authoritative
+        # record, mirroring agent/output_handler.py:807-824. Its own try/except:
+        # a failed clear must not turn a delivered message into a flush failure
+        # — the SETNX key remains the backstop for the remainder of its TTL.
+        #
+        # ALSO mutate the caller's in-memory `session` object (not just the
+        # freshly-fetched authoritative record): `finalize_session` performs a
+        # full (non-partial) `session.save()` on its own `session` parameter
+        # immediately after this flush returns, and a full save writes back
+        # whatever `session.extra_context` still holds in memory. Without this
+        # second mutation, that full save silently resurrects the just-cleared
+        # flag on the very save that finalizes the transition.
+        try:
+            _clear_target = get_authoritative_session(session_id) or source
+            _clear_ctx = dict(getattr(_clear_target, "extra_context", None) or {})
+            _clear_ctx.pop("deferred_self_draft_pending", None)
+            _clear_ctx.pop("deferred_self_draft_text", None)
+            _clear_target.extra_context = _clear_ctx
+            _clear_target.save(update_fields=["extra_context"])
+            if session is not None and session is not _clear_target:
+                _caller_ctx = dict(getattr(session, "extra_context", None) or {})
+                _had_caller_flags = (
+                    "deferred_self_draft_pending" in _caller_ctx
+                    or "deferred_self_draft_text" in _caller_ctx
+                )
+                if _had_caller_flags:
+                    _caller_ctx.pop("deferred_self_draft_pending", None)
+                    _caller_ctx.pop("deferred_self_draft_text", None)
+                    session.extra_context = _caller_ctx
+        except Exception as _clear_err:
+            logger.warning(
+                "[session-health] failed to clear deferred_self_draft_pending for "
+                "%s after successful flush (non-fatal, SETNX dedup still applies): %s",
+                session_id,
+                _clear_err,
+            )
 
         # Best-effort telemetry counter.
         try:
@@ -2832,12 +2928,15 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         except Exception:  # noqa: S110 -- optional telemetry counter
             pass
 
+        return delivered
+
     except Exception as _err:
         logger.warning(
             "[session-health] flush_deferred_self_draft_sync failed for %s: %s",
             getattr(session, "session_id", "?"),
             _err,
         )
+        return False
 
 
 async def _deliver_deferred_self_draft_fallback(
@@ -2988,6 +3087,234 @@ async def _deliver_deferred_self_draft_fallback(
         )
 
 
+# Backstop sweep (#3053): lookback window for the periodic re-scan of
+# terminal sessions still carrying a stranded `deferred_self_draft_pending`
+# flag. PROVISIONAL/TUNABLE -- grain of salt: sized to the SETNX dedup TTL
+# (`HOUR_DEDUP_LOCK_TTL_SECONDS`) per the PM ruling on Open Question 2 in
+# docs/plans/sdlc-3053.md. The post-delivery flag clear added by this plan
+# (not the window) is what bounds re-delivery, so this no longer has to be a
+# short multiple of the health-check interval. Env-overridable for ops tuning
+# without a redeploy.
+def deferred_flush_backstop_lookback_seconds() -> int:
+    """Resolve the backstop lookback window at call time, never at import time.
+
+    Read lazily so the "env-overridable for ops tuning without a redeploy"
+    intent above is actually true: a module-scope capture freezes the value at
+    whatever the first importer saw, so a live worker would keep the old window
+    until the process restarted — which is the redeploy the comment promises to
+    avoid (#2866).
+    """
+    return int(
+        os.environ.get(
+            "DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS",
+            str(HOUR_DEDUP_LOCK_TTL_SECONDS),
+        )
+    )
+
+
+# Delivery-posture statuses for the backstop sweep (#3053): "the machine
+# dropped it" vs "a person called it off". `completed`, `failed`, and
+# `abandoned` are cases where the session ran out of road without delivering
+# -- the user asked something and silence is a failure they cannot detect or
+# recover from, so these are swept generously. `killed` and `cancelled` carry
+# an explicit human/supervisory "stop this"; honouring that intent matters
+# more than draining a held reply, so they are deliberately excluded. If a
+# new terminal status is added later, classify it by whether an actor chose
+# to stop the session, not by appending it here without re-reading this
+# rationale.
+DEFERRED_FLUSH_BACKSTOP_STATUSES = frozenset({"completed", "failed", "abandoned"})
+
+# Per-tick cap on rows acted on by the backstop sweep, so a pathological
+# backlog cannot stall the health loop. PROVISIONAL/TUNABLE.
+DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK_DEFAULT = 25
+
+
+def deferred_flush_backstop_max_rows_per_tick() -> int:
+    """Resolve the per-tick cap at call time. See the lookback accessor above."""
+    return int(
+        os.environ.get(
+            "DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK",
+            str(DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK_DEFAULT),
+        )
+    )
+
+
+def _sweep_stranded_deferred_self_drafts() -> None:
+    """Periodic backstop: deliver or report any terminal session still holding
+    a stranded ``deferred_self_draft_pending`` flag.
+
+    Independent of the ``finalize_session`` call graph (#3053) -- this is the
+    mechanism that closes any path that cannot route through the hoisted
+    chokepoint flush, including the three last-resort ``"failed"`` bypass
+    writes in ``agent/session_executor.py`` (which now also call the flush
+    directly as belt-and-braces redundancy; this sweep is the independent
+    third layer).
+
+    Scan predicate: ORM-only (``AgentSession.query.filter(status=...)`` --
+    never a raw Redis scan, per repo convention) over
+    ``DEFERRED_FLUSH_BACKSTOP_STATUSES`` (the delivery-posture principle:
+    sessions the machine dropped, not sessions a human stopped), keeping only
+    rows whose ``extra_context.get("deferred_self_draft_pending")`` is truthy
+    AND whose ``completed_at`` is within ``DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS``.
+
+    A row with ``completed_at=None`` (legacy data predating this plan's
+    ``completed_at`` backfill at the three bypass sites, or any other writer
+    that skipped it) is ACTED ON exactly once -- the same repo precedent as
+    ``_response_delivered_after_start`` above ("legacy: no anchor at all,
+    preserve original always-fire behavior"). Skipping is the failure mode
+    this sweep exists to prevent. After a hit, the flush's own post-delivery
+    flag clear removes the row from this predicate on the very next tick, so
+    an anchorless row is neither permanently skipped nor permanently
+    resurrected.
+
+    A sweep hit means the chokepoint (the hoisted flush inside
+    ``finalize_session``) was bypassed for this session -- a defect signal,
+    not routine housekeeping -- so a hit logs at WARNING and increments
+    ``{project_key}:session-health:deferred_flush_backstop_hits`` ONLY when
+    ``flush_deferred_self_draft_sync`` reports it actually delivered (return
+    value ``True``). A row the flush declines (e.g. transport=email with
+    status=failed/abandoned -- the sync flush always defers those to the
+    async fallback, which a terminal row can never reach) is logged at DEBUG
+    instead and does not increment the counter, so a row nothing ever
+    delivers cannot make the counter climb forever.
+
+    Delegates delivery to ``flush_deferred_self_draft_sync`` -- no second
+    delivery implementation. That function's own SETNX dedup makes a
+    concurrent chokepoint-flush-plus-sweep-flush on the same session safe.
+
+    Bounded work: caps rows acted on per tick
+    (``DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK``) and logs when the cap is
+    hit. One failing row is exception-isolated and never aborts the sweep.
+    Never raises.
+    """
+    try:
+        now = time.time()
+        # Resolved once per tick, not per row: a value that shifted mid-sweep
+        # would make the cap and the window mean different things to different
+        # rows of the same pass.
+        max_rows = deferred_flush_backstop_max_rows_per_tick()
+        lookback = deferred_flush_backstop_lookback_seconds()
+        acted = 0
+        capped = False
+        for status in DEFERRED_FLUSH_BACKSTOP_STATUSES:
+            if acted >= max_rows:
+                capped = True
+                break
+            try:
+                # NOTE: this scans every AgentSession row for this terminal
+                # status with no completed_at bound pushed into the query --
+                # ``completed_at`` is a plain ``DatetimeField`` (see
+                # models/agent_session.py), not a Popoto ``SortedFieldMixin``
+                # field, so Popoto has no cheap range-filter path
+                # (``completed_at__gte=...``) that pushes down to Redis; a
+                # range filter there would silently fail to narrow the scan
+                # rather than raise. Full per-status scan is acceptable here,
+                # but note what each bound actually covers:
+                # DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK caps *flush actions
+                # taken* per tick, not rows scanned/hydrated -- every matching
+                # row for this status is hydrated by _filter_hydrated_sessions
+                # above before that cap is ever checked. The only bound on
+                # total row count is the loose one from AgentSession's
+                # ``Meta.ttl`` (rows expire out of Redis eventually; see
+                # models/agent_session.py), which does not limit a single
+                # tick's scan/hydration cost. Narrowing this properly would
+                # mean promoting completed_at to a sorted-field index -- a
+                # schema/index migration, out of scope for this patch.
+                candidates = _filter_hydrated_sessions(AgentSession.query.filter(status=status))
+            except Exception as _query_err:
+                logger.warning(
+                    "[session-health] backstop sweep query failed for status=%s: %s",
+                    status,
+                    _query_err,
+                )
+                continue
+
+            for entry in candidates:
+                if acted >= max_rows:
+                    capped = True
+                    break
+                try:
+                    extra_ctx = getattr(entry, "extra_context", None)
+                    if not isinstance(extra_ctx, dict):
+                        continue
+                    if not extra_ctx.get("deferred_self_draft_pending"):
+                        continue
+
+                    completed_at_ts = _ts(getattr(entry, "completed_at", None))
+                    if completed_at_ts is not None:
+                        age = now - completed_at_ts
+                        if age > lookback:
+                            logger.debug(
+                                "[session-health] backstop sweep: %s outside lookback "
+                                "window (age=%.0fs), skipping",
+                                getattr(entry, "session_id", "?"),
+                                age,
+                            )
+                            continue
+                    # completed_at is None: anchorless row -- act on it once
+                    # (legacy precedent, see docstring).
+
+                    session_id = getattr(entry, "session_id", "?")
+                    project_key = getattr(entry, "project_key", None) or "unknown"
+
+                    delivered = flush_deferred_self_draft_sync(entry, status)
+
+                    if delivered:
+                        # A defect signal: the chokepoint flush inside
+                        # finalize_session was bypassed for this session.
+                        logger.warning(
+                            "[session-health] backstop sweep hit for %s (status=%s, reason=%s)",
+                            session_id,
+                            status,
+                            "backstop sweep",
+                        )
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _R_SWEEP
+
+                            _R_SWEEP.incr(
+                                f"{project_key}:session-health:deferred_flush_backstop_hits"
+                            )
+                        except Exception:  # noqa: S110 -- optional telemetry counter
+                            pass
+                    else:
+                        # Not a defect signal: the flush declined (gated
+                        # transport/status combo, dedup already held, nothing
+                        # pending, or an internal failure). Logging at DEBUG
+                        # keeps the row traceable without inflating the
+                        # backstop-hits counter on rows nothing ever delivers
+                        # (e.g. transport=email + status=failed/abandoned,
+                        # which the sync flush always declines and the async
+                        # fallback never reaches from a terminal row).
+                        logger.debug(
+                            "[session-health] backstop sweep: %s not delivered this tick "
+                            "(status=%s), skipping WARNING/counter",
+                            session_id,
+                            status,
+                        )
+
+                    acted += 1
+                except Exception as _row_err:
+                    logger.warning(
+                        "[session-health] backstop sweep failed for row %s: %s",
+                        getattr(entry, "session_id", "?"),
+                        _row_err,
+                    )
+                    continue
+
+        if capped:
+            logger.warning(
+                "[session-health] backstop sweep hit its per-tick cap (%d rows); "
+                "remaining stranded rows will be picked up on a subsequent tick",
+                max_rows,
+            )
+    except Exception as _sweep_err:
+        logger.error(
+            "[session-health] _sweep_stranded_deferred_self_drafts failed: %s",
+            _sweep_err,
+            exc_info=True,
+        )
+
+
 async def _apply_recovery_transition(
     entry: AgentSession,
     *,
@@ -3108,6 +3435,17 @@ async def _apply_recovery_transition(
     # that the delivery belongs to the current run's epoch
     # (response_delivered_at >= started_at, falling back to created_at; a
     # legacy row with no anchor still passes through, unguarded).
+    #
+    # No live-fence gate here, unlike the sibling guard in
+    # `_agent_session_health_check` (#3270). The difference is what this branch
+    # is an alternative TO: every caller of `_apply_recovery_transition` has
+    # already evaluated liveness and decided this row is being taken away from
+    # its runner — the only open question is whether it lands `pending`,
+    # `failed`, or `abandoned`. Finalizing a delivered row `completed` is
+    # strictly the gentler of those outcomes, so adding a fence gate here would
+    # not spare a live row, it would only route it into a harsher transition.
+    # The sibling guard needs the gate precisely because it runs BEFORE any
+    # liveness evaluation.
     if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
@@ -3406,6 +3744,7 @@ async def _apply_recovery_transition(
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_recovery_cap",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
@@ -3444,6 +3783,7 @@ async def _apply_recovery_transition(
                     f"kind={reason_kind})"
                 ),
                 emit_telemetry=False,
+                dead_letter_stage="session_init_hang",
             )
             _reclaim_slot_lease()  # row is now terminal (failed, init hang circuit break)
             try:
@@ -4338,7 +4678,23 @@ async def _agent_session_health_check() -> None:
         # falling back to created_at) so a stale prior-run delivery doesn't
         # suppress recovery of a genuinely stuck current run; legacy rows
         # with no anchor still pass through unguarded.
-        if _delivery_belongs_to_current_run(entry):
+        #
+        # ...and the row must not be EXECUTING (#3270). Because this branch
+        # deliberately skips the worker_alive/_has_progress evaluation, the
+        # only thing standing between it and a live mid-turn row is this
+        # check. `response_delivered_at` is now stamped mid-run on the
+        # deferred-self-draft redraft path (`agent/output_handler.py::send`),
+        # so a long eng/PM run that answers the human and then keeps working
+        # past this 300s cadence presents exactly the shape the branch below
+        # finalizes: status `running`, delivery inside the current run's
+        # epoch. Finalizing it `completed` writes a terminal status onto a row
+        # the runner is still driving — the mid-turn status corruption #3270
+        # exists to stop. A live execution fence is the same discriminator
+        # `models/session_lifecycle.py`'s idempotent-skip WARNING uses: the
+        # per-turn subprocess is still ours and still alive. A dead or absent
+        # fence still falls through, so the #918 duplicate-delivery guard this
+        # branch exists for is unchanged for genuinely stranded rows.
+        if _delivery_belongs_to_current_run(entry) and not _session_has_live_fence(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 
@@ -5247,6 +5603,12 @@ async def _agent_session_health_loop() -> None:
             # is too slow. The fast reaper is itself fail-silent (never
             # raises); the outer try/except here is a second safety layer.
             _fast_reap_stale_print_oneshots()
+            # #3053 backstop: re-scan recently-terminal sessions for a
+            # deferred self-draft that never made it through the
+            # finalize_session chokepoint. Independent of the call graph
+            # above -- catches the three last-resort bypass writes and any
+            # future bypass. Synchronous and self-contained (never raises).
+            _sweep_stranded_deferred_self_drafts()
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
@@ -5694,11 +6056,14 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
                     is_corrupt = True
 
         # Keepalive: hold Meta.ttl at the ceiling without writing any field.
+        # AgentSession rows live until something deletes them explicitly; the
+        # 30-day Meta.ttl is a backstop for rows this sweep never sees, and
+        # this call is what keeps it from firing on the live population.
         # Deliberately a SEPARATE statement AFTER classification, in its own
         # try/except that never touches is_corrupt — folding this into the
         # classification try/except above would turn a transient Redis fault
         # into a bulk delete of live session rows (the positive-classification
-        # branch below routes straight to session.delete()). See #2698.
+        # branch below routes straight to session.delete()).
         if not is_corrupt:
             try:
                 session.refresh_ttl()

@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from agent.agent_session_queue import maybe_send_revival_prompt
+from agent.session_revival import maybe_send_revival_prompt
 
 
 class TestMaybeSendRevivalPrompt:

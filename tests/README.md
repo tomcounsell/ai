@@ -16,6 +16,8 @@ pytest tests/unit/ -n0
 pytest tests/integration/ -n0
 
 # By feature (works across all levels)
+# The counts below predate several file splits and are low; run the selector
+# for the current number rather than quoting them.
 pytest -m sdlc                   # All SDLC pipeline tests (516)
 pytest -m messaging              # All messaging tests (327)
 pytest -m sessions               # All session tests (293)
@@ -30,7 +32,7 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 `pytest-xdist` runs tests across N worker subprocesses (one per CPU). Two patterns matter when authoring tests:
 
-1. **Per-process Redis db (claimed), and ownership is enforced.** Each pytest **process** gets a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (#2060) in `pytest_configure`, before collection and therefore before any fixture. This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run plus a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. **Never construct a `redis.Redis(db=N)` from a number you derived yourself** — not from `PYTEST_XDIST_WORKER`, not from a literal, not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. `tests.db_claim.claim_test_db()` and the `redis_test_url` fixture are the only sources; a test that genuinely needs a *second* db requests the `scratch_test_db` fixture, which claims another owned pool slot. A `flushdb()` against a db this process has not claimed now raises at its own line (#2628), and a subprocess inherits the claim through `tests.db_claim.subprocess_env`. See [`docs/features/test-db-ownership.md`](../docs/features/test-db-ownership.md).
+1. **Per-process Redis db (claimed), and ownership is enforced.** Each pytest **process** gets a *unique* test db, claimed atomically from the pool `[1..15]` via a held `fcntl.flock` (#2060) in `pytest_configure`, before collection and therefore before any fixture. This is stronger than the old per-*worker* `gw{N}→db{N+1}` mapping: it prevents two concurrent pytest **processes** (a single-test run plus a background full-suite run) from both landing on db1 and `flushdb()`-ing each other's data mid-test. **Never construct a `redis.Redis(db=N)` from a number you derived yourself** — not from `PYTEST_XDIST_WORKER`, not from a literal, not by reading it back out of `POPOTO_REDIS_DB.connection_pool.connection_kwargs`. `tests.db_claim.claim_test_db()` and the `redis_test_url` fixture are the only sources; a test that genuinely needs a *second* db requests the `scratch_test_db` fixture, which claims another owned pool slot. A `flushdb()` against a db this process has not claimed now raises at its own line (#2628). The process environment is correct by construction: `pytest_configure` exports the claimed db as `REDIS_URL` process-wide, so a subprocess inherits the claim without any special handling; `tests.db_claim.subprocess_env` survives as an opt-in `PYTHONPATH` pinner, not the inheritance channel (see "Subprocess Test-DB Inheritance" below). See [`docs/features/test-db-ownership.md`](../docs/features/test-db-ownership.md).
 
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
 3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
@@ -40,14 +42,14 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 Two cross-file phantom-failure mechanisms were root-caused and fixed in `tests/conftest.py` (umbrella issue #1897). Both are single-run, single-worker-sequence bugs — a test passes in isolation but fails only under a specific xdist worker composition, then passes again on re-run. If you hit a new instance of this class, read the fixture docstrings in `tests/conftest.py` first; they are the source of truth for the exact mechanism.
 
-1. **Popoto db-cache split-brain.** `_popoto_modules_with_redis_db()` (consumed by the autouse `redis_test_db` fixture) memoizes which `popoto.*` submodules hold a `POPOTO_REDIS_DB` symbol so it doesn't walk all of `sys.modules` every test. The cache invalidates on a **compound trigger**: `len(sys.modules)` change (catches a brand-new, never-cached db-holder) **OR** per-entry object-identity divergence (catches an equal-count eviction-then-reimport, where a module is replaced under the same dotted name — e.g. by `mock_claude_sdk_cleanup` evicting `agent.*`). Count/len may gate additions but must **never** be the sole invalidation key — a sole count/name-set signal false-greens an equal-count module replacement (the stale object keeps its pre-swap `POPOTO_REDIS_DB` binding), and identity alone misses never-cached new holders (`any()` over an empty or partial cache is vacuously false). A stale cache leaves some popoto submodule's `POPOTO_REDIS_DB` pointed at the wrong test db, so an in-process write and a subprocess (or `Model.query.filter`) read can silently land on different Redis databases. This fix also subsumes issue #2037 (create-then-`filter` split-brain — same stale-cache mechanism, read path instead of write path).
+1. **Popoto client identity.** There is exactly one `POPOTO_REDIS_DB` client object per pytest process. The session-scoped, autouse `_popoto_pool_install` fixture in `tests/conftest.py` mutates that object's `connection_pool` in place, once per session, to point at the db-claim registry's server; the per-test autouse `redis_test_db` fixture does hygiene only (a registry-match assertion plus a flush before and after). Because every `popoto.*` submodule captures `POPOTO_REDIS_DB` with `from ..redis_db import POPOTO_REDIS_DB` at import time, and the object's identity never changes, every submodule binding follows the pool swap for free — there is no cache to invalidate and no submodule walk to perform. This also closes issue #2037 (create-then-`filter` split-brain): a stale binding pointed at a different client object is no longer possible once every binding is the same object.
 2. **agent-hooks hooks-less-parent corruption.** The autouse `agent_hooks_consistency_guard` fixture detects and repairs a state where `sys.modules["agent"]` is cached but lacks a `hooks` attribute even though `sys.modules["agent.hooks"]` is still cached — CPython only rebinds a submodule onto its parent package at fresh-import time, so a partial `sys.modules` mutation (SDK swap, `importlib.reload`, `patch.dict`) can leave the parent "hooks-less" while the submodule cache survives. Any dotted-string `monkeypatch.setattr("agent.hooks...", ...)` then raises `AttributeError` during test setup, before the test body runs. The guard repairs by rebinding every cached `agent.*` submodule onto its parent package, in place. It deliberately does **not** evict: eviction also rebuilds the chain, but it strands any module-level `from agent import X` binding, so the test body calls a stale object while `patch("agent.X.seam")` patches the fresh one and the seam under test is never patched (#2551).
 
 3. **A reload splits a shared exception class in two (#2603).** `importlib.reload(models.session_lifecycle)` keeps the module object and rebinds every class in it, so every module that imported `StatusConflictError` by name — including every test module, at collection time — keeps the old class and its `except`/`pytest.raises` silently stops matching. The autouse `shared_module_identity_guard` restores the original binding at teardown and warns, naming the test that reloaded (a teardown failure under `-W error::RuntimeWarning`). Exception classes are not the only casualties: a module-level **registry** is orphaned the same way, so the guard also covers `agent.index_drift`, `monitoring.bridge_watchdog`, and `monitoring.worker_watchdog` (#2628). **Do not reload a shared module in-process, and if you must, restore what it owns.** A test whose restore fixture holds a collection-time `from module import REGISTRY` binding will silently clean the orphan while the test writes into the live one — go through the module object. When you need to observe a genuinely first import, shell out to a fresh interpreter; an in-process reload cannot see one anyway, since everything is already cached.
 
-A **cross-process** family (#2060, #2605) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other, fixed by the per-process db claim described in pattern 1 above. #2605 is the subprocess corollary — a test that shells out must build its environment with `tests/db_claim.py::subprocess_env`, which reads the same claim and pins `PYTHONPATH` to the checkout under test. Re-deriving the db from `PYTEST_XDIST_WORKER` sends the child to a db this process does not own.
+A **cross-process** family (#2060, #2605) is not xdist-ordering at all: two separate pytest processes sharing a test db and `flushdb()`-ing each other, fixed by the per-process db claim described in pattern 1 above. #2605 was the subprocess corollary; a process-wide `REDIS_URL` export now makes the inheritance correct by construction for any subprocess, so `tests/db_claim.py::subprocess_env` survives only as an opt-in `PYTHONPATH` pinner (see "Subprocess Test-DB Inheritance" below). Re-deriving the db from `PYTEST_XDIST_WORKER` sends the child to a db this process does not own.
 
-New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the fixes (Test A: agent-hooks guard repair; Test B: falsifiable len-vs-identity binding gate for the popoto cache; Test C: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim and its consumers; `TestSharedExceptionIdentityGuard`: #2603 reload repair; `TestFlushOwnershipGuard` / `TestSessionClaimHook` / `TestReloadedRegistryIdentity`: #2628 db ownership, the popoto plugin repoint, and the registry reload leak) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
+New instances of this class get filed under the umbrella issue [#1897](https://github.com/tomcounsell/ai/issues/1897) as they're observed and root-caused. `tests/unit/test_popoto_client_identity.py` locks in the popoto client identity invariant (one client object per process, every submodule binding is that object, the pool is a `BlockingConnectionPool` at popoto's cap, the pool identity is stable across a session). `tests/unit/test_conftest_isolation_guards.py` is the deterministic regression suite locking in the remaining fixes (`TestAgentHooksGuardRepair`: agent-hooks guard repair; `TestPopotoSplitBrainRoundTrip`: #2037 create-then-`filter` round trip; `TestPerProcessDbClaim`: #2060/#2605 per-process db claim, its consumers, and the process-wide `REDIS_URL` export's behavioral assertions; `TestExportedRedisUrlSurvivesSyntheticHookCalls`: the leak-detection probe proving nothing earlier in the file's own synthetic hook calls polluted the live session's `REDIS_URL`; `TestSharedExceptionIdentityGuard`: #2603 reload repair; `TestFlushOwnershipGuard` / `TestSessionClaimHook` / `TestReloadedRegistryIdentity`: #2628 db ownership, the popoto plugin repoint, and the registry reload leak) — start there when investigating a new phantom failure. See [`docs/features/test-isolation-hardening.md`](../docs/features/test-isolation-hardening.md) for a write-up of this single-run isolation work, and [`docs/features/test-concurrency-coordination.md`](../docs/features/test-concurrency-coordination.md) for the cross-run sentinel-ID namespacing.
 
 ### Un-awaited-coroutine leak guardrail (issue #2120)
 
@@ -113,7 +115,9 @@ The previously known-bad clusters on `main` were driven to green in #1578. The f
 
 ## Feature Markers
 
-Every test is auto-tagged by filename via `tests/conftest.py`. When a feature changes, run its marker to find tests that may need updating.
+Every test is auto-tagged by filename via `tests/marker_map.py`'s `FEATURE_MAP` and
+`resolve_marker()`, which `tests/conftest.py` imports and calls at collection time. When a
+feature changes, run its marker to find tests that may need updating.
 
 | Marker | What it covers | Example command |
 |--------|----------------|-----------------|
@@ -138,7 +142,11 @@ Check counts with: `pytest -m <marker> --collect-only -q`
 
 ## Patch-Target Convention
 
-When a test patches a symbol, patch the **canonical module that owns the symbol**, not the shim that re-exports it. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd because the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`). The shim keeps re-exports for type checkers and editor navigation, but patch targets must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
+When a test patches a symbol, patch the **canonical module that owns the symbol**. After PR #1023 split `agent/agent_session_queue.py` into purpose-specific modules (`session_health`, `session_completion`, `session_executor`, `branch_manager`, etc.), tests that still patched `agent.agent_session_queue.<X>` silently no-op'd: the new modules import helpers via direct paths (`from agent.session_executor import steer_session as _steer_session`), so patching the queue module's copy could not reach the copy the code under test reads. A patch target must hit the runtime import site. See #1041 and the post-mortem in its plan for details.
+
+The queue module no longer offers a second path to those symbols at all — issue #2876 deleted its 40 re-exports, and `tests/unit/test_no_reexport_hub.py` fails if any return. So a patch aimed at `agent.agent_session_queue.<X>` for a symbol owned elsewhere now raises `AttributeError` instead of passing vacuously, which is the louder and better failure.
+
+Attribute access through a module alias — `_queue.<X>`, where `_queue` is the hub module object — is the same mistake in a second syntax, and a write through it (`_queue.X = fake`) rebinds only the hub's copy, so the owning module never sees it. `tests/unit/test_hub_alias_references.py` guards both forms. It derives the hazard set from the hub's own AST (a name the hub imports and never references in its own body) rather than pinning a list, so it stays honest as the hub changes.
 
 ## Test-Reliability Layers
 
@@ -152,6 +160,7 @@ The merge gate runs no tests (#2376) — the TEST stage owns the final full-suit
 ```
 tests/
 ├── conftest.py              # Root fixtures + feature auto-tagging
+├── marker_map.py            # FEATURE_MAP, resolve_marker(), and the marker-regression guard's rules (#3010)
 ├── unit/                    # Pure logic, no external deps
 ├── integration/             # Requires Redis and/or network
 ├── tools/                   # Tool-specific tests (may need API keys)
@@ -168,11 +177,19 @@ tests/
 |-------|------|------:|-------------|
 | unit | `test_bridge_logic.py` | 40 | Group-to-project mapping, routing |
 | unit | `test_bridge_shutdown.py` | 5 | Graceful shutdown task cancellation |
-| unit | `test_valor_telegram.py` | 17 | Telegram command handling |
+| unit | `valor_telegram/test_valor_telegram_parsing.py` | 23 | `parse_since`, `resolve_chat`, timestamp/relative-age formatting, CLI arg parsing |
+| unit | `valor_telegram/test_valor_telegram_cli_send.py` | 16 | `cmd_send` |
+| unit | `valor_telegram/test_valor_telegram_cli_read.py` | 30 | `cmd_read`: ambiguity handling, flags, did-you-mean, project scoping |
+| unit | `valor_telegram/test_valor_telegram_cli_chats.py` | 10 | `cmd_chats` search and project scoping |
+| unit | `valor_telegram/test_valor_telegram_rtr.py` | 18 | Read-the-room secondary consumer, `cmd_send` RTR path, promise gate |
+| unit | `valor_telegram/test_valor_telegram_await.py` | 10 | Await/settle timing for send |
+| unit | `valor_telegram/test_valor_telegram_chat_log.py` | 5 | Chat-log recording |
+| unit | `valor_telegram/test_valor_telegram_voice_flag.py` | 3 | Voice-note payload flags |
 | unit | `test_media_handling.py` | 17 | Media attachment handling |
 | unit | `test_transcript_liveness.py` | 12 | Transcript state management |
 | unit | `test_messenger.py` | 11 | Message formatting and delivery |
 | unit | `test_duplicate_delivery.py` | 7 | Duplicate message prevention |
+| unit | `test_recovery_strip_private.py` | 3 | Recovery scanners strip `<private>` spans at intake (#3040) |
 | unit | `test_file_extraction.py` | 20 | File extraction from messages |
 | integration | `test_message_routing.py` | 21 | Message routing end-to-end |
 | integration | `test_reply_delivery.py` | — | Reply delivery flow |
@@ -185,6 +202,7 @@ tests/
 |-------|------|------:|-------------|
 | unit | `test_email_bridge.py` | 31 | Parsing, SMTP output, batch cap, env loading |
 | integration | `test_email_bridge.py` | 5 | Inbound routing, thread continuation, health timestamp |
+| unit | `test_attachment_descriptor_parity.py` | 11 | Same file yields one attachment descriptor on Telegram and email; executor delivery seam (#3136) |
 
 ### `sdlc` — Pipeline stages and observer
 
@@ -201,7 +219,17 @@ tests/
 | unit | `test_sdlc_stage_marker.py` | 25 | Stage marker writes via CLI (session resolution, issue-number fallback, opt-in predecessor backfill on `in_progress`/`completed`) |
 | unit | `test_sdlc_lease_helper_binding.py` | 10 | Lease helpers stay unsnapshotted in `sdlc_dispatch`/`sdlc_meta_set`/`sdlc_stage_marker`: per-module globals check, repo-wide AST sweep, and a behavioral late-patch assertion (#2469, #2637) |
 | unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
-| unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_core.py` | 15 | `ensure_session` create/reuse, CLI output, local message text |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_short_circuit.py` | 14 | Env-var short-circuit for bridge-initiated sessions, identifier mismatch |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_adoption.py` | 27 | Ownerless adoption, lane-slug minting at lane start, `--kill-orphans` |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_issue_lock.py` | 16 | Issue-level ownership lock wiring at all return points (#1954) |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_run_identity.py` | 23 | Verified run-id reuse, supervised-run signal/module, owned-run self-recognition |
+| unit | `sdlc_session_ensure/test_sdlc_session_ensure_lease_identity.py` | 19 | Lease-heartbeat spawn identity, durable run identity, anchor write on lease confirmation |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_dispatch_rows.py` | 33 | `DISPATCH_RULES` wiring and rows 1–10, verdict normalization, plan-existence gate |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_verdict_staleness.py` | 14 | Review and critique verdict staleness |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_convergence.py` | 26 | Convergence latch, dead-end recovery, marker desync, G5 loop bound |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_post_patch.py` | 18 | Row 8b ownership of stale verdicts and its disjointness/failure paths |
+| unit | `sdlc_router_decision/test_sdlc_router_decision_with_concerns.py` | 16 | READY-WITH-CONCERNS scoping, rule ordering, termination |
 | unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |
 | unit | `test_observer_message_for_user.py` | 11 | Observer user messaging |
 | unit | `test_sdlc_env_vars.py` | 10 | SDLC environment variable injection |
@@ -241,6 +269,7 @@ tests/
 | unit | `test_session_health_orphan_process_reap.py` | 48 | Cross-process orphan reaper gates, with `find_live_session_by_pid` mocked to isolate them; the scan itself is covered unmocked in `test_orphan_reap_forward_scan.py` |
 | unit | `test_session_health_subprocess_kill.py` | 33 | Recovery SIGTERM→SIGKILL escalation and the fenced pre-cancel snapshot: a legacy row yields `pid_snapshot=None` instead of failing open into a real kill |
 | unit | `test_worker_session_sweep.py` | 19 | Dead-worker startup sweep, including all three fence branches (dead / recycled / matching), status-index scoping, and sweep-exactly-once |
+| unit | `test_worker_loop_completion_conflict.py` | 6 | `_worker_loop`'s per-session completion `finally` survives a terminal-status conflict (#3253): the already-terminal skip before the write, the typed `StatusConflictError` catch on the write itself, the guard-read-failure fallback, and the broad non-conflict backstop — the loop keeps draining its `worker_key` in every case |
 | integration | `test_orphan_reap_forward_scan.py` | 17 | Ownership resolution against REAL Redis rows with `find_live_session_by_pid` unmocked: a live fenced session is not reaped (the canary assertion), orphans still are, duplicate fence pids resolve by identity rather than `frozenset` order, and a blinded status cohort fails toward protected |
 | unit | `test_fence_census.py` | 22 | The `tools/check_fence_census.py` anti-criterion: green state at HEAD (the Verification row), the RED-state proof against `tests/fixtures/fence_census_violator/` naming both violating functions, exemption-marker line precision, and guard recognition (predicate call or forwarding both fence halves) |
 | unit | `test_update_stale_session_fence.py` | 17 | `/update`'s stale-session cleanup: fence-live rows skipped at any age and counted separately, fence-dead rows still deferring to the recency and age gates, the two reason strings, and the caller's three-value unpack |
@@ -269,14 +298,23 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_docs_auditor_substrate.py` | 130 | Documentation reference validation |
+| unit | `test_docs_auditor_substrate.py` | 196 | Documentation reference validation |
+| unit | `test_reflections_docs_auditor_git_surface.py` | 15 | Docs-auditor real-git surface: staging, restore, sweeper close path |
+| unit | `test_hook_target.py` | 128 | Shared hook-payload target resolution and scope filtering (`hook_target.py`) |
+| unit | `test_validate_no_gos_justification.py` | 77 | No-Gos section justification validation |
+| unit | `test_validate_file_contains.py` | 49 | Required-content file validation, payload-targeted |
+| unit | `test_validate_test_impact.py` | 42 | Test impact section validation |
+| unit | `test_validate_documentation_section.py` | 41 | Documentation section validation, payload-targeted |
+| unit | `test_validate_verification_section.py` | 31 | Verification validation |
 | unit | `test_features_readme_sort.py` | 27 | README table sorting |
-| unit | `test_verification_parser.py` | 20 | Verification section parsing |
-| unit | `test_validate_test_impact.py` | 20 | Test impact section validation |
+| unit | `test_verification_parser.py` | 58 | Verification section parsing (per-block table scoping, `SkippedTable`) |
+| unit | `test_validate_build.py` | 43 | `scripts/validate_build.py` execution loop (30s-timeout SKIP, cross-runner agreement with `agent.verification_parser` on parse-only fixtures) |
 | unit | `test_validate_commit_message.py` | 16 | Commit message format |
 | unit | `test_validate_sdlc_on_stop.py` | 12 | SDLC stop validation |
-| unit | `test_validate_verification_section.py` | 9 | Verification validation |
 | unit | `test_build_validation.py` | 6 | Build process validation |
+| unit | `test_no_reexport_hub.py` | 6 | Re-export-hub guard (#2876): `agent/agent_session_queue.py` imports no sibling symbol it does not use. Derived from that one file's AST — no F401-string check, so a re-export without a suppression is still caught. Carries its own demonstrated-red case, and asserts its two stated limits (`__all__` is not a use; a `TYPE_CHECKING`-only name is) |
+| unit | `test_hub_alias_references.py` | 5 | Module-alias reference guard (#2876): no tracked Python reaches an `agent.agent_session_queue` pure re-export through a module alias. Hazard set derived from the hub's AST, not pinned; discovery via `git ls-files`, no exemption set |
+| unit | `test_stale_reference_sweep.py` | 3 | Stale-prose sweep (#2853, #2839): the unregistered reflection name, the two deleted granite package paths, and a scoped cadence-wording anti-criterion. Enumerates via `git ls-files` (untracked scratch Markdown is not repo content) and assembles every compared token by concatenation so the file cannot trip its own sweeps |
 | unit | `test_site_graph_consistency.py` | 2 | Public-site knowledge-graph staleness (#2531): every `data-files` chip reference resolves to a `graph.js` node; frameworks named by the graph are still declared dependencies |
 
 ### `reflections` — Learning system
@@ -290,6 +328,21 @@ tests/
 | unit | `test_reflections_scheduling.py` | 19 | Launchd infrastructure |
 | unit | `test_reflection_model.py` | 12 | Reflection model: mark_completed(), run_history append |
 | integration | `test_reflections_redis.py` | 20 | Reflection persistence |
+
+The 23 files in `tests/unit/reflections/` and `tests/integration/reflections/` all
+resolve to this marker. #3175 renamed 20 of them to lead with `test_reflections_`,
+because a basename is the only thing `FEATURE_MAP` looks at, and
+`pytest -m reflections` was collecting 36 of the packages' 399 tests. Two already
+led with that prefix; the remaining file, `test_stall_advisory_reflection.py`,
+resolves through the singular `reflection` key instead. Rule R1 asks only that a
+file's derived marker equal its package's, so a new file here must resolve to
+`reflections` — leading with `test_reflections_` is the reliable way to get
+there.
+
+| Level | Package | Files | Description |
+|-------|---------|------:|-------------|
+| unit | `tests/unit/reflections/` | 21 | Daily log, PM briefings, docs auditor, expectation reconciler, SDLC progress/upvote lanes |
+| integration | `tests/integration/reflections/` | 2 | PM briefings dispatch and end-to-end |
 
 ### `tools` — Individual tool tests
 
@@ -319,7 +372,11 @@ tests/
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_worktree_manager.py` | 28 | Worktree management |
+| unit | `worktree_manager/test_worktree_manager_cleanup.py` | 25 | Slug validation, cleanup after merge, stale-worktree recovery |
+| unit | `worktree_manager/test_worktree_manager_creation.py` | 8 | `create_worktree` stale recovery, `get_or_create_worktree` |
+| unit | `worktree_manager/test_worktree_manager_busy_guards.py` | 30 | Busy check/probe, session scan, live-process and removal guards |
+| unit | `worktree_manager/test_worktree_manager_venv_provisioning.py` | 39 | Branch verification, interpreter-pin resolution, venv provisioning wiring |
+| unit | `worktree_manager/test_worktree_manager_uncommitted.py` | 5 | Preserving uncommitted changes |
 | unit | `test_git_state_guard.py` | 21 | Git state validation |
 | unit | `test_workspace_safety.py` | 18 | Workspace safety checks |
 | unit | `test_branch_manager.py` | 11 | Branch creation/deletion |
@@ -334,7 +391,11 @@ tests/
 | unit | `test_chunking.py` | 15 | Chunking engine: heading-aware, token-count, overlap |
 | unit | `test_memory_model.py` | 151 | Memory model (decay, confidence, write filter, bloom) |
 | unit | `test_memory_hook.py` | 135 | PostToolUse thought injection, sliding window |
-| unit | `test_memory_extraction.py` | 107 | Post-session Haiku extraction, outcome detection |
+| unit | `memory_extraction/test_memory_extraction_post_session.py` | 20 | Post-session Haiku extraction driver, session cap |
+| unit | `memory_extraction/test_memory_extraction_outcome_detection.py` | 37 | Outcome detection, bigrams, act rate, history, LLM judge |
+| unit | `memory_extraction/test_memory_extraction_parsing.py` | 48 | Categorized-observation parsing, JSON payload extraction, post-merge learning |
+| unit | `memory_extraction/test_memory_extraction_refusal_filters.py` | 36 | Refusal detector and scoping-boilerplate filters, narrowness guards |
+| unit | `memory_extraction/test_memory_extraction_event_loop_safety.py` | 7 | No nested `asyncio.run()` on the hook subprocess path |
 | unit | `test_memory_ingestion.py` | 89 | Telegram message memory ingestion |
 | integration | `test_redis_models.py` | 30 | Popoto model CRUD |
 
@@ -346,6 +407,7 @@ tests/
 | unit | `test_health_check.py` | 12 | Health monitoring |
 | unit | `test_bridge_watchdog.py` | — | Bridge watchdog |
 | unit | `test_watchdog_log_isolation.py` | 17 | Import-time logging isolation for `monitoring/bridge_watchdog.py`, `monitoring/worker_watchdog.py`, `scripts/log_rotate.py` — no root handler, no file opened at import, config only from `__main__` (#2643) |
+| unit | `test_doctor_console_scripts.py` | 48 | Doctor's `[project.scripts]` health check, both halves: PATH resolution into a repo venv bin dir with three-state remedy attribution (#2566/#2665), and interpreter identity for the winning script's shebang (`ok`/`missing`/`off-pin`/`outside`/`unverified`, #2748) |
 | integration | `test_connectivity_gaps.py` | 12 | Connectivity failure handling |
 | integration | `test_silent_failures.py` | 7 | Silent failure detection |
 | performance | `test_benchmarks.py` | 16 | Latency, throughput, memory |
@@ -414,9 +476,11 @@ here.
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `test_nightly_regression_tests.py` | 28 | Nightly regression runner: suite invocation, JSON report parsing, Telegram alerting, version-pinned `claude` canary |
+| unit | `test_nightly_regression_tests.py` | 107 | Nightly regression runner: widened-collection argv, process-group ownership, run-integrity guard (coverage floor, fixture-error ceiling, signal-death), serial re-confirmation trust, collection-aware re-baseline/seed escalation, `_fatal`/`load_env_or_die` refusal paths, JSON report parsing, Telegram alerting |
+| unit | `test_update_nightly_tests_staleness.py` | 11 | Three-way install-outcome classification (`installed`/`skipped`/`failed`) and the `/update` staleness warning clock (`max(plist_mtime, run_at)`) |
 | unit | `test_template_filter_registry.py` | 4 | Dashboard Jinja filter guards (#2719): every template's filter demand resolves against `ui.app.register_template_filters`; filter-key equality against a `Jinja2Templates`-shaped env; registrar-completeness; no test file hand-copies a `.filters[...]` registration |
 | unit | `test_analytics_stats_render.py` | 3 | Render coverage for `_partials/analytics_stats.html`'s two `\| usd` cost cards, including the sub-cent-renders-as-$0.01 case |
+| integration | `test_install_nightly_tests.py` | 13 | `install_nightly_tests.sh`: worktree refusal precedes the role gate, `has_worker_role()` gate text, the shipped success-marker `scripts/update/service.py` depends on |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
 
 Dashboard render-test fixtures (`test_session_modal_liveness_render.py`,
@@ -438,6 +502,7 @@ enforces this in CI, not just in this note.
 | `isolate_catchup_kill_switch` | autouse | `conftest.py` | Repoints the operator catchup kill-switch flag at a per-test tmp path (issue #2552) |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
+| `cross_lane_repo` | function | `tests/unit/conftest.py` | Factory building the #2689 cross-lane reproducer repo (tracked anchor + another lane's untracked plan) shared by the hook-validator target-resolution tests |
 | `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
 | `make_telegram_event` | function | `tests/e2e/conftest.py` | Telegram event factory |
 | `mock_agent_response` | function | `tests/e2e/conftest.py` | Canned agent response |
@@ -448,9 +513,15 @@ enforces this in CI, not just in this note.
 ## Adding Tests for New Features
 
 1. **Pick the right level**: Unit for pure logic, integration for Redis/network, e2e for multi-component flows
-2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/conftest.py` so it auto-tags
+2. **Name the file** with a keyword from `FEATURE_MAP` in `tests/marker_map.py` so it auto-tags.
+   Inside a themed package whose own directory name resolves (`tests/unit/reflections/`,
+   `tests/unit/bridge/`, ...), guard rule R1 requires the basename to resolve to *that*
+   package's marker — leading with `test_{package}_` is the reliable way to get there.
 3. **Or add a new entry** to `FEATURE_MAP` if creating a new feature area
 4. **Add to this index** under the appropriate feature section
+5. **Run the audit** (`python tests/marker_map.py --audit`) before opening the PR — it fails
+   loudly if the new basename resolves to a marker nobody intended. See
+   [`docs/features/feature-map-marker-guard.md`](../docs/features/feature-map-marker-guard.md).
 
 ### Naming Convention
 
@@ -458,16 +529,85 @@ enforces this in CI, not just in this note.
 test_{feature_keyword}[_detail].py
 ```
 
-The `{feature_keyword}` must match a key in `FEATURE_MAP` (in `tests/conftest.py`) for auto-tagging. Examples:
+The `{feature_keyword}` must match a key in `FEATURE_MAP` (in `tests/marker_map.py`) for auto-tagging. Examples:
 - `test_pipeline_new_stage.py` → auto-tagged `sdlc`
 - `test_session_timeout.py` → auto-tagged `sessions` (matches "session_")
 - `test_bridge_rate_limit.py` → auto-tagged `messaging` (matches "bridge")
+
+### Splitting or Renaming a Test File
+
+Markers are derived from the **basename only** — `resolve_marker()` in
+`tests/marker_map.py` (called by `pytest_collection_modifyitems` in `tests/conftest.py`)
+strips `test_` and `.py` from the nodeid's last path segment and substring-matches the
+remainder against `FEATURE_MAP`, taking the first hit. The directory a file sits in
+contributes nothing to *this* substring match, so moving a file into a subpackage is
+marker-neutral on its own — see the ordering-collision example below for the case where
+the package directory and the basename disagree.
+
+That makes a split of a large module a silent marker hazard in three ways. All three are
+caught before you open the PR by `python tests/marker_map.py --audit` (see
+[`docs/features/feature-map-marker-guard.md`](../docs/features/feature-map-marker-guard.md)
+for what each rule can and cannot see):
+
+- **Losing a marker.** `test_stop_hook.py` (marker `sdlc`) split into
+  `tests/unit/stop_hook/test_exit_codes.py` yields basename `exit_codes`, which matches
+  nothing — those tests vanish from `pytest -m sdlc` while still running in a full sweep.
+- **Gaining one.** A new basename can pick up an unrelated pattern by accident;
+  `..._transport_aware_routing` matches `routing` and would be tagged `messaging`.
+- **An ordering collision.** `FEATURE_MAP` is a first-hit-wins dict, so a correctly
+  prefixed name can still land on the wrong marker when an *earlier* key happens to
+  appear in the suffix you chose. `worktree_manager` sits well after `config` and
+  `lifecycle`:
+
+  ```
+  test_worktree_manager_config.py     -> "config" is found first    -> tagged `config`,   not `git`
+  test_worktree_manager_lifecycle.py  -> "lifecycle" is found first -> tagged `sessions`, not `git`
+  test_worktree_manager_cleanup.py    -> no earlier key matches     -> tagged `git`       (correct)
+  ```
+
+  All three follow the "keep the original basename as a prefix" convention. Two of them
+  are silently wrong. `resolve_marker()`'s guard rule R1 catches this class *only* when
+  the file sits inside a themed package directory whose own name resolves — a file at
+  `tests/unit/` top level with the same basename passes every rule and stays silently
+  wrong (see the feature doc's coverage-boundary section).
+
+- **A fragment match.** The winning key does not have to be a whole word: `config` is a
+  literal substring of `configured`. `test_pm_briefings_no_slots_configured.py` used to
+  tag `config` on exactly that fragment, even though nothing named "config" was
+  intended. #3175 renamed it to `test_reflections_pm_briefings_no_slots_configured.py`,
+  so its stem now hits `reflections` first and the accidental `config` tag is gone.
+  Guard rule R3 catches this class suite-wide, with no package-directory signal
+  required.
+
+A `--collect-only` total-count check cannot catch any of these: the total is unchanged,
+only the tagging moves. So when splitting a file:
+
+1. Keep the original basename as a **prefix** of every new file
+   (`test_output_handler.py` → `test_output_handler_drafter.py`), which preserves any
+   matching substring by construction.
+2. Run `python tests/marker_map.py --audit`. It replays the real first-hit algorithm
+   against every candidate basename and reports a mistag with its resolved marker,
+   expected marker, and the `FEATURE_MAP` key responsible — do this *before* writing the
+   files, since renaming afterwards is cheap only if you notice.
+3. If the audit is clean but you still want to eyeball the count shift, compare
+   `pytest -m <marker> --collect-only -q | tail -1` before and after for every marker the
+   file touches.
+
+The same holds for a **rename**, with one extra step: the old basename's marker is
+simply gone, so any marker a selector still wants has to be declared as a module-level
+`pytestmark` in the renamed file (the collection hook's `add_marker` is additive, so the
+file then carries both). That is remedy 1 in the feature doc's remediation ladder.
+
+This is no longer a manual habit to remember: `tests/unit/test_feature_map_markers.py`
+runs the same audit as an ordinary test, so a mistagged basename fails the suite instead
+of relying on whoever does the split noticing. See #3010 for the guard itself and #3175
+for draining the pre-existing baseline it was introduced against.
 
 ### Feature Marker Registration
 
 New markers must be added in two places:
 1. `pyproject.toml` → `[tool.pytest.ini_options]` markers list
-2. `tests/conftest.py` → `FEATURE_MAP` dictionary
+2. `tests/marker_map.py` → `FEATURE_MAP` dictionary
 
 ## Known Blind Spots
 
@@ -489,32 +629,37 @@ Source modules with no test coverage. Priority targets for new tests.
 **Partially covered** (operational layer added in #936):
 - `bridge/email_bridge.py` — parsing, SMTP output, routing, and thread continuation have full coverage. Operational layer (`main()`, `_poll_imap()` batch cap, `_email_inbox_loop()` health timestamp) now covered via unit and integration tests.
 
-## Subprocess Test-DB Inheritance (issue #2763)
+## Subprocess Test-DB Inheritance (issue #2805)
 
-Any test that shells out to a subprocess which can reach Popoto — a Python
-interpreter running a repo module, the sdlc-tool `WRAPPER`, or an inline `-c`
-script against a repo checkout — must pass `env=subprocess_env(...)` from
-`tests.db_claim`.
+The pytest process's environment is correct by construction. `tests/conftest.py::pytest_configure`
+claims a private db from the pool `[1..15]` (`tests/db_claim.py`'s
+`fcntl.flock`) and exports it as both `POPOTO_TEST_DB` and `REDIS_URL`
+immediately after the claim. A plain `subprocess.run([...])` with **no
+`env=`** inherits `os.environ` and therefore inherits the claimed
+`REDIS_URL` — a child launched without any special handling lands on the
+claimed test db, not production db0. This holds for every process in the
+tree: a nested pytest child spawned without `env=` inherits the claimed
+`REDIS_URL`, then overwrites it with its own claim via its own
+`pytest_configure` (the #2628 invariant), and each xdist worker exports
+its own claim independently since every worker runs `pytest_configure`
+itself.
 
-**Why**: Popoto resolves `REDIS_URL` at *import time* and falls back to
-`redis://localhost:6379` — db0, production — when the variable is unset. The
-parent pytest process claims a test db from the pool `[1..15]` via
-`tests/db_claim.py`'s `fcntl.flock`, but that claim lives only in the parent's
-in-process Popoto client objects; `os.environ` is never mutated. The
-environment is therefore the only channel to a child, and `subprocess_env` is
-the bridge. A child launched without it silently reads and writes production
-db0.
+**`subprocess_env` survives as the `PYTHONPATH` pinner it also always
+was**, not as an isolation gate. `subprocess_env(*, project_root=None,
+**extra)` from `tests.db_claim` re-pins `REDIS_URL` to the same claimed
+db (redundant with the process-wide export, but states the intent at the
+call site) and, when `project_root=` is passed, prepends it to the
+child's `PYTHONPATH` so the child resolves repo modules from this
+checkout. Thread extra variables as keyword arguments
+(`subprocess_env(AI_REPO_ROOT=...)`) rather than hand-building a dict. If
+a site also needs keys removed, the accepted shape is `env =
+subprocess_env(); env.pop("NAME", None)` — assign, then mutate with
+`.pop(<literal>, None)` / `.update(...)`, never rebind.
 
-**How to use it**: `subprocess_env(*, project_root=None, **extra)`. Thread
-extra variables as keyword arguments (`subprocess_env(AI_REPO_ROOT=...)`)
-rather than hand-building a dict. If a site also needs keys removed, the
-accepted shape is `env = subprocess_env(); env.pop("NAME", None)` — assign,
-then mutate with `.pop(<literal>, None)` / `.update(...)`, never rebind.
-
-`project_root=` is **opt-in, not a default**. It prepends the path to the
-child's `PYTHONPATH`. Pass it when the child must resolve repo modules from
-this checkout; omit it when the test asserts something about import order or
-module resolution. `tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
+`project_root=` is **opt-in, not a default**. Pass it when the child must
+resolve repo modules from this checkout; omit it when the test asserts
+something about import order or module resolution.
+`tests/unit/test_sdlc_tool_wrapper.py::test_dispatch_from_foreign_cwd_with_own_tools_succeeds`
 is the worked example of a deliberate omission — it pins the wrapper's own
 module-resolution order against a decoy `tools/` package, so prepending
 `REPO_ROOT` to `PYTHONPATH` would resolve the import for reasons other than
@@ -522,19 +667,37 @@ the wrapper's doing.
 
 Never re-derive a db number by hand. Reading
 `POPOTO_REDIS_DB.connection_pool.connection_kwargs` to rebuild a `REDIS_URL`
-is the anti-pattern this work removed; `claim_test_db()` via `subprocess_env`
-is the only source.
+is the anti-pattern the #2628/#2763 line of fixes removed; `claim_test_db()`
+(directly, or via `subprocess_env`/the process-wide export) is the only
+source.
 
-The enforcing guard is `tests/unit/test_subprocess_test_db_isolation.py`, an
-AST scan of `tests/**/*.py`. It matches in-scope call sites on **argv**
-(`sys.executable`, a `PYTHON`-containing identifier, a `"-m"` element,
-`WRAPPER`, or a `scripts/` string); `cwd=` is deliberately not part of the
-predicate, since what determines whether a child can import popoto is what is
-executed, not where it is executed from. Exemptions exist only as
-`SKIP_ARGV0 = {"git"}` (a `git` child never imports Python) and a commented
-`ALLOWLIST` of `path:line` entries, each carrying one of exactly two reasons:
-`[#2628]` (the file is owned by open PR #2683 — fix it there when it lands)
-or `[standalone-script]` (the child imports no repo package). **When
-reachability is unclear, convert the site — do not allowlist it.**
+**A test that genuinely needs db0**, to prove a production guard fires,
+states that intent explicitly at the call site:
+`env={**subprocess_env(), "REDIS_URL": "redis://localhost:6379/0"}`.
 
-When #2683 lands, this section folds into `docs/features/test-db-ownership.md`.
+**One documented coverage gap remains by design**: a child spawned with a
+non-splatting `env=` (e.g. `env={"PATH": os.environ["PATH"]}`) drops
+`REDIS_URL` entirely — the child never inherits `os.environ` at all, so
+the process-wide export cannot rescue it. This shape is rarer than
+omitting `env=` altogether, and the runtime backstops
+(`tools/redis_flush_guard.py` on a db0 flush; the conftest claimed-db
+flush guard) still fail closed underneath it.
+`tests/unit/test_conftest_isolation_guards.py::TestPerProcessDbClaim::test_non_splatting_env_drops_redis_url`
+documents this gap in code rather than only here.
+
+The enforcement layer this replaced — a 688-line AST scanner over
+`tests/**/*.py` with a `path:line`-keyed `ALLOWLIST` — was deleted in
+full. A static scanner cannot see a child spawned any other way, cannot
+see in-process code that builds its own client from `REDIS_URL`, and its
+allowlist's line-number keys were unstable under any merge that shifted
+a line. The permanent regression detector is now behavioral, split across
+two classes in `tests/unit/test_conftest_isolation_guards.py` by the
+property each checks: `TestPerProcessDbClaim` asserts that the live
+process's `REDIS_URL` names its own claim under per-worker `--dist=each`,
+that an unguarded child's resolved `REDIS_URL` is byte-identical to the
+parent's, that a nested pytest child claims its own db rather than
+leaking the parent's, and documents the non-splatting-`env=` coverage
+gap; `TestExportedRedisUrlSurvivesSyntheticHookCalls`, placed at the END
+of the file so it collects last, asserts nothing in the file's own
+synthetic `pytest_configure()` calls polluted the live session's
+`REDIS_URL` by the time collection finishes.

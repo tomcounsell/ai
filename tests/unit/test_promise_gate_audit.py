@@ -185,10 +185,25 @@ class TestDrafterPathAudit:
 
     @pytest.mark.asyncio
     async def test_full_path_block_writes_drafter_audit(self, tmp_path, monkeypatch):
+        """The main (composed) path runs use_llm=True by default (Task 5,
+        #3027), so the LLM call is mocked here to keep the test fast and
+        deterministic — the audit source becomes ``promise_gate_drafter_llm``
+        (main-path LLM verdict), distinct from the short path's
+        ``promise_gate_drafter`` (heuristic-only, tested above)."""
         from bridge.message_drafter import draft_message
+        from bridge.promise_gate import PromiseVerdict
 
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
+
+        async def _fake_llm(text):
+            return PromiseVerdict(
+                action="block",
+                reason="Forward-deferral without verifiable scheduled-delivery reference",
+                class_="forward_deferral",
+            )
+
+        monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _fake_llm)
 
         long_text = (
             "Thanks for flagging that — good catch on the newsletter section. "
@@ -200,9 +215,10 @@ class TestDrafterPathAudit:
         result = await draft_message(long_text)
 
         assert result.needs_self_draft is True
-        blocks = [e for e in self._entries(log_path) if e["source"] == "promise_gate_drafter"]
+        blocks = [e for e in self._entries(log_path) if e["source"] == "promise_gate_drafter_llm"]
         assert len(blocks) == 1
         assert blocks[0]["action"] == "block"
+        assert "elapsed_ms" in blocks[0]
 
     @pytest.mark.asyncio
     async def test_audit_write_failure_does_not_break_drafting(self, tmp_path, monkeypatch):

@@ -95,8 +95,8 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 - End with a connection to the next slide
 
 ### Figure Slide
-- `<!-- _class: figure -->`, visual inside a `.figure` panel
-- Minimal text — the action title and a mono `.figure__meta` caption
+- No slide class. The visual goes inside a `.figure` div
+- Minimal text — the action title and a mono `.figure__meta` title block
 - Label everything on the diagram itself, not in surrounding text
 
 ### Example Slide
@@ -105,7 +105,7 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 - Before/after comparisons work well
 
 ### Comparison / Table Slide
-- `<!-- _class: data -->`, tables instead of side-by-side bullets
+- No slide class. Use a markdown table instead of side-by-side bullets
 - 2-4 columns max, clear headers
 - Mark the recommended option with the slide's one accent
 
@@ -158,7 +158,9 @@ Test your analogy: Would a 16-year-old get it? If not, simplify.
 
 Educational decks explain a system to people who want to understand it. Client-facing decks — proposals, working sessions, decision briefs — serve a different function: they help a decision-maker act. The structure is different.
 
-**The failure mode for client-facing decks:** opening with the solution. Jumping to scope, architecture, or features before the client sees their own problem reflected back puts them in a passive receiver role instead of an active decision-maker. They disengage or start objecting to details before the framing is established.
+**This section is for decision-driving decks only.** The Why → How → What arc and the reflect-their-problem-back rule earn their place where there is a decision to drive. A deliverable whose job is description — an architecture overview, a vendor inventory, audit findings, a status report — leads with the content: a one-line scope/method note, then the subject itself. It describes accurately; the audience supplies their own conclusions.
+
+**The failure mode for decision-driving decks:** opening with the solution. Jumping to scope, architecture, or features before the client sees their own problem reflected back puts them in a passive receiver role instead of an active decision-maker. They disengage or start objecting to details before the framing is established.
 
 **The fix is structural, not cosmetic:**
 
@@ -193,6 +195,10 @@ For a client-facing deck, the title slide is not about the deck — it is about 
 - **Burying the lead**: Put the conclusion FIRST, then explain why — don't build to a reveal
 - **Accent inflation**: More than one red on a slide. The second one cancels the first
 - **Slide numbers as content**: "Step 1, Step 2..." is a document, not a presentation
+- **Belittling the audience / manufactured fear**: Never tell the audience what they lack, imply
+  they are exposed, impotent, or behind, or manufacture urgency to make a point land. Describe the
+  subject, not the audience's inadequacy. A finding is a neutral technical fact with a remediation,
+  never a warning about the reader's competence or a countdown to disaster
 
 ## Engagement Hooks
 

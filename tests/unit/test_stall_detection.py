@@ -43,7 +43,7 @@ def _make_agent_session(
     project_key="test",
     chat_id="12345",
     agent_session_id="session-001",
-    history=None,
+    session_events=None,
 ):
     now = time.time()
     ns = SimpleNamespace(
@@ -56,8 +56,7 @@ def _make_agent_session(
         project_key=project_key,
         chat_id=chat_id,
     )
-    _history = history or []
-    ns._get_history_list = lambda: _history
+    ns.session_events = session_events or []
     ns.log_lifecycle_transition = MagicMock()
     ns.save = MagicMock()
     ns.delete = MagicMock()
@@ -657,7 +656,7 @@ class TestReactionSlotPrecedence:
         session = MagicMock()
         session.status = "killed"
         with patch("models.agent_session.AgentSession") as mock_model:
-            mock_model.query.filter.return_value = [session]
+            mock_model.newest_for_session_id.return_value = session
             assert _session_reached_terminal_status("tg_user_-100_42") is True
 
     def test_unranked_reaction_delivers_without_claiming_the_slot(self, fake_redis):
@@ -805,15 +804,10 @@ class TestReactionPayloadSchemaParity:
 
         captured = {}
 
-        class _FakeRedisModule:
-            @staticmethod
-            def from_url(*a, **kw):
-                return fake_redis
-
         monkeypatch.setattr(session_completion, "_OUTBOX_TTL", 3600, raising=False)
-        with patch.dict("sys.modules", {"redis": SimpleNamespace(Redis=_FakeRedisModule)}):
-            parent = SimpleNamespace(session_id="tg_user_-100_42")
-            assert session_completion._queue_completion_suppress_reaction(parent, "-100", 42)
+        monkeypatch.setattr("utils.redis_client.text_redis", lambda: fake_redis)
+        parent = SimpleNamespace(session_id="tg_user_-100_42")
+        assert session_completion._queue_completion_suppress_reaction(parent, "-100", 42)
         captured["payload"] = json.loads(fake_redis.lists["telegram:outbox:tg_user_-100_42"][0])
         self._assert_parity(
             captured["payload"],

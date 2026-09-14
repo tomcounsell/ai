@@ -509,6 +509,24 @@ def record_verdict(
             except (TypeError, ValueError):
                 current = 0
             states["_concern_round_count"] = current + 1
+
+        # #2885 (folded into #3065): count revision-demanding CRITIQUE rounds.
+        # Same durable design as `_concern_round_count` above, for the same
+        # reasons: `_revision_round_count` is absent from `_OWNED_METADATA_KEYS`
+        # (agent/pipeline_state.py), so `PipelineStateMachine._save()` merges it
+        # back from the live store instead of clobbering it with the in-memory 0.
+        # `_critique_cycle_count` cannot serve this loop: it IS an owned key, and
+        # its only incrementer is `PipelineStateMachine.fail_stage`, which the
+        # skill-driven flow never calls — which is why G2's cap sat inert while
+        # lanes ran 9+ NEEDS REVISION rounds. G2 reads this via
+        # `_meta.revision_round_count` and escalates at MAX_CRITIQUE_CYCLES.
+        # Monotonic and deliberately dedupe-free, per the block above.
+        if stage == "CRITIQUE" and ("NEEDS REVISION" in verdict or "MAJOR REWORK" in verdict):
+            try:
+                current = int(states.get("_revision_round_count", 0) or 0)
+            except (TypeError, ValueError):
+                current = 0
+            states["_revision_round_count"] = current + 1
         return states
 
     try:
@@ -969,7 +987,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
-            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+            "Required for this state-mutating subcommand, but a resumed turn that lost "
+            "its run_id may omit it: identity is re-established from the "
+            "environment (.sdlc-run / active_run_id / a live supervisor; issue "
+            "#2144). A foreign live lease is never adopted. Refuses with "
+            "RUN_ID_REQUIRED only when that heal finds nothing to write under: no "
+            "--issue-number, a foreign live lease, or a finished pipeline."
         ),
     )
     rec.set_defaults(func=_cli_record, requires_run_id=True)
@@ -1037,7 +1060,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
-            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+            "Required for this state-mutating subcommand, but a resumed turn that lost "
+            "its run_id may omit it: identity is re-established from the "
+            "environment (.sdlc-run / active_run_id / a live supervisor; issue "
+            "#2144). A foreign live lease is never adopted. Refuses with "
+            "RUN_ID_REQUIRED only when that heal finds nothing to write under: no "
+            "--issue-number, a foreign live lease, or a finished pipeline."
         ),
     )
     fin.set_defaults(func=_cli_finalize, requires_run_id=True)

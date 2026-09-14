@@ -11,7 +11,7 @@ branch added for issue #1215.
 """
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -73,9 +73,25 @@ class TestSteerBranch:
                 sender_name="Alice",
                 text="please update the readme",
                 log_context="[test] steer log",
+                room_id="test|system",
+                context_advisory="advisory text",
             )
 
-        push.assert_called_once_with("sess-1", "please update the readme", "Alice", is_abort=False)
+        # Human message + context-recall advisory both ride the Room leg
+        # (same room_id) — #2694. The advisory is a second steering message,
+        # never appended to the human's text.
+        assert len(push.call_args_list) == 2
+        assert push.call_args_list[0] == call(
+            "sess-1", "please update the readme", "Alice", is_abort=False, room_id="test|system"
+        )
+        assert push.call_args_list[1] == call(
+            "sess-1",
+            "advisory text",
+            "intake-classifier",
+            is_abort=False,
+            room_id="test|system",
+            front=False,
+        )
         react.assert_awaited_once()
         # Steer reaction is the standard "received" eyes
         args, _ = react.await_args
@@ -108,7 +124,9 @@ class TestAbortBranch:
                 log_context="[test] abort log",
             )
 
-        push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True)
+        # An abort is demoted to the legacy leg regardless of room_id, so
+        # the None default (no room_id passed) pins the legacy leg.
+        push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True, room_id=None)
         react.assert_awaited_once()
         args, _ = react.await_args
         assert args[3] == "\U0001fae1"  # 🫡
@@ -135,8 +153,9 @@ class TestAbortBranch:
                 text="  STOP  ",
                 log_context="[test]",
             )
-        # is_abort should still be detected after strip + lower
-        push.assert_called_once_with("sess-1", "  STOP  ", "Alice", is_abort=True)
+        # is_abort should still be detected after strip + lower; abort lands
+        # on the legacy leg (room_id=None), never a Room leg.
+        push.assert_called_once_with("sess-1", "  STOP  ", "Alice", is_abort=True, room_id=None)
 
 
 class TestDefensiveReaction:
@@ -217,10 +236,15 @@ class TestMediaEnrichment:
                 sender_name="Alice",
                 text="--file attachment only--",
                 log_context="[test]",
+                room_id="test|system",
             )
 
         push.assert_called_once_with(
-            "sess-1", "[Document content: hello world]", "Alice", is_abort=False
+            "sess-1",
+            "[Document content: hello world]",
+            "Alice",
+            is_abort=False,
+            room_id="test|system",
         )
 
     @pytest.mark.asyncio
@@ -249,10 +273,13 @@ class TestMediaEnrichment:
                 sender_name="Alice",
                 text="check this out",
                 log_context="[test]",
+                room_id="test|system",
             )
 
         expected = "[User sent an image]\nImage description: cat\n\ncheck this out"
-        push.assert_called_once_with("sess-1", expected, "Alice", is_abort=False)
+        push.assert_called_once_with(
+            "sess-1", expected, "Alice", is_abort=False, room_id="test|system"
+        )
 
     @pytest.mark.asyncio
     async def test_text_only_path_skips_process_incoming_media(self):
@@ -279,10 +306,13 @@ class TestMediaEnrichment:
                 sender_name="Alice",
                 text="hello",
                 log_context="[test]",
+                room_id="test|system",
             )
 
         proc.assert_not_awaited()
-        push.assert_called_once_with("sess-1", "hello", "Alice", is_abort=False)
+        push.assert_called_once_with(
+            "sess-1", "hello", "Alice", is_abort=False, room_id="test|system"
+        )
 
     @pytest.mark.asyncio
     async def test_process_incoming_media_failure_leaves_sentinel_intact(self):
@@ -311,10 +341,13 @@ class TestMediaEnrichment:
                 sender_name="Alice",
                 text="--file attachment only--",
                 log_context="[test]",
+                room_id="test|system",
             )
 
         # Push still happens with the sentinel (defensive fallback).
-        push.assert_called_once_with("sess-1", "--file attachment only--", "Alice", is_abort=False)
+        push.assert_called_once_with(
+            "sess-1", "--file attachment only--", "Alice", is_abort=False, room_id="test|system"
+        )
         rec.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -357,9 +390,12 @@ class TestMediaEnrichment:
                 sender_name="Alice",
                 text="--file attachment only--",
                 log_context="[test]",
+                room_id="test|system",
             )
 
-        push.assert_called_once_with("sess-1", "[Document content: hi]", "Alice", is_abort=False)
+        push.assert_called_once_with(
+            "sess-1", "[Document content: hi]", "Alice", is_abort=False, room_id="test|system"
+        )
         rec.assert_awaited_once()
 
     @pytest.mark.asyncio

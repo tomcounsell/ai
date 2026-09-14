@@ -66,7 +66,7 @@ class TestHealthCheckOrphanFixPreservesStatus:
     ):
         """A completed child with an orphaned parent must remain completed
         after the health check clears the parent reference."""
-        from agent.agent_session_queue import _agent_session_hierarchy_health_check
+        from agent.session_health import _agent_session_hierarchy_health_check
 
         child = completed_child_with_orphaned_parent
         original_session_id = child.session_id
@@ -96,7 +96,7 @@ class TestHealthCheckOrphanFixPreservesStatus:
     ):
         """A failed child with an orphaned parent must remain failed
         after the health check clears the parent reference."""
-        from agent.agent_session_queue import _agent_session_hierarchy_health_check
+        from agent.session_health import _agent_session_hierarchy_health_check
 
         child = failed_child_with_orphaned_parent
         original_session_id = child.session_id
@@ -119,7 +119,7 @@ class TestHealthCheckOrphanFixPreservesStatus:
     async def test_orphaned_parent_reference_is_cleared(self, completed_child_with_orphaned_parent):
         """The health check must clear the parent_agent_session_id when the
         parent no longer exists, allowing the child to stand alone."""
-        from agent.agent_session_queue import _agent_session_hierarchy_health_check
+        from agent.session_health import _agent_session_hierarchy_health_check
 
         child = completed_child_with_orphaned_parent
 

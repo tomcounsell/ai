@@ -5,10 +5,11 @@ share a single root cause: duplicate ``AgentSession`` records for one
 ``session_id`` in divergent statuses, mishandled at two consumer sites.
 
 Defect B — a completed cold-start run never reached a terminal status. The
-unconditional completion-exit finalize guard in ``agent/session_executor.py``
-(added after the whole ``if agent_session: / else:`` completion block) is the
-load-bearing fix: it re-reads the authoritative session and finalizes it if
-still ``running``, regardless of what ``complete_transcript`` did. These
+module-level ``_finalize_if_still_running`` helper in
+``agent/session_executor.py``, called from ``_execute_agent_session``'s
+``finally`` and keyed on ``status == "running"``, is the load-bearing fix: it
+re-reads the authoritative session and finalizes it if still ``running``,
+regardless of what ``complete_transcript`` did. These
 tests prove the GUARD closes the gap — not just the ``complete_transcript``
 migration to ``get_authoritative_session`` (covered separately in
 ``tests/unit/test_session_transcript.py``).
@@ -110,14 +111,16 @@ def _make_teammate_session(session_id: str, **overrides) -> AgentSession:
 
 
 # ---------------------------------------------------------------------------
-# Defect B — unconditional completion-exit finalize guard
+# Defect B — status-keyed finalize guard (_finalize_if_still_running)
 # ---------------------------------------------------------------------------
 
 
 class TestDefectBCompletionExitGuard:
-    """The load-bearing fix: a re-read + finalize after the whole if/else
-    completion block, unconditional and independent of complete_transcript's
-    own record selection or success."""
+    """The load-bearing fix: ``_finalize_if_still_running``, called from
+    ``_execute_agent_session``'s ``finally`` and keyed on ``status ==
+    "running"``, re-reads and finalizes the authoritative session
+    unconditionally, independent of complete_transcript's own record
+    selection or success."""
 
     @pytest.mark.asyncio
     async def test_if_branch_divergent_pair_finalizes_despite_noop_complete_transcript(
@@ -180,9 +183,9 @@ class TestDefectBCompletionExitGuard:
         guard_logs = [
             r.getMessage()
             for r in caplog.records
-            if "Completion-exit guard finalized session" in r.getMessage()
+            if "Finalize guard finalized session" in r.getMessage()
         ]
-        assert guard_logs, "expected the unconditional completion-exit guard to log its finalize"
+        assert guard_logs, "expected _finalize_if_still_running to log its finalize"
 
     @pytest.mark.asyncio
     async def test_else_branch_agent_session_none_still_finalizes_authoritative_record(
@@ -220,11 +223,12 @@ class TestDefectBCompletionExitGuard:
         guard_logs = [
             r.getMessage()
             for r in caplog.records
-            if "Completion-exit guard finalized session" in r.getMessage()
+            if "Finalize guard finalized session" in r.getMessage()
         ]
         assert guard_logs, (
-            "expected the post if/else completion-exit guard to cover the "
-            "agent_session-is-None exit, not just the if agent_session: branch"
+            "expected _finalize_if_still_running (called from the finally, "
+            "keyed on status == 'running') to cover the agent_session-is-None "
+            "exit, not just the if agent_session: branch"
         )
 
     @pytest.mark.asyncio
@@ -259,6 +263,38 @@ class TestDefectBCompletionExitGuard:
         assert not fail_logs, (
             "StatusConflictError must be swallowed as success, not logged as a failure"
         )
+
+    async def test_guard_status_conflict_error_logs_info_not_silently(self, redis_test_db, caplog):
+        """#3053: the guard's StatusConflictError handler used to be a bare
+        ``pass`` — one of the two silent exits that could skip the deferred
+        self-draft flush with no trace. It must now log at INFO naming the
+        session and the conflict ("expected, do not treat as an error" is a
+        reason to log at INFO, not a reason to log nothing)."""
+        sid = _sid("defect-b-info-log")
+        session = _make_teammate_session(sid, project_key="dbinfolog")
+
+        def _noop_complete_transcript(*_a, **_k):
+            return None
+
+        def _raising_finalize(*_a, **_k):
+            raise StatusConflictError(sid, "running", "completed", reason="raced by another actor")
+
+        with (
+            _patch_runner(),
+            patch("bridge.session_transcript.complete_transcript", _noop_complete_transcript),
+            patch("models.session_lifecycle.finalize_session", _raising_finalize),
+            caplog.at_level(logging.INFO),
+        ):
+            await _execute_agent_session(session)
+
+        info_logs = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and "already finalized" in r.getMessage()
+            and sid in r.getMessage()
+        ]
+        assert info_logs, "the StatusConflictError guard exit must log at INFO, not silently"
 
 
 # ---------------------------------------------------------------------------

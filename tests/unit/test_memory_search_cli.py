@@ -48,7 +48,7 @@ class TestStatusFunction:
         ]
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=records),
+            patch("tools.memory_search.fetch_all_records", return_value=records),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):
             mock_redis.ping.return_value = True
@@ -80,7 +80,7 @@ class TestStatusFunction:
         from tools.memory_search import status
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=[]),
+            patch("tools.memory_search.fetch_all_records", return_value=[]),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):
             mock_redis.ping.return_value = True
@@ -104,7 +104,7 @@ class TestStatusFunction:
         ]
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=records),
+            patch("tools.memory_search.fetch_all_records", return_value=records),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):
             mock_redis.ping.return_value = True
@@ -132,7 +132,7 @@ class TestStatusFunction:
         fake_cleanup._count_disk_orphans = lambda model: 17
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=records),
+            patch("tools.memory_search.fetch_all_records", return_value=records),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
             patch.dict(sys.modules, {"popoto_index_cleanup": fake_cleanup}),
         ):
@@ -165,7 +165,7 @@ class TestStatusFunction:
         fake_cleanup._count_disk_orphans = lambda model: 0
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=records),
+            patch("tools.memory_search.fetch_all_records", return_value=records),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
             patch.dict(sys.modules, {"popoto_index_cleanup": fake_cleanup}),
         ):
@@ -178,11 +178,11 @@ class TestStatusFunction:
         assert abs(cat_conf["correction"]["avg_confidence"] - 0.7) < 0.001
 
     def test_project_key_scoping(self):
-        """status() calls _fetch_all_records with the resolved project key."""
+        """status() calls fetch_all_records with the resolved project key."""
         from tools.memory_search import status
 
         with (
-            patch("tools.memory_search._fetch_all_records", return_value=[]) as mock_fetch,
+            patch("tools.memory_search.fetch_all_records", return_value=[]) as mock_fetch,
             patch("tools.memory_search._resolve_project_key", return_value="my-project"),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
         ):

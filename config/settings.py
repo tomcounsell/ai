@@ -10,7 +10,7 @@ import logging.handlers
 import os
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -237,7 +237,8 @@ class TimeoutSettings(BaseModel):
             "Timeout (seconds) for generic/other subprocess calls that are "
             "NOT git/gh-specific (grep, pgrep, launchctl kickstart, `ruff "
             "check`/`ruff format --check`, `pytest tests/unit/`, etc.), e.g. "
-            "monitoring/worker_watchdog.py's pgrep probe (5s) up to "
+            "monitoring/bridge_watchdog.py's `pgrep -f telegram_bridge.py` "
+            "stale-process sweep in kill_stale_processes() up to "
             "tools/doctor.py's full unit-test run (300s). Default normalizes "
             "to the LONGEST observed value in this bucket (300s, the pytest "
             "quality-gate check in tools/doctor.py) per Decision #1 -- safe "
@@ -370,6 +371,25 @@ class TimeoutSettings(BaseModel):
             "(a 5s buffer over anthropic_sdk_s). Migration must preserve "
             "BOTH timers as separate fields -- never collapse to one value. "
             "Env: TIMEOUTS__ANTHROPIC_HARD_S."
+        ),
+    )
+    local_typed_hard_s: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=300.0,
+        description=(
+            "Wall-clock cap (seconds) for local granite/Ollama calls via "
+            "`agent/llm/wrapper.py::run_typed_local`, read inside the "
+            "function so a bump takes effect without a module reload. "
+            "GRAIN OF SALT: provisional and tunable -- sized from spike-3's "
+            "measured router latency (median ~1.1s / p95 ~1.4s against the "
+            "live granite daemon) with generous headroom for a cold model "
+            "load. Unlike the Anthropic pair above this is a SINGLE timer: "
+            "a localhost daemon either answers or refuses, so the "
+            "half-open-socket case the two-timer structure guards does not "
+            "arise. Local calls fail open at the call site, so a timeout "
+            "here costs a conservative default, never a lost message. "
+            "Env: TIMEOUTS__LOCAL_TYPED_HARD_S."
         ),
     )
 
@@ -544,26 +564,123 @@ class HybridEvalSettings(BaseModel):
     )
 
 
+class ImprovementSettings(BaseModel):
+    """Bounds for the recursive self-improvement controller (#3177).
+
+    The controller finds its own weaknesses, gathers what it needs to know,
+    tests candidate changes, and proposes measured improvements. These are the
+    limits it runs inside. Immutable, human-approved scope on top of them lives
+    in ``ImprovementCharter`` records in Redis, not here — a setting is a
+    default, a charter is an authorization, and the controller can amend
+    neither.
+
+    There is deliberately **no** setting bounding how many questions the
+    controller may ask a human per day. The bound is zero and the capability
+    does not exist: the controller asks Tom nothing. It resolves uncertainty
+    from Tom-sourced memories and online research, and records what it cannot
+    resolve as a provisional assumption with its evidence, surfaced on the
+    dashboard as an assumption rather than a fact. An anti-criterion in
+    ``docs/plans/recursive-self-improvement.md`` fails the build if a question
+    path reappears anywhere in bridge/, tools/, config/, models/, or ui/.
+
+    Budget is three separately reserved units, none of them a per-experiment
+    dollar ceiling for Claude. Claude work runs on the subscription and is
+    budgeted as SDLC lane concurrency. Paid inference on other models runs
+    through the existing OpenRouter path against a daily dollar pool, settled
+    per call from reported usage, with the controller and the evaluator drawing
+    separate reservations from it. Infrastructure (sandboxes, storage,
+    Cloudflare) draws on a weekly dollar pool of its own. The day and week
+    boundaries are disclosed rather than assumed, because a reservation that
+    resets on an undisclosed boundary cannot be audited.
+
+    Every default here is PROVISIONAL/TUNABLE. ``enabled`` defaults to False:
+    nothing in this system runs until it is deliberately turned on.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the improvement controller. False means no "
+            "controller tick runs, no research session is dispatched, and no "
+            "evidence-collection adapter writes. The evidence-collection "
+            "reflection stays registered either way so turning this on needs "
+            "no re-registration. Env: IMPROVEMENT__ENABLED."
+        ),
+    )
+    max_concurrent_research_sessions: int = Field(
+        default=1,
+        ge=0,
+        le=4,
+        description=(
+            "How many research sessions may hold a lane slot at once. One is "
+            "the budgeted unit for Claude work: the subscription is the "
+            "constraint, so concurrency is the currency. Raising this competes "
+            "directly with ordinary SDLC lanes. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__MAX_CONCURRENT_RESEARCH_SESSIONS."
+        ),
+    )
+    daily_paid_inference_usd: float = Field(
+        default=10.00,
+        ge=0.0,
+        description=(
+            "Daily dollar pool for paid inference on non-Claude models through "
+            "the OpenRouter path, settled per call from the usage reported in "
+            "each response envelope. The controller and the evaluator draw "
+            "separate reservations from this one pool, so a runaway research "
+            "loop cannot starve the evaluator that would catch it. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__DAILY_PAID_INFERENCE_USD."
+        ),
+    )
+    weekly_infrastructure_usd: float = Field(
+        default=50.00,
+        ge=0.0,
+        description=(
+            "Weekly dollar pool for the infrastructure the loop runs on: "
+            "sandboxes, storage, and Cloudflare. Reserved separately from paid "
+            "inference and on a different window, because a week is the unit a "
+            "sandbox or a storage bucket is actually billed and reasoned about "
+            "in. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__WEEKLY_INFRASTRUCTURE_USD."
+        ),
+    )
+    budget_day_boundary: Literal["UTC"] = Field(
+        default="UTC",
+        description=(
+            "The timezone whose midnight ends a budget day. Disclosed rather "
+            "than assumed: a reservation that resets on an undisclosed "
+            "boundary cannot be audited against what was actually spent. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__BUDGET_DAY_BOUNDARY."
+        ),
+    )
+    budget_week_start: Literal["monday", "sunday"] = Field(
+        default="monday",
+        description=(
+            "The weekday a budget week begins on, for the infrastructure pool. "
+            "Disclosed for the same reason as the day boundary, and typed so a "
+            "bad override fails at settings load rather than at the first "
+            "window computation. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__BUDGET_WEEK_START."
+        ),
+    )
+    controller_tick_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description=(
+            "Cadence of the controller and evidence-collection ticks, in "
+            "seconds. Matches the cadence the evidence-collection reflection "
+            "registers with. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__CONTROLLER_TICK_SECONDS."
+        ),
+    )
+
+
 class RedisSettings(BaseModel):
     """Redis connection settings."""
 
     url: str = Field(
         default="redis://localhost:6379/0",
         description="Redis connection URL (env: REDIS_URL)",
-    )
-
-    # Layer 2 ACL credential (issue #2645, D8/D8a). Defaults to "" so
-    # Settings() never fails on a machine without the secret -- the report
-    # path of scripts/update/redis_acl.py plans against a literal
-    # <REDIS_APP_PASSWORD> placeholder regardless of whether this is set,
-    # and only the human-gated apply path (scripts.update.redis_acl --apply)
-    # reads it. Not in .env.example on purpose (Finding 4, round-3 critique):
-    # a placeholder there would trip scripts/update/verify.py's
-    # check_env_completeness on every machine for a credential this PR never
-    # reads. Ships in the follow-up #2661 rotation PR instead.
-    app_password: str = Field(
-        default="",
-        description="Password for the valor-app Redis ACL user (env: REDIS_APP_PASSWORD)",
     )
 
     @field_validator("url")
@@ -624,13 +741,14 @@ class ModelSettings(BaseModel):
         ),
     )
     session_default_model: str = Field(
-        default="opus",
+        default="fable",
         description=(
             "Fallback Claude model for sessions where AgentSession.model is None/empty. "
-            "Part of the precedence cascade: session.model > settings > codebase default 'opus'. "
-            "Short aliases (opus, sonnet, haiku) preferred; "
-            "full names (claude-opus-4-7) also accepted. "
-            "Env: MODELS__SESSION_DEFAULT_MODEL."
+            "Part of the precedence cascade: session.model > settings > codebase default 'fable'. "
+            "Short aliases (fable, opus, sonnet, haiku) preferred: the CLI resolves an alias "
+            "to the latest model in that family under subscription auth, whereas a pinned "
+            "full id (claude-fable-5-1) is rejected with an api_error on subscription-only "
+            "machines. Env: MODELS__SESSION_DEFAULT_MODEL."
         ),
     )
 
@@ -822,6 +940,32 @@ class FeatureSettings(BaseModel):
             "comment above this field. Env: FEATURES__BRIDGE_MSG_CLAIM_TTL_SECONDS."
         ),
     )
+    max_critique_cycles: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description=(
+            "Maximum CRITIQUE -> PLAN revision cycles before the SDLC router "
+            "escalates to human review (agent/pipeline_graph.py's "
+            "MAX_CRITIQUE_CYCLES, consumed by get_next_stage and the router's "
+            "G2 gate). Provisional and tunable: 2 admits one genuine revision "
+            "after the first NEEDS REVISION verdict before a human rules. "
+            "Promoted off a module-scope os.getenv read (#3087). Env: "
+            "FEATURES__MAX_CRITIQUE_CYCLES."
+        ),
+    )
+    side_effects_paused: bool = Field(
+        default=False,
+        description=(
+            "Administrative pause for the side-effect drain "
+            "(agent/side_effects.py::run_due). While true the drain reports a "
+            "skip and runs no handler; jobs stay pending and drain when the "
+            "pause lifts, so pausing loses no work. Exists so post-session "
+            "memory extraction can be held off during an incident or a trial "
+            "arm without the enqueue path changing. Env: "
+            "FEATURES__SIDE_EFFECTS_PAUSED."
+        ),
+    )
 
 
 class SessionRunnerSettings(BaseModel):
@@ -834,8 +978,6 @@ class SessionRunnerSettings(BaseModel):
     per-role transport seam — protocol, not paint.
 
     Env prefix: ``SESSION_RUNNER__`` (e.g. ``SESSION_RUNNER__PM_MODEL``).
-    Legacy ``GRANITE__*``/``GRANITE_*`` keys are ignored and flagged by
-    :func:`stale_granite_env_keys`.
     """
 
     pm_model: str = Field(
@@ -910,6 +1052,85 @@ class SessionRunnerSettings(BaseModel):
     )
 
 
+class CodexSettings(BaseModel):
+    """Codex exec dev-lane configuration (plan #2001, Phase 3).
+
+    Provisional typed knobs for the opt-in Codex dev lane. Every value is
+    env-overridable via the ``CODEX__`` prefix (e.g.
+    ``CODEX__MAX_RESUMED_TURNS=20``) through the settings catalog — no
+    inline literals elsewhere. All defaults are provisional/tunable; a
+    version-floor bump must update fixtures/probes before changing the
+    gate (see agent/session_runner/harness/codex.py).
+    """
+
+    install_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in Codex CLI provisioning via scripts/update/codex_cli.py. "
+            "Default OFF — only opted-in machines install/upgrade @openai/codex. "
+            "Override via CODEX__INSTALL_ENABLED=1."
+        ),
+    )
+    npm_package: str = Field(
+        default="@openai/codex",
+        description="npm package name for Codex CLI provisioning. Override via CODEX__NPM_PACKAGE.",
+    )
+    min_version: str = Field(
+        default="0.144.3",
+        description=(
+            "Minimum verified Codex CLI version (JSONL/resume/schema contract, "
+            "live-probed). Override via CODEX__MIN_VERSION."
+        ),
+    )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional Codex model override for dev turns. None inherits the "
+            "CLI default. Override via CODEX__MODEL."
+        ),
+    )
+    sandbox: str = Field(
+        default="workspace-write",
+        description=(
+            "Default Codex sandbox for dev turns. Only 'workspace-write' or "
+            "'danger-full-access' are accepted (validated); the CLI flag path "
+            "never selects danger-full-access. Override via CODEX__SANDBOX."
+        ),
+    )
+    turn_timeout_s: float = Field(
+        default=600.0,
+        gt=0,
+        le=900,
+        description=(
+            "Per-turn budget (seconds) bounding one codex_dev.run tool call. "
+            "Upper-bounded by the dev-lane lease TTL (900s, see "
+            "agent/codex_dev_lease.py): a turn that outlives the lease lets "
+            "a second turn acquire it and race on one thread. "
+            "Provisional/tunable. Override via CODEX__TURN_TIMEOUT_S."
+        ),
+    )
+    max_resumed_turns: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Provisional bound on resumed turns against one Codex thread. At "
+            "the limit the lane stops with an actionable PM-visible error "
+            "while preserving the thread — never silent rollover. "
+            "Override via CODEX__MAX_RESUMED_TURNS."
+        ),
+    )
+
+    @field_validator("sandbox")
+    @classmethod
+    def validate_sandbox(cls, v):
+        """Only the two explicit sandbox policies are accepted."""
+        allowed = ("workspace-write", "danger-full-access")
+        if v not in allowed:
+            raise ValueError(f"Codex sandbox must be one of: {', '.join(allowed)}")
+        return v
+
+
 class PathSettings(BaseModel):
     """Path settings derived from project root. No hardcoded usernames."""
 
@@ -945,7 +1166,13 @@ class Settings(BaseSettings):
         # into the launchd plist by install_worker.sh. The .env symlinks to
         # ~/Desktop/Valor/.env (iCloud), and pydantic-settings' open() on that
         # file blocks indefinitely under macOS TCC in the launchd environment.
-        env_file=None if __import__("os").environ.get("VALOR_LAUNCHD") else ".env",
+        # Class-body equivalent of the worker/bridge bootstrap gates: pre-config,
+        # launcher-owned, cannot vary per-instance (#2866 triage). The AST census
+        # does not descend into class bodies, so this site is not in the 190; the
+        # marker records the verdict so a later refactor cannot lose it.
+        env_file=None
+        if __import__("os").environ.get("VALOR_LAUNCHD")  # env-scope-guard: allow
+        else ".env",
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,
@@ -1005,6 +1232,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Persona toolbelts activation flag (plan #3081, Lane A — ships dark).
+    # When False (the committed default), the headless harness never calls the
+    # belt resolver and every `claude -p` invocation stays byte-identical to
+    # pre-belt ambient behavior. Flipped on in a dedicated commit (task 4 of
+    # the plan) only after the baseline measurement window closes; the env
+    # override exists as break-glass rollback only, never for per-machine
+    # activation (the fleet activates together via git sync + /update).
+    toolbelts_enforce: bool = Field(
+        default=False,
+        description=(
+            "Enforce per-persona toolbelt manifests (config/toolbelts/) on "
+            "headless harness turns. Default OFF (dark). Env: TOOLBELTS_ENFORCE."
+        ),
+    )
+
+    # Escalation rollback gate constants (plan #3081, Risk 1). The gate itself
+    # is armed at activation time (task 4, out of scope for the dark build):
+    # escalation-tagged lines per persona per week above
+    # max(ESCALATION_CEILING_MULTIPLIER x belt-relevant denial baseline,
+    # ESCALATION_CEILING_FLOOR) for two consecutive weeks flips
+    # TOOLBELTS_ENFORCE back off. The baseline denominator excludes denial
+    # causes a belt cannot affect (sensitive-path and, pre-Lane-B, the
+    # teammate write-restriction blocks). The floor keeps a near-zero
+    # baseline — plausible for PM/Dev under bypassPermissions — from tripping
+    # the gate on the first-ever escalation line.
+    escalation_ceiling_multiplier: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "Multiplier over the belt-relevant denial baseline for the "
+            "escalation rollback ceiling. Env: ESCALATION_CEILING_MULTIPLIER."
+        ),
+    )
+    escalation_ceiling_floor: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Absolute floor for the escalation rollback ceiling, so a "
+            "near-zero baseline cannot trip the gate on the first escalation "
+            "line. Env: ESCALATION_CEILING_FLOOR."
+        ),
+    )
+
     # Email resolver persistent-unavailability alert (issue #1817, workstream A2).
     # Provisional/tunable — chosen to absorb a one-off transient resolver blip
     # without paging, while still catching a genuinely stuck resolver (e.g. an
@@ -1058,6 +1328,8 @@ class Settings(BaseSettings):
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
     session_runner: SessionRunnerSettings = Field(default_factory=SessionRunnerSettings)
+    codex: CodexSettings = Field(default_factory=CodexSettings)
+    improvement: ImprovementSettings = Field(default_factory=ImprovementSettings)
 
     @field_validator("environment")
     @classmethod
@@ -1145,49 +1417,3 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
-
-
-# --- Stale legacy env-prefix guard (plan #1924, hard requirement) ---------
-#
-# The PTY teardown renamed the ``GraniteSettings`` group to
-# ``SessionRunnerSettings`` (env prefix ``GRANITE__*`` -> ``SESSION_RUNNER__*``)
-# and deleted the flat ``GRANITE_*`` knobs. ``extra="ignore"`` means a stale
-# key in the vault .env or a launchd plist silently does NOTHING — the exact
-# silent-failure mode the critique flagged. Warn loudly at settings import;
-# scripts/update/run.py surfaces the same list during deploy.
-
-_LEGACY_GRANITE_ENV_PREFIX = "GRANITE_"
-
-
-def stale_granite_env_keys(env_file: str | Path = ".env") -> list[str]:
-    """Return legacy ``GRANITE__*``/``GRANITE_*`` env keys that are still set.
-
-    Scans both the process environment and ``env_file`` (the same file
-    ``Settings`` reads; skipped under ``VALOR_LAUNCHD=1``, matching
-    ``model_config`` — in the launchd environment all vars are already in
-    the process env). Returns a sorted list of stale key names; empty when
-    the machine is clean.
-    """
-
-    keys = {k for k in os.environ if k.startswith(_LEGACY_GRANITE_ENV_PREFIX)}
-    if not os.environ.get("VALOR_LAUNCHD"):
-        try:
-            for line in Path(env_file).read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith(_LEGACY_GRANITE_ENV_PREFIX) and "=" in stripped:
-                    keys.add(stripped.split("=", 1)[0].strip())
-        except OSError:
-            pass
-    return sorted(keys)
-
-
-_stale_granite_keys = stale_granite_env_keys()
-if _stale_granite_keys:
-    logging.getLogger(__name__).warning(
-        "Stale legacy GRANITE_* env keys detected — ignored since the PTY "
-        "teardown (plan #1924): %s. Rename surviving knobs to the "
-        "SESSION_RUNNER__* prefix (e.g. GRANITE__PM_MODEL -> "
-        "SESSION_RUNNER__PM_MODEL) or delete them from ~/Desktop/Valor/.env "
-        "and the launchd plists.",
-        ", ".join(_stale_granite_keys),
-    )

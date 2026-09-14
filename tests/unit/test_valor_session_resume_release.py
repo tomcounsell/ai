@@ -17,6 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 # Bootstrap: ensure repo root is on sys.path
 _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
@@ -57,6 +59,11 @@ def _make_session(
     s.retain_for_resume = retain
     s.pr_url = pr_url
     s.slug = slug
+    # A real project_key string. The resume steer is session-scoped (#3270), so
+    # nothing derives a room id from it any more, but ~30 call sites share this
+    # helper and other paths still read project_key; a MagicMock repr there is
+    # noise. No test asserts on project_key being absent.
+    s.project_key = "test"
     # Default to a non-null UUID so existing happy-path tests continue to
     # exercise the status-guard path without tripping the null-UUID guard
     # added in issue #1061. Tests that want to exercise the null-UUID path
@@ -89,6 +96,7 @@ class TestCmdResumeNotFound:
         """cmd_resume with unknown ID returns 1 and prints error to stderr."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         # _find_session falls back to get_by_id when filter is empty (#1061).
         mock_cls.get_by_id.return_value = None
 
@@ -117,6 +125,7 @@ class TestCmdResumeWrongStatus:
         session = _make_session("sess-1", status=status)
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -159,6 +168,7 @@ class TestCmdResumeHappyPath:
         session = _make_session("sess-ok", status="completed", model="claude-opus-4-5")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (
@@ -179,7 +189,9 @@ class TestCmdResumeHappyPath:
 
         assert result == 0
         # Steering message must be pushed to Redis before transition_status is called
-        mock_push.assert_called_once_with("sess-ok", "Do the patch.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-ok", "Do the patch.", "resume:valor-session resume", room_id=None
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -190,6 +202,7 @@ class TestCmdResumeHappyPath:
         session = _make_session("sess-order", status="completed")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         def _record_push(*_a, **_kw):
             call_order.append("push")
@@ -227,6 +240,7 @@ class TestCmdResumeHappyPath:
         )
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -264,6 +278,7 @@ class TestCmdResumeKilledFailedSupport:
     def _run_resume(self, session, message="Try again."):
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (
@@ -290,7 +305,10 @@ class TestCmdResumeKilledFailedSupport:
         )
         assert result == 0
         mock_push.assert_called_once_with(
-            "sess-k", "Pick up where we left off.", "resume:valor-session resume"
+            "sess-k",
+            "Pick up where we left off.",
+            "resume:valor-session resume",
+            room_id=None,
         )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
@@ -300,7 +318,9 @@ class TestCmdResumeKilledFailedSupport:
         session = _make_session("sess-f", status="failed", claude_session_uuid="uuid-failed")
         result, mock_transition, mock_push = self._run_resume(session, message="Recover.")
         assert result == 0
-        mock_push.assert_called_once_with("sess-f", "Recover.", "resume:valor-session resume")
+        mock_push.assert_called_once_with(
+            "sess-f", "Recover.", "resume:valor-session resume", room_id=None
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -312,6 +332,7 @@ class TestCmdResumeNullUuidGuard:
     def _run_resume_and_capture(self, session, capsys):
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -392,6 +413,7 @@ class TestCmdResumeStatusGuardExactMessage:
         session = _make_session("sess-paused", status="paused_circuit")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         resumable = frozenset({"completed", "killed", "failed", "abandoned"})
 
@@ -429,6 +451,7 @@ class TestCmdResumeAbandonedSupport:
     def _run_resume(self, session, message="Continue."):
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
         resumable = frozenset({"completed", "killed", "failed", "abandoned"})
 
@@ -456,7 +479,10 @@ class TestCmdResumeAbandonedSupport:
         )
         assert result == 0
         mock_push.assert_called_once_with(
-            "sess-a", "Pick up where we left off.", "resume:valor-session resume"
+            "sess-a",
+            "Pick up where we left off.",
+            "resume:valor-session resume",
+            room_id=None,
         )
         mock_transition.assert_called_once()
         _, kwargs = mock_transition.call_args
@@ -467,6 +493,7 @@ class TestCmdResumeAbandonedSupport:
         session = _make_session("sess-c", status="cancelled", claude_session_uuid="uuid-c")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         resumable = frozenset({"completed", "killed", "failed", "abandoned"})
 
         with (
@@ -508,6 +535,8 @@ class TestResumeSessionCore:
         s.status = status
         s.claude_session_uuid = uuid
         s.model = "claude-opus-4-5"
+        # Real project_key so the derived room id is assertable ("test|system").
+        s.project_key = "test"
         return s
 
     def _patch_lifecycle(self, mock_transition=None, resumable=None):
@@ -619,7 +648,7 @@ class TestResumeSessionCore:
 
         assert result.success is True
         assert call_order.index("push") < call_order.index("transition")
-        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli")
+        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli", room_id=None)
 
     def test_transition_error_returns_failure(self):
         session = self._make_mock_session(status="failed")
@@ -665,6 +694,7 @@ class TestFindSessionByPrimarySessionId:
         session = _make_session("sess-1")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with patch.dict(
             "sys.modules",
@@ -683,6 +713,7 @@ class TestFindSessionByPrimarySessionId:
         new_session.created_at = 500
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [old_session, new_session]
+        wire_session_lookup(mock_cls)
 
         with patch.dict(
             "sys.modules",
@@ -705,6 +736,7 @@ class TestFindSessionFallbackToAgentSessionId:
         uuid_session = _make_session("sess-from-uuid")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = uuid_session
 
         with patch.dict(
@@ -725,6 +757,7 @@ class TestFindSessionFallbackToAgentSessionId:
         fallback_session = _make_session("sess-1")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = fallback_session
 
         with (
@@ -743,6 +776,7 @@ class TestFindSessionFallbackToAgentSessionId:
     def test_returns_none_when_neither_lookup_finds(self):
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = None
 
         with (
@@ -763,6 +797,7 @@ class TestFindSessionFallbackToAgentSessionId:
         """Empty string must not raise — get_by_id has its own empty-string guard."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = None
 
         with (
@@ -803,6 +838,7 @@ class TestDualIdLookupAcrossSubcommands:
         mock_cls = MagicMock()
         # session_id filter returns empty → UUID fallback path
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = session
 
         args = argparse.Namespace(
@@ -823,6 +859,7 @@ class TestDualIdLookupAcrossSubcommands:
         session = _make_session("sess-inspect", status="completed")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = session
 
         args = argparse.Namespace(id="c00fd40d7a10432ba38b52bead17061f", json=True)
@@ -840,6 +877,7 @@ class TestDualIdLookupAcrossSubcommands:
         session = _make_session("sess-kill", status="running")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = session
         mock_finalize = MagicMock()
 
@@ -873,6 +911,7 @@ class TestDualIdLookupAcrossSubcommands:
         session = _make_session("sess-steer", status="running")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = session
         mock_steer = MagicMock(return_value={"success": True})
 
@@ -888,7 +927,7 @@ class TestDualIdLookupAcrossSubcommands:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                    "agent.session_executor": MagicMock(steer_session=mock_steer),
                 },
             ),
         ):
@@ -901,6 +940,7 @@ class TestDualIdLookupAcrossSubcommands:
     def test_cmd_steer_not_found_returns_1(self, capsys):
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         mock_cls.get_by_id.return_value = None
         mock_steer = MagicMock()
 
@@ -912,7 +952,7 @@ class TestDualIdLookupAcrossSubcommands:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "agent.agent_session_queue": MagicMock(steer_session=mock_steer),
+                    "agent.session_executor": MagicMock(steer_session=mock_steer),
                 },
             ),
         ):
@@ -933,6 +973,7 @@ class TestCmdReleaseNoMatch:
         """No retained sessions → returns 0 with informational message, no crash."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -951,6 +992,7 @@ class TestCmdReleaseNoMatch:
         session = _make_session("sess-x", retain=True, pr_url="", slug="my-feature")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -980,6 +1022,7 @@ class TestCmdReleaseNoMatch:
         session.retain_for_resume = "False"  # untyped Popoto string round-trip
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -1007,6 +1050,7 @@ class TestCmdReleaseNoMatch:
         session.retain_for_resume = "True"  # untyped Popoto string round-trip
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -1032,6 +1076,7 @@ class TestCmdReleaseHappyPath:
         )
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -1055,6 +1100,7 @@ class TestCmdReleaseHappyPath:
         )
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -1077,6 +1123,7 @@ class TestCmdReleaseHappyPath:
         )
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -1203,6 +1250,7 @@ class TestRetainForResumeStageCase:
         session = _make_session("sess-terminal", status="completed")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
         mock_transition = MagicMock()
 
         with (

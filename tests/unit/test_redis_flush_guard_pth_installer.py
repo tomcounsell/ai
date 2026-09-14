@@ -16,6 +16,10 @@ import sys
 import pytest
 
 from scripts.update.redis_flush_guard_pth import (
+    _PIN_PTH_CONTENT,
+    _PIN_PTH_FILENAME,
+    _PIN_SHIM_FILENAME,
+    _PIN_SOURCE_PATH,
     _PTH_CONTENT,
     _PTH_FILENAME,
     _SHIM_CONTENT,
@@ -35,17 +39,18 @@ def _make_fake_venv(tmp_path, name="venv"):
 
 
 class TestFreshInstall:
-    def test_writes_both_files_with_correct_content(self, tmp_path):
+    def test_writes_all_four_files_with_correct_content(self, tmp_path):
         venv_dir, site_packages = _make_fake_venv(tmp_path)
 
         result = install_into(venv_dir)
 
         assert result["status"] == "installed"
         assert result["reason"] is None
-        shim_path = site_packages / _SHIM_FILENAME
-        pth_path = site_packages / _PTH_FILENAME
-        assert shim_path.read_text() == _SHIM_CONTENT
-        assert pth_path.read_text() == _PTH_CONTENT
+        assert (site_packages / _SHIM_FILENAME).read_text() == _SHIM_CONTENT
+        assert (site_packages / _PTH_FILENAME).read_text() == _PTH_CONTENT
+        # The checkout-pin shim is a byte copy of its single source (#3141).
+        assert (site_packages / _PIN_SHIM_FILENAME).read_text() == _PIN_SOURCE_PATH.read_text()
+        assert (site_packages / _PIN_PTH_FILENAME).read_text() == _PIN_PTH_CONTENT
 
     def test_shim_written_before_pth(self, tmp_path, monkeypatch):
         """Ordering assertion (Race 1): the .pth must never reference a
@@ -67,7 +72,12 @@ class TestFreshInstall:
         result = mod.install_into(venv_dir)
 
         assert result["status"] == "installed"
-        assert write_order == [_SHIM_FILENAME, _PTH_FILENAME]
+        assert write_order == [
+            _PIN_SHIM_FILENAME,
+            _PIN_PTH_FILENAME,
+            _SHIM_FILENAME,
+            _PTH_FILENAME,
+        ]
 
 
 class TestIdempotence:
@@ -152,6 +162,11 @@ class TestPthOrdering:
             "_editable_impl_valor_bridge.pth",
             _PTH_FILENAME,
         ]
+
+    def test_checkout_pin_pth_sorts_before_flush_guard_pth(self):
+        """The flush-guard shim imports ``tools`` at site time; the checkout
+        pin must already be at the front of sys.path by then (#3141)."""
+        assert sorted([_PTH_FILENAME, _PIN_PTH_FILENAME]) == [_PIN_PTH_FILENAME, _PTH_FILENAME]
 
 
 class TestFilePathLoadability:

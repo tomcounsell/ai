@@ -234,13 +234,3 @@ print(result.format_summary())
 3. **Test execution**: Run tests and report pass/fail
 4. **PR validation**: Check if PR is mergeable, approved, etc.
 5. **Time tracking**: Log how long work took from start to completion
-
-## Migration Notes
-
-**Before**: No explicit completion, relied on agent saying "done" in prose.
-
-**After**: Structured completion with verification checks.
-
-**Breaking changes**: None - additive only. Old sessions continue working.
-
-**Rollout**: Enable via flag or gradual adoption per project.

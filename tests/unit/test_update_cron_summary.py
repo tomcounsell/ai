@@ -100,3 +100,141 @@ def test_pull_path_reports_updated_with_commit_count(tmp_path, capsys):
 
     assert rc == 0
     assert "updated to def5678" in out
+
+
+# ---------------------------------------------------------------------------
+# #2845: failure-branch warnings render, and the `suppressed:` trailer
+# ---------------------------------------------------------------------------
+
+
+def test_failed_run_with_only_warnings_still_renders_bullets(tmp_path, capsys):
+    """run.py:704/:1999/:2014's shape: success=False, empty errors, warnings
+    present. Without the failure-branch warnings render, the fix session gets
+    an empty warning list on exactly the runs that most need one."""
+    result = UpdateResult(
+        success=False,
+        errors=[],
+        warnings=["Worker not running after install and kickstart retry", "Worker install failed"],
+    )
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "update failed at abc1234" in out
+    assert "⚠️ Worker not running after install and kickstart retry" in out
+    assert "⚠️ Worker install failed" in out
+
+
+def test_suppressed_trailer_appears_on_clean_run_with_active_state(tmp_path, capsys):
+    """The modal suppressed case: nothing else wrong (empty warnings/errors),
+    but a key is genuinely suppressed. The trailer must still appear — the
+    `else: status = "update successful"` branch is where Risk 4 lives."""
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    warn_state.should_emit("gws-auth", "needs_auth:none", tmp_path)
+
+    result = UpdateResult(success=True, warnings=[])
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert warn_state.SUPPRESSED_PREFIX in out
+    assert "gws-auth" in out
+    # data/update.txt must exist — the write gate widened to fire on a
+    # non-empty suppressed map even though result.warnings is empty.
+    assert (tmp_path / "data" / "update.txt").exists()
+    log_text = (tmp_path / "data" / "update.txt").read_text()
+    assert warn_state.SUPPRESSED_PREFIX in log_text
+
+
+def test_suppressed_trailer_names_only_non_emitted_keys(tmp_path, capsys):
+    """One key emitting THIS run + one genuinely suppressed key: the trailer
+    must name only the second (the emission-subtraction test — Race 3's
+    inverse hazard)."""
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    # gws-auth emits THIS run (first warn).
+    warn_state.should_emit("gws-auth", "needs_auth:none", tmp_path)
+    # env-completeness was already suppressed from an earlier run.
+    warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+
+    result = UpdateResult(
+        success=True,
+        warnings=["gws auth: needs setup"],
+        warn_keys_emitted={"gws-auth"},
+    )
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert warn_state.SUPPRESSED_PREFIX in out
+    assert "env-completeness" in out
+    # gws-auth emitted this run — must NOT also appear in the trailer.
+    trailer_line = next(
+        line for line in out.splitlines() if line.strip().startswith(warn_state.SUPPRESSED_PREFIX)
+    )
+    assert "gws-auth" not in trailer_line
+
+
+def test_suppressed_trailer_lists_exactly_the_live_keys_when_none_emitted(tmp_path, capsys):
+    """Operator-visible-surface guard for issue #3004: a warn_state map
+    holding only keys live callers can still produce, with a run that
+    emitted none of them, must list exactly those keys in the trailer —
+    positively, not by asserting the absence of the retired ACL key."""
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    warn_state.should_emit("calendar-config", "misconfigured:1", tmp_path)
+    warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+    warn_state.should_emit("google-token", "expired:1", tmp_path)
+
+    result = UpdateResult(success=True, warnings=[], warn_keys_emitted=set())
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    trailer_line = next(
+        line for line in out.splitlines() if line.strip().startswith(warn_state.SUPPRESSED_PREFIX)
+    )
+    for key in ("calendar-config", "env-completeness", "google-token"):
+        assert key in trailer_line
+
+
+def test_no_trailer_when_all_active_keys_emitted_this_run(tmp_path, capsys):
+    """Every entry in active() also appears in warn_keys_emitted: no
+    trailer, and the write gate is not widened on that account alone."""
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    warn_state.should_emit("gws-auth", "needs_auth:none", tmp_path)
+
+    result = UpdateResult(
+        success=True,
+        warnings=["gws auth: needs setup"],
+        warn_keys_emitted={"gws-auth"},
+    )
+    rc = _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert warn_state.SUPPRESSED_PREFIX not in out
+
+
+def test_trailer_is_inert_to_extract_update_warnings(tmp_path, capsys):
+    """The real trailer, fed through extract_update_warnings, must yield []
+    — including when it follows a real (N warnings) block."""
+    from bridge.update import extract_update_warnings
+    from scripts.update import warn_state
+
+    (tmp_path / "data").mkdir()
+    warn_state.should_emit("gws-auth", "needs_auth:none", tmp_path)
+
+    result = UpdateResult(success=True, warnings=["a real warning"])
+    _run_main_cron(result, tmp_path, sha_return="abc1234")
+    out = capsys.readouterr().out
+    status_lines = [line for line in out.split("\n") if line.strip()]
+
+    extracted = extract_update_warnings(status_lines)
+    assert extracted == ["a real warning"]

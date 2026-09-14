@@ -574,7 +574,7 @@ class TestRecoveryExcludesKilled:
         """
         import time
 
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
             _recover_interrupted_agent_sessions_startup,
         )

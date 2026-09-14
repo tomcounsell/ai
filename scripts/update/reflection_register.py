@@ -29,12 +29,17 @@ vault source (``~/Desktop/Valor/reflections.yaml``), refreshed by
 ``env_sync.sync_reflections_yaml()`` (Step 1.66) on every ``/update``. Appending
 the entry only to the in-repo copy is silently clobbered the next time that copy
 step runs, so registration for real means appending the entry to the *vault*
-file. The target is resolved via
-``agent.reflection_scheduler._resolve_registry_path()`` (critique C6), which
-prioritizes the vault over the config copy -- a builder who hardcoded the config
-copy would reproduce #1539's "looks wired, never lands" failure. This step runs
-BEFORE Step 1.66's vault->config copy (critique NIT) so the appended entry
-propagates into the per-machine ``config/reflections.yaml`` on the same cycle.
+file. The target is resolved by :func:`_resolve_write_target`, a write-side
+resolver independent of the scheduler's read-side
+``agent.reflection_scheduler._resolve_registry_path()`` (issue #2855). The read
+side gates its vault candidate on ``VALOR_LAUNCHD`` because macOS TCC blocks
+``~/Desktop`` from launchd agents; applying that environment gate to a *write*
+sent registration to the soon-clobbered ``config/reflections.yaml`` instead,
+reproducing #1539's "looks wired, never lands" failure silently. The write side
+has no fallback level, so registration now either lands in the vault or fails
+loudly. This step runs BEFORE Step 1.66's vault->config
+copy (critique NIT) so the appended entry propagates into the per-machine
+``config/reflections.yaml`` on the same cycle.
 
 Guarded on (mirroring ``reflection_arm.py``):
   - the vault ``reflections.yaml`` existing (fresh machines with no vault copy
@@ -69,6 +74,9 @@ OWNING_PROJECT_KEY = "valor"
 CRASH_RECOVERY_NAME = "crash-recovery"
 CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 
+IMPROVEMENT_COLLECT_NAME = "improvement-evidence-collect"
+IMPROVEMENT_COLLECT_CALLABLE = "reflections.improvement_collect.run_improvement_collect"
+
 # Reflections whose callables have been deleted from the repo. Each name is
 # removed from the vault registry on /update (the reflection counterpart of
 # hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
@@ -83,6 +91,12 @@ MEMORY_DISTILL_BACKFILL_CALLABLE = "reflections.memory_management.run_memory_dis
 
 UPVOTE_PICKUP_NAME = "sdlc-upvote-pickup"
 UPVOTE_PICKUP_CALLABLE = "reflections.sdlc_upvote_lanes.run_sdlc_upvote_lanes"
+
+SIDE_EFFECT_DRAIN_NAME = "side-effect-drain"
+SIDE_EFFECT_DRAIN_CALLABLE = "reflections.housekeeping.side_effect_drain.run"
+
+DEAD_LETTER_REPLAY_NAME = "dead-letter-replay"
+DEAD_LETTER_REPLAY_CALLABLE = "reflections.housekeeping.dead_letter_replay.run"
 
 # Matches the leading whitespace of an existing ``reflections:`` list item so the
 # appended entry adopts the file's own indentation (the hand-authored registry
@@ -178,18 +192,44 @@ def _vault_reflections_path() -> Path:
     return Path.home() / "Desktop" / "Valor" / "reflections.yaml"
 
 
-def _resolve_target() -> Path:
-    """Resolve the registry file to write, prioritizing the vault (critique C6).
+def _resolve_write_target(vault_path: Path) -> Path:
+    """Resolve the registry file to WRITE. Always the vault (issue #2855).
 
-    Delegates to ``agent.reflection_scheduler._resolve_registry_path`` -- the
-    same vault-first resolver the scheduler reads at runtime -- so the entry
-    lands where the scheduler will actually look, not in the soon-clobbered
-    config copy. Imported lazily because the scheduler transitively imports
-    heavy models; the update step only needs it at call time.
+    This is the write-side resolver, deliberately independent of the
+    scheduler's read-side ``_resolve_registry_path``. Sharing that resolver is
+    what caused the silent-loss bug described below; splitting them is the
+    ``[ORDERED]`` No-Go in ``docs/plans/reflection-registry-schedule-contract.md``
+    (Risk 3), and this is that split.
+
+    Why the vault is unconditionally correct here: both callers have already
+    returned early unless ``vault_path.exists()`` and this machine owns the
+    ``valor`` project. That existence check reads ``~/Desktop``. If macOS TCC
+    were blocking this process from the vault -- the entire reason the read
+    side gates on ``VALOR_LAUNCHD`` -- the check would have failed and we would
+    have skipped before reaching this function. Reaching here is positive
+    evidence the vault is readable by this process, so the environment gate
+    that belongs on the read side must not be applied to the write.
+
+    The bug this replaces: the read-side resolver appends its vault candidate
+    the vault candidate was skipped, control fell through to the local-config
+    level, and ``config/reflections.yaml`` exists in the primary checkout -- so
+    registration wrote there. The worker plist sets ``VALOR_LAUNCHD=1`` and a
+    worker-spawned ``claude -p`` session inherits it, so an agent running
+    ``/update`` always hit this path. The write succeeded silently and Step
+    1.66's vault->config copy discarded it on the next cycle: #1539's "looks
+    wired, never lands" failure, with no error. From a worktree the fourth
+    owning-checkout level (issue #2734) resolved to the primary checkout's copy
+    with the same outcome.
+
+    Returning the vault makes both of those unreachable: there is no longer a
+    fallback level for a write to land on, so registration either lands where
+    the scheduler will read it or fails loudly.
+
+    ``_this_machine_owns_valor`` remains the containment against a non-owning
+    machine mutating the shared iCloud file; it is checked by the callers, not
+    here.
     """
-    from agent.reflection_scheduler import _resolve_registry_path
-
-    return _resolve_registry_path()
+    return vault_path
 
 
 def _this_machine_owns_valor(project_dir: Path) -> bool:
@@ -408,10 +448,7 @@ def remove_reflection(project_dir: Path, *, name: str) -> RegisterResult:
     if not _this_machine_owns_valor(project_dir):
         return RegisterResult(True, "skipped", "this machine does not own the 'valor' project")
 
-    try:
-        target = _resolve_target()
-    except Exception:  # pragma: no cover - defensive
-        target = vault_path
+    target = _resolve_write_target(vault_path)
 
     verdict = _remove_entry(target, name)
     if verdict == "absent":
@@ -482,13 +519,9 @@ def register_reflection(
     if not _this_machine_owns_valor(project_dir):
         return RegisterResult(True, "skipped", "this machine does not own the 'valor' project")
 
-    # Resolve via the scheduler's vault-first resolver (critique C6). With the
-    # vault present and not running under launchd, this returns the vault file.
-    try:
-        target = _resolve_target()
-    except Exception as e:  # pragma: no cover - defensive
-        target = vault_path
-        _ = e
+    # Write-side resolver (#2855): always the vault, never the scheduler's
+    # environment-gated read-side resolver.
+    target = _resolve_write_target(vault_path)
 
     entry_kwargs = {
         "name": name,
@@ -544,6 +577,75 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
         callable_path=CRASH_RECOVERY_CALLABLE,
         description="Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)",
         cadence="300s",
+        priority="normal",
+    )
+
+
+def register_side_effect_drain(project_dir: Path) -> RegisterResult:
+    """Ensure the ``side-effect-drain`` reflection is registered (#3183).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence. 60s cadence: post-session memory extraction
+    used to run in-process the moment a session ended, and a durable job row
+    should not cost the user minutes of latency to gain its durability.
+    """
+    return register_reflection(
+        project_dir,
+        name=SIDE_EFFECT_DRAIN_NAME,
+        callable_path=SIDE_EFFECT_DRAIN_CALLABLE,
+        description=(
+            "Run due SideEffectJob rows (post-session memory extraction), "
+            "back off failures, dead-letter what exhausts its attempts (#3183)"
+        ),
+        cadence="60s",
+        priority="normal",
+    )
+
+
+def register_dead_letter_replay(project_dir: Path) -> RegisterResult:
+    """Ensure the ``dead-letter-replay`` reflection is registered (#3183).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence. 300s cadence: replay is recovery rather than
+    delivery, and the pass also reconciles the per-stage eviction index.
+    """
+    return register_reflection(
+        project_dir,
+        name=DEAD_LETTER_REPLAY_NAME,
+        callable_path=DEAD_LETTER_REPLAY_CALLABLE,
+        description=(
+            "Replay replayable DeadLetter rows through their stage handlers "
+            "and evict per-stage overflow (#3183)"
+        ),
+        cadence="300s",
+        priority="normal",
+    )
+
+
+def register_improvement_collect(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-evidence-collect`` reflection is registered (#3177).
+
+    Thin wrapper over :func:`register_reflection` — same guards, same target
+    resolution, same idempotence. This is the tick that makes the improvement
+    loop notice anything: without it the correction detector, the
+    memory-inspiration adapter, and the expectation-coverage adapter have no
+    caller and ``ImprovementEvidence`` stays empty forever.
+
+    Registered regardless of ``ImprovementSettings.enabled``. The controller
+    stays off until it is switched on; evidence accumulates either way, so the
+    first thing the controller reads is history rather than nothing.
+
+    Machine pinning is inherited, not re-implemented: ``register_reflection``
+    already returns ``skipped`` when ``_this_machine_owns_valor`` is false.
+    """
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_COLLECT_NAME,
+        callable_path=IMPROVEMENT_COLLECT_CALLABLE,
+        description=(
+            "Collect improvement evidence from completed sessions and Tom-sourced memories (#3177)"
+        ),
+        cadence="900s",
         priority="normal",
     )
 

@@ -148,6 +148,7 @@ so previously-stranded sessions are back in `pending` — one session per key.
 - `bridge/session_transcript.py` — transcript end → terminal status
 - `bridge/telegram_bridge.py` — intake-classifier acknowledgment → completed
 - `models/session_lifecycle.py` — `_transition_parent` helper itself, so every caller of `_transition_parent` gets the catch for free
+- `agent/agent_session_queue.py:_worker_loop` — per-session completion `finally` (`_complete_agent_session` call), plus an already-terminal skip before the write is even attempted (#3253)
 
 The `agent/agent_session_queue.py:cancel_agent_session` site does **not** need a wrapper — its pre-condition (`session.status != "pending"` early-return) guarantees a non-terminal status, and there is no race window before the `finalize_session()` call.
 
@@ -191,7 +192,7 @@ Before consolidation, completion side effects were scattered across 4 paths, eac
 
 ## Child Session Creation Temporarily Disabled (#1633)
 
-Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. The granite PTY cutover (PR #1612) runs every session in a container that owns its own PM+Dev claude TUI pair from a bounded pool, so parent-spawned child AgentSessions (the old PM→Dev pattern) double-consume scarce pool slots and risk starvation/deadlock when a parent in `waiting_for_children` holds a slot its child needs. Dependent work should run as subagents inside the current session instead.
+Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. Sessions run as headless `claude -p` subprocesses via `agent/session_runner/`; parent-spawned child AgentSessions (the old PM→Dev pattern) are refused because they are semantically redundant — dependent work runs as subagents within the session (the D1 topology) — and unbounded, with no independent fanout cap until #1633's subagent refactor lands or #1926 names a cap. Dependent work should run as subagents inside the current session instead.
 
 Gated creation paths (all share `models/child_session_gate.py`):
 
@@ -202,7 +203,7 @@ Gated creation paths (all share `models/child_session_gate.py`):
 
 **Escape hatch (genuine emergencies only):** `VALOR_ALLOW_CHILD_SESSIONS=1` bypasses the block with a loud warning at each creation site.
 
-**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal and hold no pool slot. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
+**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
 
 ## Parent Finalization
 
@@ -395,7 +396,7 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 ## Timestamp Convention — `updated_at` is Explicit UTC
 
-`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `bridge.utc.utc_now()`, not by a Popoto `auto_now` field.
+`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `utils.utc.utc_now()`, not by a Popoto `auto_now` field.
 
 **Why:** Popoto's `auto_now` calls `datetime.now()` (no `tz` argument), which mints a naive datetime in the host's local timezone. On non-UTC hosts the stored value is naive-local, but every downstream reader (watchdog, dashboard, stale-cleanup) interprets it as UTC. The result is a future-dated `updated_at` for sessions created on hosts running ahead of UTC, causing the watchdog/dashboard to report sessions as perpetually "fresh" and stale-cleanup to skip them forever.
 
@@ -514,20 +515,77 @@ short-lived and best-effort; the durable record of the cancellation is the
 `finalize_session(..., reason=...)` call, which lands in the `LIFECYCLE`
 transition log.
 
-**Guaranteed terminal finalize on the completion exit.**
-`complete_transcript()` now selects the record to finalize via
+**Guaranteed terminal finalize on every exit the executor owns.**
+`complete_transcript()` selects the record to finalize via
 `get_authoritative_session()` — the same running-preferring tie-break
 pattern described in [Worker Completion — Redis
 Re-read](#worker-completion--redis-re-read) above — instead of the blind
-`[0]`. The load-bearing fix for phantom running, though, is an unconditional
-completion-exit guard in `agent/session_executor.py`, placed after the
-entire `if agent_session: / else:` completion block closes so it covers
-both exits, including the case where the `agent_session` lookup returned
-`None`. It re-reads the authoritative session and, if still `running`,
-calls `finalize_session()`, treating a `StatusConflictError` from a racing
-concurrent finalizer as success. Every non-deferred completion path now
-reaches a terminal status regardless of what `complete_transcript()` did
-upstream.
+`[0]`. The load-bearing fix for phantom running, though, is
+`_finalize_if_still_running` in `agent/session_executor.py`, called from
+`_execute_agent_session`'s `finally`. It re-reads the authoritative session
+and, if still `running`, calls `finalize_session()`, treating a
+`StatusConflictError` from a racing concurrent finalizer as success.
+
+The predicate is `status == "running"`, never `defer_reaction` (#3209). The
+status predicate protects the nudge's write on its own, on both
+`_enqueue_nudge` paths. The main path has already moved this row to
+`pending`, so the guard no-ops. The fallback path is entered *only because*
+`get_authoritative_session(orig_session_id)` returned `None` — no row for
+that `session_id` was visible at all — and it then creates a fresh `pending`
+record under that `session_id`, so the normal post-fallback state is exactly
+one row, the continuation, and the guard no-ops there too. (A transient
+index-visibility flap could leave an original row the nudge's re-read missed;
+if it reappears as `running` the guard finalizes that stranded original and
+still never touches the continuation, which is a distinct record with its own
+`agent_session_id`.)
+
+The status written is `failed`, not `_runner_final_status`, on two exits:
+when the executor is unwinding on an exception, and when the body raised
+before `BackgroundTask` was constructed. `_runner_final_status` returns
+`completed` whenever `task.error` is falsy and the runner exit was clean, and
+it has no notion of unwinding — a session whose executor raised did not
+complete, and recording `completed` would also disagree with the worker's own
+`failed` write in `agent_session_queue`'s outer `finally`, where a terminal →
+different-terminal write raises `StatusConflictError`. An explicit `except
+BaseException` clause in `_execute_agent_session` sets the flag and re-raises;
+the `except asyncio.CancelledError` clause precedes it, so a cancel is never
+misread as a raise.
+
+On the raise path the guard is the *sole* terminal writer, not an earlier
+duplicate. The worker's outer `finally` in `agent_session_queue.py` is still
+entered — it gates on `not session_completed and not finalized_by_execute`,
+and `finalized_by_execute` is set on the non-exceptional return and on the
+deadline-kill/terminal path, never on a raise — but it re-reads the
+authoritative row before writing, and the already-terminal skip branch
+documented above then logs at INFO and performs no completion write at all.
+The guard also lands ahead of the synthetic-slug worktree cleanup, which
+refuses to reclaim a lane whose row still reads `running`.
+
+That is precisely why `raised=True` must force `failed`: with no second
+writer to disagree with, this is the only chance to record the outcome
+honestly, and a `completed` written here for an executor that unwound on an
+exception would stand unchallenged.
+
+Cancellation is the one exit deliberately excluded. `_execute_agent_session`
+carries an `except asyncio.CancelledError` whose only job is to mark the exit
+so the `finally` skips the finalize. The health checker cancels the session
+task and then decides the row's fate itself inside the same await — usually
+`transition_status(entry, "pending")` to requeue it — and `transition_status`
+rejects a terminal source status, so finalizing here would win the race and
+silently retire the retry loop. Worker-shutdown cancellation is owned the
+same way by `_recover_interrupted_agent_sessions_startup`.
+
+The exclusion holds for every session except a synthetic `dev-{aid8}` lane.
+There, the separate #3176 pre-finalize guard further down the same `finally`
+has no cancel carve-out and finalizes the row anyway, so the requeue loses the
+race and its `StatusConflictError` is swallowed at INFO, so the session is not
+retried. Whether its lane is reclaimed in exchange depends on the exit: an
+ordinary cancellation reaches `cleanup_after_merge`, but the turn-timeout and
+reap-failure preserve branches skip it, leaving the directory for a manual
+`git worktree prune`. That is long-standing behavior on both guards'
+part, and the carve-out still earns its keep by holding for every
+non-synthetic session; collapsing the two guards into one authority is tracked
+in #3305.
 
 ## Liveness Counter Re-Anchoring (issue #2716)
 
@@ -590,13 +648,22 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    "(the referenced file is no longer available)" notice if scrubbing empties the text with
    nothing attached. See [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211)
    for the full mechanism.
-   - Runs **after** the idempotency early-return (already-terminal sessions exit before reaching it).
-   - Runs **after** the `reject_from_terminal` guard (illegal re-transitions raise before reaching it).
+   - **Runs UNCONDITIONALLY, first, on every `finalize_session` invocation carrying a terminal
+     status (issue #3053)** — immediately after terminal-status validation, above the telemetry
+     tap, the idempotency early-return, the `reject_from_terminal` guard, and the CAS re-read. See
+     *Unconditional Terminal Delivery Flush* below for the full rationale — this superseded the
+     original placement (which ran the flush only on a first-time, uncontested transition) after a
+     third recurrence of a silently-skipped flush losing a user's reply.
    - Runs **before** `session.save()`, inside the CAS region.
    - **Exception-isolated**: a flush failure never blocks the status write.
    - Reads the deferral flag from a **fresh authoritative session** via
      `get_authoritative_session(session_id)` — not the caller's possibly-stale object.
    - Deduplicates on its **own** SETNX key `self_draft_completed_flush_sent:{session_id}` (1 h TTL).
+   - **Self-clearing (issue #3053)**: on a successful delivery, pops `deferred_self_draft_pending`
+     and `deferred_self_draft_text` from the authoritative record's `extra_context` (and from the
+     caller's in-memory `session` object, so `finalize_session`'s own subsequent full `save()` does
+     not resurrect the just-cleared flag). A failed clear logs WARNING and never blocks the
+     delivery — the SETNX key remains the backstop for the remainder of its TTL.
    - **Transport/status gate** (evaluated before the dedup SETNX):
      - **telegram** (or `None`): proceeds for **all** terminal statuses (`completed`, `failed`,
        `abandoned`), writing directly to `telegram:outbox:{session_id}` via `rpush`.
@@ -638,6 +705,92 @@ non-deferred send) now also clears both `deferred_self_draft_pending` and
 (`get_authoritative_session` re-read, then merge so a concurrent `extra_context` write is not
 clobbered). The clear is gated on a cheap local check of the flag first, so the common case (no
 prior deferral) skips the extra authoritative re-read entirely.
+
+### Unconditional Terminal Delivery Flush (issue #3053)
+
+**The recurring failure:** a validator-flagged final reply that is never redrafted was lost with
+no log line explaining why — the third recurrence of this failure class after #1794 and #2197.
+Root cause: every prior fix moved the chokepoint flush closer to the terminal write, but its
+execution stayed **conditional** on `finalize_session` completing a first-time, uncontested,
+non-idempotent terminal transition. Three gates sat in front of it — the idempotency
+early-return, the `reject_from_terminal` guard, and the CAS re-read — and every abort path through
+those gates logged at DEBUG or was a bare `pass`, so a skipped flush left no trace.
+
+**The fix — hoist above every gate.** The flush now runs **first**, immediately after
+terminal-status validation, before the telemetry tap and all three gates above. This deliberately
+**reverses** the placement invariant documented in earlier revisions of this section (that the
+flush ran only on a legitimate first-time transition, specifically to avoid flushing on a rejected
+terminal→terminal re-transition). That old concern is no longer a hazard: a session that is
+already terminal and still carries a pending deferral is exactly the state where nobody else will
+ever deliver the text, so flushing there is the desired outcome, not a bug. The hoist is safe
+unconditionally because the flush is fresh-reading, self-gating (no-ops when nothing is pending),
+self-deduping (per-run SETNX), and — as of this change — self-clearing (see above). Do not
+reintroduce a gate in front of the flush; that is the exact shape of the original defect.
+
+**Closed silent exits:**
+
+- `agent/session_health.py` (`flush_deferred_self_draft_sync`'s own early-returns) — the
+  "nothing pending" return and the email/status-gate return both now log at DEBUG, making "the
+  flush ran and found nothing" distinguishable from "the flush never ran".
+- `models/session_lifecycle.py`'s idempotency early-return — promoted to INFO when a **fresh**
+  `get_authoritative_session()` read shows the record still carries a pending deferral (the state
+  that costs a user their reply); stays DEBUG otherwise. Reads the authoritative record, never the
+  caller's `session` parameter, so an ordinary stale-object double-finalize (the ORDINARY case
+  after this hoist, since the flush itself is what clears the flag) still logs at DEBUG.
+- `models/session_lifecycle.py`'s step-1 LIFECYCLE-log swallow — promoted from DEBUG to WARNING; a
+  lifecycle log that cannot be written is a real observability outage on the terminal path, not a
+  routine condition.
+- `agent/session_executor.py`'s exit finalize guard (#2007) — the bare
+  `pass` on its own `StatusConflictError` catch (meaning "another actor already finalized this
+  session, treat as success") now logs at INFO naming the session and the conflict. "Expected, do
+  not treat as an error" is a reason to log at INFO, not a reason to log nothing.
+
+**Belt-and-braces at the three last-resort bypass writes.** `agent/session_executor.py` has three
+sites that assign `session.status = "failed"` directly, bypassing `finalize_session` entirely,
+reached only inside an `except Exception` around a `finalize_session(session, "failed", ...)` call
+that itself raised. Each site now also calls `flush_deferred_self_draft_sync(session, "failed")`
+before the direct write, and adds `"completed_at"` to its `update_fields` (`session.completed_at =
+time.time()`) so the backstop sweep below has an anchor for these rows. **This is deliberate
+belt-and-braces redundancy over a path the hoist and the backstop sweep already cover — it is NOT
+"the one place the chokepoint is provably not going to run"** (an earlier, incorrect framing): the
+hoisted flush is the first action `finalize_session` takes, so on the path into these `except`
+blocks it has already run — successfully — before `finalize_session` itself raised. The flush's
+own SETNX dedup makes the extra call harmless even when redundant.
+
+**Terminal backstop sweep.** `agent/session_health._sweep_stranded_deferred_self_drafts`, called
+from `_agent_session_health_loop` alongside the existing per-tick checks, independently re-scans
+recently-terminal sessions for a stranded `deferred_self_draft_pending=True` flag — closing any
+path that cannot route through `finalize_session` at all (including the three bypass writes
+above, and any future bypass). Scans `AgentSession.query.filter(status=...)` (ORM-only, never a
+raw Redis scan) over `completed`, `failed`, and `abandoned` — **never** `killed` or `cancelled`,
+per the delivery-posture principle: a session that ended on its own still owes its reply; a
+session someone stopped does not. Rows are kept only if `deferred_self_draft_pending` is truthy
+and `completed_at` falls within `DEFERRED_FLUSH_BACKSTOP_LOOKBACK_SECONDS` (a named,
+env-overridable, provisional constant defaulting to the SETNX dedup TTL); a row with
+`completed_at=None` (legacy data, or any writer that skipped the backfill) is acted on exactly
+once **when the flush actually delivers it**, matching the existing
+`_response_delivered_after_start` precedent for anchorless rows — it is the flush's own
+post-delivery flag clear, not the lookback window, that stops a delivered anchorless row from
+re-firing on the next tick. Every matching row delegates to `flush_deferred_self_draft_sync` (no
+second delivery implementation), which reports back whether it actually delivered (`True`) or
+declined (`False` — nothing pending, the transport/status gate refused, the SETNX dedup was
+already held, or an internal failure). **Only a `True` result** logs at **WARNING** (a genuine
+sweep hit means the chokepoint was bypassed for this session — a defect signal, not routine
+housekeeping) and increments `{project_key}:session-health:deferred_flush_backstop_hits`; a
+declined result logs at **DEBUG** instead and does **not** touch the counter — and for an
+anchorless row, a declined result leaves the flag untouched, so that row is silently re-evaluated
+on every subsequent tick until something else clears it or delivers it. Bounded to
+`DEFERRED_FLUSH_BACKSTOP_MAX_ROWS_PER_TICK` rows per tick; one failing row never aborts the sweep
+or the loop.
+
+**Pre-existing gap this plan did not introduce:** a PM/parent session's terminal transition after
+a worker-shutdown `asyncio.CancelledError` in `_deliver_pipeline_completion`
+(`agent/session_completion.py`) explicitly skips `finalize_session` for the parent ("the shutdown
+path owns that transition"), and nothing else in the shutdown sequence invokes it either — the
+parent is left `waiting_for_children` until the next `_agent_session_hierarchy_health_check` tick
+picks it up via `_transition_parent` → `finalize_session`. Reachability holds but is delayed to
+that pre-existing periodic check rather than the hoisted step-0 path on the first attempt after a
+restart.
 
 ## Design Constraints
 

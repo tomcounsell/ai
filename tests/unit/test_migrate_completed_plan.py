@@ -2,7 +2,8 @@
 
 Covers Bug 1 fix: README-based display name extraction replacing .title() mangling.
 Also covers the path-independent migrate_plan_to_completed() primitive (issue
-#1900, Tier 0): guarded git-mv of a root plan into docs/plans/completed/.
+#1900, Tier 0): guarded git-mv of a root plan into the completed-plan
+archive (docs/archive/plans-completed/, #2878).
 """
 
 import contextlib
@@ -17,6 +18,7 @@ import pytest
 # Import the functions under test directly
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.migrate_completed_plan import (  # noqa: E402
+    COMPLETED_PLANS_DIR,
     extract_feature_doc_path,
     extract_feature_name_from_index,
     migrate_plan_to_completed,
@@ -250,9 +252,10 @@ class TestMigratePlanToCompleted:
     """
 
     def _init_repo(self, tmp_path: Path) -> Path:
-        """Create a bare-bones git repo with docs/plans/ + docs/plans/completed/."""
+        """Create a bare-bones git repo with docs/plans/ + the archive dir."""
         repo = tmp_path / "repo"
-        (repo / "docs" / "plans" / "completed").mkdir(parents=True)
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / COMPLETED_PLANS_DIR).mkdir(parents=True)
         _git(repo, "init", "-q", "-b", "main")
         _git(repo, "config", "user.email", "test@example.com")
         _git(repo, "config", "user.name", "Test")
@@ -271,7 +274,7 @@ class TestMigratePlanToCompleted:
         _git(repo, "commit", "-q", "-m", message)
 
     def test_closed_issue_plan_migrates(self, tmp_path):
-        """A plan on a clean main branch is git-mv'd into completed/, not unlinked."""
+        """A plan on a clean main branch is git-mv'd into the archive, not unlinked."""
         repo = self._init_repo(tmp_path)
         plan = self._write_plan(repo, "example-plan.md")
         self._commit_all(repo)
@@ -280,12 +283,12 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "migrated"
         assert not plan.exists()
-        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
         assert completed.exists()
         assert "example-plan.md" in completed.read_text()
         # Verify it was a tracked git mv, not a bare unlink: git status is clean
         # (the move + commit is fully recorded), and the file shows up under
-        # completed/ in the git history for HEAD.
+        # the archive in the git history for HEAD.
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == ""
         log = _git(repo, "log", "--oneline", "-1")
@@ -298,7 +301,7 @@ class TestMigratePlanToCompleted:
         must not look like a failure.
         """
         repo = self._init_repo(tmp_path)
-        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
         completed.write_text("# already here\n")
         missing_plan = repo / "docs" / "plans" / "example-plan.md"
 
@@ -320,7 +323,7 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "dirty-tree-skip"
         assert plan.exists(), "plan must be preserved in place, never lost"
-        completed = repo / "docs" / "plans" / "completed" / "dirty-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "dirty-plan.md"
         assert not completed.exists()
 
     def test_non_main_branch_preserves_plan(self, tmp_path):
@@ -345,7 +348,7 @@ class TestMigratePlanToCompleted:
 
         assert verdict == "migrated"  # verdict describes what WOULD happen
         assert plan.exists(), "apply=False must not perform the git mv"
-        completed = repo / "docs" / "plans" / "completed" / "dry-run-plan.md"
+        completed = repo / COMPLETED_PLANS_DIR / "dry-run-plan.md"
         assert not completed.exists()
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == "", "apply=False must leave the tree untouched"
@@ -432,3 +435,108 @@ class TestRunIssueEvidenceGate:
         gate_calls = []
         monkeypatch.setattr(mcp, "_gh_issue_state", lambda n: gate_calls.append(n) or "closed")
         assert mcp.run_issue("999", apply=True) == 2
+
+
+class TestGhIssueStateRepoScoping:
+    """Issue #2889: `_gh_issue_state` must scope `gh issue view` with --repo.
+
+    A bare ``gh issue view N`` resolves GH_REPO from the environment before
+    cwd, so under a foreign GH_REPO it answers about a *different*
+    repository's issue #N and exits 0. The argv must carry
+    ``--repo <resolved-slug>`` when a repo resolves (mirroring the
+    tools/sdlc_stage_query.py ladder: GH_REPO env first, else
+    ``gh repo view --json nameWithOwner`` from the working-tree root); when
+    nothing resolves, the argv degrades to the prior unscoped shape and the
+    ``"unknown"``-on-failure contract is preserved.
+    """
+
+    def test_argv_scoped_from_gh_repo_env(self, monkeypatch):
+        import scripts.migrate_completed_plan as mcp
+
+        captured: dict = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = '{"state": "closed"}'
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return FakeResult()
+
+        monkeypatch.setenv("GH_REPO", "tomcounsell/ai")
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "closed"
+        assert captured["argv"] == [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "--repo",
+            "tomcounsell/ai",
+            "--json",
+            "state",
+        ]
+
+    def test_argv_scoped_from_derived_repo(self, monkeypatch):
+        """GH_REPO unset: slug derived via gh repo view from the git root."""
+        import scripts.migrate_completed_plan as mcp
+
+        captured: list = []
+
+        class IssueResult:
+            returncode = 0
+            stdout = '{"state": "open"}'
+
+        def fake_run(argv, **kwargs):
+            captured.append(argv)
+            if argv[:2] == ["git", "rev-parse"]:
+                return type("GitResult", (), {"returncode": 0, "stdout": "/repo/root"})()
+            if argv[:3] == ["gh", "repo", "view"]:
+                return type("RepoResult", (), {"returncode": 0, "stdout": "tomcounsell/ai"})()
+            return IssueResult()
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "open"
+        assert captured[-1] == [
+            "gh",
+            "issue",
+            "view",
+            "42",
+            "--repo",
+            "tomcounsell/ai",
+            "--json",
+            "state",
+        ]
+
+    def test_argv_unscoped_when_repo_resolution_fails(self, monkeypatch):
+        """No GH_REPO and gh repo view fails: degrade to the unscoped argv."""
+        import scripts.migrate_completed_plan as mcp
+
+        captured: list = []
+
+        class IssueResult:
+            returncode = 0
+            stdout = '{"state": "closed"}'
+
+        def fake_run(argv, **kwargs):
+            captured.append(argv)
+            if argv[:2] == ["git", "rev-parse"] or argv[:3] == ["gh", "repo", "view"]:
+                return type("FailResult", (), {"returncode": 1, "stdout": ""})()
+            return IssueResult()
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "closed"
+        assert captured[-1] == ["gh", "issue", "view", "42", "--json", "state"]
+
+    def test_gh_failure_returns_unknown(self, monkeypatch):
+        """The fail-soft contract: any gh failure reads as "unknown"."""
+        import scripts.migrate_completed_plan as mcp
+
+        def fake_run(argv, **kwargs):
+            raise OSError("gh missing")
+
+        monkeypatch.setenv("GH_REPO", "tomcounsell/ai")
+        monkeypatch.setattr(mcp.subprocess, "run", fake_run)
+        assert mcp._gh_issue_state("42") == "unknown"

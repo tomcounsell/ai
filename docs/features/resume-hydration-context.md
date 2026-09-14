@@ -4,7 +4,7 @@ When a PM session resumes mid-SDLC-pipeline, the worker injects a `<resumed-sess
 
 ## Problem
 
-Without resume hydration, a resumed PM session starts cold with no memory of prior stages. The agent re-reads files, re-runs tests, and re-dispatches stages whose commits are already in `git log`. In observed sessions, roughly 30-40% of tool calls were wasted on rediscovery after each resume.
+Without resume hydration, a resumed PM session starts cold with no memory of prior stages. The agent re-reads files, re-runs tests, and re-dispatches stages whose commits are already in `git log`. In observed sessions, roughly 30-40% of tool calls are wasted on rediscovery after each resume.
 
 ## How It Works
 
@@ -65,8 +65,3 @@ already committed.
 - **Advisory hint** over structured stage-commit mapping: the `<resumed-session-context>` block is plain text for the LLM to interpret. No fragile parsing of commit messages against stage names.
 - **`log_depth=10`** for hydration vs the default `log_depth=3` for snapshots: deeper history improves stage correlation without affecting the snapshot writer
 - **Prepend before steering** so the agent orients itself on prior work before processing new instructions
-
-## Tracking
-
-- GitHub Issue: [#874](https://github.com/tomcounsell/ai/issues/874)
-- Pull Request: [#878](https://github.com/tomcounsell/ai/pull/878)

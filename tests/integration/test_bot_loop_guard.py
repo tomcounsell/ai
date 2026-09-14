@@ -24,16 +24,27 @@ from bridge import routing
 @pytest.fixture
 def registered_bot_map():
     """Register a bot peer the way the bridge does at startup, kept ONLY in the
-    bot map (never in DM_USER_TO_PROJECT / GROUP_TO_PROJECT)."""
+    bot map (never in DM_USER_TO_PROJECT / GROUP_TO_PROJECT).
+
+    Also pins the DM-path module globals RESPOND_TO_DMS/DM_WHITELIST to their
+    defaults: a sibling test importing bridge.telegram_bridge on the same xdist
+    worker rebinds routing.DM_WHITELIST to the real whitelist and
+    routing.RESPOND_TO_DMS to the production value, which would flip
+    should_respond_sync to False for the non-bot DM sender (#2916, #2917, #2918,
+    #2919 — the same hazard fixed for the sibling unit fixture in #2093).
+    """
     bot_id = 8837490628
     saved_bots = dict(routing.BOT_ID_TO_PROJECT)
     saved_dm = dict(routing.DM_USER_TO_PROJECT)
     saved_groups = dict(routing.GROUP_TO_PROJECT)
     saved_whitelist = set(routing.DM_WHITELIST)
+    saved_respond_to_dms = routing.RESPOND_TO_DMS
 
     routing.BOT_ID_TO_PROJECT.clear()
     routing.BOT_ID_TO_PROJECT[bot_id] = {"_key": "valor", "name": "Valor AI"}
     # Deliberately do NOT add to DM_USER_TO_PROJECT / GROUP_TO_PROJECT / whitelist.
+    routing.RESPOND_TO_DMS = True
+    routing.DM_WHITELIST = set()
     yield bot_id
 
     routing.BOT_ID_TO_PROJECT.clear()
@@ -42,8 +53,8 @@ def registered_bot_map():
     routing.DM_USER_TO_PROJECT.update(saved_dm)
     routing.GROUP_TO_PROJECT.clear()
     routing.GROUP_TO_PROJECT.update(saved_groups)
-    routing.DM_WHITELIST.clear()
-    routing.DM_WHITELIST.update(saved_whitelist)
+    routing.DM_WHITELIST = saved_whitelist
+    routing.RESPOND_TO_DMS = saved_respond_to_dms
 
 
 def test_registered_bot_resolves_no_project_on_spawn_path(registered_bot_map):

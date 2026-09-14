@@ -77,6 +77,34 @@ function toggleStats() {
 }
 </script>
 
+{# ── Improvement + Pipeline integrity (compact, secondary to Jobs) ── #}
+<div class="mt-8 compact-panels-row">
+    <section id="improvement" class="compact-panel">
+        <h2>Improvement</h2>
+        <p class="improvement-meta">
+            What the system has noticed about its own work. Counts are observations,
+            never achievements: nothing here reports experiment count or merged-patch
+            count, because activity is not improvement.
+        </p>
+        <div id="improvement-goals-panel"
+             hx-get="/_partials/improvement/goals/" hx-trigger="revealed, every 60s"
+             hx-swap="innerHTML"></div>
+        <div id="improvement-coverage-panel"
+             hx-get="/_partials/improvement/coverage/" hx-trigger="revealed, every 60s"
+             hx-swap="innerHTML"></div>
+        <div id="improvement-burden-panel"
+             hx-get="/_partials/improvement/burden/" hx-trigger="revealed, every 60s"
+             hx-swap="innerHTML"></div>
+    </section>
+
+    <section id="pipeline-integrity" class="compact-panel">
+        <h2>Pipeline integrity</h2>
+        <div id="pipeline-integrity-tiles"
+             hx-get="/_partials/pipeline-integrity/" hx-trigger="load, every 30s" hx-swap="innerHTML">
+        </div>
+    </section>
+</div>
+
 {# ── Reflections ── #}
 <section id="reflections" class="mt-8">
     <h2>Reflections</h2>

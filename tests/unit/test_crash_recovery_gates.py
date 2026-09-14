@@ -178,3 +178,86 @@ class TestDeterministicFloorSetting:
             FeatureSettings(crash_autoresume_deterministic_floor_attempts=-1)
         with pytest.raises(ValidationError):
             FeatureSettings(crash_autoresume_deterministic_floor_attempts=6)
+
+
+# ---------------------------------------------------------------------------
+# Resumable-session filter (#3181): reaching test for the deleted
+# naive-tzinfo guard on `updated_at`
+# ---------------------------------------------------------------------------
+
+
+class TestResumableSessionFilterReachesUpdatedAt:
+    """`run_crash_recovery`'s resumable-session filter reads `updated_at` as a
+    pure popoto value (in `_DATETIME_FIELDS`, coerced aware by every
+    `__setattr__` assignment); the naive-tzinfo guard that used to sit in
+    front of it is gone (#3181)."""
+
+    def test_session_with_aware_updated_at_reaches_fresh_terminal_processing(self):
+        """Fixture is built by writing through popoto and reading back: an
+        aware `updated_at` inside the lookback window, persisted with
+        `save(preserve_updated_at=True)` -- load-bearing, since a plain
+        `save()` re-stamps `updated_at` to `utc_now()` at
+        `models/agent_session.py::save`.
+
+        `recent` is a local variable inside `run_crash_recovery()`, so
+        membership is observed indirectly: only a session that survives the
+        filter (and has no crash_signature yet) reaches
+        `read_session_timeline`. Patching it and asserting our session_id
+        was passed is the external signal that the session reached
+        `recent` -- if the guard's deletion were wrong, the per-session
+        `except Exception` swallows the naive-vs-aware TypeError and the
+        session never reaches this call.
+
+        `AgentSession.query` is patched to return only this fixture's
+        session (still a real ORM read -- `get_by_id` after the save above
+        is the popoto round trip the fixture exercises). Scoping the query
+        this way, rather than letting `run_crash_recovery()` sweep every
+        RESUMABLE_STATUSES row in the shared per-worker test db, keeps this
+        test from processing (and potentially auto-resuming) unrelated
+        sessions left behind by other concurrently-running tests.
+        """
+        import uuid
+        from datetime import UTC, datetime, timedelta
+
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import RESUMABLE_STATUSES
+
+        uid = uuid.uuid4().hex[:8]
+        session_id = f"crash-recovery-reach-{uid}"
+        session = AgentSession.create(
+            session_id=session_id,
+            project_key=f"test-crash-recovery-{uid}",
+            status=next(iter(RESUMABLE_STATUSES)),
+            chat_id=f"crash-recovery-chat-{uid}",
+            working_dir="/tmp/test-crash-recovery",
+        )
+        session.updated_at = datetime.now(UTC) - timedelta(minutes=5)
+        session.save(preserve_updated_at=True)
+        reloaded = AgentSession.get_by_id(session.id)
+
+        seen_session_ids = []
+
+        def fake_read_session_timeline(sid):
+            seen_session_ids.append(sid)
+            return []
+
+        try:
+            with (
+                patch.object(AgentSession, "query") as mock_query,
+                patch(
+                    "agent.session_telemetry.read_session_timeline",
+                    side_effect=fake_read_session_timeline,
+                ),
+            ):
+                mock_query.filter.return_value = [reloaded]
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+        finally:
+            session.delete()
+
+        assert result["status"] == "ok"
+        assert session_id in seen_session_ids, (
+            "a session with an aware, in-window updated_at must reach "
+            "fresh_terminal processing (i.e. survive the resumable-session filter)"
+        )

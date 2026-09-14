@@ -50,53 +50,18 @@ class TestOutputRouterExports:
         assert state.auto_continue_count == 0
 
 
-class TestBackwardCompatExports:
-    """Verify symbols are still importable from agent.agent_session_queue for backward compat."""
-
-    def test_max_nudge_count_from_queue(self):
-        from agent.agent_session_queue import MAX_NUDGE_COUNT
-
-        assert isinstance(MAX_NUDGE_COUNT, int)
-
-    def test_nudge_message_from_queue(self):
-        from agent.agent_session_queue import NUDGE_MESSAGE
-
-        assert isinstance(NUDGE_MESSAGE, str)
-
-    def test_determine_delivery_action_from_queue(self):
-        from agent.agent_session_queue import determine_delivery_action
-
-        assert callable(determine_delivery_action)
-
-    def test_send_to_chat_result_from_queue(self):
-        from agent.agent_session_queue import SendToChatResult
-
-        state = SendToChatResult()
-        assert state.completion_sent is False
-
-    def test_steer_session_from_queue(self):
-        from agent.agent_session_queue import steer_session
-
-        assert callable(steer_session)
-
-    def test_re_enqueue_session_from_queue(self):
-        from agent.agent_session_queue import re_enqueue_session
-
-        assert callable(re_enqueue_session)
-
-
 class TestSteerSessionGuards:
     """Unit tests for steer_session() edge cases (no Redis required)."""
 
     def test_empty_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "")
         assert result["success"] is False
         assert "Empty message" in result["error"]
 
     def test_whitespace_only_message_rejected(self):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("nonexistent-session", "   ")
         assert result["success"] is False
@@ -104,7 +69,7 @@ class TestSteerSessionGuards:
 
     def test_nonexistent_session_returns_error(self):
         """steer_session on a non-existent session returns an error dict."""
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session("definitely-does-not-exist-xyz-123", "hello")
         assert result["success"] is False
@@ -136,14 +101,14 @@ class TestSteerSessionLedgerGuard:
         session.delete()
 
     def test_ledger_session_rejected(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
 
         result = steer_session(ledger_session.session_id, "hello ledger")
         assert result["success"] is False
         assert "ledger" in result["error"].lower()
 
     def test_ledger_rejection_pushes_nothing(self, ledger_session):
-        from agent.agent_session_queue import steer_session
+        from agent.session_executor import steer_session
         from agent.steering import has_steering_messages
 
         steer_session(ledger_session.session_id, "hello ledger")

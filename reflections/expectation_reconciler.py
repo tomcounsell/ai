@@ -63,7 +63,12 @@ from datetime import datetime
 from typing import Any
 
 from config.settings import settings
-from reflections.utilities import _get_redis, machine_owns_project, run_per_project_audit
+from reflections.utilities import (
+    _get_redis,
+    machine_owns_project,
+    run_per_project_audit,
+    send_eng_telegram,
+)
 
 logger = logging.getLogger("reflections.expectation_reconciler")
 
@@ -167,26 +172,29 @@ def _escalation_exists(job_id: str, eid: str) -> bool | None:
         return None
 
 
-def _escalate_once(job_id: str, eid: str, message: str) -> bool:
-    """Page the operator at most once per (job, expectation). True = sent."""
+def _escalate_once(project: dict, job_id: str, eid: str, message: str) -> tuple[bool, str | None]:
+    """Page the project's operator at most once per (job, expectation).
+
+    Returns ``(sent, suppression_finding)``:
+      - burned sentinel or Redis unreadable: ``(False, None)`` — nothing to
+        report, nothing to count (unchanged behavior, just re-typed).
+      - a page was sent: ``(True, None)``.
+      - the sentinel claimed but no ``Eng:`` group resolved for the project:
+        ``(False, "alert-suppressed: ...")`` — the caller threads this into
+        ``findings`` without incrementing its escalation counter.
+    """
     key = _ESCALATED_KEY.format(job=job_id, eid=eid)
     try:
         if not _get_redis().set(key, "1", nx=True, ex=_escalation_ttl_seconds()):
-            return False
+            return False, None
     except Exception as exc:  # noqa: BLE001
         logger.warning("expectation_reconciler: escalation set failed for %s: %s", key, exc)
-        return False
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("expectation_reconciler: alert send failed: %s", exc)
-    return True
+        return False, None
+    sent = send_eng_telegram(project, message, logger_prefix="expectation_reconciler")
+    if sent:
+        return True, None
+    project_key = project.get("slug", "?")
+    return False, f"alert-suppressed: no Eng: group for {project_key} ({eid})"
 
 
 # --- Owner liveness (a session row is a claim, not proof — #2705) -----------
@@ -230,6 +238,35 @@ def _owner_is_gone(owner: str) -> bool | None:
 
 
 # --- Shipped-work guard (Race 2's sole collision guard) ---------------------
+
+
+def _record_shipped_work_evidence(
+    project_key: str, job_id: str, eid: str, owner: str, evidence: str
+) -> None:
+    """Persist the shipped-work signal this run just computed (#3177).
+
+    ``_shipped_evidence`` does a fresh git/GitHub read and the reconciler acts
+    on it and then discards it, so the system has never been able to answer
+    "how often did a lane ship without discharging its expectation?" — the
+    exact shape of the intervention burden the improvement controller measures.
+    One durable row per ``(job, expectation)``, deduped so re-running the
+    reconciler does not inflate the count.
+
+    Fail-soft by construction: the reconciler's own decision must not depend on
+    an evidence write succeeding.
+    """
+    try:
+        from models.improvement_evidence import ImprovementEvidence
+
+        ImprovementEvidence.record_once(
+            project_key,
+            "shipped_work",
+            source_ref=f"shipped:{job_id}:{eid}",
+            text=f"lane {owner} shipped without discharging: {evidence}",
+            detail=evidence,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("expectation_reconciler: shipped-work evidence write failed: %s", exc)
 
 
 def _lane_slug(owner: str) -> str | None:
@@ -298,9 +335,9 @@ def _live_pm_session(project_key: str, holder: str):
     recently updated live non-ledger eng session in the project."""
     try:
         from agent.session_health import _is_ledger
-        from bridge.utc import to_unix_ts
         from models.agent_session import AgentSession
         from models.session_lifecycle import NON_TERMINAL_STATUSES
+        from utils.utc import to_unix_ts
 
         rows = list(AgentSession.query.filter(project_key=project_key, session_type="eng"))
         live = [
@@ -408,6 +445,13 @@ def _reconcile_project(project: dict) -> dict:
     now = time.time()
     min_age = _min_age_seconds()
     for job in jobs:
+        if job.goal_is_corrupt():
+            # with_open_expectations() retains a flagged Job whose goal no
+            # longer decodes: the flag is the last known truth and an empty
+            # parse cannot disprove it. Nothing here can act on obligations
+            # it cannot read, so the row surfaces as a finding for a human.
+            findings.append(f"corrupt-goal: {job.job_id}")
+            continue
         for entry in job.open_expectations(direction="outbound"):
             try:
                 eid = str(entry.get("id") or "")
@@ -434,15 +478,19 @@ def _reconcile_project(project: dict) -> dict:
                 what = str(entry.get("what") or "")
                 slug = _lane_slug(owner)
                 if attempts >= _max_attempts():
-                    if _escalate_once(
+                    sent, sup = _escalate_once(
+                        project,
                         job.job_id,
                         eid,
                         f"[{project_key}] Orphaned expectation on Job {job.job_id}: "
                         f"lane {owner} is gone, {attempts} recovery attempt(s) spent. "
                         f"Expected: {what!r}. Needs a human.",
-                    ):
+                    )
+                    if sent:
                         counts["escalated"] += 1
                         findings.append(f"escalated: {eid}")
+                    elif sup:
+                        findings.append(sup)
                     continue
                 if not _cooldown_claim(job.job_id, eid):
                     continue
@@ -458,6 +506,7 @@ def _reconcile_project(project: dict) -> dict:
                 pm = _live_pm_session(project_key, str(entry.get("holder") or ""))
 
                 if evidence is not None:
+                    _record_shipped_work_evidence(project_key, job.job_id, eid, owner, evidence)
                     # Shipped work is never respawned: evidence goes to a PM
                     # for deliberate discharge.
                     message = (
@@ -470,9 +519,15 @@ def _reconcile_project(project: dict) -> dict:
                         counts["steered"] += 1
                         findings.append(f"steered-evidence: {eid} ({evidence})")
                         _bump_attempts(job.job_id, eid)
-                    elif _escalate_once(job.job_id, eid, f"[{project_key}] {message}"):
-                        counts["escalated"] += 1
-                        findings.append(f"escalated-evidence: {eid}")
+                    else:
+                        sent, sup = _escalate_once(
+                            project, job.job_id, eid, f"[{project_key}] {message}"
+                        )
+                        if sent:
+                            counts["escalated"] += 1
+                            findings.append(f"escalated-evidence: {eid}")
+                        elif sup:
+                            findings.append(sup)
                     continue
 
                 # Unshipped, owner gone: steer a live PM to re-own; else
@@ -496,15 +551,19 @@ def _reconcile_project(project: dict) -> dict:
                     _bump_attempts(job.job_id, eid)
                     continue
                 _bump_attempts(job.job_id, eid)
-                if _escalate_once(
+                sent, sup = _escalate_once(
+                    project,
                     job.job_id,
                     eid,
                     f"[{project_key}] Orphaned expectation on Job {job.job_id}: lane "
                     f"{owner} gone, no live PM to steer and no respawnable slug. "
                     f"Expected: {what!r}. Needs a human.",
-                ):
+                )
+                if sent:
                     counts["escalated"] += 1
                     findings.append(f"escalated: {eid}")
+                elif sup:
+                    findings.append(sup)
             except Exception as exc:  # noqa: BLE001 — one expectation never stops the pass
                 logger.warning(
                     "expectation_reconciler: per-expectation pass failed on job %s: %s",

@@ -21,6 +21,7 @@ crashing the live handler, reconciler, or catchup scan.
 import logging
 from datetime import UTC, datetime
 
+from agent.lock_policy import record_lock_degradation
 from models.dedup import DedupRecord
 from models.last_processed import LastProcessedRecord
 
@@ -72,7 +73,7 @@ async def record_last_processed(chat_id, message_id: int, message_ts) -> None:
     ``record_message_processed``); catchup falls back to the global cutoff.
     """
     try:
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         unix_ts = to_unix_ts(message_ts)
         if unix_ts is None:
@@ -176,9 +177,10 @@ async def claim_message(chat_id, message_id: int, ttl: int | None = None) -> boo
     already holds the claim (a peer won -- this caller must skip the
     message without enqueuing or recording durable dedup).
 
-    Fails OPEN (returns ``True``) on Redis errors -- a Redis hiccup must not
-    silently drop messages; the durable cursor-coupled membership set and the
-    caller's own dedup checks remain as the fallback safety net.
+    Policy: fail open; a Redis hiccup must not silently drop messages. The
+    durable cursor-coupled membership set and the caller's own dedup checks
+    remain as the fallback safety net, and the degradation is counted
+    (``agent/lock_policy.py``) so the blip is visible on the dashboard.
     """
     try:
         r = _get_redis()
@@ -192,6 +194,7 @@ async def claim_message(chat_id, message_id: int, ttl: int | None = None) -> boo
             message_id,
             e,
         )
+        record_lock_degradation("claim_message", "open")
         return True
 
 
@@ -222,7 +225,7 @@ async def record_last_event(chat_id, event_ts=None) -> None:
     Best-effort: failures log a WARNING and never raise.
     """
     try:
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         unix_ts = to_unix_ts(event_ts)
         if unix_ts is None:

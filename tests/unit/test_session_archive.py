@@ -17,7 +17,7 @@ import json
 import sqlite3
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -26,8 +26,8 @@ from agent.constants import (
     SESSION_ARCHIVE_BUSY_TIMEOUT_MS,
     SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS,
 )
-from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
+from utils.utc import to_unix_ts
 
 pytestmark = pytest.mark.usefixtures("redis_test_db")
 
@@ -201,7 +201,10 @@ def test_restore_preserves_a_real_datetime_byte_identically(archive_db):
     # payload without a second save() re-stamping it.
     archived_at = datetime.now(UTC).replace(microsecond=456000)
     session.updated_at = archived_at
-    baseline = session.updated_at.replace(tzinfo=None)
+    # popoto 1.9.0 preserves the UTC offset through the encoder (see the
+    # DatetimeField docstring, popoto #521), so the archived aware value is
+    # exactly what must come back -- compare aware to aware.
+    baseline = session.updated_at
 
     archive.export_session(session)
     session.delete()
@@ -213,6 +216,15 @@ def test_restore_preserves_a_real_datetime_byte_identically(archive_db):
     restored = AgentSession.query.get(id=session_id)
     assert restored.updated_at == baseline, (
         "a real archived datetime must round-trip byte-identically through restore"
+    )
+    # `==` on aware datetimes compares instants, so an equal instant carried
+    # in some other offset would slip past it. Pin the offset and the
+    # microsecond explicitly to keep the byte-identity intent intact.
+    assert restored.updated_at.utcoffset() == timedelta(0), (
+        "the restored stamp must read back as aware UTC, not naive or offset-shifted"
+    )
+    assert restored.updated_at.microsecond == baseline.microsecond, (
+        "restore must not truncate sub-second precision"
     )
 
 

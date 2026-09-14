@@ -192,7 +192,7 @@ def record_turn_boundary(session_id: str | None = None) -> bool:
         try:
             from models.agent_session import AgentSession
 
-            matches = list(AgentSession.query.filter(session_id=session_id))
+            matches = AgentSession.rows_for_session_id(session_id)
             if not matches:
                 return False
             entry = matches[0]

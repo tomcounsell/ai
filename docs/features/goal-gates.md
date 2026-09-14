@@ -55,7 +55,7 @@ Gate checks never raise exceptions. All subprocess and IO errors are caught and 
 | `agent/goal_gates.py` | Pure gate check functions -- no side effects, no codebase imports |
 | `agent/agent_session_queue.py` | Nudge loop checks gate status before delivery |
 | `agent/agent_session_queue.py` | Completion guard appends warning for unsatisfied gates |
-| `.claude/skills/sdlc/SKILL.md` | Step 2.5 gate check instructions before stage dispatch |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Gate checks before stage dispatch (Step 4) |
 | `tests/test_goal_gates.py` | 37 unit tests covering all gates, edge cases, and error paths |
 
 ## Design Decisions

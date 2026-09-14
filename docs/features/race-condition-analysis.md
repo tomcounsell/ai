@@ -6,7 +6,7 @@ The plan template includes a structured `## Race Conditions` section that prompt
 
 ## Motivation
 
-Issues #276, #279, and #280 revealed at least 5 race conditions in the bridge/agent pipeline that were never caught during planning. The plan template previously had no section prompting concurrency analysis, so timing-dependent bugs were only discovered in production.
+Timing-dependent bugs, concurrent access patterns, and data/state prerequisites are analyzed before implementation begins, so concurrency hazards surface during planning rather than in production.
 
 ## How It Works
 
@@ -28,10 +28,8 @@ Phase 1 step 6 in the `/do-plan` skill instructs the planner to perform race con
 
 ### No Registered Validator
 
-There is no hook enforcing this section. A prior `validate_race_conditions.py` soft validator
-existed but was never wired into `.claude/hooks/manifest.toml`; it was deleted as dead code
-(see [Hook Manifest](hook-manifest.md)). Compliance relies entirely on the `/do-plan` skill
-guidance below and reviewer judgment.
+There is no hook enforcing this section. Compliance relies entirely on the `/do-plan` skill
+guidance and reviewer judgment.
 
 ## When to Use
 

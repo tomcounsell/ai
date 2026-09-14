@@ -53,7 +53,6 @@ def _clean_draft(text="Which PR do you mean?"):
         needs_self_draft=False,
         artifacts={},
         context_summary="asked which PR",
-        expectations=None,
     )
 
 
@@ -188,7 +187,6 @@ class TestOutboundBounce:
             needs_self_draft=True,
             artifacts={},
             context_summary="c",
-            expectations=None,
         )
 
         with (
@@ -228,7 +226,6 @@ class TestOutboundBounce:
             needs_self_draft=True,
             artifacts={},
             context_summary="c",
-            expectations=None,
         )
         bump = MagicMock(return_value=1)
 
@@ -291,7 +288,6 @@ class TestBudgetExhaustionKeepsTheDraft:
             needs_self_draft=True,
             artifacts={},
             context_summary="c",
-            expectations=None,
         )
         raw = "Let me investigate. Which PR do you mean?"
 
@@ -319,7 +315,6 @@ class TestAdvisoriesCoexist:
             needs_self_draft=True,
             artifacts={},
             context_summary="c",
-            expectations=None,
         )
         draft.promise_advisory = "PROMISE-ADVISORY-TEXT"
         pushed = []

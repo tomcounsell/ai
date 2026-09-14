@@ -43,7 +43,7 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | Telegram | `TelegramSettings` | `session_name` (default: `valor_bridge`) | `TELEGRAM_SESSION_NAME` |
 | Redis | `RedisSettings` | `url` (default: `redis://localhost:6379/0`) | `REDIS_URL` |
 | Google Auth | `GoogleAuthSettings` | `credentials_dir` (default: `~/Desktop/Valor/`) | `GOOGLE_CREDENTIALS_DIR` |
-| Models | `ModelSettings` | `ollama_vision_model` (default: `llama3.2-vision:11b`) | `OLLAMA_VISION_MODEL` |
+| Models | `ModelSettings` | `ollama_generation_model` (default: `gemma4:31b-cloud`), `ollama_host` (default: `http://localhost:11434`) | `MODELS__OLLAMA_GENERATION_MODEL`, `MODELS__OLLAMA_HOST` |
 | Paths | `PathSettings` | `project_root`, `data_dir`, `config_dir` | -- |
 | API | `APISettings` | `claude_api_key`, `openai_api_key`, etc. | `CLAUDE_API_KEY`, etc. |
 | Timeouts | `TimeoutSettings` | `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_sdk_s`/`anthropic_hard_s`, `agent_session_retain_ttl_s`, `last_processed_ttl_s` -- see [Config Timeout Catalog](config-timeout-catalog.md) | `TIMEOUTS__*` |
@@ -105,7 +105,7 @@ Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.j
 
 ### Guarded config read
 
-`bridge/routing.py::load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both read `projects.json` through a shared guarded loader (`_guarded_json_load()`) instead of a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/corrupt file; the guarded loader catches `JSONDecodeError`/`OSError`/`UnicodeDecodeError`, logs, and serves the `data/projects.last_known_good.json` sidecar (refreshed atomically on every successful read) instead of raising. This closes an import-time crash-loop, since `_get_active_projects()` used to raise directly out of module import. See [Bridge Self-Healing: Guarded Config Read](bridge-self-healing.md#19-guarded-config-read-bridgeroutingpy-issue-1817-workstream-c4) for the full failure mode and fix.
+`bridge/routing.py::load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both read `projects.json` through a shared guarded loader (`_guarded_json_load()`) instead of a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/corrupt file; the guarded loader catches `JSONDecodeError`/`OSError`/`UnicodeDecodeError`, logs, and serves the `data/projects.last_known_good.json` sidecar (refreshed atomically on every successful read) instead of raising. The sidecar prevents an import-time crash-loop when `_get_active_projects()` reads a corrupt file during module import. See [Bridge Self-Healing](bridge-self-healing.md) (Guarded Config Read) for the full failure mode.
 
 Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 

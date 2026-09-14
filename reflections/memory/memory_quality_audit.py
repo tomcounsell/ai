@@ -207,7 +207,7 @@ def _is_extraction_record(memory) -> bool:
 def _to_unix_ts_safe(memory) -> float | None:
     """Best-effort created_at -> unix timestamp; None on any failure."""
     try:
-        from bridge.utc import to_unix_ts
+        from utils.utc import to_unix_ts
 
         created_at = getattr(memory, "created_at", None)
         if created_at is None:

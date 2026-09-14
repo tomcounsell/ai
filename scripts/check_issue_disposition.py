@@ -9,8 +9,10 @@ indefinitely, indistinguishable from live work. A 2026-08-06 audit of 29 open
 ``bug`` issues found exactly one stale issue, and it was stale because of a
 hotfix rather than any merged PR.
 
-**The rule.** A ``git commit`` on ``main`` that stages any file outside
-``docs/plans/`` must say what it does to the issue tracker. One of:
+**The rule.** A ``git commit`` on ``main`` that stages any file outside the
+plan directories (``docs/plans/`` and the completed-plan archive
+``docs/archive/plans-completed/``) must say what it does to the issue tracker.
+One of:
 
 - a closing keyword and issue -- ``Closes #123`` / ``Fixes #123`` /
   ``Resolves #123``. GitHub auto-closes on push to the default branch.
@@ -23,9 +25,10 @@ ambiguity the gate exists to remove. ``tools/sdlc_stage_query.py`` already
 refuses to treat a bare mention as a link on the PR side; this is the same
 judgement on the hotfix side.
 
-**Why ``docs/plans/`` is exempt.** Plan-document commits (``Migrate completed
-plan: X``, ``Plan (slug): ...``) are the bulk of legitimate direct-to-``main``
-traffic and essentially never resolve an issue by themselves. Exempting them
+**Why the plan directories are exempt.** Plan-document commits (``Migrate
+completed plan: X``, ``Plan (slug): ...``) are the bulk of legitimate
+direct-to-``main`` traffic and essentially never resolve an issue by
+themselves. Exempting them
 keeps the hotfix path fast, which is the whole reason it exists. Everything
 else -- source, tests, config, skills, feature docs, runbooks -- is in scope.
 Skill and doc files are deliberately NOT exempt: commit ``f695d2bed`` ("Hotfix
@@ -75,7 +78,17 @@ from pathlib import Path
 
 # Paths whose commits never need a disposition. Directory prefixes, matched
 # against git's forward-slash-separated paths from the repo root.
-EXEMPT_PREFIXES = ("docs/plans/",)
+#
+# Both endpoints of the plan lifecycle are listed, and both are load-bearing:
+# a `Migrate completed plan: X` commit is a rename, so git stages the deletion
+# under `docs/plans/` AND the addition under the archive. Exempting only one
+# side refuses the mover's own commit (#2878).
+EXEMPT_PREFIXES = ("docs/plans/", "docs/archive/plans-completed/")
+
+# Ceiling on the local `git` reads below. Named rather than inline because this
+# script runs as a git hook in a bare environment and cannot import
+# ``config.settings``; the timeout guard's other remedy is unavailable here.
+GIT_READ_TIMEOUT_SECONDS = 10
 
 # GitHub's closing keywords. Matching GitHub's own set exactly means the gate
 # passes precisely when GitHub will actually auto-close on push.
@@ -109,8 +122,27 @@ Add ONE of these to the commit message:
   Refs #123            this commit touches #123 but does NOT resolve it
   No-issue: <reason>   nothing to link, and here is why
 
-Staged files outside docs/plans/ ({count}):
+Staged files outside the plan directories ({count}):
 {files}
+
+Bypass with `git commit --no-verify` if this gate is wrong for your case.
+Full rationale: docs/features/hotfix-issue-disposition.md
+"""
+
+PLAN_CLOSING_MESSAGE = """
+COMMIT BLOCKED (#2890): this plan-only commit carries a GitHub closing keyword.
+
+Plan-document commits need no disposition, but GitHub still honours a closing
+keyword in the body and will close the issue on push to `main`. A plan that
+quotes the `Closes #N` its PR body must eventually carry hands that keyword to
+`main` months early, closing a live issue against code that never changed.
+
+Rewrite the keyword so it does not fire, e.g.:
+
+  the PR body carries a closing keyword for 123
+  Refs #123
+
+Leave the literal `Closes #123` only where it must fire: the PR body itself.
 
 Bypass with `git commit --no-verify` if this gate is wrong for your case.
 Full rationale: docs/features/hotfix-issue-disposition.md
@@ -125,7 +157,7 @@ def _git(args: list[str], cwd: str | None = None) -> tuple[int, str]:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_READ_TIMEOUT_SECONDS,
         )
         return proc.returncode, proc.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -185,7 +217,13 @@ def find_violation(
 
     scoped = in_scope_paths(paths)
     if not scoped:
-        # Plan-document-only commit (or an empty stage): exempt by design.
+        # Plan-document-only commit (or an empty stage): exempt from *declaring*
+        # a disposition, but not licensed to close an issue. Plan prose is
+        # summarised into the commit body, and plans routinely quote the literal
+        # `Closes #N` their PR body must eventually carry, so the keyword reaches
+        # `main` and GitHub honours it (#2890).
+        if _CLOSING_RE.search(message):
+            return PLAN_CLOSING_MESSAGE
         return None
 
     if has_disposition(message):

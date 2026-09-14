@@ -79,6 +79,30 @@ def _now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+class CorruptGoalError(RuntimeError):
+    """The stored ``goal`` bytes are not JSON, so no write may replace them.
+
+    A ``goal`` that fails to decode is the one copy of that Job's obligation
+    history. Every mutator (:meth:`Job.add_expectation`,
+    :meth:`Job.discharge_expectation`, :meth:`Job.append_goal_version`) and
+    the ``_write_goal_data`` chokepoint itself raise this rather than persist
+    an empty structure over the original bytes. Reads stay tolerant so an
+    unrelated caller never crashes on a corrupt row; writes fail closed so the
+    corruption stays recoverable (issue #2862).
+    """
+
+
+# Sentinel returned by ``Job._parse_goal`` when the stored bytes do not decode.
+_CORRUPT = object()
+
+# Job ids whose corrupt goal this process has already sent to Sentry. The
+# ERROR log fires on every read (it is the signal of record); the Sentry
+# capture fires once per process per Job so the cadence readers (reconciler,
+# health sweep) cannot flood one bad row into thousands of events.
+_corrupt_goal_reported: set[str] = set()
+_CORRUPT_GOAL_REPORT_CAP = 1000
+
+
 def mint_placeholder_goal(message_text: str) -> str:
     """The mechanical mint-time goal — router-seeded, never model-authored.
 
@@ -114,55 +138,6 @@ class Job(Model):
     # `type=bool` is load-bearing: without it the value hydrates as the
     # string "False", which is truthy.
     has_open_expectations = IndexedField(type=bool, default=False)
-
-    # -- Persistence --------------------------------------------------------
-
-    def save(
-        self,
-        pipeline=None,
-        ignore_errors: bool = False,
-        skip_auto_now: bool = False,
-        update_fields: list | None = None,
-        migrate_key: bool = False,
-        **kwargs,
-    ):
-        """Re-attach UTC to a naive ``last_active_at`` before persisting.
-
-        popoto 1.8.0 decodes a stored datetime without tzinfo, so a reloaded
-        Job carries a naive ``last_active_at``; the next save would compute the
-        SortedField score as ``naive.timestamp()`` — local time, skewed from the
-        stored hash value by the host's UTC offset. Every write funnels through
-        here, so this one re-attach makes every score a pure UTC epoch.
-
-        **Instant-preserving, not a re-stamp.** It attaches the tzinfo the value
-        already meant and never assigns ``_now()``: re-stamping would refresh
-        recency on every unrelated write, resurrecting idle Jobs and defeating
-        rest-by-age.  Idempotent — an aware value is left untouched.
-
-        The reattach is gated on the field being in scope. A scoped save that
-        excludes ``last_active_at`` (``backfill_open_expectations_index``'s
-        ``save(update_fields=["has_open_expectations"])``, whose docstring
-        guarantees it never writes recency) must not touch the SortedField score
-        path at all; a scoped save that *names* the field still reattaches.
-
-        The signature mirrors popoto 1.8.0's ``Model.save`` exactly (rather
-        than ``*args``) so a caller passing ``update_fields`` positionally is
-        still captured by the guard — a splat signature would let a positional
-        ``update_fields`` slip past the keyword check and only surface as a
-        ``TypeError`` at the ``super().save`` delegation.
-        """
-        if update_fields is None or "last_active_at" in update_fields:
-            value = self.last_active_at
-            if isinstance(value, datetime) and value.tzinfo is None:
-                self.last_active_at = value.replace(tzinfo=UTC)
-        return super().save(
-            pipeline=pipeline,
-            ignore_errors=ignore_errors,
-            skip_auto_now=skip_auto_now,
-            update_fields=update_fields,
-            migrate_key=migrate_key,
-            **kwargs,
-        )
 
     # -- Identity -----------------------------------------------------------
 
@@ -214,11 +189,70 @@ class Job(Model):
 
     # -- Goal (append-only versioned) ---------------------------------------
 
-    def _goal_data(self) -> dict:
+    def _parse_goal(self):
+        """Decode the stored ``goal`` bytes, or return :data:`_CORRUPT`.
+
+        Two categorically different failures share this field and must not
+        share a handler. A null/empty field or a wrong-shaped JSON value is
+        something this system's own writer can plausibly leave behind, and
+        ``_goal_data`` coerces those to empty. Bytes that do not decode at all
+        (or a non-string value) were not written intact by this system; that
+        is corruption, and the caller decides how loudly to treat it.
+        """
+        if not self.goal:
+            return {}
         try:
-            data = json.loads(self.goal) if self.goal else {}
+            return json.loads(self.goal)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("[job] invalid goal JSON on %s; treating as empty", self.job_id)
+            return _CORRUPT
+
+    def goal_is_corrupt(self) -> bool:
+        """True when the stored ``goal`` bytes do not decode as JSON.
+
+        A pure predicate (no logging, no Sentry) so scan helpers and the
+        maintenance path can branch on it without re-reporting.
+        """
+        return self._parse_goal() is _CORRUPT
+
+    def _report_corrupt_goal(self) -> None:
+        """ERROR log on every call; one Sentry event per process per Job."""
+        raw = self.goal
+        preview = repr(raw)[:80]
+        logger.error(
+            "[job] CORRUPT goal on %s (room=%s): stored value does not decode as "
+            "JSON (%s, %d chars); reading as empty and refusing every write until "
+            "repaired. Preview: %s",
+            self.job_id,
+            self.room_id,
+            type(raw).__name__,
+            len(str(raw)),
+            preview,
+        )
+        if self.job_id in _corrupt_goal_reported:
+            return
+        if len(_corrupt_goal_reported) < _CORRUPT_GOAL_REPORT_CAP:
+            _corrupt_goal_reported.add(self.job_id)
+        try:
+            import sentry_sdk
+
+            sentry_sdk.capture_message(
+                f"[job] corrupt goal JSON on Job {self.job_id} (room={self.room_id}); "
+                "writes refused until repaired",
+                level="error",
+            )
+        except Exception:  # noqa: BLE001 — the ERROR log above is the signal of record
+            logger.warning("[job] Sentry capture for corrupt goal failed", exc_info=True)
+
+    def _goal_data(self) -> dict:
+        """Tolerant read: every caller gets a well-shaped dict.
+
+        Corruption reads as empty so an unrelated caller never crashes on a
+        bad row, but it is never quiet: :meth:`_report_corrupt_goal` fires,
+        and every write path refuses until the bytes are repaired.
+        """
+        data = self._parse_goal()
+        if data is _CORRUPT:
+            self._report_corrupt_goal()
             data = {}
         if not isinstance(data, dict):
             logger.warning("[job] non-object goal JSON on %s; treating as empty", self.job_id)
@@ -252,7 +286,33 @@ class Job(Model):
                 )
         return data
 
+    def _mutable_goal_data(self) -> dict:
+        """The read half of every read-modify-write; refuses on corruption.
+
+        ``_goal_data`` reads a corrupt goal as empty. Feeding that empty dict
+        back through ``_write_goal_data`` would persist ``{"versions": [],
+        "expectations": []}`` over the only copy of the original bytes, so a
+        mutator must never start from it. Raising here (before any mutation)
+        also makes :meth:`discharge_expectation` loud instead of a misleading
+        ``False``.
+        """
+        if self.goal_is_corrupt():
+            self._report_corrupt_goal()
+            raise CorruptGoalError(
+                f"job {self.job_id}: stored goal is not JSON; refusing to mutate it "
+                "(the stored bytes are the only copy of its history)"
+            )
+        return self._goal_data()
+
     def _write_goal_data(self, data: dict, *, save: bool = True) -> None:
+        # Fail closed on corruption at the chokepoint itself, so no caller
+        # (including a migration handing back a freshly read dict) can turn a
+        # truncated-but-present goal into a clean, empty, plausible one.
+        if self.goal_is_corrupt():
+            self._report_corrupt_goal()
+            raise CorruptGoalError(
+                f"job {self.job_id}: stored goal is not JSON; refusing to overwrite it"
+            )
         # Derive BEFORE assigning goal so a derivation failure on malformed
         # entries raises without half-writing the record.
         has_open = any(
@@ -297,7 +357,7 @@ class Job(Model):
 
     def append_goal_version(self, text: str, *, author: str) -> None:
         """Append a new goal version (never overwrites prior versions)."""
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         data["versions"].append({"ts": _now().isoformat(), "author": author, "text": text})
         self._write_goal_data(data)
 
@@ -336,7 +396,7 @@ class Job(Model):
             raise ValueError("expectation 'owner' must be non-empty (who must deliver this?)")
         if holder is None:
             holder = "requester" if direction == "inbound" else "pm"
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         expectation_id = uuid.uuid4().hex[:12]
         data["expectations"].append(
             {
@@ -359,7 +419,7 @@ class Job(Model):
         Always owner-authored — no mechanical trigger ever discharges; the
         reconciler surfaces evidence and the PM discharges deliberately.
         """
-        data = self._goal_data()
+        data = self._mutable_goal_data()
         for entry in data["expectations"]:
             if entry.get("id") == expectation_id and entry.get("removed_ts") is None:
                 entry["removed_ts"] = _now().isoformat()
@@ -380,19 +440,37 @@ class Job(Model):
     # -- Lifecycle (rest by age, revived by any steer; never hard-closed) ---
 
     def touch(self) -> None:
-        """Record activity (message bound, PM turn) — refreshes recency."""
+        """Record activity (message bound, PM turn) — refreshes recency.
+
+        Field-scoped save (the structural clobber-proof idiom): a bare
+        ``save()`` would serialize the whole hash, including a concurrent
+        writer's in-flight ``goal`` mutation loaded earlier by this
+        instance. ``update_fields=["last_active_at"]`` writes only what this
+        method actually mutates.
+        """
         self.last_active_at = _now()
-        self.save()
+        self.save(update_fields=["last_active_at"])
 
     def mark_at_rest(self) -> None:
+        """Field-scoped save (the structural clobber-proof idiom): mutates
+        only ``status``, so an in-flight ``goal`` write from a concurrent
+        expectation mutation is never clobbered. Also deliberately excludes
+        ``last_active_at`` — resting a Job by age must never refresh its
+        recency.
+        """
         self.status = "at-rest"
-        self.save()
+        self.save(update_fields=["status"])
 
     def revive(self) -> None:
-        """Any steering message revives a Job regardless of age."""
+        """Any steering message revives a Job regardless of age.
+
+        Field-scoped save (the structural clobber-proof idiom): mutates only
+        ``status`` and ``last_active_at``, so an in-flight ``goal`` write
+        from a concurrent expectation mutation is never clobbered.
+        """
         self.status = "active"
         self.last_active_at = _now()
-        self.save()
+        self.save(update_fields=["status", "last_active_at"])
 
     # -- Queries ------------------------------------------------------------
 
@@ -403,7 +481,7 @@ class Job(Model):
         A bounded reverse-range read over the ``last_active_at`` SortedField's
         per-Room partition: one ``ZREVRANGE`` for the top members, then one
         pipelined hydration of just those members. Cost is a function of
-        ``limit``, not of the Room's lifetime Job count — popoto 1.8.0's
+        ``limit``, not of the Room's lifetime Job count — popoto's
         ``QueryBuilder`` has no early-limit path for a SortedField, so a
         ``filter()`` here would hydrate every Job in the Room (twice, per
         popoto#2639) to answer a top-5 question. This runs on the bind-or-mint
@@ -462,13 +540,15 @@ class Job(Model):
         """
         rested = 0
         try:
-            from bridge.utc import to_unix_ts
+            from utils.utc import to_unix_ts
 
             now_ts = now if now is not None else time.time()
             cutoff = now_ts - JOB_AT_REST_AGE_SECONDS
             for job in cls.query.filter(status="active"):
                 try:
-                    if job.open_expectations():
+                    # A corrupt goal cannot prove its obligations are met, so
+                    # the Job stays active (pinned visible) until repaired.
+                    if job.open_expectations() or job.goal_is_corrupt():
                         continue
                     last_ts = to_unix_ts(job.last_active_at)
                     if last_ts is not None and last_ts < cutoff:
@@ -510,7 +590,7 @@ class Job(Model):
         flagged = []
         try:
             for job in cls.query.filter(status="at-rest", has_open_expectations=True):
-                if job.open_expectations():
+                if job.open_expectations() or job.goal_is_corrupt():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a backstop query never raises
             logger.warning("[job] at_rest_with_open_expectations query failed: %s", e)
@@ -527,7 +607,7 @@ class Job(Model):
         flagged = []
         try:
             for job in cls.query.filter(has_open_expectations=True):
-                if job.open_expectations():
+                if job.open_expectations() or job.goal_is_corrupt():
                     flagged.append(job)
         except Exception as e:  # noqa: BLE001 — a scan helper never raises
             logger.warning("[job] with_open_expectations query failed: %s", e)
@@ -638,100 +718,182 @@ class Job(Model):
                 )
 
             rebuilt = cls.rebuild_indexes()
-            # rebuild_indexes() re-scores every row via field.on_save on
-            # naive-decoded instances — naive.timestamp() is local time, and
-            # the rebuild bypasses save()'s UTC-reattach — so on a non-UTC
-            # host the rebuild itself re-skews every recency score. Sweep the
-            # scores back so the maintenance path is score-preserving.
-            scanned, renormalized = cls.renormalize_last_active_scores()
-            if renormalized:
-                logger.info(
-                    "[job] re-normalized %d of %d recency score(s) after the index rebuild",
-                    renormalized,
-                    scanned,
-                )
             cls.backfill_open_expectations_index()
             return (quarantined, rebuilt if isinstance(rebuilt, int) else 0)
         finally:
             cls._repair_lock.release()
 
+    # Rows per pipeline in :meth:`renormalize_last_active_scores`. Sized on the
+    # mechanism, never on a measured population: each batch is one HMGET
+    # pipeline (three small fields per row) plus one ZSCORE pipeline, so 500
+    # bounds both the reply payload and the per-batch memory at a few tens of
+    # kilobytes regardless of how many Jobs exist. It also serves as the SSCAN
+    # COUNT hint; SSCAN treats COUNT as advisory (a small, listpack-encoded set
+    # comes back whole), so members are re-chunked client-side to this size
+    # before any pipeline is built.
+    _RENORMALIZE_BATCH_SIZE = 500
+
     @classmethod
-    def renormalize_last_active_scores(cls) -> tuple[int, int]:
+    def renormalize_last_active_scores(
+        cls, *, batch_size: int = _RENORMALIZE_BATCH_SIZE
+    ) -> tuple[int, int]:
         """Sweep every recency score back to the pure UTC epoch its hash implies.
 
-        The single shared implementation behind two callers:
+        The one-shot repair behind the ``backfill_job_last_active_scores``
+        migration (``scripts/update/migrations.py``): it swept skew written
+        before popoto#519/1.8.2 made a ``SortedField(type=datetime)`` score a
+        pure function of the stored value regardless of tzinfo. That
+        migration has already run fleet-wide and stays recorded in
+        ``MIGRATIONS``, so this classmethod stays as its implementation —
+        it has no recurring caller.
 
-        - the one-shot ``backfill_job_last_active_scores`` migration
-          (``scripts/update/migrations.py``), which sweeps skew written
-          before the :meth:`save` UTC-reattach override shipped; and
-        - :meth:`repair_indexes`, because popoto's ``rebuild_indexes()``
-          re-scores every row via ``field.on_save`` on naive-decoded
-          instances — ``naive.timestamp()`` is local time, bypassing the
-          :meth:`save` override entirely — so on a non-UTC host every
-          rebuild (run at worker startup via
-          ``scripts/popoto_index_cleanup.run_cleanup``) would re-skew every
-          score the migration repaired.
+        Cursored and pipelined (issue #2848). The class set is walked with
+        ``SSCAN`` and re-chunked into ``batch_size`` rows. Each chunk costs
+        two round trips: one pipeline of ``HMGET id room_id last_active_at``
+        (decoded with popoto's own hash decoder, so no Job is hydrated) and
+        one pipeline of ``ZSCORE`` against each row's Room partition (key
+        **derived** via ``SortedField.get_sortedset_db_key``, never
+        hand-built). Startup cost is therefore ``O(N / batch_size)`` round
+        trips with per-batch memory independent of ``N``; Job is immortal
+        (no ``Meta.ttl``), so that bound is what keeps a growing population
+        off the worker-start critical path. ``SSCAN`` may hand back a member
+        twice if the set is rewritten mid-walk; the sweep is idempotent, so a
+        repeat costs one extra comparison and can only inflate ``scanned``.
 
-        For each Job the stored score in its Room partition (key **derived**
-        via ``SortedField.get_sortedset_db_key``, never hand-built) is
-        compared against ``bridge.utc.to_unix_ts(job.last_active_at)``; a row
-        outside a 1-second tolerance is re-read fresh and repaired with the
-        structural clobber-proof idiom
+        A row whose score sits outside a 1-second tolerance is re-read fresh
+        and repaired with the structural clobber-proof idiom
         ``fresh.save(update_fields=["last_active_at"])`` — a field-scoped
-        write that can never touch ``goal``/``status``, and one that names the
-        field so the :meth:`save` tz-reattach fires. **Instant-preserving**:
-        each row keeps its own stored instant; no constant timestamp is ever
-        stamped (spike-4 tie-break hazard). A Job whose partition member is
-        absent, or whose instant is unreadable, is skipped — partition
-        membership belongs to the rebuild, not this sweep. Idempotent (a
-        repaired score is inside tolerance next pass) and per-row failure
-        tolerant (one bad row logs and the sweep continues).
-
-        Scale note: because :meth:`repair_indexes` calls this after every
-        rebuild, the uncursored full-population pass here is a
-        per-worker-startup commitment against an immortal, unboundedly
-        growing model (via ``scripts/popoto_index_cleanup.run_cleanup``) —
-        not a one-shot migration cost. At the measured population (92 Jobs) that
-        is negligible; past roughly 10,000 Jobs the full hydrate + one
-        ``zscore`` round trip per row needs pipelining or a cursor. Tracked as
-        issue #2848 so the ceiling surfaces on its own rather than only here.
+        write that can never touch ``goal``/``status``. Repairs are the only
+        per-row writes and the only per-row round trips. **Instant-
+        preserving**: each row keeps its own stored instant; no constant
+        timestamp is ever stamped (spike-4 tie-break hazard). A Job whose
+        partition member is absent, or whose instant is unreadable, is
+        skipped — partition membership belongs to the rebuild, not this
+        sweep. Idempotent (a repaired score is inside tolerance next pass)
+        and failure tolerant at two grains: one bad row logs and the chunk
+        continues; one failed pipeline logs and the walk continues with the
+        next chunk.
 
         Returns ``(scanned, repaired)``. ``(0, 0)`` is overloaded: it is also
-        the return when the enumeration itself fails (Redis down, popoto
-        decode blow-up) — the guard logs a WARNING and swallows the error so
-        :meth:`repair_indexes` still reaches
-        :meth:`backfill_open_expectations_index`.
+        the return when the enumeration itself fails before any row is seen
+        (Redis down) — the guard logs a WARNING and swallows the error rather
+        than raising into the caller. An ``SSCAN`` failure part way through
+        returns the counts accumulated so far.
         """
         from popoto.redis_db import POPOTO_REDIS_DB
 
-        from bridge.utc import to_unix_ts
+        class_set_key = cls._meta.db_class_set_key.redis_key
+        scanned = 0
+        repaired = 0
+        cursor = 0
+        while True:
+            try:
+                cursor, members = POPOTO_REDIS_DB.sscan(
+                    class_set_key, cursor=cursor, count=batch_size
+                )
+            except Exception as e:  # noqa: BLE001 — maintenance path never raises
+                logger.warning(
+                    "[job] score renormalization SKIPPED -- enumeration failed "
+                    "after %d row(s) %s: %s",
+                    scanned,
+                    type(e).__name__,
+                    e,
+                )
+                return (scanned, repaired)
+            keys = [m.decode() if isinstance(m, bytes) else str(m) for m in members]
+            for start in range(0, len(keys), batch_size):
+                chunk_scanned, chunk_repaired = cls._renormalize_score_chunk(
+                    keys[start : start + batch_size]
+                )
+                scanned += chunk_scanned
+                repaired += chunk_repaired
+            if cursor == 0:
+                break
+        logger.info(
+            "[job] renormalized recency scores across %d Job(s), %d repaired",
+            scanned,
+            repaired,
+        )
+        return (scanned, repaired)
 
-        # Maintenance path never raises: an enumeration failure (Redis down,
-        # popoto decode blow-up) logs and returns (0, 0) so repair_indexes
-        # still reaches backfill_open_expectations_index().
+    _RENORMALIZE_FIELDS = ("id", "room_id", "last_active_at")
+
+    @classmethod
+    def _renormalize_score_chunk(cls, keys: list[str]) -> tuple[int, int]:
+        """One batch of :meth:`renormalize_last_active_scores`: two pipelines, then repairs.
+
+        Reads only the three fields the comparison needs, decoded through
+        popoto's ``decode_popoto_model_hashmap(fields_only=True)`` so the
+        bytes on the wire mean exactly what a hydrated Job would carry. A key
+        whose hash is gone (class-set member outliving its row) decodes to
+        nothing and is skipped; the rebuild owns class-set hygiene.
+
+        Returns ``(scanned, repaired)`` for this chunk. A failed pipeline
+        returns ``(0, 0)`` after a WARNING so the caller moves on.
+        """
+        from popoto.models.encoding import decode_popoto_model_hashmap
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from utils.utc import to_unix_ts
+
+        field_names = list(cls._RENORMALIZE_FIELDS)
         try:
-            jobs = list(cls.query.filter())
-        except Exception as e:  # noqa: BLE001 — maintenance path never raises
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for key in keys:
+                pipe.hmget(key, field_names)
+            raw_rows = pipe.execute()
+        except Exception as e:  # noqa: BLE001 — one failed batch never stops the sweep
             logger.warning(
-                "[job] score renormalization SKIPPED -- enumeration failed %s: %s",
+                "[job] score renormalization SKIP batch of %d -- hmget pipeline %s: %s",
+                len(keys),
                 type(e).__name__,
                 e,
             )
             return (0, 0)
-        logger.info("[job] renormalizing recency scores across %d Job(s)", len(jobs))
-        repaired = 0
-        for job in jobs:
-            try:
+
+        rows: list[tuple[str, dict]] = []
+        for key, values in zip(keys, raw_rows, strict=True):
+            redis_hash = {
+                name.encode(): value
+                for name, value in zip(field_names, values, strict=True)
+                if value is not None
+            }
+            decoded = decode_popoto_model_hashmap(cls, redis_hash, fields_only=True)
+            if not decoded:
+                continue
+            fields = {(k.decode() if isinstance(k, bytes) else k): v for k, v in decoded.items()}
+            if fields.get("room_id") is None or fields.get("id") is None:
+                continue
+            rows.append((key, fields))
+        if not rows:
+            return (0, 0)
+
+        try:
+            pipe = POPOTO_REDIS_DB.pipeline(transaction=False)
+            for key, fields in rows:
                 partition_key = SortedField.get_sortedset_db_key(
-                    cls, "last_active_at", job.room_id
+                    cls, "last_active_at", fields["room_id"]
                 ).redis_key
-                score = POPOTO_REDIS_DB.zscore(partition_key, job.db_key.redis_key)
-                expected = to_unix_ts(job.last_active_at)
+                pipe.zscore(partition_key, key)
+            scores = pipe.execute()
+        except Exception as e:  # noqa: BLE001 — one failed batch never stops the sweep
+            logger.warning(
+                "[job] score renormalization SKIP batch of %d -- zscore pipeline %s: %s",
+                len(rows),
+                type(e).__name__,
+                e,
+            )
+            return (0, 0)
+
+        repaired = 0
+        for (key, fields), score in zip(rows, scores, strict=True):
+            try:
+                expected = to_unix_ts(fields.get("last_active_at"))
                 if score is None or expected is None:
                     continue
-                if abs(score - expected) <= 1.0:
+                if abs(float(score) - expected) <= 1.0:
                     continue
-                fresh = cls.query.get(id=job.id, room_id=job.room_id)
+                fresh = cls.query.get(id=fields["id"], room_id=fields["room_id"])
                 if fresh is None:
                     continue
                 fresh.save(update_fields=["last_active_at"])
@@ -739,11 +901,11 @@ class Job(Model):
             except Exception as e:  # noqa: BLE001 — one bad row never stops the sweep
                 logger.warning(
                     "[job] score renormalization SKIP job=%s -- %s: %s",
-                    getattr(job, "job_id", "?"),
+                    fields.get("id", "?"),
                     type(e).__name__,
                     e,
                 )
-        return (len(jobs), repaired)
+        return (len(rows), repaired)
 
     @classmethod
     def backfill_open_expectations_index(cls) -> int:
@@ -798,6 +960,12 @@ class Job(Model):
                 try:
                     fresh = cls.query.get(id=job.id, room_id=job.room_id)
                     if fresh is None:
+                        continue
+                    if fresh.goal_is_corrupt():
+                        # The stored flag is the last known truth; an empty
+                        # parse cannot disprove it. Re-deriving here would drop
+                        # the Job out of the reconciler's index (#2862).
+                        fresh._report_corrupt_goal()
                         continue
                     derived = any(
                         entry.get("removed_ts") is None

@@ -1,7 +1,6 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("eng" or "teammate";
-"granite" persists on historical records only — see config/enums.py).
+Single Popoto model with session_type discriminator ("eng" or "teammate").
 
 Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
@@ -15,10 +14,13 @@ Session types (permission model):
     Participates in group conversations without orchestration authority.
 
 Parent-child relationship:
-  parent_agent_session_id is the canonical parent link.
-  parent_session_id and parent_chat_session_id are deprecated aliases that
-  delegate to parent_agent_session_id via property.
-  Use create_child() to spawn child sessions.
+  parent_agent_session_id is the sole parent link; get_parent_session() and
+  get_child_sessions() traverse it. Use create_child() to spawn child sessions.
+
+Event storage:
+  session_events is the sole event log (a list of SessionEvent dicts, see
+  models/session_event.py). Use append_event() to write and
+  models.session_event.format_event_lines() to render display strings.
 
 Status lifecycle (see models/session_lifecycle.py for canonical mutation functions):
   Non-terminal: pending -> running -> active -> dormant | waiting_for_children | superseded
@@ -62,12 +64,13 @@ CHAT_LOG_MAX_ENTRIES = 50
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
 # Plain (non-Popoto-managed) Redis key used to persist the most recent
-# repair_indexes() identity-less quarantine count across process boundaries
-# (issue #2207). AgentSession._last_quarantined_identityless is an in-memory
-# class attribute -- only visible within the process that populated it -- so
-# it alone cannot answer "did the last repair_indexes() run (worker Step 2,
-# hourly agent-session-cleanup reflection, scripts/update/run.py) see
-# anything?" from a freshly-started `python -m tools.doctor` process. This
+# repair_indexes() de-duplicated identity-less-row quarantine count across
+# process boundaries (issue #2207, re-based on row identity under popoto
+# 1.9.0's divergence guard by #3199). AgentSession._last_quarantined_identityless
+# is an in-memory class attribute -- only visible within the process that
+# populated it -- so it alone cannot answer "did the last repair_indexes() run
+# (worker Step 2, hourly agent-session-cleanup reflection, scripts/update/run.py)
+# see anything?" from a freshly-started `python -m tools.doctor` process. This
 # key gives the doctor `agentsession-index-drift` check a durable signal.
 # Grain of salt: name/TTL are provisional/tunable, not load-bearing.
 _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY = (
@@ -78,8 +81,14 @@ _LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS = 7 * 86400
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
 
-# TRM task type vocabulary — used for TaskTypeProfile keying and delegation decisions.
-# Pattern-based derivation in tools/session_tags.py auto_tag_session() Rule 7.
+# TRM task type vocabulary — read by tools/session_tags.py, which derives a
+# session's task_type from pattern rules in auto_tag_session().
+# "rework-triggered" is historical only. The rule that derived it read a
+# session field no production code ever wrote, so it never fired; #3177 removed
+# the field and the rule together. The vocabulary entry stays because existing
+# rows carry the value and the matching $IndexF set is real. Rework is now
+# derived from ImprovementEvidence rows classified "architectural", which have
+# an actual writer. See docs/features/improvement-controller.md.
 TASK_TYPE_VOCABULARY = {
     "sdlc-build",
     "sdlc-test",
@@ -99,7 +108,7 @@ class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
     Single Popoto model with a session_type discriminator ("eng" or
-    "teammate"; "granite" persists on historical records only).
+    "teammate").
 
     Session types (permission model):
         Eng session (session_type="eng"):
@@ -216,7 +225,6 @@ class AgentSession(Model):
     branch_name = Field(null=True)
     tags = ListField(null=True)
     task_type = IndexedField(null=True)  # TRM task category (see TASK_TYPE_VOCABULARY)
-    rework_triggered = Field(null=True)  # "true"/"false" — session retried prior output
 
     # === Structured event log (replaces history, summary, result_text, stage_states) ===
     session_events = ListField(null=True)  # List of SessionEvent dicts
@@ -274,7 +282,7 @@ class AgentSession(Model):
     # an id older than that, judged acceptable because a fork carries the id it
     # was handed seconds ago, not one from hours back. If you raise or remove
     # the cap, update tools/sdlc_session_ensure.py, the bound assertion in
-    # tests/unit/test_sdlc_session_ensure.py::
+    # tests/unit/sdlc_session_ensure/test_sdlc_session_ensure_run_identity.py::
     # test_append_dedups_preserves_order_and_caps, and
     # docs/features/sdlc-run-self-recognition.md together.
     # Additive nullable; Popoto lazy-load descriptor healing default-fills
@@ -393,15 +401,15 @@ class AgentSession(Model):
     parent_agent_session_id = KeyField(null=True)
 
     # === Per-session model selection ===
-    # Claude model name for this session (short aliases preferred: "opus",
-    # "sonnet", "haiku"; full names like "claude-opus-4-7" also accepted).
+    # Claude model name for this session (short aliases preferred: "fable",
+    # "opus", "sonnet", "haiku"; full names like "claude-opus-4-7" also accepted).
     #
     # Flows to the CLI harness subprocess as `--model <value>` via
     # `agent.session_executor._resolve_session_model()` and
     # `agent.sdk_client.get_response_via_harness(model=...)`. When None/empty,
     # the D1 precedence cascade falls through to
     # `settings.models.session_default_model` and finally the codebase
-    # default "opus". See `docs/features/agent-session-model.md` for details.
+    # default "fable". See `docs/features/agent-session-model.md` for details.
     model = Field(null=True)
 
     # === BUILD session retention for hard-PATCH resume ===
@@ -426,6 +434,36 @@ class AgentSession(Model):
     # default-fills absent fields generically (since 1.6.1). Default False keeps
     # existing sessions unaffected.
     requires_real_chrome = Field(default=False)
+
+    # === Codex dev-lane selection and continuity (plan #2001, Phase 3) ===
+    # `dev_harness` is the immutable creation-time-only in-turn dev-lane
+    # selector: None (the default) means the existing Claude `Agent(dev)`
+    # lane; "codex" means developer work runs through a worktree-scoped,
+    # resumable `codex exec` thread driven by a session-scoped MCP tool.
+    # Ownership split with `exec_harness` above: `exec_harness` stays the
+    # top-level spawn selector and remains fixed to "claude" on every
+    # flagged eng row; `dev_harness` owns only the in-turn dev lane. No
+    # reuse of `exec_harness == "codex"` — the two selectors coexist with
+    # this stated boundary. Nullable non-indexed adds: Popoto's
+    # `_create_lazy_model` default-fills absent fields generically (since
+    # 1.6.1), so no backfill is needed; a registered read-compatibility
+    # migration probes them (scripts/update/migrations.py).
+    dev_harness = Field(null=True)
+    # Codex thread id (UUID from `thread.started`), persisted synchronously
+    # on first sight (write-or-kill) and preserved for forensics across the
+    # one-way codex-to-claude downgrade. Never inferred from rollout files.
+    codex_thread_id = Field(null=True)
+    # Codex CLI version that opened the thread (informational / forensics).
+    codex_version = Field(null=True)
+    # Count of executed Codex turns against the persisted thread. Guarded by
+    # `codex_max_resumed_turns`; incremented only after a live child spawn,
+    # refunded on spawn failure, so the guard counts real turns only.
+    codex_turn_count = IntField(null=True)
+    # Monotonic dev-lane fence token (uuid hex, stamped at creation).
+    # Every resume re-checks the token under the dev-lane lease so a TTL
+    # lease expiry that races a still-live child cannot resume a superseded
+    # thread.
+    dev_lane_fence = Field(null=True)
 
     # === Runner user-facing delivery tracking (issue #1647) ===
     # Set to True by SessionRunnerAdapter.publish_exit_summary when at least
@@ -553,6 +591,35 @@ class AgentSession(Model):
     budget_tripped = Field(default=False)
     budget_tripped_reason = Field(null=True, default=None)
 
+    # === Per-tool context-cost attribution (issue #3081, Lane A) ===
+    # JSON-serialised cumulative snapshot from `agent/tool_cost_attribution.py`
+    # — per-tool call counts and approximate attributed tokens, accumulated
+    # turn over turn by `get_response_via_harness` in the SAME narrow
+    # update_fields save that writes turn_count / tool_call_count. Read by
+    # `session_tool_cost_summary()` so a stage transition can stamp a
+    # session-level aggregate without replaying the telemetry JSONL, and by
+    # `tools/belt_baseline.py` for the pre-activation baseline.
+    # Nullable with a None default: Popoto is schema-on-read, so pre-#3081
+    # records need NO data migration and read back as "no attribution
+    # recorded". These numbers are a RANKING aid, not billing — `total_cost_usd`
+    # remains the only authority on spend.
+    tool_cost_json = Field(null=True, default=None)
+
+    # === Persona toolbelt stamps (plan #3081, Lane A — Race 3 observability) ===
+    # belt_version: the config/toolbelts/{persona}.toml belt_version this
+    # session's most recent turn resolved under; None while enforcement is off
+    # or for sessions predating belts (pre-belt legacy read — nullable
+    # additive, Popoto default-fills absent fields, no migration needed).
+    # belt_enforce_state: "on"/"off" — the TOOLBELTS_ENFORCE state the most
+    # recent turn resolved on its host. At turn start
+    # agent/session_runner/belt_resolver.py::check_and_stamp_belt_state
+    # compares this prior-turn stamp against the current host's resolved state
+    # and emits the WARNING-level belt skew telemetry event on mismatch
+    # (fail-quiet), making fleet skew during the activation window observable.
+    # That function is the SOLE writer, via a narrow save(); ORM access only.
+    belt_version = IntField(null=True)
+    belt_enforce_state = Field(null=True, default=None)
+
     # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).
     # Persisted best-effort by `get_response_via_harness` after the stale-UUID
     # fallback completes. Read by `agent/session_health.py` in the recovery
@@ -629,15 +696,15 @@ class AgentSession(Model):
         # 30 days — hard backstop for retain_for_resume BUILD sessions.
         # Sourced from settings so it's .env-overridable (issue #1968 Task 5).
         #
-        # Measured trap (#2698): this TTL has never actually fired. The
-        # corruption sweep (agent/session_health.py::cleanup_corrupted_agent_
-        # sessions) used to full-save() every hydrated row as a validation
-        # probe, and every save() resets a key's TTL to this ceiling — so the
-        # clock was reset on every worker start, every /update, and every
-        # hourly agent-session-cleanup tick, forever. AgentSession.refresh_ttl()
-        # now holds it there deliberately, via a targeted EXPIRE instead of an
-        # incidental full save. #2698 owns the decision to stop calling it and
-        # let the 30-day expiry actually activate.
+        # Retention policy: AgentSession rows live until explicitly deleted.
+        # The corruption sweep (agent/session_health.py::cleanup_corrupted_
+        # agent_sessions) calls AgentSession.refresh_ttl() on every healthy
+        # row it visits, a targeted EXPIRE that holds this ceiling in place,
+        # so the TTL only ever fires on a row the sweep cannot reach. The
+        # sweep runs on every worker start, every /update, and every hourly
+        # agent-session-cleanup tick. Deleting that call would activate a
+        # 30-day expiry with no archive backstop (restore_if_empty() only
+        # rehydrates on a cold start against an empty keyspace).
         #
         # Dropping this attribute does NOT clear TTLs already stamped on
         # existing keys — measured: a key retained its decaying TTL (595s)
@@ -655,13 +722,31 @@ class AgentSession(Model):
     # Matches the worktree-using stages in resolve_branch_for_stage().
     _ENG_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
-    # Per-pass count of identity-less (session_id-less) hashes the last
-    # repair_indexes() rebuild refused to re-add to the status index (issue
-    # #2101). This is a per-pass event count, NOT a cumulative keyspace gauge —
-    # a growing raw AgentSession:* hash count from an unfixed write source is a
-    # separate concern (see the plan's Risk 4). Optionally surfaced on the
-    # dashboard.
+    # De-duplicated count of identity-less (session_id-less) rows the last
+    # repair_indexes() pass quarantined, across every IndexedField and via
+    # either seam that can catch one -- popoto 1.9.0's divergence pre-check
+    # (the primary path; see the "A1 rebuild guard" docstring above the
+    # method) and the retained on_save shim (issue #2101, generalized
+    # #2207). A row seen through both seams counts once. This is a per-pass
+    # ROW count, NOT a cumulative keyspace gauge and NOT a per-field
+    # invocation count -- a growing raw AgentSession:* hash count from an
+    # unfixed write source is a separate concern (see the plan's Risk 4).
+    # Optionally surfaced on the dashboard.
     _last_quarantined_identityless: int = 0
+
+    # Latches the Sentry capture (not the log) on the decode-import degrade
+    # path in repair_indexes() to once per process. decode_popoto_model_hashmap
+    # is a popoto internal (popoto/models/encoding.py); if a future popoto
+    # moves or renames it, the identity filter on diverged keys can no longer
+    # import it and repair_indexes() degrades to the unfiltered
+    # len(diverged_keys) sum. That condition is permanent for the life of the
+    # process, and repair_indexes() runs on worker startup, the hourly
+    # agent-session-cleanup reflection (agent/session_health.py), and
+    # opportunistically from session pickup (agent/session_pickup.py) -- an
+    # unlatched capture would be an unthrottled fleet-wide error-level Sentry
+    # stream for as long as the condition lasts. logger.error stays
+    # unconditional on every degraded pass; only the Sentry call is latched.
+    _decode_degrade_reported: bool = False
 
     @property
     def worker_key(self) -> str:
@@ -760,6 +845,16 @@ class AgentSession(Model):
         This guards against Popoto's is_valid() coercion failure when a
         DatetimeField holds a non-datetime value (e.g. a descriptor object
         for sessions loaded from Redis before the field existed).
+
+        Keep: the ISO-string and float branches below are what close the
+        naive-write ingress for every `_DATETIME_FIELDS` member — they are
+        the reason the deletions in `_heal_future_updated_at` and
+        `_collect_sessions` are safe. This coercion fires only for names in
+        `_DATETIME_FIELDS` (never for `created_at`), and it never fires for a
+        constructor kwarg — `Model.__init__` does
+        `self.__dict__.update(kwargs)`, bypassing `__setattr__` entirely; a
+        `datetime` value passed as a kwarg reaches `_normalize_kwargs`
+        instead.
         """
         if name in self._DATETIME_FIELDS:
             if isinstance(value, int | float):
@@ -809,6 +904,15 @@ class AgentSession(Model):
         against Popoto's ``is_valid()`` silently aborting ``save()`` when a
         session loaded from Redis holds a stale or corrupt value in this field
         (issue #929).
+
+        Keep: this is the *only* ingress coercion that runs for a constructor
+        kwarg (``Model.__init__`` does ``self.__dict__.update(kwargs)``, so
+        ``__setattr__`` never fires), and it converts only ``int | float`` for
+        most fields (the ISO-string branch below is ``response_delivered_at``-
+        specific). ``created_at`` gets its own ``int | float`` conversion a few
+        lines down but no ISO-string or datetime handling at all — a naive
+        ``datetime`` passed as a constructor kwarg for any of these fields
+        passes through untouched.
         """
         # Extract fields that map to initial_telegram_message
         itm_fields = {}
@@ -836,32 +940,6 @@ class AgentSession(Model):
         if ec_fields and "extra_context" not in kwargs:
             kwargs["extra_context"] = ec_fields
 
-        # Map deprecated field names
-        if "work_item_slug" in kwargs and "slug" not in kwargs:
-            kwargs["slug"] = kwargs.pop("work_item_slug")
-        elif "work_item_slug" in kwargs:
-            kwargs.pop("work_item_slug")
-
-        if "last_activity" in kwargs and "updated_at" not in kwargs:
-            kwargs["updated_at"] = kwargs.pop("last_activity")
-        elif "last_activity" in kwargs:
-            kwargs.pop("last_activity")
-
-        if "scheduled_after" in kwargs and "scheduled_at" not in kwargs:
-            val = kwargs.pop("scheduled_after")
-            if isinstance(val, int | float):
-                kwargs["scheduled_at"] = datetime.fromtimestamp(val, tz=UTC)
-            else:
-                kwargs["scheduled_at"] = val
-        elif "scheduled_after" in kwargs:
-            kwargs.pop("scheduled_after")
-
-        # Map old field names to new ones  # legacy
-        if "parent_job_id" in kwargs and "parent_agent_session_id" not in kwargs:  # legacy
-            kwargs["parent_agent_session_id"] = kwargs.pop("parent_job_id")  # legacy
-        elif "parent_job_id" in kwargs:  # legacy
-            kwargs.pop("parent_job_id")  # legacy
-
         # Schema diet (#1927): watchdog_unhealthy -> unhealthy_reason back-alias.
         if "watchdog_unhealthy" in kwargs and "unhealthy_reason" not in kwargs:
             kwargs["unhealthy_reason"] = kwargs.pop("watchdog_unhealthy")
@@ -871,62 +949,11 @@ class AgentSession(Model):
         if "agent_session_id" in kwargs:
             kwargs.pop("agent_session_id")  # AutoKeyField, ignore
 
-        if "job_id" in kwargs:  # legacy
-            kwargs.pop("job_id")  # legacy
-
-        # Map old history to session_events
-        if "history" in kwargs and "session_events" not in kwargs:
-            kwargs["session_events"] = kwargs.pop("history")
-        elif "history" in kwargs:
-            kwargs.pop("history")
-
-        # Convert stage_states to a session event
-        stage_states_val = kwargs.pop("stage_states", None)
-        if stage_states_val is not None and "session_events" not in kwargs:
-            if isinstance(stage_states_val, str):
-                try:
-                    stages_dict = _json.loads(stage_states_val)
-                except (ValueError, TypeError):
-                    stages_dict = None
-            elif isinstance(stage_states_val, dict):
-                stages_dict = stage_states_val
-            else:
-                stages_dict = None
-            if stages_dict:
-                event = SessionEvent.stage_change("bulk", "init", stages_dict)
-                kwargs["session_events"] = [event.model_dump()]
-
-        # Convert commit_sha to a session event
-        commit_sha_val = kwargs.pop("commit_sha", None)
-        if commit_sha_val is not None:
-            events = kwargs.get("session_events", []) or []
-            event = SessionEvent.checkpoint(commit_sha_val)
-            events.append(event.model_dump())
-            kwargs["session_events"] = events
-
-        # Convert summary to a session event
-        summary_val = kwargs.pop("summary", None)
-        if summary_val is not None:
-            events = kwargs.get("session_events", []) or []
-            event = SessionEvent.summary(summary_val)
-            events.append(event.model_dump())
-            kwargs["session_events"] = events
-
-        # Remove dead fields silently. Note: fields removed by the schema
-        # diet (#1927 -- see scripts/migrate_schema_diet_fields.py's
-        # module docstring for the exact deleted-field list) do NOT need an
-        # entry here: Popoto's Model.__init__ silently drops any kwarg that
-        # doesn't match a declared field (verified empirically and matching
-        # the #1924 PTY-teardown precedent, which added no pop-list entries
-        # either), so an archive-restore payload carrying an old dead-field
-        # key never raises.
-        for dead in (
-            "depends_on",
-            "stable_agent_session_id",
-            "scheduling_depth",
-            "_qa_mode_legacy",
-        ):
-            kwargs.pop(dead, None)
+        # No pop-list for fields deleted by past schema changes (#2873, #1927,
+        # #1924). Popoto's Model.__init__ does ``self.__dict__.update(kwargs)``
+        # (popoto/models/base.py), so an unknown key lands harmlessly in the
+        # instance dict and never raises; encoding iterates ``_meta.fields``
+        # only, so it is never persisted and disappears on the next save.
 
         # Ensure created_at has a default (SortedField is not nullable)
         if "created_at" not in kwargs:
@@ -1019,7 +1046,7 @@ class AgentSession(Model):
 
         Popoto auto_now mints naive local time (bug #1645); instead we stamp
         explicitly so the stored value is always UTC wall-clock, consistent
-        with how created_at/started_at are handled (see bridge/utc.py::utc_now).
+        with how created_at/started_at are handled (see utils/utc.py::utc_now).
 
         update_fields guard: if update_fields omits 'updated_at', skip the stamp
         entirely (no in-memory mutation without a matching persist, to avoid
@@ -1037,7 +1064,7 @@ class AgentSession(Model):
         the combination is a caller smell — a WARNING names the caller and no
         exception is raised (fail-quiet, matching every other guard here).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         if preserve_updated_at:
             if update_fields is not None and "updated_at" not in update_fields:
@@ -1069,9 +1096,10 @@ class AgentSession(Model):
     def refresh_ttl(self) -> bool:
         """Hold this row's ``Meta.ttl`` at the ceiling without writing any field.
 
-        #2698 placeholder. The corruption sweep used to do this incidentally,
-        as a side effect of its save() probe, so ``Meta.ttl`` has never fired.
-        Deleting this call activates a 30-day expiry on every session row.
+        The retention policy is that session rows live until explicitly
+        deleted. The corruption sweep calls this once per healthy row, so
+        ``Meta.ttl`` acts only as a backstop for rows the sweep cannot reach.
+        Deleting the call site activates a 30-day expiry on every session row.
 
         Uses ``self.db_key.redis_key``, never ``self._redis_key``: the latter
         is ``None`` on query-hydrated rows (``Model.__init__`` only populates
@@ -1116,7 +1144,7 @@ class AgentSession(Model):
         Returns the number of future-dated records detected (NOT healed —
         nothing is mutated or re-saved).
         """
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         now = utc_now()
         count = 0
@@ -1131,11 +1159,11 @@ class AgentSession(Model):
                 if record.updated_at is None:
                     continue  # None is safe — save() will stamp on next write
 
-                # Popoto strips tzinfo on load — treat naive datetimes as UTC
-                # (consistent with bridge/utc.py::to_unix_ts).
+                # popoto 1.9.0 decodes `updated_at` aware (it is in
+                # `_DATETIME_FIELDS`, so every `__setattr__` assignment
+                # coerces it); this is a pure popoto read, so no naive-tzinfo
+                # guard is needed here.
                 updated_at_utc = record.updated_at
-                if updated_at_utc.tzinfo is None:
-                    updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
 
                 if updated_at_utc <= now:
                     continue  # already sane, skip
@@ -1232,6 +1260,52 @@ class AgentSession(Model):
                 agent_session_id,
             )
         return results[0]
+
+    @staticmethod
+    def _newest_first_key(row: "AgentSession") -> tuple[float, str]:
+        """Sort key placing the newest row last: ``(created_at epoch, id)``.
+
+        ``created_at`` is compared as a UTC epoch so naive and aware values
+        order together; a missing or unparseable ``created_at`` sorts oldest.
+        ``id`` breaks exact ties deterministically, so two rows minted in the
+        same instant resolve the same way on every call.
+        """
+        from utils.utc import to_unix_ts
+
+        try:
+            ts = to_unix_ts(getattr(row, "created_at", None))
+        except Exception:  # noqa: BLE001 — an unreadable stamp sorts oldest
+            ts = None
+        return (ts if ts is not None else float("-inf"), str(getattr(row, "id", "") or ""))
+
+    @classmethod
+    def rows_for_session_id(cls, session_id: str, **filters) -> list["AgentSession"]:
+        """Every row sharing ``session_id``, newest first.
+
+        ``session_id`` is a plain ``Field()``; the primary key is the
+        ``AutoKeyField`` ``id``. Two ``ensure`` calls for one logical session
+        therefore produce two rows with one ``session_id``, and SDLC lanes
+        make that deterministic (``sdlc-local-{issue}``). Popoto resolves the
+        filter via ``SMEMBERS`` on the class set, so the raw result order is a
+        Redis set's order. This method is the single place that order is
+        fixed: newest ``created_at`` first, ``id`` as the tie-break (see
+        :meth:`_newest_first_key`). Extra ``filters`` narrow the query
+        (``status="pending"``) before ordering.
+
+        Callers that need one row use :meth:`newest_for_session_id`; callers
+        with domain preferences (an eng-typed row first) iterate this list
+        and fall back to ``[0]``, which is then the newest rather than a
+        coin flip.
+        """
+        rows = list(cls.query.filter(session_id=session_id, **filters))
+        rows.sort(key=cls._newest_first_key, reverse=True)
+        return rows
+
+    @classmethod
+    def newest_for_session_id(cls, session_id: str, **filters) -> "AgentSession | None":
+        """The newest row for ``session_id`` (see :meth:`rows_for_session_id`), or None."""
+        rows = cls.rows_for_session_id(session_id, **filters)
+        return rows[0] if rows else None
 
     @property
     def live_fence(self) -> dict | None:
@@ -1553,11 +1627,6 @@ class AgentSession(Model):
         elif "chat_title" in itm:
             del itm["chat_title"]
         self.initial_telegram_message = itm
-
-    @property
-    def sender(self) -> str | None:
-        """Alias for sender_name (SessionLog used 'sender')."""
-        return self.sender_name
 
     @property
     def revival_context(self) -> str | None:
@@ -1994,13 +2063,6 @@ class AgentSession(Model):
             )
             return None
 
-    def get_parent_chat_session(self) -> "AgentSession | None":
-        """Backward-compat wrapper for get_parent_session().
-
-        Deprecated: Use get_parent_session() instead.
-        """
-        return self.get_parent_session()
-
     def get_child_sessions(self) -> list["AgentSession"]:
         """Return all child sessions linked via parent_agent_session_id."""
         try:
@@ -2008,13 +2070,6 @@ class AgentSession(Model):
         except Exception as e:
             logger.warning(f"Failed to query child sessions for {self.id}: {e}")
             return []
-
-    def get_dev_sessions(self) -> list["AgentSession"]:
-        """Backward-compat wrapper for get_child_sessions().
-
-        Deprecated: Use get_child_sessions() instead.
-        """
-        return self.get_child_sessions()
 
     # === Chat message log helpers (issue #1192) ===
 
@@ -2053,10 +2108,9 @@ class AgentSession(Model):
         }
         try:
             # Re-fetch the freshest version to minimize lost-update window.
-            # query.filter(session_id=...) is correct — session_id is a regular Field(),
-            # not the AutoKeyField. query.get() requires the AutoKey (id field).
-            rows = list(AgentSession.query.filter(session_id=self.session_id))
-            fresh = rows[0] if rows else None
+            # session_id is a regular Field(), not the AutoKeyField, so this is
+            # a newest-wins lookup rather than a query.get().
+            fresh = AgentSession.newest_for_session_id(self.session_id)
             if fresh is None:
                 # Session vanished — fall back to self to avoid losing the entry.
                 fresh = self
@@ -2150,34 +2204,6 @@ class AgentSession(Model):
 
     # === Event log helpers ===
 
-    def get_history_list(self) -> list:
-        """Get session_events as a list of formatted strings (backward compat)."""
-        events = self.session_events
-        if not isinstance(events, list):
-            return []
-        result = []
-        for event in events:
-            if isinstance(event, dict):
-                etype = event.get("event_type", "system")
-                text = event.get("text", "")
-                result.append(f"[{etype}] {text}")
-            elif isinstance(event, str):
-                result.append(event)
-        return result
-
-    # Keep private alias for internal callers
-    _get_history_list = get_history_list
-
-    @property
-    def history(self) -> list | None:
-        """Backward-compatible alias for session_events."""
-        return self.session_events
-
-    @history.setter
-    def history(self, value) -> None:
-        """Backward-compatible setter for session_events."""
-        self.session_events = value
-
     def append_event(self, event_type: str, text: str, data: dict | None = None) -> None:
         """Append a structured event to session_events.
 
@@ -2266,6 +2292,9 @@ class AgentSession(Model):
         now = datetime.now(tz=UTC)
 
         # Calculate duration from session start
+        # Keep: `created_at` (SortedField) sits outside `_DATETIME_FIELDS`, so
+        # `__setattr__` never coerces it, and a constructor kwarg or an
+        # archive-restore `fromisoformat()` value can land here naive.
         prev_time = self.started_at or self.created_at
         if prev_time is not None:
             if isinstance(prev_time, datetime):
@@ -2408,31 +2437,49 @@ class AgentSession(Model):
         to repopulate the class set, KeyField, and SortedField indexes from
         actual hashes.
 
-        A1 rebuild guard (issue #2101, generalized #2207): popoto's
-        rebuild_indexes() scan_iters every ``AgentSession:*`` hash and runs
-        ``field.on_save`` for EVERY field in a generic loop
-        (base.py:2849-2856). Because every ``IndexedField`` decodes SOME
-        value off an identity-less / near-empty hash (no ``session_id`` —
-        e.g. ``status`` defaults to ``"pending"``), any such phantom hash
-        gets re-SADDed into that field's ``$IndexF:AgentSession:<field>:<value>``
-        set on every rebuild — the phantom re-inflation leak. This applies
-        to ALL current IndexedFields (``status``, ``task_type``,
-        ``claude_session_uuid``), not just ``status``.
-        ``query.filter(...)`` then drops these via
+        A1 rebuild guard (issue #2101, generalized #2207, re-based on row
+        identity by #3199): historically popoto's rebuild_indexes() scan_iterd
+        every ``AgentSession:*`` hash and ran ``field.on_save`` for EVERY
+        field in a generic loop, unconditionally. Because every
+        ``IndexedField`` decodes SOME value off an identity-less /
+        near-empty hash (no ``session_id`` — e.g. ``status`` defaults to
+        ``"pending"``), any such phantom hash got re-SADDed into that
+        field's ``$IndexF:AgentSession:<field>:<value>`` set on every
+        rebuild — the phantom re-inflation leak. This applied to ALL
+        IndexedFields (``status``, ``task_type``, ``claude_session_uuid``),
+        not just ``status``. ``query.filter(...)`` then drops these via
         ``_filter_hydrated_sessions`` (no ``session_id``), so the ORM count
         stays 0 while ``scard`` climbs.
 
-        To stop it WITHOUT reimplementing popoto's rebuild loop, we install a
-        transient shim on EVERY IndexedField's ``on_save`` (enumerated at
-        runtime from ``cls._meta.fields`` via ``isinstance(f, IndexedField)``
-        — no hardcoded field-name list, so a future 5th IndexedField is
+        Under popoto >= 1.9.0, the PRIMARY seam that now catches this is
+        upstream: ``rebuild_indexes()`` added a divergence pre-check that
+        compares each scanned row's stored Redis key against the key
+        re-derived from its decoded values, and skips (into
+        ``RebuildIndexesResult.diverged_keys``) any row whose keys disagree
+        — an identity-less row can never derive back to its stored key, so
+        it is always skipped there, *before* reaching ``field.on_save``.
+        The leak is still prevented; what changed is which seam catches it.
+
+        To count what THIS seam catches WITHOUT reimplementing popoto's
+        rebuild loop, each diverged key is re-decoded and identity-tested
+        with the same ``_filter_hydrated_sessions`` check (see "Technical
+        Approach" in the #3199 plan). A retained transient shim on EVERY
+        IndexedField's ``on_save`` (enumerated at runtime from
+        ``cls._meta.fields`` via ``isinstance(f, IndexedField)`` — no
+        hardcoded field-name list, so a future 5th IndexedField is
         automatically covered) for the DURATION of the ``rebuild_indexes()``
-        call only. Each shim skips the SADD for identity-less records
-        (rejected by ``_filter_hydrated_sessions``) and delegates every
-        healthy record to popoto's original ``on_save``. This is scoped to
-        the rebuild path only: normal live ``AgentSession(...).save()`` stays
-        unguarded so a legitimate brand-new session is still indexed (the
-        inverse-bug guard).
+        call only remains the SECOND defence: ``session_id`` is a plain
+        ``Field``, not a ``KeyField``, so it is invisible to the divergence
+        pre-check — an identity-less row whose KEY FIELDS are well-formed
+        (the ordinary partially-written shape, not an edge case) derives
+        back to its own stored key, sails past the pre-check, and still
+        needs skipping here. Each shim skips the SADD for identity-less
+        records (rejected by
+        ``_filter_hydrated_sessions``) and delegates every healthy record to
+        popoto's original ``on_save``. This is scoped to the rebuild path
+        only: normal live ``AgentSession(...).save()`` stays unguarded so a
+        legitimate brand-new session is still indexed (the inverse-bug
+        guard). A row caught by both seams in the same pass counts once.
 
         Install-inside-try invariant: all per-field shims are installed
         INSIDE the ``try`` block (not before it), so that if installing a
@@ -2465,15 +2512,16 @@ class AgentSession(Model):
 
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions
-            indexed during rebuild. The identity-less quarantine count (summed
-            across all IndexedFields) is exposed separately via
-            ``cls._last_quarantined_identityless`` + a WARNING log (the
-            2-tuple arity is preserved for existing unpackers).
+            indexed during rebuild. The identity-less quarantine count
+            (de-duplicated rows, across all IndexedFields and both seams) is
+            exposed separately via ``cls._last_quarantined_identityless`` + a
+            WARNING log (the 2-tuple arity is preserved for existing
+            unpackers).
         """
         from popoto.models.query import POPOTO_REDIS_DB
 
         from agent.session_health import _filter_hydrated_sessions
-        from config.popoto_floor import assert_popoto_floor
+        from config.popoto_floor import assert_popoto_floor, installed_popoto_version
 
         # Ordering constraint (issue #2536): this MUST precede the $IndexF scan
         # below, which DELETES index keys at the end of its loop -- teardown the
@@ -2518,7 +2566,10 @@ class AgentSession(Model):
             # Enumerate every IndexedField at runtime -- no hardcoded list,
             # so a future new IndexedField is automatically covered.
             indexed_fields = [f for _, f in cls._meta.fields.items() if isinstance(f, IndexedField)]
-            quarantined = [0]
+            # Row-scoped, not event-scoped (#3199): a set of Redis keys, so a
+            # row seen through both the on_save shim and popoto's divergence
+            # pre-check counts once, not twice.
+            quarantined_keys: set[str] = set()
 
             def _make_identityless_skip_shim(field, orig_on_save):
                 # A classmethod is a non-data descriptor, so an instance
@@ -2534,7 +2585,15 @@ class AgentSession(Model):
                     # session_id). _filter_hydrated_sessions is the
                     # canonical identity check -- reuse it exactly.
                     if not _filter_hydrated_sessions([model_instance]):
-                        quarantined[0] += 1
+                        row_key = getattr(model_instance, "_redis_key", None)
+                        if not row_key:
+                            try:
+                                row_key = model_instance.db_key.redis_key
+                            except Exception:
+                                row_key = None
+                        # An unkeyable row is still counted once, via a
+                        # synthetic token unique to this shim invocation.
+                        quarantined_keys.add(row_key or f"__unkeyable__:{id(model_instance)}")
                         logger.debug(
                             "[repair_indexes] skipped %s-index re-add for identity-less hash",
                             field_name or field,
@@ -2562,7 +2621,11 @@ class AgentSession(Model):
                         )
                     orig = f.on_save  # bound classmethod, captured fresh per field, inside the loop
                     f.on_save = _make_identityless_skip_shim(f, orig)
-                rebuilt_count = cls.rebuild_indexes()
+                # result carries .diverged_keys under popoto >= 1.9.0
+                # (RebuildIndexesResult, an int subclass); rebuilt_count stays
+                # a plain int so the returned 2-tuple is byte-identical.
+                result = cls.rebuild_indexes()
+                rebuilt_count = int(result)
             finally:
                 # Restore driven from the FULL enumerated field list, not
                 # "fields observed installed" -- each pop is a safe no-op
@@ -2572,12 +2635,126 @@ class AgentSession(Model):
         finally:
             lock.release()
 
-        cls._last_quarantined_identityless = quarantined[0]
-        if quarantined[0] > 0:
+        # Fold in the divergence seam (primary path under popoto >= 1.9.0):
+        # popoto's rebuild_indexes() skips a row into .diverged_keys BEFORE
+        # reaching field.on_save whenever the row's stored key disagrees
+        # with the key re-derived from its decoded values -- which an
+        # identity-less row always does, so under 1.9.0 this seam, not the
+        # shim above, carries the phantom-hash traffic. A getattr guard
+        # (not isinstance) so a future popoto that returns a plain int
+        # degrades gracefully to the shim-only count instead of raising.
+        diverged_keys = getattr(result, "diverged_keys", ()) or ()
+        if diverged_keys:
+            try:
+                from popoto.models.encoding import decode_popoto_model_hashmap
+            except ImportError:
+                # decode_popoto_model_hashmap is a popoto internal
+                # (popoto/models/encoding.py, not exported from
+                # popoto/__init__.py). If it moves, degrade to the
+                # unfiltered sum -- exactly the counting rule issue comment
+                # 5563793165 directs, just coarser than the identity-filtered
+                # count below. Report loudly (logger.error unconditionally;
+                # Sentry latched to once per process -- see the
+                # _decode_degrade_reported class attribute's docstring).
+                # config/popoto_floor.py is deliberately NOT extended with
+                # this probe: it fails open by policy, and repair_indexes()
+                # runs on worker startup and an hourly reflection, where a
+                # false positive would block index repair fleet-wide.
+                quarantined_keys.update(diverged_keys)
+                logger.error(
+                    "[repair_indexes] decode_popoto_model_hashmap is not importable from "
+                    "popoto.models.encoding (installed popoto %s) -- the identity filter on "
+                    "diverged keys is disabled; degrading to the unfiltered diverged-key count "
+                    "(%d row(s)). A diverged-but-healthy row (e.g. a datetime-key-"
+                    "canonicalization mismatch) may now be miscounted as identity-less.",
+                    installed_popoto_version() or "unknown",
+                    len(diverged_keys),
+                )
+                if not cls._decode_degrade_reported:
+                    cls._decode_degrade_reported = True
+                    try:
+                        import sentry_sdk
+
+                        sentry_sdk.capture_message(
+                            "[repair_indexes] decode_popoto_model_hashmap import failed -- "
+                            "quarantine count degraded to the unfiltered diverged-key sum",
+                            level="error",
+                        )
+                    except Exception:
+                        # Sentry capture must never crash the caller -- the
+                        # ERROR log above is already the loud signal of
+                        # record even if Sentry is unreachable.
+                        logger.warning(
+                            "[repair_indexes] Sentry capture_message failed", exc_info=True
+                        )
+            else:
+                # One HGETALL per diverged key, no pipeline batching: this
+                # is the raw-Redis exception #3 for this method (alongside
+                # the $IndexF scan and the plain counter key below) -- a
+                # diverged row is unindexed and identity-less by
+                # construction, so AgentSession.query.filter(...) cannot
+                # reach it; this is the only way to observe it at all. It is
+                # non-mutating and bypasses no on_save/on_delete hook.
+                # Diverged keys are 0 in a healthy keyspace and a non-empty
+                # list is itself a loud popoto WARNING, so this loop's input
+                # is bounded by a broken-deploy signal, not steady state.
+                # NOTE (#3199 review nit): measured 0.175 ms/key serial here,
+                # 14.8x slower than pipelined batching -- seconds, not hours,
+                # at current AgentSession scale. Left un-pipelined on purpose:
+                # the plan's Risk 2 dropped the pipelining mandate for this
+                # loop as out-of-appetite (a settled round-1 critique
+                # resolution); the WARNING above is the documented trigger to
+                # revisit if a real keyspace ever produces a large diverged
+                # list.
+                for key in diverged_keys:
+                    try:
+                        raw_hash = POPOTO_REDIS_DB.hgetall(key)
+                    except Exception as read_err:
+                        # Could not even read the row -- treat as
+                        # identity-less rather than silently dropping it.
+                        quarantined_keys.add(key)
+                        logger.debug(
+                            "[repair_indexes] raw hash read failed for diverged key %s "
+                            "(counted as identity-less): %s",
+                            key,
+                            read_err,
+                        )
+                        continue
+                    if not raw_hash:
+                        # The row is GONE, not identity-less -- a vanished
+                        # row cannot be re-inflated into any index, so it is
+                        # not quarantine by this counter's own definition.
+                        # Matches the rule test_gone_hash_orphan_cleared_by_
+                        # wholekey_rebuild already asserts.
+                        logger.debug(
+                            "[repair_indexes] diverged key %s has no backing hash -- gone, "
+                            "not quarantined",
+                            key,
+                        )
+                        continue
+                    try:
+                        instance = decode_popoto_model_hashmap(cls, raw_hash, source_redis_key=key)
+                    except Exception as decode_err:
+                        # A decode that raises is certainly not a hydrated
+                        # session -- treat as identity-less.
+                        quarantined_keys.add(key)
+                        logger.debug(
+                            "[repair_indexes] decode failed for diverged key %s "
+                            "(counted as identity-less): %s",
+                            key,
+                            decode_err,
+                        )
+                        continue
+                    if instance is None or not _filter_hydrated_sessions([instance]):
+                        quarantined_keys.add(key)
+
+        cls._last_quarantined_identityless = len(quarantined_keys)
+        if quarantined_keys:
             logger.warning(
-                "[repair_indexes] quarantined %d identity-less AgentSession hash re-add(s) "
-                "across %d IndexedField(s) (no session_id)",
-                quarantined[0],
+                "[repair_indexes] quarantined %d identity-less AgentSession row(s) this pass "
+                "(popoto's divergence pre-check plus the retained on_save shim, across %d "
+                "IndexedField(s), de-duplicated; no session_id)",
+                len(quarantined_keys),
                 len(indexed_fields),
             )
 
@@ -2590,7 +2767,7 @@ class AgentSession(Model):
         try:
             POPOTO_REDIS_DB.set(
                 _LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY,
-                quarantined[0],
+                len(quarantined_keys),
                 ex=_LAST_QUARANTINED_IDENTITYLESS_TTL_SECONDS,
             )
         except Exception as persist_err:
@@ -2613,8 +2790,10 @@ class AgentSession(Model):
             if started is None:
                 continue
             # Handle both datetime and float timestamps (migration period).
-            # to_unix_ts treats naive datetimes as UTC (Popoto strips tzinfo).
-            from bridge.utc import to_unix_ts
+            # to_unix_ts treats a naive datetime as UTC; that guard is for a
+            # constructor kwarg or archive-restore value on created_at, which
+            # has no __setattr__ coercion, not for a popoto read.
+            from utils.utc import to_unix_ts
 
             ts = to_unix_ts(started)
             if ts is None:

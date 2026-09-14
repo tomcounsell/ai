@@ -21,10 +21,22 @@ block `/update`.
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
 _STATE_FILENAME = "update_warn_state.json"
+
+# scripts/update/ -> repo root, the same idiom as run.py and verify.py.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# The bare stdout spelling of the suppression trailer's leading token
+# (#2845). `run.py`'s `log()` prepends "[update] " before writing to
+# data/update.txt, so that sink carries this constant offset by those five
+# bytes — `bridge/update.py` matches the bare form because it reads
+# stdout-derived `status_lines`. Shared by both sides so the producer and
+# consumer can never spell it differently (the drift that produced Defect 2).
+SUPPRESSED_PREFIX = "suppressed (unchanged since first warning):"
 
 
 def _state_path(project_dir: Path) -> Path:
@@ -38,7 +50,36 @@ def _load(project_dir: Path) -> dict:
         return {}
 
 
+# Read-only mode (issue #2898). When set, this module computes and returns its
+# verdicts exactly as normal but persists nothing.
+#
+# `should_emit` writes the signature the instant it returns True, which under a
+# read-only `--verify` run silently consumed the one emission the next
+# unattended cron cycle would have made: an operator's diagnostic run left the
+# durable record in logs/update.log silent about a machine that was still
+# broken.
+#
+# The switch lives on the writer rather than on each of the six `should_emit`
+# call sites deliberately. A per-call-site `persist=` argument is a checklist
+# that the next call site added has to remember to join; a gate inside `_save`
+# is honored by every present and future writer in this module for free.
+_READ_ONLY = False
+
+
+def set_read_only(value: bool) -> None:
+    """Suppress all state persistence in this module.
+
+    Called once by the `--verify` entry point. Verdicts are unaffected, so
+    `--verify` still reports accurately -- it just stops mutating the
+    suppression state that the scheduled runs depend on.
+    """
+    global _READ_ONLY
+    _READ_ONLY = value
+
+
 def _save(project_dir: Path, state: dict) -> None:
+    if _READ_ONLY:
+        return
     try:
         path = _state_path(project_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,3 +118,42 @@ def should_emit(key: str, signature: str, project_dir: Path) -> bool:
         state.pop(key, None)
     _save(project_dir, state)
     return True
+
+
+def active(project_dir: Path = PROJECT_ROOT) -> dict[str, str]:
+    """Return the currently-suppressed key -> signature map, fail-soft.
+
+    Enumerates whatever `_load` returns, including keys this module's
+    callers never wired explicitly (e.g. `calendar-config`, wired bespoke at
+    its own call site) — the retrieval surface for Risk 4: a suppressed
+    condition must stay discoverable by an operator who missed the one
+    emission. Fails soft to `{}`, matching `_load`'s own contract.
+    """
+    return _load(project_dir)
+
+
+def _main() -> int:
+    """`python -m scripts.update.warn_state` — the retrieval surface's CLI.
+
+    Prints which state file it read FIRST, because every failure mode of
+    this surface is silent: `_load`'s fail-soft `{}` on OSError means a
+    `_main()` that resolved the wrong root would otherwise print an empty
+    map and exit 0, indistinguishable from a machine with nothing
+    suppressed.
+    """
+    parser = argparse.ArgumentParser(description="Show currently-suppressed /update warnings.")
+    parser.add_argument("--project-dir", type=Path, default=PROJECT_ROOT)
+    args = parser.parse_args()
+
+    print(f"state: {_state_path(args.project_dir)}")
+    state = active(args.project_dir)
+    if not state:
+        print("(nothing suppressed)")
+        return 0
+    for key, signature in sorted(state.items()):
+        print(f"{key}: {signature}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

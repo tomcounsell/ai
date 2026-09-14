@@ -74,7 +74,10 @@ deck.md
   |     Extract one narration string per slide (document order).
   |     Empty string for un-narrated slides.
   |
-  |-- Marp PNG export (npx @marp-team/marp-cli --images png)
+  |-- Marp PNG export (npx @marp-team/marp-cli --images png --html)
+  |     --html enables raw HTML tags; every Yudame House slide archetype is
+  |     built from <div>/<span> markup, so this is passed explicitly rather
+  |     than relied on as a CLI default.
   |     One PNG per slide; zero-padded sequence filenames (deck.001.png ...).
   |     Sorted numerically by parsed sequence number (not lexicographically).
   |     Parity assertion: len(pngs) == total_slide_count == len(narration_blocks).
@@ -177,7 +180,7 @@ OK -> /path/to/deck.mp4
 
 - `tools/deck_video/__init__.py` — compositor: narration parser, Marp export, synthesis loop, ffmpeg compositing, `build_deck_video()` entrypoint
 - `tools/deck_video/cli.py` — `valor-deck-video` entry point
-- `.claude/skills-global/do-presentation/SKILL.md` — skill definition, `--video` mode, narration schema, version history
+- `.claude/skills-global/do-presentation/SKILL.md` — skill definition, `--video` mode, narration schema
 - `tests/unit/test_deck_video.py` — unit tests (narration parser, per-slide synthesis, error handling)
 - `tests/integration/test_deck_video_e2e.py` — E2E test (2-slide fixture deck, real ffmpeg + valor-tts, playable MP4 assertion)
 - `docs/features/tts.md` — `valor-tts` reference (dual backend, voice catalog, duration field)

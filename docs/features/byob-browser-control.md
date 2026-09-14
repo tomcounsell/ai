@@ -1,13 +1,10 @@
 # BYOB Browser Control (Real Chrome, Logged-In)
 
-**Issue:** [#1256](https://github.com/tomcounsell/ai/issues/1256)
-**Plan:** [`docs/plans/byob_and_computer_use.md`](../plans/byob_and_computer_use.md)
-
 ## What it is
 
 BYOB (Bring Your Own Browser) is a Chrome extension + native messaging host + MCP server stack that lets the agent read and act on the user's already-logged-in Chrome session via MCP tools (`mcp__byob__browser_navigate`, `mcp__byob__browser_click`, `mcp__byob__browser_screenshot`, etc.) -- no `state.json` files in the repo, no per-session re-auth, no headless-fingerprint detection.
 
-It is the **only** browser surface in this repo. The legacy `agent-browser` and `bowser` skills, plus the `bowser` subagent, were retired in #1256. Public pages and authenticated dashboards both go through BYOB.
+It is the **only** browser surface in this repo. Public pages and authenticated dashboards both go through BYOB.
 
 Communication chain:
 
@@ -41,17 +38,17 @@ Never rely on the active-tab default. Reach for `list_tabs → match → explici
 
 CLI users set the flag explicitly: `valor-session create --needs-real-chrome ...`.
 
-## Scheduler-layer serialization (Decision 2)
+## Scheduler-layer serialization
 
 Real Chrome has **one** DOM tree. Two BYOB MCP clients driving it concurrently corrupt active-tab state. Mitigation lives at the worker scheduler layer, not as a file lock:
 
-- New nullable Popoto field on AgentSession: `requires_real_chrome: bool` (default `False`).
+- Nullable Popoto field on AgentSession: `requires_real_chrome: bool` (default `False`).
 - The worker session-pick loop in `agent/session_pickup.py` checks the flag before starting a candidate. If any currently-running session has `requires_real_chrome=True`, the new candidate is deferred until the running one finishes -- it stays `pending`, the next pop cycle retries.
 - Two surfaces set the flag at session creation time:
   - `valor-session create --needs-real-chrome ...` (operator-driven)
-  - The plan's machinery for inferring it from the session message (left for downstream wiring; the explicit-creation path is enough)
+  - Inference from the session message (not wired; the explicit-creation path is the active surface)
 
-No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- there is exactly one queue, regardless of which surface initiated the request. Per memory `feedback_field_backcompat_heal` (#1099, #1172): nullable Popoto field needs no migration code; Popoto default-fills absent fields at lazy-load (see [`popoto-descriptor-pollution-ledger.md`](popoto-descriptor-pollution-ledger.md), #2083).
+No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- there is exactly one queue, regardless of which surface initiated the request. A nullable Popoto field needs no migration code; Popoto default-fills absent fields at lazy-load (see [`popoto-descriptor-pollution-ledger.md`](popoto-descriptor-pollution-ledger.md)).
 
 ## Files
 
@@ -60,10 +57,10 @@ No `flock(2)`. No per-process collision guard. No "MCP-vs-CLI precedence" -- the
 | `scripts/update/mcp_byob.py` | Idempotent registrar that writes `mcpServers.byob` into `~/.claude.json` under `fcntl.flock(LOCK_EX|LOCK_NB)` on `~/.claude.json.lock`. Modeled directly on `mcp_memory.py`. |
 | `config/byob_pin.json` | Pinned BYOB upstream commit. Bump only via `/update --bump-byob`. |
 | `config/bcu_pin.json` | Pinned bcu release tag (used by the computer-use sibling feature). |
-| `models/agent_session.py` | New `requires_real_chrome` Field. |
-| `agent/session_pickup.py` | New `_real_chrome_slot_busy()` helper + the pickup-loop gate (both async and sync-fallback paths). |
-| `agent/agent_session_queue.py` | `_push_agent_session(...)` now accepts `requires_real_chrome`. |
-| `tools/valor_session.py` | New `--needs-real-chrome` flag on `valor-session create`. |
+| `models/agent_session.py` | `requires_real_chrome` Field. |
+| `agent/session_pickup.py` | `_real_chrome_slot_busy()` helper + the pickup-loop gate (both async and sync-fallback paths). |
+| `agent/agent_session_queue.py` | `_push_agent_session(...)` accepts `requires_real_chrome`. |
+| `tools/valor_session.py` | `--needs-real-chrome` flag on `valor-session create`. |
 | `ui/app.py` + `ui/data/sdlc.py` | Field surfaced in `/dashboard.json` so operators can see why a real-Chrome session is being deferred. |
 
 ## ~/.claude.json `mcpServers.byob` shape
@@ -110,7 +107,7 @@ When `config/byob_pin.json` changes, `/update --full` rebuilds the BYOB workspac
 
 ## Setup gotchas (BYOB v0.3+)
 
-These are the realities of BYOB's actual on-disk layout. Verified during PR #1277 live setup; documented here so future operators don't waste time on the same drift.
+These are the realities of BYOB's actual on-disk layout.
 
 | What you might assume | What's actually true |
 |---|---|
@@ -127,4 +124,3 @@ These are the realities of BYOB's actual on-disk layout. Verified during PR #127
 
 - [Computer Use](computer-use.md) -- sibling feature for native macOS desktop automation via bcu
 - [Agent Session Queue](agent-session-queue.md) -- pickup-loop architecture
-- [Issue #1256](https://github.com/tomcounsell/ai/issues/1256) -- BYOB adoption + retirement of legacy `agent-browser`/`bowser` surfaces

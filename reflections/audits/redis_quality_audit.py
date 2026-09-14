@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger("reflections.maintenance")
@@ -56,10 +56,11 @@ async def run() -> dict:
         if dead_chats:
             findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
             for chat in dead_chats[:5]:
-                _ua = chat.updated_at
-                if isinstance(_ua, datetime):
-                    _ua = _ua.timestamp() if _ua.tzinfo else _ua.replace(tzinfo=UTC).timestamp()
-                days_inactive = int((_time.time() - (_ua or 0)) / 86400)
+                # Dead code removed: Chat.updated_at is SortedField(type=float)
+                # (models/chat.py:23), never a datetime — line 55 above already
+                # compares it against the float month_ago, so this branch was
+                # unreachable by construction.
+                days_inactive = int((_time.time() - (chat.updated_at or 0)) / 86400)
                 findings.append(
                     f"  Inactive: {chat.chat_name} ({days_inactive} days, type={chat.chat_type})"
                 )

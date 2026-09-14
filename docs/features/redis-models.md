@@ -68,25 +68,25 @@ This bidirectional link enables:
 
 ### Fallback Path
 
-For sessions created before the migration (no `telegram_message_key`), the session worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for backward compatibility with pre-existing records.
+For sessions without a `telegram_message_key`, the session worker falls back to reading enrichment fields directly from AgentSession. These fields are retained on AgentSession for compatibility with pre-existing records.
 
 ## project_key
 
-All models carry a `project_key` field for direct project association. This replaces the implicit `chat_id -> project` lookup that previously required loading `~/Desktop/Valor/projects.json` at query time.
+All models carry a `project_key` field for direct project association. This makes the project association explicit on each record rather than derived from `chat_id`.
 
 Models with project_key:
-- **AgentSession** (existing)
-- **BridgeEvent** (existing)
-- **TelegramMessage** (added)
-- **Link** (added)
-- **DeadLetter** (added)
-- **Chat** (added)
-- **ReflectionRun** (added)
-- **Memory** (added — subconscious memory records, partitioned by project_key)
+- **AgentSession**
+- **BridgeEvent**
+- **TelegramMessage**
+- **Link**
+- **DeadLetter**
+- **Chat**
+- **ReflectionRun**
+- **Memory** — subconscious memory records, partitioned by project_key
 
 ## Field Ownership
 
-Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models for backward compatibility, but new code should always read from TelegramMessage via `telegram_message_key`.
+Message metadata (media, URLs, classification) is owned by **TelegramMessage**, not AgentSession. The fields exist on both models, but new code reads from TelegramMessage via `telegram_message_key`.
 
 | Field | Owner | Also On |
 |-------|-------|-------------------|
@@ -98,37 +98,17 @@ Message metadata (media, URLs, classification) is owned by **TelegramMessage**, 
 | classification_type | TelegramMessage | AgentSession |
 | classification_confidence | TelegramMessage | AgentSession |
 
-## Migration
-
-Run the one-time backfill script after deploying the code changes:
-
-```bash
-# Preview changes
-python scripts/migrate_model_relationships.py --dry-run
-
-# Run migration (last 90 days)
-python scripts/migrate_model_relationships.py
-
-# Custom time range
-python scripts/migrate_model_relationships.py --max-age 30
-```
-
-The script:
-1. Backfills `project_key` on all models using `chat_id -> project` mapping from `~/Desktop/Valor/projects.json`
-2. Copies enrichment metadata from AgentSession to TelegramMessage
-3. Sets `telegram_message_key` and `agent_session_id` cross-references
-
 ## Identity Fields
 
 | Field | Purpose | Notes |
 |-------|---------|-------|
-| `id` | AgentSession primary key (AutoKeyField) | `session.agent_session_id` backward-compat alias available |
+| `id` | AgentSession primary key (AutoKeyField) | `session.agent_session_id` alias available |
 | `session_id` | Telegram-derived session identifier | Format: `tg_{project}_{chat_id}_{msg_id}` |
-| `telegram_message_id` | Telegram message ID (integer) | Renamed from `message_id` for clarity |
-| `telegram_message_key` | Popoto key to TelegramMessage | Renamed from `trigger_message_id` for clarity |
+| `telegram_message_id` | Telegram message ID (integer) | |
+| `telegram_message_key` | Popoto key to TelegramMessage | |
 | `claude_session_uuid` | Claude Code transcript UUID | Used for continuation sessions |
 
-## Boolean Field Storage: Typed vs Untyped (issue #2439)
+## Boolean Field Storage: Typed vs Untyped
 
 Popoto boolean fields round-trip through Redis differently depending on whether the field
 declares `type=bool`:
@@ -141,36 +121,73 @@ declares `type=bool`:
   truthy), so a naive `bool(getattr(obj, "field", False))` read is silently wrong for the `False`
   case.
 
-This was confirmed live (8 `TelegramMessage` and 13 `AgentSession` records) while investigating
-#2439: `TelegramMessage.has_media` and the reflection-model fields `auto_delete_after_run` /
-`dead_letter_escalated` (`models/reflection.py`) are all **typed** and were correctly left
-untouched. `AgentSession.requires_real_chrome`, `AgentSession.user_facing_routed`, and
-`AgentSession.retain_for_resume` are **untyped** and were the real bugs — the dashboard displayed
-`requires_real_chrome: true` for sessions whose real stored value was the string `'False'`. Same
-mechanism produced a genuine logic-inversion in `tools/valor_session.py`'s `cmd_release`: it read
-`retain = getattr(s, "retain_for_resume", False)` and skipped non-matching records with
-`if not retain: continue`. Since a stored `'False'` string is truthy, `not retain` was always
-`False` for those records, so the `continue` never fired — sessions that should have been
-skipped (real value `False`) were incorrectly treated as retained instead.
+`TelegramMessage.has_media` and the reflection-model fields `auto_delete_after_run` /
+`dead_letter_escalated` (`models/reflection.py`) are all **typed**. `AgentSession.requires_real_chrome`,
+`AgentSession.user_facing_routed`, and `AgentSession.retain_for_resume` are **untyped**.
 
-**The fix is a read-path substitution, not a field-type migration.** Every untyped-field read
-site now goes through the canonical `_truthy()` helper (`agent/session_pickup.py`) instead of a
-bare `bool()` call: `ui/data/sdlc.py`, `ui/app.py` (`/dashboard.json` output), and the
-`cmd_release` fast-path in `tools/valor_session.py`. Converting the untyped fields themselves to
-`Field(type=bool)` was considered and rejected as a separate, larger, destructive change (existing
-Redis records already hold string values and would need a re-cast migration) — see the plan's
-No-Gos for the full rationale. `_truthy()` had previously drifted into an inline duplicate in
-`models/crash_signature.py`; that site now imports the canonical helper instead.
+Every untyped-field read site goes through the canonical `_truthy()` helper
+(`agent/session_pickup.py`) instead of a bare `bool()` call: `ui/data/sdlc.py`,
+`ui/app.py` (`/dashboard.json` output), and the `cmd_release` fast-path in
+`tools/valor_session.py`. `models/crash_signature.py` imports the canonical helper.
 
 **When adding a new boolean Popoto field:** always declare `Field(type=bool, ...)` so it
 round-trips as a real bool and needs no `_truthy()` wrapping at read sites. Only reach for
 `_truthy()` when reading an existing *untyped* boolean field you can't safely re-type.
 
+## The Schema Gate
+
+Every new model must record two decisions in its module docstring, and both are
+checkable: the **KeyField set** and the **index cardinality**.
+
+**The cardinality rule.** Never index a pid, a uuid, a timestamp, a digest, or a
+monotonic counter. `rebuild_indexes()` walks one Redis set per distinct value,
+so an index on an unbounded field turns a maintenance pass into a scan that
+grows without limit. An `IndexedField` earns its place only when its value space
+is small and named — `status` (active / at-rest), `verdict` (four values), a
+two-valued bool. A field you want to look records up by but whose values are
+unbounded stays a plain `Field`, and the lookup goes through a partitioned
+recency sort plus a filter in Python.
+
+**The TTL decision.** State in the docstring whether the model expires and why.
+`Meta.ttl` is declared at the Model level so popoto applies Redis EXPIRE on
+every save — never a runtime `r.expire()` call, which would violate the
+no-raw-Redis-on-Popoto-keys invariant. "Immortal" is a decision too, and lineage
+records (a verdict, an obligation, an authorization) generally are: a record
+that outlives nothing it is cited by makes the citation unresolvable.
+
+Worked examples of both, with the reasoning written out:
+`models/job.py`, `models/room.py`, and the eight `models/improvement_*.py`
+modules. `tests/unit/test_improvement_models.py` shows how to enforce the rule
+structurally rather than by trusting prose — every `IndexedField` must appear in
+a declared vocabulary, index defaults must fall inside their own vocabulary, and
+a field whose name marks it unbounded fails on sight.
+
+### The control-namespace exception
+
+The improvement controller (#3177) keeps its research state in a **non-Popoto**
+Redis namespace, `improve:{project_key}:{case_id}:*`, whose Lua transition
+script is the sole authority for state changes. Raw Redis there is correct and
+already precedented in this repo — `models/session_lifecycle.py` states the same
+exemption for its lock key and carries the working Lua CAS.
+
+Two rules make the exception safe rather than a loophole:
+
+- **The exemption is for keys popoto does not manage, and nothing else.** The
+  flat `Improvement*` Popoto records are ordinary models and every read and
+  write of them goes through the ORM.
+- **The raw-Redis guard is a text heuristic, not a namespace check.** It fires
+  when one command string contains both a Popoto-context substring and a block
+  pattern, so it will misfire on a plain `improve:*` key. The control journal
+  therefore binds its client under a private alias in its own module, never
+  `from popoto.redis_db import POPOTO_REDIS_DB as _R` in a file where an
+  operator would type a debug one-liner, and its compare-and-delete is exercised
+  through a pytest file rather than an inline `python -c`.
+
 ## Field Type Semantics: KeyField vs IndexedField
 
 Popoto field types have different implications for how records behave on mutation:
 
-- **KeyField**: Part of the Redis key. Changing a KeyField value changes the record's identity, creating a new record and orphaning the old one. Code that needs to change a KeyField value must use the **delete-and-recreate** pattern (delete old record, create new one with all fields copied).
+- **KeyField**: Part of the Redis key. Assigning a new value on an already-persisted row raises `KeyMutationError`. A genuine identity change goes through popoto's sanctioned `save(migrate_key=True)`, which deletes the old Redis key and moves the row in place; `models/knowledge_document.py::KnowledgeDocument.safe_upsert` is a worked example that also reconciles denormalized rows (`DocumentChunk`, `Memory`) carrying the same KeyField -- see [Knowledge Document Integration § Cross-Project Re-Keying](knowledge-document-integration.md#cross-project-re-keying). The delete-and-recreate pattern (delete old record, create new one with all fields copied) remains an alternative when there is no reconciliation to do.
 - **IndexedField**: Maintains a secondary index for `.filter()` queries but is NOT part of the Redis key. Mutating an IndexedField and calling `.save()` updates the record in place and correctly updates the secondary index. No delete-and-recreate needed.
 - **Field**: Plain data field with no indexing. Mutate and save freely.
 
@@ -183,6 +200,7 @@ Popoto field types have different implications for how records behave on mutatio
 | `project_key` | KeyField | No | Set once at creation |
 | `chat_id` | KeyField | No | Set once at creation |
 | `parent_agent_session_id` | KeyField | No | Canonical parent reference. Set once at creation (child sessions only). |
+| `slug` | KeyField | Once | Empty-only: `bridge/session_transcript.py::start_transcript` sets it when unset, otherwise logs a warning and skips the write (issue #3247) |
 | `role` | Field | No | Set once at creation ("pm", "dev", or null for legacy) |
 | `status` | IndexedField | Yes | Mutate and save directly; no delete-and-recreate |
 
@@ -194,23 +212,23 @@ All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)`:
 |-------|------|-------|
 | `created_at` | SortedField(type=datetime) | Partitioned by project_key |
 | `started_at` | DatetimeField(null=True) | Set when worker picks up session |
-| `updated_at` | DatetimeField(null=True) | Renamed from `last_activity`; stamped explicitly via `utc_now()` in `AgentSession.save()` override (see #1645 — `auto_now=True` minted naive-local time) |
+| `updated_at` | DatetimeField(null=True) | Stamped explicitly via `utc_now()` in `AgentSession.save()` override |
 | `completed_at` | DatetimeField(null=True) | Set on terminal status |
-| `scheduled_at` | DatetimeField(null=True) | Renamed from `scheduled_after` |
+| `scheduled_at` | DatetimeField(null=True) | |
 
-Timestamps are auto-converted to UTC-aware `datetime` via `AgentSession.__setattr__`: `int | float` values are treated as Unix timestamps; `str` values are parsed as ISO 8601 (falling back to `None` on failure); any other non-`datetime`, non-`None` type is reset to `None`. This guards against Popoto's `is_valid()` silently aborting `save()` when a field holds a corrupt value (see issue #929). Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info) for other models; `AgentSession` normalizes all datetime fields to UTC-aware on load.
+Timestamps are auto-converted to UTC-aware `datetime` via `AgentSession.__setattr__`: `int | float` values are treated as Unix timestamps; `str` values are parsed as ISO 8601 (falling back to `None` on failure); any other non-`datetime`, non-`None` type is reset to `None`. This guards against Popoto's `is_valid()` silently aborting `save()` when a field holds a corrupt value. Note: Popoto `DatetimeField` returns naive datetimes from Redis (no timezone info) for other models; `AgentSession` normalizes all datetime fields to UTC-aware on load.
 
 ### AgentSession Consolidated DictFields
 
-| Field | Contains | Replaces |
-|-------|----------|----------|
-| `initial_telegram_message` | `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title` | Six separate fields |
-| `extra_context` | `revival_context`, `classification_type`, `classification_confidence` | Three separate fields |
+| Field | Contains |
+|-------|----------|
+| `initial_telegram_message` | `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title` |
+| `extra_context` | `revival_context`, `classification_type`, `classification_confidence` |
 
-The `status` field was changed from KeyField to IndexedField (popoto >= 1.4.3) to eliminate the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed). This removed the primary source of duplicate session records in the dashboard.
+The `status` field is an IndexedField (popoto >= 1.4.3), which eliminates the delete-and-recreate overhead on every lifecycle transition (pending -> running -> active -> completed).
 
 ### Where Delete-and-Recreate Is Still Needed
 
-With `status` as an IndexedField, the delete-and-recreate pattern is no longer needed for status transitions. All status transitions (session pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
+With `status` as an IndexedField, all status transitions (session pickup, completion, failure, recovery, watchdog marking, nudge re-enqueue) use direct field mutation and `.save()`.
 
-The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in `clone_agent_session_fields` / `continuation_agent_session_fields`, which build the field payload when a record needs re-creating for a KeyField change. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` mutation by logging a warning and skipping the write if the value would change.
+The delete-and-recreate pattern remains in `agent/agent_session_queue.py` only in `clone_agent_session_fields` / `continuation_agent_session_fields`, which build the field payload when a record needs re-creating for a KeyField change. In practice, no current code path changes a KeyField value after creation -- the `bridge/session_transcript.py` module guards against `chat_id` and `slug` mutation on an already-hydrated `AgentSession` by logging a warning and skipping the write if the value would change. That skip is an interim measure (issue #3247); a genuine rename needs `save(migrate_key=True)`. `models/knowledge_document.py::KnowledgeDocument.safe_upsert` takes the other branch of the same hazard: a `project_key` divergence is a genuine re-key driven by `projects.json`, not an error, so it routes through `doc.save(migrate_key=True)` instead of skipping -- see [Knowledge Document Integration § Cross-Project Re-Keying](knowledge-document-integration.md#cross-project-re-keying).

@@ -1,12 +1,17 @@
-"""Unit tests for agent/sustainability.py.
+"""Unit tests for the self-healing reflection modules under reflections/agents/.
 
 Uses unittest.mock to avoid real Redis or circuit breaker connections.
 All tests are synchronous and fast.
 
-NOTE: sustainability.py imports are deferred (inside each function body), so we
-can safely patch sys.modules for the heavy dependencies that are not available
+NOTE: each reflection module defers its heavy imports (inside the function body),
+so we can safely patch sys.modules for the dependencies that are not available
 in a unit-test environment.  We do NOT pre-install stub packages at module level
 because that collides with the real `bridge` package imported by agent/__init__.py.
+
+Each module does `from reflections.redis_access import get_project_key, get_redis`,
+which binds those names into the consumer's own namespace -- so every patch target
+below is module-local (`reflections.agents.<module>.get_redis`), never the
+canonical `reflections.redis_access.get_redis`.
 """
 
 import os
@@ -98,9 +103,9 @@ class TestCircuitHealthGate(unittest.TestCase):
         r.exists.side_effect = [int(was_paused), int(was_hibernating)]
 
         with (
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch(
-                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+                "reflections.agents.circuit_health_gate.get_project_key", return_value="testproj"
             ),
             patch("reflections.agents.circuit_health_gate.send_hibernation_notification"),
             patch.dict(
@@ -142,9 +147,9 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch(
-                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+                "reflections.agents.circuit_health_gate.get_project_key", return_value="testproj"
             ),
             patch(
                 "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
@@ -179,9 +184,9 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch(
-                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+                "reflections.agents.circuit_health_gate.get_project_key", return_value="testproj"
             ),
             patch(
                 "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
@@ -210,7 +215,7 @@ class TestCircuitHealthGate(unittest.TestCase):
         from reflections.agents.circuit_health_gate import run as circuit_health_gate
 
         with patch(
-            "reflections.agents.circuit_health_gate._get_redis",
+            "reflections.agents.circuit_health_gate.get_redis",
             side_effect=RuntimeError("redis down"),
         ):
             circuit_health_gate()  # Should not raise
@@ -227,9 +232,9 @@ class TestCircuitHealthGate(unittest.TestCase):
         notif_mock = MagicMock()
 
         with (
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch(
-                "reflections.agents.circuit_health_gate._get_project_key", return_value="testproj"
+                "reflections.agents.circuit_health_gate.get_project_key", return_value="testproj"
             ),
             patch(
                 "reflections.agents.circuit_health_gate.send_hibernation_notification", notif_mock
@@ -284,9 +289,9 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch("reflections.agents.session_recovery_drip.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+                "reflections.agents.session_recovery_drip.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
@@ -323,9 +328,9 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch("reflections.agents.session_recovery_drip.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+                "reflections.agents.session_recovery_drip.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
@@ -351,9 +356,9 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch("reflections.agents.session_recovery_drip.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+                "reflections.agents.session_recovery_drip.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
@@ -373,9 +378,9 @@ class TestSessionRecoveryDrip(unittest.TestCase):
         r.exists.side_effect = [False, False]
 
         with (
-            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch("reflections.agents.session_recovery_drip.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+                "reflections.agents.session_recovery_drip.get_project_key", return_value="testproj"
             ),
             patch.object(lm, "transition_status") as mock_transition,
         ):
@@ -388,7 +393,7 @@ class TestSessionRecoveryDrip(unittest.TestCase):
         from reflections.agents.session_recovery_drip import run as session_recovery_drip
 
         with patch(
-            "reflections.agents.session_recovery_drip._get_redis",
+            "reflections.agents.session_recovery_drip.get_redis",
             side_effect=RuntimeError("redis down"),
         ):
             session_recovery_drip()  # Should not raise
@@ -419,9 +424,9 @@ class TestSessionRecoveryDrip(unittest.TestCase):
             return []
 
         with (
-            patch("reflections.agents.session_recovery_drip._get_redis", return_value=r),
+            patch("reflections.agents.session_recovery_drip.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_recovery_drip._get_project_key", return_value="testproj"
+                "reflections.agents.session_recovery_drip.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
             patch.object(lm, "transition_status") as mock_transition,
@@ -468,9 +473,9 @@ class TestSessionCountThrottle(unittest.TestCase):
         }
 
         with (
-            patch("reflections.agents.session_count_throttle._get_redis", return_value=r),
+            patch("reflections.agents.session_count_throttle.get_redis", return_value=r),
             patch(
-                "reflections.agents.session_count_throttle._get_project_key",
+                "reflections.agents.session_count_throttle.get_project_key",
                 return_value="testproj",
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
@@ -582,9 +587,9 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(3)]
 
         with (
-            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch("reflections.agents.failure_loop_detector.get_redis", return_value=r),
             patch(
-                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+                "reflections.agents.failure_loop_detector.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
@@ -616,9 +621,9 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(3)]
 
         with (
-            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch("reflections.agents.failure_loop_detector.get_redis", return_value=r),
             patch(
-                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+                "reflections.agents.failure_loop_detector.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
@@ -640,9 +645,9 @@ class TestFailureLoopDetector(unittest.TestCase):
         sessions = [self._make_failed_session("conn_timeout", f"s{i}") for i in range(2)]
 
         with (
-            patch("reflections.agents.failure_loop_detector._get_redis", return_value=r),
+            patch("reflections.agents.failure_loop_detector.get_redis", return_value=r),
             patch(
-                "reflections.agents.failure_loop_detector._get_project_key", return_value="testproj"
+                "reflections.agents.failure_loop_detector.get_project_key", return_value="testproj"
             ),
             patch.object(asm.AgentSession, "query", new_callable=MagicMock) as mock_query,
         ):
@@ -822,9 +827,9 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
         fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
 
         with (
-            patch("reflections.agents.system_health_digest._get_redis", return_value=r),
+            patch("reflections.agents.system_health_digest.get_redis", return_value=r),
             patch(
-                "reflections.agents.system_health_digest._get_project_key", return_value="testproj"
+                "reflections.agents.system_health_digest.get_project_key", return_value="testproj"
             ),
             patch.object(asm, "AgentSession", fake_session_cls),
             patch.dict(
@@ -882,9 +887,9 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
         fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
 
         with (
-            patch("reflections.agents.system_health_digest._get_redis", return_value=r),
+            patch("reflections.agents.system_health_digest.get_redis", return_value=r),
             patch(
-                "reflections.agents.system_health_digest._get_project_key", return_value="testproj"
+                "reflections.agents.system_health_digest.get_project_key", return_value="testproj"
             ),
             patch.object(asm, "AgentSession", fake_session_cls),
             patch.dict(
@@ -932,8 +937,8 @@ class TestCircuitHealthGateRegistered(unittest.TestCase):
 
 class TestSendHibernationNotificationPublishesNotify(unittest.TestCase):
     """send_hibernation_notification() publishes a session-notify AFTER save
-    (issue #2439) -- its one canonical definition lives in
-    reflections.agents.circuit_health_gate; agent.sustainability re-exports it.
+    (issue #2439) -- its one and only definition lives in
+    reflections.agents.circuit_health_gate.
     """
 
     def _run(self, event, *, publish_side_effect=None):
@@ -964,16 +969,6 @@ class TestSendHibernationNotificationPublishesNotify(unittest.TestCase):
 
         instance.save.assert_called_once()
         mock_publish.assert_called_once_with(instance)
-
-    def test_reexported_from_agent_sustainability_still_publishes(self):
-        """The agent.sustainability re-export resolves to the same function
-        object -- not a drifted second copy (#2439 dedup)."""
-        from agent.sustainability import send_hibernation_notification as reexported
-        from reflections.agents.circuit_health_gate import (
-            send_hibernation_notification as canonical,
-        )
-
-        assert reexported is canonical
 
     def test_publish_failure_does_not_raise(self):
         """A notify-publish failure must not fail the hibernation notification

@@ -65,11 +65,13 @@ _PRIME_SLASH_BY_ROLE = {
     "pm": "/roles:prime-pm-role",
     "dev": "/roles:prime-dev-role",
     "teammate": "/roles:prime-teammate-role",
+    "pm-codex": "/roles:prime-pm-codex-role",
 }
 _PRIME_FILE_BY_ROLE = {
     "pm": "prime-pm-role.md",
     "dev": "prime-dev-role.md",
     "teammate": "prime-teammate-role.md",
+    "pm-codex": "prime-pm-codex-role.md",
 }
 
 
@@ -192,6 +194,13 @@ class HeadlessRoleDriver:
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         on_init: Callable[[dict], None] | None = None,
+        # Codex dev lane (plan #2001, Phase 3): "codex" selects the Codex
+        # PM prime variant AND carries the session-local MCP config with
+        # the codex_dev tool. Any other value (including None) keeps the
+        # default Claude Agent(dev) lane byte-identical. HeadlessRoleDriver
+        # stays statically Claude — this never selects a top-level harness.
+        dev_harness: str | None = None,
+        mcp_config: dict | None = None,
     ) -> None:
         self.role = role
         self.session_id = session_id
@@ -206,6 +215,8 @@ class HeadlessRoleDriver:
         self.project_root = project_root
         self.turn_timeout_s = turn_timeout_s
         self.full_context_message = full_context_message
+        self.dev_harness = dev_harness
+        self.mcp_config = mcp_config
         self._harness_fn = harness_fn
         self._on_stdout_event = on_stdout_event
         # Spawn/exit callbacks (Race 2): on_spawn(pid) fires as soon as the
@@ -383,14 +394,23 @@ class HeadlessRoleDriver:
         Slash path (default): prepend the role's prime slash command to the
         first message. Append path: inject the prime command body via
         ``--append-system-prompt`` (system_prompt), leaving the message intact.
+
+        Codex dev lane (plan #2001): a pm-role driver with
+        ``dev_harness="codex"`` primes with the Codex variant
+        (``prime-pm-codex-role``), which teaches ``codex_dev_run`` instead of
+        ``Agent(dev)``. Final user/complete routing is unchanged (still
+        Claude schema-first). Every other role/harness keeps its prime.
         """
         if self._primed:
             return (message, None)
+        role = self.role
+        if role == "pm" and self.dev_harness == "codex":
+            role = "pm-codex"
         if self.prime_path == PRIME_PATH_SLASH:
-            slash = _slash_command_for(self.role)
+            slash = _slash_command_for(role)
             return (f"{slash} {message}" if message else slash, None)
         # append-system-prompt contingency path.
-        body = _read_prime_body(self.role, self.project_root)
+        body = _read_prime_body(role, self.project_root)
         return (message, body or None)
 
     def _dispatch_turn_event(self, event: TurnEvent) -> None:
@@ -467,6 +487,10 @@ class HeadlessRoleDriver:
                         # validation failure) demotes to the prefix-regex
                         # fallback.
                         json_schema=PM_TURN_JSON_SCHEMA,
+                        # Codex dev lane (plan #2001): session-local MCP
+                        # config carrying codex_dev, for flagged turns only.
+                        # None (unflagged) leaves the argv byte-identical.
+                        mcp_config=self.mcp_config,
                     ),
                     on_event=self._dispatch_turn_event,
                 ),

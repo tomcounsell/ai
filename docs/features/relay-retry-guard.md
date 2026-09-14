@@ -4,7 +4,7 @@ Bounded retry and dead-letter routing for the Telegram relay's outbox message pr
 
 ## Problem
 
-The relay in `bridge/telegram_relay.py` previously re-queued failed messages to the queue tail unconditionally. Messages that were structurally undeliverable (wrong type, missing fields, unrecognized format) would never succeed, creating an infinite retry loop that blocked session outbox queues and stalled agent sessions.
+Messages that are structurally undeliverable (wrong type, missing fields, unrecognized format) never succeed on retry. Unbounded re-queuing of such messages would create an infinite retry loop that blocks session outbox queues and stalls agent sessions.
 
 ## How It Works
 
@@ -35,11 +35,11 @@ Group and supergroup chat IDs are legitimately negative integers (e.g. `-1003900
 | Persist | `_dead_letter_message` | discarded, WARNING |
 | Replay | `replay_dead_letters` (`dead_letters.py`) | deleted on next bridge startup |
 
-The three send paths share one helper, `_deliverable_peer(chat_id, kind, message)`, which also separates the two drop reasons by log level: a local session id (`local-<uuid>`) is routine and logs at DEBUG, while a zero peer is the chatless-session placeholder leaking into an outbound payload and logs at WARNING. Before #2644 only the text/file path was guarded; the other two reached Telethon and raised (#2644).
+The three send paths share one helper, `_deliverable_peer(chat_id, kind, message)`, which also separates the two drop reasons by log level: a local session id (`local-<uuid>`) is routine and logs at DEBUG, while a zero peer is the chatless-session placeholder leaking into an outbound payload and logs at WARNING.
 
-All five derive the peer from `utils.peer.numeric_peer`, which is the single home for this parse across the source side too. It is deliberately stricter than a bare `int()` — it rejects `"+5"`, `5.9`, and `True` — so re-deriving the check locally makes the relay and the source side disagree about the same payload. That is not hypothetical: while the replay side parsed locally, `int("+5")` was 5, so a stored record with `chat_id="+5"` was replayed to peer 5 while every send path dropped it. Only legacy rows can carry such forms now that the persist side rejects them on the way in, and replay is exactly where they surface.
+All five derive the peer from `utils.peer.numeric_peer`, which is the single home for this parse across the source side too. It is deliberately stricter than a bare `int()` — it rejects `"+5"`, `5.9`, and `True` — so re-deriving the check locally makes the relay and the source side disagree about the same payload. That is not hypothetical: a bare `int("+5")` yields 5 while `numeric_peer` rejects it, so re-deriving the check locally would make the relay and the source side disagree about the same payload. Legacy rows can still carry such forms, and replay is exactly where they surface.
 
-Two sites keep their own log wording while sharing the parse: `_dead_letter_message` (it discards a stored record rather than dropping a send, and logs only the chat_id rather than the whole payload) and `replay_dead_letters` (its message is about discarding a stored record on startup). In the replay guard, unparseable and zero collapse into one branch — `numeric_peer` returns `None` for the former, which the old `except -> 0` was already folding into the latter.
+Two sites keep their own log wording while sharing the parse: `_dead_letter_message` (it discards a stored record rather than dropping a send, and logs only the chat_id rather than the whole payload) and `replay_dead_letters` (its message is about discarding a stored record on startup). In the replay guard, unparseable and zero collapse into one branch — `numeric_peer` returns `None` for the former, which folds into the latter.
 
 The persist and replay guards must stay in lockstep — narrowing only one side is a no-op, because a negative-chat_id record persisted by the relay side will be deleted by the replay side on the next bridge startup.
 
@@ -93,4 +93,4 @@ All three message type paths (reaction, custom_emoji_message, default text) use 
 
 ## See Also
 
-- [Bridge Worker Architecture](bridge-worker-architecture.md) — full detail on the four relay defects patched in issue #1749: file-send idempotency, oversized-text guard for file+text messages, group/supergroup-safe dead-letter (lockstep guards), and send-path FloodWait handling.
+- [Bridge Worker Architecture](bridge-worker-architecture.md) — file-send idempotency, oversized-text guard for file+text messages, group/supergroup-safe dead-letter (lockstep guards), and send-path FloodWait handling.

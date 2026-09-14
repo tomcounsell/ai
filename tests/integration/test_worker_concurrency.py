@@ -8,6 +8,12 @@ Validates:
 5. Dev sessions with slug from different chat_ids run concurrently (chat-keyed workers)
 
 All tests use redis_test_db fixture (autouse=True in conftest.py) for Redis isolation.
+
+The concurrency ceiling lives in `agent.session_state._slot_registry`, and that is
+the only module these tests may set it through. `agent.agent_session_queue` binds
+the name at import time, so assigning through the hub rebinds a copy the runtime
+never reads: the ceiling is silently never installed and the test passes without
+testing anything.
 """
 
 import asyncio
@@ -16,7 +22,7 @@ from unittest.mock import patch
 
 import pytest
 
-import agent.agent_session_queue as _queue
+import agent.session_state as _ss
 from agent.agent_session_queue import (
     _active_workers,
     _ensure_worker,
@@ -56,7 +62,7 @@ class TestPopLockContention:
         This simulates the TOCTOU race scenario: a second worker calling
         _pop_agent_session for the same chat_id while the first is mid-transition.
         """
-        from agent.agent_session_queue import _acquire_pop_lock, _release_pop_lock
+        from agent.session_pickup import _acquire_pop_lock, _release_pop_lock
 
         chat_id = "test-contention-chat"
         _create_test_session(chat_id=chat_id, session_id="session-contention-1")
@@ -78,7 +84,7 @@ class TestPopLockContention:
     @pytest.mark.asyncio
     async def test_pop_succeeds_after_lock_released(self):
         """_pop_agent_session succeeds once the lock is released."""
-        from agent.agent_session_queue import _acquire_pop_lock, _release_pop_lock
+        from agent.session_pickup import _acquire_pop_lock, _release_pop_lock
 
         chat_id = "test-contention-after-release"
         _create_test_session(chat_id=chat_id, session_id="session-after-release-1")
@@ -126,8 +132,6 @@ class TestGlobalSemaphore:
         _execute_agent_session with a controlled delay. Verifies the global
         semaphore caps peak concurrent executions.
         """
-        import agent.session_state as _ss
-
         max_sessions = 2
         original_semaphore = _ss._slot_registry
 
@@ -187,7 +191,6 @@ class TestGlobalSemaphore:
         from popoto.redis_db import POPOTO_REDIS_DB
 
         import agent.session_health as _sh
-        import agent.session_state as _ss
 
         original = _ss._slot_registry
         try:
@@ -223,9 +226,9 @@ class TestGlobalSemaphore:
         This is the backward-compatible mode before the worker initializes
         the semaphore (e.g., in tests that don't call _run_worker).
         """
-        original_semaphore = _queue._slot_registry
+        original_semaphore = _ss._slot_registry
         try:
-            _queue._slot_registry = None
+            _ss._slot_registry = None
             # Just verify the pop path doesn't crash when semaphore is None
             chat_id = "test-semaphore-none"
             _create_test_session(chat_id=chat_id, session_id="sess-no-sem")
@@ -233,7 +236,7 @@ class TestGlobalSemaphore:
             assert result is not None
             assert result.status == "running"
         finally:
-            _queue._slot_registry = original_semaphore
+            _ss._slot_registry = original_semaphore
 
 
 class TestPerChatSerialization:
@@ -280,9 +283,11 @@ class TestPerChatSerialization:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._slot_registry
+        original_semaphore = _ss._slot_registry
         try:
-            _queue._slot_registry = SlotLeaseRegistry(3)  # Global ceiling
+            # Headroom, not an assertion: this test's subject is per-chat serialization,
+            # so the ceiling is deliberately set above what the test can reach.
+            _ss._slot_registry = SlotLeaseRegistry(3)  # Global ceiling
 
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 _ensure_worker(chat_id)
@@ -297,11 +302,13 @@ class TestPerChatSerialization:
                 f"Expected 3 sessions to execute, got {len(execution_order)}: {execution_order}"
             )
         finally:
-            _queue._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             task = _active_workers.pop(chat_id, None)
             if task:
                 task.cancel()
             _starting_workers.discard(chat_id)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_global_ceiling_across_multiple_chat_ids(self):
@@ -310,13 +317,7 @@ class TestPerChatSerialization:
         Post-#1029 default is MAX_CONCURRENT_SESSIONS=8. We enqueue 12 sessions
         across distinct chat_ids with a faster-than-ceiling arrival rate and
         verify the semaphore caps peak concurrency at 8.
-
-        The runtime reads the semaphore from agent.session_state, not from
-        agent.agent_session_queue's import-time alias — so the test patches
-        the canonical module.
         """
-        import agent.session_state as _ss
-
         max_sessions = 8
         chat_ids = [f"global-ceil-chat-{i}" for i in range(max_sessions + 4)]
 
@@ -362,12 +363,14 @@ class TestPerChatSerialization:
                 "hold time."
             )
         finally:
-            _ss._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for cid in chat_ids:
                 task = _active_workers.pop(cid, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(cid)
+            _ss._slot_registry = original_semaphore
 
 
 class TestPMProjectKeySerialization:
@@ -400,9 +403,11 @@ class TestPMProjectKeySerialization:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._slot_registry
+        original_semaphore = _ss._slot_registry
         try:
-            _queue._slot_registry = SlotLeaseRegistry(5)
+            # Headroom, not an assertion: this test's subject is project-keyed serialization,
+            # so the ceiling is deliberately set above what the test can reach.
+            _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Both PM sessions should route to the same project-keyed worker
                 _ensure_worker(project_key, is_project_keyed=True)
@@ -413,11 +418,13 @@ class TestPMProjectKeySerialization:
                 "Project-keyed serialization is broken."
             )
         finally:
-            _queue._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             task = _active_workers.pop(project_key, None)
             if task:
                 task.cancel()
             _starting_workers.discard(project_key)
+            _ss._slot_registry = original_semaphore
 
 
 class TestDevWorktreeParallelism:
@@ -454,9 +461,11 @@ class TestDevWorktreeParallelism:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._slot_registry
+        original_semaphore = _ss._slot_registry
         try:
-            _queue._slot_registry = SlotLeaseRegistry(5)
+            # Headroom, not an assertion: this test's subject is worktree parallelism,
+            # so the ceiling is deliberately set above what the test can reach.
+            _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker.
                 # Stagger starts so Worker A can pop its session before Worker B
@@ -472,12 +481,14 @@ class TestDevWorktreeParallelism:
                 "Slugged dev sessions should run in parallel."
             )
         finally:
-            _queue._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(sl)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_two_slugged_dev_sessions_same_chat_id_execute_concurrently(self):
@@ -514,9 +525,11 @@ class TestDevWorktreeParallelism:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._slot_registry
+        original_semaphore = _ss._slot_registry
         try:
-            _queue._slot_registry = SlotLeaseRegistry(5)
+            # Headroom, not an assertion: this test's subject is slug-keyed parallelism,
+            # so the ceiling is deliberately set above what the test can reach.
+            _ss._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker,
                 # regardless of shared chat_id.
@@ -531,12 +544,14 @@ class TestDevWorktreeParallelism:
                 "via slug-keyed workers (issue #1085)."
             )
         finally:
-            _queue._slot_registry = original_semaphore
+            # Cancel the in-flight workers before restoring the registry: a task
+            # still running could otherwise acquire against the restored value.
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:
                     task.cancel()
                 _starting_workers.discard(sl)
+            _ss._slot_registry = original_semaphore
 
     @pytest.mark.asyncio
     async def test_slug_keyed_pop_finds_session_by_slug(self):

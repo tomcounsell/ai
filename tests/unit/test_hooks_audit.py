@@ -369,7 +369,7 @@ class TestShimFailOpenSignal:
     """
 
     def _recent_ts(self) -> str:
-        from bridge.utc import utc_now
+        from utils.utc import utc_now
 
         return utc_now().strftime("%Y-%m-%d %H:%M:%S")
 

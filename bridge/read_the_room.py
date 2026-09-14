@@ -32,12 +32,8 @@ Public surface
 --------------
 * ``RoomVerdict`` -- the verdict dataclass returned to the call site.
 * ``read_the_room(draft_text, chat_id, session) -> RoomVerdict`` -- the
-  async entry point.
-* ``READ_THE_ROOM_ENABLED`` -- module-level env-var gate (default ``False``).
-  The master kill switch. When enabled, RTR runs for GROUP chats only; DMs are
-  always excluded (issue #2199). Default is off pending a group-chat canary; the
-  flip criterion is a low false-suppression rate observed in ``rtr.suppressed``
-  session_events against human reports of missed replies.
+  async entry point. Runs unconditionally for GROUP chats; DMs are always
+  excluded (issue #2199).
 * ``RTR_STALE_TRIGGER_SECONDS`` -- deterministic staleness floor (#2199).
 * ``RTR_SUPPRESS_EMOJI`` -- the reaction emoji emitted on suppress.
 """
@@ -109,21 +105,7 @@ PREVIEW_LENGTH = 200
 RTR_STALE_TRIGGER_SECONDS = int(os.environ.get("RTR_STALE_TRIGGER_SECONDS", "3600"))
 
 
-def _read_enabled() -> bool:
-    """Read ``READ_THE_ROOM_ENABLED`` env var fresh on each call.
-
-    Tests set this var via ``monkeypatch.setenv`` per-test; reading at
-    call time keeps the toggle live without a process restart.
-    """
-    return os.environ.get("READ_THE_ROOM_ENABLED", "false").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
-def _is_group_chat(chat_id: str | int | None) -> bool:
+def is_group_chat(chat_id: str | int | None) -> bool:
     """Return True when ``chat_id`` is a Telegram group/supergroup/channel.
 
     RTR only ever room-reads GROUP chats (issue #2199): a DM always deserves a
@@ -478,15 +460,19 @@ async def read_the_room(
     draft text on any non-send / non-trim verdict it cannot handle.
 
     Short-circuits (return ``send`` without calling Haiku, no event emitted):
-        * ``READ_THE_ROOM_ENABLED`` env var is falsey.
         * ``draft_text`` is empty / whitespace-only.
         * ``chat_id`` is ``None`` (no room to read).
         * ``chat_id`` is a DM (positive id) -- RTR only room-reads group chats
           (#2199); a DM always deserves a reply.
         * ``len(draft_text) < SHORT_OUTPUT_THRESHOLD`` -- aligns with the
           drafter's own bypass band so we don't pay RTR latency for short
-          messages the drafter already skipped.
-        * ``session.sdlc_slug`` is set -- emits a ``rtr.bypassed`` event.
+          messages the drafter already skipped. Note this check runs BEFORE
+          the SDLC bypass below, so a short SDLC ``delivery_text`` returns
+          here with ``reason="short_output"`` and never reaches (and never
+          emits) ``rtr.bypassed`` -- ``rtr.bypassed`` counts undercount real
+          SDLC bypasses whenever the composed message is short.
+        * ``session.is_sdlc`` is true -- emits a ``rtr.bypassed`` event
+          (``reason="sdlc_session"``).
         * Snapshot is empty -- nothing to compare against.
 
     Deterministic staleness (#2199): before the Haiku pass, if the triggering
@@ -514,23 +500,20 @@ async def read_the_room(
         text (when no anchor is available).
     """
     # ── Short-circuits ──
-    if not _read_enabled():
-        return RoomVerdict(action="send", reason="rtr_disabled")
-
     if not draft_text or not draft_text.strip():
         return RoomVerdict(action="send", reason="empty_draft")
 
     if chat_id is None:
         return RoomVerdict(action="send", reason="no_chat_id")
 
-    if not _is_group_chat(chat_id):
+    if not is_group_chat(chat_id):
         # DMs (and unclassifiable ids) always get a reply — never room-read.
         return RoomVerdict(action="send", reason="dm_excluded")
 
     if len(draft_text) < SHORT_OUTPUT_THRESHOLD:
         return RoomVerdict(action="send", reason="short_output")
 
-    if bool(session and getattr(session, "sdlc_slug", None)):
+    if bool(session and getattr(session, "is_sdlc", False)):
         _append_event(
             session,
             _make_event(

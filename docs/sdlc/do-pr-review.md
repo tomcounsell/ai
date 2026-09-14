@@ -69,9 +69,12 @@ inheritance, not a block: use the returned `run_id` and continue; only a foreign
 **Verification-table runner (§ 4.5):**
 
 ```bash
-python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t.malformed)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
-# A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it), not a
-# finding about the code. Write pipes in the table as `\|`. See #2570.
+python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
+# A row in `t.malformed` is a PLAN-AUTHORING error (an unescaped `|` split it, or a
+# pipe-block with rows but no Command column), not a finding about the code. Write
+# pipes in the table as `\|`. See #2570, #2836. A row in `t.skipped` is a non-check
+# table (a summary, a findings recap) -- named in the report but never counted toward
+# the exit code.
 ```
 
 **Plan-checkbox updater (post-review § 2.5).** Sync each rubric-judged criterion with:
@@ -242,23 +245,55 @@ expect:
 - The aggregate verdict is derived by `agent.sdlc_review_consensus.compute_consensus`
   with `rule="any-blocker-wins"` — any judge raising a blocker forces
   `CHANGES_REQUESTED`.
+- The parent passes `expected_judges=2` — the size of the mandatory declared
+  roster above, derived from the roster it just dispatched rather than from a
+  second hardcoded literal. Optional judges (the cross-vendor judge) are never
+  counted toward `expected_judges`: an optional judge that returns can only
+  raise `n` above the floor, and one that skips leaves the floor exactly where
+  it was. When fewer distinct judges report than `expected_judges`,
+  `compute_consensus` refuses `APPROVED` and returns `CHANGES REQUESTED` with
+  `quorum_shortfall: true` in the consensus metadata — a degraded single-judge
+  run is recorded as a shortfall, never read back as agreement. The aggregate
+  `## Review:` comment must state the shortfall explicitly rather than posting
+  a bare `CHANGES REQUESTED`.
 - The OUTCOME block includes `judges_run` (int) and `consensus_disagreement` (bool)
-  side-fields when multi-judge runs.
+  side-fields when multi-judge runs. On a `quorum_shortfall`, the artifacts
+  instead carry `judges_run` and `quorum_shortfall: true`, and omit
+  `consensus_disagreement` — that field derives from `tied`, which is only
+  meaningful once the rule has run over a full roster, and the rule never ran
+  on a shortfall. The `notes` field names the degraded run in its first
+  clause (e.g. "1 of 2 judges reported").
+- The aggregate `## Review:` comment states the run's `REVIEW_MODE`. With the
+  declared roster dispatched that is `independent roster (2 judges)`; where the
+  Agent tool is unavailable it is
+  `sequential lenses (Agent tool unavailable: {reason})`, and the run is
+  recorded as a quorum shortfall rather than read back as agreement (#3198).
 - Cost containment: trivial PRs force the legacy single-judge path. A PR is
   trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
   docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
   `pyproject.toml` only). This is the only cost control on this surface, and
-  it needs no operator action.
+  it needs no operator action. This path never calls `compute_consensus` at
+  all — it posts one judge's verdict directly, with no `judges`/`consensus`
+  kwargs on `record_verdict` and no `judges_run` in its OUTCOME — so the
+  quorum floor above does not apply to it and needs no exemption.
 
 Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-consensus.md).
 
 ### In-turn-await + artifact-presence gate (WS-D, issue #2124)
 
+REVIEW runs **inline** in the dispatching context: `do-pr-review` carries no
+`context: fork` frontmatter, so the judges are the stage runner's own subagents.
+A forked review sat at the harness spawn-depth limit, was withheld the Agent
+tool, and silently collapsed this two-judge roster into one sequential reviewer
+(#3198). Judge dispatches pass `run_in_background: false` and no `name` — a named
+nested spawn is refused with a misleading "Teammates cannot spawn other
+teammates" error.
+
 The judge subagents run in the **foreground and are awaited in-turn**: the parent
 blocks on every judge returning IN THE SAME TURN before it aggregates, posts the
-`## Review:` comment, and records the verdict. A fork that exits with judges still in
-flight kills those children and posts nothing (the #2112 miss) — so this is a hard
-contract, not a latency preference.
+`## Review:` comment, and records the verdict. A parent that returns with judges
+still in flight kills those children and posts nothing (the #2112 miss) — so this
+is a hard contract, not a latency preference.
 
 The mechanical backstop lives in `tools/sdlc_stage_marker.py`: the REVIEW `completed`
 marker now requires **both** (a) a readable substrate verdict (WS3c / #2062,

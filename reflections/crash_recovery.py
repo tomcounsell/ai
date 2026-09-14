@@ -172,19 +172,15 @@ def run_crash_recovery() -> dict:
             "summary": f"crash-recovery query error: {e}",
         }
 
-    # Filter to recently-updated sessions.
-    # Popoto's DatetimeField round-trips values as NAIVE datetimes (tzinfo
-    # stripped on read), so normalize to UTC before comparing against the
-    # tz-aware cutoff — otherwise every comparison raises TypeError and the
-    # session is silently dropped, leaving the reflection a no-op.
+    # Filter to recently-updated sessions. `updated_at` is a pure popoto
+    # read (in `_DATETIME_FIELDS`, coerced aware by `__setattr__` on every
+    # assignment), so no naive-tzinfo guard is needed here.
     recent = []
     for s in all_resumable:
         try:
             updated = getattr(s, "updated_at", None)
             if updated is None:
                 continue
-            if getattr(updated, "tzinfo", None) is None:
-                updated = updated.replace(tzinfo=UTC)
             if updated > cutoff:
                 recent.append(s)
         except Exception as e:
@@ -415,16 +411,13 @@ def run_crash_recovery() -> dict:
                     continue
 
                 # Re-read status to prevent race with recovery mechanisms (#1537)
-                fresh_sessions = list(AgentSession.query.filter(session_id=session_id))
-                if not fresh_sessions:
+                fresh_session = AgentSession.newest_for_session_id(session_id)
+                if fresh_session is None:
                     logger.debug(
                         "crash_recovery: session %s disappeared before auto-resume",
                         session_id,
                     )
                     continue
-                # Pick newest by created_at if duplicates
-                fresh_sessions.sort(key=lambda s: getattr(s, "created_at", 0) or 0, reverse=True)
-                fresh_session = fresh_sessions[0]
 
                 if fresh_session.status not in RESUMABLE_STATUSES:
                     logger.debug(

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -25,6 +26,152 @@ from config.machine import get_machine_display_name
 from config.settings import settings
 
 _PROJECT_DIR = Path(__file__).parent.parent
+
+# The four legacy line-anchored warning prefixes the non-cron ``--verify``
+# path still emits (issue #1898's over-match analysis: line-anchored only,
+# never a bare substring — a git diffstat filename containing "error" must
+# not match).
+_LEGACY_WARNING_PREFIXES = ("[update] WARN", "WARNING:", "ERROR", "RESTART FAILED")
+
+# The rendered summary formats from run.py's `--cron` summary block.
+_WARNING_SUMMARY_RE = re.compile(r"^(?:updated to|up to date at)\s+\S+\s+\((\d+)\s+warnings?\)$")
+_FAILURE_SUMMARY_RE = re.compile(r"^update failed at\s+\S+")
+
+# Fix-session tail cap: raised from the historical 500 chars (#2845) to a few
+# thousand. A hard bound on the returned tail -- see _tail_with_elision.
+_FIX_SESSION_TAIL_CAP = 4000
+
+# Width reserved for `[... N characters elided ...]\n` so the marker is paid
+# for out of the cap instead of added on top of it.
+_ELISION_MARKER_RESERVE = 48
+
+
+def extract_update_warnings(status_lines: list[str]) -> list[str]:
+    """Parse every warning/error shape ``scripts/update/run.py`` can emit.
+
+    Recognises, in the order lines are encountered:
+
+    - ``  ⚠️ <text>`` bullets — the cron warning form (one per
+      ``result.warnings`` entry, rendered in run.py's summary block).
+    - The ``(N warnings)`` / ``(N warning)`` summary line
+      (``updated to <sha> (N warnings)`` / ``up to date at <sha> (N
+      warnings)``). Used only to cross-check the parsed ``⚠️`` bullet count —
+      never appended to the returned list itself.
+    - ``  - <text>`` bullets that follow an ``update failed at <sha>`` line —
+      the cron failure form. State-tracked: a bare ``  - `` line elsewhere in
+      the log (npm output, git diffstat) must not match.
+    - The four legacy prefixes in :data:`_LEGACY_WARNING_PREFIXES` — the
+      non-cron ``--verify`` path still emits these, verbatim, line-anchored.
+
+    On a mismatch between the summary's declared count and the number of
+    parsed ``⚠️`` bullets (only when a summary line was actually seen),
+    appends one synthetic entry naming the discrepancy — this is the named
+    channel for that condition (Technical Approach → Defect 2), not a second
+    return value or a logger call.
+
+    Every warning that reaches this parser has already had embedded
+    newlines collapsed by ``_append_warning``/``_append_error`` on the
+    producer side (``scripts/update/run.py``), so each entry here is
+    guaranteed to be exactly one physical line — this parser does not itself
+    accumulate continuation lines.
+    """
+    warnings: list[str] = []
+    warn_bullets: list[str] = []
+    in_failure_block = False
+    summary_count: int | None = None
+
+    for raw_line in status_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+
+        if stripped.startswith("⚠️"):
+            text = stripped[len("⚠️") :].strip()
+            warn_bullets.append(text)
+            warnings.append(text)
+            continue
+
+        match = _WARNING_SUMMARY_RE.match(stripped)
+        if match:
+            summary_count = int(match.group(1))
+            continue
+
+        if _FAILURE_SUMMARY_RE.match(stripped):
+            in_failure_block = True
+            continue
+
+        if in_failure_block and stripped.startswith("- "):
+            warnings.append(stripped[2:].strip())
+            continue
+
+        if stripped.startswith(_LEGACY_WARNING_PREFIXES):
+            warnings.append(stripped)
+            continue
+
+    if summary_count is not None and summary_count != len(warn_bullets):
+        warnings.append(
+            f"[update] WARN: summary declared {summary_count} warning(s) "
+            f"but {len(warn_bullets)} were parsed"
+        )
+
+    return warnings
+
+
+def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
+    """Combine stdout/stderr into one tail block, hard-bounded by ``cap``.
+
+    Two invariants, in priority order:
+
+    1. **For any ``cap >= _ELISION_MARKER_RESERVE``, the return is never
+       longer than ``cap``** — the elision marker is
+       paid for out of the budget, not added on top of it. The payload
+       becomes an AgentSession ``message_text`` and then a ``claude -p``
+       prompt, so an unbounded tail is a real cost.
+    2. **A cut is never silent.** Every truncated return leads with
+       ``[... N characters elided ...]`` and ``N`` is exact. A silent
+       character-index cut at a fixed, tiny size is what produced the
+       original truncation defect (#2845); a marked cut is recoverable,
+       because the reader can tell there is more and go get it.
+
+    The cut lands on a line boundary when one is affordable. It deliberately
+    does *not* when the leading partial line is itself oversized — a
+    multi-KB exception ``str()`` arrives as one physical line, because
+    ``_append_warning``/``_append_error`` collapse embedded newlines by
+    design, and discarding it to buy a clean boundary would throw away
+    nearly everything the budget just paid for. Invariant 2 still holds
+    there: the mid-word slice is announced and counted.
+    """
+    combined = f"stdout:\n{stdout or '(empty)'}\n\nstderr:\n{stderr or '(empty)'}"
+    if len(combined) <= cap:
+        return combined
+
+    # Reserve the marker's own width before spending the budget, so the
+    # returned string honours `cap` rather than exceeding it by the marker.
+    budget = max(cap - _ELISION_MARKER_RESERVE, 0)
+
+    # Take the last `budget` characters, then drop the leading partial line so
+    # the cut lands on a line boundary. When the tail is a single line wider
+    # than the whole budget there is no boundary to land on, and the hard
+    # slice stands: `_append_warning`/`_append_error` collapse embedded
+    # newlines by design, so a multi-KB exception `str()` legitimately arrives
+    # as one physical line. Slicing it beats both alternatives — dropping it
+    # loses the most diagnostic text in the payload, and keeping it whole
+    # makes `cap` a fiction for a string that becomes a `claude -p` prompt.
+    tail = combined[-budget:] if budget else ""
+    kept_text = tail
+    boundary = tail.find("\n")
+    if 0 <= boundary < len(tail) - 1:
+        trimmed = tail[boundary + 1 :]
+        # Only pay for the clean boundary when it is cheap. If the leading
+        # partial line IS the oversized one, trimming it throws away nearly
+        # everything the budget just bought, which is worse than a single
+        # mid-word cut the marker already announces.
+        if len(trimmed) * 2 >= len(tail):
+            kept_text = trimmed
+
+    elided_chars = len(combined) - len(kept_text)
+    return f"[... {elided_chars} characters elided ...]\n{kept_text}"
+
 
 # Bounded beacon poll (Race 1 mitigation, issue #1898 Decision 20): 15 x 2s
 # (30s), matching run.py's worker-heartbeat freshness poll.
@@ -109,18 +256,42 @@ def _get_running_sessions_info() -> tuple[int, list[str]]:
         return 0, []
 
 
-async def _queue_fix_session(event, machine: str, stdout: str, stderr: str, failed: bool) -> None:
-    """Queue an agent session to diagnose and fix update issues."""
+async def _queue_fix_session(
+    event, machine: str, stdout: str, stderr: str, warnings: list[str], *, failed: bool
+) -> None:
+    """Queue an agent session to diagnose and fix update issues.
+
+    The complete, un-truncated warning list leads the brief (issue #2845:
+    the historical fixed 500-character stdout/stderr slice cut the warning
+    list — the entire reason the session exists — mid-word). The raw
+    stdout/stderr tail follows under a much larger, line-boundary cap.
+    """
     try:
         from agent.agent_session_queue import enqueue_agent_session
 
         problem = "Update failed" if failed else "Update has warnings"
-        message = (
-            f"/update fix: {problem} on {machine}.\n"
-            f"stdout:\n{stdout[:500]}\n"
-            f"stderr:\n{stderr[:500]}\n\n"
-            "Diagnose and fix the issue. Use the /update skill."
-        )
+        warnings_block = "\n".join(f"  ⚠️ {w}" for w in warnings) if warnings else "  (none parsed)"
+
+        log_path = None
+        for line in (stdout or "").split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("<<FILE:") and stripped.endswith(">>"):
+                log_path = stripped[len("<<FILE:") : -len(">>")]
+
+        tail = _tail_with_elision(stdout, stderr, cap=_FIX_SESSION_TAIL_CAP)
+
+        message_lines = [
+            f"/update fix: {problem} on {machine}.",
+            "",
+            "Warnings:",
+            warnings_block,
+            "",
+            tail,
+        ]
+        if log_path:
+            message_lines.append(f"\nLog: {log_path}")
+        message_lines.append("\nDiagnose and fix the issue. Use the /update skill.")
+        message = "\n".join(message_lines)
         session_id = f"update_fix_{uuid.uuid4().hex[:8]}"
         await enqueue_agent_session(
             project_key="ai",
@@ -284,15 +455,40 @@ async def handle_update_command(tg_client, event):
 
         # If update had warnings or failed, queue agent session to fix.
         # ALL stdout lines are scanned (issue #1898), not only the first.
-        # Line-anchored markers only: a bare substring scan over-matches
-        # git-pull diffstat filenames containing "error"/"warning" (spurious
-        # fix sessions on green updates); the anchors below are exactly what
-        # remote-update.sh and the verify CLI emit.
-        _warning_prefixes = ("[update] WARN", "WARNING:", "ERROR", "RESTART FAILED")
-        has_warnings = any(line.strip().startswith(_warning_prefixes) for line in status_lines)
+        # extract_update_warnings recognises the cron summary formats
+        # (`(N warnings)` / `update failed at`) as well as the legacy
+        # line-anchored prefixes the non-cron `--verify` path still emits
+        # (#2845 — the cron summary previously matched nothing here).
+        warnings = extract_update_warnings(status_lines)
+        has_warnings = bool(warnings)
         if failed or has_warnings:
             status += " — spawning agent session to fix"
-            await _queue_fix_session(event, machine, stdout, stderr, failed)
+            await _queue_fix_session(event, machine, stdout, stderr, warnings, failed=failed)
+
+        # Suppression trailer forwarding (#2845, Task 5): the interactive
+        # path is the only one with a chat to push into, so a suppressed
+        # condition (warn_state) arrives unasked here even on an otherwise
+        # clean run. OUTSIDE the failed/has_warnings branch above — the
+        # modal suppressed case is a run where BOTH are False, and nesting
+        # inside that branch would make the trailer silently disappear on
+        # exactly the run this exists to cover. Match on SUPPRESSED_PREFIX
+        # imported from scripts.update.warn_state, never a locally-spelled
+        # literal — that drift is exactly what produced Defect 2.
+        try:
+            from scripts.update.warn_state import SUPPRESSED_PREFIX
+
+            suppressed_line = next(
+                (
+                    line.strip()
+                    for line in status_lines
+                    if line.strip().startswith(SUPPRESSED_PREFIX)
+                ),
+                None,
+            )
+            if suppressed_line:
+                status += f"\n{suppressed_line}"
+        except Exception as e:
+            logger.debug("[update] suppressed-trailer forwarding failed (non-fatal): %s", e)
 
         await tg_client.send_message(event.chat_id, f"{machine} - {status}")
     except subprocess.TimeoutExpired:

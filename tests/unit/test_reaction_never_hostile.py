@@ -143,7 +143,6 @@ class TestFindBestEmojiNeverHostile:
         }
         with (
             patch("tools.emoji_embedding._embedding_cache", fake_cache),
-            patch("tools.emoji_embedding._custom_embedding_cache", {}),
             patch.dict("os.environ", {"OPENROUTER_API_KEY": "test-key"}),
             patch(
                 "tools.emoji_embedding._compute_embedding",

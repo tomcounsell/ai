@@ -8,7 +8,20 @@ as Memory records via memory_bridge.ingest().
 After ingest, runs memory_bridge.prefetch() to surface up to 3 relevant
 <thought> blocks against the user's prompt before any tool fires. The
 result is emitted as a hookSpecificOutput JSON object on stdout, which
-Claude Code prepends to the agent's first system message.
+Claude Code appends to the *user turn* -- it arrives as a
+``hook_additional_context`` attachment parented to the user record, after
+all sealed history.
+
+That position is load-bearing and must not be "corrected" to the system
+prompt or any other pre-history location. Prompt caches are keyed on an
+exact token prefix, so appending at the tail costs only the injected
+tokens, while writing above the history invalidates everything behind it
+-- the whole context, on every turn that recall changes.
+
+This is the turn-granularity half of recall; ``post_tool_use.py`` carries
+the tool-granularity half. Both inject via the same
+``hookSpecificOutput.additionalContext`` channel, and both land at the
+tail, so both are append-only against the cache.
 
 All operations fail silently -- memory errors never block prompt submission.
 """
@@ -183,13 +196,12 @@ def main():
             agent_session_id = sidecar.get("agent_session_id")
             if agent_session_id:
                 # Subsequent prompt in same session -- re-activate
-                import time
 
                 from models.agent_session import AgentSession
 
                 try:
                     local_sid = f"local-{session_id}"
-                    matches = list(AgentSession.query.filter(session_id=local_sid))
+                    matches = AgentSession.rows_for_session_id(local_sid)
                     if matches:
                         agent_session = matches[0]
                         # Use lifecycle module for consistent transition logging
@@ -216,7 +228,6 @@ def main():
                                 current_status,
                             )
                         else:
-                            agent_session.updated_at = time.time()
                             agent_session.completed_at = None
                             transition_status(
                                 agent_session,
@@ -260,11 +271,9 @@ def main():
 
                         if attached is None and worker_bridge_session_id:
                             try:
-                                matches = list(
-                                    AgentSession.query.filter(session_id=worker_bridge_session_id)
+                                attached = AgentSession.newest_for_session_id(
+                                    worker_bridge_session_id
                                 )
-                                if matches:
-                                    attached = matches[0]
                             except Exception:
                                 attached = None
 

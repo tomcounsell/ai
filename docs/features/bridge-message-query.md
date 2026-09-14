@@ -1,58 +1,29 @@
-# Bridge Message Query Tool
+# Bridge Message Query
 
-**Status**: Consolidated into `valor-telegram` (issue #1163)
-**Created**: 2026-02-09
-**Implemented**: 2026-02-09
-**Consolidated**: 2026-04-24
+DM message-history queries go through `valor-telegram read`. The bridge-side IPC
+handler remains in `bridge/telegram_bridge.py` but is not invoked by any in-tree
+CLI.
 
----
-
-## Status Update
-
-The standalone DM-history CLI script has been **removed** as part of issue
-[#1163](https://github.com/tomcounsell/ai/issues/1163) — it duplicated the
-name-resolution surface of `valor-telegram` with a second identity space and
-was a known source of silent wrong-matches. The bridge-side IPC handler
-(`check_message_query_request` in `bridge/telegram_bridge.py`) remains in
-place for back-compat (see No-Gos in the consolidation plan) but is no longer
-invoked by any in-tree CLI.
-
-**Migration path**: use `valor-telegram read --user USERNAME` for all DM
-message-history queries. The `--user` flag forces resolution through the DM
-whitelist (`tools/telegram_users.resolve_username`) and reads from Redis /
-Telethon like any other `read` invocation, with the same ambiguity safety net
-and freshness header.
+## Usage
 
 ```bash
-# Before (removed)
-# scripts/<removed-cli> tom 10
-
-# After (current)
 valor-telegram read --user tom --limit 10
 ```
 
+The `--user` flag forces resolution through the DM whitelist
+(`tools/telegram_users.resolve_username`) and reads from Redis / Telethon like
+any other `read` invocation, with the same ambiguity safety net and freshness
+header.
+
 See [`docs/features/telegram-messaging.md`](telegram-messaging.md) for the
-canonical `valor-telegram` reference, including the new `--chat-id`, `--user`,
-and `--search` flags and the `AmbiguousChatError` disambiguation UX.
+canonical `valor-telegram` reference, including the `--chat-id`, `--user`, and
+`--search` flags and the `AmbiguousChatError` disambiguation UX.
 
-## Legacy Implementation (retained for bridge-IPC context)
+## Bridge IPC Handler
 
-The sections below describe the bridge-side IPC handler that still exists in
-`bridge/telegram_bridge.py` but is no longer actively exercised. This
-documentation is preserved so readers tracing IPC code in the bridge can find
-historical context.
-
-### Overview
-
-The Bridge Message Query Tool originally provided a command-line interface
-(now removed) to fetch Telegram message history from whitelisted users. It
-solved the problem of accessing Telegram messages when the Telegram session
-is exclusively held by the running bridge process.
-
-### How the Bridge IPC Works
-
-A lightweight file-based IPC system allows a CLI tool to request data from
-the bridge:
+The bridge retains a lightweight file-based IPC handler
+(`check_message_query_request` in `bridge/telegram_bridge.py`) that lets a CLI
+tool request data from the bridge:
 
 1. CLI writes request to `data/message_query_request.json`
 2. Bridge polls for requests every second
@@ -93,7 +64,7 @@ the bridge:
 }
 ```
 
-### Bridge Components (still in code)
+### Bridge Components
 
 **Bridge Handler** (`bridge/telegram_bridge.py::check_message_query_request()`):
 
@@ -113,7 +84,7 @@ the bridge:
 
 | File | Purpose |
 |------|---------|
-| `tools/telegram_users.py` | Username resolution and whitelist loading (still used by `valor-telegram`) |
-| `bridge/telegram_bridge.py` | Message query IPC handler and polling loop (retained, dormant) |
-| `data/message_query_request.json` | IPC request file (no longer written by any CLI) |
-| `data/message_query_result.json` | IPC result file (no longer written by any CLI) |
+| `tools/telegram_users.py` | Username resolution and whitelist loading (used by `valor-telegram`) |
+| `bridge/telegram_bridge.py` | Message query IPC handler and polling loop (dormant) |
+| `data/message_query_request.json` | IPC request file (not written by any in-tree CLI) |
+| `data/message_query_result.json` | IPC result file (not written by any in-tree CLI) |

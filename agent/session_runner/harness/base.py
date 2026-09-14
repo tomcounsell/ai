@@ -61,6 +61,13 @@ class TurnRequest:
     start_new_session: bool = False
     harness_cmd: list[str] | None = None
     json_schema: dict[str, Any] | None = None
+    # Per-session MCP server config (plan #2001, Phase 3): when set, the
+    # harness appends ``--mcp-config <json> --strict-mcp-config`` so ONLY
+    # these servers are visible to the turn. ``None`` (the default) omits
+    # the flags entirely — non-Codex callers are unaffected. Merges with
+    # (rather than duplicating) a belt-resolved ``--mcp-config`` when both
+    # are present.
+    mcp_config: dict[str, Any] | None = None
 
 
 @dataclass
@@ -83,6 +90,12 @@ class TurnResult:
     returncode: int | None = None
     result_event_fired: bool | None = None
     exit_reason: ExitReason | None = None
+    # Bounded, secret-scrubbed native failure detail (plan #2001, Phase 3):
+    # ``turn.failed`` / stream ``error`` / malformed-JSONL / nonzero-exit
+    # shapes from non-Claude harnesses that have no stream-json ``result``
+    # event to normalize into. ``None`` on success. Claude turns leave this
+    # unset — the exit-shape contract there is unchanged.
+    error_detail: str | None = None
 
 
 @runtime_checkable

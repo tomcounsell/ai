@@ -44,7 +44,7 @@ Evaluated in order; the first matching condition returns `"send"` immediately:
 
 1. **Empty draft** — `draft_text` is empty or whitespace-only.
 2. **No baseline** — `recent_sent_drafts` is `None` or empty (cannot be redundant).
-3. **Has expectations** — `MessageDraft.expectations` is non-empty (drafter detected
+3. **Has open questions** — `MessageDraft.open_questions` is non-empty (drafter detected
    a question for the human; this send is intentional).
 4. **Terminal status** — `session.status` is `"completed"`, `"failed"`, or `"blocked"`.
 5. **New artifact** — The new draft contains an artifact (PR URL, commit hash, error
@@ -122,7 +122,7 @@ contract:
 - `session_status=None` — intentionally bypasses the `_TERMINAL_STATUSES`
   exemption (which is correct for the in-session drafter but wrong for the
   completion runner, where dedupe IS desired even on terminal sessions).
-- `expectations=None` — Pass 2 of the runner returns plain text, not a
+- `open_questions=None` — Pass 2 of the runner returns plain text, not a
   `MessageDraft`.
 
 Baseline source is `chat_message_log` outbound entries (Path A + Path B
@@ -145,7 +145,7 @@ TelegramRelayOutputHandler.send
   │   → suppress? queue 👀 reaction and return
   │   → send?    fall through ↓
   │
-  ├─ [All sessions] RTR (bridge/read_the_room.py) — opt-in
+  ├─ [All sessions] RTR (bridge/read_the_room.py) — unconditional
   │   → suppress? queue 👀 reaction and return
   │   → trim?     swap delivery_text and fall through ↓
   │   → send?     fall through ↓
@@ -153,11 +153,10 @@ TelegramRelayOutputHandler.send
   └─ Telegram outbox rpush → record_recent_sent_draft
 ```
 
-RTR's SDLC-session bypass (`bridge/read_the_room.py:400`) is structurally
-present but currently a no-op (the `sdlc_slug` attribute it reads does not
-exist on `AgentSession`). The redundancy filter intentionally does not rely on
-that bypass — it scopes itself via `session.is_sdlc`, the real property at
-`models/agent_session.py:1612`.
+RTR's SDLC-session bypass (`bridge/read_the_room.py:533`) reads
+`session.is_sdlc`, the same real property at `models/agent_session.py:2271`
+the redundancy filter above scopes itself on. Both now depend on the actual
+model property rather than a phantom field.
 
 ## `recent_sent_drafts` field
 
@@ -183,6 +182,6 @@ successfully-sent drafts as dicts:
 | Test file | Coverage |
 |-----------|---------|
 | `tests/unit/test_redundancy_filter.py` | All 5 termination conditions, Jaccard threshold edges, error fallback, stale priors |
-| `tests/unit/test_output_handler.py::TestRedundancyFilterWiring` | SDLC suppress → reaction, non-SDLC bypass, draft recording, filter exception fallthrough |
+| `tests/unit/output_handler/test_output_handler_filters.py::TestRedundancyFilterWiring` | SDLC suppress → reaction, non-SDLC bypass, draft recording, filter exception fallthrough |
 | `tests/unit/test_agent_session.py::TestRecentSentDraftsField` | Field presence, FIFO cap, scoped save contract |
 | `tests/integration/test_message_drafter_integration.py` | 3-send regression scenario, artifact-termination integration |

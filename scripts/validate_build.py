@@ -22,7 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent.verification_parser import split_row_cells  # noqa: E402
+from agent.verification_parser import (  # noqa: E402
+    ParsedTable,
+    evaluate_expectation,
+    parse_verification_table,
+)
 
 
 def extract_section(plan_text: str, heading: str) -> str:
@@ -75,75 +79,6 @@ def parse_file_assertions(plan_text: str) -> list[dict[str, str]]:
             continue
 
     return assertions
-
-
-def parse_verification_table(plan_text: str) -> list[dict[str, str]]:
-    """Parse the ## Verification table for check commands.
-
-    Expected format:
-    | Check | Command | Expected |
-    |-------|---------|----------|
-    | name  | `cmd`   | result   |
-
-    Rows split on **unescaped** ``|`` only, with ``\\|`` unescaped to a literal
-    pipe afterwards, sharing ``agent.verification_parser.split_row_cells`` so
-    this validator and the verification runner cannot disagree about what a row
-    says (#2570). A row that does not yield the header's column count is
-    returned with ``malformed`` set: it is reported as a plan-authoring error
-    rather than executed truncated, which used to run a command the author
-    never wrote and blame the failure on the code under test.
-    """
-    section = extract_section(plan_text, "Verification")
-    if not section:
-        return []
-
-    checks = []
-    lines = section.splitlines()
-    i = 0
-    while i < len(lines):
-        stripped = lines[i].strip()
-        # Look for table header with Command column
-        if stripped.startswith("|") and "command" in stripped.lower():
-            expected_columns = max(len(split_row_cells(stripped)), 3)
-            # Skip separator row
-            i += 1
-            if i < len(lines) and re.match(r"^\s*\|[\s\-:]+\|", lines[i]):
-                i += 1
-            # Parse data rows
-            while i < len(lines):
-                row = lines[i].strip()
-                if not row.startswith("|"):
-                    break
-                cells = split_row_cells(row)
-                if len(cells) == expected_columns:
-                    cmd_cell = cells[1]
-                    cmd_match = re.search(r"`(.+?)`", cmd_cell)
-                    command = cmd_match.group(1) if cmd_match else cmd_cell.strip()
-                    checks.append(
-                        {
-                            "name": cells[0],
-                            "command": command,
-                            "expected": cells[2],
-                        }
-                    )
-                else:
-                    checks.append(
-                        {
-                            "name": row,
-                            "command": "",
-                            "expected": "",
-                            "malformed": (
-                                f"expected {expected_columns} columns, got {len(cells)}. "
-                                "An unescaped `|` inside a cell splits the row; "
-                                "write it as `\\|`."
-                            ),
-                        }
-                    )
-                i += 1
-            break
-        i += 1
-
-    return checks
 
 
 def parse_success_criteria_commands(plan_text: str) -> list[dict[str, str]]:
@@ -258,49 +193,56 @@ def check_file_assertions(assertions: list[dict[str, str]]) -> list[dict]:
     return results
 
 
-def check_verification_table(checks: list[dict[str, str]]) -> list[dict]:
-    """Run verification table commands and compare output."""
-    results = []
-    for check in checks:
-        if check.get("malformed"):
-            # Plan-authoring error, not evidence about the code (#2570). Fails
-            # the run -- a row nobody can execute is not a passing check -- but
-            # says plainly that the plan is what needs fixing.
-            results.append(
-                {
-                    "status": "FAIL",
-                    "message": (
-                        f"MALFORMED VERIFICATION ROW (fix the plan, not the code): "
-                        f"{check['malformed']} Row: {check['name']}"
-                    ),
-                }
-            )
-            continue
+def check_verification_table(table: ParsedTable) -> list[dict]:
+    """Run verification table commands and compare output.
 
-        cmd = check["command"]
-        expected = check["expected"]
-        name = check["name"]
+    Delegates table definition and expectation grammar to
+    ``agent.verification_parser`` (#2843) rather than carrying its own,
+    weaker evaluator. This runner keeps only what is genuinely its own: a
+    30s-timeout, SKIP-on-timeout execution loop and its report shape.
+    """
+    results = []
+
+    for m in table.malformed:
+        # Plan-authoring error, not evidence about the code (#2570/#2836).
+        # Fails the run -- a row nobody can execute is not a passing check --
+        # but says plainly that the plan is what needs fixing.
+        results.append(
+            {
+                "status": "FAIL",
+                "message": (
+                    f"MALFORMED VERIFICATION ROW (fix the plan, not the code): "
+                    f"{m.reason} Row: {m.line}"
+                ),
+            }
+        )
+
+    for s in table.skipped:
+        # Non-check table: named, but never counted as PASS/FAIL/SKIP so it
+        # cannot change the exit code (#2836).
+        results.append(
+            {
+                "status": "INFO",
+                "message": (
+                    f"NON-CHECK TABLE SKIPPED: {s.header} ({s.row_count} row(s)) -- {s.reason}"
+                ),
+            }
+        )
+
+    for check in table.checks:
+        cmd = check.command
+        expected = check.expected
+        name = check.name
 
         try:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-            actual_output = result.stdout.strip()
+            # `output` must be unstripped stdout -- run_checks passes proc.stdout
+            # unmodified, and a stripped copy here would re-create divergence at
+            # the exact seam this convergence closes. The stripped value is used
+            # only in the FAIL message.
+            actual_output = result.stdout
             actual_exit = result.returncode
-
-            # Check expected value
-            passed = False
-            if expected.startswith("exit code "):
-                expected_code = int(expected.replace("exit code ", ""))
-                passed = actual_exit == expected_code
-            elif expected.startswith("output contains "):
-                # Substring match (matches agent/verification_parser.py semantics)
-                expected_substring = expected.replace("output contains ", "").strip().strip("`")
-                passed = expected_substring in actual_output
-            elif expected.startswith("output "):
-                expected_output = expected.replace("output ", "")
-                passed = actual_output == expected_output
-            else:
-                # Flexible match: check if expected is in output or exit code is 0
-                passed = expected.lower() in actual_output.lower() or actual_exit == 0
+            passed = evaluate_expectation(expected, exit_code=actual_exit, output=actual_output)
 
             if passed:
                 results.append({"status": "PASS", "message": name})
@@ -311,7 +253,7 @@ def check_verification_table(checks: list[dict[str, str]]) -> list[dict]:
                         "message": (
                             f"{name} -- expected: {expected},"
                             f" got exit={actual_exit}"
-                            f" output={actual_output[:100]}"
+                            f" output={actual_output.strip()[:100]}"
                         ),
                     }
                 )
@@ -390,9 +332,9 @@ def main() -> int:
         all_results.extend(check_file_assertions(file_assertions))
 
     # 2. Verification table
-    verification_checks = parse_verification_table(plan_text)
-    if verification_checks:
-        all_results.extend(check_verification_table(verification_checks))
+    verification_table = parse_verification_table(plan_text)
+    if verification_table.checks or verification_table.malformed or verification_table.skipped:
+        all_results.extend(check_verification_table(verification_table))
 
     # 3. Success criteria commands
     success_criteria = parse_success_criteria_commands(plan_text)

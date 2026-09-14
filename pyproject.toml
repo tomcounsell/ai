@@ -5,9 +5,12 @@ description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    "anthropic==0.122.0", # CRITICAL — pin exact, upgrade via /update only
-    "pydantic-ai-slim[anthropic]==2.9.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
-    "claude-agent-sdk==0.2.139", # CRITICAL — pin exact, upgrade via /update only
+    # CRITICAL — coupled set: anthropic + pydantic-ai-slim move together.
+    # anthropic>=1.0.0 requires pydantic-ai-slim>=2.33.0. Gated by AUTO_BUMP_SETS in
+    # scripts/update/deps.py; see docs/features/llm-stack-compat-gate.md.
+    "anthropic==1.5.0",
+    "pydantic-ai-slim[anthropic]==2.43.0", # CRITICAL — pin exact, upgrade via /update only. Slim + anthropic extra only (avoids openai/google/mcp/logfire/cli/evals/web extras pulled in by the `pydantic-ai` meta-package)
+    "claude-agent-sdk==0.2.152", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.28.1", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
@@ -15,7 +18,7 @@ dependencies = [
     "ollama>=0.3.0", # Local LLM fallback for summarization
     "yt-dlp>=2026.7.4", # YouTube audio download for transcription
     "youtube-transcript-api>=0.6.0", # Caption-based YouTube transcription (no API key required)
-    "popoto>=1.8.0", # Redis ORM — agent memory primitives; v1.8.0 makes secondary-index maintenance atomic via Lua (cross-process save() races), invalidates EmbeddingField cache across processes, adds capped-evidence Bayesian ConfidenceField updates + deterministic decay-field tie-breaking; v1.7.1 stamps auto_now/auto_now_add in UTC (#1653, popoto#421); v1.6.1 fixed lazy-load descriptor leak (#1099 + #1172)
+    "popoto>=1.9.0", # Redis ORM — agent memory primitives; v1.9.0 hydrates each row once per list()/tuple()/sorted() materialization instead of twice (#2639, popoto#632) and makes the bundled pytest plugin opt-in so it can only flush the db POPOTO_TEST_DB names (#2770, popoto#594); v1.8.0 makes secondary-index maintenance atomic via Lua (cross-process save() races), invalidates EmbeddingField cache across processes, adds capped-evidence Bayesian ConfidenceField updates + deterministic decay-field tie-breaking; v1.7.1 stamps auto_now/auto_now_add in UTC (#1653, popoto#421); v1.6.1 fixed lazy-load descriptor leak (#1099 + #1172)
     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
@@ -23,7 +26,7 @@ dependencies = [
     "pypdf>=6.15.0",  # floor tracks upstream SEC/ROB fixes; 6.10.0 patched the XMP metadata RAM-exhaustion CVE
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
-    "openai>=1.0.0", # Embedding API for semantic doc impact finder
+    "openai>=3.0.0", # Embedding API for semantic doc impact finder; floor (not exact pin, per #3001 round-2). 3.x floor required: pydantic-ai-slim 2.39's OpenAI model rejects 2.x with a misleading "Please install `openai`" ImportError, which _load_stack would surface on every call
     "pyyaml>=6.0.3",
     "rich>=13.0.0", # Required by pydantic logfire plugin
     "sentry-sdk>=2.0.0", # Error monitoring and performance tracing
@@ -79,6 +82,7 @@ valor-telegram = "tools.valor_telegram:main"
 valor-catchup = "bridge.agent_catchup:main"
 valor-email = "tools.valor_email:main"
 valor-calendar = "tools.valor_calendar:main"
+valor-ask-poll = "tools.ask_poll:main"
 valor-image-gen = "tools.image_gen:main"
 valor-selfie = "tools.selfie:main"
 valor-image-analyze = "tools.image_analysis:main"
@@ -93,11 +97,12 @@ valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
 valor-deck-video = "tools.deck_video.cli:main"
 valor-computer = "tools.computer.cli:main"
-valor = "tools.valor_cli:main"
 valor-cross-vendor-judge = "tools.cross_vendor_judge:main"
 valor-session = "tools.valor_session:main"
 valor-session-archive = "tools.session_archive_cli:main"
 valor-venv-health = "tools.venv_health:main"
+belt-baseline = "tools.belt_baseline:main"
+belt-skew-report = "tools.belt_skew_report:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -229,4 +234,5 @@ markers = [
     "models: Redis/Popoto model relationships and persistence",
     "webui: Web UI dashboards, routes, templates",
     "analytics: Unified analytics collection, query, and dashboard",
+    "codex_live: Live codex exec probes on a provisioned machine (plan #2001)",
 ]

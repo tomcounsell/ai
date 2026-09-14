@@ -1,18 +1,24 @@
-"""Regression tests for project_key namespace alignment between sustainability
-reflections and the AgentSession writers (issue #1171).
+"""Namespace regression tests for the self-healing reflections.
 
-These tests assert that with ``VALOR_PROJECT_KEY=valor`` set:
-  - ``circuit_health_gate`` writes its flags under ``valor:sustainability:*``
-    and ``valor:worker:*``.
-  - ``session_recovery_drip`` queries ``AgentSession.query.filter(project_key="valor")``.
+Two subjects, both about where a name lives:
 
-Catches the failure mode where one half of the system writes/reads ``default:*``
-while AgentSession records carry ``project_key="valor"``, leaving paused
-sessions stranded.
+1. **project_key namespace alignment** (issue #1171) — with
+   ``VALOR_PROJECT_KEY=valor`` set, ``circuit_health_gate`` writes its flags
+   under ``valor:sustainability:*`` / ``valor:worker:*`` and
+   ``session_recovery_drip`` queries
+   ``AgentSession.query.filter(project_key="valor")``. Catches the failure mode
+   where one half of the system writes/reads ``default:*`` while AgentSession
+   records carry ``project_key="valor"``, leaving paused sessions stranded.
+
+2. **module namespace after shim retirement** (issue #2875) — the
+   ``agent.sustainability`` compatibility shim is deleted, so it must not be
+   importable, and every name it used to re-export must resolve at its real
+   ``reflections.agents.*`` home.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 import unittest
@@ -70,7 +76,7 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch("reflections.agents.circuit_health_gate.send_hibernation_notification"),
             patch.dict(
                 sys.modules,
@@ -98,7 +104,7 @@ class TestCircuitHealthGateValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch("reflections.agents.circuit_health_gate._get_redis", return_value=r),
+            patch("reflections.agents.circuit_health_gate.get_redis", return_value=r),
             patch(
                 "reflections.agents.circuit_health_gate.send_hibernation_notification"
             ) as notif_mock,
@@ -134,7 +140,7 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
         """With VALOR_PROJECT_KEY=valor, recovery_drip queries project_key="valor"."""
         # Patch AgentSession.query.filter so we can capture the call args.
         from models import agent_session as agent_session_mod
-        from reflections.agents import session_recovery_drip as sust_mod
+        from reflections.agents import session_recovery_drip as drip_mod
 
         captured_filter_kwargs = []
 
@@ -152,10 +158,10 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"VALOR_PROJECT_KEY": "valor"}, clear=False),
-            patch.object(sust_mod, "_get_redis", return_value=r),
+            patch.object(drip_mod, "get_redis", return_value=r),
             patch.object(agent_session_mod, "AgentSession", _FakeAgentSession),
         ):
-            sust_mod.run()
+            drip_mod.run()
 
         # We expect at least one filter call to have been made with
         # project_key="valor". The function may make multiple filter calls
@@ -168,16 +174,49 @@ class TestSessionRecoveryDripValorNamespace(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Shim re-export guard: worker hibernation path imports from agent.sustainability
+# Shim retirement guard (#2875): agent.sustainability is gone and every name it
+# used to re-export resolves at its real reflections.agents.* home.
 # ---------------------------------------------------------------------------
 
 
-class TestShimReExports(unittest.TestCase):
-    """Guard the shim symbols the worker still imports from agent.sustainability."""
+#: The five registry callables the deleted shim re-exported, mapped from the
+#: shim's attribute name to the module that actually defines them. Each is
+#: exposed as ``run`` in its own module; the shim aliased them to these names.
+_CALLABLE_HOMES = {
+    "circuit_health_gate": "reflections.agents.circuit_health_gate",
+    "session_count_throttle": "reflections.agents.session_count_throttle",
+    "failure_loop_detector": "reflections.agents.failure_loop_detector",
+    "session_recovery_drip": "reflections.agents.session_recovery_drip",
+    "sustainability_digest": "reflections.agents.system_health_digest",
+}
 
-    def test_send_hibernation_notification_importable(self):
-        """agent/agent_session_queue.py imports send_hibernation_notification from the shim."""
-        from agent.sustainability import send_hibernation_notification
+
+class TestShimRetired(unittest.TestCase):
+    """The agent.sustainability compatibility shim no longer exists (#2875)."""
+
+    def test_shim_module_is_not_importable(self):
+        """agent/sustainability.py is deleted, so the module must not resolve."""
+        import importlib.util
+
+        assert importlib.util.find_spec("agent.sustainability") is None, (
+            "agent.sustainability resolved -- the shim was reintroduced"
+        )
+
+    def test_shim_import_raises_module_not_found(self):
+        """A live import of the shim fails loudly rather than silently resolving."""
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module("agent.sustainability")
+
+    def test_every_callable_resolves_at_its_real_home(self):
+        """Each of the five reflections exposes a callable ``run`` at its real module."""
+        for shim_name, module_path in _CALLABLE_HOMES.items():
+            mod = importlib.import_module(module_path)
+            run = getattr(mod, "run", None)
+            assert callable(run), f"{module_path}.run is not callable (shim name: {shim_name})"
+
+    def test_send_hibernation_notification_resolves_at_circuit_health_gate(self):
+        """agent/agent_session_queue.py now imports it from its canonical home."""
+        from reflections.agents.circuit_health_gate import send_hibernation_notification
 
         assert callable(send_hibernation_notification)
 

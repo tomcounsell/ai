@@ -2,11 +2,11 @@
 
 ## Overview
 
-Three improvements to the `/do-test` pipeline that eliminate false regression reports and make baseline classification truly deterministic.
+Three parts of the `/do-test` pipeline that eliminate false regression reports and make baseline classification deterministic.
 
 ## Flaky Filter (Step 0.5)
 
-When tests fail on a feature branch, the pipeline now retries only the failing tests once more before dispatching to baseline verification.
+When tests fail on a feature branch, the pipeline retries only the failing tests once more before dispatching to baseline verification.
 
 **Flow:**
 1. Tests fail on feature branch
@@ -15,19 +15,19 @@ When tests fail on a feature branch, the pipeline now retries only the failing t
 4. Tests that still fail → sent to baseline verification as normal
 5. If all failures are flaky → baseline verification skipped entirely
 
-**Why:** Flaky tests (timing-dependent, LLM non-determinism, resource contention) that fail on the branch but pass on main were being misclassified as regressions. A single retry catches the most common intermittent failures without requiring additional dependencies like `pytest-rerunfailures`.
+**Why:** Flaky tests (timing-dependent, LLM non-determinism, resource contention) that fail on the branch but pass on main are otherwise misclassified as regressions. A single retry catches the most common intermittent failures without requiring additional dependencies like `pytest-rerunfailures`.
 
 **Reporting:** Flaky tests appear in a dedicated results table with `FLAKY` verdict and a note that they should be investigated but don't block the pipeline.
 
 ## Deterministic Baseline Parsing (junitxml)
 
-The baseline-verifier agent previously relied on LLM interpretation of raw pytest console output to classify each test. This was non-deterministic and vulnerable to:
+The baseline-verifier runs pytest with `--junitxml=/tmp/baseline-results.xml` and parses the XML deterministically using Python's `xml.etree.ElementTree`. This avoids the non-determinism of LLM interpretation of raw console output, which is vulnerable to:
 - Output truncation filling the context window
 - Test ID format mismatches
 - Status keywords appearing in test names
 - Traceback output interleaving with status lines
 
-**Now:** The baseline-verifier runs pytest with `--junitxml=/tmp/baseline-results.xml` and parses the XML deterministically using Python's `xml.etree.ElementTree`:
+The structured XML parse:
 
 ```python
 import xml.etree.ElementTree as ET
@@ -68,7 +68,5 @@ Step 6-7: Cleanup + return JSON
 
 ## Related
 
-- Issue: [#476](https://github.com/tomcounsell/ai/issues/476)
 - Plan: `docs/plans/476_test_reliability.md`
-- Prior art: Issue #363, PR #369 (original baseline verification)
 - Spec files: `.claude/skills/do-test/SKILL.md`, `.claude/agents/baseline-verifier.md`

@@ -139,9 +139,11 @@ sys.exit(0 if result['status'] != 'error' else 1)
 "
 ```
 
-The substrate applies fixes to the working tree, commits them to the **current branch** (not
-a new branch), fires the memory-refresh hook after the commit, and files deduped GitHub
-issues for cases needing human judgment (deleted targets, stub docs, orphan plans).
+The substrate applies fixes to the working tree, fires the memory-refresh hook on the applied
+set, and files deduped GitHub issues for cases needing human judgment (deleted targets, stub
+docs, orphan plans). It runs **no git at all** and leaves the tree dirty: you own the commit,
+and its diff passes through your Step 4 review first. Carry the `files_touched` list from the
+JSON output into Step 4 — those paths are expected there, alongside the Step 2 task list.
 
 Parse the JSON output. `status` alone does **not** mean the output is correct — check
 `fixes_withheld` too:
@@ -149,7 +151,7 @@ Parse the JSON output. `status` alone does **not** mean the output is correct �
 - `status: "ok"` and `fixes_withheld == 0` — proceed to Step 3 for any remaining manual edits.
 - `fixes_withheld > 0` (with any `status`) — the existence invariant rejected one or more
   fixes because they would have introduced a path that does not exist on disk. Before
-  trusting the substrate's self-committed output:
+  trusting the substrate's applied-but-uncommitted output:
   1. **Echo every `withheld` entry into your transcript output** — one line per entry giving
      `doc`, `old`, `new`, and `reason` — so the rejection is visible in the stage record and
      not buried in a log file.
@@ -163,9 +165,8 @@ Parse the JSON output. `status` alone does **not** mean the output is correct �
 Result keys that carry the withheld set: `fixes_withheld` (int) and `withheld`
 (list of `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"`).
 
-Do not re-commit the substrate's changes — it commits them itself. Withheld fixes were never
-written, so there is nothing of theirs to commit; any correction you make in Step 3 is your
-own commit.
+Withheld fixes were never written, so there is nothing of theirs in the diff; any correction
+you make for them in Step 3 rides in the same commit you make in Step 4.
 
 ## Index-table maintenance (Step 3)
 

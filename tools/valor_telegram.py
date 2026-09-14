@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -719,11 +719,10 @@ def _linkify_text(text: str) -> str:
 
 
 def _get_redis_connection():
-    """Get a Redis connection using the project's standard pattern."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _should_run_rtr(args: argparse.Namespace) -> bool:
@@ -740,8 +739,7 @@ def _should_run_rtr(args: argparse.Namespace) -> bool:
     (session.session_id, injected for every harness subprocess -- issue
     #2190). Humans typing ``valor-telegram send`` in a fresh terminal do not
     have it set, so RTR skips by default for human invocations and runs by
-    default for agent invocations (subject to the ``READ_THE_ROOM_ENABLED``
-    machine-wide gate inside ``read_the_room()`` itself).
+    default for agent invocations.
 
     Note: env vars inherit across nested shells, ``tmux``, and
     ``claude --resume`` started from inside an existing session. The
@@ -898,11 +896,10 @@ def cmd_send(args: argparse.Namespace) -> int:
 
     # ── Read-the-Room pre-send pass for Path B (issue #1203) ──
     # Mirrors PR #1204 / commit 531e8f4e (Path A in agent/output_handler.py
-    # lines 361-455). Gated by:
-    #   1. _should_run_rtr(args): caller-type gate — agent vs. human (see
-    #      VALOR_SESSION_ID auto-detection + --read-the-room/--no-read-the-room).
-    #   2. READ_THE_ROOM_ENABLED env var (read fresh inside read_the_room()).
-    # Fail-open: any error path falls through to the original text rpush.
+    # lines 361-455). Gated by _should_run_rtr(args): caller-type gate —
+    # agent vs. human (see VALOR_SESSION_ID auto-detection +
+    # --read-the-room/--no-read-the-room). Fail-open: any error path falls
+    # through to the original text rpush.
     rtr_should_send = True  # default: rpush the original (possibly trimmed) text
     rtr_suppress_reaction: dict | None = None  # optional suppress-with-anchor reaction payload
     rtr_suppressed_reason: str | None = None  # set when fully suppressed (no rpush)
@@ -932,8 +929,7 @@ def cmd_send(args: argparse.Namespace) -> int:
             try:
                 from models.agent_session import AgentSession
 
-                matches = list(AgentSession.query.filter(session_id=valor_session_id))
-                session = matches[0] if matches else None
+                session = AgentSession.newest_for_session_id(valor_session_id)
             except Exception as e:
                 logger.warning(
                     "Path B RTR: session lookup failed for %s: %s",
@@ -1452,10 +1448,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Issue #1203: Read-the-Room (RTR) pre-send pass for Path B.
     # Default behavior (no flag): RTR auto-runs for agent-invoked sends
-    # (VALOR_SESSION_ID env var set) when READ_THE_ROOM_ENABLED=true; human
-    # invocations bypass RTR. Use --read-the-room to force RTR on for human
-    # invocations or --no-read-the-room to opt out from inside an agent
-    # session. Mutually exclusive (argparse rejects both at parse time).
+    # (VALOR_SESSION_ID env var set); human invocations bypass RTR. Use
+    # --read-the-room to force RTR on for human invocations or
+    # --no-read-the-room to opt out from inside an agent session. Mutually
+    # exclusive (argparse rejects both at parse time).
     rtr_group = send_parser.add_mutually_exclusive_group()
     rtr_group.add_argument(
         "--read-the-room",

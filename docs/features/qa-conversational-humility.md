@@ -19,11 +19,11 @@ Controls that make QA responses in teammate group chats conversational rather th
 
 ### Layer 2: Agent-Controlled Message Delivery (`agent/hooks/stop.py`)
 
-The stop-hook review gate was designed to give the agent final say over message delivery: when a session completes, the hook evaluates the output and chooses a delivery action (SEND, EDIT, REACT, SILENT, CONTINUE), with react-only responses (e.g., emoji reactions to social banter) handled through this gate rather than the classifier. This gate is dead code for sessions executed through `agent/session_runner/` (confirmed independently in issue #1955) — the self-draft steering path in `agent/output_handler.py` is the live mechanism for that traffic today.
+A stop-hook review gate exists at `agent/hooks/stop.py`. The live message-delivery mechanism for sessions executed through `agent/session_runner/` is the self-draft steering path in `agent/output_handler.py`.
 
-### Layer 3: Config Cleanup
+### Layer 3: Config Segments
 
-**Config cleanup** (`config/personas/segments/identity.md`, `config/personas/segments/tools.md`): Removed `valor-telegram send` examples from inline code blocks. Added "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only. This addresses the root cause of CLI syntax leaking into responses.
+`config/personas/segments/identity.md` and `config/personas/segments/tools.md`: inline code blocks omit `valor-telegram send` examples and carry "TOOL USAGE ONLY" warnings making clear the syntax is for programmatic use only.
 
 ### Social Token Classification (`bridge/routing.py`)
 
@@ -46,6 +46,5 @@ Classification uses a two-stage approach:
 
 ## Related
 
-- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- Teammate mode routing (predecessor)
+- [Config-Driven Chat Mode](config-driven-chat-mode.md) -- Teammate mode routing
 - [Agent-Controlled Message Delivery](agent-message-delivery.md) -- Stop-hook review gate
-- Issue [#589](https://github.com/tomcounsell/ai/issues/589) -- Tracking issue

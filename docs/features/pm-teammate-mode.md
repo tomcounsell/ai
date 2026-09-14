@@ -4,7 +4,7 @@
 
 PM session teammate mode adds a fast path for informational queries. When a user asks a question (e.g., "where is the observer prompt?", "what tests are failing?"), the PM session answers directly using read-only tools instead of spawning a full Dev session. This reduces latency and cost for simple lookups while preserving the full SDLC pipeline for actual work requests.
 
-Teammate mode is now a first-class session type (`SessionType.TEAMMATE`). It was previously a routing decision within the PM session, gated by an intent classifier and indicated by a `session_mode` field set to `PersonaType.TEAMMATE`; that field had been a no-op since `SessionType.TEAMMATE` became the first-class discriminator and was deleted by the schema diet (#1927). Teammate sessions are now indicated directly by `session_type == SessionType.TEAMMATE`. The `ChatMode` enum has been removed -- `PersonaType` is the sole persona identifier.
+Teammate mode is a first-class session type (`SessionType.TEAMMATE`), indicated directly by `session_type == SessionType.TEAMMATE`. `PersonaType` is the sole persona identifier.
 
 ## Architecture
 
@@ -61,11 +61,11 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 - **Eng session delegation**: when source code changes are needed, the teammate surfaces `valor-session create --role eng --slug <slug> --message "<task>"` and waits for human go-ahead rather than refusing
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
-- **Delivery**: teammate sessions were designed to use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). That gate is dead code for sessions executed through `agent/session_runner/` (issue #1955) — in practice, delivery falls through to the message drafter's self-draft steering path, the live mechanism for both eng and teammate `session_runner` traffic.
+- **Delivery**: delivery falls through to the message drafter's self-draft steering path, the live mechanism for both eng and teammate `session_runner` traffic.
 
 ### Metrics (`agent/teammate_metrics.py`)
 
-Popoto-backed counters for observability (migrated from raw Redis in PR #650). All operations are fire-and-forget -- metrics failures never affect message processing.
+Popoto-backed counters for observability. All operations are fire-and-forget -- metrics failures never affect message processing.
 
 - `teammate_classified_count`: messages routed to teammate mode
 - `work_classified_count`: messages routed to Dev session
@@ -93,7 +93,7 @@ In `_execute_agent_request()`, after determining the session type is "pm" or "te
 Teammate sessions bypass structured formatting entirely. Since the drafter is now a pass-through validation filter (no LLM call), this bypass is built into `_compose_structured_draft()`:
 
 - When `persona == "teammate"`, `_compose_structured_draft()` returns the agent's prose verbatim — no emoji prefix, no bullet parsing, no stage header, no structured template
-- The persona hint still flows through `draft_message(persona="teammate")`; `_build_draft_prompt()` and the LLM rewrite path were removed in the drafter_passthrough_validation refactor
+- The persona hint still flows through `draft_message(persona="teammate")`
 - Wire-format validators still run; violations are surfaced via self-draft steering exactly as for other personas
 
 ### `agent/output_router.py` + `agent/agent_session_queue.py`

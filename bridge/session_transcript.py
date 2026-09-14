@@ -17,7 +17,7 @@ import logging
 import time
 from pathlib import Path
 
-from bridge.utc import utc_iso
+from utils.utc import utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ def start_transcript(
     # session exists (defensive fallback for standalone transcript usage).
     try:
         now = time.time()
-        existing = list(AgentSession.query.filter(session_id=session_id))
+        existing = AgentSession.rows_for_session_id(session_id)
         if existing:
             s = existing[0]
             s.log_path = log_path
@@ -85,13 +85,29 @@ def start_transcript(
             if branch_name:
                 s.branch_name = branch_name
             if slug:
-                s.slug = slug
+                # slug is a KeyField — reassigning it on a hydrated row raises
+                # KeyMutationError under the pinned popoto, and the broad
+                # except below swallows that before s.save() runs, discarding
+                # this whole transcript-phase update (log_path, sender_name,
+                # branch_name, classification_type, correlation_id) and the
+                # "active" lifecycle transition with it.  Only set it when the
+                # existing value is empty (initial population); a genuine
+                # rename needs save(migrate_key=True) — tracked in #3247.
+                if not s.slug:
+                    s.slug = slug
+                elif str(s.slug) != str(slug):
+                    logger.warning(
+                        f"slug mismatch for session {session_id}: "
+                        f"existing={s.slug}, incoming={slug} — "
+                        f"skipping mutation (KeyField is immutable after creation)"
+                    )
             if classification_type:
                 s.classification_type = classification_type
             if chat_id is not None:
-                # chat_id is a KeyField — mutating it after creation silently
-                # creates a new Redis record (orphaning the old one).  Only set
-                # it when the existing value is empty (initial population).
+                # chat_id is a KeyField — same failure as the slug branch
+                # above: a reassignment on a hydrated row raises
+                # KeyMutationError, swallowed before s.save().  Only set it
+                # when the existing value is empty (initial population).
                 if not s.chat_id:
                     s.chat_id = str(chat_id)
                 elif str(s.chat_id) != str(chat_id):
@@ -129,7 +145,7 @@ def start_transcript(
             )
             # Log lifecycle transition
             try:
-                sessions = list(AgentSession.query.filter(session_id=session_id))
+                sessions = AgentSession.rows_for_session_id(session_id)
                 if sessions:
                     sessions[0].log_lifecycle_transition("active", "transcript started")
             except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
@@ -198,11 +214,10 @@ def append_turn(
 
     # Update SessionLog counters
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
-            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog turn_count for {session_id}: {e}")
@@ -239,11 +254,10 @@ def append_tool_result(
 
     # Increment tool_call_count in SessionLog
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1
-            s.updated_at = time.time()
             s.save()
     except Exception as e:
         logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")

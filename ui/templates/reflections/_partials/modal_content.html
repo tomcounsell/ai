@@ -56,6 +56,11 @@
         <pre class="error-block" style="font-size: 12px; color: var(--red); white-space: pre-wrap; word-break: break-word;">{{ r.last_error }}</pre>
         {% endif %}
 
+        {% if r.last_run_summary and r.last_run_summary.output_summary %}
+        <h3>Last run summary</h3>
+        <p style="font-size: 12px; white-space: pre-wrap; word-break: break-word;">{{ r.last_run_summary.output_summary }}</p>
+        {% endif %}
+
         <h3>History (last {{ recent_runs|length }} of {{ r.run_count }})</h3>
         {% if recent_runs %}
         <table class="data-table compact">

@@ -37,7 +37,13 @@ is what looks.
    - no live PM and work unshipped → **respawn** the lane via
      `create_session` with the recorded `what` (which re-records the
      expectation through the spawn chokepoint, `--job-id` bound);
-   - action failed → escalate once (Telegram operator alert), stop.
+   - action failed → escalate once (Telegram alert to the project's own
+     `Eng:` group, resolved by numeric `chat_id` — see
+     [`reflection-telegram-routing.md`](reflection-telegram-routing.md)),
+     stop. When no `Eng:` group resolves for the project, the page is
+     suppressed rather than misrouted; the suppression reaches this
+     reflection's `findings`/`summary` as an `alert-suppressed` entry so it
+     stays legible, but no counter treats it as a delivered page.
 
 Immediately before acting it re-fetches the Job by KeyFields and re-checks
 the expectation is still open — a PM discharge racing the tick always wins.
@@ -54,6 +60,12 @@ the expectation is still open — a PM discharge racing the tick always wins.
   are readable ownership records; a second PM reads and decides (#2704).
 - **Never raises**: every boundary (ORM scan, per-expectation pass, git/gh
   subprocess, steer/create) logs a warning and continues.
+- **A corrupt goal is a finding, never an empty loop** (#2862):
+  `Job.with_open_expectations()` retains a flagged Job whose `goal` no
+  longer decodes, and the tick records `corrupt-goal: <job_id>` in its
+  findings and moves on. It cannot act on obligations it cannot read; the
+  row waits for a human. See rule 8 in
+  [`durability-model.md`](durability-model.md).
 - **Single-machine ownership**: acts only for projects this machine owns
   (`machine_owns_project`).
 - Composes with `reflections/sdlc_progress.py` (PR-based stall recovery)
@@ -77,4 +89,4 @@ the expectation is still open — a PM discharge racing the tick always wins.
 
 - [`durability-model.md`](durability-model.md) — the expectation primitive
   itself (schema, chokepoint-derived status, rest derivation, discharge).
-- Tests: `tests/unit/reflections/test_expectation_reconciler.py`.
+- Tests: `tests/unit/reflections/test_reflections_expectation_reconciler.py`.

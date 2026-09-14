@@ -386,11 +386,12 @@ def test_self_heal_loads_installer_by_path_not_package_import(tmp_path, monkeypa
 
     sys_path_before = list(sys.path)
     # Delta, not absolute presence: a sibling test in the same xdist worker
-    # (tests/unit/test_redis_acl.py) legitimately imports scripts.update.*, and
-    # `scripts/update/__init__.py` does `from .run import ...`. Asserting
-    # absolute absence would make this test fail on the sibling's import rather
-    # than on the property under test, which is that THE SELF-HEAL ITSELF pulls
-    # in no part of the update system (round-3 Finding B).
+    # (tests/unit/test_doctor.py, which patches scripts.update.redis_flush_guard_pth)
+    # legitimately imports scripts.update.*, and `scripts/update/__init__.py`
+    # does `from .run import ...`. Asserting absolute absence would make this
+    # test fail on the sibling's import rather than on the property under
+    # test, which is that THE SELF-HEAL ITSELF pulls in no part of the update
+    # system (round-3 Finding B).
     modules_before = set(sys.modules)
 
     rfg._self_heal()

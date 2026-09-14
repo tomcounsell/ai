@@ -78,7 +78,7 @@ def _run_cleanup_full(sessions_by_status, active_workers=None, age_minutes=120):
     ):
         mock_as_class.query.filter.side_effect = mock_filter
 
-        import agent.agent_session_queue as queue_module
+        import agent.session_state as queue_module
 
         original = getattr(queue_module, "_active_workers", {})
         try:
@@ -115,7 +115,7 @@ def _run_cleanup(sessions_by_status, active_workers=None, age_minutes=120):
     ):
         mock_as_class.query.filter.side_effect = mock_filter
 
-        import agent.agent_session_queue as queue_module
+        import agent.session_state as queue_module
 
         original = getattr(queue_module, "_active_workers", {})
         try:
@@ -319,7 +319,7 @@ class TestCleanupUsesLifecycleLayer:
         ):
             mock_as_class.query.filter.side_effect = mock_filter
 
-            import agent.agent_session_queue as queue_module
+            import agent.session_state as queue_module
 
             original = getattr(queue_module, "_active_workers", {})
             try:
@@ -373,7 +373,7 @@ class TestCleanupPendingExclusion:
 
             mock_as_class.query.filter.side_effect = mock_filter
 
-            import agent.agent_session_queue as queue_module
+            import agent.session_state as queue_module
 
             original = getattr(queue_module, "_active_workers", {})
             try:

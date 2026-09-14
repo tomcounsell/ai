@@ -19,29 +19,11 @@ See also: config/reflections.yaml (declaration), docs/features/reflections.md
 """
 
 import logging
-import os
 import time
 
+from reflections.redis_access import get_project_key, get_redis
+
 logger = logging.getLogger(__name__)
-
-
-def _get_project_key() -> str:
-    """Return the project-scoped Redis key prefix.
-
-    Sources VALOR_PROJECT_KEY from env (injected by worker/bridge plist
-    generators). Empty or whitespace-only values fall back to ``"valor"`` so a
-    misconfigured ``VALOR_PROJECT_KEY=`` line in ``.env`` does not produce a
-    bare ``:sustainability:queue_paused`` key (issue #1171).
-    """
-    v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
-    return v or "valor"
-
-
-def _get_redis():
-    """Return the shared Popoto Redis connection."""
-    from popoto.redis_db import POPOTO_REDIS_DB
-
-    return POPOTO_REDIS_DB
 
 
 def run() -> None:
@@ -59,8 +41,8 @@ def run() -> None:
     try:
         from models.agent_session import AgentSession
 
-        r = _get_redis()
-        project_key = _get_project_key()
+        r = get_redis()
+        project_key = get_project_key()
         throttle_key = f"{project_key}:sustainability:throttle_level"
         pause_key = f"{project_key}:sustainability:queue_paused"
         fingerprints_key = f"{project_key}:sustainability:seen_fingerprints"

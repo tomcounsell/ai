@@ -1,44 +1,32 @@
 # PM Voice Refinement
 
-Naturalizes SDLC language, adds crash message variety, sentence-aware truncation, and milestone-selective emoji to make the PM persona's Telegram output sound human rather than robotic.
+The PM persona's Telegram output reads as natural human prose: the agent's own text reaches the human verbatim, truncation lands on sentence boundaries, question prefixes are normalized, issue and PR references are linkified, and the completion emoji is reserved for milestones.
 
-## Problem Addressed
+## Behavior
 
-The PM persona leaked implementation details into stakeholder-facing messages: raw SDLC stage labels ("PLAN stage complete"), a single hardcoded crash string repeated verbatim, mid-sentence truncation, developer metrics in output, and completion emoji on every message regardless of significance.
+### Verbatim Pass-Through
 
-## Changes
-
-### SDLC Stage Naturalization
-
-The `DRAFTER_SYSTEM_PROMPT` in `bridge/message_drafter.py` (formerly `SUMMARIZER_SYSTEM_PROMPT` in `bridge/summarizer.py`) instructs the LLM to translate raw SDLC stage labels to natural language: PLAN becomes "planning", BUILD becomes "building", TEST becomes "testing", REVIEW becomes "reviewing", DOCS becomes "documenting", MERGE becomes "merging". The term "SDLC" itself remains acceptable as a process reference. This is a prompt-only change -- the LLM handles the translation at draft time.
-
-### Crash Message Pool
-
-`agent/sdk_client.py` defines `CRASH_MESSAGE_POOL`, a list of five varied crash fallback messages. Each includes next-step language ("retry", "try again", "re-trigger", "re-send"). The `_get_crash_message()` function selects randomly from the pool while tracking `_last_crash_message` at module level to prevent consecutive repeats. If the pool is somehow empty, a hardcoded default is returned.
+`bridge/message_drafter.py` performs validation and structural composition, not summarization. There is no LLM rewriting step: the agent's text is stripped of process narration (`_strip_process_narration()`), validated against the per-medium wire format, and composed with the emoji prefix, SDLC stage line, and link footer by `_compose_structured_draft()`. A response too long for the medium is written out and attached as a `.txt` file by `_write_full_output_file()`, never shortened.
 
 ### Question Prefix
 
-The question prefix changed from `? ` to `>> ` for better visual distinction in Telegram. The `_normalize_question_prefix()` function provides backward compatibility by converting any legacy `? ` prefixes to `>> `. Both `DRAFTER_SYSTEM_PROMPT` and `_parse_summary_and_questions()` use the new format.
+The question prefix is `>> ` for better visual distinction in Telegram. `_normalize_question_prefix()` converts any legacy `? ` prefixes to `>> `, and `_parse_draft_and_questions()` splits the composed draft into bullet text and a questions block.
 
 ### Link Footer Standardization
 
-The drafter prompt now explicitly instructs the LLM to use short-form references only in bullet text (e.g., "PR #N", "issue #N") and never include full URLs in bullets. Full URL rendering is handled by the existing `_linkify_references()` post-processor.
+Bullet text carries short-form references only (e.g. "PR #N", "issue #N"). Full URL rendering is handled by the `_linkify_references()` post-processor, which resolves those references against the session's project before the draft is sent.
 
 ### Sentence-Aware Truncation
 
-`bridge/response.py` adds `_truncate_at_sentence_boundary()` to replace the raw `text[:4093] + "..."` slice at Telegram's 4096-character limit. The function searches the last 500 characters of the allowed window for sentence-ending punctuation (`.`, `!`, `?`) followed by whitespace or end-of-string, and cuts there. If no sentence boundary is found, it falls back to the ellipsis truncation.
-
-### Developer Metrics Suppression
-
-The drafter prompt instructs the LLM to avoid line counts, file counts, addition/deletion counts, and exact test pass/fail numbers. Instead it should use outcome language: "shipped and tested", "all tests passing", "reviewed and approved".
+`bridge/message_drafter.py` provides `_truncate_at_sentence_boundary()` instead of a raw slice at Telegram's 4096-character limit. The function searches the last 500 characters of the allowed window for sentence-ending punctuation (`.`, `!`, `?`) followed by whitespace or end-of-string, and cuts there. If no sentence boundary is found, it falls back to ellipsis truncation.
 
 ### Dual-Personality Guard
 
-The `pm_bypass` path in `response.py` has clarified documentation confirming it prevents sending both PM self-messages and a drafted version of the same content. The guard blocks both drafting and text sending when the PM has already delivered its own messages.
+The `pm_bypass` path in `bridge/telegram_bridge.py` prevents sending both PM self-messages and a drafted version of the same content. When the PM session (or its parent PM session in SDLC flows) has already delivered messages via `tools/send_message.py`, the drafter is skipped entirely. File attachments still send — they would otherwise be lost.
 
 ### Milestone-Selective Emoji
 
-`_get_status_emoji()` in `bridge/message_drafter.py` now reserves the completion emoji for true milestones. The logic:
+`_get_status_emoji()` in `bridge/message_drafter.py` reserves the completion emoji for true milestones. The logic:
 
 | Condition | Emoji |
 |-----------|-------|
@@ -49,19 +37,15 @@ The `pm_bypass` path in `response.py` has clarified documentation confirming it 
 | In-progress work | hourglass |
 | No session context | checkmark if completion, hourglass otherwise |
 
-Routine completions produce no emoji prefix, reducing noise. Only merged PRs and closed issues get the completion checkmark.
+Routine completions produce no emoji prefix. Only merged PRs and closed issues get the completion checkmark.
 
-## Files Modified
+## Key Files
 
-- `bridge/message_drafter.py` (née `bridge/summarizer.py`) -- Prompt updates (naturalization, question prefix, link format, metrics suppression), `_get_status_emoji()` milestone logic, `_normalize_question_prefix()`, `_parse_summary_and_questions()` updates
-- `bridge/response.py` -- `_truncate_at_sentence_boundary()`, dual-personality guard documentation
-- `agent/sdk_client.py` -- `CRASH_MESSAGE_POOL`, `_get_crash_message()`
-- `tests/unit/test_message_drafter.py` -- Updated and new tests for all changes
+- `bridge/message_drafter.py` — `_strip_process_narration()`, `_truncate_at_sentence_boundary()`, `_normalize_question_prefix()`, `_parse_draft_and_questions()`, `_linkify_references()`, `_get_status_emoji()`, `_write_full_output_file()`, `_compose_structured_draft()`
+- `bridge/telegram_bridge.py` — `pm_bypass` dual-personality guard
 
 ## Related
 
-- [Message Drafter](message-drafter.md) -- Output format specification (formerly "Summarizer Format"; renamed per #1035)
-- [Bridge Response Improvements](bridge-response-improvements.md) -- Response pipeline
-- [Eng Session Architecture](eng-session-architecture.md) -- PM/Dev session split
-- Issue [#540](https://github.com/tomcounsell/ai/issues/540) -- Tracking issue
-- PR [#548](https://github.com/tomcounsell/ai/pull/548) -- Implementation
+- [Message Drafter](message-drafter.md) — output format specification
+- [Bridge Response Improvements](bridge-response-improvements.md) — response pipeline
+- [Eng Session Architecture](eng-session-architecture.md) — PM/Dev session split

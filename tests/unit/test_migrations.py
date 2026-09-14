@@ -12,6 +12,7 @@ Every test cleans up the AgentSession/PipelineLedger records it creates.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -22,7 +23,6 @@ from popoto import SortedField
 from popoto.redis_db import POPOTO_REDIS_DB
 
 from agent.pipeline_ledger import PipelineLedger
-from bridge.utc import to_unix_ts
 from models.agent_session import AgentSession
 from models.job import Job
 from models.session_lifecycle import touch_issue_lock
@@ -31,6 +31,7 @@ from scripts.update.migrations import (
     _migrate_backfill_job_last_active_scores,
     _migrate_backfill_pipeline_ledger,
 )
+from utils.utc import to_unix_ts
 
 _TEST_REPO = "test-owner/test-repo"
 
@@ -430,3 +431,447 @@ class TestBackfillJobLastActiveScores:
         fn, description = MIGRATIONS["backfill_job_last_active_scores"]
         assert fn is _migrate_backfill_job_last_active_scores
         assert description
+
+
+class TestClearOrphanedWarnStateKey:
+    """One-shot cleanup of the warn_state key (``_ORPHANED_WARN_KEY``) orphaned
+    by the deletion of the server-side access-control layer (issue #3004).
+
+    Hermetic ``tmp_path`` cases only -- no Redis, no Popoto. The migration
+    touches a single gitignored JSON file via ``scripts.update.warn_state``.
+    The literal key string is imported from ``scripts.update.migrations``
+    rather than repeated here, so this file carries no ACL-flavored token.
+    """
+
+    def test_pops_the_orphaned_key_and_leaves_live_keys_byte_for_byte(self, tmp_path):
+        from scripts.update import warn_state
+        from scripts.update.migrations import (
+            _ORPHANED_WARN_KEY,
+            _migrate_clear_orphaned_warn_state_key,
+        )
+
+        (tmp_path / "data").mkdir()
+        warn_state.should_emit(_ORPHANED_WARN_KEY, "drift:75d2c91d7d42deab", tmp_path)
+        warn_state.should_emit("calendar-config", "misconfigured:1", tmp_path)
+        warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+        warn_state.should_emit("google-token", "expired:1", tmp_path)
+        before = warn_state.active(tmp_path)
+
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+
+        after = warn_state.active(tmp_path)
+        assert _ORPHANED_WARN_KEY not in after
+        for key in ("calendar-config", "env-completeness", "google-token"):
+            assert after[key] == before[key]
+        assert set(after) == {"calendar-config", "env-completeness", "google-token"}
+
+    def test_no_op_when_the_key_is_already_absent(self, tmp_path):
+        from scripts.update import warn_state
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        (tmp_path / "data").mkdir()
+        warn_state.should_emit("env-completeness", "missing:1", tmp_path)
+        before = warn_state.active(tmp_path)
+
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+
+        assert warn_state.active(tmp_path) == before
+
+    def test_no_op_when_there_is_no_data_directory_at_all(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        assert not (tmp_path / "data").exists()
+        assert _migrate_clear_orphaned_warn_state_key(tmp_path) is None
+        # Fail-soft: no data/ directory must not be created as a side effect
+        # of a no-op cleanup, and no exception propagates.
+
+    def test_registered_in_migrations_dict(self):
+        from scripts.update.migrations import _migrate_clear_orphaned_warn_state_key
+
+        assert "clear_orphaned_warn_state_key" in MIGRATIONS
+        fn, description = MIGRATIONS["clear_orphaned_warn_state_key"]
+        assert fn is _migrate_clear_orphaned_warn_state_key
+        assert description
+
+
+class TestClearDocsAuditLivenessKeys:
+    """One-shot sweep of the two orphaned ``docs_audit:last_completed_run_*``
+    Redis keys left by the deleted docs-auditor liveness channel (issue #2743).
+
+    Real Popoto/Redis against the test db (autouse ``redis_test_db``). The two
+    key strings are hard-coded in the migration itself since the constants
+    that named them are deleted, so this test hard-codes them too.
+    """
+
+    _TS_KEY = "docs_audit:last_completed_run_ts"
+    _SUMMARY_KEY = "docs_audit:last_completed_run_summary"
+
+    def test_deletes_both_orphaned_keys(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        POPOTO_REDIS_DB.set(self._TS_KEY, "1234567890.0")
+        POPOTO_REDIS_DB.set(self._SUMMARY_KEY, '{"status": "ok"}')
+
+        assert _migrate_clear_docs_audit_liveness_keys(tmp_path) is None
+
+        assert POPOTO_REDIS_DB.exists(self._TS_KEY) == 0
+        assert POPOTO_REDIS_DB.exists(self._SUMMARY_KEY) == 0
+
+    def test_no_op_and_no_error_when_keys_are_already_absent(self, tmp_path):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        POPOTO_REDIS_DB.delete(self._TS_KEY, self._SUMMARY_KEY)
+
+        assert _migrate_clear_docs_audit_liveness_keys(tmp_path) is None
+
+    def test_registered_in_migrations_dict(self):
+        from scripts.update.migrations import _migrate_clear_docs_audit_liveness_keys
+
+        assert "clear_docs_audit_liveness_keys" in MIGRATIONS
+        fn, description = MIGRATIONS["clear_docs_audit_liveness_keys"]
+        assert fn is _migrate_clear_docs_audit_liveness_keys
+        assert description
+
+
+class _FakeCountQuery:
+    """Stand-in for ``Memory.query.filter(...)``: only ``.count()`` is used."""
+
+    def count(self):
+        return 0
+
+
+class _FakeMemoryQuery:
+    @staticmethod
+    def filter(**kwargs):
+        return _FakeCountQuery()
+
+
+class _FakeMemory:
+    query = _FakeMemoryQuery()
+
+
+class _FakeSession:
+    def __init__(self, session_id: str, completed_at, project_key: str = "test-migration"):
+        self.session_id = session_id
+        self.completed_at = completed_at
+        self.project_key = project_key
+
+
+class _FakeSessionQuery:
+    def __init__(self, rows: list):
+        self._rows = rows
+
+    def filter(self, **kwargs):
+        return self._rows
+
+
+class _FakeAgentSession:
+    def __init__(self, rows: list):
+        self.query = _FakeSessionQuery(rows)
+
+
+class TestSideEffectJobMigrationPayload:
+    """The back-enqueue must give the handler a payload it can bind (#3183 review blocker 3).
+
+    ``scripts/update/migrations.py:1286`` used to call ``enqueue()`` with no
+    payload at all. ``run_post_session_extraction`` requires ``response_text``
+    positionally (``agent/memory_extraction.py:1663-1669``), so every
+    back-enqueued job raised ``TypeError`` on all 4 attempts, became a
+    ``DeadLetter(stage="extraction", replayable=True)``, and the replay path
+    re-enqueued the identical payload-less job forever. Hermetic: the
+    ``AgentSession``/``Memory`` lookups and ``agent.side_effects.enqueue``
+    are all faked so this test exercises exactly the payload construction,
+    not the shared test Redis db's accumulated session history.
+    """
+
+    def test_back_enqueue_payload_satisfies_the_handler_signature(self, monkeypatch):
+        import inspect
+
+        from agent.memory_extraction import run_post_session_extraction
+        from scripts.update.migrations import _migrate_side_effect_job_model
+
+        session_id = f"test-mig-sideeffect-{uuid.uuid4().hex[:8]}"
+        fake_session = _FakeSession(session_id, datetime.now(UTC))
+
+        monkeypatch.setattr("models.agent_session.AgentSession", _FakeAgentSession([fake_session]))
+        monkeypatch.setattr("models.memory.Memory", _FakeMemory)
+
+        calls = []
+        monkeypatch.setattr(
+            "agent.side_effects.enqueue",
+            lambda *a, **k: calls.append((a, k)) or "fake-job-id",
+        )
+
+        result = _migrate_side_effect_job_model(Path("."))
+
+        assert result is None
+        assert len(calls) == 1, "the migration must back-enqueue exactly one job"
+        args, kwargs = calls[0]
+        assert args[0] == "memory_extraction"
+        assert args[1] == session_id
+        payload = args[3] if len(args) > 3 else kwargs.get("payload")
+        assert payload == {"response_text": ""}
+
+        # The concrete defect: a payload-less call cannot bind
+        # run_post_session_extraction's signature and raises TypeError on
+        # every attempt. A payload of {"response_text": ""} must bind clean.
+        inspect.signature(run_post_session_extraction).bind(session_id, **payload)
+
+
+class TestMigrationNeverClobbersALivePendingRow:
+    """The back-enqueue must not destroy a live pending job's real payload
+    (#3183 review round 2 blocker).
+
+    Blocker 3's fix gave the migration's back-enqueue a payload
+    (``{"response_text": ""}``). Blocker 2's fix made a lost ``enqueue``
+    race call ``_merge_payload_into_pending``, which replaces
+    ``payload_json`` outright on any still-``pending`` row
+    (``agent/side_effects.py:163-192``). Put together: if a live session's
+    real extraction job is still pending when the migration runs against the
+    same session_id -- exactly the fleet scenario the migration's own
+    docstring describes, machines 2..N running the one-shot migration
+    against Redis a machine already on new code has written to -- the
+    migration's empty payload overwrites the real one. The job then
+    "succeeds" having extracted nothing, with no dead letter and no trace.
+
+    Real Popoto/Redis, not the FakeJobs/FakeRedis doubles above: the
+    round-1 tech debt item on this same file names FakeJobs's ``save()`` as
+    a no-op that cannot model Popoto's full-hash overwrite, and this is
+    precisely the overwrite in question. The autouse ``redis_test_db``
+    fixture (see module docstring) scopes this to the isolated test db.
+
+    The fix: ``scripts/update/migrations.py``'s back-enqueue now passes
+    ``merge_on_lost_race=False``, which makes a lost race a no-op on the
+    bound row instead of a payload replacement
+    (``agent/side_effects.py:103-160``). This test calls
+    ``side_effects.enqueue`` directly with that exact kwarg -- the same call
+    the migration makes -- rather than going through
+    ``_migrate_side_effect_job_model``'s ``AgentSession``/``Memory`` lookups,
+    which ``TestSideEffectJobMigrationPayload`` above already covers.
+    """
+
+    def test_a_live_pending_rows_real_payload_survives_the_migrations_enqueue(self):
+        from agent import side_effects
+        from models.side_effect_job import SideEffectJob
+
+        session_id = f"test-mig-clobber-{uuid.uuid4().hex[:8]}"
+        real_payload = {
+            "response_text": "a" * 400,
+            "turn_count": 3,
+            "is_conversational": True,
+        }
+        try:
+            # A live per-turn caller already has a job pending for this
+            # session -- the row the migration must not touch.
+            job_id = side_effects.enqueue("memory_extraction", session_id, "valor", real_payload)
+
+            # The migration's own back-enqueue for the same (kind,
+            # session_id): a lost race against the guard the first enqueue
+            # already bound. merge_on_lost_race=False matches
+            # scripts/update/migrations.py's call exactly.
+            side_effects.enqueue(
+                "memory_extraction",
+                session_id,
+                "valor",
+                {"response_text": ""},
+                merge_on_lost_race=False,
+            )
+
+            row = SideEffectJob.query.get(job_id=job_id)
+            assert row is not None
+            stored = json.loads(row.payload_json)
+            assert stored == real_payload, (
+                f"CLOBBERED: the migration's empty payload replaced the real one. now={stored!r}"
+            )
+        finally:
+            side_effects.release_idempotency("memory_extraction", session_id)
+            for leftover in SideEffectJob.query.filter(session_id=session_id):
+                leftover.delete()
+
+    def test_without_the_flag_the_same_scenario_still_clobbers(self):
+        """Control: proves the assertion above is real, not vacuous.
+
+        Same setup, default ``merge_on_lost_race=True`` (the live per-turn
+        caller's own default, unchanged by this fix) -- the pre-fix
+        behavior this blocker was filed against.
+        """
+        from agent import side_effects
+        from models.side_effect_job import SideEffectJob
+
+        session_id = f"test-mig-clobber-ctrl-{uuid.uuid4().hex[:8]}"
+        real_payload = {"response_text": "real turn content"}
+        try:
+            job_id = side_effects.enqueue("memory_extraction", session_id, "valor", real_payload)
+            side_effects.enqueue("memory_extraction", session_id, "valor", {"response_text": ""})
+            row = SideEffectJob.query.get(job_id=job_id)
+            assert json.loads(row.payload_json) == {"response_text": ""}
+        finally:
+            side_effects.release_idempotency("memory_extraction", session_id)
+            for leftover in SideEffectJob.query.filter(session_id=session_id):
+                leftover.delete()
+
+
+class TestImprovementMigrationRegistration:
+    """#3177's two migrations must be registered, not merely defined.
+
+    A defined-but-unregistered migration never runs, and it is invisible in the
+    obvious check: a text grep for the name still finds the function
+    definition, its docstring, and the script filename it shells out to, so a
+    `grep -c ... > 1` row reports healthy while the migration is dead. This
+    reads the actual dict, which is the only thing `run_pending_migrations`
+    iterates.
+    """
+
+    def test_task_type_profile_retirement_is_registered(self):
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        assert "retire_task_type_profile" in MIGRATIONS, (
+            "TaskTypeProfile was deleted whole; without this entry its hashes and "
+            "its delegation_recommendation index sets are orphaned in Redis with no "
+            "surviving code able to reach them through the ORM"
+        )
+        fn, description = MIGRATIONS["retire_task_type_profile"]
+        assert fn is _migrate_retire_task_type_profile
+        assert description
+
+    def test_improvement_models_registration_marker_exists(self):
+        from scripts.update.migrations import _migrate_confirm_improvement_models_readable
+
+        assert "confirm_improvement_models_readable" in MIGRATIONS
+        fn, description = MIGRATIONS["confirm_improvement_models_readable"]
+        assert fn is _migrate_confirm_improvement_models_readable
+        assert description
+
+    def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
+        """The subprocess-shaped migrations name a script by filename.
+
+        A registered migration pointing at a missing script fails at /update
+        time on every machine, which is the worst place to discover it.
+        """
+        import inspect
+        from pathlib import Path
+
+        from scripts.update.migrations import _migrate_retire_task_type_profile
+
+        source = inspect.getsource(_migrate_retire_task_type_profile)
+        assert "migrate_retire_task_type_profile.py" in source
+        repo_root = Path(__file__).resolve().parents[2]
+        assert (repo_root / "scripts" / "migrate_retire_task_type_profile.py").exists()
+
+
+class TestTaskTypeProfileRetirementStub:
+    """The stub must de-index every key the retired model owned (#3177).
+
+    ``Model.delete()`` de-indexes by iterating ``_meta.fields`` and firing each
+    field's ``on_delete`` hook. A field the stub does not declare gets no hook,
+    so its key survives the delete with no class left that can ever reach it —
+    and Redis cannot expire a single sorted-set member, so the residue is
+    permanent. The retired model carried a ``SortedField`` (``last_updated``)
+    alongside its ``IndexedField``; both must be on the stub.
+
+    Real Popoto/Redis against the test db (autouse ``redis_test_db``). Rows are
+    seeded through the stub itself, which is the only surviving way to reach the
+    keyspace.
+    """
+
+    _PK = "test-3177-ttp"
+
+    @staticmethod
+    def _stub():
+        import scripts.migrate_retire_task_type_profile as mod
+
+        return mod
+
+    def _sorted_partition(self):
+        mod = self._stub()
+        return SortedField.get_sortedset_db_key(
+            mod.TaskTypeProfile, "last_updated", self._PK
+        ).redis_key
+
+    def _seed(self):
+        mod = self._stub()
+        return mod.TaskTypeProfile.create(
+            project_key=self._PK,
+            task_type="sdlc-build",
+            delegation_recommendation="structured",
+            last_updated=1700000000.0,
+        )
+
+    def teardown_method(self):
+        mod = self._stub()
+        for row in mod.TaskTypeProfile.query.filter(project_key=self._PK):
+            row.delete()
+
+    def test_the_stub_declares_the_sorted_field(self):
+        mod = self._stub()
+        names = set(mod.TaskTypeProfile._meta.fields)
+        assert "last_updated" in names, (
+            "without it, instance.delete() fires no ZREM and the sorted-set "
+            "members outlive every key that could ever purge them"
+        )
+        assert "delegation_recommendation" in names
+        # Type matters, not just the name: a plain ``Field`` stores the value in
+        # the row hash and registers no ZREM hook at all, so the sorted set is
+        # never written and never cleaned.
+        from popoto import IndexedField as _IndexedField
+        from popoto import SortedField as _SortedField
+
+        assert isinstance(mod.TaskTypeProfile._meta.fields["last_updated"], _SortedField)
+        assert isinstance(
+            mod.TaskTypeProfile._meta.fields["delegation_recommendation"], _IndexedField
+        )
+
+    def test_delete_empties_the_sorted_set(self):
+        mod = self._stub()
+        row = self._seed()
+        partition = self._sorted_partition()
+        assert POPOTO_REDIS_DB.zcard(partition) == 1, "seed did not reach the sorted set"
+
+        handled = mod.retire(apply=True)
+
+        assert handled == 1
+        assert POPOTO_REDIS_DB.zcard(partition) == 0, (
+            "the sorted-set member survived the delete — this is the orphaned "
+            "index state the migration exists to prevent"
+        )
+        assert not list(mod.TaskTypeProfile.query.filter(project_key=self._PK))
+        assert row is not None
+
+    def test_a_dry_run_deletes_nothing(self):
+        mod = self._stub()
+        self._seed()
+        partition = self._sorted_partition()
+
+        assert mod.retire(apply=False) == 1
+        assert POPOTO_REDIS_DB.zcard(partition) == 1
+
+    def test_an_empty_keyspace_is_a_clean_no_op(self):
+        mod = self._stub()
+        assert mod.retire(apply=True) == 0
+
+    def test_a_partial_pass_exits_non_zero_so_update_retries_it(self, monkeypatch):
+        """A run that deleted nothing must not be recorded permanently complete.
+
+        ``run_pending_migrations`` skips any name already in the completed set,
+        and the class this stub stands in for no longer exists — so a migration
+        marked done after a failed pass can never be corrected.
+        """
+        import sys
+
+        mod = self._stub()
+        self._seed()
+
+        def boom(self):
+            raise RuntimeError("wedged row")
+
+        monkeypatch.setattr(mod.TaskTypeProfile, "delete", boom, raising=False)
+        monkeypatch.setattr(sys, "argv", ["migrate_retire_task_type_profile.py", "--apply"])
+        assert mod.main() == 1
+
+    def test_a_complete_pass_exits_zero(self, monkeypatch):
+        import sys
+
+        mod = self._stub()
+        self._seed()
+        monkeypatch.setattr(sys, "argv", ["migrate_retire_task_type_profile.py", "--apply"])
+        assert mod.main() == 0

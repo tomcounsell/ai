@@ -47,10 +47,11 @@ meaningless out of context.
 
 | Class | Sites | Rule |
 |-------|-------|------|
-| **Conversation-level originating writes** | `bridge/telegram_bridge.py` `_ack_steering_routed` (4 of its 5 callers) and both edit-steer paths, `tools/valor_session.py` resume, `agent/session_executor.py` `steer_session` | **Room**, when a Room resolves |
+| **Conversation-level originating writes** | `bridge/telegram_bridge.py` `_ack_steering_routed` (4 of its 5 callers) and both edit-steer paths, `agent/session_executor.py` `steer_session` | **Room**, when a Room resolves |
 | **Requeue writes** | `agent/health_check.py::_repush_messages`, `agent/session_runner/runner.py::_default_steering_push`, `agent/session_executor.py`'s remaining-message re-push | **The leg the message was drained from** |
 | **Abort signals** | any push with `is_abort` true, explicit or auto-detected from `ABORT_KEYWORDS`, including `scripts/steer_child.py --abort` | **Legacy, always** — "You MUST stop immediately" is destructive and non-idempotent; delivered to the wrong session it kills innocent work. Stranding an abort is the correct failure mode |
 | **Session-scoped diagnostics** | `agent/output_handler.py` drafter self-draft, `agent/session_health.py` tool-timeout advisory, `monitoring/session_watchdog.py` loop-break steer | **Legacy** — each describes the state of *this* session. Delivered to a successor it is noise. The drafter one also has a session-keyed attempt budget (`steering:attempts:{session_id}`) that a Room-durable copy would escape |
+| **Resume** | `tools/valor_session.py::resume_session` | **Legacy, always** — a resume names one row, transitions that row in place, and the worker runs it in that row's own `working_dir`. It calls `push_steering_message(session_id, outbound, ...)` with no `room_id`, which resolves to `steering:{session_id}` — the row it targets is the only row that can drain it. A Room-scoped push here would be drained by whichever session next serves the Room, not necessarily the resumed one |
 | **No live row / ORM-free writers** | `bridge/telegram_bridge.py`'s in-memory coalescing guard, `scripts/migrate_steering_queue_drain.py` | **Legacy** — neither holds a session row it could derive a Room from, and fabricating one picks an arbitrary row |
 
 The caller derives `room_id` via `models.room.room_id_for_session` and hands it
@@ -246,16 +247,9 @@ In `cmd_create`, all three fields are always non-null. In `cmd_status`, `worker_
 
 Agent callers should branch on `worker_state` rather than parsing the stderr warning text.
 
-## Backward Compatibility
+## Where These Symbols Live
 
-All symbols that previously lived only in `agent/agent_session_queue.py` are re-exported from there for backward compatibility:
-
-- `MAX_NUDGE_COUNT`
-- `NUDGE_MESSAGE`
-- `SendToChatResult`
-- `determine_delivery_action`
-
-Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
+`MAX_NUDGE_COUNT`, `NUDGE_MESSAGE`, `SendToChatResult` and `determine_delivery_action` are defined in `agent/output_router.py` and imported from there. They were reachable through `agent.agent_session_queue` for a period after the split; issue #2876 removed that path, so `agent.output_router` is the only one.
 
 ## Drafter Self-Draft Steering (née "Summarizer Fallback")
 
@@ -486,6 +480,52 @@ All validation failures exit with non-zero code and print an error to stderr.
 | Sender field | User's name | `"pm"` (abort path) |
 
 The non-abort path converges on `steer_session()` in `agent/session_executor.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
+
+## Steering producers
+
+Two things write to the steering inbox today. Both go through
+`agent/steering.py::push_steering_message` — **never a raw steering-key write**.
+
+| Producer | Trigger | Entry point |
+|---|---|---|
+| Reply-to handler | A human types a reply into a thread with a live session | `bridge/telegram_bridge.py` |
+| **Poll vote** | A human **taps** an option on an `/ask-me` poll | `bridge/poll_vote.py::translate_poll_vote` |
+
+A vote produces no Telegram message at all — only an `updateMessagePoll` broadcast — so the
+translator reconstructs the routing information from the poll registry. See
+[Telegram Poll Questions](telegram-poll-questions.md).
+
+`room_id` is **mandatory** for both. `push_steering_message` selects the Room key
+(`steering:room:{room_id}`) only when the caller supplies it, and deliberately never looks a session
+up itself: `session_id` is unindexed and a lookup on the inbound fast path would cost seconds. A
+caller that omits it silently writes the legacy `steering:{session_id}` key while every peer writes
+the Room leg — a regression that produces no error.
+
+## The shared `bridge/answer_routing.py` seam
+
+The reply-to handler and the vote translator answer the same question — *what state is the session
+in, and how do I reach it?* — so that ladder lives in one place:
+
+- **`resolve_answer_target(session_id) -> AnswerTarget`** — a pure state read returning
+  `LIVE | PENDING | LIVE_GUARD | COMPLETED | NONE`. It carries the **session object**, not just a
+  kind, because the caller must derive `room_id` from it.
+- **`resume_completed_session(...)`** — the completed-session re-enqueue
+  (`_build_completed_resume_text` → `dispatch_telegram_session`), with `project` / `project_key` /
+  `working_dir` / `session_type` each falling back to the field on the completed record, which is
+  why a caller holding no project dict can still use it.
+
+**Everything caller-specific stays in the caller**: `_ack_steering_routed`, the
+`is_duplicate_message` short-circuit, reply-chain hydration, and `react_if_worker_down` (which needs
+the inbound `message.id` — a vote has no equivalent). That split is what makes "behavior must not
+change" a checkable claim rather than a wish.
+
+The module is deliberately **poll-independent**: `translate_poll_vote` lives in
+`bridge/poll_vote.py` and imports from it, rather than living inside it. The extraction restructures
+the primary inbound path for every typed Telegram reply on every machine, so it landed as its own
+commit and reverting the poll feature does not revert it.
+
+**`COMPLETED` is the normal outcome for a poll answer**, not an edge case — `/ask-me` finalizes its
+session at turn end via the clean, wrap-up-eligible `pm_needs_human` exit, long before a human taps.
 
 ## No-Gos
 

@@ -56,9 +56,9 @@ for r in results:
 `find_affected_code` returns `(results, meta)`, not a bare list — the same
 `ImpactFinderMeta` degraded-result contract as `find_affected_docs`; see
 [Semantic Doc Impact Finder → Degraded-Result Contract](semantic-doc-impact-finder.md#degraded-result-contract-impactfindermeta-issue-2004)
-for the full field reference and reason values (issue #2004 T1.4). The CLI
+for the full field reference and reason values. The CLI
 (below) prints a `WARNING: impact finder degraded (...)` line when
-`meta.degraded` is true and **exits 1 on any degraded run** (#2499), so a
+`meta.degraded` is true and **exits 1 on any degraded run**, so a
 caller — the `/do-plan` blast-radius step in particular — can never mistake
 "the finder is broken" for "nothing is affected". A whitespace-only change
 summary is itself a degraded run (`empty_query`): it would otherwise embed
@@ -99,7 +99,7 @@ Results map to plan sections:
 - Model mismatch (provider change) → full rebuild
 - Content hashing → only changed files re-embedded
 - Cost warning at >1000 chunks (informational, non-blocking)
-- Rerank endpoint down → embedding-only fallback. Because `find_affected_code` shares `tools/impact_finder_core.py` with the doc finder, it inherits the same all-or-nothing fallback: when *every* Stage 2 Haiku rerank request fails with a transport/API error (e.g. a misconfigured `ANTHROPIC_BASE_URL`), the finder returns embedding-only candidates (`meta.reason="rerank_all_failed"`) instead of a bare `[]`, and logs a warning naming the likely cause. Every fallback/failure branch is visible on `meta.degraded`/`meta.reason` rather than only in log output. See [Semantic Doc Impact Finder → Graceful Degradation](semantic-doc-impact-finder.md#graceful-degradation) for the full behavior. (issue #1950, tuple contract added #2004)
+- Rerank endpoint down → embedding-only fallback. Because `find_affected_code` shares `tools/impact_finder_core.py` with the doc finder, it inherits the same all-or-nothing fallback: when *every* Stage 2 Haiku rerank request fails with a transport/API error (e.g. a misconfigured `ANTHROPIC_BASE_URL`), the finder returns embedding-only candidates (`meta.reason="rerank_all_failed"`) instead of a bare `[]`, and logs a warning naming the likely cause. Every fallback/failure branch is visible on `meta.degraded`/`meta.reason` rather than only in log output. See [Semantic Doc Impact Finder → Graceful Degradation](semantic-doc-impact-finder.md#graceful-degradation) for the full behavior.
 
 ## Index Storage
 

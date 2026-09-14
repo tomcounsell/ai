@@ -18,10 +18,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scripts.update.deps import (
+    AUTO_BUMP_SETS,
+    CoupledSet,
+    PinDeclarationError,
     auto_bump_deps,
     bump_pin_in_pyproject,
     get_pinned_version,
     get_pypi_latest,
+    llm_gate_argv,
+    verify_critical_versions,
 )
 
 # Project root
@@ -470,6 +475,157 @@ class TestGetPypiLatest:
         assert version is None
 
 
+# Mirrors the real ``pyproject.toml`` shape the pin helpers must survive:
+# a floor declaration (``openai>=1.0.0``) whose package name also appears
+# inside the TRAILING COMMENT of a line that does carry ``==`` (the exact
+# defect-1 reproduction — a comment on its own line would not trip the old
+# substring scan), an extras pin (``pydantic-ai-slim[anthropic]``) that
+# contains a second package's name, and that extras line placed ABOVE the
+# ``anthropic`` declaration so a line-order-dependent reader resolves the
+# wrong one.
+REALISTIC_PYPROJECT = """[project]
+name = "ai"
+dependencies = [
+    "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
+    "pydantic-ai-slim[anthropic]==2.9.0", # slim: avoids the openai/google/mcp extras
+    "anthropic==0.125.0", # CRITICAL — pin exact
+    "claude-agent-sdk==0.2.151", # CRITICAL — pin exact
+    "openai>=1.0.0", # Embedding API for semantic doc impact finder
+]
+"""
+
+
+class TestPinDeclarationDefects:
+    """Regression tests for the three spike-2 pin-helper defects (#3001).
+
+    Each defect silently produced the half-bump the coupled-set gate exists
+    to prevent, so each gets its own test.
+    """
+
+    def test_openai_pin_not_read_from_comment(self, tmp_path: Path):
+        """Defect 1: the reader scraped a version out of a *comment*.
+
+        ``openai`` appears inside the ``pydantic-ai-slim`` comment block, so
+        the old substring scan returned that line's ``2.9.0``. The real
+        declaration is a floor with no ``==`` at all, which must read as
+        "no exact pin" (``None``), never a version.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "openai") is None
+
+    def test_anthropic_pin_not_read_from_extras_line(self, tmp_path: Path):
+        """Defect 2: ``anthropic`` resolved correctly only by line order.
+
+        ``pydantic-ai-slim[anthropic]==2.9.0`` contains both ``anthropic``
+        and ``==``. With that line above the real declaration, the old
+        reader returned ``2.9.0``.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "anthropic") == "0.125.0"
+        assert get_pinned_version(tmp_path, "pydantic-ai-slim") == "2.9.0"
+
+    def test_extras_pin_is_bumped(self, tmp_path: Path):
+        """Defect 3: the writer could not match an extras pin.
+
+        ``"{package}==[^"]*"`` never matches
+        ``"pydantic-ai-slim[anthropic]==2.9.0"``, so the writer silently
+        no-opped while the rest of the coupled set moved.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(REALISTIC_PYPROJECT)
+
+        bump_pin_in_pyproject(tmp_path, "pydantic-ai-slim", "2.35.0")
+
+        content = pyproject.read_text()
+        assert '"pydantic-ai-slim[anthropic]==2.35.0"' in content
+        # The extras marker and the neighbouring declarations are untouched.
+        assert '"anthropic==0.125.0"' in content
+        assert '"openai>=1.0.0"' in content
+        assert "avoids the openai/google/mcp extras" in content
+
+
+class TestPinHelpersRefuseLoudly:
+    """Neither helper may return a wrong-but-plausible answer."""
+
+    def test_writer_raises_when_declaration_absent(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "nonexistent", "1.0.0")
+
+    def test_writer_raises_on_floor_declaration(self, tmp_path: Path):
+        """A floor is not a pin — rewriting it would invent a pin."""
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "openai", "2.30.0")
+
+    def test_reader_raises_on_conflicting_declarations(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\ndependencies = [\n    "anthropic==0.125.0",\n    "anthropic==0.62.0",\n]\n'
+        )
+        with pytest.raises(PinDeclarationError):
+            get_pinned_version(tmp_path, "anthropic")
+
+    def test_reader_returns_none_when_package_absent(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+        assert get_pinned_version(tmp_path, "not-declared-anywhere") is None
+
+    def test_no_dependency_block_refuses_without_crashing(self, tmp_path: Path):
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "ai"\n')
+        assert get_pinned_version(tmp_path, "anthropic") is None
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "anthropic", "1.0.0")
+        # Refusal is a refusal: the file is byte-for-byte untouched.
+        assert (tmp_path / "pyproject.toml").read_text() == '[project]\nname = "ai"\n'
+
+    def test_writer_raises_when_pyproject_missing(self, tmp_path: Path):
+        with pytest.raises(PinDeclarationError):
+            bump_pin_in_pyproject(tmp_path, "anthropic", "1.0.0")
+
+    def test_real_pyproject_declarations_resolve(self):
+        """The live file is the shape that produced every spike-2 defect."""
+        assert get_pinned_version(PROJECT_DIR, "anthropic") == "0.125.0"
+        assert get_pinned_version(PROJECT_DIR, "pydantic-ai-slim") == "2.9.0"
+        # A floor is not a pin, and `openai` sits inside the slim line's comment.
+        assert get_pinned_version(PROJECT_DIR, "openai") is None
+
+
+class TestVerifyCriticalVersions:
+    def test_verify_critical_versions_unchanged_by_helper_rewrite(self, tmp_path: Path):
+        """The helper rewrite must not move ``verify_critical_versions``.
+
+        Expected pins still come from the real declarations, and the
+        installed-vs-expected comparison is untouched.
+        """
+        (tmp_path / "pyproject.toml").write_text(REALISTIC_PYPROJECT)
+
+        installed = {
+            "telethon": "1.42.0",
+            "anthropic": "0.62.0",
+            "claude-agent-sdk": None,
+        }
+        with patch(
+            "scripts.update.deps.get_installed_version",
+            side_effect=lambda _dir, pkg: installed[pkg],
+        ):
+            results = verify_critical_versions(tmp_path)
+
+        by_package = {r.package: r for r in results}
+        assert [r.package for r in results] == [
+            "telethon",
+            "anthropic",
+            "claude-agent-sdk",
+        ]
+        assert by_package["telethon"].expected == "1.42.0"
+        assert by_package["telethon"].matches is True
+        # Installed disagrees with the pin -> mismatch.
+        assert by_package["anthropic"].expected == "0.125.0"
+        assert by_package["anthropic"].matches is False
+        # Pinned but not installed -> mismatch, expected still reported.
+        assert by_package["claude-agent-sdk"].expected == "0.2.151"
+        assert by_package["claude-agent-sdk"].version is None
+        assert by_package["claude-agent-sdk"].matches is False
+
+
 class TestBumpPinInPyproject:
     def test_bumps_existing_pin(self, tmp_path: Path):
         pyproject = tmp_path / "pyproject.toml"
@@ -493,67 +649,601 @@ class TestBumpPinInPyproject:
         assert "# CRITICAL" in content
         assert '"anthropic==0.99.0"' in content
 
-    def test_returns_false_for_missing_package(self, tmp_path: Path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("[project]\ndependencies = []\n")
-        assert bump_pin_in_pyproject(tmp_path, "nonexistent", "1.0.0") is False
+
+# Two independent sets, so a failure in one is visibly scoped to that set.
+# `held` is a third set that must never execute anything.
+SET_A = CoupledSet(
+    members=["anthropic", "pydantic-ai-slim"],
+    import_names=("anthropic", "pydantic_ai"),
+    gates=("llm", "import", "pytest"),
+    reason="test double for the LLM coupled set",
+)
+SET_B = CoupledSet(
+    members=["claude-agent-sdk"],
+    import_names=("claude_agent_sdk",),
+    reason="test double for the standalone set",
+)
+
+TWO_SET_PYPROJECT = (
+    "[project]\ndependencies = [\n"
+    '    "anthropic==0.62.0",\n'
+    '    "pydantic-ai-slim[anthropic]==2.9.0",\n'
+    '    "claude-agent-sdk==0.1.35",\n'
+    "]\n"
+)
 
 
-class TestGetPinnedVersion:
-    def test_reads_pinned_version(self, tmp_path: Path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text('    "anthropic==0.62.0",  # CRITICAL\n')
-        assert get_pinned_version(tmp_path, "anthropic") == "0.62.0"
+PRE_BUMP_LOCK = 'version = 1\n\n[[package]]\nname = "httpcore"\nversion = "1.0.9"\n'
+# What a restore's re-sync actually produced live: unrelated transitive drift
+# that has nothing to do with the set being rolled back.
+DRIFTED_LOCK = 'version = 1\n\n[[package]]\nname = "httpcore"\nversion = "1.0.10"\n'
+POST_BUMP_LOCK = 'version = 1\n\n[[package]]\nname = "claude-agent-sdk"\nversion = "0.9.9"\n'
+
+
+def _latest(mapping: dict[str, str]):
+    """A `get_pypi_latest` stub driven by an explicit per-package table."""
+    return lambda package, timeout=10: mapping.get(package)
+
+
+def _drifting_sync(lock: Path, result):
+    """A `sync_dependencies` stub that rewrites `uv.lock` the way uv does.
+
+    A stub that leaves the lockfile alone cannot see this defect at all —
+    that blindness is why the dirty-lockfile bug shipped. Only an unfrozen
+    sync re-resolves; `uv sync --frozen` installs from the lock and leaves
+    it byte-identical.
+    """
+
+    def _sync(project_dir, reinstall=False, frozen=True):
+        if not frozen:
+            lock.write_text(DRIFTED_LOCK)
+        return result
+
+    return _sync
+
+
+class TestCoupledSetDeclaration:
+    """The declaration itself is a safety surface (#3001)."""
+
+    def test_llm_set_is_declared_and_held(self):
+        """`anthropic` is back in the auto-bump *structure*, but parked.
+
+        Without the hold, the first post-merge cron tick would execute the
+        Step 2 upgrade fleet-wide, unattended.
+        """
+        llm_set = next(s for s in AUTO_BUMP_SETS if "anthropic" in s.members)
+        assert set(llm_set.members) == {"anthropic", "pydantic-ai-slim"}
+        assert llm_set.import_names == ("anthropic", "pydantic_ai")
+        assert llm_set.gates == ("llm", "import", "pytest")
+        assert llm_set.hold == "#3001 Step 2"
+
+    def test_openai_is_not_in_any_coupled_set(self):
+        """spike-5: no packaging coupling, and its declaration is a floor."""
+        assert "openai" not in {member for s in AUTO_BUMP_SETS for member in s.members}
+
+    def test_default_gates_exclude_llm_phase(self):
+        """A new set must not silently inherit a billed API call."""
+        fresh = CoupledSet(members=["x"], import_names=("x",), reason="t")
+        assert fresh.gates == ("import", "pytest")
+        assert fresh.hold is None
+
+    def test_import_phase_is_set_derived_not_hardcoded(self):
+        """Each set's `import` phase probes what that set actually moved."""
+        from scripts.update.deps import _gate_argv
+
+        argv = _gate_argv(Path("/proj"), "import", SET_A)
+        assert argv[-1] == "import anthropic; import pydantic_ai"
+        assert _gate_argv(Path("/proj"), "import", SET_B)[-1] == "import claude_agent_sdk"
+
+
+class TestLlmGateArgv:
+    def test_llm_phase_argv_matches_gate_helper(self):
+        """The phase and any manual invocation share ONE argv construction.
+
+        Two constructions would let a hand-run verification pass against a
+        command production never issues.
+        """
+        from scripts.update.deps import _gate_argv
+
+        venv_python = Path("/proj/.venv/bin/python")
+        assert _gate_argv(Path("/proj"), "llm", SET_A) == llm_gate_argv(venv_python)
+
+    def test_llm_gate_runs_in_the_target_venv(self):
+        """Never the update process's own interpreter — it imported pre-sync."""
+        argv = llm_gate_argv(Path("/proj/.venv/bin/python"))
+        assert argv == [
+            "/proj/.venv/bin/python",
+            "-m",
+            "agent.llm.compat",
+            "--json",
+            "--allow-network",
+        ]
 
 
 class TestAutoBumpDeps:
     def test_no_bump_when_already_latest(self, tmp_path: Path):
-        """When all packages are at latest, nothing should be bumped."""
+        """When every set is at latest, nothing bumps and nothing syncs."""
         pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text(
-            "[project]\ndependencies = [\n"
-            '    "anthropic==999.0.0",\n'
-            '    "claude-agent-sdk==999.0.0",\n'
-            "]\n"
-        )
-        # Mock PyPI to return the same versions
-        with patch(
-            "scripts.update.deps.get_pypi_latest",
-            return_value="999.0.0",
-        ):
-            result = auto_bump_deps(tmp_path)
-        assert not result.any_bumped
-        assert not result.rolled_back
-
-    def test_rollback_on_smoke_failure(self, tmp_path: Path):
-        """If smoke test fails, pyproject.toml should be rolled back."""
-        pyproject = tmp_path / "pyproject.toml"
-        original = (
-            "[project]\ndependencies = [\n"
-            '    "anthropic==0.62.0",\n'
-            '    "claude-agent-sdk==0.1.35",\n'
-            "]\n"
-        )
-        pyproject.write_text(original)
+        pyproject.write_text(TWO_SET_PYPROJECT)
 
         with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A, SET_B]),
             patch(
                 "scripts.update.deps.get_pypi_latest",
-                return_value="99.0.0",
+                _latest(
+                    {
+                        "anthropic": "0.62.0",
+                        "pydantic-ai-slim": "2.9.0",
+                        "claude-agent-sdk": "0.1.35",
+                    }
+                ),
+            ),
+            patch("scripts.update.deps.sync_dependencies") as sync,
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert not result.any_bumped
+        assert not result.rolled_back
+        # A quiet cycle must not re-resolve the lockfile.
+        sync.assert_not_called()
+
+    def test_rollback_on_gate_failure_restores_whole_set(self, tmp_path: Path):
+        """A failed gate reverts EVERY member of the set, not just one."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest({"anthropic": "1.0.0", "pydantic-ai-slim": "2.35.0"}),
             ),
             patch(
                 "scripts.update.deps.sync_dependencies",
-                return_value=MagicMock(success=True),
+                return_value=MagicMock(success=True, error=None),
             ),
             patch(
-                "scripts.update.deps.run_smoke_test",
-                return_value=(False, "ImportError"),
+                "scripts.update.deps.run_gate_phases",
+                return_value=(False, "pytest", "pytest gate failed:\nboom", False),
             ),
         ):
             result = auto_bump_deps(tmp_path)
 
-        assert result.any_bumped
         assert result.rolled_back
-        assert not result.smoke_passed
-        # pyproject.toml should be restored
-        assert pyproject.read_text() == original
+        assert result.failed_phase == "pytest"
+        # Nothing is reported bumped, so run.py's commit list stays honest.
+        assert not result.any_bumped
+        assert pyproject.read_text() == TWO_SET_PYPROJECT
+
+    def test_llm_gate_failure_rolls_back_set(self, tmp_path: Path):
+        """The failed phase is named, so `llm` reads differently from `pytest`."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest({"anthropic": "1.0.0", "pydantic-ai-slim": "2.35.0"}),
+            ),
+            patch(
+                "scripts.update.deps.sync_dependencies",
+                return_value=MagicMock(success=True, error=None),
+            ),
+            patch(
+                "scripts.update.deps.run_gate_phases",
+                return_value=(
+                    False,
+                    "llm",
+                    "llm gate failed:\nINCOMPATIBLE: no temperature",
+                    False,
+                ),
+            ),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert result.failed_phase == "llm"
+        assert "INCOMPATIBLE" in result.smoke_output
+        errors = " ".join(b.error or "" for b in result.bumps)
+        assert "llm gate failed" in errors
+        assert pyproject.read_text() == TWO_SET_PYPROJECT
+
+    def test_unrelated_set_survives_failed_set(self, tmp_path: Path):
+        """spike-4: a per-set snapshot, not a whole-file one.
+
+        A whole-file snapshot taken once before the loop reverts the good
+        set's bump along with the bad one's.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+
+        def gates(_project_dir, coupled_set):
+            if "anthropic" in coupled_set.members:
+                return False, "import", "import gate failed", False
+            return True, None, "gates passed", False
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A, SET_B]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest(
+                    {
+                        "anthropic": "1.0.0",
+                        "pydantic-ai-slim": "2.35.0",
+                        "claude-agent-sdk": "0.9.9",
+                    }
+                ),
+            ),
+            patch(
+                "scripts.update.deps.sync_dependencies",
+                return_value=MagicMock(success=True, error=None),
+            ),
+            patch("scripts.update.deps.run_gate_phases", side_effect=gates),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        content = pyproject.read_text()
+        # Failed set reverted...
+        assert '"anthropic==0.62.0"' in content
+        assert '"pydantic-ai-slim[anthropic]==2.9.0"' in content
+        # ...good set kept.
+        assert '"claude-agent-sdk==0.9.9"' in content
+        assert {b.package for b in result.bumps if b.bumped} == {"claude-agent-sdk"}
+        assert result.rolled_back
+
+    def test_partial_resolve_skips_whole_set(self, tmp_path: Path):
+        """One unresolvable member skips the set — a half-resolve is a half-bump."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                # Network down for the second member only.
+                _latest({"anthropic": "1.0.0"}),
+            ),
+            patch("scripts.update.deps.sync_dependencies") as sync,
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert not result.any_bumped
+        assert pyproject.read_text() == TWO_SET_PYPROJECT
+        sync.assert_not_called()
+        assert all("set skipped" in (b.error or "") for b in result.bumps)
+        assert {b.package for b in result.bumps} == {"anthropic", "pydantic-ai-slim"}
+
+    def test_held_set_is_skipped_and_legible(self, tmp_path: Path):
+        """A held set executes nothing and says why, per member."""
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+
+        held = CoupledSet(
+            members=["anthropic", "pydantic-ai-slim"],
+            import_names=("anthropic", "pydantic_ai"),
+            gates=("llm", "import", "pytest"),
+            reason="test double",
+            hold="#3001 Step 2",
+        )
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [held]),
+            patch("scripts.update.deps.get_pypi_latest") as pypi,
+            patch("scripts.update.deps.sync_dependencies") as sync,
+            patch("scripts.update.deps.run_gate_phases") as gates,
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        pypi.assert_not_called()
+        sync.assert_not_called()
+        gates.assert_not_called()
+        assert not result.any_bumped
+        assert [b.error for b in result.bumps] == ["held: #3001 Step 2"] * 2
+        # The recorded current pin keeps run.py's per-bump log informative.
+        assert {b.package: b.old_version for b in result.bumps} == {
+            "anthropic": "0.62.0",
+            "pydantic-ai-slim": "2.9.0",
+        }
+        assert pyproject.read_text() == TWO_SET_PYPROJECT
+
+    def test_gate_unavailable_is_fail_closed(self, tmp_path: Path):
+        """No venv to gate with is a FAILED gate, never a skipped one."""
+        from scripts.update.deps import run_gate_phases
+
+        passed, phase, output, gate_unverifiable = run_gate_phases(tmp_path, SET_A)
+        assert passed is False
+        assert phase == "llm"
+        assert "No Python venv" in output
+        assert gate_unverifiable is False
+
+    def test_restore_failure_blocks_commit(self, tmp_path: Path):
+        """A rollback whose re-sync failed must stop the run committing.
+
+        `run.py` gates its commit on `any_bumped and not restore_failed`,
+        AND `auto_bump_deps` itself stops the loop right after the failed
+        restore: gating a later set against a venv that no longer matches
+        the restored `pyproject.toml` / `uv.lock` would record a verdict
+        against an environment that isn't the one on disk.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+        lock = tmp_path / "uv.lock"
+        lock.write_text(PRE_BUMP_LOCK)
+
+        results = [
+            MagicMock(success=True, error=None),  # SET_A post-bump sync
+            MagicMock(success=False, error="resolver exploded"),  # SET_A restore sync
+        ]
+        resolved = [DRIFTED_LOCK]  # what the unfrozen bump sync resolves to
+        observed: list[tuple[bool, str]] = []
+
+        def _sync(project_dir, reinstall=False, frozen=True):
+            observed.append((frozen, lock.read_text()))
+            if not frozen:
+                lock.write_text(resolved.pop(0))
+            return results.pop(0)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A, SET_B]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest(
+                    {
+                        "anthropic": "1.0.0",
+                        "pydantic-ai-slim": "2.35.0",
+                        "claude-agent-sdk": "0.9.9",
+                    }
+                ),
+            ),
+            patch("scripts.update.deps.sync_dependencies", side_effect=_sync),
+            patch(
+                "scripts.update.deps.run_gate_phases",
+                side_effect=lambda _d, s: (
+                    (False, "import", "boom", False)
+                    if "anthropic" in s.members
+                    else (True, None, "ok", False)
+                ),
+            ),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert result.restore_failed is True
+        # The poisoned lockfile is discarded BEFORE the restore re-sync, and
+        # that re-sync is frozen so it cannot resolve a new one.
+        assert observed[1] == (True, PRE_BUMP_LOCK)
+        # The loop stopped: SET_B was never gated against the inconsistent
+        # venv, so nothing is reported bumped.
+        assert not result.any_bumped
+        assert any("an earlier set's rollback failed" in (b.error or "") for b in result.bumps)
+
+    def test_worktree_clean_after_every_rollback_path(self, tmp_path: Path):
+        """Sync failure, gate failure, and rewrite refusal all leave the tree pristine.
+
+        "Pristine" means BOTH tracked files: `pyproject.toml` **and**
+        `uv.lock`. A restore that re-syncs and keeps whatever uv resolved
+        leaves the lockfile carrying unrelated transitive drift, which a
+        later set's good bump then commits — the poisoned-lockfile class
+        this gate exists to prevent, reached on the success path.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        lock = tmp_path / "uv.lock"
+
+        scenarios = [
+            # (sync result, gate result)
+            (MagicMock(success=False, error="sync died"), (True, None, "ok", False)),
+            (MagicMock(success=True, error=None), (False, "pytest", "gate died", False)),
+        ]
+        for sync_result, gate_result in scenarios:
+            pyproject.write_text(TWO_SET_PYPROJECT)
+            lock.write_text(PRE_BUMP_LOCK)
+            with (
+                patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
+                patch(
+                    "scripts.update.deps.get_pypi_latest",
+                    _latest({"anthropic": "1.0.0", "pydantic-ai-slim": "2.35.0"}),
+                ),
+                patch(
+                    "scripts.update.deps.sync_dependencies",
+                    side_effect=_drifting_sync(lock, sync_result),
+                ),
+                patch("scripts.update.deps.run_gate_phases", return_value=gate_result),
+            ):
+                result = auto_bump_deps(tmp_path)
+            assert result.rolled_back
+            assert pyproject.read_text() == TWO_SET_PYPROJECT
+            assert lock.read_text() == PRE_BUMP_LOCK
+
+        # A writer refusal mid-set abandons the set with the file restored.
+        pyproject.write_text(TWO_SET_PYPROJECT)
+        lock.write_text(PRE_BUMP_LOCK)
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest({"anthropic": "1.0.0", "pydantic-ai-slim": "2.35.0"}),
+            ),
+            patch(
+                "scripts.update.deps.bump_pin_in_pyproject",
+                side_effect=PinDeclarationError("declared twice"),
+            ),
+            patch("scripts.update.deps.sync_dependencies") as sync,
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        sync.assert_not_called()
+        assert pyproject.read_text() == TWO_SET_PYPROJECT
+        assert lock.read_text() == PRE_BUMP_LOCK
+        assert all("set abandoned" in (b.error or "") for b in result.bumps)
+
+    def test_rollback_keeps_an_earlier_sets_good_lockfile(self, tmp_path: Path):
+        """Per-set, not per-run: the restore is scoped to the set that failed.
+
+        A blanket `git checkout -- uv.lock` would revert the *earlier*
+        set's legitimately-bumped lockfile too, leaving its pin in
+        `pyproject.toml` with no lock entry behind it — spike-4's failure
+        mode, on the lockfile axis.
+        """
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text(TWO_SET_PYPROJECT)
+        lock = tmp_path / "uv.lock"
+        lock.write_text(PRE_BUMP_LOCK)
+
+        # What each unfrozen sync resolves to, in call order: SET_B's good
+        # bump, then SET_A's bump, then SET_A's restore re-sync.
+        resolved = [POST_BUMP_LOCK, DRIFTED_LOCK, DRIFTED_LOCK]
+
+        def _sync(project_dir, reinstall=False, frozen=True):
+            if not frozen:
+                lock.write_text(resolved.pop(0))
+            return MagicMock(success=True, error=None)
+
+        with (
+            patch("scripts.update.deps.AUTO_BUMP_SETS", [SET_B, SET_A]),
+            patch(
+                "scripts.update.deps.get_pypi_latest",
+                _latest(
+                    {
+                        "anthropic": "1.0.0",
+                        "pydantic-ai-slim": "2.35.0",
+                        "claude-agent-sdk": "0.9.9",
+                    }
+                ),
+            ),
+            patch("scripts.update.deps.sync_dependencies", side_effect=_sync),
+            patch(
+                "scripts.update.deps.run_gate_phases",
+                side_effect=lambda _d, s: (
+                    (False, "import", "boom", False)
+                    if "anthropic" in s.members
+                    else (True, None, "ok", False)
+                ),
+            ),
+        ):
+            result = auto_bump_deps(tmp_path)
+
+        assert result.rolled_back
+        assert {b.package for b in result.bumps if b.bumped} == {"claude-agent-sdk"}
+        # SET_B's lockfile survives SET_A's rollback; SET_A's drift does not.
+        assert lock.read_text() == POST_BUMP_LOCK
+
+
+# =============================================================================
+# Verify-time LLM stack compat check
+# =============================================================================
+
+
+class TestVerifyRunsCompatCheck:
+    """The verify leg is the ONLY guard on a follower machine (route 3).
+
+    Followers never auto-bump, so if this check is silent an incompatible
+    stack ships with nothing saying so.
+    """
+
+    INCOMPATIBLE = {
+        "compatible": False,
+        "loader_ok": True,
+        "anthropic_version": "1.0.0",
+        "pydantic_ai_version": "2.9.0",
+        "reason": "anthropic 1.0.0's client.beta.messages.create does not accept: temperature",
+    }
+
+    def _stub_run(self, tmp_path: Path, payload: dict):
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.write_text("")
+        import json as _json
+
+        return patch(
+            "scripts.update.verify.run_cmd",
+            return_value=MagicMock(returncode=0, stdout=_json.dumps(payload), stderr=""),
+        )
+
+    def test_verify_runs_compat_check_without_bump(self, tmp_path: Path):
+        """Incompatible stack -> non-empty `.error`, not just `available=False`.
+
+        `run.py`'s valor_tools loop is `if not tool.available and tool.error:`
+        — a check that only flips `available` produces no log line, no
+        warning, and nothing for `extract_update_warnings` to surface.
+        """
+        from bridge.update import extract_update_warnings
+        from scripts.update import verify
+
+        with self._stub_run(tmp_path, self.INCOMPATIBLE):
+            check = verify.check_llm_stack_compat(tmp_path)
+
+        assert check.name == "llm-stack-compat"
+        assert check.available is False
+        assert check.error
+        assert "temperature" in check.error
+        # Both versions are legible whether it passed or failed.
+        assert "anthropic 1.0.0" in check.detail
+        assert "pydantic-ai 2.9.0" in check.detail
+
+        # And the warning run.py builds from it survives the parser.
+        warnings = extract_update_warnings([f"  ⚠️ {check.name}: {check.error}"])
+        assert any("llm-stack-compat" in w and "temperature" in w for w in warnings)
+
+    def test_compat_check_is_appended_to_valor_tools(self, tmp_path: Path):
+        """It must reach `result.valor_tools`, where run.py's loop looks."""
+        from scripts.update import verify
+
+        cheap = {
+            "check_system_tools": [],
+            "check_python_deps": [],
+            "check_dev_tools": [],
+            "check_valor_tools": [],
+            "check_sdk_auth": {},
+            "check_mcp_servers": [],
+            "check_gitignore_issues": [],
+        }
+        singles = ["check_telegram_session", "check_google_token", "check_env_completeness"]
+
+        with patch.multiple(
+            "scripts.update.verify",
+            **{name: MagicMock(return_value=value) for name, value in cheap.items()},
+            **{
+                name: MagicMock(return_value=verify.ToolCheck(name=name, available=True))
+                for name in singles
+            },
+        ):
+            with self._stub_run(tmp_path, self.INCOMPATIBLE):
+                result = verify.verify_environment(tmp_path, check_ollama_model=False)
+
+        compat = [t for t in result.valor_tools if t.name == "llm-stack-compat"]
+        assert len(compat) == 1
+        assert compat[0].error
+
+    def test_compat_check_reports_versions_on_pass(self, tmp_path: Path):
+        """Print-on-pass: `detail` carries both versions on a healthy stack."""
+        from scripts.update import verify
+
+        payload = dict(self.INCOMPATIBLE, compatible=True, reason=None)
+        with self._stub_run(tmp_path, payload):
+            check = verify.check_llm_stack_compat(tmp_path)
+
+        assert check.available is True
+        assert check.error is None
+        assert check.detail == "anthropic 1.0.0 / pydantic-ai 2.9.0"
+        assert check.version == check.detail
+
+    def test_compat_check_is_fail_closed_on_garbage(self, tmp_path: Path):
+        """A subprocess that emits no verdict is a failure with a reason."""
+        from scripts.update import verify
+
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True, exist_ok=True)
+        venv_python.write_text("")
+
+        with patch(
+            "scripts.update.verify.run_cmd",
+            return_value=MagicMock(returncode=1, stdout="", stderr="Traceback: boom"),
+        ):
+            check = verify.check_llm_stack_compat(tmp_path)
+
+        assert check.available is False
+        assert "boom" in check.error
+
+    def test_compat_check_not_human_gated(self):
+        """It is agent-resolvable, so it must re-warn every run until fixed."""
+        source = (PROJECT_DIR / "scripts" / "update" / "run.py").read_text()
+        gated = source.split("human_gated_tools = ")[1].split("\n")[0]
+        assert "llm-stack-compat" not in gated

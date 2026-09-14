@@ -443,3 +443,91 @@ class TestCountDiskOrphans:
                         "_count_disk_orphans must call the shared "
                         "_compute_expected_keep helper (C-C single source of truth)"
                     )
+
+
+class TestGuardedRepairsHaveAWallClockBudget:
+    """#2699: the guarded pass runs on the worker startup critical path.
+
+    ``Job.repair_indexes()`` closes with a full hydration of a Job population
+    that has no upper bound, so an unbounded guarded repair delays worker start
+    proportionally. These pin that it degrades to a logged timeout instead —
+    the same treatment the generic sweep got after the #2207 wedge.
+    """
+
+    def test_budget_expires_on_an_overrunning_repair(self):
+        import scripts.popoto_index_cleanup as c
+
+        with patch.object(c, "_REBUILD_TIMEOUT_SECONDS", 0.2):
+            started = time_module.monotonic()
+            result, timed_out, error = c._run_with_timeout(lambda: time_module.sleep(30))
+            elapsed = time_module.monotonic() - started
+
+        assert timed_out is True, "an overrunning repair must trip the budget"
+        assert result is None
+        assert error is None
+        assert elapsed < 5, f"must return at the budget, not the call's duration (took {elapsed}s)"
+
+    def test_fast_repair_returns_its_value_untouched(self):
+        import scripts.popoto_index_cleanup as c
+
+        assert c._run_with_timeout(lambda: (3, 7)) == ((3, 7), False, None)
+
+    def test_raising_repair_surfaces_the_error_not_a_timeout(self):
+        import scripts.popoto_index_cleanup as c
+
+        result, timed_out, error = c._run_with_timeout(
+            lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        assert timed_out is False
+        assert result is None
+        assert isinstance(error, RuntimeError)
+
+    def test_timed_out_guarded_model_is_recorded_and_the_sweep_continues(self):
+        """A wedged Room repair must not stop Job from being repaired."""
+        import scripts.popoto_index_cleanup as c
+
+        calls = []
+
+        def _fake_timeout(fn):
+            calls.append(fn)
+            # First guarded model times out; the second succeeds.
+            if len(calls) == 1:
+                return None, True, None
+            return (0, 4), False, None
+
+        with patch.object(c, "_run_with_timeout", _fake_timeout):
+            results = c._run_guarded_repairs()
+
+        assert len(calls) == 2, "sweep must continue past a timed-out model"
+        statuses = {name: r["status"] for name, r in results.items()}
+        assert "timeout" in statuses.values()
+        assert "ok" in statuses.values()
+
+    def test_errored_guarded_model_is_recorded_and_the_sweep_continues(self):
+        import scripts.popoto_index_cleanup as c
+
+        calls = []
+
+        def _fake_error(fn):
+            calls.append(fn)
+            if len(calls) == 1:
+                return None, False, RuntimeError("redis down")
+            return (1, 2), False, None
+
+        with patch.object(c, "_run_with_timeout", _fake_error):
+            results = c._run_guarded_repairs()
+
+        assert len(calls) == 2
+        errored = [r for r in results.values() if r["status"] == "error"]
+        assert len(errored) == 1
+        assert "redis down" in errored[0]["error"]
+
+    def test_guarded_repairs_route_through_the_budget_at_all(self):
+        """The regression this issue is about: calling repair_fn() directly,
+        outside the budget, is what made startup unbounded."""
+        import scripts.popoto_index_cleanup as c
+
+        with patch.object(c, "_run_with_timeout", return_value=((0, 0), False, None)) as budgeted:
+            c._run_guarded_repairs()
+
+        assert budgeted.call_count == 2, "every guarded repair must go through the budget"

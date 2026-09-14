@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -85,9 +86,9 @@ def _find_session_by_id(session_id: str):
 
         attempts = 0
         for attempts in class_set_retry_attempts():  # noqa: B007 — final value used below
-            sessions = list(AgentSession.query.filter(session_id=session_id))
+            sessions = AgentSession.rows_for_session_id(session_id)
             if sessions:
-                # Prefer eng sessions (they own stage_states)
+                # Prefer eng sessions (they own stage_states); newest otherwise
                 for s in sessions:
                     if getattr(s, "session_type", None) == "eng":
                         return s
@@ -160,18 +161,37 @@ def _get_stage_states(session) -> dict[str, str]:
 
 def _fetch_pr_merge_state(
     pr_number: int | None, repo: str | None = None
-) -> tuple[str | None, bool | None]:
-    """Fetch live PR merge state and CI status from GitHub.
+) -> tuple[str | None, bool | None, str | None]:
+    """Fetch live PR merge state, CI status, and lifecycle state from GitHub.
 
-    Returns a tuple of (pr_merge_state, ci_all_passing):
+    Returns a tuple of (pr_merge_state, ci_all_passing, pr_state):
     - ``pr_merge_state``: value of ``mergeStateStatus`` (e.g. "CLEAN", "BLOCKED",
       "DIRTY") or ``None`` on any failure.
     - ``ci_all_passing``: ``True`` if all ``statusCheckRollup`` conclusions are
       ``"SUCCESS"`` (empty list also returns ``True`` — a repo with no required
       checks has no failing checks), ``None`` on failure.
+    - ``pr_state``: value of ``state`` — "OPEN", "MERGED", or "CLOSED" — or
+      ``None`` on failure.
+
+    ``pr_state`` exists because ``mergeStateStatus`` cannot answer "did this
+    merge?" (#2894). GitHub stops computing mergeability once a PR merges, so a
+    merged PR reads ``UNKNOWN`` — the same value it reports while mergeability is
+    still being computed AND when the repo/env is genuinely misconfigured. Those
+    three meanings are indistinguishable on ``mergeStateStatus`` alone, which is
+    what let a shipped lane keep matching dispatch rules. ``state`` separates
+    them unambiguously and is what ``agent.sdlc_router.guard_terminal_lane``
+    keys on.
 
     On any ``gh`` CLI failure (network error, unknown PR, timeout), both fields
     default to ``None``. Guard G6 will not fire if either is ``None``.
+
+    GitHub computes ``mergeStateStatus`` asynchronously, so a just-updated PR
+    (e.g. immediately after a rebase) can read back ``"UNKNOWN"`` on the first
+    query. A single ``"UNKNOWN"`` read is retried once after a short delay,
+    mirroring the retry ``/do-pr-review``'s own preflight already performs
+    (`.claude/skills-global/do-pr-review/sub-skills/checkout.md`) — without it,
+    every caller of this helper (guard G9, guard G6) can fail-closed on a
+    transient read instead of the settled state (#2796 tech debt).
 
     Args:
         pr_number: The PR number to query.
@@ -181,18 +201,19 @@ def _fetch_pr_merge_state(
             for resolving the repo and threading it in.
     """
     if not pr_number:
-        return None, None
+        return None, None, None
+
+    cmd = [
+        "gh",
+        "pr",
+        "view",
+        str(pr_number),
+        *(["--repo", repo] if repo else []),
+        "--json",
+        "mergeStateStatus,statusCheckRollup,state",
+    ]
 
     try:
-        cmd = [
-            "gh",
-            "pr",
-            "view",
-            str(pr_number),
-            *(["--repo", repo] if repo else []),
-            "--json",
-            "mergeStateStatus,statusCheckRollup",
-        ]
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -201,11 +222,36 @@ def _fetch_pr_merge_state(
         )
         if proc.returncode != 0:
             logger.debug(f"_fetch_pr_merge_state: gh returned {proc.returncode}")
-            return None, None
+            return None, None, None
         data = json.loads(proc.stdout or "{}")
         merge_state = data.get("mergeStateStatus")
         if not isinstance(merge_state, str):
             merge_state = None
+
+        pr_state = data.get("state")
+        if not isinstance(pr_state, str):
+            pr_state = None
+
+        # A merged PR reports UNKNOWN mergeability permanently, so the retry
+        # below would sleep and re-query for a value that can never settle.
+        # Skip it once `state` proves the PR is no longer open.
+        if merge_state == "UNKNOWN" and (pr_state or "").upper() in ("MERGED", "CLOSED"):
+            pass
+        elif merge_state == "UNKNOWN":
+            time.sleep(2)
+            retry_proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if retry_proc.returncode == 0:
+                retry_data = json.loads(retry_proc.stdout or "{}")
+                retry_state = retry_data.get("mergeStateStatus")
+                if isinstance(retry_state, str):
+                    data = retry_data
+                    merge_state = retry_state
+
         rollup = data.get("statusCheckRollup")
         if not isinstance(rollup, list):
             ci_all_passing = None
@@ -215,10 +261,10 @@ def _fetch_pr_merge_state(
             ci_all_passing = all(
                 isinstance(check, dict) and check.get("conclusion") == "SUCCESS" for check in rollup
             )
-        return merge_state, ci_all_passing
+        return merge_state, ci_all_passing, pr_state
     except Exception as e:
         logger.debug(f"_fetch_pr_merge_state failed: {e}")
-        return None, None
+        return None, None, None
 
 
 def _gh_pr_list(args: list[str], repo: str | None = None) -> int | None:
@@ -598,7 +644,26 @@ def _compute_meta(
             pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo, state="merged")
 
     # Fetch live PR merge state and CI status for G6 guard
-    pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
+    pr_merge_state, ci_all_passing, pr_state = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
+
+    # Open-before-merged ordering for the RECORDED path (#2894 tech debt).
+    # `session_pr` is a single-writer FIELD (comment above), but the write is
+    # not re-armed when an issue reopens with a fresh PR: the field can still
+    # point at a PR that has since merged while a NEW open PR for the same
+    # issue is live. Left unchecked, `pr_state` reads "MERGED" for a lane that
+    # is still mid-flight, and `agent.sdlc_router.guard_terminal_lane` declares
+    # it finished (plan's Risk 1 — "the terminal guard swallows a live
+    # pre-merge lane"). Mirrors `_ledger_less_merged_pr`'s ordering below: an
+    # OPEN PR must always win over a historical MERGED one for the same issue.
+    # Scoped to fire ONLY when the recorded PR resolves MERGED, so the common
+    # case (recorded PR is itself the live one) pays no extra `gh` call.
+    if isinstance(session_pr, int) and session_pr > 0 and (pr_state or "").upper() == "MERGED":
+        live_open_pr = _lookup_pr(issue_number, slug=slug, repo=resolved_repo, state="open")
+        if live_open_pr and live_open_pr != pr_number:
+            pr_number = live_open_pr
+            pr_merge_state, ci_all_passing, pr_state = _fetch_pr_merge_state(
+                pr_number, repo=resolved_repo
+            )
 
     # Compute dispatch-history derived fields.
     # D5: pass the LIVE stage snapshot so the count resets when state has
@@ -647,6 +712,7 @@ def _compute_meta(
         "revision_applied_at": revision_applied_at,
         "pr_number": pr_number,
         "pr_merge_state": pr_merge_state,
+        "pr_state": pr_state,
         "ci_all_passing": ci_all_passing,
         "same_stage_dispatch_count": int(same_stage_count),
         "last_dispatched_skill": last_skill,
@@ -676,6 +742,10 @@ def _compute_meta(
         # non-integer value must degrade to 0 (the bound stands down) rather than
         # raise and take the whole stage-query down with it.
         "concern_round_count": _coerce_count(raw_states.get("_concern_round_count")),
+        # Revision-demanding critique rounds (#2885 via #3065), written by
+        # tools/sdlc_verdict.py::record_verdict. Rides `_meta` for the same
+        # reason as `concern_round_count` directly above.
+        "revision_round_count": _coerce_count(raw_states.get("_revision_round_count")),
     }
 
 
@@ -695,6 +765,7 @@ def _default_meta() -> dict:
         "revision_applied_at": None,
         "pr_number": None,
         "pr_merge_state": None,
+        "pr_state": None,
         "ci_all_passing": None,
         "same_stage_dispatch_count": 0,
         "last_dispatched_skill": None,
@@ -707,6 +778,7 @@ def _default_meta() -> dict:
         "_resolved_target_repo": None,
         "completion_refusal_count": 0,
         "concern_round_count": 0,
+        "revision_round_count": 0,
     }
 
 
@@ -783,6 +855,97 @@ def query_stage_states(
     return _get_stage_states(session)
 
 
+# TTL cache for the ledger-less merged-PR probe. Provisional and tunable:
+# override with SDLC_LEDGERLESS_PR_TTL (seconds).
+_LEDGERLESS_PR_TTL_DEFAULT = 300.0
+_ledgerless_pr_cache: dict[int, tuple[float, int | None, str | None]] = {}
+
+
+def _ledgerless_pr_ttl_seconds() -> float:
+    """Resolve the ledger-less probe TTL at call time, never at import time.
+
+    Read lazily rather than frozen into a module-scope constant: this module is
+    imported into long-lived bridge/worker processes and into per-plugin
+    contexts that set their own environment after import, so an import-time
+    capture would pin every one of them to whatever the ambient value happened
+    to be when the first importer ran (#2866).
+    """
+    return float(os.environ.get("SDLC_LEDGERLESS_PR_TTL", _LEDGERLESS_PR_TTL_DEFAULT))
+
+
+def _evict_expired_ledgerless_entries(now: float) -> None:
+    """Drop every ``_ledgerless_pr_cache`` entry older than the TTL.
+
+    The TTL was previously enforced on READ only (a stale hit is recomputed),
+    so an expired entry that is never looked up again sat in the dict forever
+    — in the long-lived bridge/worker the cache grows monotonically with every
+    distinct issue number the router has ever polled. Called on every write
+    path so the dict self-bounds to "issues polled within one TTL window"
+    rather than "issues ever polled", in the spirit of ``MAX_DISPATCH_HISTORY``
+    elsewhere in this codebase.
+    """
+    ttl = _ledgerless_pr_ttl_seconds()
+    expired = [k for k, v in _ledgerless_pr_cache.items() if (now - v[0]) >= ttl]
+    for k in expired:
+        del _ledgerless_pr_cache[k]
+
+
+def _ledger_less_merged_pr(issue_number: int) -> tuple[int | None, str | None]:
+    """Resolve a PR for an issue whose ledger is gone. Cached, fail-open.
+
+    Returns ``(pr_number, pr_state)`` or ``(None, None)``.
+
+    **Open-before-merged ordering (#2894 tech debt).** Mirrors `_compute_meta`'s
+    two-pass ordering above: try `state="open"` first, and only fall back to
+    `state="merged"` when the open pass finds nothing. An OPEN PR is the lane's
+    live artifact and must always win over a historical one — without this
+    ordering, an issue with a merged PR AND a live open PR whose ledger was
+    evicted (the #2853/#2812 shape this rung exists to handle) would resolve to
+    the historical merged PR, read `pr_state == "MERGED"`, and
+    `agent.sdlc_router.guard_terminal_lane` would declare the lane finished
+    while its open PR is still in flight (the plan's Risk 1).
+
+    **Caching the negative is the whole point.** The caller sits on a path the
+    router polls constantly, and it cannot tell a shipped-but-evicted lane from
+    a brand-new issue without asking GitHub. Asking once per TTL window — and
+    remembering "no" just as durably as "yes" — is what keeps a fresh issue from
+    paying a ``gh`` subprocess on every single poll.
+
+    Fail-open by design: any failure returns ``(None, None)``, which reproduces
+    the previous behavior exactly. A lookup problem must never manufacture a
+    terminal verdict.
+    """
+    now = time.monotonic()
+    _evict_expired_ledgerless_entries(now)
+    hit = _ledgerless_pr_cache.get(issue_number)
+    if hit is not None and (now - hit[0]) < _ledgerless_pr_ttl_seconds():
+        return hit[1], hit[2]
+
+    # Repo resolution is best-effort and must not abort the lookup: `_lookup_pr`
+    # falls back to the ambient repo when `repo` is None, and a resolution
+    # failure here previously swallowed the whole probe.
+    resolved_repo = None
+    try:
+        resolved_repo = _resolve_target_repo_for_read()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_ledger_less_merged_pr({issue_number}) repo resolution failed: {e}")
+
+    pr_number: int | None = None
+    pr_state: str | None = None
+    try:
+        pr_number = _lookup_pr(issue_number, repo=resolved_repo, state="open")
+        if pr_number is None:
+            pr_number = _lookup_pr(issue_number, repo=resolved_repo, state="merged")
+        if pr_number:
+            _, _, pr_state = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
+    except Exception as e:  # noqa: BLE001 — fail-open; never manufacture terminality
+        logger.debug(f"_ledger_less_merged_pr({issue_number}) failed: {e}")
+        pr_number, pr_state = None, None
+
+    _ledgerless_pr_cache[issue_number] = (now, pr_number, pr_state)
+    return pr_number, pr_state
+
+
 def query_enriched(
     session_id: str | None = None,
     issue_number: int | None = None,
@@ -808,7 +971,27 @@ def query_enriched(
         session = _resolve_issue_record(issue_number)
 
     if session is None:
-        return {"stages": {}, "_meta": _default_meta()}
+        # A lane whose ledger is gone is NOT necessarily a lane that never
+        # existed (#2894/#2817). #2853 merged cleanly, then its ledger emptied,
+        # and with no `pr_number` the router fell through to row 1 and began
+        # dispatching `/do-plan` on shipped work. `_compute_meta`'s merged-PR
+        # fallback would have resolved it, but this early return short-circuits
+        # that entire path, so the router was handed nothing to reason with.
+        #
+        # Deliberately NOT gated on bare `session is None`: that branch also
+        # fires for every never-seen issue, and the router polls it constantly,
+        # so an ungated lookup would run a `gh` subprocess on every poll for a
+        # fresh issue. The TTL cache below is what makes this safe — it caches
+        # the NEGATIVE result too, so a fresh issue costs one lookup per window
+        # rather than one per poll.
+        meta = _default_meta()
+        if issue_number is not None:
+            merged_pr, merged_state = _ledger_less_merged_pr(issue_number)
+            if merged_pr:
+                meta["pr_number"] = merged_pr
+                meta["pr_state"] = merged_state
+                meta["issue_number"] = issue_number
+        return {"stages": {}, "_meta": meta}
 
     raw_states = _load_raw_states(session)
     stages = {}

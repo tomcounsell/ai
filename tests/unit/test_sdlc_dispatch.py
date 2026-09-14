@@ -126,12 +126,17 @@ class TestDispatchRecordLease:
         with (
             patch("models.session_lifecycle.touch_issue_lock", mock_touch),
             patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+            patch("tools.sdlc_dispatch.record_dispatch_for_ledger") as mock_record_dispatch,
         ):
             result = sdlc_dispatch._cli_record(self._args())
 
         assert result["ok"] is False
         assert result["reason"] == "ISSUE_LOCKED"
-        mock_get_or_create.assert_not_called()
+        # The run-identity anchor's single get_or_create is legitimate; a second
+        # call would mean the write path ran. The dispatch write is refused, so
+        # record_dispatch_for_ledger is never called.
+        assert mock_get_or_create.call_count == 1
+        mock_record_dispatch.assert_not_called()
 
     def test_run_id_annotated_onto_dispatch_history(self):
         from tools import sdlc_dispatch

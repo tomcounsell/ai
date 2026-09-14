@@ -1,20 +1,10 @@
 # Bridge Response Improvements
 
-**Status**: Implemented
-**Created**: 2026-01-20
-**Completed**: 2026-01-20
+The Telegram bridge formats responses so Valor behaves like a senior coworker rather than a chatbot.
 
----
+## Response Filtering
 
-## Summary
-
-Implemented four improvements to the Telegram bridge to make Valor behave like a senior coworker rather than a chatbot.
-
-## Implemented Features
-
-### 1. Response Filtering ✅
-
-Filters out tool execution traces from agent responses before sending to Telegram.
+`bridge/response.py:filter_tool_logs()` filters tool execution traces from agent responses before sending to Telegram. `bridge/context.py` re-exports this canonical implementation for reply-chain hydration (`build_conversation_history` and `format_reply_chain`).
 
 **Patterns filtered:**
 - `🛠️ exec:` - Bash execution
@@ -28,40 +18,26 @@ Filters out tool execution traces from agent responses before sending to Telegra
 
 If filtering removes everything, no message is sent (reaction emoji suffices).
 
-**Location**: `bridge/response.py:filter_tool_logs()` (single source of truth).
-`bridge/context.py` re-exports this canonical implementation for reply-chain
-hydration (`build_conversation_history` and `format_reply_chain`); see
-issue #1359 for the consolidation history.
+## Reply-Based Session Continuity
 
-### 2. Reply-Based Session Continuity ✅
-
-Prevents context pollution by using Telegram's reply-to feature for session management.
+Telegram's reply-to feature drives session management, preventing context pollution.
 
 | Message Type | Session Behavior |
 |--------------|------------------|
 | Reply to Valor's message | Resume original session (root-resolved) |
 | New message (no reply) | Fresh session using message ID |
 
-**Session ID format**: `tg_{project}_{chat_id}_{root_msg_id}` — where `root_msg_id` is the oldest human message in the reply chain, resolved via `resolve_root_session_id()` in `bridge/context.py`. This ensures replying to any message in a thread (including Valor's responses) always maps to the original session. See [Session Management](session-management.md) for details.
+**Session ID format**: `tg_{project}_{chat_id}_{root_msg_id}` — where `root_msg_id` is the oldest human message in the reply chain, resolved via `resolve_root_session_id()` in `bridge/context.py`. Replying to any message in a thread (including Valor's responses) maps to the original session. See [Session Management](session-management.md) for details.
 
 **Location**: Handler in `bridge/telegram_bridge.py` around line 943
 
-### 3. Retry with Self-Healing ✅
+## Retry with Self-Healing
 
-On timeout or failure, retries up to 3 times with progressive delays.
+On timeout or failure, `bridge/telegram_bridge.py:get_agent_response_with_retry()` retries up to 3 times with progressive delays of 5s, 15s, 30s. On final failure it creates `docs/plans/fix-bridge-failure-{timestamp}.md` instead of showing an error to the user.
 
-**Retry delays**: 5s, 15s, 30s
+## Activity Context
 
-**Self-healing actions**:
-- Brief pause between retries
-
-**On final failure**: Creates `docs/plans/fix-bridge-failure-{timestamp}.md` instead of showing error to user.
-
-**Location**: `bridge/telegram_bridge.py:get_agent_response_with_retry()`
-
-### 4. Activity Context ✅
-
-When user asks status questions like "what are you working on?", injects recent activity into context.
+When a user asks a status question, `bridge/telegram_bridge.py:build_activity_context()` injects recent activity into context.
 
 **Status patterns detected**:
 - "what are you working on"
@@ -76,19 +52,9 @@ When user asks status questions like "what are you working on?", injects recent 
 - Modified files
 - Active plan docs
 
-**Location**: `bridge/telegram_bridge.py:build_activity_context()`
+## Working Directory Configuration
 
----
-
-## Previous Improvement (Already Done)
-
-### Working Directory Configuration ✅
-
-Added `working_directory` to project config and pass to agent subprocess.
-
-**Location**: `~/Desktop/Valor/projects.json` and `bridge/telegram_bridge.py:get_agent_response()`
-
----
+Projects configure `working_directory` in `~/Desktop/Valor/projects.json`; the bridge passes it to the agent subprocess.
 
 ## Design Philosophy
 
@@ -99,9 +65,7 @@ A helpful coworker only responds:
 
 Never: Play-by-play updates, error dumps, excuses, or "waiting for tasks"
 
----
-
-## Testing
+## Test Coverage
 
 | Test Case | Expected |
 |-----------|----------|

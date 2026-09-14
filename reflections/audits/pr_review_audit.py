@@ -208,10 +208,10 @@ def run() -> dict:
 
     Runs in dry_run=True mode by default to avoid spurious issue creation.
     """
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     try:
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
     except Exception as e:
         logger.warning(f"PR review audit: could not import PRReviewAudit: {e}")
         return {"status": "error", "findings": [], "summary": f"Import error: {e}"}

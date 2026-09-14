@@ -36,7 +36,7 @@ async def run() -> dict:
         return {"status": "ok", "findings": [finding], "summary": finding}
 
     mod_time = datetime.fromtimestamp(principal_path.stat().st_mtime, tz=UTC)
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     age_days = (utc_now() - mod_time).days
     staleness_threshold = 90

@@ -51,6 +51,8 @@ import json
 import logging
 import time
 
+from pydantic import ValidationError
+
 logger = logging.getLogger(__name__)
 
 ABORT_KEYWORDS = frozenset({"stop", "cancel", "abort", "nevermind"})
@@ -107,6 +109,58 @@ def _is_expired(msg: dict, max_age_seconds: float | None, now: float) -> float |
     return age if age > max_age_seconds else None
 
 
+def _parse_entry(raw, key: str, *, destructive: bool) -> dict | None:
+    """Validate one steering entry against ``SteeringPayload``.
+
+    Returns the entry as a dict, or ``None`` when it did not validate.
+
+    A destructive read has already LPOPped the entry, so an unparseable one is
+    gone: it becomes a ``steering_parse`` dead letter carrying the raw string.
+    A peek leaves the entry on the list for the next drain to handle, so it
+    only logs — dead-lettering there would write one row per peek for the same
+    entry.
+
+    Only ``ValidationError`` is caught, which is what a malformed or
+    schema-violating entry raises; pydantic reports a JSON syntax error the
+    same way, so this covers everything the ``json.JSONDecodeError`` branch
+    it replaced covered. Anything else — a client handing back a value that
+    is not text at all, say — is a fault in the caller or the Redis layer
+    rather than a bad message, and it still raises out of the drain the way
+    it always has. Swallowing those would convert a broken reader into a
+    silent stream of dead letters.
+    """
+    from bridge.wire_schemas import SteeringPayload
+
+    try:
+        return SteeringPayload.model_validate_json(raw).model_dump(exclude_unset=True)
+    except ValidationError as e:
+        logger.warning(f"[steering] Invalid entry in queue {key}: {raw!r} ({e})")
+        if destructive:
+            try:
+                from bridge import dead_letters
+
+                dead_letters.record(
+                    "steering_parse",
+                    raw if isinstance(raw, str) else repr(raw),
+                    f"steering payload failed validation in {key}: {e}",
+                    replayable=False,
+                )
+            except Exception as dl_exc:  # noqa: BLE001 -- never break a drain
+                logger.debug("[steering] dead-letter write failed (non-fatal): %s", dl_exc)
+        return None
+
+
+# Upper bound on one destructive drain. A steering list holds a handful of
+# entries; this exists so the LPOP loop below can never spin without end.
+MAX_DRAIN_ENTRIES = 10_000
+
+# How many entries in a row may fail validation before the drain gives up.
+# Every failure LPOPs an entry and writes a dead letter, so a list of nothing
+# but malformed entries would otherwise shred itself into DeadLetter rows.
+# Stopping leaves the rest queued for someone to look at.
+MAX_CONSECUTIVE_PARSE_FAILURES = 20
+
+
 def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
     """Destructively drain one steering list via sequential LPOPs (FIFO).
 
@@ -119,19 +173,41 @@ def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
             is never filtered, so every message that exists today behaves
             exactly as it does today. An entry with a missing or non-numeric
             ``timestamp`` is kept (fail open).
+
+    Two bounds stop the LPOP loop. ``MAX_DRAIN_ENTRIES`` caps the loop
+    outright: before entries were validated, a raw value the JSON parse could
+    not handle raised out of this function and ended the drain, and now
+    ``_parse_entry`` catches everything and ``continue``s, so without a bound
+    a reader whose ``lpop`` never returns ``None`` would spin forever.
+    ``MAX_CONSECUTIVE_PARSE_FAILURES`` stops earlier and matters more: each
+    failure has already LPOPped its entry and written a dead letter, so a
+    list of nothing but malformed entries would shred itself into DeadLetter
+    rows. Giving up leaves the remainder queued for inspection. A steering
+    list is a handful of entries in practice, so reaching either bound is a
+    bug report and both are logged as one.
     """
     r = _get_redis()
     now = time.time()
     messages: list[dict] = []
-    while True:
+    consecutive_failures = 0
+    for _ in range(MAX_DRAIN_ENTRIES):
         raw = r.lpop(key)
         if raw is None:
             break
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning(f"[steering] Invalid JSON in queue {key}: {raw!r}")
+        msg = _parse_entry(raw, key, destructive=True)
+        if msg is None:
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_PARSE_FAILURES:
+                logger.error(
+                    "[steering] Stopping the drain of %s after %d consecutive "
+                    "unparseable entries. The rest stay queued rather than "
+                    "becoming dead letters.",
+                    key,
+                    consecutive_failures,
+                )
+                break
             continue
+        consecutive_failures = 0
         age = _is_expired(msg, max_age_seconds, now)
         if age is not None:
             logger.info(
@@ -143,6 +219,14 @@ def _drain_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
             )
             continue
         messages.append(msg)
+    else:
+        logger.error(
+            "[steering] Drain of %s stopped at the %d-entry bound; "
+            "the list is longer than any real steering queue, or lpop is "
+            "not draining it. Remaining entries stay queued.",
+            key,
+            MAX_DRAIN_ENTRIES,
+        )
     return messages
 
 
@@ -162,10 +246,8 @@ def _peek_list(key: str, max_age_seconds: float | None = None) -> list[dict]:
     now = time.time()
     messages: list[dict] = []
     for raw in r.lrange(key, 0, -1):
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning(f"[steering] Invalid JSON in queue {key}: {raw!r}")
+        msg = _parse_entry(raw, key, destructive=False)
+        if msg is None:
             continue
         if _is_expired(msg, max_age_seconds, now) is not None:
             continue
@@ -182,8 +264,12 @@ def push_steering_message(
     front: bool = False,
     room_id: str | None = None,
     timestamp: float | None = None,
-) -> None:
+) -> str:
     """Push a message to a steering queue — the Room leg, or the legacy leg.
+
+    Returns the serialized payload exactly as it was written, so a caller
+    whose own follow-up work fails can hand it back to
+    :func:`remove_steering_message` and undo the push. Most callers ignore it.
 
     Args:
         session_id: The active session to steer
@@ -239,7 +325,9 @@ def push_steering_message(
     if target_agent is not None:
         msg_dict["target_agent"] = target_agent
 
-    payload = json.dumps(msg_dict)
+    from bridge.wire_schemas import SteeringPayload, dump
+
+    payload = dump(SteeringPayload(**msg_dict))
     if front:
         r.lpush(key, payload)
     else:
@@ -250,6 +338,46 @@ def push_steering_message(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
         f"{text[:80]!r} (from {sender}){target_suffix}{front_suffix}"
     )
+    return payload
+
+
+def remove_steering_message(
+    session_id: str,
+    payload: str,
+    room_id: str | None = None,
+) -> bool:
+    """Undo a single :func:`push_steering_message`, by exact payload.
+
+    Exists for the push-then-do-something-that-can-fail shape: a caller that
+    must push BEFORE a second write (to close a two-write race) has no other
+    way to clean up when that second write raises. Without it the orphaned
+    steer sits on the legacy key forever — the legacy leg carries no TTL and
+    is never age-bounded at drain time (only the Room leg is, via
+    ``steering_room_max_age_s``) — and is injected verbatim whenever that
+    session next runs, however much later that is.
+
+    Removes the LAST occurrence (``LREM count=-1``), which is the entry a
+    just-completed ``RPUSH`` wrote. Concurrent pushes of *different* text are
+    unaffected; a byte-identical duplicate would lose its newest copy, which
+    is the correct one to drop here.
+
+    The leg is re-derived from the payload's own ``is_abort`` so it always
+    matches the key ``push_steering_message`` chose, including for a keyword
+    auto-detected abort. Never raises.
+    """
+    try:
+        is_abort = bool(json.loads(payload).get("is_abort"))
+    except Exception:
+        is_abort = False
+    key = _room_queue_key(room_id) if (room_id and not is_abort) else _queue_key(session_id)
+    try:
+        removed = _get_redis().lrem(key, -1, payload)
+    except Exception as e:
+        logger.warning("[steering] Failed to remove steering message from %s: %s", key, e)
+        return False
+    if removed:
+        logger.info("[steering] Removed %s orphaned steering message(s) from %s", removed, key)
+    return bool(removed)
 
 
 def pop_all_steering_messages(session_id: str, room_id: str | None = None) -> list[dict]:

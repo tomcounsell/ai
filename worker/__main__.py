@@ -30,13 +30,18 @@ from pathlib import Path
 # dotenv entirely in that case: macOS TCC blocks open() on iCloud-synced
 # ~/Desktop/Valor/.env (which .env symlinks to), causing the process to
 # hang indefinitely.
-if not os.environ.get("VALOR_LAUNCHD"):
+# Pre-config launcher flag (#2866 triage): this read decides whether .env is
+# loaded at all, so it cannot itself come from config.settings, and launchd sets
+# it per-process — all three exemption tests hold.
+if not os.environ.get("VALOR_LAUNCHD"):  # env-scope-guard: allow
     try:
         from dotenv import load_dotenv
 
         load_dotenv(Path(__file__).parent.parent / ".env")
     except ImportError:
         pass
+
+from bridge.log_format import StructuredJsonFormatter  # noqa: E402
 
 logger = logging.getLogger("worker")
 
@@ -249,7 +254,7 @@ def _green_heartbeat_write() -> None:
     filesystem error must not be confused with a frozen event loop. Refreshes
     the Redis worker PID as a side effect (issue #1271).
     """
-    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+    from agent.session_health import _write_worker_heartbeat  # noqa: PLC0415
 
     try:
         _write_worker_heartbeat()
@@ -431,16 +436,18 @@ def _configure_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    handlers: list[logging.Handler] = [
-        logging.StreamHandler(sys.stderr),
-        logging.FileHandler(str(log_file)),
-    ]
-    for handler in handlers:
-        handler.setFormatter(formatter)
+    # The file handler emits JSON so worker logs can be joined to the bridge's
+    # on correlation_id, agent_session_id, and session_id — the bridge has done
+    # this since #1817 and the worker's half of every journey was plain text
+    # (#3183 lane 5a). stderr stays human-readable: it is what a person tails.
+    stream_handler = logging.StreamHandler(sys.stderr)
+    stream_handler.setFormatter(formatter)
+    file_handler = logging.FileHandler(str(log_file))
+    file_handler.setFormatter(StructuredJsonFormatter())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    for handler in handlers:
+    for handler in (stream_handler, file_handler):
         root_logger.addHandler(handler)
 
 
@@ -531,22 +538,24 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     8. Waits for shutdown signal
     """
     from agent.agent_session_queue import (
-        _active_workers,
-        _agent_session_health_loop,
-        _cleanup_orphaned_claude_processes,
         _ensure_worker,
-        _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
+        register_callbacks,
+        request_shutdown,
+    )
+    from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
+    from agent.session_health import (
+        _agent_session_health_loop,
+        _agent_session_tool_timeout_loop,
+        _cleanup_orphaned_claude_processes,
+        _recover_interrupted_agent_sessions_startup,
         _sweep_dead_worker_sessions,
         _sweep_stranded_waiting_for_children_parents,
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
-        register_callbacks,
         register_worker_pid,
-        request_shutdown,
     )
-    from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
-    from agent.session_health import _agent_session_tool_timeout_loop
+    from agent.session_state import _active_workers
 
     # Initialize the global concurrency slot registry BEFORE any worker loops
     # are created. Clamp to minimum 1 to prevent deadlock if
@@ -681,8 +690,20 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
     # before yielding to the event loop, so asyncio.wait_for cannot apply the timeout.
     # Binary existence (shutil.which) is the only reliable check in this environment.
+    # A dry run skips it for a different reason: the smoke test is ADVISORY (every
+    # branch below logs and continues), so its result cannot change the dry-run
+    # verdict -- but it costs a live network round-trip to the Claude CLI, ~8s of
+    # a ~14s total. `TestWorkerDryRun` shells out under a 30s `subprocess.run`
+    # timeout, so two concurrent xdist workers each paying that cost exhausted the
+    # ceiling and the tests flaked. Binary existence (`shutil.which` above) is the
+    # real gate and still runs. Keeping the network out of the dry-run path also
+    # lets the suite pass offline.
     if os.environ.get("VALOR_LAUNCHD"):
         logger.info("CLI harness smoke test skipped (VALOR_LAUNCHD — TCC restriction)")
+    elif dry_run:
+        logger.info(
+            "CLI harness smoke test skipped (dry run — advisory check, binary already found)"
+        )
     else:
         try:
             from agent.sdk_client import verify_harness_health
@@ -1056,17 +1077,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Completion drain failed: {e}")
 
-    # Drain in-flight post-session extractions (hotfix #1055).
-    # Ordering: after worker-task wait (so every extraction that will be scheduled
-    # has been scheduled), before health/notify/reflection cancels (so the event
-    # loop is still running and pending extractions can cooperate with cancel).
-    try:
-        from agent.session_executor import drain_pending_extractions
-
-        await drain_pending_extractions(timeout=5.0)
-    except Exception as e:
-        logger.warning(f"Extraction drain failed: {e}")
-
     # Drain in-flight calendar heartbeats (issue #2590). Same ordering rationale
     # as the extraction drain above: the loop is still running, so a heartbeat
     # mid-subprocess-spawn is cancelled cleanly here instead of being abandoned
@@ -1174,6 +1184,15 @@ def main() -> None:
     from config.redis_bootstrap import configure_resilient_redis  # noqa: PLC0415
 
     configure_resilient_redis()
+
+    # LLM-stack compat (#3001): force the degraded flag to resolve now, so a
+    # broken anthropic + pydantic-ai pair alarms at boot instead of at the
+    # first non-harness call. Deliberately NOT fatal — the worker keeps
+    # executing sessions; only non-harness LLM calls fail fast with the typed
+    # LLMStackIncompatible, and each call site keeps its own fail-safe default.
+    from agent.llm.compat import resolve_degraded_flag  # noqa: PLC0415
+
+    resolve_degraded_flag("worker")
 
     # Validate agent definition files are usable on disk. Missing, malformed,
     # or unreadable files are not fatal — the SDK falls back gracefully — but

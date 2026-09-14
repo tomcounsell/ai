@@ -15,18 +15,10 @@ from enum import StrEnum
 
 
 class SessionType(StrEnum):
-    """Discriminator for AgentSession: eng or teammate.
-
-    ``GRANITE`` is a historical value: its sole producer (the standalone
-    ``valor-granite-loop`` CLI) was deleted with the PTY substrate (plan
-    #1924). The value is retained so pre-cutover Redis records that carry
-    ``session_type="granite"`` keep hydrating and rendering; nothing creates
-    new sessions with it. Removal is #1927's (schema diet) scope.
-    """
+    """Discriminator for AgentSession: eng or teammate."""
 
     ENG = "eng"
     TEAMMATE = "teammate"
-    GRANITE = "granite"
 
 
 class PersonaType(StrEnum):

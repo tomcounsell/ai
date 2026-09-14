@@ -11,7 +11,7 @@ a terminal-status guard, the zombie gets re-promoted to pending.
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -69,10 +69,10 @@ class TestStartupRecoverySkipsTerminalSessions:
     """Startup recovery must skip sessions whose hash status is terminal."""
 
     @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
-    @patch("agent.agent_session_queue.AgentSession")
+    @patch("agent.session_health.AgentSession")
     def test_terminal_session_not_recovered(self, mock_cls, terminal_status):
         """Sessions with any terminal hash status should not be recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         zombie = _make_session(
             status=terminal_status,
@@ -87,7 +87,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     @patch("agent.session_health.AgentSession")
     def test_legitimate_running_session_still_recovered(self, mock_cls, mock_update):
         """A truly running session (non-terminal) should still be recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         legit = _make_session(status="running", session_id="tg_proj_chat_legit")
         mock_cls.query.filter.return_value = [legit]
@@ -100,7 +100,7 @@ class TestStartupRecoverySkipsTerminalSessions:
     @patch("agent.session_health.AgentSession")
     def test_mixed_terminal_and_running_only_recovers_running(self, mock_cls, mock_update):
         """When both zombie and legitimate sessions exist, only the running one is recovered."""
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         zombie = _make_session(
             agent_session_id="zombie-1",
@@ -129,12 +129,25 @@ class TestHealthCheckSkipsTerminalSessions:
 
     @pytest.mark.parametrize("terminal_status", ["killed", "completed", "abandoned"])
     @pytest.mark.asyncio
-    @patch("agent.agent_session_queue._active_workers", {})
-    @patch("agent.agent_session_queue._active_events", {})
-    @patch("agent.agent_session_queue.AgentSession")
+    # Patch the bindings `agent.session_health` itself captured (#3055). It does
+    # `from agent.session_state import _active_events, _active_workers` at module
+    # scope, so rebinding the name on any OTHER module — including the old
+    # agent_session_queue re-export hub these patches used to name — leaves the
+    # health check reading the real registry and the isolation is silent fiction.
+    @patch("agent.session_health._active_workers", {})
+    @patch("agent.session_health._active_events", {})
+    @patch("agent.session_health.AgentSession")
     async def test_terminal_session_not_recovered_by_health_check(self, mock_cls, terminal_status):
-        """Health check should skip a terminal session found in running index."""
-        from agent.agent_session_queue import _agent_session_health_check
+        """Health check should skip a terminal session found in running index.
+
+        Asserts on the recovery action, not merely that the call returns. This
+        test used to have no assertion at all: it awaited the health check and
+        passed if nothing raised, so it held for ANY status — including
+        ``running`` — and could not detect a zombie actually being recovered
+        (#3054). ``test_running_session_is_a_positive_control`` below is what
+        proves the assertion can fail.
+        """
+        from agent.session_health import _agent_session_health_check
 
         zombie = _make_session(
             status=terminal_status,
@@ -148,8 +161,52 @@ class TestHealthCheckSkipsTerminalSessions:
 
         mock_cls.query.filter.side_effect = mock_filter
 
-        # Should complete without attempting recovery on the zombie
-        await _agent_session_health_check()
+        with patch(
+            "agent.session_health._apply_recovery_transition", new_callable=AsyncMock
+        ) as mock_recover:
+            await _agent_session_health_check()
+
+        assert mock_cls.query.filter.called, (
+            "the patched AgentSession was never consulted — the patch does not "
+            "reach the code under test and every assertion here is vacuous"
+        )
+        assert not mock_recover.called, (
+            f"terminal session ({terminal_status}) was put through recovery: "
+            f"{mock_recover.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    @patch("agent.session_health._active_workers", {})
+    @patch("agent.session_health._active_events", {})
+    @patch("agent.session_health.AgentSession")
+    async def test_running_session_is_a_positive_control(self, mock_cls):
+        """A stale NON-terminal session must reach recovery.
+
+        Without this, the terminal cases above could pass because recovery never
+        fires for any input — which is precisely how the hollow version survived.
+        """
+        from agent.session_health import _agent_session_health_check
+
+        live = _make_session(status="running", session_id="tg_proj_chat_running")
+        live.started_at = None  # legacy row: worker dead + no started_at -> recover
+
+        def mock_filter(**kwargs):
+            if kwargs.get("status") == "running":
+                return [live]
+            return []
+
+        mock_cls.query.filter.side_effect = mock_filter
+
+        with patch(
+            "agent.session_health._apply_recovery_transition", new_callable=AsyncMock
+        ) as mock_recover:
+            mock_recover.return_value = True
+            await _agent_session_health_check()
+
+        assert mock_recover.called, (
+            "a stale running session did not reach _apply_recovery_transition — "
+            "the terminal-skip assertions above would then be vacuous"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -8,12 +8,10 @@ contract (pr-changed-files mode).
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
 import tempfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -35,17 +33,34 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _git(cwd: Path, *args: str) -> str:
+    """Run a real git command in ``cwd`` and return stdout."""
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _porcelain(cwd: Path) -> str:
+    """``git status --porcelain`` output, stripped."""
+    return _git(cwd, "status", "--porcelain").strip()
+
+
 @pytest.fixture()
 def git_repo(repo: Path) -> Path:
-    """A ``repo`` that is also a real git checkout.
+    """A ``repo`` that is also a real git checkout, able to commit.
 
     The bare-name existence oracle (#2759) resolves a filename with no ``/``
     against a ``git ls-files --cached --others --exclude-standard`` basename
     index. That index only exists inside a git checkout, so ambiguity and
     index-backed resolution have to be exercised here rather than on the plain
     ``tmp_path`` ``repo`` fixture.
+
+    Identity is set locally so tests asserting on commit state can create a
+    baseline commit without depending on the machine's global git config.
     """
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Docs Auditor Test")
     return repo
 
 
@@ -57,6 +72,10 @@ def fake_redis():
     fake.delete.return_value = 1
     fake.hgetall.return_value = {}
     fake.hset.return_value = 1
+    # A blank fake holds no keys. Without this, MagicMock's truthy default makes
+    # _daily_pr_cap_reached() report a cap on every run, which now short-circuits
+    # run_docs_auditor at the hoisted preflight guard.
+    fake.exists.return_value = 0
     return fake
 
 
@@ -177,6 +196,61 @@ class TestAuditSubstrate:
 # ---------------------------------------------------------------------------
 
 
+class TestNeighborhoodPlanExclusion:
+    """#3133 Gap 2: outbound links must honor NON_AUDITED_DOC_PREFIXES."""
+
+    def test_outbound_plan_link_excluded(self, repo: Path):
+        (repo / "docs" / "plans" / "old-plan.md").write_text("# plan")
+        (repo / "docs" / "features" / "other.md").write_text("# other")
+        (repo / "docs" / "features" / "primary.md").write_text(
+            "# P\n[plan](../plans/old-plan.md)\n[other](other.md)\n"
+        )
+        hood = docs_auditor._resolve_neighborhood(Path("docs/features/primary.md"), repo)
+        hood_strs = {str(p) for p in hood}
+        assert "docs/plans/old-plan.md" not in hood_strs
+        # The non-plan sibling still joins, so the exclusion is targeted,
+        # not a broken outbound branch.
+        assert "docs/features/other.md" in hood_strs
+
+    def test_outbound_archived_plan_link_excluded(self, repo: Path):
+        archived = repo / "docs" / "archive" / "plans-completed"
+        archived.mkdir(parents=True)
+        (archived / "done-plan.md").write_text("# done")
+        (repo / "docs" / "features" / "primary.md").write_text(
+            "# P\n[done](../archive/plans-completed/done-plan.md)\n"
+        )
+        hood = docs_auditor._resolve_neighborhood(Path("docs/features/primary.md"), repo)
+        assert {str(p) for p in hood} == {"docs/features/primary.md"}
+
+
+class TestInstalledPackageResolution:
+    """#3133 Gap 1: citations of installed-dependency source are not deleted targets."""
+
+    def test_installed_citation_not_reported_and_fake_is(self, repo: Path):
+        # Real upstream citation: zero findings. Mutating the cited path to a
+        # nonexistent module produces one, so the test reaches the resolver
+        # rather than passing vacuously.
+        real = "Upstream pool setup lives in `popoto/models/base.py`.\n"
+        assert _mk_finding(real, repo) == []
+        fake = "Upstream pool setup lives in `popoto/models/nope.py`.\n"
+        findings = _mk_finding(fake, repo)
+        assert len(findings) == 1
+        assert "popoto/models/nope.py" in findings[0]["title"]
+
+    def test_helper_resolves_only_under_site_packages(self):
+        assert docs_auditor._installed_package_target_exists("popoto/redis_db.py") is True
+        assert docs_auditor._installed_package_target_exists("popoto/does_not_exist.py") is False
+        # First-party packages resolve through an editable path entry outside
+        # site-packages; the helper must never vouch for them, or a
+        # branch-deleted module would be suppressed by the primary checkout.
+        assert docs_auditor._installed_package_target_exists("tools/doctor.py") is False
+
+    def test_helper_rejects_non_package_first_components(self):
+        assert docs_auditor._installed_package_target_exists("docs/features/x.py") is False
+        assert docs_auditor._installed_package_target_exists(".claude/hooks/x.py") is False
+        assert docs_auditor._installed_package_target_exists("bare.py") is False
+
+
 class TestNeighborhoodCap:
     def test_neighborhood_capped_at_20(self, repo: Path):
         primary = repo / "docs" / "features" / "primary.md"
@@ -215,7 +289,7 @@ class TestSetnxLock:
         fake_redis.set.return_value = None  # already locked
         with patch("reflections.docs_auditor.PROJECT_ROOT", repo):
             result = docs_auditor.run_docs_auditor()
-        assert result["status"] == "ok"
+        assert result["status"] == "skipped"
         assert "locked" in result["summary"].lower() or "locked" in str(result["findings"]).lower()
 
 
@@ -238,7 +312,9 @@ class TestZeroDiffGate:
         ):
             result = docs_auditor.run_docs_auditor()
 
-        assert result["status"] == "ok"
+        # "ok" survives on exactly one return in run_docs_auditor — the one that
+        # created a PR. A zero-diff pass produced no PR, so it is "skipped" (R7-2).
+        assert result["status"] == "skipped"
         # Push must NOT be called when zero-diff
         mock_push.assert_not_called()
 
@@ -261,6 +337,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -299,6 +376,7 @@ class TestRefreshDocsInMemoryHook:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -388,12 +466,18 @@ class TestDoDocsContract:
         # Substrate must not push branches in any scope mode
         mock_push.assert_not_called()
 
-    def test_hook_invocation_under_pr_mode(self, repo: Path, auth_ok, patch_redis):
-        # In pr-changed-files mode the substrate fires the memory refresh hook
-        # itself, so the /do-docs skill is a true thin caller (no skill-level
-        # work needed per Task 4 acceptance criteria).
-        primary = repo / "docs" / "features" / "foo.md"
+    def test_hook_fires_and_nothing_is_committed_under_pr_mode(
+        self, git_repo: Path, auth_ok, patch_redis
+    ):
+        # In pr-changed-files mode the substrate fires the memory refresh hook on
+        # the *applied* set and commits nothing: the /do-docs skill owns the
+        # commit, because the diff has to pass a review gate before it becomes a
+        # permanent record. The applied fix must therefore still be dirty on exit.
+        primary = git_repo / "docs" / "features" / "foo.md"
         primary.write_text("# Foo\n\nThe SessionLog tracks state.\n" + "Padding line.\n" * 6)
+        _git(git_repo, "add", "-A")
+        _git(git_repo, "commit", "-q", "-m", "baseline")
+        assert _porcelain(git_repo) == ""
 
         with (
             patch(
@@ -401,7 +485,6 @@ class TestDoDocsContract:
                 return_value=[Path("docs/features/foo.md")],
             ),
             patch.object(docs_auditor, "_file_issue_if_new", return_value=False),
-            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
             patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
         ):
             result = docs_auditor.audit(
@@ -409,12 +492,15 @@ class TestDoDocsContract:
                 scope_mode="pr-changed-files",
                 apply_mode="apply",
                 project_key="test",
-                repo_root=repo,
+                repo_root=git_repo,
             )
 
         assert "docs/features/foo.md" in result["files_touched"]
-        mock_commit.assert_called_once()
         mock_hook.assert_called_once_with(["docs/features/foo.md"])
+        # The write landed and stayed uncommitted, for the skill to review.
+        assert "AgentSession" in primary.read_text()
+        assert "docs/features/foo.md" in _porcelain(git_repo)
+        assert _git(git_repo, "rev-list", "--count", "HEAD").strip() == "1"
 
     def test_rotation_mode_does_not_fire_hook_inside_audit(self, repo: Path, auth_ok, patch_redis):
         # In rotation mode, the hook is fired by run_docs_auditor (Caller A),
@@ -475,7 +561,6 @@ class TestNonMarkdownApplyGuard:
                 "reflections.docs_auditor._resolve_pr_changed_files",
                 return_value=[Path("site/runtime.html")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch") as mock_commit,
             patch.object(docs_auditor, "refresh_docs_in_memory") as mock_hook,
         ):
             result = docs_auditor.audit(
@@ -491,8 +576,7 @@ class TestNonMarkdownApplyGuard:
         assert result["status"] == "ok"
         assert result["files_touched"] == []
         assert result["fixes_applied"] == 0
-        # No commit / memory refresh fires when nothing was touched.
-        mock_commit.assert_not_called()
+        # No memory refresh fires when nothing was touched.
         mock_hook.assert_not_called()
 
     def test_markdown_sibling_still_rewritten(self, repo: Path, auth_ok, patch_redis):
@@ -505,7 +589,6 @@ class TestNonMarkdownApplyGuard:
                 "reflections.docs_auditor._resolve_pr_changed_files",
                 return_value=[Path("docs/features/runtime.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch"),
             patch.object(docs_auditor, "refresh_docs_in_memory"),
         ):
             result = docs_auditor.audit(
@@ -519,6 +602,75 @@ class TestNonMarkdownApplyGuard:
         assert "agent_session" in md.read_text()
         assert result["fixes_applied"] >= 1
         assert "docs/features/runtime.md" in result["files_touched"]
+
+    def test_live_claim_veto_does_not_reach_the_write_path(self, repo: Path, auth_ok, patch_redis):
+        """Q7b / R4-1 regression: the veto is keyword-only and off by default.
+
+        `_make_stale_term_replacer` never passes `live_claim_veto=True`, so a
+        `STALE_TERMS` hit on a line reading "X remains defined in Y" under a
+        `## Migration` heading must still land in `suppressed` and the file
+        must come back byte-identical. A build that evaluates the veto
+        unconditionally would rewrite this line — the auditor editing
+        narrative prose on the cascade path, which #2739 exists to gate.
+        """
+        md = repo / "docs" / "features" / "runtime.md"
+        content = (
+            "# Runtime\n\n"
+            "## Migration\n\n"
+            "The `session_log` field remains defined in `agent/x.py`.\n" + "Padding line.\n" * 6
+        )
+        md.write_text(content)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("docs/features/runtime.md")],
+            ),
+            patch.object(docs_auditor, "refresh_docs_in_memory"),
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert md.read_text() == content
+        assert result["files_touched"] == []
+        assert result["fixes_applied"] == 0
+
+    def test_live_claim_veto_mirror_control_still_suppressed_on_plain_line(
+        self, repo: Path, auth_ok, patch_redis
+    ):
+        """The same stale term under the same heading, with no live-claim cue,
+        is still suppressed — pins that the heading tier alone (not the veto)
+        is what's doing the work in the case above."""
+        md = repo / "docs" / "features" / "runtime.md"
+        content = (
+            "# Runtime\n\n"
+            "## Migration\n\n"
+            "The `session_log` field is referenced here.\n" + "Padding line.\n" * 6
+        )
+        md.write_text(content)
+
+        with (
+            patch(
+                "reflections.docs_auditor._resolve_pr_changed_files",
+                return_value=[Path("docs/features/runtime.md")],
+            ),
+            patch.object(docs_auditor, "refresh_docs_in_memory"),
+        ):
+            result = docs_auditor.audit(
+                primary_path=None,
+                scope_mode="pr-changed-files",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert md.read_text() == content
+        assert result["files_touched"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +734,7 @@ class TestStaleTermDictionary:
         Every case here is a document that *correctly* records a completed
         rename. Rewriting any occurrence in it produces a sentence saying the
         new name was formerly itself — a false statement that ships with
-        ``fixes_withheld == 0`` and auto-merges unread.
+        ``fixes_withheld == 0`` and reaches a human review unflagged.
         """
         assert docs_auditor._detect_stale_term_fixes(content) == []
 
@@ -642,7 +794,7 @@ class TestStaleTermWordBoundary:
         "content",
         [
             "| `save_session_snapshot()` | `agent/session_logs.py` | (none) |",
-            "See `bridge/session_logs.py` for the re-export shim.",
+            "See `agent/session_logs.py` for the canonical module.",
             "The SessionLogs collection is plural.",
             "A `_RedisJob` wrapper carries the payload.",
         ],
@@ -913,6 +1065,68 @@ class TestExistenceInvariant:
         assert withheld == []
         assert "headless_runner.py" in (repo / bare_doc).read_text()
 
+    def test_nested_name_resolvable_by_suffix_passes(self, git_repo):
+        """Resolution order for a multi-segment ref, step 2: suffix match (#2936).
+
+        A nested ref is often written package-relative rather than rooted at the
+        repo root. Resolving against ``repo_root`` alone reads it as absent and
+        over-withholds.
+        """
+        repo = git_repo
+        doc = repo / "docs" / "features" / "nested.md"
+        doc.write_text("The runtime lives in the runner module.\n")
+        (repo / ".claude" / "hooks" / "hook_utils").mkdir(parents=True)
+        (repo / ".claude" / "hooks" / "hook_utils" / "hook_target.py").write_text("")
+
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/nested.md"),
+            repo,
+            [(re.compile(r"\brunner\b"), "hook_utils/hook_target.py")],
+        )
+
+        assert applied == 1
+        assert withheld == []
+        assert "hook_utils/hook_target.py" in doc.read_text()
+
+    @pytest.mark.parametrize(
+        ("owner", "case"),
+        [
+            pytest.param(None, "absent-everywhere", id="absent-everywhere"),
+            pytest.param("pkg/myhook_utils/hook_target.py", "near-miss", id="component-near-miss"),
+        ],
+    )
+    def test_nested_name_without_component_anchored_owner_is_withheld(self, git_repo, owner, case):
+        """The suffix fallback must not weaken the detector.
+
+        ``absent-everywhere`` is the #2711 shape; ``component-near-miss`` pins the
+        boundary rule — ``myhook_utils/hook_target.py`` does not own
+        ``hook_utils/hook_target.py``.
+        """
+        repo = git_repo
+        doc = repo / "docs" / "features" / "nested_absent.md"
+        doc.write_text("The runtime lives in the runner module.\n")
+        if owner is not None:
+            path = repo / owner
+            path.parent.mkdir(parents=True)
+            path.write_text("")
+
+        applied, withheld = docs_auditor._apply_fixes_to_file(
+            Path("docs/features/nested_absent.md"),
+            repo,
+            [(re.compile(r"\brunner\b"), "hook_utils/hook_target.py")],
+        )
+
+        assert applied == 0
+        assert withheld == [
+            {
+                "doc": "docs/features/nested_absent.md",
+                "old": r"\brunner\b",
+                "new": "hook_utils/hook_target.py",
+                "reason": "target-absent",
+            }
+        ], case
+        assert "hook_utils/hook_target.py" not in doc.read_text()
+
     def test_ambiguous_bare_name_passes_and_debug_logs(self, git_repo, caplog):
         """Resolution order step 2, ambiguity ruling: >=1 match passes (#2759 AC2).
 
@@ -1030,11 +1244,12 @@ class TestExistenceInvariant:
     def test_dir_prefixed_decisions_unaffected_by_degraded_index(
         self, repo, doc, clear_basename_cache, failure
     ):
-        """Degradation is scoped to bare names; ``dir/file.py`` never consults the index.
+        """A degraded index changes no ``dir/file.py`` verdict, in either direction.
 
-        The fallback must not leak into the path class that already worked, in
-        either direction: an absent dir-prefixed target still withholds and a
-        present one still applies.
+        Nested refs consult the index too since #2936 (suffix resolution), but only
+        after the direct ``repo_root`` check: an absent dir-prefixed target still
+        withholds when the index is unavailable, and a present one still applies
+        without ever needing it.
         """
         (repo / "agent" / "renamed.py").write_text("")
         with patch.object(docs_auditor.subprocess, "run", side_effect=lambda *a, **k: failure()):
@@ -1083,7 +1298,6 @@ class TestExistenceInvariant:
                 "_resolve_pr_changed_files",
                 return_value=[Path("docs/features/aud.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch") as commit,
         ):
             result = docs_auditor.audit(
                 primary_path=None,
@@ -1097,42 +1311,22 @@ class TestExistenceInvariant:
         assert result["fixes_withheld"] == 1
         assert result["withheld"][0]["new"] == "ghost_module.py"
         assert result["files_touched"] == []
-        commit.assert_not_called()
         assert "ghost_module.py" not in p.read_text()
 
 
 # ---------------------------------------------------------------------------
-# TestWithheldBlocksAutoMerge — the rotation path's only review gate
+# TestWithheldBlocksStaleClose — the rotation path's only review gate
 # ---------------------------------------------------------------------------
 
 
-class TestWithheldBlocksAutoMerge:
-    """A run that withheld a fix must not produce an auto-mergeable PR."""
+class TestWithheldBlocksStaleClose:
+    """A run that withheld a fix still requires a human merge, and the sweeper
+    must not close or delete the branch of a PR carrying the withheld marker.
 
-    @staticmethod
-    def _meta(body: str) -> dict:
-        return {
-            "files": [{"path": "docs/features/foo.md"}],
-            "reviews": [],
-            "reviewRequests": [],
-            "comments": [],
-            "additions": 1,
-            "deletions": 1,
-            "createdAt": (datetime.now(UTC) - timedelta(days=3)).isoformat().replace("+00:00", "Z"),
-            "body": body,
-        }
-
-    def _eligible(self, body: str) -> bool:
-        with patch("reflections.docs_auditor.subprocess.run") as run:
-            run.return_value = MagicMock(returncode=0, stdout=json.dumps(self._meta(body)))
-            return docs_auditor._pr_is_auto_merge_eligible(123)
-
-    def test_clean_pr_is_eligible(self):
-        assert self._eligible("Automated docs auditor pass.") is True
-
-    def test_withheld_marker_disqualifies(self):
-        body = f"Automated docs auditor pass.\n\n{docs_auditor.WITHHELD_PR_MARKER}\n1 withheld"
-        assert self._eligible(body) is False
+    The withheld marker reaches the PR body and Telegram, and the sweeper
+    exempts a withheld-marker PR from stale-close (covered in the real-git
+    test file).
+    """
 
     def test_pr_body_carries_marker_when_fixes_withheld(self, repo):
         calls: list[list[str]] = []
@@ -1151,25 +1345,25 @@ class TestWithheldBlocksAutoMerge:
         ]
         with (
             patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
-            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
-            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, withheld=withheld)
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/x.md"], withheld=withheld, starting_ref="main"
+            )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
         body = create[create.index("--body") + 1]
         assert docs_auditor.WITHHELD_PR_MARKER in body
         assert "a/c.py" in body
 
-    def test_bare_name_withhold_propagates_to_pr_body_telegram_and_liveness(
+    def test_bare_name_withhold_propagates_to_pr_body_and_telegram(
         self, repo, auth_ok, patch_redis
     ):
         """The new bare-name withhold class must reach every operator surface.
 
         Computing the withhold is not enough — #2759's whole value is that the
-        rotation PR becomes auto-merge-ineligible and a human hears about it.
-        The withheld record here is produced by a real ``audit()`` run, not
+        rotation PR carries the withheld marker and a human hears about it. The
+        withheld record here is produced by a real ``audit()`` run, not
         hand-written, so the first assertion is the one that fails on ``main``.
         """
         # Prose anchor, not a path token — see the #2744 note on the sibling
@@ -1188,7 +1382,6 @@ class TestWithheldBlocksAutoMerge:
                 "_resolve_pr_changed_files",
                 return_value=[Path("docs/features/foo.md")],
             ),
-            patch.object(docs_auditor, "_commit_current_branch"),
         ):
             audit_result = docs_auditor.audit(
                 primary_path=None,
@@ -1211,34 +1404,45 @@ class TestWithheldBlocksAutoMerge:
 
         with (
             patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
-            patch("reflections.docs_auditor._daily_pr_cap_reached", return_value=False),
-            patch("reflections.docs_auditor._has_open_pr_for_slug", return_value=False),
             patch("reflections.docs_auditor._record_daily_pr"),
         ):
-            docs_auditor._push_branch_and_pr("slug", repo, withheld=audit_result["withheld"])
+            docs_auditor._push_branch_and_pr(
+                "slug",
+                repo,
+                ["docs/features/foo.md"],
+                withheld=audit_result["withheld"],
+                starting_ref="main",
+            )
 
         create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
         body = create[create.index("--body") + 1]
         assert docs_auditor.WITHHELD_PR_MARKER in body
         assert "ghost_module.py" in body
-        # ...and that marker is what makes the PR auto-merge-ineligible.
-        assert self._eligible(body) is False
 
-        # Surfaces 2 and 3 — the Telegram notification and Redis liveness.
+        # Surface 2 — the Telegram notification, and the returned summary.
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness") as liveness,
         ):
             result = docs_auditor.run_docs_auditor()
 
-        assert result["status"] == "ok"
+        # The one fix was entirely withheld, so files_touched is empty and the
+        # run hits the zero-diff gate — "skipped", not "ok" (R7-2); the mocked
+        # _push_branch_and_pr above is never reached on this path.
+        assert result["status"] == "skipped"
         assert "1 fix(es) withheld" in notify.call_args.args[0]
-        assert liveness.call_args.kwargs["fixes_withheld"] == 1
+        assert notify.call_args.kwargs["repo_root"] == repo
+        assert "1 fix(es) withheld" in result["summary"]
 
     def test_rotation_result_surfaces_withheld_count(self, repo, auth_ok, patch_redis):
         primary = repo / "docs" / "features" / "foo.md"
@@ -1255,22 +1459,31 @@ class TestWithheldBlocksAutoMerge:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
-            patch("reflections.docs_auditor._push_branch_and_pr", return_value=None) as push,
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ) as push,
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False) as file_issue,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
             result = docs_auditor.run_docs_auditor()
 
         assert result["status"] == "ok"
         assert any("2 fix(es) withheld" in f for f in result["findings"])
         assert "withheld" in result["summary"]
+        # The staging set is passed explicitly — never a whole-tree `git add -A`.
+        assert push.call_args.args[2] == audit_result["files_touched"]
         assert push.call_args.kwargs["withheld"] == audit_result["withheld"]
         assert "withheld" in notify.call_args.args[0]
+        assert notify.call_args.kwargs["repo_root"] == repo
+        # One issue filed per withheld entry (Q5 / B4).
+        assert file_issue.call_count == 2
 
     def test_all_withheld_zero_diff_run_still_notifies(self, repo, auth_ok, patch_redis):
         """Every fix rejected => no files touched => the step-9 notify is unreachable.
@@ -1292,22 +1505,28 @@ class TestWithheldBlocksAutoMerge:
         )
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
             patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False) as file_issue,
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness") as liveness,
         ):
             result = docs_auditor.run_docs_auditor()
 
-        assert result["status"] == "ok"
+        # A zero-diff pass produced no PR, so "skipped" — "ok" survives only on
+        # the PR-created return (R7-2).
+        assert result["status"] == "skipped"
         assert "zero-diff" in result["summary"]
         assert notify.call_count == 1
         msg = notify.call_args.args[0]
         assert "2 fix(es) withheld" in msg
         assert "docs_features_foo_md" in msg  # the rotation slug
-        assert liveness.call_args.kwargs["fixes_withheld"] == 2
+        assert notify.call_args.kwargs["repo_root"] == repo
+        assert "2 fix(es) withheld" in result["summary"]
+        # One issue filed per withheld entry (Q5 / B4), even on the no-PR path.
+        assert file_issue.call_count == 2
 
     def test_clean_zero_diff_run_does_not_notify(self, repo, auth_ok, patch_redis):
         """No withholding => a zero-diff pass stays silent, as before."""
@@ -1321,11 +1540,253 @@ class TestWithheldBlocksAutoMerge:
             patch("reflections.docs_auditor.audit", return_value=audit_result),
             patch("reflections.docs_auditor._send_telegram_notification") as notify,
             patch("reflections.docs_auditor._update_rotation_hash"),
-            patch("reflections.docs_auditor._write_liveness"),
         ):
-            docs_auditor.run_docs_auditor()
+            result = docs_auditor.run_docs_auditor()
 
         assert notify.call_count == 0
+        assert result["status"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# TestTelegramChatRouting — #2754
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramChatRouting:
+    """``_send_telegram_notification`` resolves its destination from repo_root."""
+
+    VALOR_PROJECT = {
+        "slug": "valor",
+        "working_directory": str(docs_auditor.PROJECT_ROOT),
+        "telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}},
+    }
+
+    def test_production_valor_path_routes_by_id(self):
+        """Case 1: the production valor path sends to the numeric chat_id, not the name."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hello", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        argv = calls[0]
+        assert "-1003449100931" in argv
+        assert "Eng: Valor" not in argv
+
+    def test_foreign_registered_repo_routes_to_its_own_group(self, tmp_path):
+        """Case 2: a foreign registered repo with a configured Eng: group."""
+        foreign_project = {
+            "slug": "popoto",
+            "working_directory": str(tmp_path),
+            "telegram": {"groups": {"Eng: Popoto": {"chat_id": -5189826365}}},
+        }
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT, foreign_project],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is True
+        assert "-5189826365" in calls[0]
+
+    def test_project_root_with_empty_projects_falls_back_to_literal(self):
+        """Case 3: repo_root == PROJECT_ROOT with load_local_projects returning []."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=fake_run),
+            patch("reflections.docs_auditor.load_local_projects", return_value=[]),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        assert "Eng: Valor" in calls[0]
+
+    def test_foreign_unregistered_repo_suppresses_send(self, tmp_path, caplog):
+        """Case 4: a foreign, unregistered repo sends nothing and returns False."""
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch("reflections.docs_auditor.load_local_projects", return_value=[]),
+            caplog.at_level("WARNING"),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is False
+        run.assert_not_called()
+        assert str(tmp_path) in caplog.text
+
+    def test_registered_repo_with_malformed_group_suppresses_send(self, tmp_path):
+        """Case 5: a registered repo whose Eng: group is malformed (the royop shape)."""
+        malformed_project = {
+            "slug": "royop",
+            "working_directory": str(tmp_path),
+            "telegram": {"groups": {}},
+        }
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[malformed_project],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent is False
+        run.assert_not_called()
+
+    def test_load_local_projects_raising_falls_back_for_project_root_only(self, tmp_path, caplog):
+        """Case 6: ``load_local_projects`` raising is swallowed; ``PROJECT_ROOT``
+        still falls back to the literal, a foreign path returns False."""
+        with (
+            patch("reflections.docs_auditor.subprocess.run") as run,
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            sent_root = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+            sent_foreign = docs_auditor._send_telegram_notification("hi", repo_root=tmp_path)
+
+        assert sent_root is True
+        assert "Eng: Valor" in run.call_args_list[0].args[0]
+        assert sent_foreign is False
+        assert "boom" in caplog.text
+
+    def test_subprocess_filenotfounderror_still_returns_true(self):
+        """Case 7a: a resolved destination whose ``subprocess.run`` raises
+        ``FileNotFoundError`` still returns True — a send was attempted, not
+        suppressed."""
+        with (
+            patch(
+                "reflections.docs_auditor.subprocess.run",
+                side_effect=FileNotFoundError,
+            ),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+
+    def test_nonzero_exit_code_logs_warning_and_still_returns_true(self, caplog):
+        """Case 7b: a non-zero ``valor-telegram`` exit code on a resolved
+        destination logs a warning and still returns True."""
+        with (
+            patch(
+                "reflections.docs_auditor.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout="", stderr="boom"),
+            ),
+            patch(
+                "reflections.docs_auditor.load_local_projects",
+                return_value=[self.VALOR_PROJECT],
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            sent = docs_auditor._send_telegram_notification(
+                "hi", repo_root=docs_auditor.PROJECT_ROOT
+            )
+
+        assert sent is True
+        assert "valor-telegram exited 1" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# TestTelegramSuppressionReachesSummary — #2754
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramSuppressionReachesSummary:
+    """A ``False`` return threads a suppression notice into the persisted summary."""
+
+    def test_zero_diff_suppression_reaches_summary(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok",
+            files_touched=[],
+            fixes_applied=0,
+            fixes_withheld=1,
+            withheld=[
+                {"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"}
+            ],
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "suppressed" in result["summary"]
+        assert any("suppressed" in f for f in result["findings"])
+
+    def test_step9_suppression_reaches_summary_before_pr_url(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok", files_touched=["docs/features/foo.md"], fixes_applied=1
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "suppressed" in result["summary"]
+        assert result["summary"].index("suppressed") < result["summary"].index("PR=")
+        assert any("suppressed" in f for f in result["findings"])
 
 
 # ---------------------------------------------------------------------------
@@ -1342,9 +1803,10 @@ class TestWithheldRateNonRegression:
     """Widening ``_PATH_REF_RE`` adds no withholds on the real corpus (#2759 AC4).
 
     This is the mechanical proof behind the plan's ruling that #2759 does **not**
-    block on #2729 (withheld PRs are auto-merge-ineligible forever and stale-close
-    at day 14). Two measurement paths report a reassuring zero regardless of the
-    change's real effect and are therefore not used:
+    block on #2729 (a withheld-fix PR carries ``WITHHELD_PR_MARKER`` and is
+    exempt from the sweeper's stale-close; there is no auto-merge concept).
+    Two measurement paths report a reassuring zero regardless of the change's
+    real effect and are therefore not used:
 
     1. ``_detect_stale_term_fixes`` alone never reaches ``_absent_new_path_refs``;
        ``fixes_withheld`` is populated only by ``_apply_fixes_to_file``.
@@ -1493,10 +1955,16 @@ class TestDirtyTreeGuard:
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
             patch("reflections.docs_auditor._git_dirty", return_value=True),
+            patch("reflections.docs_auditor._file_issue_if_new") as file_issue,
         ):
             result = docs_auditor.run_docs_auditor()
-        assert result["status"] == "ok"
+        # The guard returns "skipped" (R5-1) and must stay quiet: the whole
+        # shared checkout is dirty here, which concurrent lanes routinely
+        # cause, so a filing guard would mint issues blaming the auditor for a
+        # peer's uncommitted work (Q4 item 5).
+        assert result["status"] == "skipped"
         assert "dirty" in result["summary"].lower()
+        file_issue.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1511,6 +1979,7 @@ class TestPRCreationFailure:
 
         with (
             patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
             patch("reflections.docs_auditor._git_dirty", return_value=False),
             patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
             patch(
@@ -1522,8 +1991,191 @@ class TestPRCreationFailure:
         ):
             result = docs_auditor.run_docs_auditor()
 
-        # Failure to create PR should not raise
-        assert result["status"] in ("ok", "error")
+        # Failure to create PR must not raise. The guards are hoisted to the
+        # preflight, so a None from _push_branch_and_pr after a write can only
+        # mean failure — it routes to "error", never a silent "ok".
+        assert result["status"] == "error"
+
+    def test_push_failure_escalates_via_operational_failure_issue(self, repo, auth_ok, patch_redis):
+        """R5-1: status="error" alone reaches nobody — a real issue must be filed
+        before the function returns, or the wedge signal dies at the return."""
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n\nThe SessionLog tracks state.\n" + "Padding line.\n" * 6)
+
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor._push_branch_and_pr", return_value=None),
+            patch("reflections.docs_auditor._send_telegram_notification"),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False) as file_issue,
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "error"
+        file_issue.assert_called_once()
+        finding = file_issue.call_args.args[0]
+        assert (
+            finding["title"]
+            == "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+        )
+        assert finding["category"] == "operational-failure"
+        # No volatile fields — no date, count, or run id in the title.
+        assert (
+            "docs-auditor: rotation failed to produce a PR for docs_features_foo_md"
+            == finding["title"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestHoistedPRGuards — the guards fire before the substrate writes
+# ---------------------------------------------------------------------------
+
+
+class TestHoistedPRGuards:
+    """The daily-cap and open-PR guards run pre-write, in run_docs_auditor.
+
+    Before this, both lived inside ``_push_branch_and_pr`` and fired *after*
+    ``audit()`` had already rewritten docs in the shared main checkout, which
+    left the edits uncommitted there while the run reported success.
+    """
+
+    @staticmethod
+    def _run(repo, **guards):
+        """Drive a rotation with the two guards forced, returning (result, mocks)."""
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch(
+                "reflections.docs_auditor._daily_pr_cap_reached",
+                return_value=guards.get("cap", False),
+            ),
+            patch(
+                "reflections.docs_auditor._has_open_pr_for_slug",
+                return_value=guards.get("open_pr", False),
+            ),
+            patch("reflections.docs_auditor.audit") as audit_mock,
+            patch("reflections.docs_auditor._push_branch_and_pr") as push,
+            patch("reflections.docs_auditor._update_rotation_hash") as rotation,
+            patch("reflections.docs_auditor._send_telegram_notification") as notify,
+        ):
+            result = docs_auditor.run_docs_auditor()
+        return result, {
+            "audit": audit_mock,
+            "push": push,
+            "rotation": rotation,
+            "notify": notify,
+        }
+
+    @pytest.mark.parametrize("guard", ["cap", "open_pr"])
+    def test_guard_returns_skipped_without_running_the_substrate(
+        self, repo, auth_ok, patch_redis, guard
+    ):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        result, mocks = self._run(repo, **{guard: True})
+
+        assert result["status"] == "skipped"
+        mocks["audit"].assert_not_called()
+        mocks["push"].assert_not_called()
+        mocks["notify"].assert_not_called()
+
+    @pytest.mark.parametrize("guard", ["cap", "open_pr"])
+    def test_guard_still_stamps_the_rotation_hash_for_the_picked_doc(
+        self, repo, auth_ok, patch_redis, guard
+    ):
+        """Without this stamp the same doc is re-picked forever.
+
+        ``_select_primary_doc`` always picks the least-recently-audited doc, so an
+        unstamped slug is re-picked on every run for as long as the guard fires —
+        and an open withheld PR is never closed, which would turn one blocked doc
+        into a permanent silent shutdown of the whole rotation.
+        """
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        _result, mocks = self._run(repo, **{guard: True})
+
+        mocks["rotation"].assert_called_once()
+        assert mocks["rotation"].call_args.args[1] == ["docs/features/foo.md"]
+
+    def test_no_guard_lets_the_substrate_run(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+
+        _result, mocks = self._run(repo)
+
+        mocks["audit"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestExplicitStagingSet — the branch stages files_touched and nothing else
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitStagingSet:
+    def test_empty_files_touched_creates_no_branch_and_no_commit(self, repo):
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("reflections.docs_auditor.subprocess.run", side_effect=record):
+            assert docs_auditor._push_branch_and_pr("slug", repo, [], starting_ref="main") is None
+
+        assert calls == []
+
+    def test_staging_command_names_the_touched_paths_only(self, repo):
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="main\n", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=record),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
+
+        add = next(c for c in calls if c[:2] == ["git", "add"])
+        assert add == ["git", "add", "--", "docs/features/foo.md"]
+        assert not any(c[:3] == ["git", "add", "-A"] for c in calls)
+
+    def test_restore_uses_head_so_staged_content_cannot_survive(self, repo):
+        """``git checkout -- <paths>`` restores from the INDEX, not from HEAD.
+
+        On the staged-then-commit-failed path the index still holds the auditor's
+        own content, so the bare form re-applies it to the working tree. The
+        ``HEAD`` in ``git checkout HEAD -- <paths>`` is what resets both.
+        """
+        calls: list[list[str]] = []
+
+        def record(cmd, *a, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="main\n", stderr="")
+
+        with (
+            patch("reflections.docs_auditor.subprocess.run", side_effect=record),
+            patch("reflections.docs_auditor._record_daily_pr"),
+        ):
+            docs_auditor._push_branch_and_pr(
+                "slug", repo, ["docs/features/foo.md"], starting_ref="main"
+            )
+
+        assert ["git", "checkout", "HEAD", "--", "docs/features/foo.md"] in calls
+        # Never a whole-tree operation — other lanes hold uncommitted work here.
+        assert not any(
+            c[:2] == ["git", "reset"] or c[:2] == ["git", "clean"] or "-f" in c for c in calls
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1556,9 +2208,18 @@ class TestDeletedTargetFiltering:
         assert docs_auditor._is_placeholder_path("pkg/example.py") is True
         assert docs_auditor._is_placeholder_path("a/thing.py") is True  # single-letter dir
 
+    def test_is_placeholder_path_md_stand_ins(self):
+        """Q7a: the .md stem strip and the link-specific stand-in names."""
+        assert docs_auditor._is_placeholder_path("docs/foo.md") is True
+        assert docs_auditor._is_placeholder_path("docs/features/filename.md") is True
+        assert docs_auditor._is_placeholder_path("docs/features/path.md") is True
+        assert docs_auditor._is_placeholder_path("docs/features/name.md") is True
+        assert docs_auditor._is_placeholder_path("docs/features/foo/bar.md") is True
+
     def test_is_placeholder_path_real_paths(self):
         assert docs_auditor._is_placeholder_path("reflections/docs_auditor.py") is False
         assert docs_auditor._is_placeholder_path("agent/output_router.py") is False
+        assert docs_auditor._is_placeholder_path("docs/features/docs-auditor.md") is False
 
     def test_is_placeholder_path_empty_and_single_segment(self):
         assert docs_auditor._is_placeholder_path("") is False
@@ -1596,6 +2257,110 @@ class TestDeletedTargetFiltering:
         )
         assert _mk_finding(content, repo) == []
 
+    # -- Q7b: each widening exercised on its own --------------------------
+
+    def test_heading_stem_dead_sdk_path_deletion(self, repo: Path):
+        """'## Dead SDK Path Deletion' — 'deleted' in 'deletion' was False pre-Q7b."""
+        content = "## Dead SDK Path Deletion\n\nRemoved `agent/gone_thing_xyz.py` wholesale.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_heading_stem_hook_cleanup(self, repo: Path):
+        """'## Hook Cleanup' — the heading tuple had no 'cleanup' entry pre-Q7b."""
+        content = (
+            "## Hook Cleanup (Phase 5)\n\ndeleted `agent/hooks/gone_thing_xyz.py` (250 lines)\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_word_level_prose_cue_deleted_parenthetical(self, repo: Path):
+        """'deleted (250 lines)' — the old cue list wanted the exact phrase 'deleted module'."""
+        content = (
+            "## Architecture\n\n`agent/gone_thing_xyz.py` deleted (250 lines) — no longer needed.\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_prose_cue_window_widened_to_two_lines(self, repo: Path):
+        """The cue sits two lines above the match — the old window was +/-1."""
+        content = (
+            "## Architecture\n\n"
+            "This module was removed in the refactor.\n"
+            "See the historical note above.\n"
+            "`agent/gone_thing_xyz.py`\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_word_anchoring_does_not_fire_on_a_substring(self, repo: Path):
+        """A line with only 'removed_at' must NOT suppress — word-anchored, not substring."""
+        content = (
+            "## Architecture\n\nThe `removed_at` field is a timestamp.\n"
+            "`agent/gone_thing_xyz.py` is live.\n"
+        )
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+
+    # -- Q7b: the live-claim veto ------------------------------------------
+
+    def test_live_claim_veto_reports_on_the_detector_path(self, repo: Path):
+        content = (
+            "## Migration\n\n`fail_stage()` remains defined in `agent/hooks/gone_thing_xyz.py`\n"
+        )
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+        assert "agent/hooks/gone_thing_xyz.py" in findings[0]["title"]
+
+    @pytest.mark.parametrize(
+        "cue", ["remains", "still", "defined in", "lives in", "currently", "implemented in"]
+    )
+    def test_live_claim_veto_words(self, repo: Path, cue: str):
+        content = f"## Migration\n\n`agent/hooks/gone_thing_xyz.py` {cue} the codebase today.\n"
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+
+    def test_live_claim_veto_is_opt_in_default_false(self):
+        content = "## Migration\n\n`x` remains defined in `y`\n"
+        lines = content.splitlines()
+        in_fence, heading_for_line = docs_auditor._build_line_context(content)
+        # Default (no veto): the heading suppresses.
+        assert docs_auditor._is_documented_deletion(2, lines, in_fence, heading_for_line) is True
+        # Opt-in veto: the live-claim cue cancels the suppression.
+        assert (
+            docs_auditor._is_documented_deletion(
+                2, lines, in_fence, heading_for_line, live_claim_veto=True
+            )
+            is False
+        )
+
+    def test_both_shapes_share_one_hatch(self, repo: Path):
+        """A .md link under a '## Removed' heading is suppressed via the same hatch."""
+        content = "## Removed\n\nSee [gone](./gone_thing_xyz.md) for the old approach.\n"
+        assert _mk_finding(content, repo) == []
+
+    # -- Q7b controls: the two real false positives go, the true positive stays --
+
+    def test_q7b_control_dead_sdk_path_deletion_suppressed(self, repo: Path):
+        content = (
+            "## Dead SDK Path Deletion\n\n"
+            "Removed wholesale, no legacy tolerance:\n\n"
+            "- `agent/sdk_client_xyz.py` and its dependents\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_q7b_control_hook_cleanup_suppressed(self, repo: Path):
+        content = (
+            "## Hook Cleanup (Phase 5)\n\n"
+            "- **`agent/hooks/session_registry_xyz.py`** deleted (250 lines) — "
+            "UUID-to-bridge-session mapping no longer needed\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_q7b_control_live_table_row_still_reported(self, repo: Path):
+        content = (
+            '| `SessionType.LEGACY_XYZ` | `"legacy_xyz"` | Direct invocations of the standalone '
+            "`valor-legacy-xyz-loop` CLI (`tools/granite_thing_xyz/cli.py`) |\n"
+        )
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+        assert "tools/granite_thing_xyz/cli.py" in findings[0]["title"]
+
     def test_genuine_dead_reference_not_suppressed(self, repo: Path):
         # Normal prose, normal heading, inline code, path does not exist on disk.
         content = (
@@ -1623,6 +2388,29 @@ class TestDeletedTargetFiltering:
         content = "The module `agent/inline_ref_xyz.py` is referenced inline in prose.\n"
         findings = _mk_finding(content, repo)
         assert len(findings) == 1
+
+    def test_package_relative_path_resolving_by_suffix_not_flagged(self, git_repo: Path):
+        """The #2936 false positive: a correct ref not rooted at the repo root.
+
+        ``docs/features/README.md`` names the hook helper by its package-relative
+        path; the module really lives under ``.claude/hooks/``. Resolving against
+        ``repo_root`` alone reported a live file as deleted.
+        """
+        repo = git_repo
+        (repo / ".claude" / "hooks" / "hook_utils").mkdir(parents=True)
+        (repo / ".claude" / "hooks" / "hook_utils" / "hook_target.py").write_text("x = 1\n")
+        content = "## Architecture\n\nTargets resolve via `hook_utils/hook_target.py`.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_component_boundary_near_miss_still_flagged(self, git_repo: Path):
+        """Suffix matching is anchored on path components, not raw string ends."""
+        repo = git_repo
+        (repo / "pkg" / "myhook_utils").mkdir(parents=True)
+        (repo / "pkg" / "myhook_utils" / "hook_target.py").write_text("x = 1\n")
+        content = "## Architecture\n\nTargets resolve via `hook_utils/hook_target.py`.\n"
+        findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+        assert "hook_utils/hook_target.py" in findings[0]["title"]
 
     def test_rename_destination_reference_is_reported(self, git_repo: Path):
         """A deleted rename destination must now reach the human-facing report.
@@ -1678,6 +2466,169 @@ class TestDeletedTargetFiltering:
 
 
 # ---------------------------------------------------------------------------
+# TestBrokenMdLinkDetection — Q7a (#2834): the .md markdown-link branch
+# ---------------------------------------------------------------------------
+
+
+class TestBrokenMdLinkDetection:
+    def test_broken_md_link_reports_a_finding(self, repo: Path):
+        content = "See [x](./gone_thing_xyz.md) for details.\n"
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), content, repo
+        )
+        assert len(findings) == 1
+        assert findings[0]["category"] == "broken-md-link"
+        assert "docs/features/gone_thing_xyz.md" in findings[0]["title"]
+
+    def test_doc_relative_frame_root_target_not_enough(self, repo: Path):
+        """The #2725 regression: a target existing at the repo root but not
+        doc-relative is still reported — doc-relative is the frame markdown
+        renderers actually use."""
+        (repo / "target_xyz.md").write_text("hi")
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](target_xyz.md)", repo
+        )
+        assert len(findings) == 1
+
+    def test_doc_relative_frame_doc_relative_target_present(self, repo: Path):
+        (repo / "docs" / "features").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "features" / "target_xyz.md").write_text("hi")
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](target_xyz.md)", repo
+        )
+        assert findings == []
+
+    def test_dotdot_resolution(self, repo: Path):
+        (repo / "docs" / "guides").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "guides" / "y_xyz.md").write_text("hi")
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](../guides/y_xyz.md)", repo
+        )
+        assert findings == []
+
+    def test_leading_slash_resolves_against_repo_root(self, repo: Path):
+        (repo / "docs" / "guides").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "guides" / "y_xyz.md").write_text("hi")
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](/docs/guides/y_xyz.md)", repo
+        )
+        assert findings == []
+
+    def test_target_normalizing_outside_repo_root_produces_no_finding(self, repo: Path):
+        content = "[x](../../../../../../etc/passwd_xyz.md)\n"
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), content, repo
+        )
+        assert findings == []
+
+    def test_anchor_and_query_stripped_from_title(self, repo: Path):
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](./gone_thing_xyz.md#section)", repo
+        )
+        assert len(findings) == 1
+        assert "gone_thing_xyz.md#section" not in findings[0]["title"]
+        assert "gone_thing_xyz.md" in findings[0]["title"]
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "http://example.com/gone_xyz.md",
+            "https://example.com/gone_xyz.md",
+            "mailto:someone@example.com",
+            "file:///etc/gone_xyz.md",
+            "#anchor-only",
+        ],
+    )
+    def test_uri_schemes_and_bare_anchors_skipped(self, repo: Path, target: str):
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), f"[x]({target})", repo
+        )
+        assert findings == []
+
+    def test_inline_code_span_skipped(self, repo: Path):
+        content = "`[Feature Name](gone_thing_xyz.md)`\n[Feature Name](gone_thing_xyz2.md)\n"
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), content, repo
+        )
+        assert len(findings) == 1
+        assert "gone_thing_xyz2.md" in findings[0]["title"]
+
+    @pytest.mark.parametrize(
+        "doc_path",
+        [
+            "docs/plans/completed/a.md",
+            "docs/plans/done/a.md",
+            ".claude/skills-global/x/SKILL_TEMPLATE.md",
+        ],
+    )
+    def test_scope_rule_excludes_completed_done_and_non_docs(self, repo: Path, doc_path: str):
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path(doc_path), "[x](./gone_thing_xyz.md)", repo
+        )
+        assert findings == []
+
+    def test_scope_rule_includes_docs_features(self, repo: Path):
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), "[x](./gone_thing_xyz.md)", repo
+        )
+        assert len(findings) == 1
+
+    @pytest.mark.parametrize("target", ["filename.md", "foo/bar.md"])
+    def test_placeholder_targets_produce_no_finding(self, repo: Path, target: str):
+        findings = docs_auditor._detect_deleted_target_issues(
+            Path("docs/features/a.md"), f"[x]({target})", repo
+        )
+        assert findings == []
+
+    def test_no_repair_path_exists_for_md_links(self, repo: Path):
+        """Q7a reports only — it must never write to the doc."""
+        doc = repo / "docs" / "features" / "a.md"
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        content = "See [x](./gone_thing_xyz.md) for details.\n"
+        doc.write_text(content)
+        docs_auditor._detect_deleted_target_issues(Path("docs/features/a.md"), content, repo)
+        assert doc.read_text() == content
+
+
+# ---------------------------------------------------------------------------
+# TestIssueFilingCapSharing — Q7 shares audit()'s advisory budget
+# ---------------------------------------------------------------------------
+
+
+class TestIssueFilingCapSharing:
+    def test_mixed_findings_file_at_most_the_shared_cap(self, repo: Path, auth_ok, patch_redis):
+        """A mix of deleted-target and broken-md-link findings shares one budget.
+
+        Q7 must not get its own per-run cap: ``ISSUE_FILING_PER_RUN_CAP`` bounds
+        the total across both finding categories from the advisory loop.
+        """
+        primary = repo / "docs" / "features" / "primary.md"
+        lines = ["# Primary\n"]
+        for i in range(4):
+            lines.append(f"See `agent/gone_py_{i:02d}.py` for details.\n")
+        for i in range(4):
+            lines.append(f"See [x](./gone_md_{i:02d}.md) for details.\n")
+        primary.write_text("".join(lines))
+
+        filed_titles: list[str] = []
+
+        def fake_file_issue(finding, repo_root):
+            filed_titles.append(finding["title"])
+            return True
+
+        with patch.object(docs_auditor, "_file_issue_if_new", side_effect=fake_file_issue):
+            docs_auditor.audit(
+                primary_path="docs/features/primary.md",
+                scope_mode="rotation",
+                apply_mode="apply",
+                project_key="test",
+                repo_root=repo,
+            )
+
+        assert len(filed_titles) <= docs_auditor.ISSUE_FILING_PER_RUN_CAP
+
+
+# ---------------------------------------------------------------------------
 # TestCrossMachineDedup — live-tracker gate + Redis fast-path
 # ---------------------------------------------------------------------------
 
@@ -1687,50 +2638,93 @@ def _gh_list_result(stdout: str, returncode: int = 0):
 
 
 class TestCrossMachineDedup:
-    def test_open_issue_exists_exact_match(self, repo: Path):
+    def test_issue_exists_no_longer_named_open(self):
+        """The old name is gone — no compatibility alias (Principle 1)."""
+        assert not hasattr(docs_auditor, "_open_issue_exists")
+        assert hasattr(docs_auditor, "_issue_exists")
+
+    def test_issue_exists_default_argv_is_all_states_limit_100_no_label(self, repo: Path):
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        with patch("subprocess.run", return_value=_gh_list_result("[]")) as run:
+            docs_auditor._issue_exists(title, repo)
+        cmd = run.call_args.args[0]
+        assert cmd[:3] == ["gh", "issue", "list"]
+        assert cmd[cmd.index("--state") + 1] == "all"
+        assert cmd[cmd.index("--limit") + 1] == "100"
+        assert "--label" not in cmd
+
+    def test_issue_exists_states_open_overrides_default(self, repo: Path):
+        with patch("subprocess.run", return_value=_gh_list_result("[]")) as run:
+            docs_auditor._issue_exists("t", repo, states="open")
+        cmd = run.call_args.args[0]
+        assert cmd[cmd.index("--state") + 1] == "open"
+
+    def test_issue_exists_matches_a_closed_issue(self, repo: Path):
+        """``states="all"`` means a closed issue is a match too — the once-ever
+        convergence semantics: a human who read a finding, ruled on it, and
+        closed it made a durable decision.
+        """
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        out = f'[{{"number": 5, "title": "{title}", "state": "CLOSED"}}]'
+        with patch("subprocess.run", return_value=_gh_list_result(out)):
+            assert docs_auditor._issue_exists(title, repo) is True
+
+    def test_issue_exists_exact_match(self, repo: Path):
         title = "Doc references deleted target: a/b.py (in docs/x.md)"
         out = f'[{{"number": 5, "title": "{title}"}}]'
         with patch("subprocess.run", return_value=_gh_list_result(out)):
-            assert docs_auditor._open_issue_exists(title, repo) is True
+            assert docs_auditor._issue_exists(title, repo) is True
 
-    def test_open_issue_exists_whitespace_normalized(self, repo: Path):
+    def test_issue_exists_whitespace_normalized(self, repo: Path):
         title = "Doc references deleted target: a/b.py (in docs/x.md)"
         # Tracker title has collapsed/extra whitespace — still an exact match.
         tracker_title = "Doc references deleted   target: a/b.py (in docs/x.md)"
         out = f'[{{"number": 5, "title": "{tracker_title}"}}]'
         with patch("subprocess.run", return_value=_gh_list_result(out)):
-            assert docs_auditor._open_issue_exists(title, repo) is True
+            assert docs_auditor._issue_exists(title, repo) is True
 
-    def test_open_issue_exists_no_match(self, repo: Path):
+    def test_issue_exists_no_match(self, repo: Path):
         title = "Doc references deleted target: a/b.py (in docs/x.md)"
         out = '[{"number": 5, "title": "Some unrelated issue"}]'
         with patch("subprocess.run", return_value=_gh_list_result(out)):
-            assert docs_auditor._open_issue_exists(title, repo) is False
+            assert docs_auditor._issue_exists(title, repo) is False
 
-    def test_open_issue_exists_empty_list(self, repo: Path):
+    def test_issue_exists_empty_list(self, repo: Path):
         with patch("subprocess.run", return_value=_gh_list_result("[]")):
-            assert docs_auditor._open_issue_exists("anything", repo) is False
+            assert docs_auditor._issue_exists("anything", repo) is False
 
-    def test_open_issue_exists_nonzero_rc_fails_open(self, repo: Path, caplog):
+    def test_issue_exists_nonzero_rc_fails_open(self, repo: Path, caplog):
         with patch("subprocess.run", return_value=_gh_list_result("", returncode=1)):
-            assert docs_auditor._open_issue_exists("t", repo) is False
+            assert docs_auditor._issue_exists("t", repo) is False
         assert any("dedup" in r.message.lower() for r in caplog.records)
 
-    def test_open_issue_exists_malformed_json_fails_open(self, repo: Path, caplog):
+    def test_issue_exists_malformed_json_fails_open(self, repo: Path, caplog):
         with patch("subprocess.run", return_value=_gh_list_result("not json{{")):
-            assert docs_auditor._open_issue_exists("t", repo) is False
+            assert docs_auditor._issue_exists("t", repo) is False
         assert any("dedup" in r.message.lower() for r in caplog.records)
 
-    def test_open_issue_exists_subprocess_raises_fails_open(self, repo: Path, caplog):
+    def test_issue_exists_subprocess_raises_fails_open(self, repo: Path, caplog):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 20)):
-            assert docs_auditor._open_issue_exists("t", repo) is False
+            assert docs_auditor._issue_exists("t", repo) is False
         assert any("dedup" in r.message.lower() for r in caplog.records)
+
+    def test_a_closed_issue_without_the_documentation_label_still_suppresses(self, repo: Path):
+        """R5-4: the query side no longer filters on ``--label documentation``.
+
+        A relabelled-and-closed issue is invisible to a label-filtered gate;
+        the authoritative match is the exact title compare, which a label
+        change cannot defeat.
+        """
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        out = f'[{{"number": 5, "title": "{title}", "state": "CLOSED", "labels": []}}]'
+        with patch("subprocess.run", return_value=_gh_list_result(out)):
+            assert docs_auditor._issue_exists(title, repo) is True
 
     def test_open_match_skips_filing(self, repo: Path, patch_redis):
         patch_redis.exists.return_value = False
         finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
         with (
-            patch.object(docs_auditor, "_open_issue_exists", return_value=True),
+            patch.object(docs_auditor, "_issue_exists", return_value=True),
             patch("subprocess.run") as run,
         ):
             filed = docs_auditor._file_issue_if_new(finding, repo)
@@ -1744,7 +2738,7 @@ class TestCrossMachineDedup:
         patch_redis.exists.return_value = False
         finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
         with (
-            patch.object(docs_auditor, "_open_issue_exists", return_value=False),
+            patch.object(docs_auditor, "_issue_exists", return_value=False),
             patch("subprocess.run", return_value=_gh_list_result("https://gh/issues/9")) as run,
         ):
             filed = docs_auditor._file_issue_if_new(finding, repo)
@@ -1758,17 +2752,18 @@ class TestCrossMachineDedup:
         assert create_cmd[:3] == ["gh", "issue", "create"]
 
     def test_redis_fast_path_skips_tracker_query(self, repo: Path, patch_redis):
-        # If the local Redis key already exists, the tracker query is skipped.
+        # If the local Redis key already exists, the tracker query is skipped
+        # — for a once-ever (non-recurring-condition) finding.
         patch_redis.exists.return_value = True
         finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
-        with patch.object(docs_auditor, "_open_issue_exists") as gate:
+        with patch.object(docs_auditor, "_issue_exists") as gate:
             filed = docs_auditor._file_issue_if_new(finding, repo)
         assert filed is False
         gate.assert_not_called()
 
     def test_tracker_failure_falls_back_to_filing(self, repo: Path, patch_redis, caplog):
-        # Simulate gh issue list failing inside _open_issue_exists (fail-open ->
-        # _open_issue_exists returns False) so filing proceeds via gh create.
+        # Simulate gh issue list failing inside _issue_exists (fail-open ->
+        # _issue_exists returns False) so filing proceeds via gh create.
         patch_redis.exists.return_value = False
         finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
 
@@ -1785,6 +2780,90 @@ class TestCrossMachineDedup:
 
     def test_empty_title_returns_false(self, repo: Path, patch_redis):
         assert docs_auditor._file_issue_if_new({"title": "", "body": "b"}, repo) is False
+
+    # -- Q7c: recurring-condition categories keep the open-only gate ---------
+
+    @pytest.mark.parametrize("category", ["vault-drift", "operational-failure"])
+    def test_recurring_condition_categories_query_state_open(
+        self, repo: Path, patch_redis, category
+    ):
+        patch_redis.exists.return_value = False
+        finding = {"title": "t", "body": "b", "category": category}
+        with patch("subprocess.run", return_value=_gh_list_result("[]")) as run:
+            docs_auditor._file_issue_if_new(finding, repo)
+        list_call = next(c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "list"])
+        cmd = list_call.args[0]
+        assert cmd[cmd.index("--state") + 1] == "open"
+
+    @pytest.mark.parametrize("category", ["deleted-target", "broken-md-link", None])
+    def test_reference_categories_query_state_all(self, repo: Path, patch_redis, category):
+        patch_redis.exists.return_value = False
+        finding = {"title": "t", "body": "b"}
+        if category is not None:
+            finding["category"] = category
+        with patch("subprocess.run", return_value=_gh_list_result("[]")) as run:
+            docs_auditor._file_issue_if_new(finding, repo)
+        list_call = next(c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "list"])
+        cmd = list_call.args[0]
+        assert cmd[cmd.index("--state") + 1] == "all"
+
+    def test_closed_drift_issue_does_not_suppress_a_fresh_filing(self, repo: Path, patch_redis):
+        """A closed vault-drift issue is one reconciliation, not a standing ruling.
+
+        The Redis fast-path is seeded as if this machine already filed it —
+        the ordinary first-filing path writes the key unconditionally — and a
+        second filing for the same recurring condition must still reach
+        ``gh issue create``, because the read is gated off for this category.
+        """
+        patch_redis.exists.return_value = True  # would short-circuit a non-recurring finding
+        finding = {
+            "title": "docs-auditor: vault narrative drift",
+            "body": "b",
+            "category": "vault-drift",
+        }
+        out = f'[{{"number": 5, "title": "{finding["title"]}", "state": "CLOSED"}}]'
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                # Simulate gh's own server-side --state filtering: a closed
+                # issue is returned only when the query asked for closed/all
+                # states, never when it asked for --state open.
+                state_idx = cmd.index("--state")
+                if cmd[state_idx + 1] == "open":
+                    return _gh_list_result("[]")
+                return _gh_list_result(out)
+            return _gh_list_result("https://gh/issues/9")
+
+        with patch("subprocess.run", side_effect=fake_run) as run:
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+
+        assert filed is True
+        create_calls = [c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "create"]]
+        assert len(create_calls) == 1
+
+    def test_closed_reference_issue_still_suppresses_with_key_set(self, repo: Path, patch_redis):
+        """Mirror of the above: a once-ever category stays gated by the fast-path."""
+        patch_redis.exists.return_value = True
+        finding = {"title": "Doc references missing link target: a.md (in b.md)", "body": "b"}
+        with patch("subprocess.run") as run:
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+        assert filed is False
+        assert run.call_count == 0
+
+    def test_dedup_key_writes_stay_unconditional_for_recurring_categories(
+        self, repo: Path, patch_redis
+    ):
+        """R8-1: the two ``set()`` writes are never gated, only the ``exists`` read.
+
+        A key written but never read suppresses nothing for the category it was
+        written for, so leaving the writes unconditional costs nothing and keeps
+        the key available as a fail-open cap if ``gh`` starts erroring.
+        """
+        patch_redis.exists.return_value = False
+        finding = {"title": "t", "body": "b", "category": "operational-failure"}
+        with patch("subprocess.run", return_value=_gh_list_result("https://gh/issues/9")):
+            docs_auditor._file_issue_if_new(finding, repo)
+        patch_redis.set.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1964,57 +3043,6 @@ class TestVaultSiteDrift:
             assert docs_auditor._resolve_vault_root("valor") == Path("/vault/valor")
 
 
-class TestWriteLivenessVaultParam:
-    def _summary(self, fake_redis) -> dict:
-        # Find the r.set call that persisted the summary JSON.
-        for c in fake_redis.set.call_args_list:
-            if c.args and c.args[0] == docs_auditor.REDIS_LAST_COMPLETED_SUMMARY_KEY:
-                return json.loads(c.args[1])
-        raise AssertionError("summary was not written")
-
-    def test_four_arg_call_omits_vault_count(self, fake_redis, patch_redis):
-        docs_auditor._write_liveness("slug", "ok", None, 3)
-        summary = self._summary(fake_redis)
-        assert "vault_narratives_compared" not in summary
-
-    def test_five_arg_call_includes_vault_count(self, fake_redis, patch_redis):
-        docs_auditor._write_liveness("slug", "ok", None, 3, 7)
-        summary = self._summary(fake_redis)
-        assert summary["vault_narratives_compared"] == 7
-
-    def test_five_arg_zero_is_emitted(self, fake_redis, patch_redis):
-        # 0 is distinct from None: a resolved-but-empty vault must be observable.
-        docs_auditor._write_liveness("slug", "ok", None, 0, 0)
-        summary = self._summary(fake_redis)
-        assert summary["vault_narratives_compared"] == 0
-
-    def test_withheld_count_absent_when_zero(self, fake_redis, patch_redis):
-        # A clean run must not carry the key at all — same shape as before.
-        docs_auditor._write_liveness("slug", "ok", None, 3)
-        assert "fixes_withheld" not in self._summary(fake_redis)
-
-    def test_withheld_count_emitted_when_nonzero(self, fake_redis, patch_redis):
-        # Redis is the only durable, queryable surface; a withheld run must not
-        # be byte-identical to a clean one there.
-        docs_auditor._write_liveness("slug", "ok", None, 3, fixes_withheld=2)
-        assert self._summary(fake_redis)["fixes_withheld"] == 2
-
-    def test_withheld_is_trailing_and_preserves_positional_contract(self):
-        import inspect
-
-        params = list(inspect.signature(docs_auditor._write_liveness).parameters)
-        # fixes_withheld must come last so existing 4-arg and 5-arg positional
-        # call sites keep their meaning.
-        assert params[-1] == "fixes_withheld"
-        assert params[:5] == [
-            "slug",
-            "status",
-            "pr_url",
-            "files_touched",
-            "vault_narratives_compared",
-        ]
-
-
 class TestVaultDeadCodeRemoved:
     def test_default_vault_weight_gone(self):
         assert not hasattr(docs_auditor, "DEFAULT_VAULT_WEIGHT")
@@ -2036,3 +3064,126 @@ class TestVaultDeadCodeRemoved:
         primary, _ = docs_auditor._select_primary_doc(repo, "valor")
         assert primary is not None
         assert str(primary).startswith("docs/features/")
+
+
+# ---------------------------------------------------------------------------
+# TestLivenessDeadCodeRemoved — #2743
+# ---------------------------------------------------------------------------
+
+
+class TestLivenessDeadCodeRemoved:
+    """The Redis liveness channel is gone; a revert must not silently bring it back."""
+
+    def test_write_liveness_gone(self):
+        assert not hasattr(docs_auditor, "_write_liveness")
+
+    def test_last_completed_ts_key_gone(self):
+        assert not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_TS_KEY")
+
+    def test_last_completed_summary_key_gone(self):
+        assert not hasattr(docs_auditor, "REDIS_LAST_COMPLETED_SUMMARY_KEY")
+
+
+# ---------------------------------------------------------------------------
+# TestVaultClauseInSummary — #2743: vault_narratives_compared rehomed onto the
+# created-PR summary string, replacing the deleted Redis liveness payload.
+# ---------------------------------------------------------------------------
+
+
+class TestVaultClauseInSummary:
+    def test_created_pr_summary_carries_vault_count_including_zero(
+        self, repo, auth_ok, patch_redis
+    ):
+        """The clause is unconditional: even a resolved-but-empty vault (0) shows up."""
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result(
+            "ok", files_touched=["docs/features/foo.md"], fixes_applied=1
+        )
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._current_ref", return_value="main"),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch(
+                "reflections.docs_auditor._push_branch_and_pr",
+                return_value="https://github.com/o/r/pull/1",
+            ),
+            patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+            patch("reflections.docs_auditor._send_telegram_notification", return_value=True),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "ok"
+        assert "vault 0 narratives compared" in result["summary"]
+
+    def test_vault_clause_absent_from_zero_diff_summary(self, repo, auth_ok, patch_redis):
+        primary = repo / "docs" / "features" / "foo.md"
+        primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+        audit_result = docs_auditor._ok_result("ok", files_touched=[], fixes_applied=0)
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=7),
+            patch("reflections.docs_auditor.audit", return_value=audit_result),
+            patch("reflections.docs_auditor._send_telegram_notification"),
+            patch("reflections.docs_auditor._update_rotation_hash"),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "vault" not in result["summary"]
+
+    def test_vault_clause_absent_from_no_candidates_summary(self, repo, auth_ok, patch_redis):
+        # No docs/features/*.md exist in `repo`, so _select_primary_doc finds nothing.
+        with (
+            patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+            patch("reflections.docs_auditor._git_dirty", return_value=False),
+            patch("reflections.docs_auditor._run_vault_drift_detection", return_value=3),
+        ):
+            result = docs_auditor.run_docs_auditor()
+
+        assert result["status"] == "skipped"
+        assert "vault" not in result["summary"]
+
+
+def test_worst_case_summary_stays_under_truncation_budget(repo, auth_ok, patch_redis):
+    """Pins Risk 1's truncation budget: agent/reflection_scheduler.py truncates
+    ``output_summary`` to 500 characters, so the worst-realistic created-PR
+    summary (many files, many fixes, a withheld note, a suppressed-Telegram
+    note, a real PR URL, and the vault clause) must stay comfortably under it.
+    """
+    primary = repo / "docs" / "features" / "foo.md"
+    primary.write_text("# Foo\n" + "Padding line.\n" * 6)
+    files_touched = [f"docs/features/file_{i:02d}.md" for i in range(42)]
+    withheld = [{"doc": "docs/features/foo.md", "old": "a/b.py", "new": "a/c.py", "reason": "x"}]
+    audit_result = docs_auditor._ok_result(
+        "ok",
+        files_touched=files_touched,
+        fixes_applied=137,
+        fixes_withheld=1,
+        withheld=withheld,
+    )
+    with (
+        patch("reflections.docs_auditor.PROJECT_ROOT", repo),
+        patch("reflections.docs_auditor._current_ref", return_value="main"),
+        patch("reflections.docs_auditor._git_dirty", return_value=False),
+        patch("reflections.docs_auditor._git_diff_quiet", return_value=False),
+        patch("reflections.docs_auditor._run_vault_drift_detection", return_value=0),
+        patch("reflections.docs_auditor.audit", return_value=audit_result),
+        patch(
+            "reflections.docs_auditor._push_branch_and_pr",
+            return_value="https://github.com/tomcounsell/ai/pull/123456",
+        ),
+        patch("reflections.docs_auditor._file_issue_if_new", return_value=False),
+        patch("reflections.docs_auditor._send_telegram_notification", return_value=False),
+        patch("reflections.docs_auditor._update_rotation_hash"),
+    ):
+        result = docs_auditor.run_docs_auditor()
+
+    assert result["status"] == "ok"
+    assert "narratives compared" in result["summary"]
+    assert len(result["summary"]) < 500

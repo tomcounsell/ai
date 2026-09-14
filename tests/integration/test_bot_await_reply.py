@@ -40,6 +40,10 @@ def _subprocess_env(config_path: str) -> dict:
     env = subprocess_env(project_root=_PROJECT_ROOT, PROJECTS_CONFIG_PATH=config_path)
     # Keep the CLI from running the Read-the-Room pass (agent-context only).
     env.pop("VALOR_SESSION_ID", None)
+    # The gate is incidental to what these tests assert (awaiter + history
+    # store), but `send` routes every text through the live Haiku classifier,
+    # whose verdict on the probe text is nondeterministic (#3106). Disable it.
+    env["PROMISE_GATE_ENABLED"] = "false"
     return env
 
 

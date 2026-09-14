@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 # The stop hook uses sys.path manipulation. We replicate the import setup.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -44,6 +46,7 @@ class TestCheckSdlcStageProgress:
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-123")
 
@@ -61,6 +64,7 @@ class TestCheckSdlcStageProgress:
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-456")
 
@@ -76,6 +80,7 @@ class TestCheckSdlcStageProgress:
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-789")
 
@@ -88,6 +93,7 @@ class TestCheckSdlcStageProgress:
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-abc")
 
@@ -112,6 +118,7 @@ class TestCheckSdlcStageProgress:
         """If no AgentSession exists for the session_id, no warning."""
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = []
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-missing")
 
@@ -124,6 +131,7 @@ class TestCheckSdlcStageProgress:
 
         with patch("models.agent_session.AgentSession") as mock_cls:
             mock_cls.query.filter.return_value = [session]
+            wire_session_lookup(mock_cls)
             check_fn = self._import_check_fn()
             check_fn("test-session-empty")
 

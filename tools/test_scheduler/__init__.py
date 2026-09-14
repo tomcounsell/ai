@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from bridge.utc import utc_iso
+from utils.utc import utc_iso
 
 # In-memory session storage (for simplicity)
 _sessions: dict[str, dict] = {}

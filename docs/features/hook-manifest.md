@@ -213,7 +213,9 @@ The first must resolve and print a version with exit 0 from both the main checko
 6. `validate_no_destructive_git_in_worktree`
 7. `validate_no_destructive_git_in_shared_checkout` (#2448)
 8. `validate_no_broad_process_kill` (#2562)
-9. `validate_design_system_sync` (out-of-process — see below)
+9. `validate_no_redis_flush`
+10. `validate_no_module_scope_env` (#2866) — see [Module-Scope Env Read Guard](module-scope-env-guard.md)
+11. `validate_design_system_sync` (out-of-process — see below)
 
 New in-process predicates are added directly to `_VALIDATORS` in `dispatch/pre_tool_use_bash.py`, not as a new standalone `manifest.toml` entry — the manifest declares exactly one `[[hook]]` for `(PreToolUse, Bash)`, pointing at this dispatcher (see `TestManifestOrderConsistency` in `tests/unit/test_pre_tool_use_dispatcher.py`).
 
@@ -242,6 +244,57 @@ Two named, env-overridable knobs govern the detached worker (both live in `.clau
 Both constants are marked provisional/tunable in code, matching the project's magic-number convention. The absolute log path (`~/.claude/logs/hooks.log`, via `get_absolute_log_path()`) and state dir are deliberately **not** repo-relative — user-scope hooks run inside foreign repos where a repo-relative `logs/` directory doesn't exist, and a silently-failing log write there would re-swallow the very drops this fix is meant to surface.
 
 See [`docs/features/memory-hook-performance.md`](memory-hook-performance.md) for the timeout root-cause writeup and [`docs/features/claude-code-memory.md`](claude-code-memory.md) for how the detached worker fits into the memory extraction pipeline.
+
+## `hook_utils/` Is the Sanctioned Home for Shared Validator Logic
+
+`.claude/hooks/hook_utils/` holds logic shared across validators that are each
+invoked as their own standalone process (one `hook_python`/interpreter start
+per script, not an import of one Python module by another at the harness
+level). `detach_lock.py` and `stop_detach_worker.py` (see
+[Detached Stop Extraction](#detached-stop-extraction) above) live there, and
+so does `hook_target.py`, which centralizes hook-payload target resolution for
+the `PostToolUse` plan-quality validator family — see
+[Hook Target Resolution](hook-target-resolution.md).
+
+A validator that needs a `hook_utils/` module uses this bootstrap, since the
+harness invokes each validator directly by absolute path and never imports it
+as a library:
+
+```python
+# Standalone script — sys.path mutation is safe (never imported as library).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from hook_utils.hook_target import in_scope, read_hook_input, target_from_hook_input  # noqa: E402
+```
+
+`Path(__file__).resolve()` is what makes this CWD-independent — the script's
+own location on disk, not the process's working directory, decides where
+`hook_utils/` is found. This is the standard import pattern anywhere a
+validator needs a `hook_utils/` sibling; see
+`validate_no_destructive_git_in_worktree.py`,
+`validate_no_destructive_git_in_shared_checkout.py`, and
+`validate_sdlc_on_stop.py` for the pre-existing precedent, and the five
+validators listed in [Hook Target Resolution](hook-target-resolution.md) for
+the newest adopters.
+
+A test file that imports a validator module directly (rather than invoking it
+as a subprocess) must put both `.claude/hooks` and `.claude/hooks/validators`
+on `sys.path` itself, since the validator's own `sys.path.insert` line only
+runs under `if __name__ == "__main__"` execution, not under import.
+
+**`hook_utils/` is not deployed to any other machine today.** Deployment is
+directory-granular (see [Registration Is Manifest-Granular; Deployment Is
+Directory-Granular](#registration-is-manifest-granular-deployment-is-directory-granular)
+above): `sync_user_hooks()` hardlinks a directory's files only when that
+directory contains at least one declared **global-scope** script. All five
+`hook_target.py` importers are `scope = "project"`, and `hook_utils/` itself
+has no `[[hook]]` entry of its own, so nothing currently pulls `hook_utils/`
+into the global deployment set — unlike `sdlc/`, whose `sdlc_context.py`
+rides along with its global-scope siblings. A future validator that moves to
+global scope and imports `hook_utils.hook_target` will raise
+`ModuleNotFoundError` on every machine but the one it was authored on, until
+`hook_utils/` picks up a global-scope declaration (or its directory is
+otherwise forced into the deployment set) alongside that promotion.
 
 ## Removal Propagation (`RENAMED_REMOVALS` "hooks" kind)
 
@@ -301,6 +354,7 @@ The migration is **registration-only: it deletes no files.** Once the registrati
 | `.claude/hooks/stop.py` | Detached-extraction spawn point; genuine bare-except swallows replaced with logged handlers. |
 | `.claude/hooks/hook_utils/detach_lock.py` | Absolute log path, absolute state dir, deadline/max-inflight env readers, slot reservation. |
 | `.claude/hooks/hook_utils/stop_detach_worker.py` | The detached worker: self-deadline via `SIGALRM`, releases its slot in `finally`. |
+| `.claude/hooks/hook_utils/hook_target.py` | `read_hook_input()`/`target_from_hook_input()` — shared payload-only target resolution for the `PostToolUse` plan-quality validators. |
 | `reflections/audits/hooks_audit.py` | Both-scope audit + agent-hooks informational scan. |
 
 ## Related
@@ -309,3 +363,4 @@ The migration is **registration-only: it deletes no files.** Once the registrati
 - [Claude Code Memory](claude-code-memory.md) — how the detached worker fits into memory extraction.
 - [Memory Hook Performance](memory-hook-performance.md) — Stop-hook timeout root cause and the detach fix.
 - [SDLC Enforcement](sdlc-enforcement.md) — the three SDLC-fork hooks this migration targets.
+- [Hook Target Resolution](hook-target-resolution.md) — the `hook_utils/hook_target.py` contract and its five validator adopters.

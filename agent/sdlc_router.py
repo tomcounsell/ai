@@ -1,13 +1,13 @@
 """Production SDLC router dispatch algorithm.
 
 This module is the **canonical dispatch source of truth** for the SDLC pipeline.
-The PM session (via ``.claude/skills/sdlc/SKILL.md``) calls the CLI wrapper
+The PM session (via ``.claude/skills-global/do-sdlc/SKILL.md``) calls the CLI wrapper
 ``sdlc-tool next-skill`` (implemented in ``tools/sdlc_next_skill.py``) which
 delegates to ``decide_next_dispatch()`` in this module.
 
 Two sources of truth in the pipeline:
 - **Dispatch decisions**: ``agent/sdlc_router.py`` — ``DISPATCH_RULES`` + guards
-  G1–G6. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
+  G1–G9. This module. The PM calls ``sdlc-tool next-skill`` to get the decision.
 - **State-machine bookkeeping**: ``agent/pipeline_graph.py`` — ``PIPELINE_EDGES``,
   ``get_next_stage()``. Used by ``PipelineStateMachine`` to mark the next stage
   'ready' when one completes. Never consulted for dispatch decisions.
@@ -17,7 +17,7 @@ The algorithm:
     decide_next_dispatch(stage_states, meta, context)
         -> Dispatch | Blocked
 
-    1. Evaluate guards (G1–G6). If any guard trips, return its decision.
+    1. Evaluate guards (G1–G9). If any guard trips, return its decision.
     2. Otherwise, walk the ``DISPATCH_RULES`` list in row order and return
        the first rule whose ``state_predicate`` accepts ``(stage_states, meta,
        context)``.
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,6 +90,29 @@ def normalize_verdict(text: str | None) -> str:
 # without the pipeline state changing; the fourth would trip G4.
 MAX_SAME_STAGE_DISPATCHES = 3
 
+
+def _terminal_guard_enabled() -> bool:
+    """Kill switch for the terminal-lane guard (#2894, #2817), read live.
+
+    The guard preempts the entire dispatch table, so a false positive halts a
+    live lane silently. Provisional and tunable: set ``SDLC_TERMINAL_GUARD=false``
+    to fall back to the pre-#2894 routing.
+
+    Read INSIDE :func:`guard_terminal_lane` rather than cached at import time —
+    ``agent/sdlc_router.py`` is imported once by the long-lived bridge/worker
+    (``agent/session_runner/runner.py``), so an import-time constant would make
+    the override per-process rather than live, defeating the point of a kill
+    switch with this guard's blast radius: a same-process flip (a test, an
+    operator script, a hot env change) takes effect on the very next call, no
+    service restart required.
+    """
+    return os.environ.get("SDLC_TERMINAL_GUARD", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+    )
+
+
 # Maximum number of router turns that G7 will wait for a /do-plan dispatch
 # after the plan_revising lock is set. After this many turns with no /do-plan
 # in the recent dispatch history, G7 escalates to Blocked so a human can
@@ -119,6 +143,11 @@ CRITIQUE_MAJOR_REWORK = "MAJOR REWORK"
 # underscore forms and mixed-case inputs still resolve correctly (#1638).
 REVIEW_APPROVED = "APPROVED"
 REVIEW_CHANGES_REQUESTED = "CHANGES REQUESTED"
+# Preflight short-circuit verdict (#2796): /do-pr-review records this when the
+# PR is CONFLICTING/DIRTY (or mergeability is UNKNOWN after retry) and stops
+# WITHOUT performing a code review. Canonical spaced form — the skills emit the
+# underscore form ``BLOCKED_ON_CONFLICT``, which normalize_verdict folds to this.
+REVIEW_BLOCKED_ON_CONFLICT = "BLOCKED ON CONFLICT"
 
 # Skill command strings. Keep in sync with ``agent/pipeline_graph.STAGE_TO_SKILL``
 # and the ``DISPATCH_RULES`` list below. The SKILL.md hand-authored dispatch table
@@ -145,6 +174,30 @@ class Dispatch:
 
     skill: str
     reason: str
+    row_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Terminal:
+    """The pipeline is finished. Nothing to dispatch, and nothing is wrong.
+
+    Distinct from ``Blocked`` on purpose (#2817). A ``Blocked`` says the router
+    could not decide and a human should look; a ``Terminal`` says there is
+    correctly nothing left to do. Collapsing the two taught every consumer to
+    treat a shipped lane as an error — ``Blocked(NO_RULE)`` on a MERGE-completed
+    pipeline is exactly that confusion.
+
+    ``evidence`` names WHICH branch of the terminal predicate fired, so a false
+    positive is greppable in the logs rather than silent. The guard preempts the
+    entire dispatch table, so a wrong Terminal halts a live lane and is otherwise
+    indistinguishable from a legitimately finished one:
+
+      - ``"merge_marker"`` — ``stage_states["MERGE"]`` is settled.
+      - ``"merged_pr"``    — the tracking PR reports ``state == "MERGED"``.
+    """
+
+    reason: str
+    evidence: str
     row_id: str | None = None
 
 
@@ -356,15 +409,37 @@ def guard_g2_critique_cycle_cap(
 ) -> Dispatch | Blocked | None:
     """G2: escalate when the critique cycle ceiling is reached.
 
-    If ``critique_cycle_count >= MAX_CRITIQUE_CYCLES`` and CRITIQUE is still
-    failing (not completed), the router blocks and surfaces to the human.
+    Two trip conditions, either suffices once ``cycles >= MAX_CRITIQUE_CYCLES``:
+
+    - CRITIQUE is not ``completed`` (the original shape), or
+    - the latest critique verdict still demands revision (#2885 via #3065).
+      The skill-driven loop marks CRITIQUE ``completed`` every round while
+      recording ``NEEDS REVISION`` / ``MAJOR REWORK``, so the marker-status
+      check alone made this guard inert against the exact loop it bounds —
+      lanes ran 9+ rounds on 2026-09-02 with the cap never firing.
+
+    ``cycles`` is the max of ``critique_cycle_count`` (the fail_stage-driven
+    legacy counter) and ``revision_round_count`` (the durable counter
+    ``record_verdict`` now increments on every revision-demanding verdict).
+    max() rather than sum: if both paths ever counted the same round, summing
+    would double-charge it.
+
+    This guard MUST evaluate before G1 in ``GUARDS``: G1 dispatches
+    ``/do-plan`` on every NEEDS REVISION verdict, so with G1 first the router
+    never reaches this cap. Below the cap G2 returns None, so the ordering is
+    behavior-identical until the bound is spent.
     """
-    cycles = meta.get("critique_cycle_count", 0)
+    cycles = max(
+        int(meta.get("critique_cycle_count", 0) or 0),
+        int(meta.get("revision_round_count", 0) or 0),
+    )
     if cycles < MAX_CRITIQUE_CYCLES:
         return None
 
     critique_status = stage_states.get("CRITIQUE")
-    if critique_status == STATUS_COMPLETED:
+    verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
+    still_revising = CRITIQUE_NEEDS_REVISION in verdict or CRITIQUE_MAJOR_REWORK in verdict
+    if critique_status == STATUS_COMPLETED and not still_revising:
         return None
 
     return Blocked(
@@ -397,8 +472,25 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
     If an open PR exists for this issue AND the most recent dispatch was
     ``/do-plan`` or ``/do-plan-critique`` (or the LLM is asking the router
     about a plan-stage dispatch), redirect to the PR-stage skill appropriate
-    for the current state: ``/do-merge`` if review is APPROVED and docs are
-    done; ``/do-patch`` if review requested changes; otherwise ``/do-pr-review``.
+    for the current state, through a four-leg ladder:
+
+    1. REVIEW completed AND DOCS completed → ``/do-merge``
+    2. CHANGES REQUESTED, or REVIEW failed → ``/do-patch``
+    3. REVIEW completed with an APPROVED verdict AND DOCS not completed →
+       ``/do-docs``
+    4. otherwise → ``/do-pr-review``
+
+    Leg 3 is #3227. Without it an approved PR whose docs were still pending
+    fell to leg 4 and re-dispatched ``/do-pr-review`` on already-approved code
+    forever — row 9 (``_rule_review_approved_docs_not_done``) holds the correct
+    answer but the dispatch table is never reached once a guard has spoken.
+    Observed on lane #3181 / PR #3219, which burned four empty review rounds.
+
+    Leg 3 refuses a head_sha-stale approval, deferring to leg 4's re-review.
+    That keeps this guard in agreement with row 8f
+    (``_rule_review_verdict_head_stale``) and G6, both of which already refuse
+    to advance on an approval recorded before the live PR head — the DOCS leg
+    must not become the one path that trusts a stale approval.
     """
     pr_number = meta.get("pr_number")
     if not pr_number:
@@ -423,12 +515,27 @@ def guard_g3_pr_lock(stage_states: dict, meta: dict, context: dict) -> Dispatch 
         review_verdict = _verdict_text(verdicts.get("REVIEW"))
     review_verdict_norm = normalize_verdict(review_verdict)
 
-    if review_status == STATUS_COMPLETED and docs_status == STATUS_COMPLETED:
+    if (
+        review_status == STATUS_COMPLETED
+        and docs_status == STATUS_COMPLETED
+        and REVIEW_APPROVED in review_verdict_norm
+        and _review_verdict_head_is_verified_fresh(stage_states, meta, context or {})
+    ):
         target = SKILL_DO_MERGE
         suffix = "review clean and docs complete"
     elif REVIEW_CHANGES_REQUESTED in review_verdict_norm or review_status == STATUS_FAILED:
         target = SKILL_DO_PATCH
         suffix = "review requested changes"
+    elif (
+        review_status == STATUS_COMPLETED
+        and docs_status != STATUS_COMPLETED
+        and REVIEW_APPROVED in review_verdict_norm
+        and not _review_verdict_head_is_stale(stage_states, meta, context or {})
+    ):
+        # #3227: the missing leg. An approved PR with docs pending has exactly
+        # one correct next step, and re-reviewing approved code is not it.
+        target = SKILL_DO_DOCS
+        suffix = "review APPROVED and docs pending"
     else:
         target = SKILL_DO_PR_REVIEW
         suffix = "PR exists — run review"
@@ -766,6 +873,72 @@ def guard_g7_plan_revising(
     return None
 
 
+def _terminal_evidence(stage_states: dict, meta: dict) -> str | None:
+    """Return which branch proves this lane is finished, or ``None``.
+
+    **Positive evidence only.** Absence of signal is never terminal — an empty
+    ledger, a missing ``pr_number``, or an unresolvable merge state all mean "we
+    do not know", and treating not-knowing as finished would silently halt live
+    lanes. That is the same fail-closed discipline the staleness gate uses.
+
+    Two branches, in order of trust:
+
+    1. ``MERGE`` settled — the pipeline recorded its own completion.
+    2. ``pr_state == "MERGED"`` — GitHub says the tracking PR merged. This is the
+       branch that survives a lost ledger (#2853 merged, then its ledger emptied,
+       and the router began dispatching ``/do-plan`` on shipped work).
+
+    ``pr_merge_state`` is deliberately NOT consulted. It carries GitHub's
+    ``mergeStateStatus``, which reports ``UNKNOWN`` for merged, not-yet-computed,
+    AND genuinely-unresolvable PRs alike (#2894). Only ``pr_state`` separates
+    merged-and-done from the other two.
+    """
+    if stage_states.get("MERGE") in SETTLED_STATUSES:
+        return "merge_marker"
+    if (meta.get("pr_state") or "").upper() == "MERGED":
+        return "merged_pr"
+    return None
+
+
+def guard_terminal_lane(stage_states: dict, meta: dict, context: dict) -> Terminal | None:
+    """T: the lane is finished — preempt the entire dispatch table (#2894, #2817).
+
+    Evaluated FIRST, ahead of every other guard, because a finished lane has no
+    correct dispatch and no guard verdict worth computing. Recon on 2026-08-26
+    measured four different rows each claiming a shipped lane — row 10
+    (``/do-merge``, the originally filed #2894), row 8f (``/do-pr-review`` on the
+    merged #2734 and #2741), row 5 (``/do-build``), and row 1 (``/do-plan`` once
+    #2853's ledger emptied). Terminality therefore belongs in a guard: a per-row
+    terminal condition would have to be written four times today and rewritten
+    for every row added later.
+
+    Set ``SDLC_TERMINAL_GUARD=false`` to disable, restoring the previous
+    routing without a revert or a fleet restart — see ``_terminal_guard_enabled``
+    for why this is read live rather than cached at import time.
+    """
+    if not _terminal_guard_enabled():
+        return None
+    evidence = _terminal_evidence(stage_states, meta)
+    if evidence is None:
+        return None
+    pr_number = meta.get("pr_number")
+    pr_clause = f"PR #{pr_number}" if pr_number else "no PR on record"
+    reason = (
+        f"Pipeline complete — nothing to dispatch "
+        f"(evidence: {evidence}; {pr_clause}). "
+        f"This is a successful terminal state, not a routing failure."
+    )
+    # INFO, not debug: a false positive silently halts a live lane, so every
+    # terminal decision must be greppable after the fact (Risk 1).
+    logger.info(
+        "[sdlc_router] terminal lane: evidence=%s pr_number=%s merge_stage=%s",
+        evidence,
+        pr_number,
+        stage_states.get("MERGE"),
+    )
+    return Terminal(reason=reason, evidence=evidence, row_id="T")
+
+
 def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict) -> Dispatch | None:
     """G6: PR is mergeable, CI green, DOCS done, review APPROVED — fast-path to /do-merge.
 
@@ -803,10 +976,12 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
         return None
     # WS3d (#2062): never fast-path a head_sha-stale APPROVED verdict — a
     # commit landed after approval (or the live-head lookup failed, which
-    # fails closed toward stale). Fall through to the dispatch table, where
-    # row 8f routes to /do-pr-review at the new head. This makes G6 agree
-    # with tools/merge_predicate's Group (c) freshness check.
-    if _review_verdict_head_is_stale(stage_states, meta, context):
+    # fails closed toward stale). Nor on an ABSENT pr_head_sha signal: an
+    # absent key is not evidence of freshness, so a terminal /do-merge
+    # dispatch requires POSITIVE verification. Fall through to the dispatch
+    # table, where row 8f routes to /do-pr-review at the new head. This makes
+    # G6 agree with tools/merge_predicate's Group (c) freshness check.
+    if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
         return None
     return Dispatch(
         skill=SKILL_DO_MERGE,
@@ -815,11 +990,118 @@ def guard_g6_terminal_merge_ready(stage_states: dict, meta: dict, context: dict)
     )
 
 
-GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
-    guard_g1_critique_loop,
+# The non-conflicting mergeStateStatus values /do-pr-review's own preflight
+# treats as proceed-worthy (.claude/skills-global/do-pr-review/sub-skills/
+# checkout.md decision table) — anything outside this set (DIRTY, None,
+# UNKNOWN, or an unrecognized value) still reads as a live conflict to G9.
+_G9_NON_CONFLICTING_MERGE_STATES = frozenset(
+    {"CLEAN", "HAS_HOOKS", "UNSTABLE", "BLOCKED", "BEHIND"}
+)
+
+
+def guard_g9_blocked_on_conflict(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G9: escalate when the recorded REVIEW verdict is BLOCKED_ON_CONFLICT (#2796).
+
+    ``BLOCKED_ON_CONFLICT`` is a first-class verdict token in
+    ``tools/sdlc_verdict.py``, ``tools/sdlc_review_finalize.py`` and
+    ``tools/sdlc_stage_marker.py``: ``/do-pr-review``'s preflight records it
+    when the PR is ``CONFLICTING``/``DIRTY`` (or mergeability is ``UNKNOWN``
+    after retry) and stops WITHOUT reviewing any code. Until this guard, the
+    router had no notion of the token at all, so a correctly-finalized
+    conflict verdict routed by accident:
+
+        row 8  (``_rule_review_has_findings``, via REVIEW==failed) → /do-patch
+        row 8b (``_rule_patch_applied_after_review``)              → /do-pr-review
+        → preflight short-circuits again, re-records the same verdict, repeat
+
+    ``/do-patch`` cannot resolve a merge conflict (its remit is failing tests
+    and review blockers) and the re-review never reaches the code, so the pair
+    ping-pongs until G4 escalates with a generic "stage oscillation" message
+    that names neither the conflict nor the rebase. Observed on popoto PRs
+    #546 and #548.
+
+    **Why Blocked rather than a dispatch row.** Nothing in the skill set can
+    resolve conflicts: ``/do-merge`` declares conflict resolution explicitly
+    out of scope, ``/do-patch`` is not specced for rebases, and there is no
+    rebase skill. The ``/do-pr-review`` outcome contract already states the
+    conclusion this guard enforces —
+    ``BLOCKED_ON_CONFLICT`` carries ``next_skill: null``, "the pipeline should
+    NOT auto-advance; the author must rebase". A guard is also the only shape
+    that CAN express this: a ``DispatchRule`` always yields a ``Dispatch``.
+
+    Two step-asides keep a resolved conflict from wedging the lane, so this
+    escalates on a LIVE conflict only:
+
+    - ``pr_merge_state`` is in the non-conflicting set ``/do-pr-review``'s own
+      preflight already treats as proceed-worthy (issue #2796 tech debt round
+      1): ``CLEAN``, ``HAS_HOOKS``, ``UNSTABLE``, ``BLOCKED`` (GitHub's status
+      for a missing required review/check — not a merge conflict), and
+      ``BEHIND`` (out of date, not conflicting). The live world says the PR is
+      mergeable or at least not blocked by conflicts, so the recorded verdict
+      is describing a conflict that has since been resolved. Any other value
+      (including ``None``/``UNKNOWN``/``DIRTY``) still escalates: fail-closed,
+      since ``DIRTY`` and an unresolved/unknown merge state are exactly what
+      preflight itself treats as conflicting. ``_fetch_pr_merge_state``
+      (``tools/sdlc_stage_query.py``) retries once on a transient ``UNKNOWN``
+      read before this guard ever sees the value, so a resolved-but-just-read
+      ``UNKNOWN`` settles to its real state instead of reaching this guard at
+      all.
+    - ``_review_verdict_is_stale`` — a ``/do-patch`` was dispatched after the
+      verdict was recorded, so the rebase may already have landed. Step aside
+      and let row 8b re-review; if the conflict survives, the re-review
+      records a FRESH conflict verdict and this guard fires on the next turn.
+
+    Ordered immediately after G4 so an already-oscillating lane keeps G4's
+    existing precedence (no behavior change for states that escalate today),
+    while a newly-conflicted lane stops here on turn 1 — before it can burn
+    a patch/review cycle — with a reason that names the rebase.
+    """
+    if not meta.get("pr_number"):
+        return None
+    verdict = normalize_verdict(_latest_review_verdict(stage_states, meta))
+    if REVIEW_BLOCKED_ON_CONFLICT not in verdict:
+        return None
+    if meta.get("pr_merge_state") in _G9_NON_CONFLICTING_MERGE_STATES:
+        return None
+    if _review_verdict_is_stale(stage_states):
+        return None
+
+    pr_number = meta.get("pr_number")
+    merge_state = meta.get("pr_merge_state")
+    if merge_state == "DIRTY":
+        state_clause = "has merge conflicts"
+    else:
+        # None/UNKNOWN/any other unrecognized value: mergeability could not be
+        # confirmed, not confirmed-conflicting — say so rather than asserting
+        # a conflict that may not exist (#2796 tech debt round 1).
+        state_clause = "has an unresolved or unconfirmed merge state"
+    return Blocked(
+        reason=(
+            f"G9: PR #{pr_number} {state_clause} "
+            f"(review recorded BLOCKED_ON_CONFLICT, merge state {merge_state!r}). "
+            f"No code review was performed. Rebase the branch onto main and "
+            f"resolve the conflicts, then re-run /do-pr-review. No SDLC skill "
+            f"resolves conflicts — this needs a human."
+        ),
+        guard_id="G9",
+    )
+
+
+GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | Terminal | None]] = [
+    # T runs first by design: a finished lane has no correct dispatch, so no
+    # other guard's verdict is worth computing (#2894, #2817).
+    guard_terminal_lane,
+    # G2 before G1 (#2885 via #3065): G1 dispatches /do-plan on every
+    # revision-demanding verdict, so it would shadow the cycle cap forever.
+    # G2 is None below the cap, so this order changes nothing until the
+    # bound is spent.
     guard_g2_critique_cycle_cap,
+    guard_g1_critique_loop,
     guard_g3_pr_lock,
     guard_g4_oscillation,
+    guard_g9_blocked_on_conflict,
     guard_g8_artifact_verification,
     guard_g7_plan_revising,
     guard_g5_artifact_hash_cache,
@@ -829,7 +1111,7 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
 
 def evaluate_guards(
     stage_states: dict, meta: dict, context: dict | None = None
-) -> Dispatch | Blocked | None:
+) -> Dispatch | Blocked | Terminal | None:
     """Walk the guard list, return the first tripped decision, or ``None``."""
     ctx = context or {}
     for guard in GUARDS:
@@ -844,10 +1126,31 @@ def evaluate_guards(
 # ---------------------------------------------------------------------------
 
 
+def _plan_stage_stood_down(stage_states: dict, meta: dict) -> bool:
+    """Return True when the lane has moved past the plan stage (#3249).
+
+    One definition for the step-aside that rows 1, 2, 2c and 3 were each
+    supposed to carry and hand-copied inconsistently. Two signals:
+
+    - ``pr_number`` set — a PR-stage lane has no plan-stage question left to
+      answer; rows 7-10 own that state.
+    - ``BUILD`` at ``in_progress`` or ``completed`` — the plan was accepted when
+      the build was dispatched. Row 5 (``_rule_branch_exists_no_pr``) owns the
+      pre-PR resume: its predicate is ``BUILD == in_progress OR
+      context['branch_exists'] is True``, so the branch half answers regardless
+      of BUILD status. Nothing is stranded.
+    """
+    if meta.get("pr_number"):
+        return True
+    return stage_states.get("BUILD") in (STATUS_IN_PROGRESS, STATUS_COMPLETED)
+
+
 def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     """No plan exists."""
-    # If an open PR exists, a plan must exist too — defer to PR-stage rows.
-    if meta.get("pr_number"):
+    # Plan-stage stand-down (#3249): a lane that has left the plan stage has no
+    # "no plan" question to answer — _plan_stage_stood_down owns the check;
+    # rows 5/7-10 own the state.
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     plan_status = stage_states.get("PLAN")
     # "No plan exists" is the absence of a plan file OR a pending PLAN stage.
@@ -858,6 +1161,20 @@ def _rule_no_plan(stage_states: dict, meta: dict, context: dict) -> bool:
     # Only treat this as "no plan" when an issue_number is available (so we
     # can verify) AND the plan file is actually absent.
     if plan_status == "ready" and meta.get("issue_number") and not meta.get("plan_exists"):
+        return True
+    # Crashed-stage recovery (#3078): PLAN="in_progress" with no plan doc on
+    # disk means the plan subagent died mid-flight — the marker has no status
+    # for "started, did not finish", so the wedge reads as still-working
+    # forever and previously dead-ended at Blocked('no matching dispatch
+    # rule'). Re-dispatching /do-plan is the recovery; same evidence
+    # discipline as the #1640 bootstrap case above (issue_number so we can
+    # verify, and the file genuinely absent), and loop-bound by G4 the same
+    # way row 2c bounds a crashed critique (#1668).
+    if (
+        plan_status == STATUS_IN_PROGRESS
+        and meta.get("issue_number")
+        and not meta.get("plan_exists")
+    ):
         return True
     return False
 
@@ -870,7 +1187,14 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
     - ``PLAN == "ready"``     → only counts if ``meta["plan_exists"]`` is True;
       without evidence, the state machine may have pre-advanced to "ready" before
       the plan doc was written (bootstrap race).
+
+    Alone in the plan-stage family this row historically carried no step-aside
+    at all (#3249), so it kept dispatching ``/do-plan-critique`` on a lane with
+    an open PR or a running BUILD. It now stands down via
+    ``_plan_stage_stood_down`` like every sibling.
     """
+    if _plan_stage_stood_down(stage_states, meta):
+        return False
     plan_status = stage_states.get("PLAN")
     critique_status = stage_states.get("CRITIQUE")
     if critique_status not in (None, "pending", "ready"):
@@ -879,6 +1203,13 @@ def _rule_plan_not_critiqued(stage_states: dict, meta: dict, context: dict) -> b
         return True  # completed implies a plan doc exists (#1275 case intact)
     if plan_status == "ready":
         return bool(meta.get("plan_exists"))  # "ready" needs real evidence (#1640)
+    # Crashed-stage recovery (#3078): PLAN="in_progress" but the plan doc IS
+    # on disk — the plan subagent wrote the doc, then died before marking the
+    # stage completed. The doc is the artifact critique reads, so with
+    # evidence it exists the lane can advance; a half-written doc comes back
+    # NEEDS REVISION and the ordinary revision loop (bounded by G2) owns it.
+    if plan_status == STATUS_IN_PROGRESS:
+        return bool(meta.get("plan_exists"))
     return False
 
 
@@ -891,11 +1222,13 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
     ``_rule_review_has_findings``.
 
-    Open-PR step-aside (#1932 gap b1): once a PR exists, a NEEDS REVISION
-    critique verdict must never route back to ``/do-plan`` — this row steps
-    aside and lets row 7 / G3 own PR-stage routing instead.
+    Plan-stage stand-down (#1932 gap b1, #3249): once a PR exists — or the lane
+    has otherwise left the plan stage — a NEEDS REVISION critique verdict must
+    never route back to ``/do-plan``. This row stands down via
+    ``_plan_stage_stood_down`` and lets row 7 / G3 (or row 5, while the build
+    runs) own the routing instead.
     """
-    if meta.get("pr_number"):
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     if _critique_verdict_is_stale(stage_states, meta):
         return False
@@ -932,21 +1265,19 @@ def _rule_critique_ready_with_concerns_no_revision(
     unreachable and sent every subsequent round straight to /do-build unreviewed --
     the defect #2787 exists to fix.
 
-    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
-    completed — a finished PR must never route back to plan/build.
+    D3: defer to downstream PR-stage rows once the lane has left the plan stage
+    — a finished PR must never route back to plan/build.
     """
-    if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+    # Once the lane has left the plan stage this row must release so routing can
+    # advance to review/merge. Without it the row re-dispatches /do-plan forever
+    # for a with-concerns plan whose revision flag never got set.
+    # _plan_stage_stood_down owns the check (#3249).
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
         return False
     if _concern_revision_is_unjudged(stage_states, meta):
-        return False
-    # Once build has produced a PR (or BUILD is already done), this row must
-    # release so routing can advance to review/merge. Without these guards the
-    # row re-dispatches /do-plan forever for a with-concerns plan whose
-    # revision flag never got set. Mirror the guards on rows 4a/4c.
-    if meta.get("pr_number"):
         return False
     build_status = stage_states.get("BUILD")
     return build_status in (None, "pending", "ready")
@@ -968,10 +1299,13 @@ def _rule_critique_ready_with_concerns_revision_applied(
     usually not watching. The accountability comes from the recorded acceptance,
     not from the halt.
 
-    D3: defer to downstream PR-stage rows once a PR exists or BUILD has
-    completed so row-4c stops re-proposing /do-build on a finished PR.
+    D3: defer to downstream PR-stage rows once the lane has left the plan stage,
+    so row 4c stops re-proposing /do-build on a finished PR.
     """
-    if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED:
+    # Once the lane has left the plan stage this row must release so routing can
+    # advance to review. Without it the row re-dispatches /do-build forever for
+    # every with-concerns plan. _plan_stage_stood_down owns the check (#3249).
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_READY_TO_BUILD not in verdict or "WITH CONCERNS" not in verdict:
@@ -979,12 +1313,6 @@ def _rule_critique_ready_with_concerns_revision_applied(
     if not _concern_revision_is_unjudged(stage_states, meta):
         return False
     if concern_round_count(meta) < MAX_CONCERN_RECRITIQUE_ROUNDS:
-        return False
-    # Once build has produced a PR (or BUILD is already done), this row must
-    # release so routing can advance to review. Without these guards the row
-    # re-dispatches /do-build forever for every with-concerns plan. Mirror the
-    # guards on row 4a (_rule_critique_ready_no_concerns).
-    if meta.get("pr_number"):
         return False
     build_status = stage_states.get("BUILD")
     return build_status in (None, "pending", "ready")
@@ -1129,6 +1457,38 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     if not recorded_head:
         return True
     return recorded_head.lower() != head_sha.lower()
+
+
+def _review_verdict_head_is_verified_fresh(stage_states: dict, meta: dict, context: dict) -> bool:
+    """Return True only on POSITIVE evidence that the REVIEW verdict judged the live head.
+
+    Narrow sibling of :func:`_review_verdict_head_is_stale`, for TERMINAL
+    ``/do-merge`` dispatch only (G3 leg 1, G6, row 10). The two differ on exactly two
+    inputs, both deliberate:
+
+    - ``pr_head_sha`` ABSENT from context → **False** here (no evidence, no
+      merge), where the stale predicate returns False meaning "inert".
+    - no recorded REVIEW verdict → **False** here, where the stale predicate
+      returns False meaning "the no-verdict recovery rows own this".
+
+    Requiring presence is free in production: ``tools/sdlc_next_skill._build_context``
+    sets ``pr_head_sha`` unconditionally whenever ``pr_number`` is set and a
+    REVIEW verdict is recorded — a real SHA, or ``""`` plus
+    ``pr_head_sha_lookup_failed`` on lookup failure. Both conditions hold on
+    every path that reaches either call site, so the key is never absent for a
+    live lane; requiring it closes the hole against non-CLI and future callers.
+    """
+    if "pr_head_sha" not in context:
+        return False
+    head_sha = context.get("pr_head_sha") or ""
+    if not head_sha:
+        return False  # fail-closed lookup-failure sentinel
+    if not _latest_review_verdict(stage_states, meta).strip():
+        return False
+    recorded_head = _latest_review_head_sha(stage_states, meta)
+    if not recorded_head:
+        return False  # unattributable verdict is never "verified fresh"
+    return recorded_head.lower() == head_sha.lower()
 
 
 def _review_verdict_is_stale(stage_states: dict) -> bool:
@@ -1317,7 +1677,32 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
       Do not delete that bound believing G5 or G4 backstops it: G5 no longer runs
       here, and G4 counts consecutive same-skill dispatches while this loop
       alternates two skills.
+
+    **Stage stand-downs (#3237, folded into #3249's ``_plan_stage_stood_down``).**
+    The loop bound terminates a lane that is still in the plan stage; it says
+    nothing about a lane that has already left it. This row stands down via the
+    shared helper like every sibling plan-stage row, so it never answers for a
+    lane whose real state has moved on: a PR-stage lane has no plan-stage
+    verdict worth refreshing, and once BUILD has started the plan was accepted
+    when the build was dispatched, so the concern loop is moot. Without the
+    BUILD half, a lane with an armed concern gate and a BUILD interrupted
+    before it opened its PR had NO exit from the plan loop: row 4c is gated on
+    ``build_status in (None, pending, ready)`` so it cannot answer, and row 5
+    ("Build must create the PR — resume build"), which holds the right answer,
+    is evaluated after this row. Observed on lane #3195 / PR #3222, which
+    escaped only by overriding ``MAX_CONCERN_RECRITIQUE_ROUNDS``.
+
+    Nothing is stranded by the stand-down. The PR-stage rows own the post-PR
+    state, and row 5 (``_rule_branch_exists_no_pr``) owns the pre-PR one — its
+    predicate is ``BUILD == in_progress OR context["branch_exists"] is True``,
+    so the branch half answers regardless of BUILD status. A BUILD cannot reach
+    ``completed`` without pushing its lane branch, so the realistic
+    crash-before-PR case carries ``branch_exists == True`` and row 5 resumes the
+    build. ``Blocked('no matching dispatch rule')`` remains only for the
+    no-live-branch subcase, where there is nothing left to resume.
     """
+    if _plan_stage_stood_down(stage_states, meta):
+        return False
     if not _critique_verdict_is_stale(stage_states, meta):
         return False
     return bool(_latest_critique_verdict(stage_states, meta).strip())
@@ -1337,7 +1722,8 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     disjoint.
 
     Narrowly gated so it cannot fire when:
-      - a PR exists (defer to G3 / PR-stage rows 7-10)
+      - the lane has left the plan stage (``_plan_stage_stood_down``; defer to
+        G3 / PR-stage rows 7-10, or to row 5 while the build runs)
       - any critique verdict IS recorded (let rows 2b/3/4a handle it)
       - CRITIQUE is not in_progress (None/pending → row 2; completed/failed → other rows)
 
@@ -1345,7 +1731,7 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     re-dispatches and escalates to a human. G2 does not bound it (it keys off
     critique_cycle_count, which stays 0 with no recorded verdict).
     """
-    if meta.get("pr_number"):
+    if _plan_stage_stood_down(stage_states, meta):
         return False
     if stage_states.get("CRITIQUE") != STATUS_IN_PROGRESS:
         return False
@@ -1472,6 +1858,46 @@ def _rule_patch_applied_after_review(stage_states: dict, meta: dict, context: di
     # #2767(b): the patch may have been followed by other dispatches. A verdict
     # older than the latest /do-patch is stale no matter what ran since.
     return _review_verdict_is_stale(stage_states)
+
+
+def _rule_patch_dispatched_not_completed(stage_states: dict, meta: dict, context: dict) -> bool:
+    """A dispatched ``/do-patch`` died before completing its stage — re-dispatch it.
+
+    Crashed-stage recovery on the PATCH side (same class as row 2c for
+    CRITIQUE, #1668, and the #3078 PLAN fix): ``/do-patch`` writes its
+    dispatch record, then dies before writing any PATCH marker. Observed live
+    on issue #2754 (2026-09-02): the crashed dispatch made the recorded
+    CHANGES REQUESTED verdict *classified stale* (``_review_verdict_is_stale``
+    compares against the latest patch DISPATCH, not a landed patch), at which
+    point no row owned the state — row 8 steps aside on staleness, row 8b
+    requires ``PATCH == completed``, rows 8c/8d/8e require an absent verdict,
+    and 8f/9/10/G6 require APPROVED. Router answered
+    ``Blocked('no matching dispatch rule')``.
+
+    Disjointness: row 8b requires ``PATCH == completed``; this row requires
+    the opposite. Rows 8c/8d/8e require the absence of a recorded REVIEW
+    verdict; this row requires one present. Row 8 fires only on a fresh
+    (non-stale) verdict; with ``last_dispatched_skill == /do-patch`` the
+    verdict necessarily predates that dispatch, so row 8 has already stepped
+    aside on every state this row owns.
+
+    Loop-bounded by G4: a deterministically crashing patch re-dispatches the
+    same skill on an identical stage snapshot (``_patch_cycle_count`` only
+    increments when the stage completes), so ``same_stage_dispatch_count``
+    climbs and G4 escalates.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if (meta.get("last_dispatched_skill") or "") != SKILL_DO_PATCH:
+        return False
+    if stage_states.get("PATCH") == STATUS_COMPLETED:
+        return False
+    # A recorded REVIEW verdict is what distinguishes "patch was warranted and
+    # died" from the no-verdict states rows 8c/8d/8e own.
+    if meta.get("latest_review_verdict"):
+        return True
+    verdicts = stage_states.get("_verdicts") or {}
+    return bool(_verdict_text(verdicts.get("REVIEW")))
 
 
 def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1660,9 +2086,10 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     # (the #1897 misroute). Row 8e owns the no-verdict state instead.
     if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
         return False
-    # WS3d (#2062): a head_sha-stale APPROVED verdict is not merge-ready —
-    # row 8f owns it (re-review at the new head).
-    if _review_verdict_head_is_stale(stage_states, meta, context):
+    # WS3d (#2062) / #3260: a terminal merge dispatch requires POSITIVE evidence
+    # that the APPROVED verdict judged the live head. An absent pr_head_sha signal
+    # is not evidence — row 10 must decline rather than merge on it.
+    if not _review_verdict_head_is_verified_fresh(stage_states, meta, context):
         return False
     needed = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"]
     return _stages_settled(stage_states, needed)
@@ -1815,6 +2242,15 @@ DISPATCH_RULES: list[DispatchRule] = [
         skill=SKILL_DO_PR_REVIEW,
         reason="Re-review is REQUIRED after every patch",
     ),
+    # Row 8g: /do-patch was dispatched but died before completing its stage —
+    # crashed-stage recovery on the PATCH side (mirrors 2c/8c; observed on
+    # #2754). Loop-bound by G4.
+    DispatchRule(
+        row_id="8g",
+        state_predicate=_rule_patch_dispatched_not_completed,
+        skill=SKILL_DO_PATCH,
+        reason="Patch dispatched but never completed — re-run patch",
+    ),
     # Row 8c: REVIEW is in_progress with no recorded verdict and row 8b does not
     # apply (no patch applied after review). Mirrors row 2c on the CRITIQUE side.
     # Re-dispatch /do-pr-review to recover from a stalled review. Loop-bound by G4.
@@ -1896,11 +2332,12 @@ def decide_next_dispatch(
     stage_states: dict,
     meta: dict | None = None,
     context: dict | None = None,
-) -> Dispatch | Blocked:
+) -> Dispatch | Blocked | Terminal:
     """Decide which sub-skill the SDLC router should dispatch next.
 
     Algorithm:
-      1. Evaluate guards G1–G7. If any guard trips, return its decision.
+      1. Evaluate the terminal guard, then G1–G9. If any trips, return its
+         decision. A ``Terminal`` here means the lane is finished (#2894, #2817).
       2. Otherwise, walk ``DISPATCH_RULES`` in row order. Take the first
          rule whose ``state_predicate`` returns True as the primary dispatch.
       3. If no rule matches at all, return ``Blocked(reason="no matching rule")``.

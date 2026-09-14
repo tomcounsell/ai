@@ -4,16 +4,6 @@
 
 The PM session PM persona orchestrates SDLC work by spawning Dev sessions for each pipeline stage. Dev sessions emit structured `<!-- OUTCOME -->` JSON blocks that encode the stage result. The PM decision rules tell the PM how to interpret these outcomes and route to the next stage automatically.
 
-## Problem Solved
-
-Without explicit decision rules, the PM had no instructions for:
-- Parsing OUTCOME blocks from Dev session output
-- Mapping status values (success/partial/fail) to next actions
-- Deciding when to auto-merge vs. escalate to human
-- Handling tech debt and nit findings (patch vs. skip)
-
-This led to the PM either asking permission for obvious merges or silently skipping review findings.
-
 ## Decision Table
 
 | OUTCOME Status | PM Action |
@@ -68,7 +58,7 @@ The decision is:
 
 A REVIEW verdict is stale (superseded) iff its `recorded_at` timestamp predates the latest `/do-patch` dispatch timestamp. When stale, row 8 (`_rule_review_has_findings`) returns False and row 8b (`_rule_patch_applied_after_review`) dispatches `/do-pr-review` for re-review instead of re-dispatching `/do-patch`.
 
-This prevents the PM from repeatedly patching against findings that were already addressed by a prior patch cycle. The staleness check is implemented as `_review_verdict_is_stale(stage_states)` in `agent/sdlc_router.py` (issue #1641). All edge cases (missing `recorded_at`, no prior `/do-patch`, parse failure) fail safe to "not stale."
+This prevents the PM from repeatedly patching against findings that were already addressed by a prior patch cycle. The staleness check is implemented as `_review_verdict_is_stale(stage_states)` in `agent/sdlc_router.py`. All edge cases (missing `recorded_at`, no prior `/do-patch`, parse failure) fail safe to "not stale."
 
 ## Key Principles
 
@@ -90,10 +80,9 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 ## Implementation
 
-- **PM dispatch rules**: `agent/sdk_client.py` -- appended to the PM dispatch instructions block (lines 1583-1596)
-- **Annotate pattern**: `.claude/skills/do-patch/SKILL.md` -- added after the builder agent prompt template
+- **PM dispatch rules**: `agent/sdk_client.py` — the PM dispatch instructions block.
+- **Annotate pattern**: `.claude/skills/do-patch/SKILL.md` — the builder agent prompt template.
 
 ## Related
 
-- [Eng Session Architecture](eng-session-architecture.md) -- how Eng sessions handle both orchestration and execution
-- Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue
+- [Eng Session Architecture](eng-session-architecture.md) — how Eng sessions handle both orchestration and execution

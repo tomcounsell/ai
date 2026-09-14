@@ -10,10 +10,6 @@ A message whose session hung or was killed *without replying* is dedup-marked **
 
 This layer answers a different question: *did Valor actually reply in the thread?*
 
-### Motivating Incident
-
-PR #1694 switched granite to `/granite:prime-pm-role` slash commands under `.claude/commands/granite/`, but `_sync_commands` globbed only top-level `*.md` and never recursed, so namespaced commands never reached `~/.claude/commands/granite/`. The result: `Unknown command` → no persona → no real turn → 600s startup ceiling → `startup_unresolved` → silent hang, `communicated=False`, no reply. Messages in the Cyndra Dev Team chat were enqueued fine (each got a `DedupRecord`), so the mechanical catchup returned "already processed" and could not recover them. (Root cause fixed separately by commit `3a3ff1ab` — `rglob` recursion.)
-
 ## How It Differs from Mechanical Catchup and Reconciler
 
 All three are owner-scoped dialog scanners that reuse `enqueue_agent_session` and write through the same dedup path. The difference is the **failure stage they cover**:
@@ -30,7 +26,7 @@ The mechanical scanners can never recover a response failure because the `DedupR
 
 The thread is the source of truth. Valor's own `out` messages are the ground truth for what has actually been said in the chat. The module reads the recent thread (including Valor's replies, marked by `m.out == True`, and Valor's own emoji reactions — see [Reaction Awareness](#reaction-awareness) below), builds a transcript, and asks an LLM judge to classify each inbound human message.
 
-This approach dissolves the "failed-silently vs. correctly-silent" ambiguity that a mechanical replay cannot resolve. This layer never needed the mechanical scanners' reply-only heuristic (formerly `_check_if_handled` in `bridge/catchup.py`, deleted per #2204 — see [Dedup TTL Contract & Rollout Seed](#dedup-ttl-contract--rollout-seed) below) — the judgment layer reads the thread directly and independently supersedes it for this failure mode.
+This approach dissolves the "failed-silently vs. correctly-silent" ambiguity that a mechanical replay cannot resolve: the judgment layer reads the thread directly and independently handles this failure mode.
 
 ## LLM Judge
 
@@ -52,7 +48,7 @@ A missed reply is recoverable on the next sweep; a spurious double-reply to a cu
 
 ### Backend
 
-Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`) with a typed `CatchupJudgeVerdict` output model, replacing the previous Ollama-first/Haiku-fallback pair. If the call fails or schema validation is exhausted, `ANSWERED` is returned.
+Routes through the [non-harness LLM wrapper](nonharness-llm-wrapper.md) (`agent.llm.run_typed`, Haiku/`MODEL_FAST`) with a typed `CatchupJudgeVerdict` output model. If the call fails or schema validation is exhausted, `ANSWERED` is returned.
 
 ## Double-Reply Guard (Race 1 Mitigation)
 
@@ -68,37 +64,35 @@ If either layer sees a Valor reply after the message, the enqueue is skipped wit
 
 **Idempotency is provided by the landed-reply guard, NOT by a dedup read.** This module never reads the dedup set (`is_duplicate_message()`) to decide whether to enqueue — the thread is the source of truth. What keeps recovery to at most one reply per message is the two-layer landed-reply guard above.
 
-The dedup write after enqueue is for the *mechanical* scanners' bookkeeping: once a recovery session's reply lands in the thread, every subsequent sweep sees it and skips. The mechanical scanners' next scan also sees the dedup entry and skips. No new watermark or store is created (per constraint established in #948).
+The dedup write after enqueue is for the *mechanical* scanners' bookkeeping: once a recovery session's reply lands in the thread, every subsequent sweep sees it and skips. The mechanical scanners' next scan also sees the dedup entry and skips. No new watermark or store is created.
 
 ## Reaction Awareness
 
 `valor-catchup` treats a Valor emoji reaction on an inbound message as a
-thread-native "handled" signal, closing the one blind spot the dedup-TTL fix
-below does not reach: an emoji-reaction ack (the repo's preferred "I heard
-you" signal, sent via `bridge/response.py::SendReactionRequest`) leaves no
-reply message, so the reply-only judge previously saw an unanswered thread and
-re-enqueued a recovery session for an already-acknowledged message.
+thread-native "handled" signal, closing a blind spot the dedup TTL does not
+reach: an emoji-reaction ack (the repo's preferred "I heard you" signal, sent
+via `bridge/response.py::SendReactionRequest`) leaves no reply message, so a
+judge that reads only reply text would see an unanswered thread and re-enqueue
+a recovery session for an already-acknowledged message.
 
 `_valor_reacted(message)` (`bridge/agent_catchup.py`) inspects the Telethon
 message object's `message.reactions.results[i].chosen_order` field, **not**
-the bounded `recent_reactions` list or its `.my` flag. A live Telethon read
-against a real chat (required verification step before building, per the plan
-critique) found `recent_reactions`/`.my` unreliable for self-reactions in a
-busy group — Valor's own reaction did not always appear in that capped list.
-`chosen_order` on `MessageReactions.results` reliably reports the self
-account's reaction regardless of how many other reactors are present. Any
-missing/`None` reactions object, or an exception while reading it, defaults to
-"not reacted" — conservative per the same contract as the LLM judge (a missed
-reaction-only ack is recoverable on the next sweep; a spurious skip of a
-genuine question is not).
+the bounded `recent_reactions` list or its `.my` flag. `recent_reactions`/`.my`
+is unreliable for self-reactions in a busy group — Valor's own reaction does
+not always appear in that capped list. `chosen_order` on
+`MessageReactions.results` reliably reports the self account's reaction
+regardless of how many other reactors are present. Any missing/`None`
+reactions object, or an exception while reading it, defaults to "not reacted"
+— conservative per the same contract as the LLM judge (a missed reaction-only
+ack is recoverable on the next sweep; a spurious skip of a genuine question is
+not).
 
 `read_thread` captures this per message as `ThreadMessage.valor_reacted`. A
 reacted-to inbound message is treated as `ANSWERED` before the LLM judge call
 (no reply text exists to feed the judge, and no judgment is needed — the
 reaction alone settles it). This is scoped strictly to `valor-catchup`; it
-does not touch the dedup set or the mechanical scanners' skip decision (see
-below), consistent with #948's "thread is source of truth" design for this
-layer.
+does not touch the dedup set or the mechanical scanners' skip decision,
+consistent with this layer's "thread is source of truth" design.
 
 ## Owner Scoping
 
@@ -108,13 +102,13 @@ Single-machine-ownership invariant is preserved: the same set of chats that the 
 
 ## Persona Correctness
 
-For each recovery enqueue, persona is resolved via `resolve_persona(project, chat_title, is_dm=False)` → `persona_to_session_type(persona)` (the helpers introduced in #1708). On resolution failure, falls back to `SessionType.ENG` with a greppable WARNING.
+For each recovery enqueue, persona is resolved via `resolve_persona(project, chat_title, is_dm=False)` → `persona_to_session_type(persona)`. On resolution failure, falls back to `SessionType.ENG` with a greppable WARNING.
 
 The module **never composes reply text**. Only the original inbound message text is enqueued as `message_text`; the worker session produces the persona-correct reply through the normal relay → outbox path.
 
 ## Lookback Window
 
-`min(last 20 messages, last 2 hours)` per chat. Constants: `MAX_MESSAGES_PER_CHAT = 20`, `LOOKBACK_HOURS = 2`. Mirrors the reconciler's bounded `get_messages` call (#1408). The `--lookback-hours` CLI flag overrides the time bound.
+`min(last 20 messages, last 2 hours)` per chat. Constants: `MAX_MESSAGES_PER_CHAT = 20`, `LOOKBACK_HOURS = 2`. Mirrors the reconciler's bounded `get_messages` call. The `--lookback-hours` CLI flag overrides the time bound.
 
 ## `valor-catchup` CLI
 
@@ -123,7 +117,7 @@ valor-catchup                    # Sweep all owned chats, print summary
 valor-catchup --lookback-hours 4 # Extend lookback window
 ```
 
-Registered in `pyproject.toml [project.scripts]` as `valor-catchup = "bridge.agent_catchup:main"`. Propagated automatically via `pip install -e .` during the existing dependency-sync step.
+Registered in `pyproject.toml [project.scripts]` as `valor-catchup = "bridge.agent_catchup:main"`. Propagated automatically via `pip install -e .` during the dependency-sync step.
 
 The CLI prints a per-chat summary including chats that errored (never silently dropped):
 
@@ -163,61 +157,46 @@ Any failure, non-zero exit, or timeout is logged (`catchup: ... (swallowed)`) an
 
 The mechanical layer has already claimed all ingestion-gap messages and written dedup. The agent-judgment layer only acts on messages that DID get a session but no reply, which the mechanical layer structurally cannot detect.
 
-## Dedup TTL Contract & Rollout Seed
+## Dedup TTL Contract & Seed
 
-This section describes the fix for #2204 (re-handling of already-answered
-messages) and applies to **startup catchup (`bridge/catchup.py`) only** — see
+This section applies to **startup catchup (`bridge/catchup.py`) only** — see
 the scope note in [Message Reconciler](message-reconciler.md#scope-note-the-re-handling-bug-2204-never-touched-the-reconciler)
-for why the reconciler's fixed 30-minute lookback was never a bug site.
+for the reconciler's fixed 30-minute lookback.
 
 ### Unified dedup TTL contract
 
-`DedupRecord` (`models/dedup.py`) is now the single authoritative "already
-dispatched" record over the **entire** startup-catchup scan window, not just a
-short fixed period. Its TTL is settings-backed
-(`config.settings.timeouts.dedup_record_ttl_s`, env
+`DedupRecord` (`models/dedup.py`) is the single authoritative "already
+dispatched" record over the **entire** startup-catchup scan window. Its TTL is
+settings-backed (`config.settings.timeouts.dedup_record_ttl_s`, env
 `TIMEOUTS__DEDUP_RECORD_TTL_S`) and defaults to `last_processed_ttl_s` (~30
 days) by design: `LastProcessedRecord`'s cursor determines the maximum
-startup-catchup lookback (issue #1408's per-chat cutoff extension can reach
-back to the cursor's own age), so the dedup membership set must remember every
-dispatched message for that entire window. A shorter TTL here reopens the
-re-handling bug — a message answered (by reply, non-reply message, emoji
-reaction, or deliberate no-reply judgment) more than the TTL ago ages out of
-dedup and gets treated as never-handled on the next restart.
+startup-catchup lookback (its per-chat cutoff extension can reach back to the
+cursor's own age), so the dedup membership set remembers every dispatched
+message for that entire window. A shorter TTL lets a message answered more
+than the TTL ago (by reply, non-reply message, emoji reaction, or deliberate
+no-reply judgment) age out of dedup and get treated as never-handled on the
+next restart.
 
-The old reply-only heuristic (`_check_if_handled` in `bridge/catchup.py`,
-which fetched the 10 messages after a candidate and matched only an explicit
-threaded reply) is **deleted**. It is dead weight now that guard 1 (the dedup
-set) is authoritative over the full window — dedup is written at *dispatch*
-time regardless of how a message was eventually answered, so it structurally
-covers every answer type the heuristic tried and failed to special-case. This
-also unifies startup catchup with the reconciler, which never had this
-heuristic.
+Startup catchup has no reply-only heuristic: dedup is written at *dispatch*
+time regardless of how a message is eventually answered, so it structurally
+covers every answer type. This matches the reconciler, which keys on the same
+dedup set.
 
-### One-time rollout dedup-seed
+### Dedup seed
 
-Deleting the old TTL is a rollout hazard on its own: the old 2h TTL had
-already deleted every dedup key for messages handled more than 2 hours before
-the fix shipped. With the reply-only heuristic gone and the dedup TTL now
-long, the very first post-fix startup catchup scan (with its up-to-30-day
-lookback) would find those handled-but-forgotten messages absent from dedup
-and re-enqueue the entire historical backlog — the exact duplicate-reply storm
-this fix exists to prevent, fired once at rollout. An `EXPIRE`-refresh
-migration cannot help; the keys are already deleted, nothing to refresh.
-
-`bridge/dedup_seed.py` closes this gap with a one-time seeding pass that runs
-during bridge startup, **before** `scan_for_missed_messages` and before the
-live `NewMessage` handler begins dispatching (`bridge/telegram_bridge.py`, run
-and awaited to completion). For each monitored/owned chat, it fetches the most
-recent `MAX_MESSAGES_PER_CHAT` messages via a live Telethon read and writes a
-`DedupRecord` entry for every inbound message whose id is `<=` that chat's
-`LastProcessedRecord` cursor id — i.e., messages the cursor already advanced
-past, and therefore messages that were demonstrably already dispatched. This
-scopes the seed to messages provably handled rather than blanket-seeding the
-whole window, so a genuine gap message *above* the cursor is never suppressed.
-Running it before live dispatch begins also avoids a lost-update race on
-`DedupRecord.add_message` (a read-modify-write, not an atomic `SADD`) between
-the seed and a concurrent live write.
+`bridge/dedup_seed.py` runs a seeding pass during bridge startup, **before**
+`scan_for_missed_messages` and before the live `NewMessage` handler begins
+dispatching (`bridge/telegram_bridge.py`, run and awaited to completion). For
+each monitored/owned chat, it fetches the most recent `MAX_MESSAGES_PER_CHAT`
+messages via a live Telethon read and writes a `DedupRecord` entry for every
+inbound message whose id is `<=` that chat's `LastProcessedRecord` cursor id —
+i.e., messages the cursor already advanced past, and therefore messages that
+were demonstrably already dispatched. This scopes the seed to messages
+provably handled rather than blanket-seeding the whole window, so a genuine
+gap message *above* the cursor is never suppressed. Running it before live
+dispatch begins also avoids a lost-update race on `DedupRecord.add_message` (a
+read-modify-write, not an atomic `SADD`) between the seed and a concurrent
+live write.
 
 ### Per-chat seed markers
 
@@ -227,17 +206,17 @@ a single global marker. A global marker would let a partial per-chat Telethon
 failure (rate limit, transient error) finish the overall pass and still stamp
 "done," permanently skipping that one chat's seed on every future restart —
 that chat would then re-enqueue its entire aged-out handled backlog on the
-first post-fix scan, silently reproducing the duplicate-reply storm with no
-recovery path. Per-chat markers make the seed self-healing instead: an
-unmarked chat (because it failed, or is newly added) simply re-seeds on the
-next restart, while already-seeded chats are skipped without a Telethon read.
-A chat with no `LastProcessedRecord` cursor yet seeds nothing but is still
-marked done (a legitimate empty outcome, not a failure).
+first scan, silently reproducing the duplicate-reply storm with no recovery
+path. Per-chat markers make the seed self-healing instead: an unmarked chat
+(because it failed, or is newly added) simply re-seeds on the next restart,
+while already-seeded chats are skipped without a Telethon read. A chat with no
+`LastProcessedRecord` cursor yet seeds nothing but is still marked done (a
+legitimate empty outcome, not a failure).
 
 ### Observability & Rollback
 
-Because the original failure mode was silent (a duplicate reply reaching the
-human with no error raised), the rollout carries an explicit detection signal
+Because the failure mode this guards is silent (a duplicate reply reaching the
+human with no error raised), the layer carries an explicit detection signal
 and a fast revert path:
 
 - **Seed pass**: logs one structured `[dedup-seed] chat=... title=... seeded=N
@@ -249,8 +228,8 @@ and a fast revert path:
 - **Reconciler**: logs the same `[reconciler] Scan decision counters:
   re_enqueued=N skipped_duplicate=N` line per scan, as a regression guard.
 
-A post-rollout spike in `re_enqueued` for historical (pre-restart) message ids
-is greppable in `logs/bridge.log` and is the signal to watch for a recurrence.
+A spike in `re_enqueued` for older message ids is greppable in `logs/bridge.log`
+and is the signal to watch for a recurrence.
 
 **Rollback lever**: `CATCHUP_DISABLED_FLAG` (`bridge/catchup.py`,
 `data/catchup-disabled`) is the operator kill switch for the entire
@@ -261,13 +240,12 @@ duplicate replies reappear after re-enabling recovery:
    entire recovery layer again within one scan cycle.
 2. `./scripts/valor-service.sh restart` so the flag takes effect on the
    running process.
-3. The per-chat seed markers, the longer dedup TTL, and the deleted
-   `_check_if_handled` heuristic are all safe to leave in place while
-   investigating — only the kill switch needs to be re-touched. Check the
-   offending chat's `[dedup-seed]` log line before re-removing the flag.
+3. The per-chat seed markers, the dedup TTL, and the absence of a
+   reply-only heuristic are all safe to leave in place while investigating —
+   only the kill switch needs to be re-touched. Check the offending chat's
+   `[dedup-seed]` log line before re-removing the flag.
 
-The kill switch is no longer silent (issue #2473: it once sat forgotten for
-7 days with all recovery disabled). Once the flag has been present longer
+The kill switch is not silent: once the flag has been present longer
 than `settings.timeouts.catchup_disabled_warn_hours` (default 24h, env
 `TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS`), the full `python -m tools.doctor`
 run fails its `catchup_kill_switch` check with a WARN, and `/dashboard.json`
@@ -339,11 +317,11 @@ valor-catchup (CLI) or run_catchup_step (/update final step)
 | `seed_dedup_for_chat` | `bridge/dedup_seed.py` | Seed one chat's dedup set from a live Telethon read; writes that chat's marker only on full success |
 | `is_chat_seeded` | `bridge/dedup_seed.py` | Check a chat's `data/dedup-seeded.{chat_id}` marker |
 | `catchup_disabled` | `bridge/catchup.py` | Operator kill switch check (`data/catchup-disabled`) |
-| `kill_switch_status` | `bridge/catchup.py` | Kill-switch staleness surface (#2473): presence, mtime age, `stale` past the warn threshold; consumed by `tools.doctor` and `/dashboard.json` |
+| `kill_switch_status` | `bridge/catchup.py` | Kill-switch staleness surface: presence, mtime age, `stale` past the warn threshold; consumed by `tools.doctor` and `/dashboard.json` |
 
 ## See Also
 
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — catchup/reconciler overview and bridge/worker process separation
-- [Message Reconciler](message-reconciler.md) — periodic ingestion-gap scanner (complement to this layer; see its scope note on why the #2204 re-handling bug never touched it)
+- [Message Reconciler](message-reconciler.md) — periodic ingestion-gap scanner (complement to this layer; see its scope note on the re-handling bug)
 - [Single-Machine Ownership](single-machine-ownership.md) — owner-scoping invariant reused by this layer
-- [Headless Session Runner](headless-session-runner.md) — production session runner; its predecessor's startup failures motivated this feature (see the [PTY-fragility postmortem](../postmortems/2026-07-06-granite-pty-fragility.md))
+- [Headless Session Runner](headless-session-runner.md) — production session runner

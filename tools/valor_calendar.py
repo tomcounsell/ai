@@ -22,8 +22,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from bridge.utc import utc_now
 from config.paths import DATA_DIR
+from utils.utc import utc_now
 
 # Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
 CALENDAR_CONFIG_PATH = Path.home() / "Desktop" / "Valor" / "calendar_config.json"

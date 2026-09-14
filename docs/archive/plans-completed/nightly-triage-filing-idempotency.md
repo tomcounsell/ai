@@ -1,0 +1,763 @@
+---
+status: docs_complete
+type: bug
+appetite: Small
+owner: Valor Engels
+created: 2026-09-05
+tracking: https://github.com/tomcounsell/ai/issues/3170
+last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-06T08:24:53Z
+---
+
+# Nightly Triage Filing Idempotency
+
+## Problem
+
+
+On 2026-08-24 one nightly triage dispatch filed the *same* failing node three times — #2960 (20:35:17), #2972 (20:40:13), #2990 (20:45:57) — with three different body templates, from the same worktree at the same commit `fd848ed83`. Across the whole wave that was 39 issues (#2960–#2999), later closed wholesale as duplicates of #3001.
+
+Every one of those three filings ran the prompt's instruction to "search ALL issues — open AND closed — for the EXACT title" and every one of them came up empty, because a search-index read lags issue creation by minutes and each wave searched inside the lag window its own predecessor had opened issues in. The turn was replayed (why, is #3161's question); the filing step had no defense of its own.
+
+**Current behavior:**
+
+The detector has genuinely good idempotency for its *own* decisions. `dispatch_findings` reads live REST state via `open_issues()` and `closed_issue_dispositions()`, partitions nodes into already-open / closed-not-planned / to-file, and comments rather than re-files. Then it throws the answer away: `maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)` hands the triage agent a bare `list[str]` of node ids, and `_build_triage_prompt` tells that agent to go re-derive from GitHub what the script already knew — using the one read mechanism this module documents as unreliable in exactly this window.
+
+Nothing else stands between a replayed turn and a duplicate issue. There is no record on disk of what the session already filed, so a fresh-context replay starts from zero every time.
+
+**Desired outcome:**
+
+A replayed triage turn re-files nothing. Three independent defenses, cheapest first:
+
+1. The agent never consults the lagging search index — the prompt hands it the exact `gh issue list --state all` REST command.
+2. The agent mostly does not need to look at all — the script hands it the disposition it already resolved, per node, with the issue number when one exists.
+3. If both of those are somehow bypassed, a session-local ledger on disk records every issue the session opened, and the agent consults it before opening the next. Defences 2 and 3 apply to the per-node dispatch, which is the path the 2026-08-24 wave came out of; defence 1 applies to all three filing prompts. The reasoning is in Solution → "Scope decision".
+
+## Freshness Check
+
+
+**Baseline commit:** `feebe32aa` (`origin/main` at plan time; local `main` was 3 behind and was pulled before planning)
+**Issue filed at:** 2026-09-05T06:46:08Z
+**Disposition:** Minor drift
+
+**File:line references re-verified (all at `feebe32aa`):**
+
+- `scripts/nightly_regression_tests.py` — `_build_triage_prompt` — claimed to say "search ALL issues". **Still holds**, now at line 1458 (`def`), with the offending wording at line 1470: `"been triaged before. For EACH node below, search ALL issues — open AND "`. Verified present on `origin/main`, not just locally.
+- `scripts/nightly_regression_tests.py` — `dispatch_findings` — claimed to "already partition nodes into open / closed-not-planned / to-file before dispatching". **Still holds**, at line 2447. The partition helpers are `partition_environmental` (1668), `partition_already_open` (2261), `partition_closed_matches` (2083). The discarding call site is line 2664.
+- Commit `8524e765b` ("Quiet the nightly regression detector") — cited as the origin of the REST-not-search principle. **Confirmed present on main**; the principle is now written into the module's own constants at lines 322–340 and guarded by `test_open_issues_uses_the_rest_list_not_the_lagging_search`.
+- `.worktrees/nightly-triage-{slug}` (cited in the #2972 body) — **still the live convention**: `agent/worktree_manager.py:20` sets `WORKTREES_DIR = ".worktrees"` and every lane lands at `.worktrees/{slug}/`. The slug is computed at `scripts/nightly_regression_tests.py:2334`.
+
+**Cited sibling issues/PRs re-checked:**
+
+- **#3161** — still OPEN. This issue was split from it; #3161 retains the "why was the turn replayed" investigation.
+- **#3075** — **CLOSED 2026-09-05T02:13:35Z**, four hours before #3170 was filed, via merged PR **#3142**. This is the significant one: #3170's fix item 2 describes work partly done by #3075. See Prior Art.
+- **#3001** — CLOSED. Its Work Item 3 is the parent scope ("make triage issue-filing idempotent — the same node must not produce a second issue on a re-run"). #3075 was that work item; this issue is its remainder.
+
+**Commits on main since issue was filed (touching referenced files):**
+
+- `35a225c19` "Nightly environmental classification escalates after consecutive nights and widens the closed dedup window" — **irrelevant to this fix.** It raised `CLOSED_ISSUE_LIST_LIMIT` to 4000 and added the consecutive-night environmental escalation. It touches neither `_build_triage_prompt` nor the `maybe_dispatch_triage_session` call site. Its `escalated` nodes flow into the ordinary filing path, so they inherit whatever this plan builds, with no special handling needed.
+- `55ad9ac89` "Stale-branch sweep reaps nightly-triage worktrees and sees checked-out branches" (Closes #3162) — **relevant, and it strengthens this plan rather than disturbing it.** It touches `agent/worktree_manager.py` (+102, the file spike-3 cites at line 20), `docs/features/nightly-triage-dispatch.md` (+26, a new "Lane reaping" section), and `docs/features/nightly-regression-tests.md` (+1) — all three named in this plan's Documentation tasks. Its reaper refuses to reap a lane whose `git status --porcelain` is non-empty, so a ledger written **inside** `.worktrees/{slug}/` would leave the tree permanently dirty and permanently unreapable, reintroducing exactly the worktree accumulation #3162 just fixed. That is independent corroboration for spike-3 and for Open Question 1: the ledger belongs in `data/`. **Documentation impact:** the quoted bullet in the Documentation section was read against the pre-`55ad9ac89` text; Task 5 must re-read `docs/features/nightly-triage-dispatch.md` at its current head before editing, since the file gained a section since.
+
+**Active plans in `docs/plans/` overlapping this area:** none. No plan doc references the nightly detector; the most recent plan touching adjacent ground is `sdlc-control-plane-asserted-facts.md` (2026-09-04), which is unrelated.
+
+**Notes:** The branch `session/nightly-triage-idempotency-3075` **exists locally only** — `git ls-remote --heads origin 'refs/heads/session/nightly-triage-idempotency-3075'` returns nothing, so it was deleted from origin after PR #3142 merged; the local ref survives because it is checked out in a worktree. It is **not** an ancestor of main, but its four commits are on main by content, squash-merged as `97354ce1e` via PR #3142. It is a leftover lane, not pending work. **The build must branch from `main`, never from that branch**, or it will reintroduce a duplicate of already-landed code. The hazard is now smaller than at critique time (a `git checkout -b ... origin/session/...` cannot resolve), but a local `git checkout` of the stale ref still can, so the Rabbit Hole and the `merge-base` Verification row both stay.
+
+**Line-number caveat (applies to every file:line citation in this plan):** this module drifts constantly — the per-node dispatch call site was cited as line 2664 at drafting and is line 2668 on `origin/main` today, and four of this plan's recon citations drifted between recon and drafting. **Follow every citation below by symbol, not by line.** The Verification rows use `inspect.getsource` for precisely this reason and are the only line-independent instrument here.
+
+## Prior Art
+
+
+This is the fourth pass over nightly triage duplicate filing. Each prior pass closed a real hole; each left the prompt untouched.
+
+- **PR #2195** (2026-07-24) "Nightly regression detector: run lock, readable alerts, triage dispatch" — introduced `maybe_dispatch_triage_session` and the run lock. First appearance of the `list[str]`-only dispatch signature this plan changes.
+- **Issue #2559 / PR #2581** (2026-08-06) "Dedup nightly triage dispatch per node" — moved title computation from the agent into Python (`f"Nightly regression: {n}"`) so the same node yields a byte-identical title everywhere, and added per-node `dispatched_nodes` suppression. This is where the "search for the exact title before opening" instruction was written into `_build_triage_prompt` — correct in intent, and the wording that failed on 2026-08-24.
+- **Commit `8524e765b`** (2026-08) "Quiet the nightly regression detector" — established the REST-not-search principle for the script's own reads: `open_issues()` uses `gh issue list`, and the constant comments reject `--search` in as many words. **The prompt was not updated in the same pass.** That asymmetry is the whole of fix 1.
+- **Commit `8eb2344b9`** "Nightly detector: comment on the open issue instead of filing a twin" (#3134) — added `partition_already_open` returning issue *numbers*, enabling comment-over-create.
+- **Issue #3001** (CLOSED) — the umbrella that absorbed the 39-issue flood; its Work Item 3 is the parent scope for all idempotency work here.
+- **Issue #3075 / PR #3142** (merged 2026-09-05T02:13Z) — closed-issue-aware dedup, body-failure cascade collapsing, environmental classification. Added `closed_issue_dispositions()`, `partition_closed_matches()`, `closed_epilogue()`. Follow-up `35a225c19` added consecutive-night escalation. **This landed the detector-side half of fix 2 and left the prompt-side half undone** — see Why Previous Fixes Failed.
+
+## Research
+
+
+The only external surface is the GitHub CLI/API. Verified directly against it rather than by web search, which is stronger evidence:
+
+**Commands run:**
+
+```bash
+gh issue list --state all --json number,title,state,stateReason --limit 5
+```
+
+**Key findings:**
+
+- **The command in the issue works as written, and is fast.** Exit 0 in ~1.0s wall clock for a 5-row read on this repo. It is the REST list endpoint, not the search index.
+- **`stateReason` is an empty string for OPEN issues**, not `null` and not absent. Sample row: `{"number":3170,"state":"OPEN","stateReason":"","title":"..."}`. Any filter the prompt tells the agent to write must branch on `state` first and read `stateReason` only when `state == "CLOSED"` — a naive `stateReason` switch will mis-handle every open issue. This is a real trap for the agent and the prompt must pre-empt it.
+- **Closed rows carry `COMPLETED` / `NOT_PLANNED`** as expected, matching the `state_reason` values `closed_issue_dispositions()` already parses (`scripts/nightly_regression_tests.py:1992`), so the prompt's vocabulary and the script's are already aligned.
+- **`--limit` above 100 causes `gh` to page the REST endpoint** 100 rows at a time; the module already relies on this for `CLOSED_ISSUE_LIST_LIMIT = 4000` (~40 calls, bounded by `CLOSED_ISSUE_LIST_TIMEOUT_SECONDS = 180`). The issue proposes `--limit 200` for the agent's read, which is two calls — cheap, but see Risks for whether 200 is enough coverage.
+
+No web search was run: the training-data question ("does GitHub's search index lag?") is already settled inside this repo by `8524e765b` with a production incident behind it, and a web answer would be weaker evidence than the module's own comments and the 2026-08-24 wave.
+
+## Spike Results
+
+
+All verifiable assumptions were resolved during recon, by direct code read and one live command. No agents were dispatched — every question was cheaper to answer inline than to hand off.
+
+### spike-1: The `gh issue list --state all` read is viable for the agent
+- **Assumption**: "`gh issue list --state all --json number,title,state,stateReason --limit 200` returns what the prompt needs, fast enough to run once per node list."
+- **Method**: code-read + live command
+- **Finding**: Confirmed. Exit 0, ~1.0s for a small read, returns all four fields. `stateReason` is `""` for open issues (see Research) — the prompt must account for that.
+- **Confidence**: high
+- **Impact on plan**: Fix 1 is a prompt-text change with no new Python machinery. The prompt should instruct **one** read for the whole node list, not one per node.
+
+### spike-2: How much of fix 2 did #3075 already land?
+- **Assumption**: "`dispatch_findings` already partitions but does not pass dispositions through."
+- **Method**: code-read of `dispatch_findings` (2447–2676) and `maybe_dispatch_triage_session` (2295)
+- **Finding**: Confirmed exactly. The partitions exist and are acted on by the script itself (it posts the comments). What reaches the agent is `maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)` at line 2664 — a bare `list[str]`. By the time nodes reach that call they have *already* survived `partition_already_open` and `partition_closed_matches`, so **every node in `single_nodes` is known to have no issue in any state**. The script knows the answer is "file it" and says nothing.
+- **Confidence**: high
+- **Impact on plan**: Fix 2 is smaller than the issue implies and its shape is inverted from the obvious reading. The pre-resolved disposition for the per-node path is uniformly `file` — the value is not in telling the agent *which* nodes are already handled (those never arrive), it is in telling the agent **that the script already checked, and what it checked against**, so a replay does not re-derive. See Solution.
+
+### spike-3: Is the lane worktree a sound home for the ledger?
+- **Assumption**: "A file under `.worktrees/{slug}/` is visible to a replayed turn."
+- **Method**: code-read of `maybe_dispatch_triage_session:2334` and `agent/worktree_manager.py`
+- **Finding**: Partly. The slug is `nightly-triage-{sha256(",".join(sorted(set(dispatch_nodes))))[:8]}` — a pure function of the node set, so a replay of the same dispatch does resolve to the same `.worktrees/{slug}/`. But the worktree is a git checkout: a stray file there shows up in the agent's own `git status` and is destroyed on lane teardown. `DATA_DIR = PROJECT_DIR / "data"` (line 155) is already this script's state home (`nightly_tests_last_run.json`, `nightly_tests.lock`), is gitignored (`.gitignore:181`), survives teardown, and is reachable by absolute path from inside a worktree.
+- **Confidence**: high
+- **Impact on plan**: Ledger goes in `data/`, keyed by slug, **not** in the lane worktree — a deliberate deviation from the issue's literal wording. Recorded in Open Questions.
+
+### spike-4: Are there xfail markers to convert?
+- **Assumption**: "A bug this old has an expected-failure test documenting it."
+- **Method**: `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py"`
+- **Finding**: **Zero matches anywhere in `tests/`** — neither decorator nor runtime form, for this bug or any other.
+- **Confidence**: high
+- **Impact on plan**: No conversion tasks. Nothing in Success Criteria about xfails.
+
+### spike-5: Does the stale `session/nightly-triage-idempotency-3075` branch contain unlanded work?
+- **Assumption**: "The branch might hold work this plan would duplicate."
+- **Method**: `git merge-base --is-ancestor` + `git log main..origin/session/...`
+- **Finding**: Not an ancestor of main, 4 commits ahead of it — but those commits are on main by content as squash-merge `97354ce1e` (PR #3142). It is a leftover lane.
+- **Confidence**: high
+- **Impact on plan**: Build branches from `main`. Called out in Freshness Check notes and Rabbit Holes.
+
+## Data Flow
+
+
+The defect lives at one boundary. Tracing a single failing node from pytest to the tracker:
+
+1. **Entry point** — `run_tests()` produces a pytest-json report; `extract_failing_node_ids()` then `reconfirm_serial()` yield a confirmed-failing set.
+2. **`compute_dispatch_set(prev, confirmed_failing)`** — drops nodes a previous *run* already dispatched. This is per-machine, per-night state in `data/nightly_tests_last_run.json`. It defends against night-over-night duplicates, not within-session replay.
+3. **`dispatch_findings(...)`** — the decision layer.
+   - `partition_environmental` removes network-fault nodes (and escalates ones that have been environmental too many consecutive nights).
+   - `group_setup_error_cascades` / `group_body_failure_cascades` collapse shared root causes into umbrellas.
+   - `open_issues()` and `closed_issue_dispositions()` read **live REST state** — `gh issue list`, deliberately not `--search`.
+   - `partition_already_open` → comment on the open issue, record, drop the node.
+   - `partition_closed_matches` → comment on a `NOT_PLANNED` closure, record, drop the node. A `COMPLETED` closure falls through and re-files.
+   - What survives is `single_nodes`: **nodes with no issue in any state, as of a REST read seconds ago.**
+4. **The boundary where the information is lost** — `maybe_dispatch_triage_session(single_nodes, dry_run=dry_run)` (line 2664). Signature accepts `list[str]`. Every disposition, every issue number, every fact about *what was checked and when* stops here.
+5. **`_build_triage_prompt(dispatch_nodes)`** — reconstitutes a prompt from node ids alone, and instructs the agent to re-derive the state of the world by "searching ALL issues".
+6. **`tools.valor_session create --role eng --slug nightly-triage-{hash} --message <prompt>`** — one Eng session, one lane worktree at `.worktrees/{slug}/`.
+7. **The agent** searches (index-backed, lagging), finds nothing, files. **On a replayed turn it does the same thing again**, because nothing in steps 4–6 left a trace it could consult and step 5's read cannot see minutes-old issues.
+8. **Output** — one GitHub issue per node. Or three, as on 2026-08-24.
+
+The fix does not move where decisions are made. It stops discarding them at step 4, hardens the read at step 5, and adds a durable trace at step 7 for the case where a replay bypasses both.
+
+## Why Previous Fixes Failed
+
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #2581 (#2559) | Moved title computation into Python; added per-node `dispatched_nodes` suppression across runs; wrote the "search for the EXACT title" instruction into the prompt. | Right layer for cross-*night* dedup, wrong layer for within-*session* replay. `dispatched_nodes` is written after the dispatch returns, so a turn replayed inside one dispatch never sees it. And the instruction it added is the one that fails: "search" names a read mechanism that cannot see minutes-old issues. |
+| Commit `8524e765b` | Established REST-not-search for the detector's own reads; wrote the rationale into the constants. | Fixed the script's read and left the agent's read alone. The module now documents in two places that `--search` lags by minutes, while still telling the agent to search. The principle was correct and its application was incomplete. |
+| Commit `8eb2344b9` (#3134) | `partition_already_open` returns issue numbers so the script comments instead of staying quiet. | Made the script's own knowledge richer without widening the channel to the agent. More was known; the same nothing was passed on. |
+| PR #3142 (#3075) | Closed-issue-aware dedup, cascade collapsing, environmental classification. Answered "where does idempotency belong?" — in the script. | Answered it **for the script's own filing decisions** and stopped there. The prompt was updated to *describe* the open-and-closed rule in prose, but not to hand the agent either the resolved answer or a reliable way to read it. The agent still re-derives everything. |
+
+**Root cause pattern:** every fix improved what the *script* knows and none of them widened the channel to the *agent*. `maybe_dispatch_triage_session(list[str])` has been the choke point since PR #2195, and four passes of increasingly sophisticated dedup have all been squeezed through it and dropped. The agent has been left to reconstruct, over an unreliable read, a decision that was fully resolved in Python seconds earlier. Fixing the reads without fixing the channel is what keeps this recurring.
+
+## Architectural Impact
+
+
+- **New dependencies**: none. No new imports, no new packages, no new services. `gh` and `subprocess` are already in use throughout the module.
+- **Interface changes**: `maybe_dispatch_triage_session` gains one optional keyword argument, `dispositions` (the script's resolved findings); `ledger_path` is *derived* inside it rather than passed. `_build_triage_prompt` gains `dispositions` and `ledger_path`, both keyword-only and both defaulting to `None`. `_build_cascade_prompt` and `_build_seed_prompt` gain **no** new parameters and receive fix 1 only — see "Scope decision". A new `_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None) -> str` extracts the inline baseline-seed prompt out of `main()` so all three prompts are named, testable functions; the keyword-only `prior_collection` exists because the inline text interpolates `prev.get("collection")`, a `main()` local no other parameter can supply, and it defaults to `None` so a two-positional call stays valid. All are module-private in practice (`_build_triage_prompt` / `_build_cascade_prompt` / `_build_seed_prompt` by name; `maybe_dispatch_triage_session` by having no importer outside this module and its test file).
+- **Callers of `maybe_dispatch_triage_session`: three, not two.** `dispatch_findings` calls it twice — once per cascade with `prompt=_build_cascade_prompt(cascade)` (~line 2598) and once for the surviving `single_nodes` (~line 2668) — and `main()` calls it a third time for the baseline seed with `prompt=<inline seed text>` and `slug_suffix="baseline"` (~line 2934). All three dispatch a session that files GitHub issues, and **all three currently instruct the agent to *search*.** The earlier draft of this plan said "exactly two callers" and hardened only the per-node prompt; that was wrong and is corrected throughout — see Solution, which scopes **fix 1 to all three** prompts and **fixes 2 and 3 to the per-node path alone**.
+- **Coupling**: decreases the agent's coupling to GitHub's search index, which is the point. Slightly increases coupling between `dispatch_findings` and the prompt builder — deliberate, and the direction the module has been moving since #2559 pinned literal titles for exactly this reason: the pre-flight check and the agent's instructions must not be able to drift.
+- **Data ownership**: introduces one new piece of state, `data/nightly-triage-ledger/{slug}.json`, owned by the nightly script (which seeds it) and appended to by the triage agent. It is written for the **per-node dispatch only** — the cascade and seed dispatches pass no `dispositions`, so their entry list is empty, no file is created for them, and `data/nightly-triage-ledger/nightly-triage-baseline.json` never exists. It is gitignored, machine-local, and advisory — losing it degrades to today's behavior rather than breaking anything.
+- **Reversibility**: high, and made structurally true rather than merely asserted. Fixes 1 and 2 are text and keyword arguments in one file. Fix 3 adds one small write and one conditional prompt paragraph. The ledger paragraph is emitted **only when `ledger_path` is non-`None`**, and `ledger_path` is produced by `write_triage_ledger` returning a path on success and `None` on failure or on an empty entry list. Reverting fix 3 therefore means deleting `write_triage_ledger` and stopping the argument from being passed — the paragraph disappears on its own, with no edit to any prompt builder. Without that threading the claim would be false: a bare revert of fix 3 would leave the per-node prompt directing the agent to read and append to a file nothing creates, which is worse than never mentioning it.
+
+## Appetite
+
+
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0 — the three fixes are specified in the issue and recon settled the one design question (ledger location) with a rationale; nothing needs a scope call.
+- Review rounds: 1
+
+One Python file, one test file, one doc. No new dependencies, no migration, no service restart. The work is bounded by the care the guards need, not by the code volume.
+
+## Prerequisites
+
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `gh` authenticated | `gh auth status` | The prompt's `gh issue list --state all` read and the plan's own verification both need a working `gh`. |
+| Repo venv on the pinned interpreter | `python -c "import sys,pathlib; pin=pathlib.Path('.python-version').read_text().strip(); v='.'.join(map(str,sys.version_info[:2])); assert v==pin or pin.startswith(v)"` | `scripts/pytest-clean.sh` aborts on an off-pin venv. Scoped to the invoking venv deliberately: `python -m tools.doctor` reports the whole machine and fails on unrelated state (a stale sibling worktree, a stopped bridge, free disk), none of which blocks this work. |
+
+## Solution
+
+
+### Key Elements
+
+- **One shared issue-lookup instruction, used by every prompt.** A module-level constant `ISSUE_LOOKUP_INSTRUCTION` holding the literal `gh issue list --state all --json number,title,state,stateReason --limit 200` command, the prohibition on the search index, and the `stateReason == ""` note. All three prompt builders interpolate the same constant, so the three can no longer drift apart the way they have for four passes.
+- **A disposition record per node** — a small dataclass (`NodeDisposition`) carrying the node id, its computed title, what the script resolved (`file`), the REST read it resolved against, and the timestamp of that read. Built in `dispatch_findings` from state it already holds, passed through `maybe_dispatch_triage_session` to the prompt builder.
+- **A named seed prompt.** `_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None) -> str` extracts the baseline-seed prompt out of `main()`. This is not cosmetic: an inline string inside a 200-line function cannot be rendered by a test or scanned by a Verification row, which is exactly why its identical defect survived the first draft of this plan.
+- **A pre-seeded session ledger** — `data/nightly-triage-ledger/{slug}.json`, written by the script *before* the session is dispatched, holding the entries the session is permitted to file and an empty `filed` list. The per-node prompt tells the agent to read it first every turn, append `{number, title, node}` to `filed` immediately after each `gh issue create`, and treat any entry already present in `filed` as done. **Per-node dispatch only** — see "Scope decision" below.
+
+### Flow
+
+Nightly run confirms failures → `dispatch_findings` reads live open+closed REST state → partitions and comments on everything already tracked → for the surviving per-node batch **writes `data/nightly-triage-ledger/{slug}.json`** (the cascade and seed dispatches pass no `dispositions`, so no ledger is written for them) → dispatches one Eng session with a prompt that names the ledger path and the exact REST command → agent reads ledger → for each entry not in `filed`: runs the one REST read, confirms no exact-title match, opens the issue, **appends to `filed` before moving to the next entry** → turn replayed → agent reads the same ledger → every entry is in `filed` → files nothing.
+
+### Scope decision: fix 1 on all three prompts, fixes 2 and 3 on the per-node path
+
+The first draft hardened `_build_triage_prompt` alone. That was a hole **for fix 1**: `_build_cascade_prompt` says "Search ALL issues — open AND closed — for the EXACT title below" and the baseline-seed prompt says "Search open AND closed issues for the EXACT title". Both reach `maybe_dispatch_triage_session` through its `prompt=` override and both file real GitHub issues, so both name the lagging read. Hardening one and gating on it would have reported clean with two thirds of that hole open. Fix 1 is text-only — one shared constant substituted for one sentence in each builder — so it goes everywhere.
+
+Fixes 2 and 3 stop at the per-node path. The decision, stated so a future reader can tell it from an oversight:
+
+| Path | Fix 1 (REST read) | Fix 2 (dispositions) | Fix 3 (ledger) |
+|------|-------------------|----------------------|----------------|
+| Per-node (`_build_triage_prompt`, ~2668) | yes | yes | yes |
+| Cascade (`_build_cascade_prompt`, ~2598) | yes | **no** | **no** |
+| Baseline seed (`_build_seed_prompt`, ~2934) | yes | **no** | **no** |
+
+**Why fix 2 stops.** The seed path runs inside `main()` before `dispatch_findings`, performs no `open_issues()` / `closed_issue_dispositions()` read of its own, and therefore has no resolved finding to hand over — there is nothing to pass. The cascade path *does* pre-resolve (`resolve_cascade_issue` consults `open_issue_map` and `closed_issue_map`), so a disposition could be built there; it is not, because the cascade prompt is pre-rendered at its call site as a plain string and `_build_cascade_prompt` gains no parameter to read one with. A disposition no builder reads is dead weight. Both deferrals are recorded as named No-Gos.
+
+**Why fix 3 stops, and which of the critique's two resolutions this is.** Round 2's Scope & Value concern offered two ways out of round 2's first blocker: **(a)** introduce a deferred-construction contract (`prompt_builder: Callable[[str | None], str]`) so a ledger path could reach the two override builders, or **(b)** narrow fix 3 to the per-node path and pass nothing at the two override call sites. **Resolution (b) is the one taken**, on three grounds:
+
+1. **Cost.** (b) costs zero lines at all three builders — the existing "emit the ledger paragraph only when `ledger_path` is non-`None`" gate does the scoping by itself. (a) costs a new callable-typed parameter, three changed call sites, a reworked dry-run leg, and a new Verification dimension. This plan's `appetite: Small` does not fund (a).
+2. **Evidence.** The 2026-08-24 wave (#2960–#2999) was per-node duplicate filing. Neither Problem, nor Prior Art, nor the Freshness Check cites a cascade or baseline-seed duplicate-filing incident. Fix 3 on those paths would buy a persistence layer for a failure mode with no observed instance.
+3. **What the blocker actually required.** Round 1's blocker 2 proved the *prompt text* hole existed in all three prompts. That is a fix-1 finding, and fix 1 does go to all three. It never established that all three needed a third-line defense — and the plan itself calls that defense advisory, fail-open, and unverifiable on this machine.
+
+Choosing (b) **dissolves round 2's first blocker outright**: with no `ledger_path` reaching the cascade and seed builders, nothing needs to reach them. No `prompt_builder` callable is introduced, and the two override call sites keep passing a pre-rendered `prompt=` string exactly as they do today. The narrowing is recorded as a named `[DEFERRED]` No-Go beside the seed fix-2 deferral.
+
+The two override paths keep the defense that matters most for their own replay risk: fix 1 makes their read see an issue the instant it exists, which is precisely the mechanism that failed on 2026-08-24.
+
+### Technical Approach
+
+**Fix 1 — every prompt reads live state.** Define once, at module scope near the existing `OPEN_ISSUE_LIST_LIMIT` constants whose comments already carry the REST-not-search rationale:
+
+```python
+ISSUE_LOOKUP_INSTRUCTION = (
+    "To find out whether an issue already exists, run exactly this ONCE for the "
+    "whole list below and filter the JSON locally on each exact title:\n"
+    "  gh issue list --state all --json number,title,state,stateReason --limit 200\n"
+    "Do NOT use GitHub's search index or the search API to answer this — that "
+    "index lags issue creation by minutes, and reading it inside the lag window "
+    "is how the #2960-#2999 duplicate wave happened (see 8524e765b). The list "
+    "endpoint above sees an issue the instant it exists.\n"
+    "Note: stateReason is the empty string on OPEN rows, not null and not "
+    "absent. Branch on state first and read stateReason only when state is "
+    "CLOSED.\n"
+)
+```
+
+Interpolate it into all three prompt builders, replacing each one's "search ALL issues" / "Search open AND closed issues" sentence. The read is **one call per prompt**, not one per node. Keep each prompt's existing open / `NOT_PLANNED` / `COMPLETED` decision prose verbatim — #3075 tuned that against `partition_closed_matches` and `closed_epilogue` and it must stay aligned; fix 1 changes the *read mechanism*, not the *decision rule*.
+
+**Wording constraint, and why it is load-bearing.** Neither the constant, **nor the comments surrounding it**, nor any prompt body, nor any prompt-builder docstring may contain the literal tokens `--search`, `gh search`, `search ALL`, or `search open`. The prohibition is expressed as "GitHub's search index" and "the search API".
+
+This is not fussiness — two gates enforce it from opposite directions and a careless prohibition fails one of them on correct code:
+
+- **Verification row 5** scans the three **rendered** prompts case-insensitively for exactly those four tokens and requires zero. A prompt body that spelled a token out to forbid it would make that gate unpassable. Round 1's first blocker was precisely this contradiction.
+- **Verification row 9** counts `--search` across the **whole module source** and requires exactly `3`. A *comment* that spelled the token out would add a fourth and fail an exact-equality row on correct code. Round 2's second blocker was precisely this contradiction, one scope wider. The constraint therefore covers comments, not only prompt text.
+
+The three pre-existing `--search` mentions — module lines ~323 and ~337 (constant comments) and `open_issues`' docstring (~1941; `open_issues` is not a prompt builder, so the constraint does not reach it) — stay exactly as they are. They are the rationale this fix extends, not the defect. Verified by symbol against `origin/main` `bf0a5d577`: `grep -c -- '--search' scripts/nightly_regression_tests.py` reports `3`.
+
+**Fix 2 — the script's decisions cross the boundary.** In `dispatch_findings`, after `partition_already_open` and `partition_closed_matches` and after the issue-budget truncation, the surviving `single_nodes` are known to have no issue in any state. Build one `NodeDisposition` per surviving node and pass the list as `dispositions=` at the per-node call site. Nothing is passed at the cascade call site (~2598) or the seed call site (~2934) — see "Scope decision". The per-node prompt then leads with, per entry, the script's own finding: *"the detector read all open and closed issues at `{resolved_at}` and found no issue titled `{title}`; your read below is a second check against issues created since."* This makes the agent's read a confirmation rather than a derivation, and — because the same list seeds the ledger — a replay inherits the script's decision instead of re-deriving it.
+
+Deliberately **not** done: passing the already-open and closed-not-planned nodes through. The script comments on those itself and drops them before this point; handing them to the agent would create a second writer for the same comment. The channel carries only entries the agent is being asked to act on.
+
+**Precedence between the empty case and the mismatch case.** These two rules read as contradictory unless their order is pinned, so pin it: `_build_triage_prompt` checks `if not dispositions:` **first** — which catches both `None` and `[]` — and returns the plain prompt without ever reaching the zip. Only a **non-empty** list whose length differs from the node list reaches `zip(dispatch_nodes, dispositions, strict=True)` and raises `ValueError`. So `dispositions=[]` against three nodes degrades; `dispositions` of length two against three nodes raises. Two separate tests pin the two behaviors so they cannot collapse into one code path.
+
+**Fix 3 — the ledger.** `data/nightly-triage-ledger/{slug}.json`, written by a new `write_triage_ledger(slug, entries) -> str | None` helper in the same module, using the same `DATA_DIR.mkdir(parents=True, exist_ok=True)` idiom `save_last_run` already uses. It returns the **absolute path as a string on success** and `None` on failure or on an empty `entries` list; that return value is what gets threaded into the prompt builder as `ledger_path`, which is what makes the reversibility claim in Architectural Impact structurally true. Shape:
+
+```json
+{
+  "slug": "nightly-triage-a1b2c3d4",
+  "created_at": "2026-09-05T06:00:00Z",
+  "entries": [
+    {"node": "tests/unit/test_a.py::test_1",
+     "title": "Nightly regression: tests/unit/test_a.py::test_1",
+     "disposition": "file",
+     "resolved_against": "gh issue list --state all (open+closed REST read)",
+     "resolved_at": "2026-09-05T06:00:00Z"}
+  ],
+  "filed": []
+}
+```
+
+`entries` is derived from the `dispositions` list and from nothing else. The two `prompt=`-override call sites pass no `dispositions`, so their entry list is empty, `write_triage_ledger` returns `None` without creating a file, and their prompts carry no ledger paragraph. **No `data/nightly-triage-ledger/nightly-triage-baseline.json` is ever written.** That single already-specified gate is the entire mechanism of the narrowing — there is no separate branch to maintain.
+
+Written **before** `subprocess.run(... valor_session create ...)`, so it exists the instant the session can start. Absolute path interpolated into the prompt — the agent runs from its lane worktree and a relative path would resolve wrong. The ledger lives in `data/` and not in `.worktrees/{slug}/` for the reasons in spike-3, now independently corroborated by `55ad9ac89`: that commit's reaper refuses to reap a lane whose working tree is dirty, so a ledger written inside the lane would make every triage worktree permanently unreapable.
+
+The write is best-effort and logged on failure, matching how the module treats every other side effect: a ledger that cannot be written must not stop the night from filing. That is the same fail-open posture `open_issues()` takes (`None` means "could not tell", dispatch proceeds), and for the same reason — a missing defense is a smaller harm than a silent night during a real regression.
+
+**Dry-run.** `maybe_dispatch_triage_session` short-circuits on `dry_run` before the subprocess (`return DRY_RUN_SESSION_ID`, ~line 2345). The ledger write must sit **after** that short-circuit, or `--dry-run` starts writing state files. This is exactly the bug the dry-run sentinel was introduced to fix (that function's docstring records it) and the plan must not reintroduce it. Under `--dry-run` the prompt is still built, with `ledger_path=None`, so the dry-run preview shows a prompt without the ledger paragraph — the honest rendering, since no ledger exists.
+
+**One line moves, and only one.** On `origin/main` `bf0a5d577` the line `message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes)` sits *above* the `if dry_run:` block (located by symbol in `maybe_dispatch_triage_session`, not by line). `ledger_path` does not exist until after the short-circuit, so the **default-prompt construction** moves below it and the dry-run leg builds its own preview with `ledger_path=None` before returning `DRY_RUN_SESSION_ID`. The `prompt=` override branch is untouched: both override callers still hand in a pre-rendered string built at their own call site, which is why the narrowing needs no `prompt_builder` callable and no change to either call site's shape.
+
+## Failure Path Test Strategy
+
+
+### Exception Handling Coverage
+
+- [ ] `write_triage_ledger` is the one new function that can fail (disk full, permissions, a `data/` that is somehow a file). It must catch broadly, `log()` a `WARNING` naming the slug, and return `None` — never raise into the dispatch path. Test asserts the observable: dispatch still proceeds, the prompt is built with `ledger_path=None` and therefore carries no ledger paragraph, and a warning line reaches `LOG_FILE`.
+- [ ] Existing handlers in scope are unchanged: `open_issues`, `closed_issue_dispositions`, and `maybe_dispatch_triage_session` each already catch broadly and `log()` — all have `test_open_issues_returns_none_on_any_failure`-style coverage. No `except Exception: pass` exists in this module; every handler logs. (Located by symbol; the line numbers this bullet previously carried had already drifted.)
+
+### Empty/Invalid Input Handling
+
+- [ ] `_build_triage_prompt([])` — currently unreachable (`maybe_dispatch_triage_session` returns `None` on an empty node list first, covered by `test_...([]) is None`). The new keyword arguments must not change that.
+- [ ] **Empty disposition list against a non-empty node list degrades to the plain prompt.** `if not dispositions:` runs before the zip and catches both `None` and `[]`. Test: `dispositions=[]` with three nodes returns a prompt with no pre-resolved block and does not raise.
+- [ ] **Non-empty disposition list of the wrong length raises.** Only this case reaches `zip(dispatch_nodes, dispositions, strict=True)` (matching the builder's existing `strict=True` use). Test: two dispositions against three nodes raises `ValueError`. The two bullets above are ordered, not contradictory — see Solution, "Precedence between the empty case and the mismatch case" — and are pinned by two separate tests so a builder cannot satisfy one by collapsing the other.
+- [ ] `write_triage_ledger(slug, [])` — must write nothing and return `None` rather than creating an empty ledger a replay would read as "nothing to file".
+- [ ] `ledger_path=None` against a non-empty node list — the prompt builds and omits the ledger paragraph entirely. This is the dry-run rendering, the ledger-write-failure rendering, and (via `_build_triage_prompt`'s default) the shape every `prompt=`-override dispatch already has. It is what makes fix 3 independently revertible and what scopes it to the per-node path with no extra branch.
+
+### Error State Rendering
+
+- [ ] The night's user-visible output is the GitHub issue and `logs/nightly_tests.log`. A failed ledger write must appear in the log with the slug named, not be swallowed — the operator's only signal that the replay defense is degraded for that dispatch.
+- [ ] `--dry-run` must print what it *would* write and write nothing; assert no file appears under a patched `DATA_DIR`'s `nightly-triage-ledger/`. This behavioral test is the primary guard on the dry-run/ledger ordering; the structural Verification row is a cheap second opinion, not a substitute.
+
+## Test Impact
+
+
+`tests/unit/test_nightly_regression_tests.py` (2835 lines) is the only test file touching this code. The changes are additive at every seam, so almost nothing breaks — but three existing tests sit directly on the surfaces being changed and must be strengthened rather than left to pass vacuously.
+
+- [ ] `tests/unit/test_nightly_regression_tests.py::TestBuildTriagePrompt::test_literal_titles_present` — **UPDATE**. Asserts only that each `Nightly regression: {node}` title appears in the prompt. Still true after the change and therefore blind to it. Add sibling assertions on the **rendered** prompt: the literal `gh issue list --state all` substring is present, and a case-insensitive search for `--search`, `gh search`, `search all`, `search open` finds nothing.
+- [ ] `tests/unit/test_nightly_regression_tests.py::test_open_issues_uses_the_rest_list_not_the_lagging_search` — **UPDATE**: no change to the assertions, but this is the pattern the new prompt guard mirrors, and the new test should reference it by name in its docstring so the two read as one contract.
+- [ ] Any existing test asserting on `_build_cascade_prompt`'s text — **AUDIT and UPDATE**. The "Search ALL issues" sentence is being replaced; a test pinning that wording goes red and must be updated to the new instruction, not deleted.
+- [ ] Any existing test asserting on the inline baseline-seed prompt via `maybe_dispatch_triage_session`'s captured `--message` argv — **AUDIT and UPDATE**. The seed prompt moves into `_build_seed_prompt`; the rendered text changes and the call site now passes the extracted builder's output. Tests that only assert the argv *shape* survive unchanged.
+- [ ] The `maybe_dispatch_triage_session` call-shape stubs (nine of them, located by searching the test file for `maybe_dispatch_triage_session` monkeypatches rather than by line — the cited line numbers have drifted) — **UPDATE where signature-sensitive**. Most stub with `lambda *a, **k` or `lambda ns, **kw` and absorb new keyword arguments without change; `lambda ns, **kw: "sess-1"` also survives, since the new arguments are keyword-only. Audit each, confirm which actually bind positionally, and change only those. Do not blanket-rewrite working stubs. **Count the matches before writing "nine" in the PR description** — enumerate, do not window.
+- [ ] `tests/unit/test_nightly_regression_tests.py::TestMaybeDispatchTriageSession` dry-run cases — **UPDATE**: add an assertion that no ledger file appears under the patched `DATA_DIR`'s `nightly-triage-ledger/` on a dry run. Without this the dry-run/ledger ordering (Solution, "Dry-run") is unguarded.
+
+New coverage to add (not modifications):
+
+- [ ] `TestBuildTriagePrompt` — pre-resolved dispositions render per node; `dispositions=[]` against 3 nodes returns the plain prompt (no raise); `dispositions` of length 2 against 3 nodes raises `ValueError`; `ledger_path=None` omits the ledger paragraph while a non-`None` path emits it with the absolute path.
+- [ ] **`TestPromptsNeverNameTheSearchIndex`** — one parametrized test over all three rendered prompts (`_build_triage_prompt`, `_build_cascade_prompt`, `_build_seed_prompt`): each contains `gh issue list --state all`, each contains the prohibition marker `search index`, each contains `stateReason`, and a case-insensitive scan for `--search` / `gh search` / `search all` / `search open` finds zero. This is the test that would have caught the two-prompt hole; it is the single most important new test in the plan.
+- [ ] `TestBuildSeedPrompt` — **byte-identity, not resemblance.** Pin the inline original's text as a fixture and assert that `_build_seed_prompt(seed_title, seeded_nodes, prior_collection=<old>)` reproduces it exactly apart from the one replaced lookup sentence (substitute `ISSUE_LOOKUP_INSTRUCTION` back out of the rendered result, or diff with that sentence excised from both sides). This is what gates "verbatim" instead of asserting it. Cover the `prior_collection` parameter explicitly: a non-`None` value renders `(old=<value>, new=['tests/'])` and the default `None` renders `(old=None, ...)` without raising — the `old=` clause is the one thing a two-parameter signature would have silently dropped. Also assert the seed's stricter dedup rule survives (open → comment, closed → comment and do NOT re-file whatever the close reason).
+- [ ] `TestWriteTriageLedger` — happy path shape (`slug`, `created_at`, `entries`, empty `filed`); empty entries writes nothing and returns `None`; an unwritable path logs a `WARNING` naming the slug and returns `None` without raising; the return value on success is an **absolute** path string.
+- [ ] `TestDispatchFindings` — the `dispositions=` kwarg handed to `maybe_dispatch_triage_session` covers exactly the surviving `single_nodes` and contains **no** already-open and no closed-not-planned node (the second-writer hazard from Solution, fix 2). Assert the **negative** too: the cascade dispatch is called with **no** `dispositions` argument, which is what pins the narrowing in behavior rather than only in prose.
+- [ ] `TestMaybeDispatchTriageSession` — the `--message` argv the subprocess receives contains the ledger's absolute path on a real per-node dispatch, and does not on a dry run.
+- [ ] `TestMaybeDispatchTriageSession` — **a `prompt=`-override dispatch writes no ledger.** Call with `prompt=<string>`, `slug_suffix="baseline"` and no `dispositions`, and assert that nothing appears under the patched `DATA_DIR`'s `nightly-triage-ledger/` — in particular no `nightly-triage-baseline.json` — and that the `--message` argv is the passed string unchanged. This is the guard on both the scope narrowing and the dissolved half of Race 1.
+
+## Rabbit Holes
+
+
+- **Diagnosing why the turn was replayed.** The `_agent_session_health_check` requeue legs, the `tool_timeout` path, the role driver's stale-UUID fallback — all of it is #3161's, all of it needs the nightly host this machine is not, and none of it is a prerequisite for making filing idempotent. If the replay mechanism is fixed tomorrow these three defenses are still correct.
+- **Building a general-purpose agent-side idempotency framework.** A `filed_issues` ledger abstraction for every dispatching skill is a tempting generalization of fix 3 and would swallow the appetite whole. One JSON file, one writer, one reader.
+- **Branching from `session/nightly-triage-idempotency-3075`.** Its name matches this work and it is not merged, which makes it look like the natural base. Its content is already on main via PR #3142's squash. Branching there duplicates landed code and produces a diff nobody can review. **Branch from `main`.** The branch is now gone from origin (Freshness Check), so the remaining hazard is narrower than at drafting: only a local `git checkout` of the surviving local ref, which is checked out in a worktree on this machine. Verification row 15 still guards it.
+- **Rewriting the open/closed decision prose in the prompt.** #3075 tuned that language against `partition_closed_matches` and `closed_epilogue`. Fix 1 changes the *read mechanism*, not the *decision rule*. Rewording the rule risks drift between the prompt and the pre-flight — the exact failure #2559 pinned literal titles to prevent.
+- **Chasing the two-simultaneous-filers shape** (#2971, #2982–#2989 interleaving the 20:40 wave). That is a second machine, not a replay; `open_issues()` already reads live REST state and sees another machine's issues instantly. Different problem, no evidence it is currently broken.
+- **Tuning `--limit 200`.** Picking the perfect window is a research project with a wrong answer at every repo size. Take the issue's number, state the failure mode, and move on — see Risks.
+
+## Risks
+
+
+### Risk 1: `--limit 200` silently under-reads on a busy repo
+
+**Impact:** The agent's confirmation read is a newest-created-first window. At ~1900 closed issues in this repo, 200 rows covers only recent history. A node whose issue was filed and closed long ago falls outside the window, the agent sees no match, and re-files — reintroducing the #3075 defect at the agent layer while the script's own read (`CLOSED_ISSUE_LIST_LIMIT = 4000`) still gets it right.
+
+**Mitigation:** The script's pre-resolution is the primary defense and it uses the wide window; the agent's read is explicitly framed in the prompt as a *second check against issues created since the script's read*, not as the authority. Reordering the risk this way is why fix 2 must land with fix 1 rather than after it. The prompt states the window's purpose so the agent does not over-trust it, and states that the script already checked the full closed set.
+
+### Risk 2: The ledger is consulted but never written, or written but never consulted
+
+**Impact:** A defense that exists in the prompt and not in behavior is worse than no defense — it invites the next investigator to conclude the hole is covered.
+
+**Mitigation:** Two separate guards, one on each half. A test asserts `write_triage_ledger` produces the file with the seeded entries before the per-node dispatch; a second asserts the per-node prompt contains the ledger's absolute path and the append-before-next-node instruction; a third asserts a `prompt=`-override dispatch writes no file at all. Neither test can pass on the other's work.
+
+### Risk 3: The prompt regresses to "search" in a later edit
+
+**Impact:** This is the fourth pass at this bug and prompt wording has drifted before — `8524e765b` hardened the script and left the prompt saying "search", which is precisely how we got here.
+
+**Mitigation:** Verification row 5 renders all three prompts and requires zero case-insensitive matches for `--search`, `gh search`, `search all`, `search open`, so a reintroduction in any of the three fails the gate rather than reaching a nightly run. Its measured pre-fix value is 3 — one hit per prompt — which is both the proof it bites and a measurement of how wide the hole was. `ISSUE_LOOKUP_INSTRUCTION` makes the three prompts share one string, so the drift the row guards against now requires editing a constant that three call sites read from. The prohibition carries its reason inline (#2960–#2999, `8524e765b`) so a future editor sees the cost before softening it, and Verification row 9 stops that editor from deleting the module's legitimate `--search` rationale in order to satisfy row 5.
+
+### Risk 4: The ledger write breaks `--dry-run`
+
+**Impact:** `--dry-run` is the only safe way to preview a night. The dry-run sentinel exists (docstring, line 2316) because an earlier version spawned real sessions that filed real issues under `--dry-run`. A ledger write placed before the short-circuit puts state-file writes back into the preview path.
+
+**Mitigation:** Ordering is specified in Solution and guarded by a dry-run test asserting no file appears under `data/nightly-triage-ledger/`.
+
+### Risk 5: Stale ledgers accumulate in `data/`
+
+**Impact:** One file per per-node dispatch slug, unbounded. Low severity — small JSON, gitignored, machine-local — but unbounded growth is how `data/` directories become a problem years later.
+
+**Mitigation:** A ledger is written only on the per-node dispatch, which never passes `slug_suffix`, so its slug is always the sha256 of the sorted node set: a recurring failure set reuses its slug and overwrites rather than accumulating. Growth is bounded by the number of *distinct* failure sets, not by nights. No pruning job for now; noted here so a future reader knows it was considered rather than missed.
+
+## Race Conditions
+
+
+### Race 1: Two triage sessions on one slug appending to one ledger
+
+**Location:** `data/nightly-triage-ledger/{slug}.json`; writers are `write_triage_ledger` (script, seed) and the triage agent (appends to `filed`). Only the **per-node** dispatch writes one — see "Scope decision".
+
+**Trigger:** The 2026-08-24 evidence shows two filers live at once (#2971 / #2982–#2989 interleaving the 20:40 wave). If two sessions ever resolve to the same slug, both read-modify-write the same JSON and a lost update drops one session's `filed` entries — the ledger then under-reports and a replay re-files.
+
+**Data prerequisite:** The ledger must exist and hold the seeded entries before any session starts appending.
+
+**State prerequisite:** One writer per slug at a time.
+
+**Mitigation:** A ledger exists only for the per-node dispatch, and that call site passes no `slug_suffix`, so its slug is *always* the `sha256` of the sorted node set — the node-set claim below holds without qualification. Two sessions therefore share a ledger slug only when they were dispatched for an identical node set, and `compute_dispatch_set` plus the run lock (`_acquire_run_lock`, `data/nightly_tests.lock`, taken as the first act of `main()`) make that near-impossible within a machine. Across machines the ledger is machine-local and the two never share a file.
+
+**The two fixed-suffix call sites cannot reach this race**, which is what the narrowing bought here. The cascade dispatch passes `slug_suffix=sha256(cascade_state_key(cascade))[:8]` and the seed dispatch passes the literal `slug_suffix="baseline"`; both bypass the node-set derivation, and the seed's is a single slot every re-baseline would reuse. Under the narrowing neither passes `dispositions`, so neither writes a ledger at all and `data/nightly-triage-ledger/nightly-triage-baseline.json` is never created. Round 2's concern that a second re-baseline could overwrite an earlier seed session's ledger inside its replay window is dissolved by construction rather than mitigated. A lost update on the per-node path degrades the ledger to partial, which falls back to fixes 1 and 2, which is today's behavior plus improvements. **Explicitly not adding file locking** — the cost is not justified for a third-line advisory defense, and this reasoning belongs in the code comment so a reviewer does not read the omission as an oversight.
+
+### Race 2: An issue created between the script's read and the agent's read
+
+**Location:** `dispatch_findings` (`open_issues()` / `closed_issue_dispositions()` at lines 2523–2529) versus the agent's `gh issue list` seconds-to-minutes later.
+
+**Trigger:** Another machine's nightly, or a human, files the exact title in the gap.
+
+**Data prerequisite:** none.
+
+**State prerequisite:** none.
+
+**Mitigation:** This is the ordinary case the agent's own read exists to catch, and it works *because* the read is REST rather than search — a search-index read cannot see an issue created seconds ago, which is the entire defect. Fix 1 is the mitigation. The residual window (an issue created between the agent's read and its `gh issue create`) is sub-second and out of appetite.
+
+### Race 3: Ledger seeded, session dispatch then fails
+
+**Location:** `maybe_dispatch_triage_session`, between the ledger write and the `subprocess.run` returning non-zero or raising (lines 2367, 2373).
+
+**Trigger:** `valor_session create` fails; the ledger exists with dispositions and an empty `filed`.
+
+**Data prerequisite:** none.
+
+**State prerequisite:** The next run must retry these nodes, not treat them as handled.
+
+**Mitigation:** No new hazard. `carry_dispatched_nodes` already records only what `DispatchOutcome.recorded` names, and a failed dispatch returns `None` so its nodes are never recorded (guarded by `test_failed_dispatch_records_nothing`, line 788). The orphan ledger is harmless: `filed` is empty, so a later session on the same slug reads it, sees nothing filed, and proceeds. The ledger must therefore be keyed on the slug and never treated as proof that filing occurred — only its `filed` array carries that meaning.
+
+## No-Gos (Out of Scope)
+
+
+- [SEPARATE-SLUG #3161] **Diagnosing the replay mechanism itself** — reading `logs/worker.log`, `valor-session telemetry`, and `session_events` for `0_1787603653699` to establish which requeue leg produced three fresh contexts at ~300s spacing. Requires the machine that ran `com.valor.nightly-tests` on 2026-08-24; this one is worker-only with `data/nightly-tests-disabled` present, and `valor-session inspect --id 0_1787603653699` reports not found. #3161 is open and holds this.
+- [SEPARATE-SLUG #3161] **Preventing two triage filers from running simultaneously** — the #2971 / #2982–#2989 interleave is a second live filer with a different node list from a different working tree, not a replay. Cross-machine dedup already rests on live REST reads and no evidence says it is currently failing. Belongs with the same investigation.
+- [DEFERRED] **Fix 2 (pre-resolved dispositions) on the cascade and baseline-seed paths.** The seed dispatch in `main()` fires only on a collection re-baseline and performs no `open_issues()` / `closed_issue_dispositions()` read of its own, so there is no resolved finding to hand across the boundary — fix 2 has nothing to pass there, and adding a REST pre-flight is new behavior on a rarely-exercised path, outside this appetite. The cascade dispatch *does* pre-resolve, but its prompt is pre-rendered at the call site and `_build_cascade_prompt` gains no parameter to read a disposition with, so a disposition built there would have no consumer. **Both paths still get fix 1** — the live-REST lookup instruction, which is the defense that actually addresses the 2026-08-24 read failure. Recorded here the same way Race 1 records the deliberate absence of file locking, so a future reader can tell it from an oversight.
+- [DEFERRED] **Fix 3 (the session ledger) on the cascade and baseline-seed paths.** Round 2's Scope & Value concern offered two resolutions and **the narrowing was chosen**; the full reasoning, including why the alternative (a `prompt_builder: Callable[[str | None], str]` deferred-construction contract) was rejected, is in Solution → "Scope decision". In short: zero lines versus a new callable-typed parameter and three changed call sites on an `appetite: Small` plan; no cascade or seed duplicate-filing incident is cited anywhere in Problem, Prior Art, or the Freshness Check; and the ledger is by the plan's own description an advisory, fail-open third defense that cannot be verified on this machine. If a cascade or seed duplicate is ever observed, this is the first thing to widen — and the widening is exactly the `prompt_builder` contract described above.
+- [EXTERNAL] **Verifying the fix against a real nightly run** — the nightly is disabled on this machine (`data/nightly-tests-disabled`) and enabling it on the host that runs `com.valor.nightly-tests` is an operator action on a machine the agent cannot reach. Unit coverage plus `--dry-run` is what this plan can establish; the first real confirmation is the next night on that host.
+
+## Update System
+
+
+No update system changes required. The change is three edits inside `scripts/nightly_regression_tests.py` plus its tests and one doc — no new dependency, no new config file, no new env key, no plist change, and no schema. `scripts/remote-update.sh` propagates the repo by pulling; the new code arrives with it.
+
+One thing worth stating because it is easy to assume otherwise: **no service restart is needed.** The nightly detector is not a resident process. `com.valor.nightly-tests` invokes `scripts/nightly_regression_tests.py` fresh on each schedule fire, so the next night after the pull runs the new code. The bridge and worker do not import this module — verified: its only importer is `tests/unit/test_nightly_regression_tests.py`, via `sys.path` insertion.
+
+`data/nightly-triage-ledger/` is created on demand by `write_triage_ledger` using the same `mkdir(parents=True, exist_ok=True)` idiom `save_last_run` uses (line 467). No migration step, no pre-created directory on any machine.
+
+## Agent Integration
+
+
+No new agent-facing surface is required — but this work *is* agent integration in the plain sense, and the wiring already exists in a form worth naming precisely, because "add a CLI entry point" would be the wrong instinct here.
+
+The triage agent is reached through exactly one channel: `maybe_dispatch_triage_session` shells out to `tools.valor_session create --role eng --slug ... --message <prompt>`. **The prompt string is the entire interface** — and it is fed by three different builders, which is why hardening one of them left two thirds of the surface unchanged. Everything this plan gives the agent — the REST command (all three prompts), the pre-resolved dispositions and the ledger path (the per-node prompt only) — travels as prompt text through that one argument. There is nothing to register in `pyproject.toml [project.scripts]`, nothing to add to `.mcp.json`, and no new import for `bridge/telegram_bridge.py`.
+
+The agent already has the two capabilities it needs: `Bash` (to run `gh issue list` and `gh issue create`) and `Read`/`Write` (for the ledger). Both are standard for an `eng` role session. No permission change.
+
+Integration coverage: the existing tests assert the dispatch subprocess argv shape (`TestMaybeDispatchTriageSession`; located by name, since the line numbers have drifted). New assertions extend that to the message content — that the argv's `--message` value carries the literal `gh issue list --state all` on every dispatch, carries the ledger's absolute path on a real **per-node** dispatch, and carries neither the ledger path on a dry run nor on a `prompt=`-override dispatch. That is the honest integration test available here; end-to-end confirmation that a live agent obeys the prompt requires the nightly host and is recorded as an `[EXTERNAL]` No-Go.
+
+## Documentation
+
+
+### Feature Documentation
+
+- [ ] Update `docs/features/nightly-triage-dispatch.md` — **re-read the file at its current head first.** `55ad9ac89` added a "Lane reaping" section (+26 lines) after this plan quoted it, so the bullet wording below may itself have moved. The "Triage dispatch" bullet (in "What It Does") said the prompt "states the same open-and-closed rule so the pre-flight and the agent's instructions cannot drift". Extend that to the three defenses, and state each one's reach: **all three prompts** hand over the literal REST command rather than an instruction to search (fix 1); the script passes its resolved dispositions across the dispatch boundary **for the per-node path** (fix 2); and a session-local ledger records what the **per-node** dispatch filed (fix 3). Say plainly that fixes 2 and 3 stop at the per-node path and why, so the next reader does not record the gap as an oversight. Name the #2960–#2999 wave as the incident that motivated it, as the doc already does for #3131 and #3134.
+- [ ] In the same doc, state explicitly that there are **three** issue-filing prompts (per-node, cascade umbrella, baseline seed) and that all three share `ISSUE_LOOKUP_INSTRUCTION`. The doc's current framing implies one, which is how the cascade and seed prompts went four passes without being hardened.
+- [ ] Add a "Replay Idempotency" subsection to the same doc documenting `data/nightly-triage-ledger/{slug}.json`: its path, its shape, who writes each field, **that it is written for the per-node dispatch only** (the cascade and seed dispatches pass no dispositions, so no ledger exists for them and no `nightly-triage-baseline.json` is ever created), that it is advisory and fail-open, that it is deliberately unlocked (Race 1), and **why it lives in `data/` rather than in the lane worktree** — cross-reference the "Lane reaping" section `55ad9ac89` added, since a ledger inside `.worktrees/{slug}/` would make the tree dirty and block that reaper.
+- [ ] Check `docs/features/nightly-regression-tests.md` for statements about the triage prompt's dedup contract and update any that describe the search-based read. The two docs cross-reference each other and must not disagree. `55ad9ac89` touched this file too (+1 line); re-read before editing.
+- [ ] `docs/features/README.md` — no new row needed; both affected docs are already indexed. Confirm this rather than assume it.
+
+### External Documentation Site
+
+Not applicable — this repo has no Sphinx/MkDocs/Read the Docs site.
+
+### Inline Documentation
+
+**Ownership** (accepted concern, round 3): the `ISSUE_LOOKUP_INSTRUCTION` comment belongs to Task 5 (`document-feature`); the three prompt-builder docstrings to Task 2 (`build-prompt`); the `write_triage_ledger` and `maybe_dispatch_triage_session` docstrings to Task 1 (`build-dispatch`). Each builder already carries its bullets in its own task text, so the documentarian edits `scripts/nightly_regression_tests.py` for the constant's comment and nothing else.
+
+- [ ] `ISSUE_LOOKUP_INSTRUCTION` — a comment above the constant stating that it hands over a REST command, that reading GitHub's search index is prohibited here and why (#2960–#2999, `8524e765b`), and **that this comment, the constant, and every prompt built from it must not name GitHub's search index or its CLI flag by literal string — the Verification anti-criterion holds the exact tokens.** Say "the search index" and "the search API" instead. The comment must not spell any forbidden token out: doing so adds a fourth `--search` to the module and fails Verification row 9, which is exact equality on `3`. Without the note the next editor writes the prohibition the obvious way and breaks a gate; with the note written the obvious way, *this* edit breaks it. The rationale must live next to the code so a future editor meets it before softening the wording.
+- [ ] `_build_triage_prompt`, `_build_cascade_prompt`, `_build_seed_prompt` docstrings: each names `ISSUE_LOOKUP_INSTRUCTION` as the shared source of its lookup paragraph, so a reader editing one sees that two siblings share it.
+- [ ] `write_triage_ledger` docstring: the fail-open posture, the advisory status, the deliberate absence of file locking (Race 1), and that the return value is the absolute path (or `None`) precisely so the prompt's ledger paragraph is conditional and fix 3 stays independently revertible — an unexplained missing lock reads as an oversight to a reviewer, and so does an unexplained return type.
+- [ ] `maybe_dispatch_triage_session` docstring: document the new keyword arguments, the three callers it now serves, and the ordering constraint that the ledger write follows the `dry_run` short-circuit, citing the earlier dry-run defect the sentinel was introduced for. Write the ordering constraint using the call form `write_triage_ledger(...)` nowhere in the docstring — the Verification row strips the docstring before measuring, but keeping the bare name out of it removes the ambiguity entirely.
+
+## Success Criteria
+
+
+- [x] `ISSUE_LOOKUP_INSTRUCTION` exists at module scope and is interpolated by **all three** prompt builders: `_build_triage_prompt`, `_build_cascade_prompt`, `_build_seed_prompt`.
+- [x] Each of the three **rendered** prompts contains the literal `gh issue list --state all --json number,title,state,stateReason --limit 200`.
+- [x] Each of the three **rendered** prompts contains the prohibition on GitHub's search index, carrying its reason (#2960–#2999).
+- [x] A case-insensitive scan of the three **rendered** prompts for `--search`, `gh search`, `search all`, `search open` returns **zero** matches. The prohibition is worded as "the search index" / "the search API" precisely so this row and the row above are simultaneously satisfiable — the earlier draft demanded a token the same gate forbade, which was unreachable.
+- [x] The three pre-existing `--search` mentions in the module's constant comments and `open_issues`' docstring are **unchanged** — they are the REST-not-search rationale this work extends, and they sit outside the scanned prompt region.
+- [x] Each of the three rendered prompts warns that `stateReason` is `""` for open issues, so the agent branches on `state` first (Research finding).
+- [x] Every prompt's open / closed-`NOT_PLANNED` / closed-`COMPLETED` decision rule is unchanged in meaning from what #3075 landed — the read mechanism changed, the rule did not. This includes the seed prompt's stricter rule (comment and do NOT re-file whatever the close reason), which extraction into `_build_seed_prompt` must preserve verbatim.
+- [x] `dispatch_findings` passes `dispositions=` for exactly the surviving `single_nodes` into `maybe_dispatch_triage_session`, and that list contains no already-open and no closed-not-planned node.
+- [x] The cascade call site (~2598) and the seed call site (~2934) pass **no** `dispositions` and are otherwise unchanged in shape; neither produces a file under `data/nightly-triage-ledger/`, and neither rendered prompt contains a ledger paragraph. `_build_cascade_prompt` and `_build_seed_prompt` gain no `dispositions` or `ledger_path` parameter.
+- [x] `_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None)` renders text **byte-identical to the inline original in `main()`** apart from the one replaced lookup sentence — including the `(old={prior_collection!r}, new={COLLECTION_PATHS!r})` clause, which a two-parameter signature could not reproduce. `main()` calls it as `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))`.
+- [x] `grep -c -- '--search' scripts/nightly_regression_tests.py` still reports exactly `3` after the change (Verification row 9). No comment, constant, prompt body, or prompt-builder docstring added by this work spells a forbidden token.
+- [x] `write_triage_ledger` writes `data/nightly-triage-ledger/{slug}.json` with the seeded entries and an empty `filed` array, **before** the session subprocess starts and **after** the `dry_run` short-circuit, and returns the absolute path (or `None`).
+- [x] A `--dry-run` invocation creates no file under `data/nightly-triage-ledger/`, and its rendered prompt carries no ledger paragraph.
+- [x] When `ledger_path` is non-`None`, the prompt names the ledger's absolute path and instructs the agent to read it first each turn and append to `filed` immediately after each `gh issue create`, before moving to the next entry. When it is `None`, no ledger paragraph appears at all.
+- [x] A ledger write failure logs a `WARNING` naming the slug, returns `None`, and does not prevent dispatch.
+- [x] `_build_triage_prompt` returns the plain prompt for `dispositions=None` **and** `dispositions=[]`, and raises `ValueError` only for a non-empty list whose length differs from the node list.
+- [x] Tests pass (`/do-test`) — `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` exits 0.
+- [x] Documentation updated (`/do-docs`) — `docs/features/nightly-triage-dispatch.md` describes all three prompts, states each defense's reach (fix 1 on all three, fixes 2 and 3 on the per-node path) with the reason for the narrowing, and gives the ledger's shape and location rationale.
+- [x] `python -m ruff check` and `python -m ruff format --check` clean on the changed files.
+- [x] The branch is rooted on `main`, not on the stale local `session/nightly-triage-idempotency-3075` (`git merge-base --is-ancestor origin/main HEAD`).
+
+## Team Orchestration
+
+
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead never builds directly.
+
+Small appetite, one source file: the split is by *concern*, not by file, and the two builders must not both edit `scripts/nightly_regression_tests.py` at once. **`prompt-builder` owns `ISSUE_LOOKUP_INSTRUCTION`, `_build_triage_prompt`, `_build_cascade_prompt`, the new `_build_seed_prompt`, and the seed call site in `main()`; `dispatch-builder` owns `write_triage_ledger`, `NodeDisposition`, `maybe_dispatch_triage_session`, and `dispatch_findings`** — a declared function-level ownership split, and they run sequentially rather than in parallel because they share a file. This is deliberate: shared-file builders converging on each other's edits is a known livelock here.
+
+The one seam between them is `_build_seed_prompt`, and the split is this, stated once: **`prompt-builder` performs the whole move — writing the function AND changing `main()`'s call site to `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))` — in one commit, and `dispatch-builder` touches no part of the inline seed string or its call site.** Stated explicitly so neither builder deletes a string the other is still reading; the seam is the one line both could otherwise reach for, which is what keeps the shared-file livelock guard intact.
+
+**Dispatch both builders from the `## Step by Step Tasks` bullets, never from the ownership sentence above** (accepted concern, round 3). The tasks are operative and unambiguous — Task 1 says to leave the inline baseline-seed string in `main()` untouched, Task 2 says to change `main()`'s call site — and this section is only their summary.
+
+### Team Members
+
+- **Builder (prompt)**
+  - Name: `prompt-builder`
+  - Role: Fix 1 across all three prompts — add `ISSUE_LOOKUP_INSTRUCTION`, interpolate it into `_build_triage_prompt` and `_build_cascade_prompt`, extract `_build_seed_prompt` out of `main()` and interpolate it there too, accept the `dispositions` and `ledger_path` keyword arguments on `_build_triage_prompt`, and render the pre-resolved block and the conditional ledger paragraph. Owns nothing else in the file.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (dispatch + ledger)**
+  - Name: `dispatch-builder`
+  - Role: Fixes 2 and 3 on the per-node path — `write_triage_ledger`, the `NodeDisposition` dataclass, the `dispatch_findings` handoff at the per-node call site, threading `ledger_path` from the ledger write into `_build_triage_prompt`, moving the default-prompt construction below the `dry_run` short-circuit, and the ordering of the ledger write against that short-circuit. Leaves the cascade and seed call sites' arguments alone.
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer**
+  - Name: `nightly-test-engineer`
+  - Role: All new coverage and the Test Impact updates. Must mutation-check each new guard: break the behavior, confirm the test goes red, restore.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Documentarian**
+  - Name: `nightly-documentarian`
+  - Role: The Feature Documentation bullets (both `docs/features/*.md` files) plus the module-level `ISSUE_LOOKUP_INSTRUCTION` comment. The four docstring bullets belong to the two builders — see Task 5's Scope bullet.
+  - Agent Type: documentarian
+  - Resume: true
+
+- **Validator**
+  - Name: `nightly-validator`
+  - Role: Read-only. Runs every Verification row and reports pass/fail per row with the command output.
+  - Agent Type: validator
+  - Resume: true
+
+### Available Agent Types
+
+Standard Tier 1 roster. No domain framing needed — this is ordinary Python with a subprocess boundary, not async, Redis, or untrusted-input work.
+
+## Step by Step Tasks
+
+
+### 1. Ledger, dispositions, and the dispatch handoff
+- **Task ID**: build-dispatch
+- **Depends On**: none
+- **Validates**: `tests/unit/test_nightly_regression_tests.py`
+- **Informed By**: spike-2 (every node reaching `maybe_dispatch_triage_session` is already known to have no issue in any state), spike-3 (ledger belongs in `data/`, not the lane worktree)
+- **Assigned To**: `dispatch-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Branch from `main`. Confirm with `git merge-base --is-ancestor origin/main HEAD` before the first commit — **not** from `session/nightly-triage-idempotency-3075`.
+- Add a `NodeDisposition` dataclass: `node`, `title`, `disposition`, `resolved_against`, `resolved_at`.
+- Add `write_triage_ledger(slug, entries) -> str | None` writing `data/nightly-triage-ledger/{slug}.json` with `slug`, `created_at`, `entries`, and an empty `filed`. Returns the **absolute path string** on success. Empty entries writes nothing and returns `None`. Catch broadly, `log()` a `WARNING` naming the slug, return `None`; never raise.
+- **Do not clobber a live session's ledger** (accepted concern, round 3). Before writing, read any existing file at the target path; when it parses and its `filed` list is non-empty, skip the write entirely and return that file's own absolute path. A same-slug retry then leaves the first session's appends intact instead of re-seeding an empty `filed` over them. The retry is real: `maybe_dispatch_triage_session` returns `None` whenever `subprocess.run` exits zero but `json.loads(result.stdout)["session_id"]` fails to parse, so `dispatch_findings` skips `outcome.recorded.extend(single_nodes)` and the identical node set returns on a later run under the same sha256 slug. The wider fix (splitting "subprocess exited zero" from "stdout parsed" so a parse failure logs a session-id-unknown warning instead of reporting dispatch failure) changes `carry_dispatched_nodes` semantics and is **out of this appetite — it is not a task here**, only a note.
+- **Write the ledger atomically** (accepted concern, round 3). Write to a sibling temp path in the same directory and `os.replace(tmp_path, path)` before returning the absolute path, so a concurrent reader sees the old content or the new content and never a truncated one. A crash or replay mid-write is the exact failure class this plan defends against, and unparseable JSON is worse for the agent than stale-but-valid JSON.
+- Add a keyword-only `dispositions` argument to `maybe_dispatch_triage_session`, defaulting to `None`. Call `write_triage_ledger` **after** the `if dry_run:` short-circuit and **before** the `subprocess.run` that creates the session. Build the ledger's `entries` from `dispositions` **and from nothing else**, so a caller that passes no `dispositions` yields an empty list, `write_triage_ledger` returns `None`, and no file is created. Thread its return value as `ledger_path` into `_build_triage_prompt` — this is what makes fix 3 independently revertible (Architectural Impact) and what scopes it to the per-node path with no extra branch.
+- **Move exactly one line.** `message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes)` currently sits *above* `if dry_run:` (locate it by symbol inside `maybe_dispatch_triage_session`, not by line). Move the **default-prompt construction** below the short-circuit so it can receive `ledger_path`. **The dry-run leg needs nothing beyond today's `log()` and `return DRY_RUN_SESSION_ID`** (accepted concern, round 3): nothing on that path returns, logs, or otherwise emits the message, so a prompt built there is discarded, and `TestBuildTriagePrompt`'s direct `ledger_path=None` case already gates the no-ledger-paragraph guarantee. If a prompt *is* built on that path anyway, it must rebind the **same name** the post-short-circuit branch uses — `message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes, ledger_path=None)` — and never a fresh `preview` local: ruff's `F841` is function-scoped, so a name rebound later in the function is never flagged while an unused `preview` is, and that finding fails Verification rows 2 and 3 on otherwise correct code. Do **not** introduce a `prompt_builder` callable and do **not** change either `prompt=`-override call site's shape — the narrowing in Solution → "Scope decision" is what makes that unnecessary.
+- In `dispatch_findings`, build the disposition list from the surviving `single_nodes` after `partition_already_open` and `partition_closed_matches`, and after the issue-budget truncation, so it matches the nodes actually dispatched. Pass it as `dispositions=` at the per-node call site (~2668) only. Pass **nothing** at the cascade call site (~2598) and nothing at the seed call site (~2934) — leave both exactly as they are. Their prompts are pre-rendered strings and their builders take no ledger; adding a disposition there would create an argument no code reads.
+- Leave the inline baseline-seed string in `main()` untouched — `prompt-builder` moves it in Task 2. Add **no** ledger plumbing for the seed or cascade dispatches.
+- Docstring the fail-open posture, the deliberate absence of file locking (Race 1), the `str | None` return contract, and the dry-run ordering constraint (without using the bare token `write_triage_ledger` in the docstring — see Documentation). **This task owns the `write_triage_ledger` and `maybe_dispatch_triage_session` bullets under Documentation → Inline Documentation outright** (accepted concern, round 3); Task 5 does not touch them.
+- Commit with explicit paths as soon as the code is coherent; do not hold the file open across the next task.
+
+### 2. The prompt hands over a command
+- **Task ID**: build-prompt
+- **Depends On**: build-dispatch
+- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestBuildTriagePrompt`
+- **Informed By**: spike-1 (`--state all` returns all four fields, ~1s; `stateReason` is `""` for open issues)
+- **Assigned To**: `prompt-builder`
+- **Agent Type**: builder
+- **Parallel**: false
+- Pull `build-dispatch`'s commit first. Own the three prompt builders and the constant; touch nothing `dispatch-builder` owns except the `main()` line that now calls `_build_seed_prompt`.
+- Add `ISSUE_LOOKUP_INSTRUCTION` at module scope near the `OPEN_ISSUE_LIST_LIMIT` constants: the literal `gh issue list --state all --json number,title,state,stateReason --limit 200` run **once for the whole list** and filtered locally per exact title; the prohibition on GitHub's search index with its reason (#2960–#2999, `8524e765b`); and the note that `stateReason` is `""` on OPEN rows so the agent branches on `state` first.
+- **Wording constraint (non-negotiable):** **the constant, its surrounding comments, any prompt body, and any prompt-builder docstring** may not contain the literal tokens `--search`, `gh search`, `search ALL`, or `search open`, in any case. Say "GitHub's search index" and "the search API"; to point at the flag, say "its CLI flag" and let the Verification anti-criterion hold the exact tokens. Two gates bite from opposite directions: row 5 scans the rendered prompts and must find zero, and row 9 counts `--search` across the whole module and must find exactly `3`, so a *comment* that spells the token out fails a passing build. That widening from "prompt text" to "comments too" is the round-2 blocker this bullet closes. Leave the module's three pre-existing `--search` mentions untouched (constant comments at ~323 and ~337, and `open_issues`' docstring at ~1941 — `open_issues` is not a prompt builder, so this constraint does not reach it).
+- **Gate before committing this task:** `python -c "import sys,re,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(len(re.findall(r'--search', inspect.getsource(n))))"` printing exactly `3`. If it prints `4`, a token was spelled out; if it prints `2`, a legitimate rationale mention was deleted. Neither is acceptable.
+- Replace `_build_triage_prompt`'s "search ALL issues — open AND closed — for the EXACT title given" sentence with the constant.
+- Replace `_build_cascade_prompt`'s "Search ALL issues — open AND closed — for the EXACT title below" sentence with the constant.
+- Extract the inline baseline-seed prompt from `main()` into **`_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None) -> str`**, replace its "Search open AND closed issues for the EXACT title" sentence with the constant, and change `main()`'s call site to `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))`. **Reproduce the seed's decision prose verbatim otherwise** — its rule is deliberately stricter than the per-node rule (comment and do NOT re-file whatever the close reason) and extraction must not soften it.
+- **Why the third parameter exists, so nobody removes it.** The inline text opens `f"(old={prev.get('collection')!r}, new={COLLECTION_PATHS!r})"`. `COLLECTION_PATHS` is module scope (~183) but `prev` is a `main()` local (`prev = load_last_run()`, ~2823) and is derivable from neither `seed_title` nor `seeded_nodes`. A two-parameter signature would silently drop the `old=` clause. `prior_collection` is **keyword-only and defaults to `None`**, so the Verification PRELUDE's two-positional call `n._build_seed_prompt("T", ["a::b"])` stays valid. `seed_size` stays derived from `len(seeded_nodes)`; `current['head_commit']` is already inside `seed_title`. Byte-identity is gated by a Success Criterion and by `TestBuildSeedPrompt`, not asserted.
+- Keep every prompt's open / `NOT_PLANNED` / `COMPLETED` decision prose unchanged in meaning.
+- `_build_triage_prompt`: render the pre-resolved block per node when `dispositions` is non-empty, zipped `strict=True` against the node list. Check `if not dispositions:` **first** so `None` and `[]` both degrade to the plain prompt and never reach the zip; only a non-empty wrong-length list raises.
+- `_build_triage_prompt` appends the ledger paragraph **only when `ledger_path` is non-`None`**: the absolute path, read it first every turn, skip any entry already in `filed`, append `{number, title, node}` immediately after each `gh issue create` and before the next entry. **One further sentence in that paragraph** (accepted concern, round 3): if the file is missing or cannot be parsed as JSON, treat it as if `filed` were empty and rely on the REST read above. That sentence is bound by the same wording constraint as everything else in this task — it must contain none of the forbidden tokens.
+- **`_build_cascade_prompt` and `_build_seed_prompt` get fix 1 and nothing else.** No `dispositions` parameter, no `ledger_path` parameter, no ledger paragraph, no pre-resolved block. Their signatures change only by `_build_seed_prompt`'s new `prior_collection`. This is the deliberate narrowing in Solution → "Scope decision", recorded as a `[DEFERRED]` No-Go; Verification row 16 fails if a ledger paragraph appears in either.
+- Docstring each builder with the REST-over-search rationale citing #2960–#2999 and `8524e765b`, and name `ISSUE_LOOKUP_INSTRUCTION` as the shared source. **This task owns the three prompt-builder docstring bullets under Documentation → Inline Documentation outright** (accepted concern, round 3); Task 5 does not touch them.
+
+### 3. Tests
+- **Task ID**: build-tests
+- **Depends On**: build-prompt
+- **Validates**: `tests/unit/test_nightly_regression_tests.py`
+- **Assigned To**: `nightly-test-engineer`
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Apply every Test Impact disposition, including the nine-stub audit — change only stubs that actually bind positionally.
+- Add `TestWriteTriageLedger`, `TestPromptsNeverNameTheSearchIndex` (parametrized over all three rendered prompts), and `TestBuildSeedPrompt`; extend `TestBuildTriagePrompt`, `TestDispatchFindings`, `TestMaybeDispatchTriageSession`, and the dry-run cases per Test Impact.
+- **Mutation-check each new guard individually**: break the behavior it claims to protect, confirm that specific test goes red, restore, re-measure. A guard that stays green under its own mutation reaches no code and must be rewritten, not kept.
+- Record the mutation results in the PR description.
+
+### 4. Validate build and tests
+- **Task ID**: validate-code
+- **Depends On**: build-tests
+- **Assigned To**: `nightly-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q`, `python -m ruff check`, `python -m ruff format --check`.
+- Run the structural Verification rows and report each with its output.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-prompt
+- **Validates**: `docs/features/nightly-triage-dispatch.md` — `grep -q 'ISSUE_LOOKUP_INSTRUCTION' docs/features/nightly-triage-dispatch.md && grep -q 'nightly-triage-ledger' docs/features/nightly-triage-dispatch.md` exits 0
+- **Assigned To**: `nightly-documentarian`
+- **Agent Type**: documentarian
+- **Parallel**: true — runs concurrently with `build-tests` and `validate-code`. **The safety comes from ordering, not from disjoint file sets** (accepted concern, round 3): this task still edits `scripts/nightly_regression_tests.py` — the module-level comment above `ISSUE_LOOKUP_INSTRUCTION` — which the ownership split gives to the two builders, and it is safe only because it runs strictly **after** `build-dispatch` and `build-prompt` have committed. Brief the documentarian that way rather than with a disjointness claim that does not hold.
+- **Re-read `docs/features/nightly-triage-dispatch.md` at its current head before editing** — `55ad9ac89` added a "Lane reaping" section after this plan quoted the file.
+- **Scope** (accepted concern, round 3): the Feature Documentation bullets (both `docs/features/*.md` files) plus exactly one Inline Documentation bullet — the module-level comment above `ISSUE_LOOKUP_INSTRUCTION`. The `write_triage_ledger` and `maybe_dispatch_triage_session` docstrings belong to Task 1 and the three prompt-builder docstrings to Task 2; both builders already carry those bullets, so this split adds no work and needs no new Verification row.
+- Run the `Validates` command above; it gates the two substantive bullets (the shared constant, and the ledger's path and location rationale). A doc edit that satisfies neither grep has not done this task.
+- **Gate before committing this task:** `python -c "import sys,re,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(len(re.findall(r'--search', inspect.getsource(n))))"` printing exactly `3`. The one Inline Documentation bullet this task owns is a code comment, so this task can still move the module's `--search` count as easily as Task 2 can.
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-dispatch, build-prompt, build-tests, validate-code, document-feature
+- **Assigned To**: `nightly-validator`
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row and every Success Criterion; report pass/fail with evidence per line.
+
+## Verification
+
+
+Structural rows use `inspect.getsource` or call the builders directly, never line-scoped `sed`, so they survive the line drift this module sees constantly. **Every row below was executed against `origin/main` at `bf0a5d577` while revising, and every row's measured pre-fix value appears in the red-state table.** (`scripts/nightly_regression_tests.py` is byte-identical between `0a9bb455f` and `bf0a5d577` — `git diff 0a9bb455f bf0a5d577 -- scripts/nightly_regression_tests.py` is empty — so the earlier round's measurements reproduce unchanged.)
+
+**Every command below was re-measured by copying it out of this document's committed text**, not out of a working buffer. That distinction is the whole of round 2's first concern: row 5's regex had its pipes escaped as `\|` by the markdown table it lived in, so the copied text compiled to a single literal and returned `0` — the row's PASS value — against entirely unfixed code. Row 5 is the plan's most important anti-criterion and it was reporting green on `main`. **Audit of every other row for the same defect:** rows 1–4, 6–17 contain no `\|` and no other markdown escape; row 11's `\"` sequences are shell escaping inside a `python -c "..."` double-quoted string, which is correct as written and was re-measured to confirm it. The only other `\|` anywhere in this plan is spike-4's `grep -rn 'pytest.mark.xfail\|pytest.xfail('`, where `\|` is BRE alternation and therefore correct for `grep`. **The fix is structural: any regex a Verification row needs now lives in the PRELUDE code block, where markdown does not escape it, and the table cell only references it by name.**
+
+Three rows share a preamble. Written once here and abbreviated as `PRELUDE` in the table:
+
+```python
+# PRELUDE — renders all three prompts, falling back to main()'s inline seed text
+# while _build_seed_prompt does not yet exist, so the same command has a defined
+# value before and after the fix. The two-positional call below stays valid after
+# _build_seed_prompt gains its keyword-only, defaulted `prior_collection`.
+#
+# SEARCH_TOKENS lives HERE and not in a table cell on purpose: a regex written
+# inside a markdown table gets its pipes escaped to `\|`, which compiles to one
+# literal string instead of an alternation and makes row 5 pass on unfixed code.
+import sys, re, inspect
+sys.path.insert(0, 'scripts')
+import nightly_regression_tests as n
+SEARCH_TOKENS = re.compile(r"--search|gh search|search all|search open", re.I)
+_c = {"nodes": ["a::b"], "workers": [], "kind": "body", "title": "T", "message": "m"}
+P = [n._build_triage_prompt(["a::b"]), n._build_cascade_prompt(_c)]
+P.append(n._build_seed_prompt("T", ["a::b"]) if hasattr(n, "_build_seed_prompt")
+         else inspect.getsource(n.main))
+```
+
+| # | Check | Command | Expected |
+|---|-------|---------|----------|
+| 1 | Unit tests pass | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
+| 2 | Lint clean | `python -m ruff check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
+| 3 | Format clean | `python -m ruff format --check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
+| 4 | All three prompts hand over the REST command | `PRELUDE; print(min(p.count('gh issue list --state all') for p in P))` | output > 0 |
+| 5 | No prompt names the lagging search index (anti-criterion) | `PRELUDE; print(len(SEARCH_TOKENS.findall(chr(10).join(P))))` | output == 0 |
+| 6 | Every prompt carries the prohibition | `PRELUDE; print(min(p.count('search index') for p in P))` | output > 0 |
+| 7 | Every prompt warns about the open-issue `stateReason` | `PRELUDE; print(min(p.count('stateReason') for p in P))` | output > 0 |
+| 8 | The seed prompt is an addressable function | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int(callable(getattr(n,'_build_seed_prompt',None))))"` | output == 1 |
+| 9 | The module's REST-not-search rationale is preserved (invariant) | `python -c "import sys,re,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(len(re.findall(r'--search', inspect.getsource(n))))"` | output == 3 |
+| 10 | Ledger helper exists | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int(callable(n.write_triage_ledger)))"` | output == 1 |
+| 11 | Ledger write follows the dry-run short-circuit | `python -c "import sys,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; b=inspect.getsource(n.maybe_dispatch_triage_session).split('\"\"\"',2)[-1]; i=b.find('write_triage_ledger('); j=b.find('return DRY_RUN_SESSION_ID'); print(1 if (i>0 and j>0 and i>j) else 0)"` | output == 1 |
+| 12 | Dispositions cross the dispatch boundary | `python -c "import sys,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(inspect.getsource(n.dispatch_findings).count('dispositions='))"` | output > 0 |
+| 13 | Named new tests exist and pass | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q -k "TestWriteTriageLedger or TestBuildTriagePrompt or TestPromptsNeverNameTheSearchIndex or TestBuildSeedPrompt"` | exit code 0 |
+| 14 | Dry run writes no ledger (behavioral) | `./scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q -k "dry_run and ledger"` | exit code 0 |
+| 15 | Branch is rooted on main (not the stale #3075 lane) | `git merge-base --is-ancestor origin/main HEAD; echo $?` | output contains 0 |
+| 16 | The cascade and seed prompts carry no ledger (scope guard) | `PRELUDE; print(sum(1 for p in P[1:] if 'nightly-triage-ledger' in p))` | output == 0 |
+| 17 | The per-node prompt does carry the ledger path when given one | `python -c "import sys; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; print(int('/tmp/led.json' in n._build_triage_prompt(['a::b'], ledger_path='/tmp/led.json')))"` | output == 1 |
+
+**Notes on four rows that were defective in an earlier draft and are now repaired:**
+
+- **Row 5** was `inspect.getsource(_build_triage_prompt)` scanned for `--search` / `gh search` / `search ALL`, while the same plan required that function's docstring and prompt body to *contain* the token `--search`. `getsource` returns the docstring, so the green state was unreachable. It now scans the **rendered** prompts (no docstring in scope), covers all three, and is case-insensitive — the earlier case-sensitive form missed `_build_cascade_prompt`'s capitalised "Search ALL" entirely. Row 6 asserts the prohibition is present as a separate positive check, so the two are simultaneously satisfiable only because the wording constraint in Solution keeps the literal tokens out of the prompt text.
+
+  **Round 2 found it still broken for a different reason, now fixed.** The regex had been written inline in the table cell as `r'--search\|gh search\|search all\|search open'`. Markdown escapes a `|` inside a table cell as `\|`, so a validator copying the cell verbatim into Python compiled a pattern matching one literal string containing pipe characters. **Measured against unmodified `origin/main` `bf0a5d577`: the as-committed escaped form returned `0` — the row's PASS value — while the intended alternation returned `3`.** The regex now lives in the PRELUDE code block as `SEARCH_TOKENS`, where markdown performs no escaping, and the cell references it by name. Re-measured from the committed text: **`3`**, matching `['search ALL', 'Search ALL', 'Search open']`.
+- **Row 11** used `str.index` on the bare name `write_triage_ledger` over the whole source including the docstring, which the Documentation section requires to mention the ordering — the docstring precedes the code, so the row would flip to fail on correct code. And `str.index` raises `ValueError` when the substring is absent, so it had no defined pre-fix value. It now strips the docstring with `split('"""', 2)[-1]`, matches the call form `write_triage_ledger(`, and uses `find` so the absent case returns `-1` rather than raising. Row 14 is the behavioral guard on the same constraint and is the primary one; row 11 is a cheap second opinion.
+- **Row 12** counted `dispositions` in `dispatch_findings` and expected > 0. That already measured **1** on unmodified `main`, from the existing `closed_issue_dispositions()` call inside the function, so the row could not distinguish the fix from HEAD. It now counts `dispositions=`, the keyword form only the fix introduces, measured at **0** pre-fix.
+
+**Red-state proof, measured at `origin/main` `0a9bb455f` before any change — every row, not a subset:**
+
+| # | Row | Pre-fix result | Verdict |
+|---|-----|----------------|---------|
+| 1 | Unit tests pass | exit 0 | PASSES pre-fix — a regression guard, not an acceptance criterion. Row 13 is the acceptance criterion. |
+| 2 | Lint clean | exit 0 | PASSES pre-fix — regression guard. |
+| 3 | Format clean | exit 0 | PASSES pre-fix — regression guard. |
+| 4 | Prompts hand over the REST command | `0` | FAIL (needs > 0) — row bites |
+| 5 | No prompt names the search index | `3` — matches `['search ALL', 'Search ALL', 'Search open']` | FAIL (needs 0) — anti-criterion bites, and its value is exactly the round-1 blocker-2 hole: three prompts, three hits. **Re-measured from this document's committed text after moving the regex into the PRELUDE. The previous, table-escaped form measured `0` on the same code — a vacuous pass.** |
+| 6 | Prohibition present in every prompt | `0` | FAIL (needs > 0) — row bites |
+| 7 | `stateReason` warning in every prompt | `0` | FAIL (needs > 0) — row bites |
+| 8 | Seed prompt is an addressable function | `0` | FAIL (needs 1) — row bites |
+| 9 | REST-not-search rationale preserved | `3` | PASSES pre-fix **by design** — this is an invariant, not an acceptance criterion. It guards a hazard this plan introduces: a builder chasing row 5 could delete the module's legitimate `--search` rationale at lines ~323, ~337 and in `open_issues`' docstring. Its red state is "after deleting any one of the three", verified by hand: removing one mention drops the count to 2 and the row fails. |
+| 10 | Ledger helper exists | `AttributeError` | FAIL — row bites |
+| 11 | Ledger write follows the dry-run short-circuit | `0` (`i = -1`, helper absent; `j = 569`) | FAIL (needs 1) — row bites, and returns a value rather than raising |
+| 12 | Dispositions cross the dispatch boundary | `0` | FAIL (needs > 0) — row bites |
+| 13 | Named new tests exist and pass | no tests collected | FAIL — row bites |
+| 14 | Dry run writes no ledger | no tests collected | FAIL — row bites |
+| 15 | Branch rooted on main | exit 0 on a `main`-rooted checkout, non-zero on `session/nightly-triage-idempotency-3075` | Environment gate, not a code criterion. The stale branch no longer exists on origin (Freshness Check), so the row now guards only against a local checkout of the surviving local ref. |
+| 16 | Cascade and seed prompts carry no ledger | `0` | PASSES pre-fix **by design** — a scope guard on the deliberate narrowing, not an acceptance criterion. Its red state is "after wiring a ledger paragraph into either override builder", which is exactly the widening the `[DEFERRED]` No-Go forbids. Row 17 is the paired positive check that stops rows 16 and 4–9 from being satisfiable by a fix 3 that does nothing at all. |
+| 17 | Per-node prompt carries the ledger path | `TypeError: _build_triage_prompt() got an unexpected keyword argument 'ledger_path'` | FAIL — row bites |
+
+Twelve of seventeen rows fail against current `main` and therefore cannot pass vacuously. The five that pass pre-fix are labelled with what they are — three regression guards (1–3), one invariant (9), and one scope guard (16) — rather than presented as evidence the fix landed. Every row was re-measured by copying its command out of this document's committed text; row 5 is the reason that distinction is now stated rather than assumed.
+
+## Critique Results
+
+
+War room round 3, FULL depth (Risk & Robustness, Scope & Value, History & Consistency) plus automated structural checks, over the revision at `356965c87`. Mode: **independent roster (3 critics)** — each critic ran as its own subagent with no sight of the others, so the two Team Orchestration findings below are independent convergence rather than one pass listing the same thing twice. Verdict: **READY TO BUILD (with concerns)** (0 blockers, 5 concerns, 0 nits).
+
+**This was the last critique round the lane is authorized.** The G2 critique cycle cap is reached, so there is no further revision pass: the five concerns below carry Implementation Notes written for the *builder*, not for a plan reviser. Each is something a competent builder handles inline while executing the tasks. Nothing below changes the design.
+
+**Round-2's seven rows verified closed, by re-measurement rather than by reading the dispositions.** `scripts/nightly_regression_tests.py` is byte-identical between `bf0a5d577` and today's `origin/main`, so every red-state value is still reproducible, and every one reproduces exactly:
+
+- **Verification row 5 is no longer vacuous.** The PRELUDE and the row-5 cell were extracted from this document's committed text at `356965c87` and executed against unmodified `scripts/nightly_regression_tests.py`: output **`3`**, matching `['search ALL', 'Search ALL', 'Search open']`. The round-2 table-escaped form measured `0` on the same code. The plan's single most important anti-criterion now bites.
+- **No other row is vacuous.** All 17 rows were re-extracted programmatically from the committed table; none but the repaired row 5 ever contained `\|`, and row 11's `\"` sequences execute correctly as shell escaping. Re-measured: row 4 `0`, row 6 `0`, row 7 `0`, row 8 `0`, row 9 `3`, row 10 `AttributeError`, row 11 `0` (`i=-1`, `j=569`), row 12 `0` for `dispositions=` against `1` for the bare token, row 16 `0`, row 17 `TypeError`.
+- **The `--search` invariant holds.** The `ISSUE_LOOKUP_INSTRUCTION` body specified in Solution scans clean for all four forbidden tokens, and no other plan instruction writes one into the module; `grep -c -- '--search' scripts/nightly_regression_tests.py` is `3` (lines 323, 337, 1941 — two constant comments plus `open_issues`' docstring). Post-fix the count stays `3`.
+- **Rows 5 and 6 are simultaneously satisfiable.** Each of the three current forbidden-token hits sits inside the one sentence Technical Approach names for replacement, not inside the open / `NOT_PLANNED` / `COMPLETED` decision prose the plan requires kept verbatim. Replacing exactly those three sentences drives row 5 to `0` while row 6 rises above `0`.
+- **The narrowing is complete, with no half-migration.** Solution, Architectural Impact, Flow, Failure Path Test Strategy, Test Impact, Risks 2 and 5, Race 1, No-Gos, Update System, Agent Integration, Documentation, Success Criteria, Team Orchestration and Tasks 1, 2 and 5 all describe one narrowed design. No live sentence mandates a cascade or seed ledger paragraph and no `prompt_builder` callable survives outside the rejected-alternative narrative.
+- **Race 1's dissolution chain holds** against the plan's own `write_triage_ledger` contract: the seed call site passes no `dispositions`, `entries` derives from `dispositions` and nothing else, an empty list writes nothing and returns `None`, so `data/nightly-triage-ledger/nightly-triage-baseline.json` is never created and the fixed `slug_suffix="baseline"` hazard has no file to overwrite.
+- **`_build_seed_prompt(seed_title, seeded_nodes, *, prior_collection=None)`** is pinned identically in Architectural Impact, Solution → Key Elements, Task 2 and Success Criteria; the PRELUDE's two-positional call stays valid because the parameter is keyword-only and defaulted; `main()` is specified to pass `prior_collection=prev.get("collection")`; and a Success Criterion gates byte-identity against the inline original.
+- Call sites re-verified by symbol on `origin/main`: cascade `2598`, per-node `2668`, seed `2934`. `COLLECTION_PATHS` `183`, `prev = load_last_run()` `2823`, the `(old=...)` clause `2919`.
+
+**What round 3 found.** Nothing on the design. Three of the five concerns sit on `maybe_dispatch_triage_session`'s existing return-and-ordering behavior, and two sit on `## Team Orchestration` prose that disagrees with the operative `## Step by Step Tasks`.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | The dry-run "preview" has no consumer, and one natural spelling of it fails lint. `maybe_dispatch_triage_session` never returns, logs, or otherwise emits the message on the dry-run path — its `log()` call is a fixed summary string — so a prompt built there is discarded, and the Success Criterion "its rendered prompt carries no ledger paragraph" for `--dry-run` has no described observer through that function (the named test asserts only file absence). A builder taking the plan's own word "preview" and binding a fresh local trips `F841` under this repo's active ruff `select`, failing Verification rows 2 and 3 on otherwise correct code. | build stage (`build-dispatch`, Task 1) | Either drop the dry-run build entirely — the dry-run leg needs nothing beyond today's `log()` and `return DRY_RUN_SESSION_ID`, and `TestBuildTriagePrompt`'s direct `ledger_path=None` case already gates the "no ledger paragraph" guarantee — or bind it to the SAME name the post-short-circuit branch uses: `message = prompt if prompt is not None else _build_triage_prompt(dispatch_nodes, ledger_path=None)`. Ruff's F841 is function-scoped, so a name rebound later in the function is never flagged while a fresh `preview` local is. |
+| CONCERN | Risk & Robustness | Race 1's "near-impossible" claim rests on an unverified premise. It assumes `maybe_dispatch_triage_session`'s return value is a trustworthy dispatch-success signal, but the function returns `None` whenever `subprocess.run` exits zero and `json.loads(result.stdout)["session_id"]` fails to parse — a stray stdout line suffices — even though the child process and the session it enqueued really ran. `dispatch_findings` then skips `outcome.recorded.extend(single_nodes)`, so the identical node set returns on a later run, recomputes the same sha256 slug, and re-seeds the ledger with an empty `filed`, discarding the first session's appends. Fix 1's REST read cannot backstop this one: the first session's issue may genuinely not exist yet rather than merely lag an index. | build stage (`build-dispatch`, Task 1) | Cheapest guard, entirely inside the new helper: before writing, read any existing file at the target path and, when it parses and its `filed` list is non-empty, skip the write and return that file's own absolute path — a live session's progress is then never clobbered by a same-slug retry. The wider fix (splitting "subprocess exited zero" from "stdout parsed" so a parse failure logs a session-id-unknown warning instead of reporting dispatch failure) changes `carry_dispatched_nodes` semantics and is out of this appetite; note it rather than build it. |
+| CONCERN | Risk & Robustness | The ledger has no atomic-write contract and no agent-facing fallback for corrupt JSON. The plan specifies `write_triage_ledger`'s failure handling (catch broadly, log, return `None`) but never that the write is atomic, and the agent's own read-modify-write of `filed` has the same gap. A crash or replay mid-write — the exact failure class this plan defends against — leaves truncated, unparseable JSON rather than the stale-but-valid JSON Race 1's "lost update" language accounts for, and no prompt sentence or docstring tells the agent what to do with a ledger it can read but not parse. | build stage (`build-dispatch` for the write, `prompt-builder` for the sentence) | In `write_triage_ledger`, write to a sibling temp path and `os.replace(tmp_path, path)` before returning the absolute path, so a concurrent reader sees the old or the new content and never a partial one. In the ledger paragraph `_build_triage_prompt` emits, add one sentence: if the file is missing or cannot be parsed as JSON, treat it as if `filed` were empty and rely on the REST read above. That sentence must not name any forbidden token — the Task 2 wording constraint still applies to it. |
+| CONCERN | Scope & Value | `## Team Orchestration` justifies `document-feature`'s `Parallel: true` on a file set that is not the documentarian's actual file set. It states the documentarian's "file set (`docs/features/*.md`) is disjoint from both builders'", but the Documentation → Inline Documentation bullets that Task 5 executes edit the `ISSUE_LOOKUP_INSTRUCTION` comment, the three prompt-builder docstrings, the `write_triage_ledger` docstring and the `maybe_dispatch_triage_session` docstring — all inside `scripts/nightly_regression_tests.py`, the file the ownership split gives exclusively to the two builders. Task 5's own gate bullet concedes it ("this task can move the module's `--search` count as easily as Task 2 can"). Task 5's `Validates` greps only two strings in one doc, so a documentarian that reads its stated scope as docs-only and skips the in-module docstrings still reports green. | build stage (lead agent, when dispatching Task 5) | The parallelism is safe in practice only because `document-feature` runs strictly after `build-prompt` and `build-dispatch` commit, not because the file sets are disjoint — brief the documentarian that way. Preferred split: leave the `write_triage_ledger` and `maybe_dispatch_triage_session` docstrings to Task 1 and the three prompt-builder docstrings to Task 2, which already carry those bullets, so Task 5 owns only the module-level `ISSUE_LOOKUP_INSTRUCTION` comment plus the two `docs/features/*.md` files. If Task 5 keeps them, extend its `Validates` to assert docstring content directly, e.g. `python -c "import sys,inspect; sys.path.insert(0,'scripts'); import nightly_regression_tests as n; assert 'ISSUE_LOOKUP_INSTRUCTION' in inspect.getdoc(n.maybe_dispatch_triage_session)"`. |
+| CONCERN | History & Consistency, Structural | `## Team Orchestration` contradicts itself, within one paragraph, about who edits the seed call site in `main()`. The ownership sentence gives `dispatch-builder` "the seed call site in `main()`" and the next sentence's first clause agrees ("`prompt-builder` writes the function, `dispatch-builder` changes `main()` to call it"), while that same sentence's second clause reverses it ("`prompt-builder` performs both halves of that move in its own commit and `dispatch-builder` leaves the inline seed string alone"). The operative `## Step by Step Tasks` is unambiguous and agrees with the second clause — Task 1 says "Leave the inline baseline-seed string in `main()` untouched", Task 2 says "change `main()`'s call site" — so a builder executing the tasks needs no guess. The exposure is a lead agent quoting the ownership sentence verbatim into `dispatch-builder`'s brief and sending it at a line Task 1 forbids it. | build stage (lead agent, when dispatching Tasks 1 and 2) | Dispatch both builders from the `## Step by Step Tasks` bullets, never from the Team Orchestration ownership sentence. The correct split, stated once: `prompt-builder` performs the whole `_build_seed_prompt` move — writing the function AND changing `main()`'s call site to `_build_seed_prompt(seed_title, confirmed_failing, prior_collection=prev.get("collection"))` — in one commit, and `dispatch-builder` touches no part of the inline seed string or its call site. This is also what keeps the shared-file livelock guard intact, since the seam is the one line both builders could otherwise reach for. |
+
+**Disposition of the five concerns (revision pass).** All five are **accepted**, and their Implementation Notes now live in the operative plan text so the builder meets them in the tasks it executes rather than in this table: concern 1 (dry-run preview / `F841`) and concern 2 (do not clobber a live ledger) in Task 1; concern 3 in Task 1 for the atomic write and Task 2 for the prompt sentence; concern 4 in `## Team Orchestration`, Task 5's Parallel and Scope bullets, and Documentation → Inline Documentation; concern 5 in `## Team Orchestration`. No design changed and no further critique round is authorized.
+
+**Structural check results:** required sections PASS (Documentation with three `docs/features/` references, Update System, Agent Integration, Test Impact all present and substantive); task numbering PASS (1–6, no gaps); dependencies PASS (every `Depends On` resolves, no cycles); file paths PASS (all referenced paths exist; `data/nightly-triage-ledger/` is intentionally new and `data/` is gitignored at `.gitignore:181` as spike-3 claims); prerequisites PASS (`gh auth status` authenticated, venv on the 3.14 pin); cross-references PASS (no No-Go or Rabbit Hole appears as planned work; every Success Criterion maps to a Verification row, a named test class, or a task's own gate); Popoto migration N/A (no model touched); round-2 dispositions PASS (all seven rows closed, none left `pending`).
+
+---
+
+## Open Questions
+
+
+1. **The ledger lives in `data/nightly-triage-ledger/{slug}.json`, not "under the lane worktree" as the issue specifies.** Reasoning in spike-3: `.worktrees/{slug}/` is a git checkout, so a ledger there pollutes the agent's own `git status`, and it is destroyed on lane teardown — a replay after teardown would find nothing. `data/` is already this script's state home, is gitignored, survives teardown, and is reachable by absolute path from inside a worktree. The slug-keyed filename preserves the "session-local" property the issue was reaching for. **Independent corroboration found during revision:** `55ad9ac89` (Closes #3162) landed a stale-branch sweep that reaps nightly-triage worktrees, and its reaper refuses to reap a lane whose `git status --porcelain` is non-empty. A ledger written inside `.worktrees/{slug}/` would leave every triage lane permanently dirty and permanently unreapable, reintroducing exactly the accumulation #3162 just fixed. That turns this from a judgement call into a near-forced choice. **Answered by default: the ledger goes in `data/`.** Say the word if you still want it in the worktree, but it would need #3162's reaper taught about the file first.
+
+2. **`--limit 200` for the agent's confirmation read is taken from the issue verbatim and is narrower than the script's own `CLOSED_ISSUE_LIST_LIMIT = 4000`.** Risk 1 argues this is fine *because* fix 2 makes the script's wide read the authority and the agent's read only a check for issues created since. If you would rather the agent's read match the script's window, that is a one-token change with roughly 40 REST calls of cost per dispatch instead of 2.
+
+3. **Should a ledger write failure block the dispatch instead of logging and continuing?** The plan chooses fail-open, matching `open_issues()` returning `None` and the module's stated posture that a silent night during a real regression is the worse harm. The opposite reading — that a dispatch without its replay defense should not go out at all — is defensible given this bug has now recurred four times. Fail-open is the default unless you say otherwise.

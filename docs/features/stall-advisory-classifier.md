@@ -141,6 +141,8 @@ The reflection is not scheduled by default. To activate, add to `~/Desktop/Valor
 
 `stall_advisory_telegram_enabled` defaults to `false` in v1. The reflection computes and logs findings regardless; the flag gates only the Telegram send. It is off by default pending coordination with #1313 (the adjacent session watchdog alert) to avoid double-alerting on the same session. When enabled, the reflection sends only when findings are present — no all-clear spam.
 
+The alert has no single project in scope (this reflection classifies sessions globally, not per-project), so it pages the host checkout's own engineer group via `reflections.utilities.resolve_host_eng_chat` — the same `PROJECT_ROOT`-narrowed fallback rule `docs_auditor` and `sentry_triage` use. See [`reflection-telegram-routing.md`](reflection-telegram-routing.md).
+
 ## Fail-Soft Guarantees
 
 - Any exception inside `classify_session_stall` returns `StallVerdict("healthy", "unclassifiable", {})`. The caller is never disrupted by a classification failure.
@@ -153,7 +155,7 @@ The reflection is not scheduled by default. To activate, add to `~/Desktop/Valor
 | File | Role |
 |---|---|
 | `agent/session_stall_classifier.py` | Core classifier: `StallVerdict`, `classify_session_stall`, `read_project_health_counters` |
-| `reflections/stall_advisory.py` | Periodic reflection: scan running sessions, collect findings, optional Telegram alert |
+| `reflections/stall_advisory.py` | Periodic reflection: scan running sessions, collect findings, optional Telegram alert to the host checkout's own `Eng:` group |
 
 ## Related
 

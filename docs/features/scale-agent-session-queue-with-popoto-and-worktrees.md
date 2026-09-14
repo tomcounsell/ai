@@ -1,28 +1,13 @@
 # Scale Agent Session Queue with Popoto + Git Worktrees
 
-**Status**: ✅ Complete (Phases 1 & 2 implemented)
+The agent session queue (`agent/agent_session_queue.py`) persists jobs in Redis
+through Popoto (a Django-style ORM over Redis) and executes them in parallel git
+worktrees, one per session. Redis is already running on every machine, so no
+additional infrastructure is required.
 
-## Problem
+## Persistence
 
-The current agent session queue (`agent/agent_session_queue.py`) has two scaling bottlenecks:
-
-1. **JSON file persistence** -- Every push/pop reads and rewrites the entire file. A crash mid-write corrupts the file and silently loses all queued jobs. No atomicity, no crash recovery.
-
-2. **Serial execution per project** -- Git checkout changes the entire working tree, so only one job can run at a time per project. A 10-minute SDK task blocks all other messages for that project.
-
-Both are solvable with minimal code changes by leveraging infrastructure we already have.
-
-## Solution
-
-### Part 1: Replace JSON persistence with Popoto (Redis ORM)
-
-**Why Popoto**: Redis is already running on all machines. Popoto is our own library with Django-like syntax, atomic Redis operations, and sorted sets for priority ordering. No new infrastructure needed.
-
-**Reference**: [popoto.readthedocs.io](https://popoto.readthedocs.io/en/latest/)
-- [Fields documentation](https://popoto.readthedocs.io/en/latest/fields/) -- KeyField, SortedField, AutoKeyField
-- [Query documentation](https://popoto.readthedocs.io/en/latest/query/) -- Filtering, ordering, sorted field range queries
-
-**Job model**:
+Jobs live in the Popoto `Job` model:
 
 ```python
 from popoto import Model, AutoKeyField, KeyField, SortedField, Field
@@ -40,15 +25,14 @@ class Job(Model):
     chat_id = Field()
     message_id = Field(type=int)
     chat_title = Field(null=True)
-    chat_title = Field(null=True)
     revival_context = Field(null=True)
-    worktree_dir = Field(null=True)            # Set when job starts (Part 2)
+    worktree_dir = Field(null=True)            # Set when the job starts
 ```
 
-**What this replaces**: The entire `ProjectJobQueue` class (load/save JSON, fcntl locking). Instead:
+Push, pop, remove, and count are atomic Redis operations (`HSET` + `ZADD`):
 
 ```python
-# Push (atomic Redis HSET + ZADD)
+# Push (atomic)
 Job.create(project_key="valor", status="pending", priority=10, ...)
 
 # Pop highest priority pending job (atomic read + update)
@@ -63,19 +47,18 @@ job.delete()
 depth = Job.query.count(project_key="valor", status="pending")
 ```
 
-**What survives crashes**: Everything. Redis persists with RDB/AOF. No corrupt JSON, no lost jobs.
+Redis persists with RDB/AOF, so a crash cannot corrupt a JSON file or lose
+queued jobs. `check_revival()` queries Redis by `chat_id` rather than scanning
+git branches.
 
-**Code changes required**:
-- `agent/agent_session_queue.py`: Replace `ProjectJobQueue` class (~40 lines) with the popoto `Job` model (~20 lines). The `_worker_loop`, `_execute_agent_session`, and callback registry stay the same. Note: `check_revival()` was subsequently rewritten to query Redis by `chat_id` rather than scanning all git branches — see `docs/features/agent-session-queue.md`.
-- `requirements.txt`: Add `popoto`
-- Delete: `data/agent_session_queue/` directory (no longer needed)
-- Delete: `MessageQueue` class from `bridge/telegram_bridge.py` (fully superseded)
+Popoto reference: [popoto.readthedocs.io](https://popoto.readthedocs.io/en/latest/)
+([Fields](https://popoto.readthedocs.io/en/latest/fields/),
+[Query](https://popoto.readthedocs.io/en/latest/query/)).
 
-### Part 2: Git worktrees for parallel job execution
+## Parallel execution with git worktrees
 
-**Why**: The current architecture serializes jobs because `git checkout` mutates the entire working tree. Git worktrees let each job operate in its own isolated directory, enabling parallel execution.
-
-**How it works**:
+Each job runs in its own isolated worktree, so jobs for the same project run in
+parallel instead of serializing on `git checkout`:
 
 ```
 ~/src/ai/                    # Main worktree (main branch, always clean)
@@ -85,8 +68,11 @@ depth = Job.query.count(project_key="valor", status="pending")
     session-tg_valor_12345_999/               # Job 2's isolated working tree (parallel)
 ```
 
+The worker creates a worktree for a job, runs the agent with `cwd` set inside
+it, then merges the branch back and removes the worktree:
+
 ```bash
-# Create worktree for a job (replaces git checkout)
+# Create worktree for a job
 git worktree add .worktrees/session-abc123 -b session/abc123
 
 # Agent runs with cwd=.worktrees/session-abc123 (isolated from other jobs)
@@ -97,81 +83,40 @@ git worktree remove .worktrees/session-abc123
 git branch -d session/abc123
 ```
 
-**Code changes required**:
-- `agent/agent_session_queue.py`: Replace `_checkout_session_branch()` (~35 lines) with worktree create (~15 lines). Replace `_finish_branch()` (~95 lines) with worktree merge+remove (~40 lines). Remove serialization constraint from `_worker_loop` (allow concurrent jobs).
-- No changes to `bridge/telegram_bridge.py` (working_dir resolution happens in agent_session_queue)
-- No changes to `agent/sdk_client.py` (receives `cwd` from agent_session_queue, works the same)
+Each agent task merges and removes its own worktree on completion. A
+per-project concurrency cap (for example, a maximum of three) bounds resource
+usage.
 
-**Concurrency model change**:
+## Concurrency model
 
-```
-BEFORE (serial):
-  Worker pops job -> checkout branch -> run agent -> merge -> pop next job
+The worker pops a job, creates its worktree, and spawns the agent task without
+blocking, so the next job is popped immediately. Each agent task merges its own
+worktree when it finishes.
 
-AFTER (parallel):
-  Worker pops job -> create worktree -> spawn agent task (non-blocking)
-  Worker pops job -> create worktree -> spawn agent task (non-blocking)
-  ...each agent task merges its own worktree on completion
-```
+## Async Redis access
 
-Optional: cap concurrent jobs per project (e.g., max 3) to limit resource usage.
+The enqueue/write path wraps Popoto calls in `asyncio.to_thread()` directly
+(`agent/agent_session_queue.py`). The worker drain loop's hot-path read (the
+idle-check query) runs through `offload_redis()`, a dedicated measured seam on a
+bounded `run_in_executor()` bulkhead — see
+[Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4) for the
+thread-safety contract and bulkhead sizing.
 
-### Part 3: Remove dead code
+## Known Limitations
 
-With Parts 1 and 2, these become unnecessary:
-- `MessageQueue` class in `bridge/telegram_bridge.py` (JSON file queue, fully replaced by popoto)
-- `data/pending_messages.json` (message queue file)
-- `data/agent_session_queue/*.json` (per-project queue files)
-- the unused `pr_manager` module (already identified in PR #10 review)
+### Worktree disk usage
 
-## Implementation Order
+A worktree is a full copy of the working-tree files (the `.git` object store is
+shared, so it is file copies, not a full clone). Large multi-project repositories
+are worth checking for per-worktree size.
 
-**Phase 1 -- Popoto job model** (smallest change, biggest reliability win):
-1. Add `popoto` to requirements
-2. Define `Job` model
-3. Replace `ProjectJobQueue._load/_save/push/pop` with popoto CRUD
-4. Keep serial execution (don't change worker loop yet)
-5. Test: verify jobs persist across bridge restarts
+### Worktree cleanup on crash
 
-**Phase 2 -- Git worktrees** (unlocks parallelism):
-1. Replace `_checkout_session_branch` with `git worktree add`
-2. Replace `_finish_branch` with worktree merge+remove
-3. Remove serial wait from worker loop
-4. Add configurable concurrency cap
-5. Test: send multiple messages rapidly, verify parallel processing
+If the bridge dies with active worktrees, they remain on disk. Recovery requires
+`git worktree prune` and cleanup of orphaned directories.
 
-**Phase 3 -- Cleanup**:
-1. Remove `MessageQueue`, `pending_messages.json`, `data/agent_session_queue/`
-2. Remove the unused `pr_manager` module
-3. Update CLAUDE.md to document new architecture
+### Merge conflicts
 
-## Research Questions to Resolve Before Building
-
-1. **Popoto async wrapping** -- Resolved. The enqueue/write path wraps Popoto calls in
-   `asyncio.to_thread()` directly (`agent/agent_session_queue.py`). The worker drain loop's
-   hot-path read (the idle-check query) runs through a dedicated instrumented seam,
-   `offload_redis()` on a bounded `run_in_executor()` bulkhead -- see
-   [Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4) for the
-   thread-safety contract, the bulkhead sizing, and why that one call site gets its own
-   measured pool instead of a bare `to_thread()`.
-
-2. **Worktree disk usage** -- Each worktree is a full copy of the working tree (not .git objects, just files). For this repo that's ~small. But for large projects monitored via multi-project config, need to check sizes. Worktrees share the .git object store so it's only file copies, not full clones.
-
-3. **Worktree cleanup on crash** -- If the bridge dies with active worktrees, they remain on disk. Startup should run `git worktree prune` and clean up orphaned directories.
-
-4. **Merge conflicts** -- Parallel worktrees writing to the same files will conflict on merge. Options:
-   - Accept: most agent work touches different files per session
-   - Mitigate: merge serially (parallel execution, serial merge step)
-   - Detect: if merge fails, keep the branch and notify user
-
-5. **Redis connection** -- Verify popoto picks up `REDIS_URL` from `.env` or uses localhost default. Check which Redis DB index to use (avoid collisions with other services).
-
-6. **Worker-per-project vs shared pool** -- Current architecture: one worker task per project. With worktrees: could use a shared worker pool across projects. Research whether the per-project model still makes sense or if a global pool with per-project concurrency limits is simpler.
-
-## Success Criteria
-
-- Jobs survive bridge crashes without data loss
-- Multiple messages to the same project process in parallel (not queued for minutes)
-- No increase in code complexity (net line count should decrease)
-- Redis is the single source of truth for queue state (no JSON files)
-- Works across all machines with no additional infrastructure
+Parallel worktrees that write the same files conflict on merge. Mitigations:
+merge serially (parallel execution, serial merge step), or, if a merge fails,
+keep the branch and notify the user.

@@ -35,7 +35,6 @@ def test_session():
     s = AgentSession(
         session_id=sid,
         project_key="tst-accum",
-        agent_session_id=f"as-{sid}",
         status="running",
     )
     s.save()

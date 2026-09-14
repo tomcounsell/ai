@@ -11,6 +11,6 @@ The SDLC parallel execution feature provided two mechanisms:
 
 ## Why it was removed
 
-The PM/Dev session split that this feature was built on (PM orchestrates, Dev executes, one Dev session per stage) has been collapsed into a single Eng session type. With a unified Eng session handling both orchestration and execution through the granite PTY container, the multi-dev fan-out machinery (`sdlc-decompose`, sub-slug session creation, merge-integration sessions) no longer has a substrate to run on.
+The PM/Dev session split that this feature was built on (PM orchestrates, Dev executes, one Dev session per stage) has been collapsed into a single Eng session type. With a unified Eng session handling both orchestration and execution, the multi-dev fan-out machinery (`sdlc-decompose`, sub-slug session creation, merge-integration sessions) no longer has a substrate to run on.
 
 The associated CLI entry point (`sdlc-decompose`) and supporting code have been deleted.

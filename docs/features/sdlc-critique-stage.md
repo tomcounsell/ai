@@ -20,11 +20,31 @@ When a plan completes, the Observer routes to CRITIQUE instead of BUILD. The `/d
 
 2. **Structural checks** (Step 2): Automated validation of required sections, task integrity, dependency chains, file path existence, and cross-reference consistency.
 
-3. **War room critics** (Step 3): Seven parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor) analyze the plan from different perspectives, each returning 0-3 severity-rated findings. The Consistency Auditor (added in #1042) specifically checks for contradictions between sections — spike findings vs. task steps, No-Gos vs. Solution, success criteria vs. Technical Approach. Each critic writes findings to a per-critic result file (`{critic_name}.result.md`) ending with a two-line terminal completion fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` / `STATUS: COMPLETED`).
+3. **War room critics** (Step 3): Seven parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor) analyze the plan from different perspectives, each returning 0-3 severity-rated findings. The Consistency Auditor specifically checks for contradictions between sections — spike findings vs. task steps, No-Gos vs. Solution, success criteria vs. Technical Approach. Each critic writes findings to a per-critic result file (`{critic_name}.result.md`) ending with a two-line terminal completion fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` / `STATUS: COMPLETED`).
 
-3.5. **Roster membership gate** (Step 3.5, added in #1690): Before aggregation, the `critique-roster-check` CLI tool verifies that every critic named in the frozen `_roster.json` manifest has delivered a complete result file. If any critics are missing, only the missing critics are re-dispatched (foreground, up to `MAX_CRITIC_REDISPATCH` cap). If the roster is still incomplete after the cap, the skill records a `MAJOR REWORK (CRITIQUE INCOMPLETE)` verdict rather than aggregating partial results.
+3.5. **Roster membership gate** (Step 3.5): Before aggregation, the `critique-roster-check` CLI tool verifies that every critic named in the frozen `_roster.json` manifest has delivered a complete result file. If any critics are missing, only the missing critics are re-dispatched (foreground, up to `MAX_CRITIC_REDISPATCH` cap). If the roster is still incomplete after the cap, the skill records a `MAJOR REWORK (CRITIQUE INCOMPLETE)` verdict rather than aggregating partial results.
 
 4. **Aggregation** (Steps 4-5): After the roster gate confirms all critics are present, findings are deduplicated, sorted by severity, and a verdict is issued.
+
+## Execution Context (#3137)
+
+`/do-plan-critique` runs inline in whatever context invokes it; it carries no
+`context: fork`. The harness withholds the Agent tool from any subagent at its
+spawn-depth limit (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, default 3), and a
+forked skill's subagent is an ordinary subagent rather than a conversation
+fork, so it gets no exemption. In the #2732 supervision run the chain was
+main → dev-session subagent → per-stage general-purpose Agent → forked
+critique, which put the critique at depth 3 with no Agent tool. Both rounds
+applied the three lenses sequentially in one agent, the roster gate still
+reported `complete: true`, and only the report prose mentioned the downgrade.
+
+Inline, the critics spawn one layer shallower on every path. Isolation of the
+critique's context is the dispatcher's job: `/do-sdlc` and `/sdlc` already wrap
+each stage in its own general-purpose Agent. The report header now carries a
+mandatory `**Mode**` line, `independent roster (M critics)` or `sequential
+lenses (Agent tool unavailable: reason)`, so a supervisor or a G2 escalation
+reader can tell a corroborated verdict from a single-agent one without reading
+the prose. The verdict string itself is unchanged in either mode.
 
 ## Finding Format
 
@@ -78,7 +98,7 @@ The concern-triggered revision pass (`READY TO BUILD (with concerns)`) re-enters
 
 ## Propagation Check (do-plan integration)
 
-The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are written and before the plan is committed. This check cross-references task bullets against the Technical Approach (or spike findings) to catch stale implementation assumptions before they reach the critic stage.
+The `do-plan` skill runs a **Phase 2.6 Propagation Check** after all tasks are written and before the plan is committed. This check cross-references task bullets against the Technical Approach (or spike findings) to catch stale implementation assumptions before they reach the critic stage.
 
 **Common failure pattern:** After spike-2 confirms `json.dumps()` is the correct encoding, a task bullet still says "msgpack-encoded payload". The propagation check flags and corrects this before commit.
 
@@ -90,10 +110,10 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 | `agent/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
 | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
 | `agent/build_pipeline.py` | "critique" in STAGES list |
-| `.claude/skills-global/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check, artifact-based roster barrier (#1690) |
-| `.claude/skills-global/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor (#1042) and serialization-boundary item in Skeptic |
-| `tools/critique_roster_check.py` | `critique-roster-check` CLI helper — reads `_roster.json`, verifies terminal fences, exits 0 with JSON gate decision when full roster is complete (#1690) |
-| `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
+| `.claude/skills-global/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check, artifact-based roster barrier |
+| `.claude/skills-global/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor and serialization-boundary item in Skeptic |
+| `tools/critique_roster_check.py` | `critique-roster-check` CLI helper — reads `_roster.json`, verifies terminal fences, exits 0 with JSON gate decision when full roster is complete |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
 | `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
 | `config/personas/engineer.md` | Hard gate rule: CRITIQUE mandatory after PLAN — Rule 1 (in-repo fallback) |
@@ -120,11 +140,4 @@ The `classify_outcome("CRITIQUE", ...)` method in `PipelineStateMachine` recogni
 - "needs revision" in output tail -> `"fail"`
 - "major rework" in output tail -> `"ambiguous"` (escalate; includes both `MAJOR REWORK` for fundamental issues and `MAJOR REWORK (CRITIQUE INCOMPLETE)` when the roster barrier cap is exhausted)
 
-## Related Issues
 
-- Issue #463: SDLC Critique Stage
-- Issue #469: Hallucination fix for critique agents
-- Issue #472: Add CRITIQUE stage to SDLC pipeline between PLAN and BUILD
-- Issue #802: Enforce CRITIQUE and REVIEW gates in PM persona
-- Issue #779: SDLC Skill Gaps — Propagation Check, Shallow Critique Findings, No Revision Pass
-- Issue #1690: Artifact-based roster barrier — replace prose-await with filesystem-verifiable `critique-roster-check` gate

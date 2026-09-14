@@ -120,27 +120,29 @@ point each tool call is dispatched. It is wired into **both** PreToolUse hook
 surfaces so the ceiling holds regardless of which harness a session runs
 under:
 
-- `agent/hooks/pre_tool_use.py::pre_tool_use_hook` — the SDK/headless path,
-  returns `{"decision": "block", "reason": ...}` on a deny.
-- `.claude/hooks/pre_tool_use.py::main` — the interactive `claude` TUI /
-  granite-PTY path, the load-bearing production surface, exits with code `2`
-  on a deny.
+- `agent/hooks/pre_tool_use.py::pre_tool_use_hook` — the SDK in-process hook
+  surface, returns `{"decision": "block", "reason": ...}` on a deny.
+- `.claude/hooks/pre_tool_use.py::main` — the CLI PreToolUse hook, registered
+  in `.claude/settings.json`, that runs in every `claude` subprocess — the
+  headless `claude -p` session-runner subprocesses (the load-bearing
+  production surface) and interactive local TUI sessions alike — exits with
+  code `2` on a deny.
 
 A deny fires when `session.tool_call_count >= MAX_TOOL_CALLS_PER_SESSION`
 (default `1000`) or `session.total_cost_usd >= SESSION_COST_CAP_USD` (default
 `50.0`). `evaluate_tool_budget` decides only; the calling hook actuates the
 inline block and, separately, the deny-surfacing side effects.
 
-**`SESSION_COST_CAP_USD` is currently a no-op on granite sessions.**
-`total_cost_usd` is written solely by `agent/sdk_client.py` — the SDK
-`ResultMessage.total_cost_usd` path and the headless `claude -p stream-json`
-`result`-event path. Nothing under `agent/granite_container/` populates it;
-the interactive TUI transcript carries no cost line. So on the load-bearing
-granite-PTY path, `total_cost_usd` stays `0.0` forever and the cost branch can
-never fire — the operative backstop there is the tool-call cap alone. The
-cost check is retained because it is live and correct on the SDK/headless
-path, and is documented inline as SDK-path-only so its granite no-op status
-is never mistaken for a working ceiling.
+**`SESSION_COST_CAP_USD` is live on the headless session-runner path and a
+no-op on interactive local TUI sessions.**
+`total_cost_usd` is written solely by `agent/sdk_client.py` — the headless
+`claude -p stream-json` `result`-event path (fed through
+`agent/session_runner/harness/claude.py`). An interactive TUI transcript
+carries no cost line, so on that path `total_cost_usd` stays `0.0` forever
+and the cost branch can never fire — the operative backstop there is the
+tool-call cap alone. The cost check is retained because it is live and
+correct on the headless path, and is documented inline as headless-path-only
+so its interactive-TUI no-op status is never mistaken for a working ceiling.
 
 ### The no-session-vs-infra-error fail-open split
 
@@ -211,8 +213,8 @@ filter never matches it and no such loop can form.
 **Race-free deny-surfacing.** On every deny, the hook sets two hook-owned
 `AgentSession` fields — `budget_tripped` (bool) and `budget_tripped_reason`
 (str) — via a narrow `save(update_fields=[...])`. The hook never writes
-`status` directly: on the granite path, `bridge_adapter` writes `status`
-through its own partitioned `update_fields` saves, and a concurrent
+`status` directly: on the headless path, the session-runner adapter writes
+`status` through its own partitioned `update_fields` saves, and a concurrent
 hook-driven status write from another process or thread would race it,
 last-writer-wins. `budget_tripped` / `budget_tripped_reason` are fields no
 other writer touches, so they stay race-free and are the authoritative,
@@ -226,13 +228,13 @@ pattern. All of this surfacing is fail-quiet — a surfacing error never flips
 a deny into an allow, and never crashes the hook; only the notification is
 best-effort.
 
-**The granite shared-counter caveat.** On the granite path,
+**The headless shared-counter caveat.** On the headless path,
 `tool_call_count` sums PM and Dev sub-agent tool calls onto the same session
 counter, so the effective per-role ceiling is roughly half
 `MAX_TOOL_CALLS_PER_SESSION`, and a trip can deny both roles mid-build. This
 is bounded by the conservative default (1000) and the
 `TOOL_BUDGET_ENABLED=false` kill-switch. It is a tuning consideration —
-granite may eventually want a higher `MAX_TOOL_CALLS_PER_SESSION` — not a
+a session type may eventually want a higher `MAX_TOOL_CALLS_PER_SESSION` — not a
 reason to gate the deny off by default, which would leave the backstop inert
 exactly where it matters most.
 
@@ -357,7 +359,7 @@ so none of these live in `config/settings.py`.
 | `TOOL_BUDGET_ENABLED` | on | The budget evaluator and the inline deny; off always allows |
 | `TOOL_BUDGET_AUTO_PAUSE` | off | The `status → paused_budget` transition and Telegram surfacing on a deny |
 | `MAX_TOOL_CALLS_PER_SESSION` | `1000` | Tool-call dimension of the budget |
-| `SESSION_COST_CAP_USD` | `50.0` | Cost dimension of the budget (SDK/headless-path-only — no-op on granite) |
+| `SESSION_COST_CAP_USD` | `50.0` | Cost dimension of the budget (headless-path-only — no-op on interactive local TUI sessions) |
 
 ## Dashboard operator surface
 

@@ -5,23 +5,20 @@ This file is the falsifiable acceptance for `docs/plans/xdist-test-isolation-fla
 multi-file collection ordering, which is machine/collection-order dependent and
 not worth chasing) and asserts the fixes in ``tests/conftest.py`` repair them.
 
-Root cause 1 (Fix 1 — popoto db-cache invalidation):
-    ``_popoto_modules_with_redis_db()`` memoized the set of popoto submodules
-    holding a ``POPOTO_REDIS_DB`` symbol using a SOLE ``len(sys.modules)`` cache
-    key. That key is non-monotonic under an equal-count eviction-then-reimport
-    (e.g. ``mock_claude_sdk_cleanup`` evicting ``agent.*`` between tests, then a
-    later import creating a NEW module object under the SAME dotted name): the
-    total module count doesn't change, so the stale cache kept serving the OLD
-    module object, whose ``POPOTO_REDIS_DB`` was never re-pointed to the test
-    db. Writes and reads then split across db=0 (or whatever db was bound at
-    import time) and the test db, a real "split-brain" that issue #2037
-    observed as a create-then-``query.filter`` miss under
-    ``--dist=loadfile`` co-scheduling. The fix adds a compound trigger: rebuild
-    when EITHER ``len(sys.modules)`` changes (catches brand-new never-cached
-    db-holders) OR any cached module's identity has diverged from
-    ``sys.modules`` (catches the equal-count replacement). Neither branch alone
-    is sufficient — see the docstring on ``_popoto_modules_with_redis_db`` in
-    ``tests/conftest.py`` for the full accounting.
+Root cause 1 (Fix 1 — one popoto client object, mutated in place):
+    Popoto submodules capture ``POPOTO_REDIS_DB`` with ``from ..redis_db import
+    POPOTO_REDIS_DB`` at import time. Whenever anything REPLACES the object on
+    ``popoto.redis_db``, every one of those bindings is stranded on the old
+    client, so writes and reads split across two databases — a real
+    "split-brain" that issue #2037 observed as a create-then-``query.filter``
+    miss under ``--dist=loadfile`` co-scheduling.
+
+    ``tests/conftest.py`` therefore never rebinds the object: its session-scoped
+    ``_popoto_pool_install`` swaps only ``client.connection_pool``, so every
+    binding follows for free and no ``sys.modules`` re-pointing walk exists
+    (#2771). ``TestPopotoSplitBrainRoundTrip`` below keeps a live reproduction
+    of the mechanism, and ``tests/unit/test_popoto_client_identity.py`` asserts
+    the invariant that makes the repair unnecessary.
 
 Root cause 2 (Fix 2 — agent-hooks consistency guard):
     CPython only rebinds a submodule as an attribute on its parent package the
@@ -42,19 +39,22 @@ Root cause 3 (Fix 3 — shared-exception identity guard, #2603):
     name elsewhere splits each class in two. See
     ``TestSharedExceptionIdentityGuard`` below.
 
-Every test below that mutates ``sys.modules``, ``tests.conftest`` module-level
-caches, or popoto ``POPOTO_REDIS_DB`` bindings restores that state in a
-``finally`` block so this file cannot poison other tests sharing its worker.
+Every test below that mutates ``sys.modules`` or a popoto ``POPOTO_REDIS_DB``
+binding restores that state in a ``finally`` block so this file cannot poison
+other tests sharing its worker.
 """
 
 from __future__ import annotations
 
 import fcntl
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
 import types
 
+import popoto.redis_db as rdb
 import pytest
 import redis
 
@@ -222,143 +222,6 @@ class TestAgentHooksGuardRepair:
 
 
 # ---------------------------------------------------------------------------
-# Test B — falsifiable binding gate for the popoto db-cache compound trigger
-# (Fix 1)
-# ---------------------------------------------------------------------------
-
-
-class TestPopotoModuleCacheBindingGate:
-    """This is the most important test in the file: it is engineered so that
-    the pre-fix SOLE ``len(sys.modules)`` cache key would be RED (miss the
-    equal-count module-identity swap and keep serving the stale object) while
-    the compound trigger (len OR identity) is GREEN.
-
-    We do NOT rely on "import a fresh popoto submodule mid-test" as the sole
-    check -- that changes ``len(sys.modules)`` too, so even the pre-fix
-    sole-len key would rebuild and the test would false-green without proving
-    anything about the identity branch.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _snapshot_and_restore_cache_globals(self):
-        """Hermeticity: every mutation this class makes to
-        ``tests.conftest``'s module-private cache globals, or to
-        ``sys.modules`` entries, is undone afterward so this file cannot
-        poison other tests sharing the worker.
-        """
-        saved_cache = dict(_conftest._POPOTO_MODULE_CACHE)
-        saved_len = _conftest._POPOTO_MODULE_CACHE_LEN
-        saved_sys_modules_entries: dict[str, object | None] = {}
-        yield saved_sys_modules_entries
-        # Restore any sys.modules entries this test swapped or added.
-        for name, original in saved_sys_modules_entries.items():
-            if original is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = original
-        _conftest._POPOTO_MODULE_CACHE = saved_cache
-        _conftest._POPOTO_MODULE_CACHE_LEN = saved_len
-
-    def test_identity_divergence_forces_rebuild_with_len_unchanged(
-        self, _snapshot_and_restore_cache_globals, request
-    ):
-        tracked = _snapshot_and_restore_cache_globals
-
-        # 1. Warm the cache against the real, currently-imported popoto state.
-        warm = _conftest._popoto_modules_with_redis_db()
-        assert warm, (
-            "popoto must already be imported with db-holding submodules by this point in the suite"
-        )
-
-        target_name = "popoto.models.query"
-        assert target_name in _conftest._POPOTO_MODULE_CACHE, (
-            f"expected {target_name!r} to be a cached popoto db-holder; "
-            f"cached names: {sorted(_conftest._POPOTO_MODULE_CACHE)}"
-        )
-        stale_module = _conftest._POPOTO_MODULE_CACHE[target_name]
-        assert sys.modules[target_name] is stale_module
-
-        # 2. Build a FRESH module object under the SAME name, carrying its own
-        #    POPOTO_REDIS_DB -- an equal-count, equal-name-set replacement
-        #    (mirrors mock_claude_sdk_cleanup's evict-then-reimport pattern).
-        fresh_module = types.ModuleType(target_name)
-        # A plain sentinel is enough here -- no redis command is ever issued
-        # against it, we only need `POPOTO_REDIS_DB` to be a distinct object
-        # from stale_module's binding so identity (`is`) is falsifiable.
-        fresh_module.POPOTO_REDIS_DB = object()
-
-        tracked[target_name] = sys.modules[target_name]  # remember for teardown
-        sys.modules[target_name] = fresh_module
-
-        # 3. Pre-seed the post-fix globals to the CURRENT state so the `len`
-        #    branch does NOT fire -- only the identity branch can catch the
-        #    swap. Swapping in place under the same name does not change
-        #    len(sys.modules), so this reflects reality; we set it explicitly
-        #    per the plan's instruction to make the non-firing of the len
-        #    branch airtight regardless of import activity elsewhere.
-        _conftest._POPOTO_MODULE_CACHE = dict(_conftest._POPOTO_MODULE_CACHE)
-        _conftest._POPOTO_MODULE_CACHE[target_name] = stale_module  # still the OLD object
-        _conftest._POPOTO_MODULE_CACHE_LEN = len(sys.modules)
-
-        assert len(sys.modules) == _conftest._POPOTO_MODULE_CACHE_LEN, (
-            "len branch must not fire: this proves any rebuild below is caused "
-            "solely by the identity-divergence branch"
-        )
-
-        # 4. The load-bearing assertion: the rebuilt cache must return the
-        #    NEW object by identity, not the stale cached one.
-        rebuilt = _conftest._popoto_modules_with_redis_db()
-        returned_for_target = [m for m in rebuilt if getattr(m, "__name__", None) == target_name]
-        assert len(returned_for_target) == 1
-        assert returned_for_target[0] is fresh_module, (
-            "identity check failed to catch the equal-count module swap -- "
-            "this is exactly the pre-fix sole-len-key failure mode (issue #2037)"
-        )
-        assert returned_for_target[0] is not stale_module
-
-        # 5. Exercise the redis_test_db re-point loop's assignment directly:
-        #    after applying the fix's result the way redis_test_db does, the
-        #    FRESH module's POPOTO_REDIS_DB must end up pointed at a real test
-        #    client (db != 0).
-        test_db_num = _db_claim.claim_test_db()
-        assert test_db_num != 0
-        test_client = redis.Redis(db=test_db_num)
-        try:
-            for mod in rebuilt:
-                mod.POPOTO_REDIS_DB = test_client
-            assert sys.modules[target_name].POPOTO_REDIS_DB is test_client
-            assert (
-                sys.modules[target_name].POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"]
-                != 0
-            )
-        finally:
-            test_client.close()
-
-    def test_len_branch_catches_a_brand_new_never_cached_holder(
-        self, _snapshot_and_restore_cache_globals
-    ):
-        """Companion assertion (Success Criteria, Test B): a genuinely new
-        popoto db-holder name that was never cached before must appear in the
-        rebuilt cache -- this is the branch an identity-only check would miss
-        (any() over an existing cache is vacuously False for unseen names).
-        """
-        tracked = _snapshot_and_restore_cache_globals
-
-        # Warm first so we have a real baseline to diverge from.
-        _conftest._popoto_modules_with_redis_db()
-
-        new_name = "popoto._test_fake_db_holder_for_len_branch"
-        assert new_name not in sys.modules
-        fake_module = types.ModuleType(new_name)
-        fake_module.POPOTO_REDIS_DB = object()
-        tracked[new_name] = None  # wasn't present before; remove at teardown
-        sys.modules[new_name] = fake_module
-
-        rebuilt = _conftest._popoto_modules_with_redis_db()
-        assert any(getattr(m, "__name__", None) == new_name for m in rebuilt)
-
-
-# ---------------------------------------------------------------------------
 # Test C — #2037 real-record create-then-query.filter split-brain regression
 # ---------------------------------------------------------------------------
 
@@ -366,8 +229,15 @@ class TestPopotoModuleCacheBindingGate:
 class TestPopotoSplitBrainRoundTrip:
     """Reproduces the exact #2037 mechanism directly: divert ONE read-path
     popoto module's local POPOTO_REDIS_DB binding to a different test db,
-    prove a create-then-filter round trip misses the record, then apply the
-    fixed re-point path and prove the identical round trip now succeeds.
+    prove a create-then-filter round trip misses the record, then restore that
+    binding to the canonical client and prove the identical round trip now
+    succeeds.
+
+    The repair step is the invariant conftest now establishes (#2771): there is
+    exactly ONE ``POPOTO_REDIS_DB`` object per process, and every module-level
+    binding of that symbol is that object. Nothing walks ``sys.modules`` to
+    re-point anything — a binding is either the canonical object or it is a bug,
+    and this test is the live reproduction of what that bug costs.
     """
 
     def test_create_then_filter_split_brain_and_fix(self, request, scratch_test_db):
@@ -377,6 +247,12 @@ class TestPopotoSplitBrainRoundTrip:
         original_query_binding = query_module.POPOTO_REDIS_DB
 
         base_test_db = _db_claim.claim_test_db()
+        # Host and port come from the claim registry, never from redis-py's
+        # localhost:6379 defaults: the flock that makes this db exclusive
+        # protects the registry's server, so a client anywhere else is
+        # unprotected (#2799).
+        test_host = _db_claim.redis_test_host()
+        test_port = int(_db_claim.redis_test_port())
         # A SECOND database this process owns, claimed from the same flock pool
         # as the primary one. It used to be a hardcoded 15 called "scratch
         # space" — but 15 is the top slot of the claim pool, so this test was
@@ -387,11 +263,10 @@ class TestPopotoSplitBrainRoundTrip:
         assert divergent_db != 0
         assert divergent_db != base_test_db
 
-        divergent_client = redis.Redis(db=divergent_db)
+        divergent_client = redis.Redis(host=test_host, port=test_port, db=divergent_db)
         divergent_client.flushdb()  # keep this scratch db clean for a deterministic miss
 
         created = None
-        correct_test_client = None
         project_key = f"test-xdist-split-brain-{id(self)}"
         try:
             # --- Step 1: reproduce the split-brain -----------------------
@@ -417,12 +292,14 @@ class TestPopotoSplitBrainRoundTrip:
                 "this demonstrates the #2037 split-brain mechanism"
             )
 
-            # --- Step 2: apply the FIXED re-point path --------------------
-            # Mirrors what the redis_test_db fixture does: walk every popoto
-            # db-holding module and repoint it at the correct test client.
-            correct_test_client = redis.Redis(db=base_test_db)
-            for mod in _conftest._popoto_modules_with_redis_db():
-                mod.POPOTO_REDIS_DB = correct_test_client
+            # --- Step 2: restore the binding to the canonical client ------
+            # There is one client object and every binding is it. No walk, no
+            # replacement client: the write path and the read path converge
+            # because they are literally the same object (#2771).
+            query_module.POPOTO_REDIS_DB = rdb.POPOTO_REDIS_DB
+            assert rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs["db"] == base_test_db, (
+                "the canonical client must be on this process's claimed db"
+            )
 
             # --- Step 3: identical round trip now succeeds ----------------
             found = list(AgentSession.query.filter(project_key=project_key))
@@ -433,15 +310,11 @@ class TestPopotoSplitBrainRoundTrip:
             # the delete() below (and the autouse redis_test_db teardown)
             # operate against the correct test db.
             query_module.POPOTO_REDIS_DB = original_query_binding
-            for mod in _conftest._popoto_modules_with_redis_db():
-                mod.POPOTO_REDIS_DB = original_query_binding
             if created is not None:
                 # ORM delete only -- never raw Redis on Popoto-managed keys.
                 remaining = list(AgentSession.query.filter(project_key=project_key))
                 for record in remaining:
                     record.delete()
-            if correct_test_client is not None:
-                correct_test_client.close()
             divergent_client.flushdb()
             divergent_client.close()
 
@@ -525,6 +398,22 @@ class TestPerProcessDbClaim:
         set — so assertions can read them.
         """
         monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
+        # The synthetic registry hands back a db this process does not own, so the
+        # real export would poison the live session env for every later test in this
+        # worker. Suppress the write instead of undoing it: there is then no window
+        # in which os.environ names a foreign db (#2805 Risk 1). This helper — not
+        # each of its 23 call sites — owns the suppression, so the next direct
+        # pytest_configure() caller is protected without anyone remembering.
+        #
+        # REDIS_URL itself is deliberately NOT touched here (no delenv, no setenv):
+        # with the write suppressed at the source there is nothing to restore, and
+        # a delenv would make REDIS_URL absent for the duration of all 23 tests that
+        # use this helper -- at which point every one of the 20 lazy REDIS_URL
+        # consumers in tests/ and production modules falls back to its hardcoded
+        # "redis://localhost:6379/0" default, manufacturing the exact db0 exposure
+        # #2805 exists to remove.
+        monkeypatch.setattr(_conftest, "_export_claimed_redis_url", lambda: None)
+        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         monkeypatch.setattr(_db_claim, "_test_db_claim_dir", lambda: str(tmp_path))
         monkeypatch.setattr(_db_claim, "_CLAIMED_TEST_DB", None, raising=False)
         monkeypatch.setattr(_db_claim, "_CLAIMED_SCRATCH_DB", None, raising=False)
@@ -852,6 +741,104 @@ class TestPerProcessDbClaim:
         finally:
             self._close_fds(fds)
 
+    def test_live_process_redis_url_names_its_own_claim(self):
+        """The live session's REDIS_URL names this process's claimed db.
+
+        Per-worker independence check: unlike the leak probe in
+        ``TestExportedRedisUrlSurvivesSyntheticHookCalls`` (which runs LAST and
+        proves nothing polluted this process's claim across the whole file),
+        this assertion runs under ``-n 2 --dist=each`` to prove EACH worker's
+        own process resolves its OWN claim, independent of its siblings.
+        """
+        assert os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")
+
+    def test_unguarded_child_inherits_the_parents_claimed_redis_url(self):
+        """A plain subprocess.run with NO env= resolves REDIS_URL to the same
+        value as the parent's os.environ -- byte-identical, not merely present.
+
+        This is what #2805 makes true by construction: no scanner, no
+        allowlist, nothing for a test author to remember.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", "import os; print(os.environ['REDIS_URL'])"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        child_url = result.stdout.strip()
+        assert child_url == os.environ["REDIS_URL"]
+
+    def test_nested_pytest_child_claims_its_own_db(self, tmp_path):
+        """A nested pytest child spawned WITHOUT env= inherits the parent's
+        REDIS_URL, then overwrites it with its OWN claim (#2628 invariant).
+
+        The nested target must live UNDER ``tests/``, not merely under the repo
+        root: pytest only auto-loads a ``conftest.py`` found in an ANCESTOR
+        directory of the collected file. A probe placed as a sibling of
+        ``tests/`` (e.g. directly under repo root) never picks up
+        ``tests/conftest.py``, so the child inherits the parent's env
+        unchanged and never runs its own ``pytest_configure`` -- this
+        assertion would then always fail, for a reason having nothing to do
+        with the #2628 invariant under test.
+
+        The nested dir/probe filename is worker-scoped (PID suffix): under
+        ``-n 2 --dist=each`` two workers run this test concurrently, and a
+        shared path lets one worker's ``finally``-block unlink race the
+        other's still-running nested pytest, producing a spurious
+        ``FileNotFoundError`` that has nothing to do with the #2628
+        invariant under test.
+        """
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        nested_dir = repo_root / "tests" / f".pytest_nested_probe_2805_{os.getpid()}"
+        nested_dir.mkdir(exist_ok=True)
+        probe_file = nested_dir / "test_probe.py"
+        out_file = tmp_path / "nested_redis_url.txt"
+        try:
+            probe_file.write_text(
+                "import os\n"
+                "def test_probe():\n"
+                f"    open({str(out_file)!r}, 'w').write(os.environ['REDIS_URL'])\n"
+            )
+            parent_url = os.environ["REDIS_URL"]
+            subprocess.run(
+                [sys.executable, "-m", "pytest", str(probe_file), "-p", "no:randomly", "-n0", "-q"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            nested_url = out_file.read_text()
+            assert nested_url != parent_url, (
+                "a nested pytest child must claim its own db, not inherit the parent's "
+                "(#2628) -- it overwrites the inherited REDIS_URL with its own claim"
+            )
+        finally:
+            probe_file.unlink(missing_ok=True)
+            shutil.rmtree(nested_dir, ignore_errors=True)
+
+    def test_non_splatting_env_drops_redis_url(self):
+        """DOCUMENTATION TEST, not a behavior the system provides.
+
+        The retired 688-line AST guard (``test_subprocess_test_db_isolation.py``,
+        deleted by #2805) used to flag any ``env=`` value that was not an
+        ``ast.Call``/``ast.Name`` -- including a non-splatting dict literal like
+        ``env={"PYTHONPATH": ...}``. That shape drops REDIS_URL entirely and the
+        export CANNOT rescue it, because the child never inherits ``os.environ``
+        at all. This is the coverage gap #2805's Risk 2 accepts: it is rarer
+        than writing no ``env=`` (the shape the export now handles by
+        construction), and the runtime backstops (tools/redis_flush_guard.py on
+        a db0 flush; conftest's claimed-db flush guard) still fail closed
+        underneath it.
+        """
+        result = subprocess.run(
+            [sys.executable, "-c", "import os; print('REDIS_URL' in os.environ)"],
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "False"
+
 
 # ---------------------------------------------------------------------------
 # Test D — shared-exception identity guard (Fix for #2603)
@@ -993,7 +980,11 @@ class TestFlushOwnershipGuard:
         suite. The db comes from the claim API — the process holds an flock on
         it, machine-wide.
         """
-        client = redis.Redis(db=_db_claim.claim_test_db())
+        client = redis.Redis(
+            host=_db_claim.redis_test_host(),
+            port=int(_db_claim.redis_test_port()),
+            db=_db_claim.claim_test_db(),
+        )
         try:
             assert client.flushdb() is True
         finally:
@@ -1093,7 +1084,6 @@ class TestSessionClaimHook:
         makes exhaustion fatal.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=2))
             assert _db_claim._CLAIMED_TEST_DB is None
@@ -1105,7 +1095,6 @@ class TestSessionClaimHook:
     def test_worker_claims_and_exports_popoto_test_db(self, monkeypatch, tmp_path):
         """A worker claims, and points popoto's plugin at the same db."""
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             config = self._stub_config(worker=True, numprocesses=4)
             _conftest.pytest_configure(config)
@@ -1123,7 +1112,6 @@ class TestSessionClaimHook:
         claims nothing and the fail-closed guard denies every flush.
         """
         fds, _nums = TestPerProcessDbClaim._reset_claim_state(monkeypatch, tmp_path)
-        monkeypatch.delenv("POPOTO_TEST_DB", raising=False)
         try:
             _conftest.pytest_configure(self._stub_config(worker=False, numprocesses=0))
             assert _db_claim._CLAIMED_TEST_DB is not None
@@ -1135,18 +1123,18 @@ class TestSessionClaimHook:
         """THE binding measurement for writer 3.
 
         popoto ships a ``pytest11`` plugin that this repo loads on every run.
-        Left on its default it sits on db 15 — the top slot of the claim pool —
-        and its autouse ``_popoto_flush_db`` flushes that db before EVERY test
-        in EVERY pytest process on the machine. It is by a wide margin the
-        highest-frequency writer, and it lives in installed library code where
-        no review of ``tests/`` can see it.
+        Its autouse ``_popoto_flush_db`` flushes the db it is pointed at before
+        EVERY test, in EVERY pytest process on the machine, from installed
+        library code where no review of ``tests/`` can see it. The plugin is
+        opt-in: it swaps and flushes nothing until ``POPOTO_TEST_DB`` or the
+        ``popoto_test_db`` ini option names a db, and this repo's opt-in is the
+        export in ``pytest_configure``, which names the db this process claimed.
 
         Asserted on the environment rather than on ``POPOTO_REDIS_DB``: inside a
         test body the autouse ``redis_test_db`` fixture has already replaced
         that client with one on the claimed db, so reading it here would measure
-        this repo's own fixture and pass on ``main`` too. ``POPOTO_TEST_DB`` is
-        the plugin's own documented resolution input, and it is unset on
-        ``main`` — which is the red state.
+        this repo's own fixture instead of the plugin's input. ``POPOTO_TEST_DB``
+        is the plugin's own documented resolution input.
 
         The ``== claim_test_db()`` form is the drift detector: if a future
         popoto changes its resolution order, this fails loudly instead of the
@@ -1171,6 +1159,23 @@ class TestSessionClaimHook:
             next(gen)
         except StopIteration:
             pass
+
+    def test_async_global_is_still_none_after_redis_test_db_setup(self):
+        """The fence against re-introducing an eager async bind in conftest.
+
+        ``redis_test_db`` has already completed its setup by the time this body
+        runs (it is autouse and function-scoped), so this observes exactly the
+        state a test sees. It must still be ``None``: conftest used to assign
+        ``aioredis.Redis(...)`` here, and because conftest sets up AFTER the
+        plugin's ``_popoto_reset_async``, that synchronously-built,
+        wrong-event-loop client was the one every test actually got. Leaving the
+        global ``None`` hands it back to ``get_async_redis_db()``, which builds
+        it lazily inside the test's own loop (#2771).
+        """
+        assert getattr(rdb, "_POPOTO_ASYNC_REDIS_DB", None) is None, (
+            "something bound popoto's async client outside a running test loop; "
+            "conftest must never assign _POPOTO_ASYNC_REDIS_DB (#2771)"
+        )
 
     def test_every_live_popoto_client_sits_on_a_claimed_db(self):
         """The plugin-agnostic half: whatever clients ``popoto.redis_db`` holds,
@@ -1362,3 +1367,41 @@ class TestReloadedRegistryIdentity:
             index_drift.DRIFT_COVERED_MODELS = original_registry
             original_registry.clear()
             original_registry.update(original_contents)
+
+
+# ---------------------------------------------------------------------------
+# Test H — REDIS_URL export survives synthetic hook calls (#2805)
+# ---------------------------------------------------------------------------
+class TestExportedRedisUrlSurvivesSyntheticHookCalls:
+    """The permanent leak-detection probe for #2805.
+
+    Placed in its own class at the END of this file, deliberately -- NOT inside
+    ``TestPerProcessDbClaim`` (line ~452), which runs BEFORE the synthetic
+    ``pytest_configure()`` calls in ``TestSessionClaimHook`` (line ~1080+). A
+    probe collected earlier in the file is structurally incapable of observing
+    a leak that a later class's synthetic hook calls would introduce, so this
+    class runs last under ``-p no:randomly`` and reads ``os.environ`` after
+    every synthetic hook call in the file has already run.
+
+    This is a DIFFERENT property from the four behavioral assertions in
+    ``TestPerProcessDbClaim`` (live-process claim naming under per-worker
+    ``--dist=each``, unguarded-child inheritance, nested-pytest own-claim, and
+    the non-splatting-``env=`` coverage-gap documentation test): those prove
+    the export mechanism works in isolation; this one proves nothing EARLIER
+    in the file's synthetic ``pytest_configure()`` calls corrupted the live
+    session's ``REDIS_URL`` by the time collection reaches the end of the
+    file. A probe with this same body placed anywhere in ``TestPerProcessDbClaim``
+    (line 452, collected before the synthetic calls at 1098+) would be
+    structurally incapable of ever going red -- this class exists solely to
+    give that check something meaningful to observe.
+    """
+
+    def test_redis_url_unpolluted_by_synthetic_hook_calls(self):
+        """The live session's REDIS_URL still names this process's claimed db
+        after every synthetic ``pytest_configure()`` call in this file has run.
+
+        This is the permanent regression test for #2805: it fails the instant
+        the export in ``pytest_configure`` stops running, is shadowed, or is
+        left corrupted by one of this file's own synthetic hook-call tests.
+        """
+        assert os.environ["REDIS_URL"].endswith(f"/{_db_claim.claim_test_db()}")

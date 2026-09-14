@@ -17,18 +17,18 @@ runs against an unchanged PR.
 | Component | Purpose |
 |-----------|---------|
 | `agent/sdlc_router.py` | Python reference implementation of the dispatch table — `decide_next_dispatch(stage_states, meta, context)`. Ground truth for the `/sdlc` router. |
-| `agent/sdlc_router.py::evaluate_guards()` | Evaluates G1-G8 preconditions, in the pinned order `[G1, G2, G3, G4, G8, G7, G5, G6]`, before the dispatch table runs. |
+| `agent/sdlc_router.py::evaluate_guards()` | Evaluates G1-G9 preconditions, in the pinned order `[G1, G2, G3, G4, G9, G8, G7, G5, G6]`, before the dispatch table runs. |
 | `tools/sdlc_verdict.py` | CLI and Python API for recording/reading critique and review verdicts under `stage_states._verdicts`. Sole writer to the `_verdicts` key. |
 | `tools/sdlc_stage_query.py` | Extended to return enriched payload: `{stages, _meta}` with cycle counters, verdicts, PR number, dispatch counter, last dispatched skill. `--format legacy` preserves the flat shape for older callers. |
 | `tools/stage_states_helpers.py` | `update_stage_states(session, update_fn, max_retries=3)` — optimistic-retry helper for concurrent writes to the JSON `stage_states` field. |
 | `agent/pipeline_state.py::classify_outcome` | Routes verdict writes through `sdlc_verdict.record_verdict()` — ONE writer to `_verdicts`. |
-| `.claude/skills/sdlc/SKILL.md` | Dispatch table rows cite the Python implementation; a parity test fails CI if markdown and Python drift. |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Dispatch table rows cite the Python implementation; a parity test fails CI if markdown and Python drift. |
 
 ### The `Blocked` escalation contract
 
 `Blocked(reason, guard_id)` tells the router to stop and surface to a human.
 `guard_id` is a short machine-matchable code saying **why**, and it does not
-imply "a numbered guard fired": alongside the `G1`–`G8` codes it carries the
+imply "a numbered guard fired": alongside the `G1`–`G9` codes it carries the
 `NO_RULE` sentinel (`NO_RULE_GUARD_ID`) for the dispatch-table fallthrough,
 which is a genuine hole in the table rather than a guard verdict. A supervisor
 can therefore tell "the rules deliberately refused" from "no rule owned this
@@ -37,31 +37,40 @@ state" without parsing the reason string.
 Consumers matching on specific guards must compare against the codes they care
 about, never merely test `guard_id is not None`.
 
-## The Eight Guards
+## The Nine Guards, Plus the Terminal Guard
 
 Guards run **before** the dispatch table. The first tripped guard wins.
 **Pinned evaluation order** (`GUARDS` in `agent/sdlc_router.py`, list-literal
 order is binding):
 
 ```
-G1 → G2 → G3 → G4 → G8 → G7 → G5 → G6
+T → G1 → G2 → G3 → G4 → G9 → G8 → G7 → G5 → G6
 ```
 
-The table below is numbered `G1`-`G8` for readability, not evaluation order —
+`T` (the terminal-lane guard, #2894/#2817) runs ahead of all nine numbered
+guards: a finished lane has no correct dispatch and no guard verdict worth
+computing, so it preempts the entire table rather than being one more row in
+it. See [SDLC Terminal Lane State](sdlc-terminal-lane-state.md) for what makes
+a lane terminal and why it sits first.
+
+The table below is numbered `G1`-`G9` for readability, not evaluation order —
 the row order in the table does **not** match the pinned order above (G7 sits
-before G5/G6; G8 sits between G4 and G7). Cross-reference the pinned order
-whenever two guards could otherwise both match the same state.
+before G5/G6; G9 sits between G4 and G8; G8 sits between G9 and G7).
+Cross-reference the pinned order whenever two guards could otherwise both
+match the same state.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
+| **T: Terminal lane** | `stage_states["MERGE"]` is settled (`completed`/`skipped`) OR `pr_state == "MERGED"` | `Terminal` — a clean "nothing to dispatch, nothing is wrong" exit, distinct from `blocked`. Preempts every other guard and the dispatch table. Disable via `SDLC_TERMINAL_GUARD=false`. |
 | **G1: Critique loop** | Latest critique verdict is `NEEDS REVISION` or `MAJOR REWORK` AND last dispatched skill was `/do-plan-critique` | `/do-plan`. **Steps aside if a PR is already open** (`meta["pr_number"]` set), deferring to G3 instead (#1932) — see below. |
 | **G2: Critique cycle cap** | `critique_cycle_count >= 2` AND CRITIQUE is still failing | `blocked` — escalate with reason `critique cycle cap reached` |
-| **G3: PR lock** | Open PR exists for the issue AND proposed dispatch is `/do-plan` or `/do-plan-critique` | Redirect to `/do-pr-review` / `/do-patch` / `/do-merge` based on `stage_states` |
+| **G3: PR lock** | Open PR exists for the issue AND **either** `meta["last_dispatched_skill"]` **or** `context["proposed_skill"]` is `/do-plan` or `/do-plan-critique` — two independent routes, see below | Redirect through a four-leg ladder on `stage_states`: `/do-merge` (REVIEW and DOCS complete) → `/do-patch` (review requested changes, or REVIEW failed) → `/do-docs` (REVIEW completed with a head-fresh `APPROVED` verdict and DOCS still pending, #3227) → `/do-pr-review` |
 | **G4: Oscillation (universal)** | `same_stage_dispatch_count >= 3` | `blocked` — escalate with reason `stage oscillation — {skill} dispatched {N} times without state change` |
 | **G5: Unchanged critique artifact** | Previous CRITIQUE verdict exists AND current plan file hash matches recorded hash | Use cached verdict — do not re-dispatch `/do-plan-critique`. **Applies to CRITIQUE only.** REVIEW non-determinism is handled by G4 instead. On a cached `NEEDS_REVISION`/`MAJOR_REWORK` verdict, **steps aside if a PR is already open**, mirroring the pre-existing defer on the `READY_TO_BUILD` branch (#1932) — see below. On its `READY_TO_BUILD` branch, also steps aside (returns `None`) when `plan_revising` is set and `revision_applied` is not — the #1871 present-gap short-circuit, see below. |
 | **G6: Terminal merge ready** | `pr_number` set AND `pr_merge_state == "CLEAN"` AND `ci_all_passing == True` AND `DOCS == "completed"` AND `_verdicts["REVIEW"]` contains `APPROVED` | `/do-merge {pr_number}` — fast-path bypasses re-reviewing an already-approved PR |
 | **G7: Plan-revising lock** | `pr_number` is `None` AND `plan_revising == True` AND `revision_applied != True` | `/do-plan` (if `last_dispatched_skill == /do-plan-critique`); escalate to `blocked` if no `/do-plan` dispatch appears in the last `MAX_PLAN_REVISING_DISPATCHES + 1` turns |
 | **G8: Artifact verification** | `context["stage_artifacts_verified"] is False` (an explicit, live-checked mismatch — see below) | Re-dispatch the skill for `context["unverified_stage"]` rather than letting the pipeline advance on the self-attested marker |
+| **G9: Blocked-on-conflict** | Recorded REVIEW verdict contains `BLOCKED_ON_CONFLICT` AND `pr_merge_state` is not in the non-conflicting set (`CLEAN`, `HAS_HOOKS`, `UNSTABLE`, `BLOCKED`, `BEHIND` — mirrors `/do-pr-review`'s own preflight decision table) AND the verdict is not stale (no `/do-patch` landed after it) | `blocked` — escalate with a reason naming the PR, the merge state, and the rebase; no SDLC skill resolves merge conflicts (#2796) |
 
 ### Why G6 is Evaluated Last
 
@@ -226,6 +235,67 @@ bug, not infra) is **not** swallowed: it is logged at error level and
 re-raised, so a broken gate is visible instead of silently failing open
 forever.
 
+### G9: escalate on unresolved conflicts (#2796)
+
+`BLOCKED_ON_CONFLICT` is a first-class verdict token in
+`tools/sdlc_verdict.py`, `tools/sdlc_review_finalize.py`, and
+`tools/sdlc_stage_marker.py` — `/do-pr-review`'s preflight records it when the
+PR is `CONFLICTING`/`DIRTY` (or mergeability is `UNKNOWN` after retry) and
+stops without reviewing any code. Before G9 existed, the router had no notion
+of the token at all, so a correctly-finalized conflict verdict routed by
+accident: row 8 (`_rule_review_has_findings`, via `REVIEW == failed`) sent it
+to `/do-patch`, which cannot rebase; row 8b then sent it back to
+`/do-pr-review`, whose preflight short-circuited again and re-recorded the
+same verdict — ping-ponging until G4 escalated with a generic "stage
+oscillation" reason naming neither the conflict nor the rebase. Observed on
+popoto PRs #546 and #548.
+
+**Why a guard, not a dispatch row.** Nothing in the skill set can resolve a
+merge conflict: `/do-merge` declares conflict resolution explicitly out of
+scope, `/do-patch`'s remit is failing tests and review blockers (not
+rebases), and there is no rebase skill. A `DispatchRule` can only ever
+produce a `Dispatch`, never a `Blocked` — expressing "stop, this needs a
+human" requires a guard.
+
+**Step-asides (tech debt round 1, #2796).** Two conditions keep a *resolved*
+conflict from wedging the lane:
+
+- `pr_merge_state` is in the non-conflicting set `/do-pr-review`'s own
+  preflight already treats as proceed-worthy
+  (`.claude/skills-global/do-pr-review/sub-skills/checkout.md`'s decision
+  table): `CLEAN`, `HAS_HOOKS`, `UNSTABLE`, `BLOCKED` (a GitHub status for a
+  missing required review/check, not a conflict), and `BEHIND` (out of date,
+  not conflicting). The first PR review round widened this set from
+  `CLEAN`-only after the reviewer demonstrated `BEHIND` and `UNSTABLE` both
+  wrongly escalating with a reason asserting "has merge conflicts" when
+  neither state means a conflict. Any value outside this set — `DIRTY`,
+  `None`, `UNKNOWN`, or an unrecognized value — still escalates: fail-closed,
+  since `DIRTY` and an unresolved/unknown merge state are exactly what
+  preflight treats as conflicting. The escalation reason is conditional on
+  the merge state: only `DIRTY` reads as "has merge conflicts"; every other
+  escalating value reads as "has an unresolved or unconfirmed merge state",
+  so the guard never asserts a conflict it cannot confirm.
+- `_review_verdict_is_stale` — a `/do-patch` was dispatched after the verdict
+  was recorded, so the rebase may already have landed. Step aside and let row
+  8b re-review; if the conflict survives, the re-review records a fresh
+  conflict verdict and G9 fires on the next turn.
+
+**Transient `UNKNOWN` reads.** GitHub computes `mergeStateStatus`
+asynchronously, so a just-rebased PR's first read can come back `UNKNOWN`
+even though the true state has already settled —
+`tools/sdlc_stage_query.py::_fetch_pr_merge_state` hit this race directly
+during the tech-debt-round-1 review of PR #2797 (first read `UNKNOWN`, retry
+3s later read `CLEAN`). `_fetch_pr_merge_state` now retries once after a 2s
+delay on an `UNKNOWN` first read, mirroring the retry `/do-pr-review`'s own
+preflight already performs, so G9 (and G6, which reads the same field) see
+the settled state rather than a transient one whenever possible.
+
+**Positioning.** G9 sits immediately after G4, so an already-oscillating
+lane keeps G4's existing precedence (no behavior change for states that
+escalated before G9 existed), while a newly-conflicted lane stops at G9 on
+turn 1 — before it can burn a patch/review cycle — with a reason naming both
+the conflict and the rebase.
+
 ### Why G5 is CRITIQUE-only
 
 Plan files are pure text: they only change when the plan file changes, so a
@@ -376,6 +446,7 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
     "latest_review_head_sha": null,
     "revision_applied": false,
     "pr_number": null,
+    "pr_state": null,
     "pr_merge_state": null,
     "ci_all_passing": null,
     "same_stage_dispatch_count": 2,
@@ -394,6 +465,15 @@ Redis) creates subtle bugs where equal-looking snapshots compare unequal.
 - `ci_all_passing` — `True` when all `statusCheckRollup` conclusions are
   `"SUCCESS"` (empty rollup also returns `True` — a repo with no required
   checks has no failing checks). `null` on `gh` failure. Used by G6.
+
+**New field added by issue #2894:**
+
+- `pr_state` — GitHub's `state` field (`"OPEN"`/`"CLOSED"`/`"MERGED"`),
+  distinct from `pr_merge_state`'s `mergeStateStatus`. `mergeStateStatus`
+  reports `"UNKNOWN"` for merged, not-yet-computed, and genuinely-unresolvable
+  PRs alike, so only `pr_state` can answer "did this merge?". Consulted by the
+  `T` terminal guard (`agent.sdlc_router.guard_terminal_lane`) — see
+  [SDLC Terminal Lane State](sdlc-terminal-lane-state.md).
 
 Both fields default to `null` when the `gh` CLI fails (network error, unknown
 PR, timeout). G6 will not fire if either field is `null`, safely falling back
@@ -516,6 +596,27 @@ The REVIEW staleness pattern above is mirrored for the CRITIQUE path (#1639), fi
 
 All edge cases fail safe to "not stale" (missing/unparseable `recorded_at`, no prior `/do-plan`, equal timestamps, any parse exception), exactly as in the REVIEW twin.
 
+**G3's DOCS leg, and the two routes that reach it (#3227).** The ladder's third leg dispatches `/do-docs` when `REVIEW == completed` carries a head-fresh `APPROVED` verdict and `DOCS != completed`. Before it existed, that state fell to the ladder's default and re-dispatched `/do-pr-review` on already-approved code forever (lane #3181 / PR #3219 burned four empty review rounds). The leg refuses a `head_sha`-stale approval and defers to the review leg, keeping the guard in agreement with row 8f (`_rule_review_verdict_head_stale`) and G6.
+
+The guard trips on `last_dispatched_skill` **or** `context["proposed_skill"]` being plan-family, so the leg is reachable by **two independent routes** — both live, both pinned by tests:
+
+1. **`proposed_skill`** — a caller passing `--proposed-skill /do-plan-critique` reaches the ladder directly, independently of the dispatch table. This is why the leg is not made redundant by row 2b's stand-downs below.
+2. **`last_dispatched_skill`, via row 2** — `_rule_plan_not_critiqued` (row 2) has no `pr_number` step-aside, so a post-PR lane whose CRITIQUE marker still reads `pending` dispatches `/do-plan-critique` from row 2 with no caller proposing anything. The next decision then enters G3 with a plan-family last dispatch, a PR open, REVIEW approved and DOCS pending — exactly leg 3's state. Row 2's missing step-aside is tracked as #3249; while it stands, this route is what keeps the leg load-bearing rather than defence in depth.
+
+**Row 2b stage stand-downs (#3237).** Staleness answers "is this verdict still describing the current plan"; it says nothing about whether the lane is still in the plan stage. Row 2b therefore steps aside outright, ahead of the staleness check, when either is true:
+
+- `meta["pr_number"]` is set — a PR-stage lane has no plan-stage verdict worth refreshing, and rows 7-10 own that state. This makes row 2b symmetric with rows 1, 3, 4a, 4b and 4c, every one of which already had the step-aside.
+- `BUILD` is `in_progress` or `completed` — the plan was accepted when the build was dispatched, so the with-concerns re-critique loop is moot.
+
+The `BUILD` stand-down closes a lane shape that had **no exit from the plan loop**: with the with-concerns gate armed (`concern_round_count < MAX_CONCERN_RECRITIQUE_ROUNDS`) and a BUILD interrupted before it opened its PR, row 4c is gated on `build_status in (None, pending, ready)` so it cannot answer, and row 5 (`Build must create the PR — resume build`), which holds the correct answer, is evaluated *after* row 2b. Observed on lane #3195 / PR #3222, which escaped only by overriding `MAX_CONCERN_RECRITIQUE_ROUNDS` — a policy override, not a fix.
+
+Nothing is stranded, and `BUILD == completed` with no PR splits into two subcases decided by row 5 (`_rule_branch_exists_no_pr`), whose predicate is `build_status == in_progress OR context["branch_exists"] is True` — the branch half fires regardless of BUILD status:
+
+- **Live branch (the production case).** A BUILD cannot reach `completed` without having pushed its lane branch, so a build that crashed after the push but before opening its PR carries `branch_exists == True` and lands on row 5 → `/do-build` ("Build must create the PR — resume build"). The lane auto-resumes; no human rescue is needed. `tools/sdlc_next_skill._build_context` sets `branch_exists` to `True` or `False` unconditionally whenever `issue_number` is present, so the key is never absent on the real CLI path.
+- **No live branch (the minority subcase).** With nothing to resume, row 5's predicate is False and the decision falls through to `Blocked('no matching dispatch rule')` — already the router's answer for this shape on the no-concerns path, since rows 4a/4b/4c all step aside on a completed BUILD.
+
+Either way the stand-down replaces an endless re-critique with the answer the no-concerns path already gives. Both subcases are pinned by `test_build_completed_with_live_branch_resumes_build` and `test_build_completed_with_no_live_branch_escalates`.
+
 **Row 2c — the empty-verdict twin (#1668).** Row 2b requires a *recorded-but-stale* verdict (it gates on a `recorded_at` timestamp), so it deliberately does not fire when the critique skill ran but **never persisted any verdict at all** — `_verdicts.CRITIQUE` is `{}`, `latest_critique_verdict` is `None`, CRITIQUE marker is `in_progress`, and no PR exists yet. Before #1668 that state hit *every* rule and guard's gate and fell through to `Blocked('no matching dispatch rule')`. **Row 2c** (`_rule_critique_in_progress_no_verdict`, inserted after row 2b, before row 3) closes that hole: it re-dispatches `/do-plan-critique` when `CRITIQUE == in_progress` AND the critique verdict is absent AND no PR exists. It is narrowly gated so it cannot fire once a PR exists (defer to G3 / PR-stage rows), once any verdict is recorded (rows 2b/3/4a own it), or when CRITIQUE is not `in_progress`. Row 2b (stale verdict) and row 2c (empty verdict) are **disjoint** — 2b requires `recorded_at`, 2c requires the verdict be absent — so order between them is immaterial for correctness. Loop-bound: unlike row 2b's 2b↔3 alternation (bounded by G5), row 2c repeats the *same* skill (`/do-plan-critique`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — exactly mirroring the bounded manual recovery (re-run once; if it keeps failing, a human looks).
 
 **Row 8c — the REVIEW empty-verdict twin (#1687).** Row 8 requires a *recorded* review verdict (it gates on a non-empty `review_verdict`), and row 8b requires a *patch-applied* state (PATCH == completed AND either `last_dispatched_skill == /do-patch` or a stale recorded verdict), so neither fires when the review skill ran but **never persisted any verdict at all** — `_verdicts.REVIEW` is `{}`, `latest_review_verdict` is `None`, REVIEW marker is `in_progress`, and row 8b's three-condition predicate does not match. Before #1687 that state fell through every REVIEW row (7, 8, 8b, 9, 10, 10b) to `Blocked('no matching dispatch rule')`. **Row 8c** (`_rule_review_in_progress_no_verdict`, inserted after row 8b, before row 9) closes that hole: it re-dispatches `/do-pr-review` when `REVIEW == in_progress` AND the review verdict is absent (`.strip()` falsy) AND a PR exists AND row 8b does not own the state. It is narrowly gated so it cannot fire without a PR (REVIEW only exists post-PR), once any verdict is recorded (rows 8/8b own it), or when REVIEW is not `in_progress`. The step-aside for 8b is gated on `_rule_patch_applied_after_review(...)` exactly (not a bare `PATCH == completed` check) — a PATCH-completed state that 8b does not own would make a bare PATCH-completed check create a Blocked leak; calling 8b's own predicate keeps the two disjoint by construction, and keeps 8c correct automatically as 8b's predicate evolves. Loop-bound: unlike row 8 (which alternates `/do-patch` <=> `/do-pr-review`), row 8c repeats the *same* skill (`/do-pr-review`) against an unchanged snapshot, so it is bounded by **G4 (`guard_g4_oscillation`)** at `MAX_SAME_STAGE_DISPATCHES`, which escalates to a human — mirroring row 2c's bounding exactly.
@@ -600,9 +701,11 @@ deferred until optimistic retry proves insufficient in production.
 
 ## Regression Coverage
 
-- `tests/unit/test_sdlc_router_decision.py` — pure-function tests for every
-  dispatch rule row (1 through 10b), including `TestReviewInProgressNoVerdictDeadEnd`
-  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`).
+- `tests/unit/sdlc_router_decision/` — pure-function tests for every
+  dispatch rule row (1 through 10b), split by theme. Row coverage lives in
+  `test_sdlc_router_decision_dispatch_rows.py`; `TestReviewInProgressNoVerdictDeadEnd`
+  (row 8c, 7 cases mirroring `TestCritiqueInProgressNoVerdictDeadEnd`) is in
+  `test_sdlc_router_decision_convergence.py`.
 - `tests/unit/test_sdlc_router.py` — `TestReReviewCrashRecovery` (row 8d, both
   `completed`/`failed` terminal markers recover), `TestRow3OpenPrStepAside`,
   `TestG1OpenPrStepAside`, `TestG5OpenPrStepAside` (NEEDS_REVISION and
@@ -610,14 +713,18 @@ deferred until optimistic retry proves insufficient in production.
   (blocked without a verdict, fires with APPROVED), `TestRow8dLoopBound` (G4
   trips on a stable crash marker), and `TestRow8dChurnLimitation` (documents the
   deliberately out-of-scope alternating-marker gap — issue #1932).
-- `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G6),
+- `tests/unit/test_sdlc_router_oscillation.py` — one test per guard (G1-G9),
   snapshot/counter helpers, guard ordering, the 12-step #1036 replay
   (`test_1036_replay_terminates`), the 8-step #1043 PR #264 replay
-  (`test_1043_pr264_8step_terminates`), and the #1267 G8 guard-ordering cases
+  (`test_1043_pr264_8step_terminates`), the #1267 G8 guard-ordering cases
   (G4 fires before G8 on a persistently-false claim; the G4 cap bounds
-  verification-driven re-dispatches).
+  verification-driven re-dispatches), and `TestG9BlockedOnConflict` (#2796:
+  the bug state, underscore/spaced/decorated verdict-token forms, the
+  non-conflicting-merge-state step-asides, DIRTY/None/UNKNOWN/unrecognized
+  still escalating, the stale-verdict handoff to row 8b, no-PR inertness,
+  other verdicts unaffected, and a zero-dispatch end-to-end assertion).
 - `tests/unit/test_sdlc_skill_md_parity.py` — markdown-to-Python parity for
-  both dispatch rows and guard rows (G1-G6), with positive (table matches)
+  both dispatch rows and guard rows (G1-G9), with positive (table matches)
   and negative (mutation detection) cases, tolerating escaped pipes in cells.
   Includes `parse_guard_rows()`, `test_guard_row_ids_in_python()`, and
   `test_g6_guard_row_present_in_skill_md()` added by issue #1043.

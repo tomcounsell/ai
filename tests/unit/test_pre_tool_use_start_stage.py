@@ -22,6 +22,7 @@ from agent.hooks.pre_tool_use import (
 from agent.pipeline_ledger import PipelineLedger
 from models.agent_session import AgentSession, SessionType
 from models.session_lifecycle import release_issue_lock, touch_issue_lock
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 
 class TestExtractStageFromPrompt:
@@ -121,6 +122,7 @@ class TestStartPipelineStage:
 
         mock_as_module = MagicMock()
         mock_as_module.AgentSession.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as_module.AgentSession)
 
         return mock_session, mock_sm_instance, mock_psm_module, mock_as_module
 
@@ -146,6 +148,7 @@ class TestStartPipelineStage:
     def test_logs_warning_when_parent_not_found(self, caplog):
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.query.filter.return_value = []
+        wire_session_lookup(mock_as_mod.AgentSession)
         mock_psm_mod = MagicMock()
 
         with (
@@ -184,6 +187,7 @@ class TestStartPipelineStage:
     def test_catches_redis_error(self, caplog):
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
+        wire_session_lookup(mock_as_mod.AgentSession)
         mock_psm_mod = MagicMock()
 
         with (

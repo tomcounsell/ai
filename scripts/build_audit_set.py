@@ -9,6 +9,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from tools._sdlc_utils import _resolve_target_repo_fallback
+
 WORKTREE = Path(__file__).parent.parent
 DATA_DIR = WORKTREE / "data"
 DIFFS_DIR = DATA_DIR / "retroactive-audit-diffs"
@@ -103,9 +105,21 @@ def parse_frontmatter(content):
 
 
 def get_issue_pr(issue_number):
-    """Find the merged PR for a given issue number."""
+    """Find the merged PR for a given issue number.
+
+    Scoped with ``--repo``: a bare ``gh issue view`` (and the ``gh pr list
+    --search`` fallback) resolves GH_REPO from the environment before cwd, so
+    under a foreign GH_REPO (or from a wrong cwd) it would answer about a
+    *different* repository's issue #N and exit 0 (issue #2889). The slug
+    resolves via the shared ladder (GH_REPO env first, else ``gh repo view
+    --json nameWithOwner`` from the working-tree root / ``SDLC_TARGET_REPO``);
+    when nothing resolves, the argv degrades to the prior unscoped shape.
+    """
+    repo = _resolve_target_repo_fallback()
+    repo_flag = f" --repo {repo}" if repo else ""
     result = subprocess.run(
-        f"gh issue view {issue_number} --json number,title,closedByPullRequestsReferences",
+        f"gh issue view {issue_number}{repo_flag}"
+        " --json number,title,closedByPullRequestsReferences",
         shell=True,
         capture_output=True,
         text=True,
@@ -123,7 +137,8 @@ def get_issue_pr(issue_number):
 
         # Fallback: search for PR by issue reference
         search_result = subprocess.run(
-            f"gh pr list --search 'Closes #{issue_number}' --state merged --json number,title",
+            f"gh pr list{repo_flag} --search 'Closes #{issue_number}'"
+            " --state merged --json number,title",
             shell=True,
             capture_output=True,
             text=True,
@@ -140,10 +155,25 @@ def get_issue_pr(issue_number):
 
 
 def fetch_pr_diff(pr_number, slug):
-    """Fetch PR diff and save to file."""
+    """Fetch PR diff and save to file.
+
+    Scoped with ``--repo`` like ``get_issue_pr`` (issue #2928): a bare
+    ``gh pr diff`` resolves GH_REPO from the environment before cwd, so under
+    a foreign GH_REPO (or from a wrong cwd) it would answer about a
+    *different* repository's PR #N and exit 0. The slug resolves via the
+    shared ladder (GH_REPO env first, else ``gh repo view --json
+    nameWithOwner`` from the working-tree root / ``SDLC_TARGET_REPO``); when
+    nothing resolves, the argv degrades to the prior unscoped shape.
+    """
     diff_path = DIFFS_DIR / f"{slug}.diff"
+    repo = _resolve_target_repo_fallback()
+    repo_flag = f" --repo {repo}" if repo else ""
     result = subprocess.run(
-        f"gh pr diff {pr_number}", shell=True, capture_output=True, text=True, cwd=str(WORKTREE)
+        f"gh pr diff{repo_flag} {pr_number}",
+        shell=True,
+        capture_output=True,
+        text=True,
+        cwd=str(WORKTREE),
     )
     if result.returncode == 0 and result.stdout:
         # Truncate if over 200KB
@@ -154,9 +184,15 @@ def fetch_pr_diff(pr_number, slug):
 
 
 def get_issue_body(issue_number):
-    """Get issue body as fallback plan content."""
+    """Get issue body as fallback plan content.
+
+    Scoped with ``--repo`` like ``get_issue_pr`` (issue #2889): see that
+    docstring for the resolution ladder and the degrade behavior.
+    """
+    repo = _resolve_target_repo_fallback()
+    repo_flag = f" --repo {repo}" if repo else ""
     result = subprocess.run(
-        f"gh issue view {issue_number} --json body",
+        f"gh issue view {issue_number}{repo_flag} --json body",
         shell=True,
         capture_output=True,
         text=True,

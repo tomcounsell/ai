@@ -4,6 +4,7 @@ Tests for create_local() behavior, including the chat_id defaulting logic,
 and worker_key property behavior.
 """
 
+import logging
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -34,7 +35,7 @@ class TestCreateLocalChatId:
         saved_sessions = []
         original_save = AgentSession.save
 
-        def mock_save(self):
+        def mock_save(self, *args, **kwargs):
             saved_sessions.append(self)
 
         AgentSession.save = mock_save
@@ -59,7 +60,7 @@ class TestCreateLocalChatId:
 
         original_save = AgentSession.save
 
-        def mock_save(self):
+        def mock_save(self, *args, **kwargs):
             saved_sessions.append(self)
 
         AgentSession.save = mock_save
@@ -85,7 +86,7 @@ class TestCreateLocalChatId:
         session_uuid = "claude-session-xyz789"
         original_save = AgentSession.save
 
-        def mock_save(self):
+        def mock_save(self, *args, **kwargs):
             pass
 
         AgentSession.save = mock_save
@@ -117,7 +118,7 @@ class TestCreateLocalChatId:
 
         original_save = AgentSession.save
 
-        def mock_save(self):
+        def mock_save(self, *args, **kwargs):
             pass
 
         AgentSession.save = mock_save
@@ -151,7 +152,11 @@ def _make_session(current_stage: str | None = None, **kwargs):
     import json
 
     original_save = AgentSession.save
-    AgentSession.save = lambda self: None
+    # #3074: the stub must accept save()'s real signature. A bare `lambda self:
+    # None` made append_event's `self.save(update_fields=[...])` raise TypeError
+    # on every stage-setting construction — swallowed by append_event's handler,
+    # so tests stayed green while every construction logged a masked failure.
+    AgentSession.save = lambda self, *args, **kwargs: None
     try:
         defaults = {
             "project_key": "test-project",
@@ -161,19 +166,73 @@ def _make_session(current_stage: str | None = None, **kwargs):
             "session_type": SessionType.ENG,
         }
         defaults.update(kwargs)
+        session = AgentSession(**defaults)
         if current_stage is not None:
             # Build a stage_states dict with the given stage as 'in_progress'.
-            # AgentSession.current_stage reads the first SDLC_STAGES entry with status
-            # 'in_progress'. We need to pass this via stage_states at construction time.
+            # AgentSession.current_stage reads the first SDLC_STAGES entry with
+            # status 'in_progress'.
+            #
+            # Assigned AFTER construction, through the setter. `stage_states` is
+            # no longer a Popoto field — it is a property backed by
+            # `session_events`, so passing it as a constructor kwarg is silently
+            # dropped and `current_stage` stays None. That is what made every
+            # slugged-Eng worker_key assertion fail: `worker_key` fell through
+            # the worktree-stage branch to `project_key`, so the tests read
+            # "test-project" where they expected the slug. The property was
+            # correct throughout; the fixture was writing to a field that had
+            # stopped existing.
             from models.agent_session import SDLC_STAGES
 
             stages_dict = {}
             for stage in SDLC_STAGES:
                 stages_dict[stage] = "in_progress" if stage == current_stage else "pending"
-            defaults["stage_states"] = json.dumps(stages_dict)
-        return AgentSession(**defaults)
+            session.stage_states = json.dumps(stages_dict)
+            assert session.current_stage == current_stage, (
+                f"fixture failed to set current_stage={current_stage!r} "
+                f"(got {session.current_stage!r}) — the stage_states write path changed again"
+            )
+        return session
     finally:
         AgentSession.save = original_save
+
+
+class TestFixtureSaveStubFidelity:
+    """#3074: save stubs must match AgentSession.save's real signature.
+
+    A stub of ``lambda self: None`` made append_event's internal
+    ``self.save(update_fields=[...])`` raise TypeError on every stage-setting
+    construction. append_event catches and logs that failure, so the suite
+    stayed green while every fixture construction emitted a masked exception.
+    """
+
+    def test_fixture_construction_emits_no_masked_save_failure(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="models.agent_session"):
+            _make_session(current_stage="BUILD")
+        masked = [r for r in caplog.records if "append_event save failed" in r.getMessage()]
+        assert not masked, (
+            "fixture construction logged a masked append_event save failure — "
+            "the save stub's signature drifted from AgentSession.save again: "
+            f"{masked[0].getMessage()}"
+        )
+
+    def test_unknown_constructor_kwarg_is_tolerated_and_unpersisted(self):
+        """Pins popoto's current tolerance while the #3074 decision stays open.
+
+        Popoto's ``Model.__init__`` does ``self.__dict__.update(kwargs)``, so an
+        unknown kwarg lands as a plain instance attribute, is never a declared
+        Field, and is never persisted (encoding iterates ``_meta.fields`` only).
+        If this test starts failing because construction raises, the ORM went
+        strict upstream: delete this pin and record the #3074 rejection decision
+        as settled.
+        """
+        import popoto
+
+        s = _make_session(definitely_not_a_field_xyz="boom")
+        assert s.definitely_not_a_field_xyz == "boom"
+        assert not isinstance(
+            vars(type(s)).get("definitely_not_a_field_xyz"),
+            popoto.fields.field.Field,
+        )
 
 
 class TestWorkerKeyProperty:
@@ -850,3 +909,45 @@ class TestClusterARemoveCandidateEmpiricalRegression:
                     session.delete()
                 except Exception:
                     pass
+
+
+class TestDevHarnessFields:
+    """Phase 3 dev-lane fields coexist with the top-level selector (#2001).
+
+    ``dev_harness`` is a creation-time capability distinct from
+    ``exec_harness`` (which stays top-level-Claude): setting one never
+    implies the other, and both default to None (unflagged).
+    """
+
+    def _unsaved(self, **overrides):
+        from datetime import UTC, datetime
+
+        base = {
+            "project_key": "test-2001",
+            "status": "pending",
+            "priority": "normal",
+            "created_at": datetime.now(tz=UTC),
+            "session_id": "unit-test-2001",
+            "working_dir": "/tmp/test",
+            "chat_id": "123",
+            "message_text": "hello",
+            "sender_name": "Tester",
+            "telegram_message_id": 1,
+        }
+        base.update(overrides)
+        return AgentSession(**base)
+
+    def test_dev_harness_distinct_from_exec_harness(self):
+        session = self._unsaved(dev_harness="codex", exec_harness="claude")
+
+        assert session.dev_harness == "codex"
+        assert session.exec_harness == "claude"
+
+    def test_dev_lane_fields_default_to_none(self):
+        session = self._unsaved()
+
+        assert session.dev_harness is None
+        assert session.codex_thread_id is None
+        assert session.codex_version is None
+        assert session.codex_turn_count is None
+        assert session.dev_lane_fence is None

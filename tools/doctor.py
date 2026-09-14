@@ -138,8 +138,12 @@ def _repo_venv_bin_dirs() -> list[Path]:
 def _same_file(a: Path, b: Path) -> bool:
     """True when two paths are the same file, including via a hardlink.
 
-    `/update` hardlinks some entry points into `~/.local/bin`, so an on-PATH
-    copy outside the venv is not automatically the wrong copy.
+    A hardlinked copy of the venv file is not automatically the wrong copy --
+    the inode, and therefore the shebang, is identical either way. This is
+    general hardlink tolerance, not an artifact of any particular tool: `git
+    grep -n USER_BIN_SCRIPTS scripts/update/hardlinks.py` shows `/update`
+    itself hardlinks exactly one script (`scripts/sdlc-tool`, not a
+    `[project.scripts]` name), so this branch is not there to accommodate it.
     """
     try:
         return a.samefile(b)
@@ -147,16 +151,128 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
+def _shebang_interpreter(path: Path) -> str | None:
+    """Extract the plain absolute interpreter path from a script's shebang.
+
+    Reads one length-capped first line in binary mode -- `.venv/bin`
+    legitimately contains non-UTF-8 files (compiled binaries), and a decode
+    error here must read as "unverified", never a crash. Deliberately narrow:
+    only the plain absolute form (``#!/path/to/python``, optionally followed
+    by interpreter flags that are discarded) is extracted. Two other shapes
+    exist in the wild and are declined rather than parsed, because neither
+    occurs anywhere in this fleet (measured directly: every declared entry
+    point here carries a plain absolute shebang) and a hand-rolled parser for
+    an unseen shape is exactly the kind of code most likely to misfire on the
+    false-accusation risk this check exists to avoid:
+
+    * The `#!/bin/sh` two-line polyglot pip/distlib emit once the absolute
+      interpreter path exceeds the kernel's shebang length cap (127-256
+      bytes) -- see pypa/setuptools#494.
+    * `uv venv --relocatable`'s ``dirname $0`` variant, which carries no
+      absolute interpreter path at all -- see astral-sh/uv#5515.
+
+    A missing `#!` line, an empty or whitespace-only one, a shell or `env` on
+    line 1 (`sh` / `bash` / `dash` / `env`), and a relative target all return
+    `None` too. `None` means "unverified": neither a pass nor a finding.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.readline(4096)
+    except OSError:
+        return None
+    try:
+        line = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        return None
+    if not line.startswith("#!"):
+        return None
+    rest = line[2:].strip()
+    if not rest:
+        return None
+    prog = rest.split()[0]
+    # An embedded NUL is rejected here rather than later: `Path` tolerates NUL
+    # at every step (`.exists()` returns `False`), so a NUL target slips
+    # through to `os.path.realpath` in `_classify_interpreter`'s missing
+    # branch, which raises `ValueError` (not `OSError`) -- neither of the two
+    # handlers above would catch it and the documented "never a crash"
+    # contract would break on a corrupt shim.
+    if not prog.startswith("/") or "\0" in prog:
+        return None
+    if Path(prog).name in {"sh", "bash", "dash", "env"}:
+        return None
+    return prog
+
+
+def _classify_interpreter(
+    target: str, venv_bins: list[Path], pin: str | None
+) -> tuple[str, str | None]:
+    """Classify a shebang's interpreter target: existence, then membership, then pin.
+
+    Returns ``(reason, detail)`` where `reason` is one of `ok` / `missing` /
+    `off-pin` / `outside` / `unverified`. `detail` is the dangling realpath for
+    `missing`, the venv's `MAJOR.MINOR` for `ok` / `off-pin`, and `None`
+    otherwise.
+
+    Existence is tested before membership or the pin: a retired interpreter
+    (its uv-managed base download garbage-collected) still leaves the venv's
+    `pyvenv.cfg` reporting the version it was *built* against, so checking the
+    pin first would call a dangling symlink healthy.
+
+    Membership compares the realpath of the interpreter's **parent
+    directory** on both sides, and never realpaths the interpreter path
+    itself. On this machine `.venv/bin/python3` is itself a symlink into a
+    uv-managed download tree outside every repo venv bin dir; resolving
+    `target` first and taking *that* parent would classify every healthy
+    script here as `outside`. A shebang names `target` literally, unresolved
+    -- that is the path a shell actually invokes.
+
+    A venv whose version cannot be read (`pyvenv.cfg` missing or carrying no
+    parseable `version_info`) is `unverified`, not `off-pin`: comparing
+    `None` against the pin would render a false `is Python None` accusation,
+    and a script the check could not actually compare must not count toward
+    the verified ratio either.
+    """
+    from agent.worktree_manager import venv_python_version
+
+    target_path = Path(target)
+    if not target_path.exists():
+        # `realpath` defaults to `strict=False`: it absorbs its own `OSError`
+        # and returns the path unresolved, so a guard here could never fire.
+        return "missing", os.path.realpath(target)
+
+    parent = target_path.parent
+    match = next(
+        (b for b in venv_bins if parent == b or os.path.realpath(parent) == os.path.realpath(b)),
+        None,
+    )
+    if match is None:
+        return "outside", None
+
+    # The venv the shebang actually names -- never venv_bins[0], which is the
+    # wrong venv's version whenever doctor runs from a worktree (two entries).
+    version = venv_python_version(match.parent)
+    if pin is None:
+        return "ok", version
+    if version is None:
+        return "unverified", None
+    if version == pin:
+        return "ok", version
+    return "off-pin", version
+
+
 def _check_console_scripts_resolve() -> CheckResult:
-    """Check every `[project.scripts]` name resolves into this repo's venv (#2566).
+    """Check every `[project.scripts]` name resolves into this repo's venv AND
+    that the winning script's interpreter is real (#2566, #2748).
 
     Skills, hooks, and SDLC addenda invoke these entry points by bare name:
     `critique-roster-check`, `critique-resume-probe`, and `sdlc-push-guard` are
     all called that way, and the first two are fail-closed *gates*. What the
-    name resolves to is therefore load-bearing, and it is pure host state that
-    no amount of correct packaging can guarantee.
+    name resolves to, and what that resolved file's shebang actually binds to,
+    is therefore load-bearing, and both are pure host state that no amount of
+    correct packaging can guarantee. This check has two parts:
 
-    Three failure modes, with three different remedies:
+    **Part 1 -- resolution.** Three failure modes, with three different
+    remedies:
 
     * `.venv/bin` is absent from PATH while a stale `~/Library/Python/3.12/bin`
       is present. The stale directory holds shims for a *system* interpreter
@@ -170,11 +286,27 @@ def _check_console_scripts_resolve() -> CheckResult:
       puller has not re-synced. The remedy is `uv sync`, and reporting this as
       "shadowed" sends an operator to reorder a PATH that is already correct.
 
-    Deleting stale shims only converts the first shape into the second, so the
-    check measures resolution rather than shim hygiene: a name is healthy when
-    it resolves into a repo venv bin directory, and unhealthy when it resolves
-    anywhere else or nowhere at all. Distinguishing the third shape from the
-    first two is what `_installed_in_venv` is for.
+    Deleting stale shims only converts the first shape into the second, so
+    resolution is measured rather than shim hygiene: a name is resolution-
+    healthy when it resolves into a repo venv bin directory, and unhealthy
+    when it resolves anywhere else or nowhere at all. Distinguishing the
+    third shape from the first two is what `_installed_in_venv` is for.
+
+    **Part 2 -- interpreter identity (#2748).** Resolving into the right
+    *directory* does not mean the winning file binds to a real interpreter: a
+    shim can sit in a repo venv bin dir whose shebang names an interpreter
+    that no longer exists, belongs to a venv off the `.python-version` pin, or
+    lives outside every repo venv entirely (no editable install of this
+    repo -- the `ModuleNotFoundError` shape from #2566 and #2858, arriving via
+    a different mechanism than PATH shadowing). For every name that resolves,
+    `_shebang_interpreter` reads the winning file's shebang and
+    `_classify_interpreter` sorts the target into `ok` / `missing` / `off-pin`
+    / `outside` / `unverified`. Only a plain absolute shebang is classified;
+    every other shape (a `/bin/sh` polyglot, `uv --relocatable`'s `dirname $0`
+    form, an `env` indirection, or no shebang at all) is `unverified` --
+    neither a pass nor a finding, but visible as a lower count in the pass
+    message. An unresolvable `.python-version` disables the off-pin
+    comparison alone; `missing` and `outside` still fire with no pin.
 
     Ordering note: this runs before `_check_system_tools`, whose
     `scripts.update.verify` import prepends `~/Library/Python/3.12/bin` to
@@ -183,6 +315,8 @@ def _check_console_scripts_resolve() -> CheckResult:
     """
     import shutil
     import tomllib
+
+    from agent.worktree_manager import repo_interpreter_pin
 
     pyproject = PROJECT_DIR / "pyproject.toml"
     try:
@@ -222,9 +356,16 @@ def _check_console_scripts_resolve() -> CheckResult:
         """
         return any((bin_dir / script_name).exists() for bin_dir in venv_bins)
 
+    pin = repo_interpreter_pin(PROJECT_DIR)
+
     misresolved: list[str] = []
     not_installed: list[str] = []
     resolved_into: list[str] = []
+    # Keyed by (reason, target). Aggregates the script names sharing one bad
+    # interpreter, plus -- for the subset accepted via the hardlink leg below
+    # -- the stale on-PATH copies a venv rebuild alone will not clear.
+    interpreter_groups: dict[tuple[str, str], dict] = {}
+    verified = 0
     for name in sorted(scripts):
         found = shutil.which(name)
         if found is None:
@@ -235,85 +376,228 @@ def _check_console_scripts_resolve() -> CheckResult:
                 misresolved.append(f"{name} -> not installed in the repo venv")
             continue
         found_path = Path(found)
-        match = next(
-            (
-                bin_dir
-                for bin_dir in venv_bins
-                if found_path.parent == bin_dir
-                or os.path.realpath(found_path.parent) == os.path.realpath(bin_dir)
-                or _same_file(found_path, bin_dir / name)
-            ),
-            None,
-        )
+        # Computed as three explicit legs (not one `any()` expression) so the
+        # hardlink-trailer gate below can tell *which* leg accepted this
+        # script: the directory legs (`in_bin_dir`) mean the venv's own entry
+        # point won, and the third leg alone means an on-PATH copy elsewhere
+        # (hardlink or symlink) happens to be the same file.
+        in_bin_dir = False
+        match: Path | None = None
+        for bin_dir in venv_bins:
+            if found_path.parent == bin_dir or os.path.realpath(
+                found_path.parent
+            ) == os.path.realpath(bin_dir):
+                in_bin_dir = True
+                match = bin_dir
+                break
+            if _same_file(found_path, bin_dir / name):
+                match = bin_dir
+                break
+
         if match is None:
             if not _installed_in_venv(name):
                 not_installed.append(name)
                 misresolved.append(f"{name} -> {found} (not installed in the repo venv)")
             else:
                 misresolved.append(f"{name} -> {found}")
-        elif str(match) not in resolved_into:
+            continue
+
+        if str(match) not in resolved_into:
             resolved_into.append(str(match))
 
-    primary = venv_bins[0] if venv_bins else PROJECT_DIR / ".venv" / "bin"
+        # Interpreter read: only for names that already resolved. A
+        # misresolved / not-installed name already carries its own remedy
+        # above; layering a second complaint on it would perturb those
+        # messages and the existing tests asserting them.
+        target = _shebang_interpreter(match / name)
+        if target is None:
+            continue  # unverified: neither pass nor fail, and not counted
 
-    if misresolved:
-        shown = misresolved[:5]
-        suffix = (
-            f" (+{len(misresolved) - len(shown)} more)" if len(misresolved) > len(shown) else ""
+        reason, detail = _classify_interpreter(target, venv_bins, pin)
+        if reason in ("ok", "unverified"):
+            if reason == "ok":
+                verified += 1
+            continue
+
+        is_hardlinked_copy = (
+            not in_bin_dir and not found_path.is_symlink() and _same_file(found_path, match / name)
         )
-        # Three states, not two. A name can lose the PATH race, or never have
-        # been built to enter it. Collapsing the second into "shadowed" tells
-        # an operator to reorder a PATH that is already correct — and that is
-        # the likeliest case from here on, since it is what a teammate hits
-        # after pulling a new [project.scripts] entry without re-syncing.
-        a_path_problem = len(not_installed) < len(misresolved)
-        if not a_path_problem:
-            path_note = f"{len(not_installed)} declared but not installed in {primary}"
-        elif not on_path:
-            path_note = f"{primary} is not on PATH"
-        else:
-            path_note = f"{on_path[0]} is on PATH but is shadowed"
-        if a_path_problem and not_installed:
-            path_note += f"; {len(not_installed)} also not installed in the venv"
+        group = interpreter_groups.setdefault(
+            (reason, target),
+            {
+                "names": [],
+                "hardlinked_paths": [],
+                "version": None,
+                "dangling": None,
+                "checkouts": [],
+            },
+        )
+        group["names"].append(name)
+        # The checkout whose `.venv` holds the flagged shim -- never
+        # PROJECT_DIR, which is the wrong checkout whenever doctor runs from a
+        # worktree and the winning shim lives in the main venv. Rebuilding
+        # PROJECT_DIR's venv there leaves PATH resolving to the same bad
+        # shebang, so the next run reports the identical finding.
+        checkout = str(match.parent.parent)
+        if checkout not in group["checkouts"]:
+            group["checkouts"].append(checkout)
+        if reason == "off-pin":
+            group["version"] = detail
+        elif reason == "missing":
+            group["dangling"] = detail
+        if is_hardlinked_copy:
+            group["hardlinked_paths"].append(str(found_path))
 
-        fixes = []
-        if a_path_problem:
-            fixes.append(
-                f'Put the repo venv first on PATH: export PATH="{primary}:$PATH" '
-                "(persist it in your shell profile). Any stale shim in an earlier "
-                "directory becomes unreachable."
+    primary = venv_bins[0] if venv_bins else PROJECT_DIR / ".venv" / "bin"
+    interpreter_findings = list(interpreter_groups.items())
+
+    if misresolved or interpreter_findings:
+        message_parts: list[str] = []
+        fixes: list[str] = []
+
+        if misresolved:
+            shown = misresolved[:5]
+            suffix = (
+                f" (+{len(misresolved) - len(shown)} more)" if len(misresolved) > len(shown) else ""
             )
-        if not_installed:
-            not_installed_sorted = sorted(not_installed)
-            shown_not_installed = not_installed_sorted[:5]
-            not_installed_suffix = (
-                f" (+{len(not_installed_sorted) - len(shown_not_installed)} more)"
-                if len(not_installed_sorted) > len(shown_not_installed)
-                else ""
+            # Three states, not two. A name can lose the PATH race, or never
+            # have been built to enter it. Collapsing the second into
+            # "shadowed" tells an operator to reorder a PATH that is already
+            # correct — and that is the likeliest case from here on, since it
+            # is what a teammate hits after pulling a new [project.scripts]
+            # entry without re-syncing.
+            a_path_problem = len(not_installed) < len(misresolved)
+            if not a_path_problem:
+                path_note = f"{len(not_installed)} declared but not installed in {primary}"
+            elif not on_path:
+                path_note = f"{primary} is not on PATH"
+            else:
+                path_note = f"{on_path[0]} is on PATH but is shadowed"
+            if a_path_problem and not_installed:
+                path_note += f"; {len(not_installed)} also not installed in the venv"
+
+            if a_path_problem:
+                fixes.append(
+                    f'Put the repo venv first on PATH: export PATH="{primary}:$PATH" '
+                    "(persist it in your shell profile). Any stale shim in an earlier "
+                    "directory becomes unreachable."
+                )
+            if not_installed:
+                not_installed_sorted = sorted(not_installed)
+                shown_not_installed = not_installed_sorted[:5]
+                not_installed_suffix = (
+                    f" (+{len(not_installed_sorted) - len(shown_not_installed)} more)"
+                    if len(not_installed_sorted) > len(shown_not_installed)
+                    else ""
+                )
+                fixes.append(
+                    f"Install the missing entry point(s) with `uv sync` in {PROJECT_DIR} "
+                    f"(or `uv pip install -e .`): {', '.join(shown_not_installed)}"
+                    f"{not_installed_suffix}."
+                )
+
+            message_parts.append(
+                f"{len(misresolved)}/{len(scripts)} console scripts do not resolve into the "
+                f"repo venv — {path_note}; bare-name callers run the wrong copy or nothing "
+                f"at all (#2566): {'; '.join(shown)}{suffix}"
             )
-            fixes.append(
-                f"Install the missing entry point(s) with `uv sync` in {PROJECT_DIR} "
-                f"(or `uv pip install -e .`): {', '.join(shown_not_installed)}"
-                f"{not_installed_suffix}."
-            )
+
+        if interpreter_findings:
+            clauses = []
+            for (reason, target), group in interpreter_findings:
+                names_sorted = sorted(group["names"])
+                shown_names = names_sorted[:5]
+                names_suffix = (
+                    f" (+{len(names_sorted) - len(shown_names)} more)"
+                    if len(names_sorted) > len(shown_names)
+                    else ""
+                )
+                count = len(names_sorted)
+                if reason == "missing":
+                    diag = (
+                        f"console script shebang target {target} does not exist "
+                        f"(resolves to {group['dangling']})"
+                    )
+                    fix_diag = f"Console script shebang target {target} does not exist."
+                elif reason == "off-pin":
+                    diag = (
+                        f"console script shebang target {target} is Python "
+                        f"{group['version']}, pin is {pin}"
+                    )
+                    fix_diag = (
+                        f"Console script shebang target {target} is Python "
+                        f"{group['version']}, pin is {pin}."
+                    )
+                else:  # outside
+                    diag = f"console script shebang target {target} is outside every repo venv"
+                    fix_diag = (
+                        f"Console script shebang target {target} is outside every repo "
+                        "venv, so it carries no editable install of this repo."
+                    )
+                clauses.append(
+                    f"{diag} ({count} script{'s' if count != 1 else ''}: "
+                    f"{', '.join(shown_names)}{names_suffix})"
+                )
+
+                # Always non-empty: every group is created alongside its first
+                # `checkouts` append, so no `PROJECT_DIR` fallback is reachable.
+                checkouts = group["checkouts"]
+                where = f"each of {', '.join(checkouts)}" if len(checkouts) > 1 else checkouts[0]
+                fix_sentence = f"{fix_diag} In {where}: rm -rf .venv && uv sync --all-extras."
+                hardlinked = group["hardlinked_paths"]
+                if hardlinked:
+                    shown_hl = hardlinked[:5]
+                    hl_suffix = (
+                        f" (+{len(hardlinked) - len(shown_hl)} more)"
+                        if len(hardlinked) > len(shown_hl)
+                        else ""
+                    )
+                    if len(hardlinked) == 1:
+                        fix_sentence += (
+                            f" Also remove the stale hardlinked copy at {shown_hl[0]}, "
+                            "which survives the rebuild with the old shebang."
+                        )
+                    else:
+                        fix_sentence += (
+                            " Also remove the stale hardlinked copies at "
+                            f"{', '.join(shown_hl)}{hl_suffix}, which survive the rebuild "
+                            "with the old shebang."
+                        )
+                fixes.append(fix_sentence)
+
+            interpreter_clause = "; ".join(clauses)
+            if pin is None:
+                interpreter_clause += " (pin unresolvable; off-pin comparison skipped)"
+            if misresolved:
+                message_parts.append(f"interpreter check: {interpreter_clause}")
+            else:
+                # These names did resolve — reusing the "do not resolve"
+                # phrasing above would be a lie about the state that failed.
+                message_parts.append(
+                    f"{len(scripts)} console scripts resolve, but the interpreter check "
+                    f"failed: {interpreter_clause}"
+                )
 
         return CheckResult(
             name="console_scripts_resolve",
             category="Environment",
             passed=False,
-            message=(
-                f"{len(misresolved)}/{len(scripts)} console scripts do not resolve into the "
-                f"repo venv — {path_note}; bare-name callers run the wrong copy or nothing "
-                f"at all (#2566): {'; '.join(shown)}{suffix}"
-            ),
+            message="; ".join(message_parts),
             fix=" ".join(fixes) + " Then re-run.",
         )
+
+    pass_message = (
+        f"{len(scripts)} console scripts resolve into {', '.join(resolved_into)}"
+        f", {verified} of {len(scripts)} interpreter-verified"
+    )
+    if pin is None:
+        pass_message += " (pin unresolvable; off-pin comparison skipped)"
 
     return CheckResult(
         name="console_scripts_resolve",
         category="Environment",
         passed=True,
-        message=f"{len(scripts)} console scripts resolve into {', '.join(resolved_into)}",
+        message=pass_message,
     )
 
 
@@ -536,6 +820,188 @@ def _check_worktree_interpreters() -> CheckResult:
             passed=False,
             message=f"check failed: {e}",
             fix="Investigate agent/worktree_manager.py",
+        )
+
+
+# Toolchain binaries that are NOT console scripts of this repo, so
+# `_check_console_scripts_resolve` never looks at them, but whose version
+# materially changes repo artifacts. `uv` is the motivating case: a stale
+# user-site `uv` ahead of the real one silently rewrites `uv.lock` in its own
+# older format on every `uv sync` (#2780).
+_SHADOW_SENSITIVE_TOOLS: tuple[str, ...] = ("uv", "uvx")
+
+# User-site bin directories that accumulate stale shims. Installing with
+# `pip install --user` writes here, and nothing ever prunes it, so a binary
+# dropped in 2025 still shadows a 2026 one if this sits earlier on PATH.
+_USER_SITE_BIN_GLOB = "Library/Python/*/bin"
+
+
+def _check_shadowed_toolchain() -> CheckResult:
+    """Report toolchain binaries resolving to a stale user-site shim (#2780).
+
+    `_check_console_scripts_resolve` covers this repo's own `[project.scripts]`.
+    It cannot cover `uv`, which is not one of them — and `uv` is the one that
+    matters most, because an old `uv` does not fail loudly. It succeeds, and
+    rewrites `uv.lock` in its own older format, so the damage lands in a tracked
+    file and looks like an ordinary diff.
+
+    Measured on this machine 2026-08-31: `~/Library/Python/3.12/bin/uv` was
+    v0.6.10 (built 2025-03-25) and won PATH resolution over Homebrew's v0.11.3.
+    """
+    try:
+        import shutil
+
+        home = Path.home()
+        user_site_bins = {p.resolve() for p in home.glob(_USER_SITE_BIN_GLOB) if p.is_dir()}
+        if not user_site_bins:
+            return CheckResult(
+                name="shadowed_toolchain",
+                category="Environment",
+                passed=True,
+                message="no user-site bin directories on this machine",
+            )
+
+        shadowed: list[str] = []
+        for tool in _SHADOW_SENSITIVE_TOOLS:
+            found = shutil.which(tool)
+            if not found:
+                continue
+            if Path(found).resolve().parent in user_site_bins:
+                shadowed.append(f"{tool} -> {found}")
+
+        if shadowed:
+            return CheckResult(
+                name="shadowed_toolchain",
+                category="Environment",
+                passed=False,
+                message=(
+                    f"{len(shadowed)} toolchain binary/ies resolve to a stale user-site "
+                    f"shim: {', '.join(shadowed)} — an old `uv` does not fail, it rewrites "
+                    "uv.lock in its own older format"
+                ),
+                fix=(
+                    "Rename the shim aside (reversible), e.g. "
+                    "mv ~/Library/Python/*/bin/uv{,.disabled} — then confirm with "
+                    "`which uv && uv --version`"
+                ),
+            )
+
+        return CheckResult(
+            name="shadowed_toolchain",
+            category="Environment",
+            passed=True,
+            message=(
+                f"{len(_SHADOW_SENSITIVE_TOOLS)} shadow-sensitive tool(s) resolve "
+                "outside user-site shims"
+            ),
+        )
+    except Exception as e:
+        return CheckResult(
+            name="shadowed_toolchain",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate tools/doctor.py::_check_shadowed_toolchain",
+        )
+
+
+def _interpreter_tag_for_pin(pin: str) -> str:
+    """``"3.14"`` -> ``"cpython-314"``, the tag CPython stamps into cache names."""
+    major, _, minor = pin.partition(".")
+    return f"cpython-{major}{minor}"
+
+
+def _scan_off_pin_bytecode(root: Path, pin: str) -> list[Path]:
+    """Return `.pyc` files under `root` whose interpreter tag is not the pin's.
+
+    Skips `.venv/` and `.worktrees/`: those are whole environments with their own
+    lifecycle (`rm -rf .venv && uv sync` replaces one wholesale, and
+    `_check_worktree_interpreters` already reports drift there). This check is
+    about the SOURCE tree's caches, which nothing owns.
+    """
+    want = _interpreter_tag_for_pin(pin)
+    skip_dirs = {".venv", ".worktrees", ".git"}
+    stale: list[Path] = []
+    for path in root.rglob("*.pyc"):
+        if any(part in skip_dirs for part in path.parts):
+            continue
+        # Cache names are `module.cpython-314.pyc`; a name with no tag at all is
+        # not attributable to an interpreter, so it is left alone.
+        if "cpython-" in path.name and want not in path.name:
+            stale.append(path)
+    return stale
+
+
+def _check_stale_bytecode() -> CheckResult:
+    """Report source-tree `.pyc` caches left behind by a previous interpreter.
+
+    Issue #2883. Bytecode caches are namespaced per interpreter
+    (`module.cpython-314.pyc`), so bumping `.python-version` ORPHANS the previous
+    interpreter's caches rather than replacing them. CPython never stats,
+    validates, or deletes a cache whose magic tag is not its own, which makes an
+    orphaned `.pyc` immortal: nothing invalidates it, nothing sweeps it, and
+    nothing warns that a pin bump created it.
+
+    Why it is not merely untidy: these files are real Python source-of-record to
+    any tool that reads the filesystem rather than tracked content. A stale
+    pre-fix `.pyc` under `tools/__pycache__` already failed a clean source tree
+    once (#2807/#2809). `PYTHONDONTWRITEBYTECODE=1` in `scripts/pytest-clean.sh`
+    prevents new ones; it cannot remove those already on disk, and does not apply
+    to a bare `python -m tools.x`.
+
+    Reported rather than swept: deletion is the operator's call, and the fix
+    line below is a single safe command. `tools/disk_reclaim.py` cannot find
+    these — it is size-ranked and these are kilobytes.
+    """
+    try:
+        from agent.worktree_manager import repo_interpreter_pin
+
+        pin = repo_interpreter_pin(PROJECT_DIR)
+        if not pin:
+            return CheckResult(
+                name="stale_bytecode",
+                category="Environment",
+                passed=True,
+                message="no interpreter pin found; skipping bytecode scan",
+            )
+
+        stale = _scan_off_pin_bytecode(PROJECT_DIR, pin)
+        if not stale:
+            return CheckResult(
+                name="stale_bytecode",
+                category="Environment",
+                passed=True,
+                message=f"no off-pin bytecode in the source tree (pin {pin})",
+            )
+
+        tags: dict[str, int] = {}
+        for path in stale:
+            for part in path.name.split("."):
+                if part.startswith("cpython-"):
+                    tags[part] = tags.get(part, 0) + 1
+        breakdown = ", ".join(f"{tag}: {count}" for tag, count in sorted(tags.items()))
+
+        return CheckResult(
+            name="stale_bytecode",
+            category="Environment",
+            passed=False,
+            message=(
+                f"{len(stale)} off-pin .pyc file(s) in the source tree "
+                f"(pin {pin} wants {_interpreter_tag_for_pin(pin)}; found {breakdown}) — "
+                "orphaned by a pin bump; CPython will never read or remove them"
+            ),
+            fix=(
+                "find . -name '*.pyc' -not -path './.venv/*' -not -path './.worktrees/*' "
+                f"| grep -v {_interpreter_tag_for_pin(pin)} | xargs rm -f"
+            ),
+        )
+    except Exception as e:
+        return CheckResult(
+            name="stale_bytecode",
+            category="Environment",
+            passed=False,
+            message=f"check failed: {e}",
+            fix="Investigate tools/doctor.py::_check_stale_bytecode",
         )
 
 
@@ -974,62 +1440,69 @@ def _check_redis_flush_guard() -> CheckResult:
         )
 
 
-def _check_redis_acl() -> CheckResult:
-    """Report Redis ACL drift against the target ``valor-app`` rule set (#2645, D8).
+def _check_gws_auth() -> CheckResult:
+    """Report Google Workspace CLI (`gws`) auth state (#2845).
 
-    Report-only, mirroring ``/update`` Step 3.135. ``/update`` cannot fix ACL
-    drift by design -- the apply is a human-signed runbook step -- so the
-    remediation here is the runbook, never ``/update``. Imports
-    ``scripts.update.redis_acl`` lazily: a missing module (this check can
-    land before that planner does) or an unreachable Redis is a non-fatal
-    skip, never a crash.
+    This is the retrieval half of the `gws-auth` warn_state suppression: an
+    unauthenticated `gws` warns once via `/update`'s `warn_state` routing
+    and then goes silent (Risk 4). `python -m tools.doctor` (full run) is
+    the on-demand answer for "is it still unauthenticated?". Imports
+    ``scripts.update.gws_auth`` lazily: a machine without the module
+    degrades to a passing skip, never a crash -- the same lazy-import-and-
+    degrade pattern this file uses for every optional-module check.
+    ``configure_gws_auth`` is already cron-safe -- it runs `gws auth status`
+    and reports, never initiating OAuth.
     """
-    name = "redis_acl"
+    name = "gws"
     category = "Services"
     try:
-        from scripts.update.redis_acl import apply_redis_acl
+        from scripts.update.gws_auth import configure_gws_auth
     except Exception as e:
         return CheckResult(
             name=name,
             category=category,
             passed=True,
-            message=f"redis_acl planner not available yet: {e}",
+            message=f"gws_auth module not available yet: {e}",
         )
 
     try:
-        acl_result = apply_redis_acl()
+        result = configure_gws_auth()
     except Exception as e:
         return CheckResult(
             name=name,
             category=category,
             passed=True,
-            message=f"redis_acl check could not run: {e}",
+            message=f"gws auth check could not run: {e}",
         )
 
-    if not acl_result.success:
-        return CheckResult(
-            name=name,
-            category=category,
-            passed=True,
-            message=f"redis_acl check skipped: {acl_result.error}",
-        )
-
-    if acl_result.drift:
+    if result.action == "needs_auth":
         return CheckResult(
             name=name,
             category=category,
             passed=False,
-            message=(
-                f"Redis ACL drift detected ({len(acl_result.planned_commands)} command(s) planned)"
-            ),
-            fix="See the apply runbook: docs/features/redis-flush-hardening.md",
+            message=result.detail or "gws needs authentication",
+            fix="gws auth setup --login   (or: gws auth setup && gws auth login)",
         )
-
+    if result.action == "already_ok":
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=result.detail or "gws authenticated",
+        )
+    if result.action == "skipped":
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"gws check skipped: {result.detail}",
+        )
+    # result.success is False on any other path.
     return CheckResult(
         name=name,
         category=category,
         passed=True,
-        message="Redis ACL matches target rule set (no drift)",
+        message=f"gws auth check did not complete: {result.error}",
     )
 
 
@@ -1102,8 +1575,9 @@ def _check_session_archive_freshness() -> CheckResult:
 def _recent_quarantine_suffix() -> str:
     """Read the most recent repair_indexes() identity-less quarantine count.
 
-    `AgentSession.repair_indexes()` (issue #2207's generalized A1 guard)
-    persists its per-pass quarantine count to a plain Redis key
+    `AgentSession.repair_indexes()` (issue #2207's generalized A1 guard,
+    re-based on row identity by #3199) persists its per-pass de-duplicated
+    quarantine ROW count to a plain Redis key
     (`_LAST_QUARANTINED_IDENTITYLESS_REDIS_KEY`, TTL-bounded) precisely so a
     detect-only, freshly-started `python -m tools.doctor` process can see it
     -- the in-memory `AgentSession._last_quarantined_identityless` class
@@ -1123,7 +1597,7 @@ def _recent_quarantine_suffix() -> str:
         count = int(raw)
         if count <= 0:
             return ""
-        return f" (most recent repair_indexes() quarantined {count} identity-less hash re-add(s))"
+        return f" (most recent repair_indexes() quarantined {count} identity-less row(s))"
     except Exception:
         return ""
 
@@ -1139,9 +1613,10 @@ def _check_agentsession_index_drift() -> CheckResult:
 
     The message also surfaces (informationally -- never gates pass/fail) the
     most recent repair_indexes() identity-less quarantine count (issue
-    #2207's generalized A1 guard) via `_recent_quarantine_suffix()`, so a
-    healthy-looking index that is only healthy because the guard is actively
-    quarantining phantom re-adds is visible here rather than silent.
+    #2207's generalized A1 guard, re-based on row identity by #3199) via
+    `_recent_quarantine_suffix()`, so a healthy-looking index that is only
+    healthy because the guard is actively quarantining phantom rows is
+    visible here rather than silent.
     """
     name = "agentsession-index-drift"
     category = "Services"
@@ -1826,6 +2301,8 @@ def get_checks(
         _check_git_hooks_installed,
         _check_popoto_floor,
         _check_worktree_interpreters,
+        _check_stale_bytecode,
+        _check_shadowed_toolchain,
         _check_system_tools,
         _check_python_deps,
         # Services
@@ -1833,7 +2310,6 @@ def get_checks(
         _check_redis_durability,
         _check_redis_replication_health,
         _check_redis_flush_guard,
-        _check_redis_acl,
         _check_session_archive_freshness,
         _check_agentsession_index_drift,
         _check_knowledge_zero_chunk_documents,
@@ -1858,6 +2334,18 @@ def get_checks(
         # push -- stronger than #2473's WARN intent. Full runs (including
         # --json) keep the check, slotted with the other Services checks.
         checks.insert(checks.index(_check_worker) + 1, _check_catchup_kill_switch)
+        # gws auth is registered here, not in the unconditional list above,
+        # for the identical reason (#2845): this repo has no WARN tier
+        # (CheckResult.passed is binary, rendered [FAIL]), so `passed=False`
+        # plus exclusion from `--quick` IS this repo's WARN idiom. `--quick`
+        # backs the opt-in pre-push hook, and gws's condition clears only
+        # through a human completing browser OAuth consent -- registering it
+        # unconditionally would give an unauthenticated machine a
+        # permanently blocked `git push`. Anchor on `_check_redis_flush_guard`
+        # (a member of the unconditional list above), never on
+        # `_check_catchup_kill_switch` (itself inserted by this same block,
+        # which would make the insert order-dependent).
+        checks.insert(checks.index(_check_redis_flush_guard) + 1, _check_gws_auth)
 
     if quality:
         checks.extend(

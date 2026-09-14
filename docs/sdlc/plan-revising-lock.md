@@ -1,7 +1,5 @@
 # SDLC Addendum: Plan-Revising Lock (`_meta.plan_revising`)
 
-**Introduced in:** issue #1302 — "SDLC state machine: build must block on in-flight plan critique"
-
 ## Overview
 
 `_meta.plan_revising` is a bool flag stored in `stage_states["_plan_revising"]` on the PM session. It signals that a critique-driven revision pass is pending — the critique has identified issues that require plan edits before build can proceed.
@@ -12,10 +10,10 @@ The flag activates guard G7 in `agent/sdlc_router.py`, which blocks `/do-build` 
 
 | Who | When | Action |
 |-----|------|--------|
-| `/do-plan-critique` Step 5.6 | Verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns) — verdict kind and nothing else (#2787) | `sdlc-tool meta-set --key plan_revising --value true --issue-number N --run-id "$RUN_ID"` |
+| `/do-plan-critique` Step 5.6 | Verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns) — verdict kind and nothing else | `sdlc-tool meta-set --key plan_revising --value true --issue-number N --run-id "$RUN_ID"` |
 | `/do-plan` Phase 4 Step 2b | After committing the revised plan and writing `revision_applied: true` to frontmatter | `sdlc-tool meta-set --key plan_revising --value false --issue-number N --run-id "$RUN_ID"` |
 
-Run identity (#2003): every state-mutating `sdlc-tool` call on this page
+Run identity: every state-mutating `sdlc-tool` call on this page
 carries `--run-id "$RUN_ID"` — supplied by the invoking supervisor (`/do-sdlc`
 or `/sdlc` carries it from `session-ensure`). When operating standalone (no
 supervisor, e.g. the manual recovery below), run
@@ -23,7 +21,7 @@ supervisor, e.g. the manual recovery below), run
 (`ISSUE_LOCKED` means another live run owns the issue — stop and report).
 Read-only calls (`stage-query`) take no run-id.
 
-**Important:** if the lock-clear step is skipped (e.g. a skill crash after the revised plan was committed), G7 self-heals automatically — but on an **event-scoped** test, not the sticky boolean (#2787): gate 3 releases the lock only once a `/do-plan` revision has landed *after* the latest CRITIQUE verdict. Keying the release on `revision_applied` meant that after a plan's first revision the boolean was permanently true, so the lock could never bind again and #1302's mechanism was inert on exactly the plans that had been round the loop.
+**Important:** if the lock-clear step is skipped (e.g. a skill crash after the revised plan was committed), G7 self-heals automatically — but on an **event-scoped** test, not the sticky boolean: gate 3 releases the lock only once a `/do-plan` revision has landed *after* the latest CRITIQUE verdict. Keying the release on `revision_applied` alone leaves the boolean permanently true after a plan's first revision, so the lock never binds again on plans that have been round the loop.
 
 ## G7 Guard Logic
 
@@ -31,7 +29,7 @@ Read-only calls (`stage-query`) take no run-id.
 guard_g7_plan_revising(stage_states, meta, context):
   1. pr_number is set → None (G3/G6 own PR-stage routing)
   2. plan_revising is falsy → None (lock not set)
-  3. plan_revising AND a revision landed since the latest CRITIQUE verdict → None (self-heal, event-scoped #2787)
+  3. plan_revising AND a revision landed since the latest CRITIQUE verdict → None (self-heal, event-scoped)
   4. plan_revising AND last_skill == /do-plan-critique → Dispatch(/do-plan)
   5. plan_revising AND no /do-plan in recent MAX+1 history → Blocked(G7)
   6. otherwise → None (plan dispatch already in recent history)
@@ -72,4 +70,4 @@ if [ -n "$STORED_HASH" ] && [ "$CURRENT_HASH" != "$STORED_HASH" ]; then
 fi
 ```
 
-The check is a no-op when `STORED_HASH` is empty (pre-#1302 sessions, or untracked plan files).
+The check is a no-op when `STORED_HASH` is empty (no hash recorded, or the plan file is untracked).

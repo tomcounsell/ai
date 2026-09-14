@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import monitoring.worker_watchdog as wwd
+from tools import process_lookup
 
 # --- Fixtures -----------------------------------------------------------------
 
@@ -42,6 +43,21 @@ def _restore_worker_watchdog_constants():
     yield
     for name, value in original.items():
         setattr(wwd, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _pin_recover_ancestry_guard(monkeypatch):
+    """Pin ``recover()``'s #3164 ancestry gate instead of reading the live tree.
+
+    ``recover()`` refuses to signal a worker PID that is an ancestor of the
+    running process — the W1/W2 ladder would otherwise SIGKILL the caller. This
+    suite routinely runs inside an agent session that IS a worker descendant, so
+    leaving the gate on the real process table would make the recover tests pass
+    or fail by host state. Pinned on ``wwd`` (the module that imported the name)
+    and without ``raising=False``, so a moved import fails loudly. The test that
+    exercises the gate itself overrides this with its own patch.
+    """
+    monkeypatch.setattr(wwd, "is_own_ancestor", lambda pid, **kwargs: False)
 
 
 @pytest.fixture
@@ -810,6 +826,64 @@ class TestRecoverW1SigtermSuccess:
         mock_kill.assert_not_called()
         mock_poll.assert_not_called()
         assert any("no PID in status" in r.message for r in caplog.records)
+
+
+class TestRecoverAncestryGuard:
+    """#3164: never signal the worker this process is running inside."""
+
+    def test_recover_refuses_to_signal_an_ancestor_worker(self, isolated_state, caplog):
+        """A worker-hosted `python -m monitoring.worker_watchdog` must not self-kill.
+
+        The launchd tick is unaffected (ppid 1, never a worker descendant), but
+        the module has an argparse ``main()``, so a manual run from a
+        worker-hosted session with a stale heartbeat would SIGTERM then SIGKILL
+        its own ancestor.
+        """
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+                patch.object(wwd, "is_own_ancestor", return_value=True),
+            ):
+                with caplog.at_level(logging.ERROR, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_kill.assert_not_called()
+        mock_poll.assert_not_called()
+        assert any("ancestor" in r.message for r in caplog.records)
+
+    def test_recover_refuses_when_the_process_tree_is_unreadable(self, isolated_state, caplog):
+        """The gate must ask for the fail-closed polarity (#3164).
+
+        ``is_own_ancestor`` defaults to fail-OPEN — an unreadable process tree
+        answers "not an ancestor", which is right for ``run.py``'s restart path
+        but wrong here, where proceeding means SIGTERM/SIGKILL on a PID that may
+        be this caller's own ancestor. Under fork pressure — the condition that
+        wedges a worker and triggers ``recover()`` — ``ps`` is also the thing
+        most likely to fail, so the default polarity would drop the gate exactly
+        when it is needed. Exercises the REAL ``is_own_ancestor`` (overriding the
+        autouse pin) with the process-table read broken.
+        """
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+                patch.object(wwd, "is_own_ancestor", process_lookup.is_own_ancestor),
+                patch.object(process_lookup, "_parent_pid", lambda pid: None),
+            ):
+                with caplog.at_level(logging.ERROR, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_kill.assert_not_called()
+        mock_poll.assert_not_called()
 
 
 class TestRecoverW2SigkillEscalation:

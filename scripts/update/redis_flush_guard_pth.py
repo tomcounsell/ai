@@ -1,9 +1,9 @@
-"""Fleet-wide installer for the ambient production-Redis flush guard (#2645).
+"""Fleet-wide installer for the repo's interpreter-startup ``.pth`` shims.
 
-Writes two files into a venv's ``site-packages`` so the guard in
-``tools/redis_flush_guard.py`` is armed from the moment the interpreter
-starts, not merely from the moment something happens to import
-``tools.redis_flush_guard``:
+Writes four files into a venv's ``site-packages``. Two arm the ambient
+production-Redis flush guard in ``tools/redis_flush_guard.py`` from the
+moment the interpreter starts (#2645), not merely from the moment something
+happens to import ``tools.redis_flush_guard``:
 
   - ``_redis_flush_guard_boot.py`` — a shim whose entire body is
     ``try: import tools.redis_flush_guard; tools.redis_flush_guard.arm()``
@@ -21,12 +21,26 @@ starts, not merely from the moment something happens to import
     the shim swallows every exception — leaving the guard installed but
     inert (Risk 1).
 
+The other two pin a bare ``python scripts/<tool>.py`` to the checkout the
+script lives in (#3141), so a worktree script run through the primary
+checkout's venv imports the worktree rather than ``main``:
+
+  - ``_valor_checkout_pin.py`` — a byte copy of ``tools/checkout_pin.py``
+    (the single source; ``/update`` rewrites the copy when that file
+    changes). Stdlib only, no side effects on import.
+  - ``_valor_checkout_pin.pth`` — one line, ``import _valor_checkout_pin;
+    _valor_checkout_pin.pin()``. The ``_v`` prefix sorts BEFORE
+    ``zzz_redis_flush_guard.pth``, which is load-bearing the other way: the
+    flush-guard shim imports ``tools`` during ``site`` processing, so the
+    invoking checkout has to be at the front of ``sys.path`` by then or
+    ``sys.modules["tools"]`` is the wrong checkout's package for the rest
+    of the process.
+
 **Race 1** (two interpreters self-healing the same venv concurrently, or
 ``/update`` rewriting the shim while a launchd service is mid-``site.py``):
-both files are written via write-temp-in-the-same-directory + atomic
-``os.replace()``, and the shim is always written **before** the ``.pth``,
-so the ``.pth`` can never reference a module that does not yet exist on
-disk.
+every file is written via write-temp-in-the-same-directory + atomic
+``os.replace()``, and each shim is always written **before** its ``.pth``,
+so a ``.pth`` can never reference a module that does not yet exist on disk.
 
 Two entry points:
 
@@ -78,6 +92,14 @@ _SHIM_FILENAME = "_redis_flush_guard_boot.py"
 
 _PTH_CONTENT = "import _redis_flush_guard_boot\n"
 
+# Checkout pin (#3141). The shim is a byte copy of this source file, read at
+# install time so the installer stays importable in isolation (never
+# `import tools.checkout_pin`: `tools/__init__.py` arms the flush guard).
+_PIN_SOURCE_PATH = _PROJECT_DIR / "tools" / "checkout_pin.py"
+_PIN_SHIM_FILENAME = "_valor_checkout_pin.py"
+_PIN_PTH_FILENAME = "_valor_checkout_pin.pth"
+_PIN_PTH_CONTENT = "import _valor_checkout_pin; _valor_checkout_pin.pin()\n"
+
 # The shim's entire body. `arm()`, never `install()` (D2a) -- arm() does not
 # import `redis`, it only inserts a meta-path finder that calls install()
 # on the first *real* import of redis/redis.asyncio. No kill-switch here on
@@ -125,7 +147,7 @@ def _atomic_write(path: Path, content: str) -> None:
 
 
 def install_into(venv_path: str | Path) -> dict:
-    """Install (or verify) the flush-guard shim + ``.pth`` in one venv.
+    """Install (or verify) the flush-guard and checkout-pin shims + ``.pth`` files in one venv.
 
     Never raises. Always returns a dict with at least:
       - ``venv``: str(venv_path)
@@ -153,21 +175,28 @@ def install_into(venv_path: str | Path) -> dict:
             result["reason"] = "read-only site-packages"
             return result
 
-        shim_path = site_packages / _SHIM_FILENAME
-        pth_path = site_packages / _PTH_FILENAME
+        try:
+            pin_shim_content = _PIN_SOURCE_PATH.read_text()
+        except OSError as exc:
+            result["reason"] = f"checkout pin source unreadable: {_PIN_SOURCE_PATH} ({exc})"
+            return result
 
-        shim_current = shim_path.read_text() if shim_path.is_file() else None
-        pth_current = pth_path.read_text() if pth_path.is_file() else None
+        # Each shim FIRST, then its .pth (Race 1) -- a .pth must never
+        # reference a module that is not yet on disk.
+        wanted = [
+            (site_packages / _PIN_SHIM_FILENAME, pin_shim_content),
+            (site_packages / _PIN_PTH_FILENAME, _PIN_PTH_CONTENT),
+            (site_packages / _SHIM_FILENAME, _SHIM_CONTENT),
+            (site_packages / _PTH_FILENAME, _PTH_CONTENT),
+        ]
 
-        if shim_current == _SHIM_CONTENT and pth_current == _PTH_CONTENT:
+        if all(path.is_file() and path.read_text() == content for path, content in wanted):
             result["status"] = "unchanged"
             result["reason"] = None
             return result
 
-        # Shim FIRST, then .pth (Race 1) -- the .pth must never reference a
-        # module that is not yet on disk.
-        _atomic_write(shim_path, _SHIM_CONTENT)
-        _atomic_write(pth_path, _PTH_CONTENT)
+        for path, content in wanted:
+            _atomic_write(path, content)
 
         result["status"] = "installed"
         result["reason"] = None
@@ -211,7 +240,7 @@ def install_fleet(repo_root: str | Path | None = None) -> list[dict]:
 
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Install the redis_flush_guard .pth shim into repo venvs."
+        description="Install the flush-guard and checkout-pin .pth shims into repo venvs."
     )
     parser.add_argument(
         "--venv",

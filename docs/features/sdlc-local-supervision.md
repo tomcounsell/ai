@@ -12,7 +12,7 @@
 2. Loops: `sdlc-tool next-skill` → `sdlc-tool dispatch record` → spawn a stage subagent that invokes the stage's `/do-*` skill → read its structured report → repeat.
 3. Exits on merge confirmation (`gh pr view --json state` = `MERGED`), a `blocked` router decision (guard fired — surfaced to the human, never retried), or a 15-dispatch iteration cap.
 
-The supervisor never decides dispatch itself — `sdlc-tool next-skill` (→ `agent.sdlc_router.decide_next_dispatch()`) remains the single source of dispatch truth, so all guards (G1–G8, including G4 oscillation) apply identically to local runs.
+The supervisor never decides dispatch itself — `sdlc-tool next-skill` (→ `agent.sdlc_router.decide_next_dispatch()`) remains the single source of dispatch truth, so all guards (G1–G9, including G4 oscillation) apply identically to local runs.
 
 The `sdlc-local-{N}` anchor created by `session-ensure` in step 1 is a bookkeeping record, not a job for a worker to run: it is created with `is_ledger=True`, and every worker recovery/pickup guard skips past it rather than requeuing or executing it. This keeps a live standalone `python -m worker` process from mistaking the anchor for orphaned work and driving the same issue a second time in parallel with this local supervisor. See [Eng Session Architecture](eng-session-architecture.md#sdlc-local-session-is_ledger-non-executable-flag-issue-2042) for the full guard-site catalogue.
 

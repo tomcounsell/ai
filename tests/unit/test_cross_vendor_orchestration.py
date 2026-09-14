@@ -65,6 +65,32 @@ class TestSkipEnvelopeNeverReachesComputeConsensus:
         assert result["verdict"] == "CHANGES REQUESTED"
         assert result["consensus"]["n"] == 0
 
+    def test_cross_vendor_skip_alongside_full_roster_satisfies_quorum(self):
+        """The cross-vendor judge skipping (its normal behavior when the gate
+        is off, the diff is trivial, or the API call fails) must never turn a
+        healthy two-judge roster into a quorum shortfall (issue #3197). Only
+        the two mandatory roster dicts reach compute_consensus here — the
+        cross-vendor envelope's skip means the parent appended nothing."""
+        judges = [
+            {
+                "judge_id": "code-quality",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+            {
+                "judge_id": "risk",
+                "verdict": "APPROVED",
+                "blockers": 0,
+                "tech_debt": 0,
+                "confidence": 0.9,
+            },
+        ]
+        result = compute_consensus(judges, rule="any-blocker-wins", expected_judges=2)
+        assert result["verdict"] == "APPROVED"
+        assert result["consensus"]["quorum_shortfall"] is False
+
 
 # ---------------------------------------------------------------------------
 # Validation layer — skip envelope dicts rejected before record_verdict

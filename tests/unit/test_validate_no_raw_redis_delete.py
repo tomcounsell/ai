@@ -179,6 +179,46 @@ class TestExecutableContextGate:
         assert validator.find_violation(cmd, str(REPO_ROOT)) is None
 
 
+class TestQuotedHeredocBodies:
+    """#2736: a quoted-heredoc body is data unless it feeds an interpreter."""
+
+    # The shape that kept blocking doc/comment authoring: a quoted example
+    # that names an interpreter AND a blocked call shape, inside a heredoc
+    # that only writes a file.
+    QUOTED_EXAMPLE = f"Example: .venv/bin/python -c \"import popoto; {DELETE_CALL}'k')\""
+
+    def test_quoted_heredoc_writing_a_doc_is_allowed(self):
+        cmd = "cat <<'EOF' > doc.md\n" + self.QUOTED_EXAMPLE + "\nEOF"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is None
+
+    def test_dash_form_quoted_heredoc_is_allowed(self):
+        cmd = "cat <<-'EOF' > doc.md\n\t" + self.QUOTED_EXAMPLE + "\n\tEOF"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is None
+
+    def test_unquoted_heredoc_with_command_substitution_still_blocks(self):
+        inner = py(f"import popoto; {DELETE_CALL}'k')")
+        cmd = "cat <<EOF > doc.md\n$(" + inner + ")\nEOF"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_quoted_heredoc_feeding_an_interpreter_stays_in_scope(self):
+        cmd = "python3 <<'EOF'\nimport popoto\n" + DELETE_CALL + "'k')\nEOF"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_quoted_heredoc_piped_into_an_interpreter_stays_in_scope(self):
+        cmd = "cat <<'PY' | python3\nimport popoto\n" + DELETE_CALL + "'k')\nPY"
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_unterminated_quoted_heredoc_stays_in_scope(self):
+        cmd = "cat <<'EOF' > doc.md\n" + py(f"import popoto; {DELETE_CALL}'k')")
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+    def test_command_after_a_stripped_heredoc_still_blocks(self):
+        """Stripping the body must not eat executable text that follows it."""
+        tail = py(f"import popoto; {DELETE_CALL}'k')")
+        cmd = "cat <<'EOF' > doc.md\nharmless prose\nEOF\n" + tail
+        assert validator.find_violation(cmd, str(REPO_ROOT)) is not None
+
+
 class TestPopotoContextEntries:
     """#2641: two stale `_POPOTO_CONTEXT` entries made the guard fail open."""
 

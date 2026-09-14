@@ -301,12 +301,12 @@ class TestPRReviewAuditModel:
     """Test that the model is importable and has expected interface."""
 
     def test_importable(self):
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
 
         assert PRReviewAudit is not None
 
     def test_has_expected_classmethods(self):
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
 
         assert hasattr(PRReviewAudit, "is_audited")
         assert hasattr(PRReviewAudit, "mark_audited")
@@ -501,7 +501,7 @@ class TestCloudRedisBypass:
         monkeypatch.setenv("GH_REPO", "org/repo")
         monkeypatch.setattr(pr_review_audit, "load_local_projects", lambda: [])
 
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
 
         def _boom(*_a, **_kw):
             raise RuntimeError("no redis connection available")
@@ -609,7 +609,7 @@ class TestLocalBehaviorPreserved:
         )
         monkeypatch.setattr(pr_review_audit.subprocess, "run", stub)
 
-        from models.reflections import PRReviewAudit
+        from models.pr_review_audit import PRReviewAudit
 
         result = pr_review_audit.run()
 

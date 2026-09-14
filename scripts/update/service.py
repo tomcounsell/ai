@@ -5,11 +5,15 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+
+from tools.process_lookup import find_python_service_pids, is_own_ancestor
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,31 @@ OBSOLETE_SERVICE_SUFFIXES: list[str] = [
     # firing every 300s and failing "No such file or directory" on every
     # already-provisioned machine.
     "issue-poller",
+    # scripts/autoexperiment.py, its installer, and com.valor.autoexperiment.plist
+    # were deleted in #3177. The script committed to whatever branch happened to be
+    # checked out and its installer defaulted to a target whose module was removed
+    # in #466, so a machine that ever ran the installer has a nightly LaunchAgent
+    # raising KeyError forever. Boot it out and remove the plist fleet-wide.
+    "autoexperiment",
 ]
+
+
+def _launchctl_loaded_labels(launchctl_list: str) -> set[str]:
+    """Parse ``launchctl list`` output into the exact set of loaded labels.
+
+    ``launchctl list`` prints three whitespace-separated columns: PID, Status,
+    Label. The label is always the last column, so an exact last-token match is
+    the only safe identity test — a substring search for
+    ``com.valor.autoexperiment`` also matches ``com.valor.autoexperiment-v2``
+    and would boot out a job this sweep does not own. A blank line contributes
+    nothing.
+    """
+    labels: set[str] = set()
+    for line in launchctl_list.splitlines():
+        parts = line.split()
+        if parts:
+            labels.add(parts[-1])
+    return labels
 
 
 def remove_obsolete_services() -> list[str]:
@@ -59,13 +87,15 @@ def remove_obsolete_services() -> list[str]:
     except Exception:
         launchctl_list = ""
 
+    loaded_labels = _launchctl_loaded_labels(launchctl_list)
+
     removed: list[str] = []
     for suffix in OBSOLETE_SERVICE_SUFFIXES:
         label = f"{SERVICE_PREFIX}.{suffix}"
         plist_path = launch_agents / f"{label}.plist"
         acted = False
 
-        if label in launchctl_list:
+        if label in loaded_labels:
             try:
                 run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
                 acted = True
@@ -124,13 +154,8 @@ def run_cmd(
 
 def get_bridge_pid() -> int | None:
     """Get PID of running bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "telegram_bridge.py"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(script_suffix="bridge/telegram_bridge.py")
+    return pids[0] if pids else None
 
 
 def is_bridge_running() -> bool:
@@ -212,20 +237,19 @@ def restart_service(project_dir: Path) -> bool:
 
 
 def get_worker_pid() -> int | None:
-    """Get PID of running worker process."""
-    try:
-        result = run_cmd(["pgrep", "-fi", "python -m worker"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    try:
-        result = run_cmd(["pgrep", "-fi", "python.*worker/__main__"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    """Get PID of running worker process.
+
+    Both launch shapes are accepted: ``python -m worker`` (how launchd starts
+    it) and ``python .../worker/__main__.py`` (a direct start).
+
+    Ordering (#3164): the old ``pgrep`` probe preferred the ``-m worker`` shape
+    and only fell back to the script shape; this ORs both selectors and takes
+    the lowest matching PID. The answer can therefore differ from the old one
+    only when both launch shapes are live at once, which no installed path
+    produces — the launchd plist is the sole worker launcher.
+    """
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    return pids[0] if pids else None
 
 
 def is_worker_running() -> bool:
@@ -552,17 +576,30 @@ def install_worker(project_dir: Path) -> bool:
         return False
 
 
-def install_nightly_tests(project_dir: Path) -> bool:
+# The installer's own stable success line (scripts/install_nightly_tests.sh).
+# Classifying on this *success* marker — rather than on a skip string — fails
+# closed: the worktree refusal and any future early-exit path that forgets to
+# update a skip string still read as "skipped" instead of falsely as
+# "installed".
+_NIGHTLY_TESTS_SUCCESS_MARKER = "Nightly regression test service installed successfully."
+
+
+def install_nightly_tests(project_dir: Path) -> Literal["installed", "skipped", "failed"]:
     """Install/reload nightly-tests plist via the self-gating install script.
 
-    Delegates to scripts/install_nightly_tests.sh which contains a has_bridge_role()
-    gate — it skips install on non-bridge machines and removes any stale plist.
-    Returns True if the script exits 0 (installed or cleanly skipped).
+    Delegates to scripts/install_nightly_tests.sh, which contains a worktree
+    refusal and a has_worker_role() gate — it skips install on a lane worktree
+    or a machine that owns no project, and removes any stale plist either way.
+
+    Returns ``"installed"`` when the script exited 0 AND its stable success
+    marker appears in stdout, ``"skipped"`` when it exited 0 without that
+    marker (a role-gate or worktree-refusal early exit), and ``"failed"`` on a
+    non-zero exit or an exception running it.
     """
     install_script = project_dir / "scripts" / "install_nightly_tests.sh"
     if not install_script.exists():
         logger.warning("install_nightly_tests: install script not found at %s", install_script)
-        return False
+        return "failed"
 
     try:
         result = run_cmd(
@@ -570,18 +607,21 @@ def install_nightly_tests(project_dir: Path) -> bool:
             cwd=project_dir,
             timeout=60,
         )
-        if result.returncode == 0:
-            logger.info("install_nightly_tests: script completed (rc=0)")
-            return True
-        logger.warning(
-            "install_nightly_tests: script exited with rc=%d; stdout=%s",
-            result.returncode,
-            (result.stdout or "").strip()[:200],
-        )
-        return False
+        if result.returncode != 0:
+            logger.warning(
+                "install_nightly_tests: script exited with rc=%d; stdout=%s",
+                result.returncode,
+                (result.stdout or "").strip()[:200],
+            )
+            return "failed"
+        if _NIGHTLY_TESTS_SUCCESS_MARKER in (result.stdout or ""):
+            logger.info("install_nightly_tests: installed")
+            return "installed"
+        logger.info("install_nightly_tests: skipped (role gate or worktree refusal)")
+        return "skipped"
     except Exception as exc:
         logger.warning("install_nightly_tests: failed to run install script: %s", exc)
-        return False
+        return "failed"
 
 
 def install_reflection_worker(project_dir: Path) -> bool:
@@ -680,13 +720,8 @@ def is_update_cron_installed() -> bool:
 
 def get_email_pid() -> int | None:
     """Get PID of running email bridge process."""
-    try:
-        result = run_cmd(["pgrep", "-f", "bridge.email_bridge"])
-        if result.returncode == 0 and result.stdout.strip():
-            return int(result.stdout.strip().split()[0])
-    except Exception:
-        pass
-    return None
+    pids = find_python_service_pids(module="bridge.email_bridge")
+    return pids[0] if pids else None
 
 
 def is_email_running() -> bool:
@@ -711,17 +746,39 @@ def is_email_configured(project_dir: Path) -> bool:
     return False
 
 
+def _signal_pid(pid: int, sig: int) -> None:
+    """Send ``sig`` to ``pid``.
+
+    A module-level seam so a test can patch signalling on *this* module instead
+    of on the shared ``os`` module, whose ``kill`` every other import in the
+    process also sees.
+    """
+    os.kill(pid, sig)
+
+
 def stop_email(project_dir: Path) -> bool:
     """Stop the email bridge. Returns True if it stopped."""
     service_script = project_dir / "scripts" / "valor-service.sh"
     if not service_script.exists():
         pid = get_email_pid()
-        if pid:
-            import os
-            import signal
-
+        # Never SIGTERM the email bridge this process is running inside (#3164).
+        # `get_email_pid` is ancestor-safe now, so a hosted caller can be handed
+        # its own ancestor's PID; signalling it would take the caller down.
+        # Skipping the kill also means we do not claim it stopped — the
+        # `is_email_running()` return below still reports it up.
+        # `on_unreadable=True`: this is a kill path, so an unreadable process
+        # tree must mean "refuse to signal" rather than "proceed" (see
+        # `is_own_ancestor`'s docstring for why the restart gate in
+        # `scripts/update/run.py` takes the opposite polarity).
+        if pid and is_own_ancestor(pid, on_unreadable=True):
+            logger.warning(
+                "stop_email: email bridge pid %s is an ancestor of this process — "
+                "refusing to SIGTERM it; stop it from outside a hosted session",
+                pid,
+            )
+        elif pid:
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal_pid(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         return not is_email_running()

@@ -62,7 +62,7 @@ cutover.
   local `/sentry` on-demand recipe and by the cloud routine (via the GitHub connector or
   the cloned repo's own `gh`) for filing and dedup.
 - `sdlc-tool stage-query --issue-number {N}` — once a routine files an issue, the normal
-  SDLC pipeline (see `.claude/skills/sdlc/SKILL.md`) picks it up from there; the routine's
+  SDLC pipeline (see `.claude/skills-global/do-sdlc/SKILL.md`) picks it up from there; the routine's
   job stops at "issue filed," it does not drive the pipeline.
 
 ## Reference implementation

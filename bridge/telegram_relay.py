@@ -31,8 +31,11 @@ import logging
 import os
 
 import redis
+from pydantic import ValidationError
 from telethon.errors import FloodWaitError
 
+from bridge import dead_letters, wire_schemas
+from bridge.wire_schemas import OutboxPayload
 from utils.peer import numeric_peer
 
 logger = logging.getLogger(__name__)
@@ -54,8 +57,10 @@ RELAY_FLOOD_WAIT_BUFFER_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_BUFFER_SECS"
 RELAY_FLOOD_WAIT_MAX_SLEEP_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_MAX_SLEEP_SECS", "300"))
 RELAY_FLOOD_WAIT_MAX = int(os.environ.get("RELAY_FLOOD_WAIT_MAX", "10"))
 
-# Known message types accepted by the relay dispatcher
-KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
+# The accepted message types live on `bridge.wire_schemas.OutboxPayload.type`
+# as a `Literal[...] | None`, so the relay dispatcher's accepted set and the
+# wire schema can no longer drift apart. `None` is a member by construction:
+# an ordinary text message carries no `type` key.
 
 
 class _DeliveredNoId:
@@ -110,10 +115,10 @@ def _safe_unlink(path: str) -> None:
 
 
 def _get_redis_connection() -> redis.Redis:
-    """Get a synchronous Redis connection for queue operations."""
+    """The shared sync text Redis client for queue operations."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _deliverable_peer(chat_id, kind: str, message: dict) -> bool:
@@ -171,9 +176,11 @@ async def _send_queued_reaction(
     """
     chat_id = message.get("chat_id")
     reply_to = message.get("reply_to")
+    # ``emoji`` is ``None`` for a clear-reaction payload (the teammate
+    # completion path); only a missing target makes the payload malformed.
     emoji = message.get("emoji")
 
-    if not chat_id or not reply_to or not emoji:
+    if not chat_id or not reply_to:
         logger.warning(f"Relay: skipping malformed reaction payload: {message}")
         return False
 
@@ -223,9 +230,10 @@ def _session_reached_terminal_status(session_id: str) -> bool:
         from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
 
-        for session in AgentSession.query.filter(session_id=session_id):
-            return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
-        return False
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
+            return False
+        return str(getattr(session, "status", "") or "").lower() in TERMINAL_STATUSES
     except Exception as e:  # noqa: BLE001
         logger.debug("Relay: terminal-status lookup failed for %s: %s", session_id, e)
         return False
@@ -236,10 +244,9 @@ def _reaction_yields_slot(message: dict) -> bool:
 
     Telegram permits one reaction per sender per message, and seven writers
     across two processes target a session's originating message. Ordering is
-    undefined: `output_handler.react()` writes ``telegram:outbox:{chat_id}``
-    while ticks, budget, and completion reactions write
-    ``telegram:outbox:{session_id}``, and `process_outbox` iterates those keys
-    in unspecified order. There is no single queue whose FIFO order could be
+    undefined: every writer targets ``telegram:outbox:{session_id}`` (falling
+    back to ``{chat_id}`` for a chatless call), and `process_outbox` iterates
+    those keys in unspecified order. There is no single queue whose FIFO order could be
     relied on, so precedence is enforced here, at the one point all outbox
     traffic converges.
 
@@ -365,8 +372,8 @@ def _record_sent_reaction(message: dict) -> None:
     every other outbound record. Best-effort: never raises into the relay.
     """
     try:
-        from bridge.utc import utc_now
         from tools.telegram_history import store_message
+        from utils.utc import utc_now
 
         chat_id = message.get("chat_id")
         reply_to = message.get("reply_to")
@@ -404,7 +411,7 @@ def _bind_outbound_message_to_job(message: dict, msg_id) -> None:
             return
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
+        sessions = AgentSession.rows_for_session_id(session_id)
         if not sessions:
             return
         from bridge.job_router import (
@@ -807,11 +814,9 @@ def _record_sent_message(session_id: str, msg_id: int) -> None:
     try:
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            # Use the newest session record
-            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-            sessions[0].record_pm_message(msg_id)
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is not None:
+            session.record_pm_message(msg_id)
             logger.debug(f"Relay: recorded msg_id={msg_id} on session {session_id}")
         else:
             logger.warning(f"Relay: session {session_id} not found for recording msg_id={msg_id}")
@@ -836,12 +841,11 @@ def _record_relay_sent_draft(session_id: str, text: str) -> None:
         from bridge.message_drafter import extract_artifacts
         from models.agent_session import AgentSession
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if not sessions:
+        session = AgentSession.newest_for_session_id(session_id)
+        if session is None:
             return
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
         artifacts = extract_artifacts(text) or {}
-        sessions[0].record_recent_sent_draft(text, artifacts)
+        session.record_recent_sent_draft(text, artifacts)
         logger.debug(f"Relay: registered PM self-send in recent_sent_drafts for {session_id}")
     except Exception as e:
         logger.warning(f"Relay: failed to record recent_sent_draft for {session_id}: {e}")
@@ -911,9 +915,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
         if session is None:
             queue_session_id = message.get("session_id") or ""
             if queue_session_id and not queue_session_id.startswith(("cli-", "local-")):
-                rows = list(AgentSession.query.filter(session_id=queue_session_id))
-                if rows:
-                    session = rows[0]
+                session = AgentSession.newest_for_session_id(queue_session_id)
 
         # Tier 3: fallback by chat_id for manual CLI sends.
         # NOTE: get_active_session_for_chat is async; we replicate its core query
@@ -976,6 +978,16 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
     # Text/file messages -- persist to dead letter queue
     text = message.get("text", "")
     reply_to = message.get("reply_to")
+
+    # A poll payload carries no `text` key, so keeping "poll" out of the
+    # ephemeral tuple above is NOT enough on its own: the `if chat_id and text`
+    # gate below would drop it silently. Supply the question as the dead-letter
+    # text. A dropped question is a stuck agent, which is exactly the failure
+    # this feature exists to prevent.
+    if msg_type == "poll" and not text:
+        from agent.output_handler import render_poll_as_text
+
+        text = render_poll_as_text(message.get("question") or "", message.get("options") or [])
     if chat_id and text:
         # Same parse as the send paths (one predicate, `utils.peer`), but not
         # `_deliverable_peer`: this is about discarding a stored record rather
@@ -1003,6 +1015,9 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
                 chat_id=chat_id_int,
                 reply_to=int(reply_to) if reply_to else None,
                 text=text,
+                reason=reason,
+                attempts=int(message.get("_relay_attempts") or 0),
+                project_key=message.get("project_key"),
             )
             logger.warning(
                 f"Relay: dead-lettered message for chat {chat_id} ({reason}, {len(text)} chars)"
@@ -1013,6 +1028,289 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
         logger.warning(
             f"Relay: discarding non-text message after {reason} (chat_id={chat_id}): {message}"
         )
+
+
+def _poll_text_payload(message: dict) -> dict:
+    """Build the plain-text payload a poll degrades to.
+
+    **One rendering of a question as prose, not several.** Both the eligibility
+    re-check branch and the terminal-failure re-enqueue go through this, so the
+    fallback cannot drift from what a reader was expecting to see. ``type`` is
+    ``None`` and ``_relay_attempts`` is reset, so the payload gets its own retry
+    budget and can never re-enter the poll branch.
+    """
+    from agent.output_handler import render_poll_as_text
+
+    return {
+        "type": None,
+        "chat_id": message.get("chat_id"),
+        "text": render_poll_as_text(message.get("question") or "", message.get("options") or []),
+        "reply_to": message.get("reply_to"),
+        "session_id": message.get("session_id"),
+        "_relay_attempts": 0,
+    }
+
+
+async def _reenqueue_poll_as_text(r, key: str, message: dict, *, reason: str) -> bool:
+    """Push the question back onto the same outbox key as plain text.
+
+    Returns whether the push landed. A decline branch **must** honor ``False``: by
+    the time it calls this, it has either dropped the provisional row (the
+    ineligible-at-send-time branch, after ``delete_pending_poll``) or never had one
+    to begin with (the missing-``poll_id_hint`` branch, which bails before
+    ``register_pending_poll`` runs). Either way there is no pending row behind it,
+    so returning ``DELIVERED_NO_ID`` on a failed push would leave the question with
+    no outbox entry, no pending row and no dead letter. Returning ``None`` instead
+    puts it back on the retry path — but
+    this only NARROWS the hole, it does not close it. The retry path's own re-queue
+    (``process_outbox``'s bounded-retry ``r.rpush`` of the original poll message)
+    uses the same primitive and the same failure is swallowed there too (logged,
+    not raised). So the question survives a single ``rpush`` failure, not two
+    consecutive ones.
+    """
+    try:
+        await asyncio.to_thread(r.rpush, key, json.dumps(_poll_text_payload(message)))
+        logger.info(
+            "Relay: poll degraded to text on %s (%s, chat_id=%s)",
+            key,
+            reason,
+            message.get("chat_id"),
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.error("Relay: failed to re-enqueue poll as text on %s: %s", key, e)
+        return False
+
+
+async def _find_already_sent_poll(telegram_client, chat_id, poll_id_hint: str):
+    """Look for a poll already on screen carrying ``poll_id_hint``.
+
+    Shared by the retry guard below and the reconciliation loop's orphan
+    adoption — one implementation, because the two must agree on what "the same
+    poll" means or the adoption bail fires on ordinary retries.
+
+    Returns ``(msg_id, server_poll_id)`` on a unique match, ``None`` when there
+    is no match, and ``None`` **with a warning** when more than one candidate
+    matches: an ambiguous adoption steers a session with someone else's answer,
+    which is worse than a dropped question.
+    """
+    from telethon.tl.types import MessageMediaPoll
+
+    from bridge.poll_registry import POLL_ADOPTION_SCAN_LIMIT
+    from bridge.response import correlation_matches, decode_option
+
+    matches = []
+    try:
+        async for msg in telegram_client.iter_messages(
+            chat_id, limit=POLL_ADOPTION_SCAN_LIMIT, from_user="me"
+        ):
+            media = getattr(msg, "media", None)
+            if not isinstance(media, MessageMediaPoll):
+                continue
+            poll = getattr(media, "poll", None)
+            answers = getattr(poll, "answers", None) or []
+            if not answers:
+                continue
+            _index, prefix = decode_option(getattr(answers[0], "option", None))
+            if correlation_matches(prefix, poll_id_hint):
+                matches.append((msg.id, poll.id))
+    except FloodWaitError:
+        # #3095: propagate so the caller's backoff actually runs — process_outbox's
+        # FloodWaitError handler on the send path, poll_reconcile_loop's on the
+        # adoption path. Swallowing it here kept both rescanning at full cadence
+        # while Telegram was asking the account to stop.
+        raise
+    except Exception as e:  # noqa: BLE001 — a scan failure must not block the send
+        logger.warning("Relay: poll lookup scan failed for hint %s: %s", poll_id_hint, e)
+        return None
+
+    if len(matches) > 1:
+        logger.warning(
+            "poll_adoption_ambiguous hint=%s candidates=%s — adopting nothing",
+            poll_id_hint,
+            [m[0] for m in matches],
+        )
+        return None
+    return matches[0] if matches else None
+
+
+async def _send_queued_poll(
+    telegram_client, message: dict, key: str
+) -> int | _DeliveredNoId | None:
+    """Send a ``type: "poll"`` payload.
+
+    Returns the sent message id; ``DELIVERED_NO_ID`` when the poll was declined
+    and the prose fallback **landed** on the outbox; ``None`` for a genuine send
+    failure the caller should retry, and for a decline whose fallback push itself
+    failed — that branch has no pending row behind it (see
+    ``_reenqueue_poll_as_text``), so the retry is the only remaining record of the
+    question. That retry only NARROWS the hole rather than closing it: it re-queues
+    via the same ``r.rpush`` primitive, and ``process_outbox`` swallows that
+    failure too (logs, does not raise). The question is lost only on two
+    consecutive ``rpush`` failures, not one.
+
+    The sentinel is load-bearing. Both decline branches push the prose fallback
+    before returning, so reporting them as failure makes ``process_outbox``
+    re-queue the *original poll payload*, which declines again for the same
+    reason and enqueues another copy of the question — up to
+    ``MAX_RELAY_RETRIES`` plus the terminal branch, each retry also burning an
+    ``iter_messages`` scan. Same shape as #2179 on the text path.
+
+    Ordering inside this function is load-bearing and is asserted by test rather
+    than left to reading order.
+    """
+    from bridge.poll_registry import (
+        delete_pending_poll,
+        promote_pending_poll,
+        register_pending_poll,
+    )
+
+    r = _get_redis_connection()
+    chat_id = message.get("chat_id")
+    session_id = message.get("session_id")
+    question = message.get("question") or ""
+    options = message.get("options") or []
+    poll_id_hint = message.get("poll_id_hint")
+
+    # A payload without the correlation key is a producer bug. Log loudly and
+    # degrade to text rather than sending a poll no vote could ever be routed to.
+    if not poll_id_hint:
+        logger.error(
+            "Relay: poll payload missing poll_id_hint (chat_id=%s session_id=%s) — "
+            "delivering as text; this is a producer bug in "
+            "build_telegram_poll_outbox_payload",
+            chat_id,
+            session_id,
+        )
+        pushed = await _reenqueue_poll_as_text(r, key, message, reason="missing poll_id_hint")
+        return DELIVERED_NO_ID if pushed else None
+
+    # ── The provisional row is the FIRST statement, ahead of every await ──
+    # `process_outbox` already consumed this work item with an atomic LPOP, so
+    # from that instant until a row exists the question has NO durable record
+    # anywhere: a restart in that window is a silent total loss, with nothing
+    # for orphan adoption to adopt and no row for `poll_expired_unanswered` to
+    # fire on — strictly worse than the Race-6 window, which at least leaves
+    # evidence behind. Nothing forces a later ordering: `poll_id_hint` rides on
+    # the payload and is knowable the moment the LPOP returns.
+    await asyncio.to_thread(
+        register_pending_poll,
+        poll_id_hint,
+        chat_id=chat_id,
+        session_id=session_id,
+        question=question,
+        options=options,
+    )
+
+    # ── On a retry, look for an already-sent poll BEFORE re-sending ──
+    # Telegram accepting `SendMediaRequest` and the client *then* raising
+    # (timeout, mid-RPC disconnect) is an ordinary MTProto outcome, and
+    # `poll_id_hint` is minted once per payload rather than per attempt. A naive
+    # retry would put two polls on screen decoding to the same hint, and the
+    # adoption guard written for an ambiguous match would then fire as the
+    # systematic outcome of an ordinary retry — leaving the question permanently
+    # unroutable.
+    if message.get("_relay_attempts", 0) > 0:
+        found = await _find_already_sent_poll(telegram_client, chat_id, poll_id_hint)
+        if found is not None:
+            found_msg_id, found_poll_id = found
+            promoted = await asyncio.to_thread(
+                promote_pending_poll, poll_id_hint, found_poll_id, msg_id=found_msg_id
+            )
+            if promoted:
+                logger.info(
+                    "Relay: poll for hint %s was already sent (msg_id=%s) — promoting, "
+                    "not resending",
+                    poll_id_hint,
+                    found_msg_id,
+                )
+                return found_msg_id
+            # promote_pending_poll refused: found_poll_id is already registered
+            # under a different hint, so this was a false-positive adoption
+            # match, not our poll. The pending row is still intact — fall
+            # through and actually send rather than claiming a delivery that
+            # never happened for this question.
+            logger.warning(
+                "Relay: poll adoption match for hint %s (poll_id=%s) was a false "
+                "positive — proceeding to send instead of adopting",
+                poll_id_hint,
+                found_poll_id,
+            )
+
+    # ── Eligibility re-check, thread-offloaded ──
+    # Defense in depth: the CLI decided at ask time, but the relay is the last
+    # writer before the wire and a payload can sit in the outbox across a
+    # session-type change. MUST be offloaded — `poll_eligible`'s second clause
+    # is an AgentSession lookup on an unindexed field, and calling it inline
+    # would stall every other bridge coroutine for seconds per poll send.
+    from bridge.poll_gating import poll_eligible
+
+    eligibility = await asyncio.to_thread(poll_eligible, chat_id, session_id)
+    if not eligibility.ok:
+        # Returning None on a failed fallback push here sends this back through
+        # process_outbox's bounded retry, which pays `_find_already_sent_poll`'s
+        # `iter_messages` scan (POLL_ADOPTION_SCAN_LIMIT messages) for a poll that
+        # was never sent — bounded by MAX_RELAY_RETRIES and accepted, because the
+        # alternative is losing the question.
+        logger.info(
+            "Relay: poll ineligible at send time (chat_id=%s session_id=%s reason=%s) — "
+            "delivering as text",
+            chat_id,
+            session_id,
+            eligibility.reason,
+        )
+        await asyncio.to_thread(delete_pending_poll, poll_id_hint)
+        pushed = await _reenqueue_poll_as_text(
+            r, key, message, reason=f"ineligible:{eligibility.reason}"
+        )
+        return DELIVERED_NO_ID if pushed else None
+
+    from bridge.response import send_poll
+
+    sent = await send_poll(
+        telegram_client,
+        numeric_peer(chat_id),
+        question,
+        options,
+        reply_to=message.get("reply_to"),
+        correlation_id=poll_id_hint,
+    )
+    if sent is None:
+        # Distinguishable failure — the caller's bounded-retry path engages.
+        # The provisional row deliberately SURVIVES here: the send may have
+        # reached Telegram before the client raised, and the row is what the
+        # retry lookup and orphan adoption need. It is deleted only on the
+        # decline branches, which are known not to have sent anything.
+        return None
+
+    msg_id, server_poll_id = sent
+    await asyncio.to_thread(promote_pending_poll, poll_id_hint, server_poll_id, msg_id=msg_id)
+    logger.info(
+        "Relay: sent poll to %s (msg_id=%s poll_id=%s hint=%s)",
+        chat_id,
+        msg_id,
+        server_poll_id,
+        poll_id_hint,
+    )
+
+    # History row, modelled on the reaction path.
+    try:
+        from bridge.telegram_bridge import store_message
+        from utils.utc import utc_now
+
+        await asyncio.to_thread(
+            store_message,
+            chat_id=chat_id,
+            content=question,
+            sender="system",
+            timestamp=utc_now(),
+            message_type="poll",
+            direction="out",
+        )
+    except Exception as e:  # noqa: BLE001 — history is best-effort
+        logger.debug("Relay poll history store_message failed: %s", e)
+
+    return msg_id
 
 
 async def process_outbox(telegram_client) -> int:
@@ -1043,19 +1341,33 @@ async def process_outbox(telegram_client) -> int:
 
                 processed += 1
 
+                # The wire shape is declared once, in bridge/wire_schemas.py.
+                # Validation subsumes the old ad-hoc JSON parse AND the
+                # KNOWN_MESSAGE_TYPES membership check: `type` is a Literal on
+                # the model, and it admits None because a plain text message
+                # carries no `type` key at all. Either failure leaves the
+                # entry as a dead letter holding the raw string rather than
+                # discarding it, which is what this loop used to do (#3183).
                 try:
-                    message = json.loads(raw)
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.warning(f"Relay: skipping malformed queue entry in {key}: {e}")
-                    continue
-
-                # Validate message type before dispatch
-                msg_type = message.get("type")
-                if msg_type not in KNOWN_MESSAGE_TYPES:
-                    logger.warning(
-                        f"Relay: unknown message type '{msg_type}', discarding: {message}"
+                    payload = OutboxPayload.model_validate_json(raw)
+                except ValidationError as e:
+                    logger.warning(f"Relay: unparseable queue entry in {key}: {e}")
+                    await dead_letters.arecord(
+                        "outbox_parse",
+                        raw,
+                        f"outbox payload failed validation in {key}: {e}",
+                        replayable=False,
                     )
                     continue
+
+                # Downstream handlers read a plain dict (and mutate it: the
+                # retry counter, the re-queue). `exclude_unset` reproduces the
+                # entry exactly as the writer put it on the wire: the keys it
+                # sent, including an explicit `"reply_to": null`, and none of
+                # the optional fields the model declares but this payload
+                # never carried.
+                message = wire_schemas.to_dict(payload)
+                msg_type = payload.type
 
                 # Dispatch to handler with unified error handling
                 success = False
@@ -1074,6 +1386,18 @@ async def process_outbox(telegram_client) -> int:
                     elif msg_type == "custom_emoji_message":
                         msg_id = await _send_custom_emoji_message(telegram_client, message)
                         success = msg_id is not None
+                    elif msg_type == "poll":
+                        send_result = await _send_queued_poll(telegram_client, message, key)
+                        # A declined poll has already been re-queued as prose, so
+                        # the payload is consumed, not failed. Re-queuing it would
+                        # decline again and put a second copy of the question in
+                        # front of the human (#2179 shape, poll path).
+                        if send_result is DELIVERED_NO_ID:
+                            success = True
+                            msg_id = None
+                        else:
+                            msg_id = send_result
+                            success = msg_id is not None
                     else:
                         send_result = await _send_queued_message(telegram_client, message)
                         # A send that reached Telegram but returned no message id
@@ -1175,7 +1499,7 @@ async def process_outbox(telegram_client) -> int:
                     if msg_type is None and msg_id is not None:
                         try:
                             from bridge.telegram_bridge import store_message
-                            from bridge.utc import utc_now
+                            from utils.utc import utc_now
 
                             await asyncio.to_thread(
                                 store_message,
@@ -1197,6 +1521,35 @@ async def process_outbox(telegram_client) -> int:
                         await _dead_letter_message(
                             message, reason=f"max retries ({MAX_RELAY_RETRIES}) exceeded"
                         )
+                        if msg_type == "poll":
+                            # Dead-lettering is DURABILITY, not delivery:
+                            # `replay_dead_letters` runs from exactly one site,
+                            # the bridge connect sequence, so a question routed
+                            # only there reaches the human on the next bridge
+                            # restart — hours away or never for a blocked agent.
+                            # Put the question in front of them on a later relay
+                            # cycle instead. Cannot loop: this loop is
+                            # `while processed < RELAY_BATCH_SIZE` over `r.lpop`
+                            # of the same key, so a same-cycle rpush is picked up
+                            # later, and the re-enqueued payload is plain text
+                            # that never re-enters the poll branch.
+                            await _reenqueue_poll_as_text(
+                                r, key, message, reason="terminal relay failure"
+                            )
+                            # All retries failed, so adoption is no longer worth
+                            # its per-tick cost: leaving the provisional row alive
+                            # makes every reconcile tick run an `iter_messages`
+                            # history scan hunting for it until the 24h TTL. Note
+                            # this is a cost trade, not proof of non-delivery —
+                            # a `None` from `send_poll` may still follow a send
+                            # that reached Telegram (see the note at the send
+                            # site), which is why the question is re-enqueued as
+                            # text above rather than simply dropped.
+                            hint = message.get("poll_id_hint")
+                            if hint:
+                                from bridge.poll_registry import delete_pending_poll
+
+                                await asyncio.to_thread(delete_pending_poll, hint)
                     else:
                         try:
                             requeue_raw = json.dumps(message)

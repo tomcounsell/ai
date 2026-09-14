@@ -50,7 +50,6 @@ def test_exit_returncode_field_defaults_to_zero():
         session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
-        agent_session_id="x-default-test",
     )
     try:
         assert s.exit_returncode == 0
@@ -139,7 +138,6 @@ def test_pending_scan_skips_deferred(clean_sessions):
         session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
-        agent_session_id="sid-defer-future",
         status="pending",
     )
     deferred.scheduled_at = future
@@ -152,7 +150,6 @@ def test_pending_scan_skips_deferred(clean_sessions):
         session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
-        agent_session_id="sid-eligible",
         status="pending",
     )
     not_deferred.scheduled_at = None
@@ -221,7 +218,6 @@ def test_store_exit_returncode_persists_value(clean_sessions, monkeypatch):
         session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
-        agent_session_id="sid-exit-rc",
         session_id="session-id-exit-rc",
     )
     s.save()

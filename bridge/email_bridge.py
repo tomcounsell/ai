@@ -317,6 +317,72 @@ def _body_references_attachments(text: str | None) -> bool:
         return False
 
 
+def _email_media_type(att: dict) -> str:
+    """Classify an email attachment with the Telegram intake's vocabulary.
+
+    `get_media_type` (bridge/media.py) labels a Telegram document by filename
+    extension as image, audio, or document. The same file arriving by email
+    gets the same label, with the declared content type as a second signal.
+    """
+    from bridge.media import VISION_EXTENSIONS, VOICE_EXTENSIONS
+
+    content_type = (att.get("content_type") or "").lower()
+    name = (att.get("filename") or "").lower()
+    if content_type.startswith("image/") or name.endswith(tuple(VISION_EXTENSIONS)):
+        return "image"
+    if content_type.startswith("audio/") or name.endswith(tuple(VOICE_EXTENSIONS)):
+        return "audio"
+    return "document"
+
+
+def _attachment_descriptors(parsed: dict) -> list[dict]:
+    """Build the medium-agnostic attachment descriptors for one inbound email.
+
+    One descriptor per persisted file, classified by the same helper the
+    Telegram intake uses (`bridge.context.describe_local_media`, rooted at
+    `EMAIL_ATTACHMENT_DIR`), plus one "unreadable" descriptor when the bridge
+    knows a file did not arrive: a part was dropped at the size or parts cap
+    or failed to decode (`truncated`), or the body refers to attachments and
+    none were recovered (`not_recovered`). Inform-not-block (#1775): the
+    session is enqueued either way and the agent asks the sender to resend.
+    """
+    from bridge.context import describe_local_media, media_descriptor
+
+    descriptors = [
+        describe_local_media(
+            att.get("filename"),
+            _email_media_type(att),
+            att.get("path"),
+            media_root=EMAIL_ATTACHMENT_DIR,
+        )
+        for att in (parsed.get("attachments") or [])
+        if att.get("path")
+    ]
+    if parsed.get("attachments_truncated"):
+        descriptors.append(
+            media_descriptor(
+                "unreadable",
+                None,
+                None,
+                None,
+                "truncated: a part exceeded the size cap or failed to decode; "
+                "ask the sender to resend",
+            )
+        )
+    elif not descriptors and _body_references_attachments(parsed.get("body")):
+        descriptors.append(
+            media_descriptor(
+                "unreadable",
+                None,
+                None,
+                None,
+                "not_recovered: the body refers to attachments but none arrived; "
+                "ask the sender to resend",
+            )
+        )
+    return descriptors
+
+
 def _extract_attachment_metadata(
     msg: email_lib.message.Message,
 ) -> tuple[list[dict], bool]:
@@ -898,7 +964,7 @@ class EmailOutputHandler:
         ``medium="email"`` before being wrapped as MIME. This is the same
         plumbing the Telegram handler uses — per-medium format rules live in
         the drafter (no markdown on the wire for email). See
-        docs/plans/completed/message-drafter.md §Part C.
+        docs/archive/plans-completed/message-drafter.md §Part C.
 
         Args:
             chat_id: The sender's email address (used as the reply-to address).
@@ -918,11 +984,19 @@ class EmailOutputHandler:
 
         # Drafter-at-the-handler. Fail open: any exception in the drafter must
         # not block the email send.
+        # NOTE: pinned use_llm=False (temporary). This call site has no bounce
+        # path: there is no `needs_self_draft`/self-draft-steering wiring here
+        # (the relay handler in `agent/output_handler.py` has it and drafts
+        # its email deliveries LLM-gated), so a `block` verdict cannot alter
+        # delivery: `draft.text` is simply empty and this call site falls
+        # through to the raw `text` unchanged. Paying an LLM round-trip for a
+        # verdict this handler cannot act on is cost without enforcement.
+        # Lifting this pin requires wiring the bounce first; tracked in #3124.
         body_text = text
         try:
             from bridge.message_drafter import draft_message
 
-            draft = await draft_message(text, session=session, medium="email")
+            draft = await draft_message(text, session=session, medium="email", use_llm=False)
             if draft.text:
                 body_text = draft.text
         except Exception as e:
@@ -1084,7 +1158,7 @@ def _query_non_terminal_sessions(project_key: str) -> list:
     # ghost as a live record (popoto silently drops empty hashes), so
     # subject-coalescing can never attach to a session that no longer exists
     # -- this call only accelerates removing the stale index entry instead of
-    # waiting for the nightly popoto-index-cleanup sweep. Rate-limited
+    # waiting for the daily redis-index-cleanup sweep. Rate-limited
     # internally; see models/ghost_reconcile.py.
     from models.ghost_reconcile import reconcile_ghost_members
     from models.session_lifecycle import NON_TERMINAL_STATUSES
@@ -1474,32 +1548,14 @@ async def _process_inbound_email(
     if _email_injection_banner:
         extra_context["injection_risk_banner"] = _email_injection_banner
 
-    # Inbound attachments: hand the agent readable on-disk paths (plus metadata)
-    # so it can open the files. Only include attachments that were actually
-    # persisted (path set by _persist_attachments); the read/fallback path never
-    # populates this since it doesn't run through _process_inbound_email.
-    _email_attachments = [
-        _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
-    ]
-
-    # Wedge guard: if the body references attachments but none (or only some) were
-    # recovered, surface that explicitly so the agent can ask the sender to resend.
-    # Inform-not-block policy (see #1775); full injection inspection deferred to #1630.
-    if _body_references_attachments(body) and (
-        not _email_attachments or parsed.get("attachments_truncated")
-    ):
-        # Inform the agent of unrecoverable/truncated attachments — agent uses context
-        # to ask sender to resend.
-        # Policy: inform-not-block (see #1775); full injection inspection deferred to #1630.
-        extra_context["attachments_unrecoverable"] = True
-        extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
-        extra_context["attachments_recovered_count"] = len(_email_attachments)
-        # attachments_referenced (bool) signals body references attachments without a precise count.
-        # A real referenced-count is deferred to when parse-time extraction is implemented (#1630).
-        extra_context["attachments_referenced"] = True
-
-    if _email_attachments:
-        extra_context["email_attachments"] = _email_attachments
+    # Inbound attachments reach the agent the way a Telegram file does:
+    # medium-agnostic descriptors on extra_context["attachments"], rendered by
+    # the worker at the transport-agnostic seam (agent/session_executor.py,
+    # prepend_trigger_attachments). Only persisted files (path set by
+    # _persist_attachments) resolve; the read/fallback path never runs here.
+    _attachments = _attachment_descriptors(parsed)
+    if _attachments:
+        extra_context["attachments"] = _attachments
 
     # Enqueue the session with email transport metadata
     try:

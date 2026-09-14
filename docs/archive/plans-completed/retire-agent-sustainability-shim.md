@@ -1,0 +1,743 @@
+---
+status: Ready
+type: chore
+appetite: Small
+owner: Dev (sdlc-2875)
+created: 2026-08-25
+tracking: https://github.com/tomcounsell/ai/issues/2875
+last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-08-25T17:10:38Z
+---
+
+# Retire the `agent/sustainability.py` shim (PR 2 of 2)
+
+## Problem
+
+`agent/sustainability.py` is a pure compatibility surface. Its five reflection
+callables moved to `reflections/agents/*.py` in #1028; the file survived only so
+the reflections registry's historical dotted paths (`agent.sustainability.*`)
+kept resolving. Its own docstring already says "new code should import the
+reflection directly."
+
+PR #2944 (commit `c9a91bdad`) shipped the registry half: a tracked migration
+script rewrites both `config/reflections.yaml` and the vault copy onto
+`reflections.agents.*`, wired into `/update` at Step 1.659. The shim was
+deliberately left in place so it would outlive the rewrite on machines that had
+not yet run `/update`.
+
+**Current behavior:**
+
+Three production import sites still reach through the shim:
+
+- `agent/agent_session_queue.py:2899` — `from agent.sustainability import send_hibernation_notification`
+- `reflections/stall_advisory.py:65-78` — two wrapper functions that do nothing
+  but delegate to `agent.sustainability._get_redis` / `_get_project_key`
+
+The shim also holds one of **seven** byte-identical copies of the
+`_get_project_key()` / `_get_redis()` pair (the other six live in
+`reflections/agents/{circuit_health_gate,failure_loop_detector,session_count_throttle,session_recovery_drip,system_health_digest}.py`
+and `reflections/stall_advisory.py`). `tests/unit/test_default_project_key_consistency.py`
+exists specifically because these copies can drift — it asserts the writer-side
+`DEFAULT_PROJECT_KEY` still agrees with the reader-side fallback. That test is a
+symptom of the duplication, not a fix for it.
+
+**Desired outcome:**
+
+`agent/sustainability.py` is deleted. Every production caller imports from the
+real module. Across the six modules that inherited the shim's helper pair — the
+five `reflections/agents/*.py` and `reflections/stall_advisory.py` — there is one
+shared definition instead of six copies. (Three unrelated `_get_redis`
+definitions elsewhere in the repo are deliberately untouched; see No-Gos.)
+
+## Freshness Check
+
+**Baseline commit:** `483c7cd14ae712a04c21fa6f908c10069577253e`
+**Issue filed at:** 2026-08-19T07:45:10Z
+**Disposition:** Minor drift — the yaml half of the issue is already done; the
+remaining scope is exactly what PR #2944's body designates as "PR 2".
+
+**File:line references re-verified:**
+
+- `agent/sustainability.py` — still exists, 79 lines, still a pure re-export
+  shim plus the two helpers. **Still holds.**
+- `agent/agent_session_queue.py:2899` — `from agent.sustainability import
+  send_hibernation_notification`. **Still holds** at that exact line.
+  (`agent/agent_session_queue.py:948` also names the shim in a docstring.)
+- `reflections/stall_advisory.py:67` / `:74` — the two delegating wrappers.
+  **Still holds.**
+- Issue claim "`config/reflections.yaml` still has 5 `callable:` entries pointing
+  at `agent.sustainability.*`" — **NO LONGER TRUE.** `grep -n sustain` returns
+  zero callable hits in both `config/reflections.yaml` and
+  `~/Desktop/Valor/reflections.yaml`. PR #2944 migrated both copies.
+- Issue claim that `config/reflections.yaml` is "a gitignored symlink to the
+  vault copy" — **FALSE as stated.** It is gitignored (`.gitignore:8`) but it is
+  a *real file copy*, not a symlink, maintained by `/update` Step 1.66
+  (`env_sync.sync_reflections_yaml`), which copies vault→config only when the
+  config copy is older. Verified with `ls -la` and `git check-ignore -v`. The
+  distinction matters: an edit to the repo copy does not propagate to the vault,
+  which is exactly why PR #2944 shipped a script that rewrites *both*.
+
+**Cited sibling issues/PRs re-checked:**
+
+- **PR #2944** — MERGED 2026-08-24. Shipped `scripts/migrate_reflections_callables.py`,
+  `scripts/update/reflections_callables.py`, and the Step 1.659 wiring. Its body
+  explicitly scopes PR 2 as: delete the shim, repoint `agent_session_queue.py`
+  and `stall_advisory.py`, update the live-import tests.
+- **#2876** — OPEN. De-hubs `agent/agent_session_queue.py`; phase 1 already
+  landed as `2239473f9`. Coordination constraint: keep this plan's edit to that
+  file to the single import line.
+- **#2879** — OPEN, running in parallel on `tests/unit/` file splitting. Its file
+  set (`test_sdlc_session_ensure.py`, `test_sdlc_router_decision.py`,
+  `test_valor_telegram.py`, `test_worktree_manager.py`) does not intersect this
+  plan's test set.
+- **#1028** — the original relocation that created the shim.
+- **#2439** — deduplicated `send_hibernation_notification` into
+  `reflections/agents/circuit_health_gate.py`; the shim re-exports it.
+
+**Commits on main since issue was filed (touching referenced files):**
+
+- `c9a91bdad` PR #2944 (PR 1 of 2) — **partially addresses**: completes the
+  registry half, leaves the Python half.
+- `2239473f9` de-hub phase 1 of #2876 — dropped 16 dead re-exports from
+  `agent_session_queue.py`; did not touch the sustainability import.
+- `b8333d115`, `2183222d1`, `511f7e936`, `12d815ccd`, `616a53007` — irrelevant
+  to this surface.
+
+**Active plans in `docs/plans/` overlapping this area:** none.
+
+## Prior Art
+
+- **PR #2944** — *Ship reflections.yaml migration off the agent.sustainability
+  shim (PR 1 of 2)* — MERGED. This plan is its stated successor. It did not fail;
+  it deliberately stopped short.
+- **#1028** — *reflections-modular* (`docs/archive/plans-completed/reflections-modular.md`)
+  — moved the five callables into `reflections/agents/` and, at the war room's
+  insistence, kept the shim rather than hard-cutting over. That decision is the
+  direct cause of this issue. The stated reason (registry still names the old
+  paths) no longer applies after #2944.
+- **#2439** — collapsed the two `send_hibernation_notification` definitions to
+  one in `circuit_health_gate.py`, re-exported through the shim. Succeeded; this
+  plan removes the remaining re-export hop.
+- **#1171** — established the `VALOR_PROJECT_KEY` empty-string fallback and
+  `tests/unit/test_default_project_key_consistency.py`. Succeeded, but as a
+  cross-copy consistency *assertion* rather than a de-duplication.
+- **#2872 / PR #2943** — deleted `bridge/session_logs.py` and
+  `models/reflections.py` re-export shims. Same class of work, merged cleanly one
+  day before this plan. Confirms the pattern is routine here.
+
+No prior attempt to delete this shim failed — none was made.
+
+## Research
+
+No relevant external findings — this is a purely internal refactor of first-party
+modules with no external libraries, APIs, or ecosystem patterns involved.
+Phase 0.7 skipped per the skill's stated skip condition.
+
+## Data Flow
+
+The reflection scheduler resolves a `callable:` dotted path from the registry:
+
+1. **Entry point**: `agent/reflection_scheduler.py` reads `config/reflections.yaml`
+   (a real file copy of `~/Desktop/Valor/reflections.yaml`, refreshed by `/update`
+   Step 1.66).
+2. **Resolution**: `_resolve_callable()` does an `importlib` import of the dotted
+   path. **Post-#2944 this path is `reflections.agents.<module>.run` — the shim is
+   no longer on this route at all.**
+3. **Execution**: the reflection body calls `_get_redis()` / `_get_project_key()`
+   to build its project-scoped Redis keys.
+
+The two remaining routes *through* the shim are separate from the scheduler:
+
+- **Hibernation**: `agent/agent_session_queue.py` → `agent.sustainability` →
+  `reflections.agents.circuit_health_gate.send_hibernation_notification` →
+  enqueues a Telegram AgentSession. One pointless hop.
+- **Stall advisory**: `reflections/stall_advisory.py` → local wrapper →
+  `agent.sustainability._get_redis` → `popoto.redis_db.POPOTO_REDIS_DB`. Two
+  pointless hops.
+
+After this change both go direct, and the registry route is unchanged.
+
+## Architectural Impact
+
+- **New dependencies**: one new first-party module, `reflections/redis_access.py`
+  (~25 lines, stdlib `os` plus a lazy `popoto` import). No third-party additions.
+- **Interface changes**: `agent.sustainability` ceases to exist as an importable
+  module. The names it re-exported remain importable at their real locations.
+  Within `reflections/`, the module-private `_get_redis` / `_get_project_key` are
+  replaced by shared `get_redis` / `get_project_key`.
+- **Coupling**: net decrease. Deletes an `agent/` → `reflections/` dependency edge
+  that existed only to serve `reflections/` consumers, and collapses six
+  duplicate helper definitions into one.
+- **Data ownership**: unchanged. Same Redis connection, same key prefix, same
+  fallback semantics (`VALOR_PROJECT_KEY` stripped, empty → `"valor"`).
+- **Reversibility**: high. Pure deletion plus mechanical import repointing; a
+  revert restores the shim verbatim.
+
+## Appetite
+
+**Size:** Small
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 0
+- Review rounds: 1
+
+## Prerequisites
+
+| Requirement | Check Command | Expected | Purpose |
+|-------------|---------------|----------|---------|
+| Registry already migrated off the shim | `grep -c "agent.sustainability" ~/Desktop/Valor/reflections.yaml` | `0` | The vault registry must already name `reflections.agents.*`, else deleting the shim kills five reflections on this machine |
+| Migration ships in tracked code | `test -f scripts/migrate_reflections_callables.py` | exit code 0 | Every other machine self-heals its registry at `/update` Step 1.659 |
+
+## Solution
+
+### Key Elements
+
+- **`reflections/redis_access.py`** (new): the single canonical definition of
+  `get_project_key()` and `get_redis()` for the six modules named below —
+  `reflections/agents/*.py` and `reflections/stall_advisory.py`. It is **not**
+  a claim of uniqueness across the whole repo: `reflections/utilities.py:267`,
+  `reflections/docs_auditor.py:158`, and `agent/steering.py:59` each keep their
+  own `_get_redis`, serve different consumer sets, and are out of scope (No-Gos).
+- **`reflections/agents/*.py` (5 modules)**: drop their private copies, import
+  the canonical pair.
+- **`reflections/stall_advisory.py`**: drop the two shim-delegating wrappers,
+  import the canonical pair.
+- **`agent/agent_session_queue.py`**: import `send_hibernation_notification`
+  from `reflections.agents.circuit_health_gate` directly. One line plus one
+  docstring mention. Nothing else in that file is touched (#2876 coordination).
+- **`agent/sustainability.py`**: deleted.
+
+### Flow
+
+Not a user-facing feature. The operator-visible flow is the `/update` cycle:
+
+`git pull` (Step 1, shim now absent) → **Step 1.659 migration rewrites the
+registry onto `reflections.agents.*`** → Step 1.66 vault→config sync → Step 5
+service restart (worker loads the new registry).
+
+The migration runs *before* the service restart on the same cycle, so a machine
+that has not yet migrated its registry heals itself in the same `/update` that
+removes the shim.
+
+### Technical Approach
+
+- **The five-module de-duplication is in scope, on the record.** Issue #2875 asks
+  only that `stall_advisory` stop importing the shim's helpers. This plan also
+  folds the five `reflections/agents/*.py` private copies onto the canonical
+  module, and that is an accepted widening, not an oversight. The reason is that
+  those five copies are the same drift class
+  `tests/unit/test_default_project_key_consistency.py` was written to police, the
+  edit is mechanical, and stopping at `stall_advisory` would leave five copies of
+  a helper the plan is simultaneously declaring canonical — a half-migration this
+  repo does not tolerate. The cost is bounded and known: one new ~25-line module,
+  32 patch-target renames in `tests/unit/test_sustainability.py`, and two deleted
+  functions in each of five modules. It carries its own acceptance criterion
+  below so it is judged rather than smuggled.
+- **Public names, not private ones.** The helpers become `get_redis` /
+  `get_project_key` in the new module. They are now a deliberate shared API
+  across six call sites; keeping the leading underscore would be a lie about
+  their scope. Each consumer does `from reflections.redis_access import
+  get_project_key, get_redis`, which binds the names into the consumer's module
+  namespace — so existing per-module `unittest.mock.patch` targets keep working
+  after a mechanical `_get_redis` → `get_redis` rename of the patch string.
+- **Lazy `popoto` import stays inside `get_redis()`.** All seven current copies
+  import `popoto.redis_db` inside the function body. Hoisting it to module scope
+  would make importing any reflection module open a Redis connection at import
+  time. Preserve the lazy form verbatim.
+- **`send_hibernation_notification` moves nowhere.** Its canonical definition is
+  already in `reflections/agents/circuit_health_gate.py` (#2439). This plan only
+  removes the re-export hop.
+- **Scope boundary on `agent_session_queue.py`.** Exactly two lines change: the
+  import at 2899 and the docstring reference at 948. #2876 owns everything else
+  in that file.
+- **The migration script keeps its `agent.sustainability.*` strings.** They are
+  the *source* side of a rename table (`CALLABLE_MIGRATIONS`); the script cannot
+  do its job without naming what it migrates *from*. Deleting them would silently
+  disarm the self-heal for every machine that has not yet run `/update`. See
+  Verification for how the acceptance-criterion grep is scoped around this.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] No new exception handlers are introduced. `get_redis()` and
+      `get_project_key()` are the same non-raising bodies as today (the lazy
+      `popoto` import can raise, exactly as it can today; callers already wrap).
+- [ ] `send_hibernation_notification` retains its existing internal
+      `try/except` — untouched, and `tests/unit/test_sustainability.py` already
+      covers its never-raises contract.
+
+### Empty/Invalid Input Handling
+- [ ] `get_project_key()` must preserve the #1171 semantics exactly: strip the
+      env value, fall back to `"valor"` on empty/whitespace-only. The existing
+      cases in `tests/unit/test_default_project_key_consistency.py` (unset,
+      empty, whitespace, set) are repointed at the canonical function and must
+      all still pass.
+- [ ] No new functions take user input; there is no new empty-input surface.
+
+### Error State Rendering
+- [ ] No user-visible output changes. The one user-visible path
+      (`send_hibernation_notification` → Telegram) is byte-identical after the
+      re-export hop is removed.
+
+## Test Impact
+
+- [ ] `tests/unit/test_sustainability.py` — UPDATE: rename **32**
+      `patch("reflections.agents.X._get_redis", ...)` targets to
+      `...X.get_redis`. Any `from agent.sustainability import ...` becomes the
+      real module. Do NOT rename this file — see Rabbit Holes.
+- [ ] `tests/unit/test_sustainability_namespace.py` — REPLACE: this file asserts
+      the *shape of the shim namespace*. With the shim gone, its subject is gone.
+      Replace with an assertion that `agent.sustainability` is no longer
+      importable and that each of the five callables plus
+      `send_hibernation_notification` resolves at its real
+      `reflections.agents.*` location.
+- [ ] `tests/unit/test_default_project_key_consistency.py` — UPDATE: repoint the
+      seven `from agent.sustainability import _get_project_key` sites at
+      `reflections.redis_access.get_project_key`; update the module docstring.
+      The assertions themselves are unchanged and still meaningful (they guard
+      the writer↔reader agreement, which survives de-duplication).
+- [ ] `tests/unit/test_session_health_sibling_phantom_safety.py` — UPDATE: three
+      `from agent.sustainability import <callable>` imports become
+      `from reflections.agents.<module> import run`; fix the module docstring's
+      "(sustainability.py)" annotations.
+- [ ] `tests/integration/test_stall_advisory_e2e.py:362` — UPDATE: import the
+      canonical `get_project_key` / `get_redis` from `reflections.redis_access`.
+- [ ] `tests/unit/test_reflection_scheduler.py:761` — UPDATE: the comment
+      describing entries that "resolve through re-export shims" is now false.
+- [ ] `tests/e2e/test_session_continuity.py:68` — UPDATE: comment-only reference
+      to `agent.sustainability._get_project_key`.
+- [ ] `tests/unit/test_update_install_worker.py:186` — UPDATE: comment-only
+      reference.
+- [ ] `tests/unit/test_migrate_reflections_callables.py` — NO CHANGE. Its
+      `agent.sustainability.*` strings are migration-source fixtures and must
+      survive. Same for `tests/unit/test_update_reflections_callables.py`.
+- [ ] `tests/unit/test_agent_session_queue.py` — NO CHANGE expected; its
+      "sustainability" references are prose about throttle guards, not imports.
+      Verify by running it.
+
+## Rabbit Holes
+
+- **Rewriting `reflections/utilities.py` into the canonical home.** It already
+  has a `_get_redis` at line 267, which makes it look like the natural host. It
+  is not: it is a heavy module (`subprocess`, `config.settings`, LLM helpers) and
+  making five tiny reflection modules import it at module scope drags that weight
+  into every reflection import. A dedicated ~25-line module is the right size.
+  De-duplicating `utilities.py`'s own copy is explicitly out of scope.
+- **De-hubbing `agent/agent_session_queue.py`.** #2876 owns it. Change the one
+  import line and stop.
+- **Deleting `scripts/migrate_reflections_callables.py` "because the migration is
+  done."** It is done *on this machine*. It is the self-heal for the other three.
+  Retiring it is a separate decision that needs every machine confirmed
+  migrated.
+- **Chasing the `agent.sustainability` strings in `docs/archive/plans-completed/`.**
+  Those are historical records of completed plans. They are supposed to name what
+  existed at the time.
+- **Renaming `tests/unit/test_sustainability.py`.** Tempting for tidiness,
+  collides with a parallel lane's working set. Not worth the coordination cost.
+  **This is the single ruling** — Task 4 repoints its contents and leaves the
+  filename alone.
+
+## Risks
+
+### Risk 1: A machine runs the new code against an unmigrated registry
+**Impact:** Five self-healing reflections (`circuit_health_gate`,
+`session_recovery_drip`, `session_count_throttle`, `failure_loop_detector`,
+`sustainability_digest`) fail to import. `run_reflection` swallows the failure in
+a broad `except`, records `last_error`, and keeps ticking — so the loss is
+**silent**. Circuit-breaker recovery and session-count throttling stop working
+with no alert.
+**Mitigation:** This is the exact hazard PR #2944 was ordered to prevent, and the
+guarantee is **pre-merge, not in-orchestrator**. `run.py`'s own Step 1 pull is not
+what saves a stale checkout: the orchestrator module is already imported by the
+time it pulls, so a checkout behind `c9a91bdad` invoking `run.py --full` directly
+would run an orchestrator that has *no* Step 1.659, then pull the shim deletion,
+then restart. What actually holds is that both sanctioned entry points
+fast-forward **before** launching any Python:
+`.claude/skills/update/SKILL.md:16` (`git checkout main && git fetch origin main
+&& git merge --ff-only origin/main`, run as a prerequisite) and
+`scripts/remote-update.sh:114-121`, whose comment states the reason outright —
+"Git pull FIRST — before invoking any Python ... Without this, a Telegram
+/update or cron run always executes the pre-pull version of the orchestrator."
+So every machine reaching Step 5 is running an orchestrator that contains Step
+1.659. The migration is idempotent and runs every cycle.
+
+Step 4.65 then gates the two restarts that this lane can reach, in two
+different processes. Step 4.65 runs `scripts/verify_registry_without_shim.py` (the
+positive check: every `callable:` in every existing registry copy imports with
+`agent.sustainability` banned, not merely "the rewriter did not error"),
+unconditionally, without regard to `config.do_service_restart`. On the `/update`
+path it suppresses `run.py`'s own Step 5 restart. On the `remote-update.sh`
+path — where `run.py --cron` sets `do_service_restart=False` and the worker
+kickstart happens in the shell *after* `run.py` exits, gated only on the diff
+touching `agent/` — the probe's verdict is carried across the process boundary
+by the `data/registry-probe-failed` sentinel, which `remote-update.sh` checks
+before `launchctl kickstart -k`. A failed probe blocks that kickstart, logs
+`RESTART BLOCKED:`, and sets `RESTART_FAILED=1` for a non-zero terminal exit.
+The one restart deliberately left ungated is the recovery bootstrap of a worker
+that is already down: there is no working worker there to preserve. The bridge
+kickstart is also ungated, on purpose — it neither reads the registry nor
+shares its config surface, and freezing chat I/O is the wrong response to a
+registry fault.
+
+**Known gap, tracked as #3029.** `service.install_reflection_worker` is the only
+site that restarts `com.valor.reflection-worker` — the process that actually
+loads the registry — and it sits under `config.do_service_restart`, which
+`UpdateConfig.cron()` sets `False`. `ReflectionScheduler.start()` calls `load()`
+once and never reloads in its tick loop. So on the routine cron path the
+registry is migrated and probed green while the live scheduler keeps whatever it
+read at process start; the migration reaches it on the next `--full` update or
+process restart, not on the cron cycle that performed it. Step 4.65's gate is
+correct about what it blocks — it simply has no reflection-worker restart to
+gate there. Closing that (a probe-gated `reflection-worker` kickstart in
+`remote-update.sh`, or moving `install_reflection_worker` out from under
+`do_service_restart`) is deferred: it changes when a live scheduler is cycled,
+which is broader than this lane's shim retirement.
+
+As a defence in depth for the path that *does* restart it,
+`scripts/install_reflection_worker.sh` runs the same probe under
+`VALOR_LAUNCHD=1` after its own `config/reflections.yaml` rewrite, so the bytes
+that were probed are the bytes that get loaded.
+Verified locally: both the vault and config registries on this machine are
+already migrated, so this machine is safe regardless. The residual exposure is a
+machine that takes the code by a bare `git pull` without `/update` — which is
+already unsupported (CLAUDE.md: `/update` after every merge).
+
+### Risk 2: Step 1.656 prunes the five reflections before Step 1.659 migrates them
+**Impact:** Would be severe — reflections deleted from the vault registry rather
+than repointed.
+**Mitigation:** Checked and **does not apply**. Step 1.656 iterates an explicit
+name list (`reflection_register.REMOVED_REFLECTIONS`), not a dynamic
+"does this callable import?" probe. None of the five names is on it. No change
+needed; recorded here so the next reader does not have to re-derive it.
+
+### Risk 3: The acceptance-criterion grep fails on its own necessary strings
+**Impact:** `git grep -n "agent.sustainability"` cannot return zero — the
+migration script's rename table, its two test files, and the archived plan docs
+all legitimately contain the string. A naive AC check reads as failure.
+**Mitigation:** Scope the Verification greps to `agent/ reflections/ config/` and
+to *import statements* rather than any occurrence. Documented explicitly in
+Verification so the reviewer is not surprised.
+
+### Risk 4: A missed `patch()` target silently no-ops
+**Impact:** `unittest.mock.patch("reflections.agents.X._get_redis")` against a
+name that no longer exists raises `AttributeError` at patch time — loud, not
+silent. The genuinely silent failure mode is the reverse: a test that patches the
+canonical module while the consumer holds a from-import binding.
+**Mitigation:** Keep every consumer on `from reflections.redis_access import
+get_redis` (name bound into the consumer namespace) and keep every patch target
+module-local. Do not introduce `import reflections.redis_access` +
+`redis_access.get_redis()` call style, which would change patch semantics.
+
+## Race Conditions
+
+No race conditions identified. Every change is a compile-time import
+redirection; no new concurrency, no new shared mutable state, no ordering
+dependency between the touched modules at runtime. The one ordering concern in
+this work is a *deployment* ordering (registry migration vs. shim deletion),
+handled under Risk 1 and already solved by PR #2944's `/update` step placement —
+it is a sequencing question, not a data race.
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #2876] De-hubbing `agent/agent_session_queue.py`. This plan
+  changes exactly one import line and one docstring line in that file.
+- [SEPARATE-SLUG #2879] Splitting or renaming files under `tests/unit/` that the
+  parallel lane owns.
+- [ORDERED] Deleting `scripts/migrate_reflections_callables.py` and its Step
+  1.659 wiring. Blocked on a human-gated event: confirmation that all four
+  machines in `projects.json` have run `/update` past `c9a91bdad`. Until then the
+  script is the only thing standing between an unmigrated machine and five
+  silently-dead reflections.
+- De-duplicating the three `_get_redis` definitions outside this plan's six-module
+  set: `reflections/utilities.py:267` (serves `sdlc_progress`,
+  `sdlc_upvote_lanes`), `reflections/docs_auditor.py:158`, and
+  `agent/steering.py:59`. Each serves a different consumer set; folding them in
+  widens the blast radius into unrelated tests for no gain against this issue's
+  acceptance criteria. A deliberate boundary, not a promise — no follow-up issue
+  is implied, and the Success Criteria scope their uniqueness claim accordingly.
+
+## Update System
+
+This lane's update-system deliverable is **Step 4.65, the registry acceptance
+probe** — the largest single part of the change. Deleting the shim removes the
+backstop that made a stale registry harmless, so `/update` needs a positive
+check that the registry can still import before it advances any service.
+
+- **`scripts/verify_registry_without_shim.py`** (new). Installs a
+  `sys.meta_path` finder that raises for `agent.sustainability`, then imports
+  every `callable:` in every registry copy that exists, reporting per file and
+  accumulating failures across copies. Runs under `VALOR_LAUNCHD=1` so the
+  probed candidate set is exactly the one the reflection worker resolves.
+- **`scripts/update/reflections_callables.py`** gains `run_registry_probe()`
+  and the `data/registry-probe-failed` sentinel that carries the verdict across
+  the Python/shell process boundary. `remote-update.sh` reads that file with
+  `[ -f ]`, so **presence blocks and absence is green**; a failing probe whose
+  sentinel could not be written is therefore a false green, and is escalated to
+  a non-zero `run.py` exit so `set -e` stops the shell before its kickstart.
+- **`scripts/update/run.py`** gains Step 4.65 itself, which runs
+  unconditionally (not under `config.do_service_restart`, which
+  `UpdateConfig.cron()` sets `False` — gating the check on it would make it
+  inert on the one path this change deploys through) and sets
+  `do_service_restart=False` on failure.
+- **`scripts/remote-update.sh`** latches the verdict immediately after `run.py`
+  and gates its worker kickstart on it. See the Deployment Safety section for
+  the gate's exact reach and the #3029 gap.
+- **`scripts/install_reflection_worker.sh`** runs the same probe after its own
+  `config/reflections.yaml` rewrite, so the validated bytes are the loaded ones.
+
+Also a wording change with no behavior change: the Step 1.659 comment said the
+migration repoints callables "off the `agent.sustainability.*` shim." After this
+plan the shim does not exist, so it says the registry must not *reacquire* those
+paths.
+
+## Agent Integration
+
+No agent integration required. This is an internal import refactor. No new CLI
+entry point in `pyproject.toml [project.scripts]`, no new MCP tool, no change to
+what the bridge imports. `send_hibernation_notification` remains reachable on the
+same worker code path (`agent/agent_session_queue.py`), only via a shorter import.
+
+## Documentation
+
+### Feature Documentation
+
+Four files carry live references. Counts verified at plan time
+(`git grep -c "agent\.sustainability\|agent/sustainability" -- docs/features/`);
+`docs/features/adding-reflection-tasks.md` has **zero** and is not a target.
+
+- [ ] `docs/features/worker-hibernation.md` (10 refs) — **highest risk, do this
+      first.** Line 114 is a copy-pasteable one-liner
+      `python -c "... from agent.sustainability import send_hibernation_notification"`
+      that raises `ModuleNotFoundError` the instant the shim is deleted. This is
+      an executable doc, not stale prose. Its registry table at ~75-91 lists
+      `agent.sustainability.*` callable paths in the left column — **replace**
+      those paths with `reflections.agents.*`, do not annotate them.
+- [ ] `docs/features/sustainable-self-healing.md` (12 refs) — contains a full
+      callable-path table at ~89-115 and a
+      `from agent.sustainability import circuit_health_gate` example. Both left
+      columns are already wrong post-#2944; replace the paths outright.
+- [ ] `docs/features/session-recovery-mechanisms.md` (2 refs) — repoint.
+- [ ] `docs/features/utc-timestamps.md` (1 ref) — repoint.
+- [ ] Re-run `git grep -l "agent\.sustainability\|agent/sustainability" -- docs/ CLAUDE.md`
+      after the four edits; the only survivors must be under
+      `docs/archive/plans-completed/`, which are historical records and are NOT
+      edited.
+- [ ] No new `docs/features/*.md` page — this deletes a compatibility layer, it
+      does not add a feature. No `docs/features/README.md` index entry.
+
+### Inline Documentation
+- [ ] `reflections/redis_access.py` module docstring states why the pair is
+      centralized: six byte-identical copies existed (the shim plus the five
+      `reflections/agents/*.py` modules), alongside a pair of shim-delegating
+      wrappers in `reflections/stall_advisory.py`, and
+      `tests/unit/test_default_project_key_consistency.py` was the guardrail
+      against their drift.
+- [ ] `agent/agent_session_queue.py:948` docstring stops naming the deleted file.
+- [ ] `scripts/update/run.py:1048` Step 1.659 comment reworded (see Update System).
+
+## Success Criteria
+
+- [x] `agent/sustainability.py` no longer exists.
+- [x] No import statement anywhere under `agent/`, `reflections/`, `bridge/`,
+      `worker/`, `tools/`, or `tests/` names `agent.sustainability`.
+- [x] Zero definitions of `get_project_key` / `get_redis` remain under
+      `reflections/agents/` or in `reflections/stall_advisory.py`; all six
+      modules import the pair from `reflections.redis_access`. (Scoped
+      deliberately: `reflections/utilities.py`, `reflections/docs_auditor.py`,
+      and `agent/steering.py` keep their own and are out of scope.)
+- [x] **Accepted scope widening:** the five `reflections/agents/*.py` helper
+      copies are folded onto the canonical module in this PR, not deferred — see
+      Technical Approach for why this is judged rather than smuggled.
+- [x] Every registry callable resolves with `agent.sustainability` banned from
+      `sys.modules` (the issue's AC #2), proven by the committed
+      `scripts/verify_registry_without_shim.py` run against the live registry.
+- [x] `agent/agent_session_queue.py` changes exactly two locations — the import
+      at :2899 and the docstring at :948 — and nothing else. The changed-line
+      count is **6**, not 4: the docstring edit is a 1-for-1 replacement (+1/-1),
+      but the import sits at 32-space indentation inside `_worker_loop`, where
+      the single-line form `from reflections.agents.circuit_health_gate import
+      send_hibernation_notification` is 111 characters against this repo's
+      `line-length = 100`. E501 is in `select`, so ruff must wrap it into a
+      parenthesized 3-line form (+3/-1). The two-location constraint (#2876
+      coordination) is what matters and is unchanged; only the arithmetic moves.
+      The Verification row asserts 6.
+- [x] Targeted tests pass (see Verification).
+- [x] `ruff check` and `ruff format --check` clean.
+- [x] Documentation updated (`/do-docs`).
+
+## Team Orchestration
+
+### Team Members
+
+- **Builder (shim removal)**
+  - Name: `shim-builder`
+  - Role: Create the canonical helper module, repoint all production callers,
+    delete the shim.
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (test repointing)**
+  - Name: `test-builder`
+  - Role: Update the eight affected test files.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `shim-validator`
+  - Role: Run the Verification table, confirm the registry resolves with the
+    shim banned.
+  - Agent Type: validator
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Create the canonical helper module
+- **Task ID**: build-redis-access
+- **Depends On**: none
+- **Validates**: `tests/unit/test_default_project_key_consistency.py`
+- **Assigned To**: shim-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `reflections/redis_access.py` with `get_project_key()` and
+  `get_redis()`, bodies copied verbatim from `agent/sustainability.py:58-74`
+  (keep the lazy `popoto.redis_db` import inside `get_redis`).
+- Module docstring records the de-duplication rationale and the #1171 fallback
+  semantics.
+
+### 2. Repoint the reflections consumers
+- **Task ID**: build-reflections-consumers
+- **Depends On**: build-redis-access
+- **Validates**: `tests/unit/test_sustainability.py`, `tests/integration/test_stall_advisory_e2e.py`
+- **Assigned To**: shim-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- In each of `reflections/agents/{circuit_health_gate,failure_loop_detector,session_count_throttle,session_recovery_drip,system_health_digest}.py`:
+  delete the local `_get_project_key` / `_get_redis`, add
+  `from reflections.redis_access import get_project_key, get_redis`, rename the
+  call sites.
+- In `reflections/stall_advisory.py`: delete the two shim-delegating wrappers at
+  lines 65-78 and the now-dead section banner, import the canonical pair, rename
+  its six call sites.
+
+### 3. Repoint the queue caller and delete the shim
+- **Task ID**: build-delete-shim
+- **Depends On**: build-reflections-consumers
+- **Validates**: `tests/unit/test_agent_session_queue.py`
+- **Assigned To**: shim-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `agent/agent_session_queue.py:2899` → `from reflections.agents.circuit_health_gate import send_hibernation_notification`.
+- `agent/agent_session_queue.py:948` docstring: drop the `agent/sustainability.py`
+  mention. **These two lines are the entire diff for this file.**
+- `git rm agent/sustainability.py`.
+- Reword the `scripts/update/run.py:1048` Step 1.659 comment.
+- **Create `scripts/verify_registry_without_shim.py`** (the AC #2 probe; no
+  existing file to copy from). It must: install a `sys.meta_path` finder whose
+  `find_spec` raises for `fullname == "agent.sustainability"`; install it
+  **before** anything resolves the registry, because
+  `agent.reflection_scheduler` resolves vault-first
+  (`~/Desktop/Valor/reflections.yaml`, then `config/reflections.yaml`) and the
+  probe must cover whichever file the running machine actually uses; then import
+  every `callable:` entry in that registry. Exit non-zero on the first failure,
+  naming the entry.
+- `git add` the two new files (`reflections/redis_access.py`,
+  `scripts/verify_registry_without_shim.py`) before the Verification table is
+  run — several rows use `git grep`, which only sees tracked files.
+
+### 4. Repoint the tests
+- **Task ID**: build-tests
+- **Depends On**: build-delete-shim
+- **Validates**: all files listed in Test Impact
+- **Assigned To**: test-builder
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Work the Test Impact checklist top to bottom.
+- `test_sustainability_namespace.py` gets the REPLACE treatment: assert the shim
+  is gone and each name resolves at its real home.
+- Do NOT touch `test_migrate_reflections_callables.py` or
+  `test_update_reflections_callables.py`.
+
+### 5. Documentation
+- **Task ID**: document-removal
+- **Depends On**: build-tests
+- **Assigned To**: shim-builder
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Work the Documentation checklist. Leave `docs/archive/` alone.
+
+### 6. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-removal
+- **Assigned To**: shim-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table and report pass/fail per row.
+
+## Verification
+
+Scoping note for the two grep rows: `agent.sustainability` legitimately survives
+in `scripts/migrate_reflections_callables.py` (its rename table's *source* keys),
+in that script's two test files, and in `docs/archive/plans-completed/`. The rows
+below are therefore scoped to production packages and to import statements, which
+is the acceptance criterion's actual intent ("no hits in production code").
+
+Second scoping note, on `git grep -c`: it prints `<path>:<count>` per *matching*
+file and prints nothing at all, exiting 1, when no file matches. It never emits a
+bare `0`. Zero-match rows below are therefore stated as `exit code 1`, not
+`match count == 0`. Rows that must inspect a file created by this plan use plain
+`grep` (working-tree, untracked-aware) or require the file to be `git add`ed
+first — see Task 3's final bullet.
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Shim deleted | `test -e agent/sustainability.py` | exit code != 0 |
+| Shim unimportable | `.venv/bin/python -c "import importlib.util as u; raise SystemExit(0 if u.find_spec('agent.sustainability') is None else 1)"` | exit code 0 |
+| No shim refs in production packages | `git grep -c "agent\.sustainability" -- agent/ reflections/ bridge/ worker/ tools/ config/` | exit code 1 |
+| No shim imports in tests | `git grep -n "^\s*from agent\.sustainability\|^\s*import agent\.sustainability" -- tests/` | exit code 1 |
+| No private helper survives under reflections/agents + stall_advisory | `git grep -c "^def get_redis\|^def _get_redis\|^def get_project_key\|^def _get_project_key" -- reflections/agents/ reflections/stall_advisory.py` | exit code 1 |
+| Canonical module defines both helpers | `grep -cE "^def get_project_key\|^def get_redis" reflections/redis_access.py` | output contains 2 |
+| All six consumers import the canonical pair | `git grep -lc "from reflections.redis_access import" -- reflections/agents/ reflections/stall_advisory.py \| wc -l` | output contains 6 |
+| Registry resolves with shim banned | `.venv/bin/python scripts/verify_registry_without_shim.py` | exit code 0 |
+| Queue file change is two locations only | `git diff origin/main -- agent/agent_session_queue.py \| grep -c '^[+-][^+-]'` | output contains 6 |
+| Migration self-heal still armed | `git grep -ch "agent.sustainability.circuit_health_gate" -- scripts/migrate_reflections_callables.py` | output > 0 |
+| Targeted tests pass | `scripts/pytest-clean.sh tests/unit/test_sustainability.py tests/unit/test_sustainability_namespace.py tests/unit/test_default_project_key_consistency.py tests/unit/test_session_health_sibling_phantom_safety.py tests/unit/test_reflection_scheduler.py tests/unit/test_migrate_reflections_callables.py tests/unit/test_update_reflections_callables.py tests/unit/test_agent_session_queue.py -q` | exit code 0 |
+| Stall advisory e2e passes | `scripts/pytest-clean.sh tests/integration/test_stall_advisory_e2e.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+
+`scripts/verify_registry_without_shim.py` does not exist on main; **Task 3's
+bullet list is where its creation is assigned**, and the spec lives there. It is
+worth committing rather than running ad hoc, because
+`tests/unit/test_reflection_scheduler.py::test_all_callables_resolve` resolves the
+registry vault-first and therefore validates whatever file happens to be on the
+running machine (flagged in PR #2944's body as not a real CI gate).
+
+## Critique Results
+
+War room (FULL depth, 3 critics) — run 2026-08-25. Verdict: **NEEDS REVISION** (1 blocker, 4 concerns, 2 nits). All seven findings addressed in the revision pass of 2026-08-26; see the Addressed By column.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency, Risk & Robustness | Verification row 'Queue file diff is two lines' runs `git diff origin/main --numstat -- agent/agent_session_queue.py \| awk '{print $1+$2}'` and expects output containing 2. Both mandated edits (import at :2899, docstring at :948) are line REPLACEMENTS, and numstat scores a replacement as 1 added + 1 deleted. Two replacements yield `2	2`, so the awk sum is 4. The row fails on a correct build, and the paired Success Criterion 'agent/agent_session_queue.py diff is exactly two lines' asserts arithmetic the check contradicts. **Suggestion:** Change the Expected cell to `output contains 4`, or replace the command with a changed-line count that excludes diff headers: `git diff origin/main -- agent/agent_session_queue.py \| grep -c '^[+-][^+-]'` (expected 4). Reword the Success Criterion to 'two lines changed (numstat sum 4)' so criterion and check agree. | **FIXED** | Verified empirically on this repo: commit `d59f6509` (a single-line CLAUDE.md edit) reports numstat `1	1`. There is no numstat 'lines changed' figure distinct from added+deleted; a same-line substitution is always +1/-1. The `git rm agent/sustainability.py` in Task 3 does not affect this path's numstat. |
+| CONCERN | Risk & Robustness, History & Consistency | The Verification prose says `scripts/verify_registry_without_shim.py` 'is a build artifact of this plan ... the builder creates it as part of task 3', but Task 3's bullet list (repoint the import, edit the docstring, `git rm` the shim, reword the run.py comment) never mentions creating it. The file does not exist on main. Success Criterion 'Every registry callable resolves with agent.sustainability banned from sys.modules' therefore has no producing task, and Task 6's validator reaches a Verification row with no script to run. **Suggestion:** Add an explicit bullet to Task 3 (or a new Task 3b) assigning creation of `scripts/verify_registry_without_shim.py` to `shim-builder`, so the instruction lives in the executable task list rather than only in prose after the table. | **FIXED** | Insert after Task 3's final bullet: 'Create `scripts/verify_registry_without_shim.py`: install a `sys.meta_path` finder whose `find_spec` raises for `fullname == "agent.sustainability"`, install it BEFORE resolving the registry, then import every `callable:` entry.' Note the finder must be installed before `agent.reflection_scheduler` resolves the registry -- the scheduler resolves vault-first (`~/Desktop/Valor/reflections.yaml` before `config/reflections.yaml`), so the script validates whichever file the running machine actually uses. There is no existing file to copy this logic from. |
+| CONCERN | Scope & Value, History & Consistency, Structural | The Documentation checklist names exactly one file, `docs/features/adding-reflection-tasks.md`, which contains ZERO `agent.sustainability` references -- a guaranteed no-op. The four files that actually carry live references are unnamed and left to a generic catch-all grep: `docs/features/sustainable-self-healing.md` (11 refs, including a full callable-path table and a `from agent.sustainability import circuit_health_gate` example), `docs/features/worker-hibernation.md` (5 refs), `docs/features/session-recovery-mechanisms.md` (2 refs), `docs/features/utc-timestamps.md` (1 ref). **Suggestion:** Name the four files explicitly in the Documentation checklist as the primary targets and drop the `adding-reflection-tasks.md` bullet, which names a file with nothing to change. | **FIXED** | `docs/features/worker-hibernation.md:114` is the highest-risk reference: it is a copy-pasteable one-liner `python -c "... from agent.sustainability import send_hibernation_notification"` that raises `ModuleNotFoundError` the moment the shim is deleted -- an executable doc, not stale prose. `docs/features/sustainable-self-healing.md:89-115` and `worker-hibernation.md:75-91` both contain registry tables whose left column lists `agent.sustainability.*` callable paths; post-#2944 those left columns are already wrong and must be replaced with the `reflections.agents.*` paths, not merely annotated. |
+| CONCERN | Risk & Robustness, Structural | Three Verification rows state an Expected output the command cannot produce. The two `git grep -c ... \| match count == 0` rows: `git grep -c` prints NOTHING and exits 1 when zero files match, so there is never a literal `0` to compare -- an empty result is indistinguishable from 'the command did not run'. Separately, `git grep -c "^def get_project_key" -- reflections/redis_access.py \| output contains 1` searches only TRACKED files, and `reflections/redis_access.py` is created by this plan, so the row returns nothing and fails unless the builder has staged the new file first. **Suggestion:** Restate the two zero-match rows in terms of exit code (`exit code 1` = zero matches) or pipe through `\| wc -l` so `0` is real output. For the canonical-module row, either `git add` the new file before validating, or use `grep -c` (working-tree, untracked-aware) instead of `git grep -c`. | **FIXED** | `git grep -c <pattern>` emits `<path>:<count>` per matching file and zero lines with exit 1 when no file matches -- it never emits a bare `0`. Verified in this checkout: `git grep -c "^def get_project_key" -- reflections/redis_access.py` currently exits 1 with no output. Task 6's validator runs the whole table, so all three rows must be self-consistent before `shim-validator` can report pass/fail per row. |
+| CONCERN | Scope & Value | Issue #2875 asks only that the shim be deleted and that `stall_advisory` stop importing its helpers. The plan additionally folds the five `reflections/agents/*.py` private helper copies onto a brand-new `reflections/redis_access.py`. That expansion drives most of the plan's size: a new module, ~32 patch-target lines in `tests/unit/test_sustainability.py` alone (the plan estimates ~20), and renames across six modules. The plan flags this itself as Open Question judgment call #1 but resolves it in favour of the wider scope without a decision from the issue. **Suggestion:** Either accept the wider scope on the record by adding it as an explicit acceptance criterion, or take the plan's own offered fallback: shrink Tasks 1-2 to `stall_advisory` alone and file the five-module de-duplication as a follow-up. | **FIXED** | The plan's stated count of 'seven byte-identical copies' is scoped to `agent/sustainability.py` + 5 `reflections/agents/*` + `stall_advisory.py`. Three further `_get_redis` definitions exist outside that set and are NOT deduplicated by this plan: `reflections/utilities.py:267`, `reflections/docs_auditor.py:158`, `agent/steering.py:59`. So Success Criterion 'Exactly one definition of get_project_key / get_redis under reflections/' is only true when scoped to `reflections/agents/` + `stall_advisory.py` as the criterion's own wording does -- keep that scoping explicit if the wider scope is retained, or the criterion reads as false against `reflections/utilities.py`. Correct the '~20' patch-target estimate to 32. |
+| NIT | Structural | Test Impact and Rabbit Holes contradict each other on renaming `tests/unit/test_sustainability.py`. Test Impact says 'Consider renaming the file to `test_reflection_agents.py` only if it is free'; Rabbit Holes says the rename 'collides with a parallel lane's working set. Not worth the coordination cost.' A builder working Task 4 from the Test Impact checklist may attempt a rename the Rabbit Holes section forbids. **Suggestion:** Delete the 'Consider renaming' clause from Test Impact and let the Rabbit Holes entry stand as the single ruling. | **FIXED** | — |
+| NIT | Structural | The Prerequisites table has no Expected column, so `grep -c "agent.sustainability" ~/Desktop/Valor/reflections.yaml` has no stated pass value. Both prerequisites were verified PASS during this critique (the grep returns 0; the migration script exists), but a later re-run has no recorded target. **Suggestion:** Add an Expected column: `0` for the registry grep, `exit 0` for the migration-script test. | **FIXED** | — |
+---
+
+## Open Questions
+
+None. Both prior judgment calls were resolved in the post-critique revision:
+
+1. **Scope of de-duplication** — resolved in favour of the wider scope, recorded
+   as an explicit acceptance criterion and argued in Technical Approach, so a
+   reviewer judges it rather than discovering it.
+2. **The migration script stays** — unchanged, tagged `[ORDERED]` in No-Gos
+   pending human confirmation that all four machines have run `/update` past
+   `c9a91bdad`. Not blocking this plan; the script is inert once a machine has
+   migrated.

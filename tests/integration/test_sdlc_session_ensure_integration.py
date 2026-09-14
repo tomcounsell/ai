@@ -491,7 +491,7 @@ class TestStageArtifactVerificationGate:
 
         result = sdlc_next_skill.decide(issue_number=issue_number)
 
-        assert result.get("dispatched") is True, result
+        assert result.get("decision") == "dispatch", result
         assert result["skill"] == "/do-build", result
         assert result["row_id"] == "G8", result
 
@@ -559,7 +559,7 @@ class TestStageArtifactVerificationGate:
 
         result = sdlc_next_skill.decide(issue_number=issue_number)
 
-        assert result.get("dispatched") is True, result
+        assert result.get("decision") == "dispatch", result
         assert result["skill"] == "/do-merge", result
         assert result["row_id"] == "10", result
 
@@ -650,7 +650,7 @@ class TestStageArtifactVerificationGate:
         assert "error" not in result, result
 
         if branch_exists:
-            assert result.get("dispatched") is True, result
+            assert result.get("decision") == "dispatch", result
             assert result["skill"] == "/do-build", result
             assert result["row_id"] == "5", result
         else:

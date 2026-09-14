@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -273,6 +275,7 @@ def build_telegram_outbox_payload(
     reply_to: int | None,
     session_id: str,
     file_paths: list[str] | None = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the telegram outbox payload dict for ``telegram:outbox:{session_id}``.
 
@@ -282,12 +285,13 @@ def build_telegram_outbox_payload(
     the wire shape is defined exactly once.  It performs no I/O and has no side
     effects.
 
-    The returned dict matches the shape consumed by the Telegram relay
-    (``bridge/telegram_relay.py``): ``chat_id``, ``reply_to``, ``text``,
-    ``session_id``, ``timestamp``, and — only when attachments are supplied —
-    ``file_paths``.  The ``file_paths`` key is OMITTED entirely when
-    ``file_paths`` is falsy (empty list or ``None``), preserving the original
-    conditional-key behaviour of the inline dict this helper replaces.
+    The shape is declared once, as ``bridge.wire_schemas.OutboxPayload``, and
+    that model is what the relay validates the entry against on the way out:
+    ``v``, ``chat_id``, ``reply_to``, ``text``, ``session_id``, ``timestamp``,
+    and — only when supplied — ``file_paths`` and ``correlation_id``.  Those
+    two are the only keys omitted when unset; every other key is always
+    written, ``reply_to`` as an explicit null when the message replies to
+    nothing.  That is the shape of the inline dict this helper replaced.
 
     Args:
         chat_id: Target Telegram chat identifier.
@@ -295,21 +299,91 @@ def build_telegram_outbox_payload(
         reply_to: Message ID to reply to, or ``None``.
         session_id: Session identifier used for the outbox key.
         file_paths: Optional list of attachment paths.
+        correlation_id: The session's correlation id, so a delivered message
+            can be tied back to the intake that produced it.
 
     Returns:
         A dict payload ready to be JSON-serialised and pushed onto
         ``telegram:outbox:{session_id}``.
     """
-    payload: dict[str, Any] = {
+    from bridge import wire_schemas
+    from bridge.wire_schemas import OutboxPayload
+
+    # `correlation_id` is a lineage tag the message does not need in order to
+    # be delivered. Before the payload was typed, a caller reading it off a
+    # session got whatever was there and it rode along unvalidated; now a
+    # non-string would raise out of this builder, and the one caller on the
+    # send path turns that into a dropped message. Losing the tag is the
+    # right trade, so drop it here rather than let it cost a delivery.
+    if not isinstance(correlation_id, str):
+        correlation_id = None
+
+    # Conditional keys are omitted by not setting them, which is the whole of
+    # the rule `wire_schemas.to_dict` then applies: the writer's keys, and
+    # only those. The hand-built dict this replaced always wrote `reply_to`,
+    # including as an explicit null on the highest-volume path (an ordinary
+    # message replying to nothing), and never carried `type` or `project_key`
+    # at all — both of which a blanket dump of the model would invent.
+    payload = OutboxPayload(
+        chat_id=chat_id,
+        reply_to=reply_to,
+        text=text,
+        session_id=session_id,
+        timestamp=time.time(),
+        **({"file_paths": file_paths} if file_paths else {}),
+        **({"correlation_id": correlation_id} if correlation_id else {}),
+    )
+    return wire_schemas.to_dict(payload)
+
+
+def build_telegram_poll_outbox_payload(
+    chat_id: str,
+    question: str,
+    options: list[str],
+    reply_to: int | None,
+    session_id: str,
+) -> dict[str, Any]:
+    """Build the ``type: "poll"`` outbox payload for ``telegram:outbox:{session_id}``.
+
+    Sibling of :func:`build_telegram_outbox_payload`, and additive: existing
+    producers are unaffected because the relay dispatches on ``type``.
+
+    **This function is the sole producer of ``poll_id_hint``.** That id is the
+    correlation key the entire Race-6 mitigation is built on — the relay passes
+    it to both ``register_pending_poll`` (as the provisional registry key) and
+    ``send_poll(correlation_id=...)`` (which embeds a 7-byte prefix of it in the
+    poll's option bytes), and the reconciliation loop's orphan adoption matches
+    on it. Minting it anywhere else, or per send attempt rather than per payload,
+    breaks the exact match against the provisional row.
+
+    ``session_type`` is deliberately **not** stamped into the payload: a queued
+    payload would outlive a session's real type. The relay re-reads eligibility
+    at send time instead.
+    """
+    return {
+        "type": "poll",
         "chat_id": chat_id,
         "reply_to": reply_to,
-        "text": text,
+        "question": question,
+        "options": list(options),
         "session_id": session_id,
         "timestamp": time.time(),
+        "poll_id_hint": uuid.uuid4().hex,
     }
-    if file_paths:
-        payload["file_paths"] = file_paths
-    return payload
+
+
+def render_poll_as_text(question: str, options: list[str]) -> str:
+    """Render a poll question as the numbered-list prose fallback.
+
+    **One rendering of a question as text, not several.** Every degradation path
+    goes through this: the CLI's ineligible-surface branch, the relay's
+    eligibility re-check branch, and the relay's terminal-failure re-enqueue. A
+    second copy would let the fallback drift from the poll a reader was expecting
+    to see.
+    """
+    lines = [question, ""]
+    lines += [f"{i + 1}. {opt}" for i, opt in enumerate(options)]
+    return "\n".join(lines)
 
 
 async def deliver_system_notice(
@@ -419,7 +493,7 @@ class TelegramRelayOutputHandler:
     Redis. This closes the worker-bypass gap where worker-executed PM sessions
     previously wrote raw text straight to the outbox, producing
     ``MessageTooLongError`` on content >4096 chars (see
-    docs/plans/completed/message-drafter.md §Problem). Drafter errors fall
+    docs/archive/plans-completed/message-drafter.md §Problem). Drafter errors fall
     through to raw-text delivery via the inner ``try/except`` block.
 
     An optional *file_handler* enables dual-write so output is also persisted
@@ -515,8 +589,8 @@ class TelegramRelayOutputHandler:
         """
         session_id = getattr(session, "session_id", None) or str(chat_id)
         try:
-            from bridge.utc import utc_now
             from models.room import SYSTEM_ADDRESSEE, Room
+            from utils.utc import utc_now
 
             project_key = getattr(session, "project_key", None)
             room = Room.resolve(str(project_key), SYSTEM_ADDRESSEE)
@@ -691,7 +765,7 @@ class TelegramRelayOutputHandler:
         # Single call site for the drafter so both transports receive
         # identically-normalized text. Drafter errors fall through to raw
         # text via the inner try/except — drafter is a guard, never a
-        # blocker. See docs/plans/completed/message-drafter.md §Part C.
+        # blocker. See docs/archive/plans-completed/message-drafter.md §Part C.
         delivery_text = text
         drafter_overflow_file: str | None = None
         steering_deferred = False
@@ -814,7 +888,63 @@ class TelegramRelayOutputHandler:
                         if _ctx.pop("deferred_self_draft_pending", None) is not None:
                             _ctx.pop("deferred_self_draft_text", None)
                             _target.extra_context = _ctx
-                            _target.save(update_fields=["extra_context"])
+                            # Stamp response_delivered_at (#3270). Reaching
+                            # here means the agent redrafted a deferred reply
+                            # and this send is delivering it — the second of
+                            # the two real delivery paths that never recorded
+                            # the fact, leaving #918's
+                            # `_delivery_belongs_to_current_run` reading None
+                            # and the #944 orphan net free to requeue a row
+                            # that had already answered the human.
+                            #
+                            # Narrow save: a bare save() here would be a full
+                            # popoto HSET of a possibly-stale instance, i.e. a
+                            # silent lifecycle write.
+                            #
+                            # The caller's `session` object is mirrored for the
+                            # same reason the flush in
+                            # agent/session_health.py::flush_deferred_self_draft_sync
+                            # mirrors: any caller that keeps holding this
+                            # object and later hands it to a lifecycle write
+                            # would otherwise persist the pre-stamp snapshot.
+                            #
+                            # Both mutations land in ONE narrow save: the
+                            # cleared `extra_context` and the stamp describe
+                            # the same delivery, and a single write keeps them
+                            # from ever persisting apart.
+                            _stamp_at = datetime.now(UTC)
+                            _target.response_delivered_at = _stamp_at
+                            _target.save(
+                                update_fields=[
+                                    "extra_context",
+                                    "response_delivered_at",
+                                    "updated_at",
+                                ]
+                            )
+                            if session is not _target:
+                                # BOTH fields, not just the stamp. Mirroring
+                                # the stamp alone leaves the caller's own
+                                # `extra_context` still carrying
+                                # `deferred_self_draft_pending`, and
+                                # `finalize_session`'s trailing full save
+                                # re-arms it with the ORIGINALLY REJECTED
+                                # draft text -- which
+                                # `_deferred_self_draft_backstop_sweep` then
+                                # selects on that flag alone and delivers on
+                                # top of the successful resend. The precedent
+                                # site in
+                                # agent/session_health.py::flush_deferred_self_draft_sync
+                                # mirrors both for exactly this reason.
+                                session.response_delivered_at = _stamp_at
+                                _caller_ctx = dict(session.extra_context or {})
+                                _had_pending = (
+                                    _caller_ctx.pop("deferred_self_draft_pending", None) is not None
+                                )
+                                _had_text = (
+                                    _caller_ctx.pop("deferred_self_draft_text", None) is not None
+                                )
+                                if _had_pending or _had_text:
+                                    session.extra_context = _caller_ctx
                     except Exception as _clear_err:
                         # Best-effort; never blocks delivery. Worst case is the
                         # pre-existing stale-flag behavior this fix targets.
@@ -991,10 +1121,9 @@ class TelegramRelayOutputHandler:
         # Lightweight Haiku call inspects the chat snapshot + the drafted
         # message and returns one of {send, trim, suppress}. RTR is a
         # *guard*, not a blocker: every error path returns send and the
-        # delivery proceeds with the original delivery_text. RTR is gated
-        # by the READ_THE_ROOM_ENABLED env var (default off) and short-
-        # circuits for SDLC sessions, short outputs, empty drafts, missing
-        # chat_ids, and empty snapshots.
+        # delivery proceeds with the original delivery_text. RTR runs
+        # unconditionally and short-circuits for SDLC sessions, short
+        # outputs, empty drafts, missing chat_ids, and empty snapshots.
         try:
             from bridge.read_the_room import (
                 RTR_SUPPRESS_EMOJI,
@@ -1127,7 +1256,12 @@ class TelegramRelayOutputHandler:
             return DeliveryOutcome.sent
 
         payload = build_telegram_outbox_payload(
-            chat_id, delivery_text, reply_to, session_id, effective_file_paths
+            chat_id,
+            delivery_text,
+            reply_to,
+            session_id,
+            effective_file_paths,
+            correlation_id=getattr(session, "correlation_id", None),
         )
 
         queue_key = f"telegram:outbox:{session_id}"
@@ -1383,13 +1517,22 @@ class TelegramRelayOutputHandler:
         (its own transient concept — verbatim questions for the human) is
         never persisted to the session row; Job expectations (#2708) are the
         durable obligation record and live on the Job, not here.
+
+        The save is narrowed to ``["context_summary", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so this routing-field write — reached from a possibly
+        long-held ``session`` object — was silently authorized to rewrite the
+        row's lifecycle state and its status index from a stale snapshot, with
+        no LIFECYCLE log and no ``session_events`` entry.
         """
         try:
             context_summary = getattr(draft, "context_summary", None)
 
             if context_summary:
                 session.context_summary = context_summary
-                session.save()
+                session.save(update_fields=["context_summary", "updated_at"])
                 logger.debug(
                     "Persisted routing fields to session %s (context_summary=%s)",
                     getattr(session, "session_id", "<unknown>"),
@@ -1428,6 +1571,15 @@ class TelegramRelayOutputHandler:
         signature. The extra fields are merged into the event dict after the
         base fields are populated, so they can never shadow ``type``, ``ts``,
         ``chat_id``, ``reason``, or ``draft_preview``.
+
+        The save is narrowed to ``["session_events", "updated_at"]`` (#3270).
+        A bare ``save()`` on an AgentSession is a lifecycle write: ``status``
+        is an ``IndexedField`` and popoto's ``save(update_fields=None)`` path
+        encodes the whole instance into one HSET and runs ``on_save()`` for
+        every field, so appending a best-effort event to a possibly-stale
+        ``session`` object was silently authorized to rewrite the row's
+        lifecycle state and its status index, with no LIFECYCLE log and — the
+        sharpest irony of the write — no ``session_events`` entry recording it.
         """
         if session is None:
             return
@@ -1446,7 +1598,7 @@ class TelegramRelayOutputHandler:
             events.append(event)
             session.session_events = events
             if hasattr(session, "save"):
-                session.save()
+                session.save(update_fields=["session_events", "updated_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("RTR event append failed (non-fatal): %s", e)
 
@@ -1469,6 +1621,78 @@ class TelegramRelayOutputHandler:
         except (TypeError, ValueError):
             return None
 
+    async def send_poll(
+        self,
+        chat_id: str,
+        question: str,
+        options: list[str],
+        reply_to_msg_id: int | None = None,
+        session: Any = None,
+    ) -> DeliveryOutcome:
+        """Queue a ``type: "poll"`` payload onto ``telegram:outbox:{session_id}``.
+
+        Sibling of :meth:`send`, discovered by capability probe
+        (``hasattr(handler, "send_poll")``) rather than added to the
+        ``OutputHandler`` Protocol as a required method — ``FileOutputHandler``
+        and ``EmailOutputHandler`` must stay valid without it. Email, local and
+        system surfaces degrade to prose at the CLI, before this is ever reached.
+
+        **Validate, do not compose.** The question goes through
+        ``validate_poll_question`` — the public drafter seam — and never through
+        ``draft_message``, which runs ``_compose_structured_draft`` *before*
+        validating and would return the question with the emoji prefix, stage
+        line and link footer attached. A stage line inside a poll question is not
+        a message with a header; it is a broken question. The escape-hatch
+        followup, which is ordinary prose, still goes through the full drafter,
+        so the comms layer is not bypassed overall.
+
+        Option-count and option-length validation lives in ``tools/ask_poll.py``:
+        the drafter's ``_validate_for_medium`` signature takes text only and
+        physically cannot see the options.
+
+        **Records no expectation.** Its sibling :meth:`send` records none, and an
+        expectation with no resolution path in any of the vote translator's
+        branches would be authored and never closed.
+        """
+        session_id = getattr(session, "session_id", None) or chat_id
+        reply_to = int(reply_to_msg_id) if reply_to_msg_id else None
+
+        try:
+            from bridge.message_drafter import validate_poll_question
+
+            violations = validate_poll_question(
+                question, session_id=getattr(session, "session_id", None)
+            )
+            if violations:
+                logger.warning(
+                    "poll question failed %s validation: %s", "telegram_poll", violations
+                )
+        except Exception as e:  # noqa: BLE001 — drafter is a guard, never a blocker
+            logger.debug("poll question validation unavailable (non-fatal): %s", e)
+
+        payload = build_telegram_poll_outbox_payload(
+            chat_id=chat_id,
+            question=question,
+            options=options,
+            reply_to=reply_to,
+            session_id=session_id,
+        )
+        queue_key = f"telegram:outbox:{session_id}"
+        try:
+            r = self._get_redis()
+            r.rpush(queue_key, json.dumps(payload))
+            r.expire(queue_key, self.OUTBOX_TTL)
+            logger.info(
+                "Queued poll to %s (%d options, poll_id_hint=%s)",
+                queue_key,
+                len(options),
+                payload["poll_id_hint"],
+            )
+            return DeliveryOutcome.sent
+        except Exception as e:
+            logger.error("Failed to write poll to Redis outbox %s: %s", queue_key, e)
+            raise
+
     def _rtr_queue_reaction(
         self,
         chat_id: str,
@@ -1479,14 +1703,9 @@ class TelegramRelayOutputHandler:
         """Queue a 👀 reaction directly to ``telegram:outbox:{session_id}``.
 
         Built via :meth:`_build_reaction_payload` so the schema matches
-        :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here:
-        on the telegram path, ``react()`` derives ``session_id = chat_id``
-        (see ``session_id = chat_id`` in :meth:`react`), which would orphan
-        the reaction in a different queue when ``session.session_id !=
-        chat_id`` (the normal case). See Implementation Note F7. (``react()``
-        also resolves transport via ``_resolve_transport`` before reaching
-        that line — a system-transport session drops before any outbox write
-        at all.)
+        :meth:`react` byte-for-byte. We do NOT call ``self.react()`` here
+        because it resolves transport via ``_resolve_transport`` first, and
+        the suppress branch already knows the target queue.
         """
         from agent.reaction_priority import PRIORITY_PICKUP
 
@@ -1591,11 +1810,9 @@ class TelegramRelayOutputHandler:
                 await self._file_handler.react(chat_id, msg_id, emoji, session)
             return
 
-        # Derive a session_id -- best effort, use chat_id as fallback.
-        # NOTE: when called with a session context, callers should prefer
-        # writing the reaction directly to ``telegram:outbox:{session.session_id}``
-        # via _build_reaction_payload (see RTR suppress branch in send()).
-        session_id = chat_id
+        # Queue on the session's own outbox so the payload carries a real
+        # session_id; chat_id is the fallback only for a chatless call.
+        session_id = getattr(session, "session_id", None) or chat_id
 
         payload = self._build_reaction_payload(chat_id, msg_id, emoji, session_id)
 

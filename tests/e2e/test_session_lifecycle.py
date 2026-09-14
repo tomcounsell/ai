@@ -11,6 +11,7 @@ import pytest
 
 from bridge.dedup import is_duplicate_message, record_message_processed
 from models.agent_session import AgentSession
+from models.session_event import format_event_lines
 
 
 @pytest.mark.e2e
@@ -194,7 +195,7 @@ class TestHistoryAccumulation:
         session.append_history("system", "Agent started")
 
         reloaded = list(AgentSession.query.filter(session_id=session.session_id))[0]
-        history = reloaded.get_history_list()
+        history = format_event_lines(reloaded.session_events)
         assert len(history) == 3
         assert "[user]" in history[0]
         assert "[classify]" in history[1]

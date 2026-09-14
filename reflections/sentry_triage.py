@@ -41,7 +41,7 @@ from pathlib import Path
 import requests
 
 from config.settings import settings
-from reflections.utilities import PROJECT_ROOT, load_local_projects
+from reflections.utilities import PROJECT_ROOT, load_local_projects, send_host_eng_telegram
 
 logger = logging.getLogger("reflections.sentry_triage")
 
@@ -695,21 +695,15 @@ def _update_sentry_issue(issue_id: str, auth_token: str, payload: dict) -> tuple
 
 
 def _send_telegram_notification(message: str) -> None:
-    """Best-effort Telegram notification. Swallows all subprocess failures."""
-    try:
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-            check=False,
-        )
-    except FileNotFoundError:
-        logger.warning("sentry_triage: valor-telegram not on PATH; skipping Telegram notify")
-    except subprocess.TimeoutExpired:
-        logger.warning("sentry_triage: valor-telegram send timed out")
-    except Exception as e:
-        logger.warning(f"sentry_triage: valor-telegram send failed: {e}")
+    """Best-effort Telegram notification to this checkout's own Eng: group.
+
+    This is a fleet-wide digest with no single project in scope (spike-2:
+    ``load_local_projects()`` elsewhere in this module resolves a
+    ``working_directory`` for ``gh issue create``, unrelated to this send),
+    so the destination is this host's own engineer group via
+    ``send_host_eng_telegram`` rather than a per-project ``Eng:`` lookup.
+    """
+    send_host_eng_telegram(message, logger_prefix="sentry_triage")
 
 
 def run_sentry_triage() -> dict:

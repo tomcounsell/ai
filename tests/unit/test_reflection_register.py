@@ -16,8 +16,11 @@ import pytest
 import yaml
 
 from scripts.update.reflection_register import (
+    IMPROVEMENT_COLLECT_CALLABLE,
+    IMPROVEMENT_COLLECT_NAME,
     REMOVED_REFLECTIONS,
     register_crash_recovery,
+    register_improvement_collect,
     register_memory_distill_backfill,
     register_reflection,
     register_sdlc_upvote_pickup,
@@ -664,3 +667,135 @@ def test_register_reflection_requires_exactly_one_of_cadence_or_cron(tmp_path):
             cadence="300s",
             cron="0 6 * * *",
         )
+
+
+# ===================================================================
+# register_improvement_collect (#3177)
+# Without this registration nothing calls the improvement observer
+# adapters, so ImprovementEvidence stays empty forever and the whole
+# loop observes nothing. These tests pin that the entry lands, lands
+# in the vault, is idempotent, and survives the vault→config sync.
+# ===================================================================
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_improvement_collect_owner_registers_missing_entry_in_vault(
+    mock_machine, tmp_path, monkeypatch
+):
+    """The entry lands in the vault file, with the cadence and callable the plan names."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_improvement_collect(project_dir)
+
+    assert result.success is True
+    assert result.action == "registered"
+    assert IMPROVEMENT_COLLECT_NAME in _names(vault_path)
+
+    entry = next(
+        r
+        for r in yaml.safe_load(vault_path.read_text())["reflections"]
+        if r["name"] == IMPROVEMENT_COLLECT_NAME
+    )
+    assert entry["callable"] == IMPROVEMENT_COLLECT_CALLABLE
+    assert entry["enabled"] is True
+    # cadence, not cron: register_reflection raises when both or neither is given.
+    assert entry["every"] == "900s"
+    assert "cron" not in entry
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_improvement_collect_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
+    """/update runs on every sync; a second registration must be a no-op, not a duplicate."""
+    vault_path, project_dir = _setup(tmp_path)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_improvement_collect(project_dir)
+    second = register_improvement_collect(project_dir)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count(IMPROVEMENT_COLLECT_NAME) == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
+def test_improvement_collect_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
+    """Machine pinning is inherited from register_reflection, not re-implemented.
+
+    projects.json says the 'valor' project belongs to Tom's MacBook Pro and this
+    machine reports a different name, so the tick must not be scheduled here.
+    """
+    vault_path, project_dir = _setup(
+        tmp_path, projects=PROJECTS_OWNED, repo_registry=REGISTRY_WITHOUT_CRASH
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    before = vault_path.read_text()
+
+    result = register_improvement_collect(project_dir)
+
+    assert result.success is True
+    assert result.action == "skipped"
+    assert IMPROVEMENT_COLLECT_NAME not in _names(vault_path)
+    assert vault_path.read_text() == before
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_improvement_collect_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(tmp_path / "vault" / "absent.yaml"))
+
+    result = register_improvement_collect(project_dir)
+
+    assert result.success is True
+    assert result.action == "skipped"
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_improvement_collect_survives_vault_to_config_sync(mock_machine, tmp_path, monkeypatch):
+    """Risk 7: /update clobbers config/reflections.yaml from the vault every cycle.
+
+    Registering into the vault is what makes the entry survive that copy. The
+    repo copy is set up absent here, so the only place registration can land is
+    the vault — then Step 1.66's copy is simulated directly and the entry has to
+    be on the other side of it. An entry written only to the config copy would
+    be erased by the very same copy.
+    """
+    vault_path, project_dir = _setup(tmp_path)  # no repo_registry: config copy absent
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    config_path = project_dir / "config" / "reflections.yaml"
+    assert not config_path.exists()
+
+    assert register_improvement_collect(project_dir).action == "registered"
+    assert IMPROVEMENT_COLLECT_NAME in _names(vault_path)
+
+    # Step 1.66's vault→config copy.
+    config_path.write_text(vault_path.read_text())
+
+    assert IMPROVEMENT_COLLECT_NAME in _names(config_path)
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_improvement_collect_entry_loads_via_scheduler_registry(
+    mock_machine, tmp_path, monkeypatch
+):
+    """A registered entry the scheduler cannot load is the failure this guards.
+
+    register_reflection emits execution_type: function entries; the scheduler's
+    own loader has to accept it, and the callable path has to resolve to the
+    real entrypoint.
+    """
+    vault_path, project_dir = _setup(tmp_path)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    register_improvement_collect(project_dir)
+
+    from agent.reflection_scheduler import load_registry
+
+    entries = load_registry()
+    match = [e for e in entries if getattr(e, "name", None) == IMPROVEMENT_COLLECT_NAME]
+    assert match, f"scheduler did not load {IMPROVEMENT_COLLECT_NAME}"
+
+    import importlib
+
+    module_path, _, attr = IMPROVEMENT_COLLECT_CALLABLE.rpartition(".")
+    assert callable(getattr(importlib.import_module(module_path), attr))

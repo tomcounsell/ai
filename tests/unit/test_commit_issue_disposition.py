@@ -31,7 +31,14 @@ from check_issue_disposition import (  # noqa: E402
 
 CODE = ["bridge/telegram_bridge.py"]
 SKILL_MD = [".claude/skills/sdlc/SKILL.md"]
-PLAN = ["docs/plans/completed/foo.md"]
+PLAN = ["docs/archive/plans-completed/foo.md"]
+
+# The literal stage of a `Migrate completed plan: X` commit (#2878). The mover
+# performs a rename, so git stages BOTH endpoints: the deletion under
+# `docs/plans/` and the addition under the archive. If either prefix falls out
+# of the exemption the mover's own commit is refused by the commit-msg hook,
+# which breaks /do-merge's plan-completion step.
+MIGRATION_STAGE = ["docs/plans/foo.md", "docs/archive/plans-completed/foo.md"]
 
 
 class TestRealCommitsFromIssue2540:
@@ -125,6 +132,17 @@ class TestScope:
         direct-to-main traffic and never resolves an issue by itself."""
         assert find_violation("Migrate completed plan: foo", "main", PLAN) is None
 
+    def test_migration_commit_rename_pair_is_exempt(self):
+        """The mover's own commit must pass this gate (#2878).
+
+        `migrate_plan_to_completed()` git-mv's a plan out of `docs/plans/` into
+        `docs/archive/plans-completed/` and commits on `main` with a fixed
+        message that carries no disposition. Git stages both endpoints of the
+        rename, so exempting only the source prefix would refuse the commit and
+        leave the tree with a staged-but-uncommitted move.
+        """
+        assert find_violation("Migrate completed plan: foo", "main", MIGRATION_STAGE) is None
+
     def test_plan_plus_code_is_not_exempt(self):
         """The exemption is per-commit, not per-file: one code file in the
         stage pulls the whole commit into scope."""
@@ -132,6 +150,50 @@ class TestScope:
 
     def test_empty_stage_is_not_gated(self):
         assert find_violation("whatever", "main", []) is None
+
+    def test_842212ace_plan_only_closing_keyword_is_blocked(self):
+        """The real commit that closed #2783 while the defect was live (#2890).
+
+        A plan-only commit needs no disposition, but a closing keyword in its
+        body still fires on push. `Refs #2836` was present and did not help:
+        GitHub scans the whole message.
+        """
+        message = (
+            "Plan revision (verification-runner-convergence): address critique "
+            "findings (Refs #2836)\n\n"
+            "Open Questions resolved into Decisions; PR carries Closes #2783."
+        )
+        assert find_violation(message, "main", PLAN) is not None
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["Closes #123", "closed #123", "Fixes #123", "fixed #123", "Resolves #123"],
+    )
+    def test_plan_only_blocks_every_github_closing_keyword(self, keyword):
+        """Blocking must track GitHub's keyword set, not just `Closes`."""
+        assert find_violation(f"Plan revision: notes\n\n{keyword}", "main", PLAN) is not None
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Migrate completed plan: foo",
+            "Plan revision (x): the PR body carries a closing keyword for 123",
+            "Plan critique round 3 (x): findings table (Refs #123)",
+            "Plan revision (x): close all six critique concerns (#123)",
+        ],
+    )
+    def test_plan_only_non_firing_references_still_pass(self, message):
+        """The narrow rule: only a *firing* keyword is refused. Bare mentions,
+        `Refs`, and prose like "close ... concerns (#N)" -- which GitHub does
+        not honour because the keyword is not adjacent to the reference -- stay
+        exempt, or the gate would block most legitimate plan traffic.
+        """
+        assert find_violation(message, "main", PLAN) is None
+
+    def test_plan_plus_code_may_still_close(self):
+        """The new rule is scoped to plan-*only* commits. A commit carrying real
+        code may legitimately close an issue, which is the #2540 contract."""
+        assert find_violation("Fix the thing\n\nCloses #123", "main", PLAN + CODE) is None
 
     def test_in_scope_paths_filters_only_the_plans_prefix(self):
         paths = ["docs/plans/a.md", "docs/features/b.md", "docs/plansible.py"]

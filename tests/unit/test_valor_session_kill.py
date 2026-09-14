@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 # Bootstrap: ensure repo root is on sys.path
 _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
@@ -76,6 +78,7 @@ class TestCmdKillAll:
             patch("models.session_lifecycle.TERMINAL_STATUSES", TERMINAL_STATUSES),
         ):
             mock_cls.query = mock_query
+            wire_session_lookup(mock_cls)
             # Patch imports inside cmd_kill
             with patch.dict(
                 "sys.modules",
@@ -132,6 +135,7 @@ class TestCmdKillAll:
         mock_finalize = MagicMock(side_effect=_finalize_side_effect)
         mock_cls = MagicMock()
         mock_cls.query = mock_query
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -161,6 +165,7 @@ class TestCmdKillAll:
 
         mock_cls = MagicMock()
         mock_cls.query = mock_query
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -198,6 +203,7 @@ class TestCmdKillById:
 
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         mock_finalize = MagicMock()
 
@@ -223,6 +229,7 @@ class TestCmdKillById:
         """kill --id with unknown ID returns 1 and prints stderr."""
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
+        wire_session_lookup(mock_cls)
         # _find_session falls back to get_by_id when filter is empty (#1061).
         mock_cls.get_by_id.return_value = None
 
@@ -249,6 +256,7 @@ class TestCmdKillById:
 
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         mock_finalize = MagicMock()
 
@@ -276,6 +284,7 @@ class TestCmdKillById:
 
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         with (
             patch("tools.valor_session._load_env"),
@@ -314,6 +323,7 @@ class TestNoValueErrorRegression:
 
         mock_cls = MagicMock()
         mock_cls.query = mock_query
+        wire_session_lookup(mock_cls)
 
         mock_finalize = MagicMock()
         mock_transition = MagicMock(side_effect=ValueError("must not be called"))
@@ -345,6 +355,7 @@ class TestNoValueErrorRegression:
 
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+        wire_session_lookup(mock_cls)
 
         mock_finalize = MagicMock()
         mock_transition = MagicMock(side_effect=ValueError("must not be called"))

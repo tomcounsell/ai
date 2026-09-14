@@ -28,4 +28,5 @@ class TestSearchIntegration:
 
     def test_real_search_limit(self):
         results = youtube_search_sync("python", limit=2)
-        assert len(results) <= 2
+        # Non-empty bound: the previous `len(results) <= 2` was vacuous against an empty result set.
+        assert 0 < len(results) <= 2

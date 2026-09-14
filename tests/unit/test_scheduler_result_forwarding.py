@@ -210,6 +210,74 @@ async def test_run_reflection_passes_none_for_dict_without_projects_key():
 
 
 @pytest.mark.asyncio
+async def test_run_reflection_forwards_output_summary_from_dict_result():
+    """A dict result's ``summary`` reaches ``mark_completed(output_summary=...)``."""
+    fake_result = {
+        "status": "ok",
+        "findings": [],
+        "summary": "docs-auditor: 2 files touched, 1 fixes, PR=https://github.com/o/r/pull/1",
+    }
+    entry = _make_entry()
+    state = _make_state()
+    with patch(
+        "agent.reflection_scheduler.execute_function_reflection",
+    ) as mock_exec:
+
+        async def _awaitable_returning(_entry):
+            return fake_result
+
+        mock_exec.side_effect = _awaitable_returning
+
+        await run_reflection(entry, state)
+
+    state.mark_completed.assert_called_once()
+    _args, kwargs = state.mark_completed.call_args
+    assert kwargs.get("output_summary") == fake_result["summary"]
+
+
+@pytest.mark.asyncio
+async def test_run_reflection_passes_none_output_summary_for_legacy_none_result():
+    """Legacy callable returning None → mark_completed(output_summary=None)."""
+    entry = _make_entry()
+    state = _make_state()
+    with patch(
+        "agent.reflection_scheduler.execute_function_reflection",
+    ) as mock_exec:
+
+        async def _none(_entry):
+            return None
+
+        mock_exec.side_effect = _none
+
+        await run_reflection(entry, state)
+
+    state.mark_completed.assert_called_once()
+    _args, kwargs = state.mark_completed.call_args
+    assert kwargs.get("output_summary") is None
+
+
+@pytest.mark.asyncio
+async def test_run_reflection_passes_none_output_summary_for_dict_without_summary_key():
+    """Dict result missing the ``summary`` key → mark_completed(output_summary=None)."""
+    entry = _make_entry()
+    state = _make_state()
+    with patch(
+        "agent.reflection_scheduler.execute_function_reflection",
+    ) as mock_exec:
+
+        async def _dict_no_summary(_entry):
+            return {"status": "ok", "findings": [], "projects": []}
+
+        mock_exec.side_effect = _dict_no_summary
+
+        await run_reflection(entry, state)
+
+    state.mark_completed.assert_called_once()
+    _args, kwargs = state.mark_completed.call_args
+    assert kwargs.get("output_summary") is None
+
+
+@pytest.mark.asyncio
 async def test_run_reflection_passes_none_for_non_dict_return():
     """Non-dict return (string, int, list) → mark_completed(projects=None).
 

@@ -77,6 +77,7 @@ PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
 from config.settings import settings  # noqa: E402
+from tools.process_lookup import find_python_service_pids, is_own_ancestor  # noqa: E402
 
 HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
 # 180s = 6× the 30s heartbeat write interval (plan: ≥6× guard).
@@ -170,24 +171,24 @@ def _configure_logger() -> None:
 
 
 def _get_worker_pid() -> int | None:
-    """Return PID of running worker process, or None."""
-    # Use case-insensitive flag (-i) to match both `python` and `Python`
-    # (macOS launchd spawns with the full path: .../Python.app/.../Python)
-    for pattern in ("python -m worker", "python.*worker/__main__"):
-        try:
-            result = subprocess.run(
-                ["pgrep", "-if", pattern],
-                capture_output=True,
-                text=True,
-                timeout=settings.timeouts.subprocess_default_s,
-            )
-            if result.returncode == 0:
-                pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
-                if pids:
-                    return pids[0]
-        except Exception:  # noqa: S110 -- falls through to next pgrep pattern
-            pass
-    return None
+    """Return PID of running worker process, or None.
+
+    Both launch shapes match: ``python -m worker`` (how launchd starts it) and
+    ``python .../worker/__main__.py`` (a direct start). The interpreter is
+    identified by ``argv[0]``'s basename, which covers the framework binary
+    ``Python`` (capital P) that launchd execs — the case the old
+    ``pgrep -if`` probe needed ``-i`` for.
+
+    Ancestor-safe by construction (#3164): ``pgrep`` hides the caller's own
+    ancestors, and a false ``None`` here drives active ``kickstart -k``
+    escalation against a healthy worker (the #1331 failure mode).
+
+    Unguarded, like the other ``find_python_service_pids`` call sites
+    (``scripts/update/service.py``, ``ui/app.py``): the helper never raises and
+    returns ``[]`` when the process table cannot be read.
+    """
+    pids = find_python_service_pids(module="worker", script_suffix="worker/__main__.py")
+    return pids[0] if pids else None
 
 
 def _heartbeat_age() -> float | None:
@@ -281,6 +282,30 @@ def recover(status: dict) -> None:
     pid = status.get("pid")
     if not pid:
         logger.error("recover(): no PID in status — cannot kill")
+        return
+
+    # Never signal the worker this process is running inside (#3164).
+    #
+    # `_get_worker_pid` is ancestor-safe now, so a manual
+    # `python -m monitoring.worker_watchdog` from a worker-hosted agent session
+    # is handed its own ancestor's PID, and the W1/W2 ladder below would SIGTERM
+    # then SIGKILL it — killing the caller mid-recovery. `pgrep`'s ancestor
+    # exclusion used to make that unreachable by accident; it is now an explicit
+    # decision, symmetric with the gate in `scripts/update/run.py`. The launchd
+    # tick is unaffected: it runs at ppid 1 and is never a worker descendant.
+    #
+    # `on_unreadable=True` because this is a kill path: an unreadable process
+    # tree must mean "refuse to signal", not "proceed". `run.py`'s restart gate
+    # takes the opposite (default) polarity — see `is_own_ancestor`'s docstring.
+    # Cheap here: `ps` already succeeded once to produce this PID, so a later
+    # transient failure only defers the kill to the next watchdog tick.
+    if is_own_ancestor(pid, on_unreadable=True):
+        logger.error(
+            "recover(): worker PID %d is an ancestor of this process — refusing to signal "
+            "it, because SIGTERM/SIGKILL here would kill this caller. Run the watchdog "
+            "from its launchd job, not from inside a worker-hosted session.",
+            pid,
+        )
         return
 
     host = socket.gethostname()

@@ -183,6 +183,64 @@ def find_plan_path(issue_number: int) -> Path | None:
     return None
 
 
+# Where completed plan documents are moved once their lane ships. Kept separate
+# from the live plans dir on purpose: an archived plan is history, not an active
+# lane artifact, so it must NOT make `plan_exists` true or route row 1.
+_ARCHIVED_PLANS_RELPATH = ("docs", "archive", "plans-completed")
+
+
+def find_archived_plan_path(issue_number: int) -> Path | None:
+    """Locate an ARCHIVED plan that tracks this issue, or ``None``.
+
+    Exists to close a hole in the skip precondition (#2851 recon). ``skip_stage``
+    may only record PLAN/CRITIQUE as ``skipped`` when there is verifiably nothing
+    to critique, and its first precondition is "no plan document" via
+    :func:`find_plan_path` — which searches ``docs/plans/`` only. Archiving a
+    plan therefore made its lane's CRITIQUE **retroactively skippable**, an
+    undesigned escape hatch straight through the verdict invariant (#2415) that
+    the precondition exists to protect. Measured on #2734 and #2741: both read
+    ``plan_exists: false`` after their plans moved to the archive.
+
+    This is deliberately a SEPARATE function rather than a widening of
+    :func:`find_plan_path`. Callers that ask "does this lane have a live plan?"
+    — the ``plan_exists`` meta field, row 1's no-plan predicate, G5's plan-hash
+    anchor — must keep their current answer for an archived plan. Only the skip
+    precondition cares that a plan *ever* existed.
+    """
+    if not issue_number:
+        return None
+
+    repo_root_env = os.environ.get("SDLC_TARGET_REPO")
+    if repo_root_env:
+        archive_dir = Path(repo_root_env).joinpath(*_ARCHIVED_PLANS_RELPATH)
+    else:
+        toplevel = _sdlc_utils._git_toplevel()
+        if toplevel is not None:
+            archive_dir = Path(toplevel).joinpath(*_ARCHIVED_PLANS_RELPATH)
+        else:
+            archive_dir = Path(__file__).resolve().parent.parent.joinpath(*_ARCHIVED_PLANS_RELPATH)
+
+    if not archive_dir.is_dir():
+        return None
+
+    tracking_re = re.compile(rf"^tracking:.*(?:#|issues/){issue_number}(?![0-9])", re.MULTILINE)
+    try:
+        for entry in sorted(archive_dir.iterdir()):
+            if not entry.is_file() or entry.suffix != ".md":
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.debug(f"find_archived_plan_path: unreadable plan doc {entry.name}: {e}")
+                continue
+            if tracking_re.search(text):
+                return entry
+    except Exception as e:
+        logger.debug(f"find_archived_plan_path walk failed: {e}")
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Adoption ladder helpers
 # ---------------------------------------------------------------------------

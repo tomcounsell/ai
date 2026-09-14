@@ -19,7 +19,9 @@ import pytest
 
 from models.job import (
     GOAL_PLACEHOLDER_PREFIX,
+    JOB_AT_REST_AGE_SECONDS,
     JOB_RECENT_OVERFETCH,
+    CorruptGoalError,
     Job,
     mint_placeholder_goal,
 )
@@ -245,10 +247,113 @@ def _age_out(job: Job) -> Job:
     return job
 
 
-class TestGoalSelfHeal:
-    """``_goal_data()`` is total: no goal shape can make it raise."""
+def _status_index_key(status: str) -> str:
+    """The ``status`` IndexedField's Set key for a value — derived via the
+    field API (``IndexedFieldMixin.filter_query``'s own key-build pattern),
+    never hand-built with an f-string."""
+    from popoto.models.db_key import DB_key
 
-    @pytest.mark.parametrize("raw", [None, "", "not json at all", "[]", '{"versions": null}'])
+    field = Job._meta.fields["status"]
+    prefix = field.get_special_use_field_db_key(Job, "status")
+    return DB_key(prefix, status).redis_key
+
+
+class TestFieldScopedLifecycleSaves:
+    """#2860: ``touch``/``mark_at_rest``/``revive`` must scope their save to
+    only the field(s) they mutate, so a concurrent ``goal`` write (an
+    expectation add/discharge on a second in-memory instance) is never
+    clobbered by the whole-hash rewrite a bare ``save()`` would perform."""
+
+    def test_touch_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        from utils.utc import to_unix_ts
+
+        a = Job.mint(scratch_room_id, "check the deploy")
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+        before = to_unix_ts(a.last_active_at)
+
+        a.touch()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+        assert to_unix_ts(reloaded.last_active_at) > before
+
+    def test_revive_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        from utils.utc import to_unix_ts
+
+        a = Job.mint(scratch_room_id, "check the deploy")
+        a.mark_at_rest()
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+        before = to_unix_ts(a.last_active_at)
+
+        a.revive()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert reloaded.status == "active"
+        assert to_unix_ts(reloaded.last_active_at) > before
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+
+    def test_mark_at_rest_preserves_a_concurrent_goal_write(self, scratch_room_id):
+        a = Job.mint(scratch_room_id, "check the deploy")
+        b = Job.query.get(id=a.id, room_id=scratch_room_id)
+        eid = b.add_expectation("I'll report back")
+
+        a.mark_at_rest()
+
+        reloaded = Job.query.get(id=a.id, room_id=scratch_room_id)
+        assert reloaded.status == "at-rest"
+        assert eid in {e["id"] for e in reloaded.open_expectations()}
+
+    def test_mark_at_rest_does_not_refresh_recency(self, scratch_room_id):
+        from utils.utc import to_unix_ts
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        before_ts = to_unix_ts(job.last_active_at)
+        [(member, score_before)] = _scores(scratch_room_id)
+
+        job.mark_at_rest()
+
+        assert to_unix_ts(job.last_active_at) == before_ts
+        assert _scores(scratch_room_id) == [(member, score_before)]
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert to_unix_ts(reloaded.last_active_at) == before_ts
+
+    @pytest.mark.parametrize("method", ["touch", "revive"])
+    def test_touch_and_revive_still_score_correctly(self, scratch_room_id, method):
+        from utils.utc import to_unix_ts
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        getattr(job, method)()
+
+        [(_member, score)] = _scores(scratch_room_id)
+        assert score == pytest.approx(to_unix_ts(job.last_active_at), abs=1.0)
+
+    def test_mark_at_rest_updates_the_raw_status_index_set(self, scratch_room_id):
+        """Index maintenance under a scoped save, asserted at the Redis layer
+        (not merely inferred from an ORM round trip)."""
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        job = Job.mint(scratch_room_id, "check the deploy")
+        member_key = job.db_key.redis_key
+        assert POPOTO_REDIS_DB.sismember(_status_index_key("active"), member_key)
+
+        job.mark_at_rest()
+
+        assert not POPOTO_REDIS_DB.sismember(_status_index_key("active"), member_key)
+        assert POPOTO_REDIS_DB.sismember(_status_index_key("at-rest"), member_key)
+
+
+class TestGoalSelfHeal:
+    """``_goal_data()`` is total: no goal shape can make a READ raise.
+
+    The shapes here are ones this system's own writer can plausibly leave
+    behind (a null field, a non-object value, a wrong-typed key). They coerce
+    to empty AND stay writable. Bytes that do not decode at all are a
+    different category, covered by :class:`TestCorruptGoal`.
+    """
+
+    @pytest.mark.parametrize("raw", [None, "", "[]", '{"versions": null}'])
     def test_malformed_goal_reads_as_empty(self, scratch_room_id, raw):
         job = Job.mint(scratch_room_id, "check the deploy")
         job.goal = raw
@@ -259,6 +364,21 @@ class TestGoalSelfHeal:
         assert reloaded.all_expectations() == []
         assert reloaded.goal_versions() == []
         assert reloaded.current_goal() == ""
+
+    @pytest.mark.parametrize("raw", [None, "", "[]", '{"versions": null}'])
+    def test_benign_shapes_are_not_corrupt_and_stay_writable(self, scratch_room_id, raw):
+        """The permissive coercion is kept for our own writer's shapes: they
+        are not flagged as corrupt, and a mutation proceeds normally."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.goal = raw
+        job.save()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal_is_corrupt() is False
+        eid = reloaded.add_expectation("I'll report back")
+
+        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert [e["id"] for e in fresh.open_expectations()] == [eid]
 
     def test_malformed_entries_cannot_lose_the_goal_write(self, scratch_room_id):
         """Derivation happens before the save, so a junk entry costs a wrong
@@ -330,6 +450,155 @@ class TestGoalSelfHeal:
         # The obligation survived the conversion; only the retired key is gone.
         assert "legacy1" in ids
         assert "promises" not in json.loads(reloaded.goal)
+
+
+# Bytes a truncated write leaves behind: mostly-valid JSON that no longer
+# decodes. Whatever is recoverable from it lives only in these bytes.
+CORRUPT_GOAL = '{"versions": [{"ts": "2026-08-01T00:00:00+00:00", "author": "pm", "text": "Ship'
+
+
+def _corrupt(job: Job) -> Job:
+    """Replace the stored goal with undecodable bytes, keeping the projection
+    the instance already carries (a truncated write never touches the flag)."""
+    job.goal = CORRUPT_GOAL
+    job.save()
+    return Job.query.get(id=job.id, room_id=job.room_id)
+
+
+@pytest.fixture
+def sentry_captures(monkeypatch):
+    import sentry_sdk
+
+    captured: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        sentry_sdk, "capture_message", lambda msg, level="info", **_: captured.append((msg, level))
+    )
+    return captured
+
+
+class TestCorruptGoal:
+    """#2862 Part 2: undecodable goal bytes fail CLOSED on every write.
+
+    Reads stay tolerant (empty, so no unrelated caller crashes) but loud
+    (ERROR log + Sentry). The read-modify-write pair is where the data loss
+    lived: ``_goal_data()`` parsed corruption as ``{}`` and the next
+    ``_write_goal_data`` persisted that emptiness over the only copy of the
+    original bytes. Every assertion here is on the stored bytes, not the
+    accessor, because the accessor is exactly what used to lie.
+    """
+
+    def test_corrupt_goal_is_a_distinct_condition_from_shape_coercion(self, scratch_room_id):
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        assert job.goal_is_corrupt() is True
+        # Reads still answer (tolerant), so unrelated callers keep working.
+        assert job.open_expectations() == []
+        assert job.current_goal() == ""
+
+    def test_read_is_loud_error_log_and_one_sentry_event(
+        self, scratch_room_id, caplog, sentry_captures
+    ):
+        import logging
+
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        with caplog.at_level(logging.ERROR, logger="models.job"):
+            job.open_expectations()
+            job.current_goal()
+            job.goal_versions()
+
+        errors = [
+            r for r in caplog.records if r.levelno == logging.ERROR and "CORRUPT" in r.message
+        ]
+        assert len(errors) == 3, "every read logs; the log is the signal of record"
+        assert all(job.job_id in r.message for r in errors)
+        # Sentry is deduplicated per process per Job so cadence readers cannot
+        # flood one bad row into thousands of events.
+        assert len(sentry_captures) == 1
+        msg, level = sentry_captures[0]
+        assert job.job_id in msg
+        assert level == "error"
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda j: j.add_expectation("I'll report back"),
+            lambda j: j.append_goal_version("Real goal v2", author="pm"),
+            lambda j: j.discharge_expectation("anything"),
+            lambda j: j._write_goal_data({"versions": [], "expectations": []}),
+        ],
+        ids=["add_expectation", "append_goal_version", "discharge_expectation", "chokepoint"],
+    )
+    def test_mutation_after_corruption_preserves_the_original_bytes(
+        self, scratch_room_id, sentry_captures, mutate
+    ):
+        """The read-modify-write sequence specifically: corrupt, then mutate,
+        and the stored bytes are byte-identical afterwards."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")  # projection True before corruption
+        job = _corrupt(job)
+
+        with pytest.raises(CorruptGoalError) as excinfo:
+            mutate(job)
+        assert job.job_id in str(excinfo.value)
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal == CORRUPT_GOAL
+        assert reloaded.has_open_expectations is True
+        assert reloaded.status == "active"
+
+    def test_backfill_never_rederives_the_flag_from_an_empty_parse(self, scratch_room_id):
+        """The second destruction path: the daily backfill derives the flag
+        from ``_goal_data()``, which reads corruption as empty. Without the
+        skip it would stamp ``False`` and drop the Job out of the reconciler's
+        index; the stored flag is the last known truth and stays."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")
+        job = _corrupt(job)
+        assert job.has_open_expectations is True
+
+        Job.backfill_open_expectations_index()
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.has_open_expectations is True
+        assert reloaded.goal == CORRUPT_GOAL
+
+    def test_corrupt_job_stays_in_the_reconciler_scan_root(self, scratch_room_id):
+        """``with_open_expectations()`` re-verifies each flagged row against
+        the goal. A corrupt goal cannot disprove the flag, so the Job is
+        retained rather than silently presenting as obligation-free."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.add_expectation("I'll report back")
+        job = _corrupt(job)
+
+        assert job.job_id in {j.job_id for j in Job.with_open_expectations()}
+
+        job.mark_at_rest()
+        assert job.job_id in {j.job_id for j in Job.at_rest_with_open_expectations()}
+
+    def test_corrupt_job_never_rests_by_age(self, scratch_room_id):
+        """Rest-by-age skips a Job with open expectations. A corrupt goal
+        cannot prove its obligations are met, so it is pinned active until a
+        human repairs it (corruption is the case that most needs one)."""
+        import time
+
+        job = _corrupt(Job.mint(scratch_room_id, "check the deploy"))
+
+        far_future = time.time() + JOB_AT_REST_AGE_SECONDS * 10
+        Job.sweep_to_rest(now=far_future)
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.status == "active"
+        assert reloaded.goal == CORRUPT_GOAL
+
+    def test_non_string_goal_value_is_corrupt(self, scratch_room_id):
+        """A non-string in the field is also not something this system wrote
+        intact (the ``TypeError`` branch of the decode)."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        job.goal = 12345
+        assert job.goal_is_corrupt() is True
+        with pytest.raises(CorruptGoalError):
+            job.add_expectation("I'll report back")
 
 
 class TestOpenExpectationIndex:
@@ -712,19 +981,21 @@ class TestRecencyLookup:
 class TestScorePurity:
     """Sorted-set scores must be pure UTC epochs, on every write path.
 
-    popoto 1.8.0 decodes datetimes without tzinfo, so a reloaded Job's
-    ``last_active_at`` is naive and the next save would score it as
-    ``naive.timestamp()`` — local time. On a UTC+07 host that buries a Job
-    active seconds ago seven hours in the past, which is what made a live
-    ``last_active_at__gte=now-1h`` filter return zero rows.
+    A reloaded Job's ``last_active_at`` used to come back naive, and the next
+    save scored it as ``naive.timestamp()``, local time. On a UTC+07 host that
+    buried a Job active seconds ago seven hours in the past, which is what made
+    a live ``last_active_at__gte=now-1h`` filter return zero rows. popoto 1.9.0
+    decodes a stored datetime as aware UTC; these tests pin the score itself,
+    which must stay a wall-clock epoch whichever way the value decodes.
     """
 
     def test_resave_after_reload_keeps_the_score_a_utc_epoch(self, scratch_room_id):
         import time
+        from datetime import UTC
 
         job = Job.mint(scratch_room_id, "check the deploy")
         reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
-        assert reloaded.last_active_at.tzinfo is None, "popoto still decodes naive (premise)"
+        assert reloaded.last_active_at.tzinfo is UTC, "popoto >= 1.9.0 decodes aware UTC"
 
         reloaded.add_expectation("I'll report back")
 
@@ -745,25 +1016,12 @@ class TestScorePurity:
 
         assert [j.job_id for j in found] == [job.job_id]
 
-    def test_reattach_preserves_the_instant_and_is_idempotent(self, scratch_room_id):
-        """The override attaches the tzinfo the value already meant; it must
-        never re-stamp ``_now()`` — that would refresh recency on every
-        unrelated write and resurrect idle Jobs past rest-by-age."""
-        job = Job.mint(scratch_room_id, "check the deploy")
-        instant = job.last_active_at
-
-        job.last_active_at = instant.replace(tzinfo=None)
-        job.save()
-
-        assert job.last_active_at == instant
-        job.save()
-        assert job.last_active_at == instant
-
     def test_scoped_save_excluding_the_field_leaves_the_score_untouched(self, scratch_room_id):
         """``backfill_open_expectations_index`` saves
         ``update_fields=["has_open_expectations"]`` under a docstring invariant
-        that it never writes recency. The override must honor that scope rather
-        than reaching into the SortedField path behind its back."""
+        that it never writes recency. popoto's own field-scoped save honors
+        that scope: a save naming only ``has_open_expectations`` must not
+        touch the SortedField score path for ``last_active_at`` at all."""
         job = Job.mint(scratch_room_id, "owes a reply")
         [(_member, score_before)] = _scores(scratch_room_id)
 
@@ -771,23 +1029,10 @@ class TestScorePurity:
         job.has_open_expectations = True
         job.save(update_fields=["has_open_expectations"])
 
-        assert job.last_active_at.tzinfo is None, "the guard let an out-of-scope write through"
+        assert job.last_active_at.tzinfo is None, (
+            "a field-scoped save touched an out-of-scope field"
+        )
         assert _scores(scratch_room_id) == [(_member, score_before)]
-
-    def test_scoped_save_naming_the_field_still_reattaches(self, scratch_room_id):
-        """The skew backfill's write path: a scoped save that *names*
-        ``last_active_at`` must reattach UTC, or it would write the very skew it
-        exists to repair."""
-        from datetime import UTC
-
-        job = Job.mint(scratch_room_id, "owes a reply")
-        [(member, score_before)] = _scores(scratch_room_id)
-
-        job.last_active_at = job.last_active_at.replace(tzinfo=None)
-        job.save(update_fields=["last_active_at"])
-
-        assert job.last_active_at.tzinfo is UTC
-        assert _scores(scratch_room_id) == [(member, score_before)]
 
 
 class TestGuardedRepair:
@@ -872,79 +1117,39 @@ class TestGuardedRepair:
             monkeypatch.setattr(POPOTO_REDIS_DB, "exists", real_exists)
             POPOTO_REDIS_DB.srem(status_index_key, *stale_members)
 
-    def test_repair_renormalizes_scores_the_rebuild_skewed(self, scratch_room_id, monkeypatch):
-        """popoto's ``rebuild_indexes()`` re-scores every row via
-        ``field.on_save`` on naive-decoded instances — ``naive.timestamp()`` is
-        local time, bypassing the ``save()`` UTC-reattach — so on a non-UTC
-        host every rebuild re-skews every recency score the one-shot
-        migration repaired. ``repair_indexes`` must sweep the scores back to
-        each row's own UTC epoch afterwards.
-
-        On a UTC host the rebuild's skew is invisible (local == UTC), so the
-        skewed rebuild is simulated: the wrapped ``rebuild_indexes`` runs the
-        real rebuild, then corrupts the score by spike-2's measured UTC+07
-        offset — exactly what a rebuild on that host writes.
-        """
-        from popoto.redis_db import POPOTO_REDIS_DB
-
-        from bridge.utc import to_unix_ts
-
-        job = Job.mint(scratch_room_id, "repair me")
-        partition = _partition_key(scratch_room_id)
-        member = job.db_key.redis_key
-        real_rebuild = Job.rebuild_indexes
-
-        def skewing_rebuild():
-            result = real_rebuild()
-            true_score = POPOTO_REDIS_DB.zscore(partition, member)
-            POPOTO_REDIS_DB.zadd(partition, {member: true_score - UTC_PLUS_7_REBUILD_SKEW_SECONDS})
-            return result
-
-        monkeypatch.setattr(Job, "rebuild_indexes", skewing_rebuild)
-
-        Job.repair_indexes()
-
-        fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
-        assert POPOTO_REDIS_DB.zscore(partition, member) == pytest.approx(
-            to_unix_ts(fresh.last_active_at), abs=1.0
-        )
-
-    def test_renormalize_enumeration_failure_returns_zero_and_backfill_still_runs(
-        self, scratch_room_id, monkeypatch, caplog
-    ):
+    def test_renormalize_enumeration_failure_returns_zero(self, monkeypatch, caplog):
         """Fail-open contract: a broken enumeration returns (0, 0) rather than
-        raising into repair_indexes(), and repair_indexes still reaches
-        backfill_open_expectations_index()."""
+        raising. The migration is still a caller of this classmethod
+        directly, so its fail-open behavior stays covered on its own."""
         import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
 
         def boom(*args, **kwargs):
             raise ConnectionError("redis is unhappy")
 
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(Job.query, "filter", boom)
+            mp.setattr(POPOTO_REDIS_DB, "sscan", boom)
             with caplog.at_level(logging.WARNING, logger="models.job"):
                 assert Job.renormalize_last_active_scores() == (0, 0)
         # The guard's WARNING proves (0, 0) came from the failure branch, not
         # from an empty db satisfying the assertion vacuously.
         assert "score renormalization SKIPPED -- enumeration failed" in caplog.text
 
-        # repair_indexes half: only the score sweep's enumeration fails (the
-        # raising patch is scoped inside the real renormalize call, so the
-        # rebuild and backfill keep a working query); the backfill spy proves
-        # the guard let repair_indexes reach it, and the drifted flag proves
-        # the index actually got stamped.
-        job = Job.mint(scratch_room_id, "stamp me despite the sweep failing")
+    def test_repair_indexes_reaches_backfill_after_rebuild(self, scratch_room_id, monkeypatch):
+        """``repair_indexes()`` wraps its whole body in a single bare
+        ``try:`` with no ``except`` before ``backfill_open_expectations_index()``,
+        so nothing between the rebuild and the backfill can swallow a failure
+        and still reach it — there is no hazard to anchor a fail-open
+        assertion to. This is a plain happy-path spy: it fails under the
+        Failure Path table's mutation (delete the
+        ``cls.backfill_open_expectations_index()`` call), which is the whole
+        proof that repair_indexes reaches its final step."""
+        job = Job.mint(scratch_room_id, "stamp me")
         job.add_expectation("expectation A")
         drifted = Job.query.get(id=job.id, room_id=scratch_room_id)
         drifted.has_open_expectations = False
         drifted.save(update_fields=["has_open_expectations"])
-
-        real_renormalize = Job.renormalize_last_active_scores
-
-        def failing_renormalize():
-            with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(Job.query, "filter", boom)
-                return real_renormalize()
 
         backfill_calls = []
         real_backfill = Job.backfill_open_expectations_index
@@ -953,7 +1158,6 @@ class TestGuardedRepair:
             backfill_calls.append(True)
             return real_backfill()
 
-        monkeypatch.setattr(Job, "renormalize_last_active_scores", failing_renormalize)
         monkeypatch.setattr(Job, "backfill_open_expectations_index", spying_backfill)
 
         Job.repair_indexes()
@@ -961,6 +1165,140 @@ class TestGuardedRepair:
         assert backfill_calls == [True]
         reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
         assert reloaded.has_open_expectations is True
+
+
+class TestRenormalizeBatching:
+    """#2848: the score sweep is cursored and pipelined.
+
+    Seeded under a ``test-`` room id (ORM cleanup via ``scratch_room_id``).
+    Round trips are measured by counting pipeline executes and by forbidding
+    the per-row ``zscore`` the old pass issued, so a regression back to one
+    round trip per Job goes red rather than merely slow.
+    """
+
+    @staticmethod
+    def _count_pipeline_executes(monkeypatch):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        executes = []
+        real_pipeline = POPOTO_REDIS_DB.pipeline
+
+        def counting_pipeline(*args, **kwargs):
+            pipe = real_pipeline(*args, **kwargs)
+            real_execute = pipe.execute
+
+            def counting_execute(*a, **k):
+                result = real_execute(*a, **k)
+                executes.append(len(result))
+                return result
+
+            pipe.execute = counting_execute
+            return pipe
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", counting_pipeline)
+        return executes
+
+    def test_no_per_row_zscore_and_two_pipelines_per_chunk(self, scratch_room_id, monkeypatch):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        for n in range(7):
+            Job.mint(scratch_room_id, f"healthy {n}")
+
+        def forbidden_zscore(*args, **kwargs):
+            raise AssertionError("per-row ZSCORE round trip issued by the sweep")
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "zscore", forbidden_zscore)
+        executes = self._count_pipeline_executes(monkeypatch)
+
+        scanned, repaired = Job.renormalize_last_active_scores(batch_size=3)
+
+        assert scanned >= 7
+        assert repaired == 0
+        # Every pipeline is bounded by the chunk size, and a healthy sweep
+        # issues exactly two per chunk (HMGET, then ZSCORE): no repair writes.
+        assert executes, "the sweep must go through pipelines"
+        assert max(executes) <= 3
+        chunks = -(-scanned // 3)
+        assert len(executes) == 2 * chunks
+
+    def test_skew_is_repaired_across_chunk_boundaries(self, scratch_room_id):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from utils.utc import to_unix_ts
+
+        jobs = [Job.mint(scratch_room_id, f"row {n}") for n in range(5)]
+        partition = _partition_key(scratch_room_id)
+        skewed = [jobs[0], jobs[4]]  # first and last: different chunks at batch_size=2
+        for job in skewed:
+            member = job.db_key.redis_key
+            true_score = POPOTO_REDIS_DB.zscore(partition, member)
+            POPOTO_REDIS_DB.zadd(partition, {member: true_score - UTC_PLUS_7_REBUILD_SKEW_SECONDS})
+
+        scanned, repaired = Job.renormalize_last_active_scores(batch_size=2)
+
+        assert scanned >= 5
+        assert repaired == 2
+        for job in jobs:
+            fresh = Job.query.get(id=job.id, room_id=scratch_room_id)
+            assert POPOTO_REDIS_DB.zscore(partition, job.db_key.redis_key) == pytest.approx(
+                to_unix_ts(fresh.last_active_at), abs=1.0
+            )
+        # Idempotent: the second pass costs reads alone.
+        assert Job.renormalize_last_active_scores(batch_size=2)[1] == 0
+
+    def test_class_set_member_without_a_hash_is_skipped(self, scratch_room_id, caplog):
+        """A class-set pointer whose hash is gone decodes to nothing; the
+        sweep skips it without raising and still repairs its neighbours."""
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        job = Job.mint(scratch_room_id, "survivor")
+        class_set_key = Job._meta.db_class_set_key.redis_key
+        ghost = f"Job:test-ghost-{uuid.uuid4().hex[:8]}:{scratch_room_id}"
+        POPOTO_REDIS_DB.sadd(class_set_key, ghost)
+        try:
+            with caplog.at_level(logging.WARNING, logger="models.job"):
+                scanned, _repaired = Job.renormalize_last_active_scores(batch_size=2)
+            assert scanned >= 1
+            assert "SKIP" not in caplog.text
+            assert Job.query.get(id=job.id, room_id=scratch_room_id) is not None
+        finally:
+            POPOTO_REDIS_DB.srem(class_set_key, ghost)
+
+    def test_one_failed_hmget_pipeline_skips_that_chunk_only(
+        self, scratch_room_id, monkeypatch, caplog
+    ):
+        import logging
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        for n in range(4):
+            Job.mint(scratch_room_id, f"row {n}")
+
+        real_pipeline = POPOTO_REDIS_DB.pipeline
+        calls = {"n": 0}
+
+        def flaky_pipeline(*args, **kwargs):
+            pipe = real_pipeline(*args, **kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                real_execute = pipe.execute
+
+                def failing_execute(*a, **k):
+                    real_execute(*a, **k)
+                    raise ConnectionError("first hmget pipeline lost")
+
+                pipe.execute = failing_execute
+            return pipe
+
+        monkeypatch.setattr(POPOTO_REDIS_DB, "pipeline", flaky_pipeline)
+        with caplog.at_level(logging.WARNING, logger="models.job"):
+            scanned, _repaired = Job.renormalize_last_active_scores(batch_size=2)
+
+        assert "SKIP batch of 2 -- hmget pipeline ConnectionError" in caplog.text
+        # The first chunk (2 rows) was dropped; the remaining chunk(s) were swept.
+        assert scanned >= 2
 
 
 class TestDriftCoverage:

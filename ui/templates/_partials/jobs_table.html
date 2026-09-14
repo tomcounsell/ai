@@ -4,6 +4,12 @@
    A Job row answers "what work is in flight". Expanding it answers "everything
    that happened to this work". Clicking either a Job row or a run row opens the
    per-session detail modal.
+
+   This "Job" is ui/data/jobs.py::JobGroup — an unpersisted, render-time
+   grouping key over AgentSession runs. It is NOT models/job.py::Job, the
+   durable room-scoped obligation record; the two share no identifier. See
+   docs/features/dashboard.md#jobs-table and docs/features/durability-model.md.
+   The per-session modal resolves and shows the real Job separately.
 #}
 {% from "_partials/session_row.html" import session_row %}
 

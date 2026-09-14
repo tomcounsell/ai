@@ -104,7 +104,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | `scripts/auto-revert.sh` | `valor-service.sh` reference |
 | `scripts/calendar_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/calendar_prompt_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
-| `scripts/update/verify.py` | `valor-calendar` path checks; `check_valor_alias_shadow` warns on a stale `alias valor=` in `~/.zshrc` shadowing `.venv/bin/valor` |
+| `scripts/update/verify.py` | `valor-calendar` path checks |
 | `scripts/update/run.py` | `com.valor.reflections.plist` (removed service) |
 | `scripts/update/__init__.py` | `"Modular update system for Valor"` |
 | `scripts/telegram_login.py` | `valor-service.sh` reference |
@@ -153,7 +153,7 @@ References in prose, test fixtures, and examples. Low runtime impact — these f
 | File | References |
 |------|-----------|
 | `tests/unit/test_bridge_logic.py` | Routing assertions with "valor" usernames |
-| `tests/unit/test_valor_telegram.py` | CLI tool tests |
+| `tests/unit/valor_telegram/` | CLI tool tests |
 | `tests/unit/test_sdk_client.py` | Persona name assertions |
 | `tests/unit/test_sdk_client_sdlc.py` | SDLC mode tests |
 | `tests/unit/test_summarizer.py` | Summarizer tests |

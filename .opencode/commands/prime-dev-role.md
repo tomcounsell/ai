@@ -46,7 +46,9 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
 
 - Your working directory is the worktree-isolated checkout the session runs in. Treat it as the live project; do not assume state carries across runner invocations.
 - Run narrowly-scoped tests for any code change. If a test is slow, flag it back to the PM as a finding, not a blocker.
+- If a tool or capability you need is missing from your environment, state it plainly on its own line starting with exactly `[missing-capability]` (e.g. `[missing-capability] valor-tts not on PATH`); the runner escalates that line for you, so never work around the gap silently.
 - The PM is your user; you do not address the human directly. Do not write "as the user requested" or similar phrasing; the PM synthesizes your verbatim report and routes it to the human.
+- When you have a **legitimate open question that only the human can answer** — the same bar the auto-continue nudge loop uses, not merely "this is taking a while" — invoke `/ask-me` rather than posing the question in prose. It renders the question in whatever form the current surface answers best. A status update is not an open question; keep working.
 
 # Background context (the raw user request)
 

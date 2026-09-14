@@ -15,7 +15,8 @@ in-process, in the same order the validators are currently registered:
   7. validate_no_destructive_git_in_shared_checkout
   8. validate_no_broad_process_kill
   9. validate_no_redis_flush
-  10. validate_design_system_sync (out-of-process -- see below)
+  10. validate_no_module_scope_env
+  11. validate_design_system_sync (out-of-process -- see below)
 
 Outcome is first-block-wins: the first validator to return a block reason
 short-circuits the rest and the dispatcher emits ONE
@@ -63,7 +64,7 @@ from hook_utils.constants import log_hook_error  # noqa: E402
 _DESIGN_SYSTEM_SCRIPT = _VALIDATORS_DIR / "validate_design_system_sync.py"
 
 # Subprocess timeout for the out-of-process design-system validator. Mirrors
-# its own internal `subprocess.run(..., timeout=9)` call plus headroom for
+# its own internal 9-second subprocess cap plus headroom for
 # interpreter startup -- provisional/tunable, not wired to TimeoutSettings
 # (see plan spike-4A: the harness, not Python, owns hook timeouts).
 _DESIGN_SYSTEM_SUBPROCESS_TIMEOUT_S = 15
@@ -152,6 +153,12 @@ def _run_no_redis_flush(command: str, _cwd: str) -> str | None:
     return validate_no_redis_flush.find_violation(command)
 
 
+def _run_no_module_scope_env(command: str, _cwd: str) -> str | None:
+    import validate_no_module_scope_env
+
+    return validate_no_module_scope_env.find_violation_for_command(command)
+
+
 def _run_design_system_sync(hook_input: dict) -> str | None:
     """Out-of-process invocation (spike-1). Returns the block reason if the
     subprocess emits a ``{"decision": "block", "reason": ...}`` line on
@@ -201,6 +208,7 @@ _VALIDATORS: list[tuple[str, object, bool]] = [
     ),
     ("validate_no_broad_process_kill", _run_no_broad_process_kill, False),
     ("validate_no_redis_flush", _run_no_redis_flush, False),
+    ("validate_no_module_scope_env", _run_no_module_scope_env, False),
 ]
 
 

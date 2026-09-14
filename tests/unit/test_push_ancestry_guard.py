@@ -31,9 +31,35 @@ class TestPushTargetParsing:
         stdin = f"refs/heads/x {'0' * 40} refs/heads/main def456\n"
         assert g._pushes_to_main([], stdin) is None
 
-    def test_empty_stdin_falls_back_to_head(self):
+    def test_empty_stdin_is_nothing_to_push(self):
+        """Empty stdin means git had nothing to send, not 'judge HEAD' (#2800).
+
+        The old fallback returned HEAD here, so an up-to-date feature-branch
+        push was judged as a push of HEAD to main and refused -- contradicting
+        the guard's promise never to impede a feature branch.
+        """
         with patch.object(g, "_head_sha", return_value="headsha"):
-            assert g._pushes_to_main([], "") == "headsha"
+            assert g._pushes_to_main([], "") is None
+
+    def test_lone_newline_is_nothing_to_push(self):
+        """The pre-push hook's ``printf '%s\\n'`` turns empty stdin into a lone
+        newline, so that shape must be treated as nothing-to-push too (#2800)."""
+        with patch.object(g, "_head_sha", return_value="headsha"):
+            assert g._pushes_to_main([], "\n") is None
+
+    def test_assume_head_flag_judges_head(self):
+        """A caller that genuinely wants HEAD judged declares it (#2800).
+
+        Intent is stated, never inferred from an absence of stdin.
+        """
+        with patch.object(g, "_head_sha", return_value="headsha"):
+            assert g._pushes_to_main(["--assume-head"], "") == "headsha"
+
+    def test_assume_head_wins_over_unrelated_stdin(self):
+        """The explicit flag is authoritative even when stdin names no main push."""
+        stdin = "refs/heads/a s1 refs/heads/feature r1\n"
+        with patch.object(g, "_head_sha", return_value="headsha"):
+            assert g._pushes_to_main(["--assume-head"], stdin) == "headsha"
 
     def test_multiple_lines_only_main_line_matters(self):
         stdin = "refs/heads/a s1 refs/heads/feature r1\nrefs/heads/b s2 refs/heads/main r2\n"

@@ -3,29 +3,28 @@
 Redis is the durable operational store for this system. All agent sessions,
 memories, Telegram/email message history, and the bloom filter live in Popoto,
 and Popoto is backed by Redis. This document describes the durability
-configuration, the resilient client, and the roadmap for higher durability tiers.
+configuration, the resilient client, and the higher durability tiers.
 
 ## Current Durability Model
 
-### AOF Floor (Fix #1)
+### AOF Floor
 
 **What:** Append-Only File persistence (`appendonly yes`, `appendfsync everysec`) is
 pinned in `redis.conf` and propagated to every machine by `/update`
 (`scripts/update/redis_persistence.py`).
 
 **Guarantee:** At most 1 second of write loss on a hard crash or power failure.
-The previous state was RDB-only (configured `save 3600 1` — up to 1 hour of loss
-per restart). AOF and RDB are kept together as two complementary durability layers.
+AOF and RDB are kept together as two complementary durability layers.
 
 **Verification:** `redis-cli INFO persistence` must show `aof_enabled:1`. The doctor
 check (`python -m tools.doctor`) and `/update` both assert this post-condition.
 
-### Eviction Policy (Fix #6)
+### Eviction Policy
 
 **What:** `maxmemory-policy noeviction` is pinned in `redis.conf` and propagated
 by the same `/update` step.
 
-**Guarantee:** Redis will never silently drop durable keys (sessions, index sets,
+**Guarantee:** Redis never silently drops durable keys (sessions, index sets,
 bloom-filter keys) under memory pressure. With `noeviction`, Redis returns an error
 on writes when memory is full rather than silently evicting data. This is the safer
 behavior for a system where eviction is indistinguishable from a legitimate delete.
@@ -43,17 +42,15 @@ evicted:
 
 All of these are safe under `noeviction`.
 
-### Resilient Client (Fix #3)
+### Resilient Client
 
 **What:** `config/redis_bootstrap.py::configure_resilient_redis()` rebuilds the
 global Popoto client with retry/backoff/health-check settings on worker and bridge
 startup.
 
 **Why:** Popoto's import-time client (`popoto/redis_db.py`) uses bare socket
-timeouts and no retry — a Redis restart or brief outage at process boot previously
-crashed the worker or bridge with an unhandled import-time exception. The only
-supported app-boundary seam for reconfiguring the Popoto client is
-`set_REDIS_DB_settings(**kwargs)` (documented in `popoto/redis_db.py:133`).
+timeouts and no retry. The only supported app-boundary seam for reconfiguring the
+Popoto client is `set_REDIS_DB_settings(**kwargs)` (documented in `popoto/redis_db.py`).
 
 **Configuration applied:**
 
@@ -103,10 +100,10 @@ The step is non-fatal: failure is logged as a warning but does not block the res
 of `/update`. The doctor check catches drift independently.
 
 A sibling **Step 3.14** (`scripts/update/redis_replication.py::apply_redis_replication()`)
-seeds the **replication + Sentinel** topology (Fix #5) immediately after durability —
+seeds the **replication + Sentinel** topology immediately after durability —
 durability before availability. Unlike the durability step it is **bootstrap-only /
 seed-once** (not idempotent re-apply) and a clean no-op on every client-only machine
-and every established cluster. See [Replication + Sentinel Failover](#replication--sentinel-failover-fix-5).
+and every established cluster. See [Replication + Sentinel Failover](#replication--sentinel-failover).
 
 ## Doctor Check
 
@@ -151,30 +148,15 @@ redis-cli CONFIG GET dir
 redis-server <data-dir>/redis.conf
 ```
 
-## Deferred Durability Work
+## Durable Secondary Store
 
-The following improvements are explicitly deferred to separate issues:
-
-| Fix | Description | Issue |
-|-----|-------------|-------|
-| **Fix #4** | Move hot-path Redis calls off the asyncio event loop to prevent loop blocking under load. | [#1826](https://github.com/tomcounsell/ai/issues/1826), **implemented** (see [Off-Loop Redis Access](#off-loop-redis-access-fix-4)) |
-| **Fix #5** | Redis replication + Sentinel on a second host for primary-loss failover. | [#1827](https://github.com/tomcounsell/ai/issues/1827), **implemented** (see [Replication + Sentinel Failover](#replication--sentinel-failover-fix-5)) |
-
-The current AOF floor (Fix #1) is the minimum durability guarantee: at most 1 second
-of loss on a hard crash. Fix #2 (SQLite export, below) covers total data-dir loss
-that AOF cannot. Fix #4 (off-loop access) and Fix #5 (replication) are both
-documented below.
-
-## Durable Secondary Store (Fix #2)
-
-AOF (Fix #1) bounds write loss to ~1 second *inside a running Redis process*. It does
+AOF bounds write loss to ~1 second *inside a running Redis process*. It does
 **nothing** for total loss of the Redis data directory: `FLUSHALL`, disk failure, an
 accidental `rm -rf` of the data dir, or a fresh machine that comes up with an empty
 Redis. In every one of those cases every `AgentSession` record is gone with no second
-copy to rehydrate from. Fix #2 ([#1825](https://github.com/tomcounsell/ai/issues/1825))
-closes that gap with a transactional SQLite secondary store (`agent/session_archive.py`)
-that every `AgentSession` is periodically exported to, plus a guarded cold-start
-restore path.
+copy to rehydrate from. A transactional SQLite secondary store
+(`agent/session_archive.py`) closes that gap: every `AgentSession` is periodically
+exported to it, plus a guarded cold-start restore path.
 
 **Data ownership is unchanged:** Redis remains the single source of truth. SQLite is a
 strictly-secondary, write-only-in-normal-operation copy, read only on a cold start.
@@ -184,9 +166,8 @@ strictly-secondary, write-only-in-normal-operation copy, read only on a cold sta
 The archive lives at `data/session_archive.db` (WAL mode, stdlib `sqlite3`). It is
 **machine-local** — each machine has its own Redis, so each machine has its own
 archive — and is **never synced or committed**: `*.db`, `*.db-shm`, `*.db-wal`, and
-`data/` are all already covered by `.gitignore`. There is nothing to propagate between
-machines and no migration step for existing installations; the file is created
-automatically on first export.
+`data/` are all covered by `.gitignore`. There is nothing to propagate between
+machines and no migration step; the file is created automatically on first export.
 
 ### Export cadence
 
@@ -341,27 +322,25 @@ valor-session-archive restore --dry-run
 
 `restore --dry-run` always calls the read-only guard evaluation; there is no CLI path
 to trigger a live (writing) restore or a manual export — those write paths are
-deliberately not exposed as CLI subcommands (see No-Gos in
-`docs/plans/session-archive-sqlite.md`), since exposing them would only duplicate the
+deliberately not exposed as CLI subcommands, since exposing them would only duplicate the
 automatic paths and add a footgun.
 
 If the archive is missing or stale, check that the worker is running
 (`./scripts/valor-service.sh worker-status`) — the periodic export thread and terminal
 hook only run inside the worker process.
 
-## Off-Loop Redis Access (Fix #4)
+## Off-Loop Redis Access
 
-The resilient client (Fix #3) bounds *recovery* from a slow or restarting Redis: a
+The resilient client bounds *recovery* from a slow or restarting Redis: a
 transient outage reconnects instead of raising. It does not bound *loop occupancy*.
 Popoto is a synchronous, redis-py-based ORM, so any Popoto call issued directly from
 an `async def` blocks the whole asyncio event loop for the call's duration. Under a
-slow Redis, that block is compounded by the Fix #3 retry policy (up to
+slow Redis, that block is compounded by the retry policy (up to
 `socket_timeout × retries` per call), and everything on the loop (every session,
-every monitor, the [worker liveness dead-man's-switch tick](worker-liveness-recovery.md))
-freezes in lockstep.
+every monitor, the worker liveness dead-man's-switch tick) freezes in lockstep.
 
-Fix #4 moves the one Redis call that runs on every idle iteration of the worker's
-drain loop off the event loop, onto a dedicated thread pool, so a slow Redis degrades
+The one Redis call that runs on every idle iteration of the worker's drain loop is
+moved off the event loop, onto a dedicated thread pool, so a slow Redis degrades
 that call's *latency* without freezing the loop for everyone else.
 
 ### The bulkhead: `_redis_io_pool`
@@ -412,14 +391,11 @@ work before it waits on its notify event. The ordering at that site is
 `AgentSession.query.filter(..., status="pending")` call, not after it.
 
 This ordering exists because adding an `await` at the check opens a real yield point
-that the old synchronous check-before-clear ordering did not have. Under the old
-ordering, a producer could enqueue work and call `event.set()` while the idle-check's
-offload was in flight, and the subsequent `event.clear()` would then swallow that
-wakeup, parking the worker on `event.wait()` with pending work it never sees.
-Clearing first removes the hole: because Redis is the source of truth, any enqueue
-that fires after the clear is either observed by the query (the worker `continue`s
-instead of waiting) or leaves the event set, so the following `event.wait()` returns
-immediately. No wakeup is lost in either case.
+that a synchronous check-before-clear ordering would not have. Clearing first removes
+the hole: because Redis is the source of truth, any enqueue that fires after the clear
+is either observed by the query (the worker `continue`s instead of waiting) or leaves
+the event set, so the following `event.wait()` returns immediately. No wakeup is lost
+in either case.
 
 ### Operator metric: drain-loop idle-check latency
 
@@ -459,14 +435,14 @@ I/O in the process. See the grandfathered call sites below.
   the drain-loop's one hot-path seam, not every bulkheaded executor in the process.
 - **The worker startup scans** (`worker/__main__.py`: the Redis-verify scan,
   cleanup/recovery helpers, and the pending-sessions kick scan) are deliberately left
-  synchronous and on-loop. The [worker liveness dead-man's-switch beacon](worker-liveness-recovery.md)
-  is not armed until after every startup scan completes, so offloading them would
-  protect no liveness while risking a startup re-ordering hazard (some of these scans
-  have a load-bearing execution order). They stay exactly as they were before this fix.
+  synchronous and on-loop. The worker liveness dead-man's-switch beacon is not armed
+  until after every startup scan completes, so offloading them would protect no
+  liveness while risking a startup re-ordering hazard (some of these scans have a
+  load-bearing execution order).
 
 ### Executor vs. async client
 
-A real async Redis client (`redis.asyncio`) was rejected in favor of
+A real async Redis client (`redis.asyncio`) is not used in favor of
 `run_in_executor` on a bounded pool. Popoto's entire ORM (models, query builder,
 index/class sets, `save`/`delete`) is synchronous and third-party; adapting it to an
 async client would mean reimplementing that ORM against a different client, creating
@@ -479,16 +455,15 @@ which already rely on the same thread-safety guarantee.
 
 `REDIS_OFFLOAD_ENABLED` (default `true`) is a complete kill switch. When set to
 `false`, `offload_redis` runs the wrapped callable inline on the event loop instead
-of dispatching it to `_redis_io_pool`: a full, instant revert to the pre-cut-over
-synchronous behavior at the one site this module serves, with no code change
-required.
+of dispatching it to `_redis_io_pool`: a full, instant revert to the synchronous
+behavior at the one site this module serves, with no code change required.
 
-## Replication + Sentinel Failover (Fix #5)
+## Replication + Sentinel Failover
 
-AOF (Fix #1) bounds write loss *within a running Redis process on one host*. It
+AOF bounds write loss *within a running Redis process on one host*. It
 does nothing for the loss of the **host itself** (hardware, disk, power, network
-partition). Fix #5 adds a **replica on a second host** plus **Redis Sentinel**
-monitoring that promotes the replica automatically when the primary is lost — with
+partition). A **replica on a second host** plus **Redis Sentinel**
+monitoring promotes the replica automatically when the primary is lost — with
 **zero application code change** (Option A, below).
 
 This ships the **config templates** (`config/redis/`), the bootstrap-only `/update`
@@ -541,7 +516,7 @@ client *before* shipping it to the replica.
   bounds loss from a *replica* crash, not the unreplicated-write window from the
   *primary's* failure. The RPO is the in-flight replication lag, not zero.
 - **RTO (interruption window) ≈ `down-after-milliseconds` + `failover-timeout`.**
-  During this window there is no writable master. The **#1814 resilient client**
+  During this window there is no writable master. The resilient client
   (`Retry(ExponentialBackoff(cap=10, base=1), retries=3)`, `health_check_interval=30`)
   already retries through the transient `ConnectionError`/`TimeoutError`, so the
   application reconnects to the promoted master once the stable address repoints —
@@ -563,9 +538,9 @@ change**. HAProxy works cross-subnet; the keepalived VIP requires L2 adjacency b
 removes the extra proxy hop. The operator picks per their network.
 
 > Option B (Sentinel-aware "smart clients" via `redis.sentinel.Sentinel(...)` on
-> every connection path) was **rejected**: it would couple all 17 mechanisms to the
+> every connection path) is **not built**: it would couple all 17 mechanisms to the
 > Sentinel protocol, a large blast radius that contradicts the infra/config-only
-> scope. It is not built.
+> scope.
 
 ### Config templates
 
@@ -575,7 +550,7 @@ the token table and substitution examples.
 
 | Template | Role |
 |----------|------|
-| `redis-replica.conf.template` | `replicaof`, `replica-read-only yes`, plus the #1814 durability posture (AOF + `noeviction`). |
+| `redis-replica.conf.template` | `replicaof`, `replica-read-only yes`, plus the durability posture (AOF + `noeviction`). |
 | `sentinel.conf.template` | `sentinel monitor`, `down-after-milliseconds 5000`, `failover-timeout 60000`, `parallel-syncs 1`. |
 | `haproxy-redis.cfg.template` | TCP frontend; `tcp-check` PING + `info replication` expecting `role:master`. keepalived-VIP alternative documented inline. |
 
@@ -684,5 +659,5 @@ python -c "import redis,os; print(redis.Redis.from_url(os.environ['REDIS_URL']).
 ```
 
 A fresh `redis.Redis.from_url(REDIS_URL)` must connect to the **promoted** master. If
-it still hits the dead primary, the stable-address layer is misconfigured (Risk 2):
+it still hits the dead primary, the stable-address layer is misconfigured:
 re-check the HAProxy health check / VIP move script.

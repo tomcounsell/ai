@@ -22,7 +22,7 @@ Every reflection is a no-argument callable named `run()` that returns a dict:
 
 ## File Layout (One File Per Reflection)
 
-Since issue #1028, each reflection lives in its own file at `reflections/{group}/<name>.py` and exposes a single `run()` entry point. Current groups (`ls reflections/`): `agents/`, `audits/`, `housekeeping/`, `memory/`, `pm_briefings/`.
+Each reflection lives in its own file at `reflections/{group}/<name>.py` and exposes a single `run()` entry point. Groups (`ls reflections/`): `agents/`, `audits/`, `housekeeping/`, `memory/`, `pm_briefings/`.
 
 The canonical example, `reflections/housekeeping/disk_space_check.py`, follows a standardized module-docstring header:
 
@@ -44,7 +44,7 @@ Give every new reflection this same five-line header — What it does / Cadence 
 
 ### The Compatibility Re-Export Shim
 
-Before #1028, reflections were bundled into group-level modules (`reflections/maintenance.py`, `reflections/auditing.py`, `reflections/task_management.py`, `reflections/memory_management.py`). Those files now exist only as **compatibility re-export shims**: each imports the relocated `run()` from its per-file module and re-exports it under its historical `run_<name>` symbol, so `config/reflections.yaml`'s pre-#1028 dotted paths (e.g. `reflections.maintenance.run_disk_space_check`) keep resolving without a registry edit.
+`reflections/maintenance.py`, `reflections/auditing.py`, `reflections/task_management.py`, and `reflections/memory_management.py` exist only as **compatibility re-export shims**: each imports the relocated `run()` from its per-file module and re-exports it under a `run_<name>` symbol, so registry dotted paths written in the older group-module style (e.g. `reflections.maintenance.run_disk_space_check`) keep resolving without a registry edit.
 
 `reflections/maintenance.py` in full:
 
@@ -55,11 +55,39 @@ from reflections.housekeeping.disk_space_check import run as run_disk_space_chec
 __all__ = ["run_disk_space_check", ...]
 ```
 
-**Do not add new code to `reflections/maintenance.py` (or its `auditing.py` / `task_management.py` / `memory_management.py` siblings).** They are generated-by-convention shims for old registry entries, not a place to register new reflections. A new reflection registers its per-file dotted path (`reflections.housekeeping.<name>.run`) directly in the YAML — see the next section.
+**Do not add new code to `reflections/maintenance.py` (or its `auditing.py` / `task_management.py` / `memory_management.py` siblings).** They are generated-by-convention shims for registry entries written against the group-module layout, not a place to register new reflections. A new reflection registers its per-file dotted path (`reflections.housekeeping.<name>.run`) directly in the YAML — see the next section.
 
 ## YAML Registration
 
-Register the reflection in `config/reflections.yaml` (see [Registry Format](reflections.md#registry-format-configreflectionsyaml) and [Schedule Grammar](reflections.md#schedule-grammar) in `reflections.md` for the full field reference). A minimal `function`-type entry:
+**The vault file is the source of truth, and `config/reflections.yaml` is a copy of it.**
+`~/Desktop/Valor/reflections.yaml` is the registry the scheduler resolves and
+the only file a registration may write. `/update` clobbers
+`config/reflections.yaml` from the vault on every run (Step 1.66), so an entry
+written to the repo copy is erased by the very next `/update` — which is exactly
+how a reflection can appear registered, pass a local check, and never run again.
+
+Two ways to get an entry into the vault:
+
+**Tracked registration (preferred for anything shipped in this repo).** Add a
+thin wrapper to `scripts/update/reflection_register.py` and call it from
+`scripts/update/run.py`, **before** Step 1.66's vault→config copy so the entry
+propagates into this machine's config copy on the same cycle. `register_reflection`
+handles the guards: it writes the vault path, refuses when
+`_this_machine_owns_valor` is false (which is how a reflection pins to one
+machine), raises when `cadence` and `cron` are both or neither supplied, and is
+idempotent — a no-op once the entry exists. Existing wrappers to copy:
+`register_crash_recovery`, `register_sdlc_upvote_pickup`,
+`register_improvement_collect`. This is the path that survives `/update` and
+lands fleet-wide without anybody editing a file by hand.
+
+**Hand edit of the vault file.** Only Tom does this, and only for
+`execution_type: agent` entries — `register_reflection` emits
+`execution_type: function` entries only.
+
+The field reference below describes the entry shape either path produces (see
+[Registry Format](reflections.md#registry-format-configreflectionsyaml) and
+[Schedule Grammar](reflections.md#schedule-grammar) in `reflections.md`). A
+minimal `function`-type entry:
 
 ```yaml
 - name: your-reflection-name
@@ -71,9 +99,18 @@ Register the reflection in `config/reflections.yaml` (see [Registry Format](refl
   enabled: true
 ```
 
-- `every: <N>s` (or `<N>m` / `<N>h` / `<N>d`) is the schedule grammar — never the legacy `interval` key. The old `interval` field was collapsed into `every:` by issue #1273; a stale header comment at the top of `config/reflections.yaml` still shows the legacy field name in its field-reference table — don't copy it.
+- `every: <N>s` (or `<N>m` / `<N>h` / `<N>d`) is the schedule grammar — never the legacy `interval` key. A stale header comment at the top of `config/reflections.yaml` still shows the legacy field name in its field-reference table — don't copy it.
 - `priority` is one of `urgent`, `high`, `normal`, `low`.
 - `callable` is the dotted path to the per-file `run` — point it at the new module directly, not at a compatibility shim.
+
+**A reflection that must ship with its feature's code registers itself instead.**
+`config/reflections.yaml` is gitignored and clobbered from the vault on every
+`/update`, so a hand-edit never reaches another machine. Add an idempotent
+wrapper in `scripts/update/reflection_register.py` (the `register_*` family) and
+call it from `scripts/update/run.py` before the vault→config copy step. The
+`side-effect-drain` and `dead-letter-replay` registrations are the current
+examples; see [Reflections](reflections.md#code-registered-reflections) for the
+mechanism.
 
 ## Async-Safety
 
@@ -144,7 +181,8 @@ When adding a new reflection:
 
 - [ ] Create `reflections/{group}/<name>.py` exposing `run()`, with the five-line module-docstring header (What it does / Cadence / Failure modes / Related reflections / See also)
 - [ ] Handle `redis.exceptions.ConnectionError` explicitly if the reflection touches Redis
-- [ ] Register it in `config/reflections.yaml` with `name`, `description`, `every:` (never the legacy `interval` key), `priority`, `execution_type: function`, `callable` pointing at the new per-file module, `enabled`
+- [ ] Register it through `scripts/update/reflection_register.py` (a thin wrapper called from `scripts/update/run.py` before Step 1.66) with `name`, `description`, `cadence` **or** `cron` but never both, `priority`, and the dotted `callable` path — the wrapper writes the vault file, which is what makes the entry survive `/update`'s vault→config copy
+- [ ] Add an idempotence case to `tests/unit/test_reflection_register.py` for the new wrapper
 - [ ] Add a smoke test to `tests/unit/test_reflections_package.py` (or a sibling `test_reflections_<topic>.py`) using `assert_valid_result`
 - [ ] Run `pytest tests/unit/test_reflections_package.py -x -q` to verify
 - [ ] Update `docs/features/reflections.md` if the new reflection changes the registered set (e.g. adds a group, or belongs in its Registered Reflections tables)

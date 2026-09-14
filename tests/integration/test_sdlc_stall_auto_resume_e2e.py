@@ -125,12 +125,14 @@ def stalled_lane(monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n: True)
+    monkeypatch.setattr(sdlc_progress, "_issue_is_open", lambda cwd, n, target_repo=None: True)
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, branch: (_SHA, stale_ts))
     monkeypatch.setattr(sdlc_progress, "machine_owns_project", lambda key: True)
 
     alerts: list[str] = []
-    monkeypatch.setattr(sdlc_progress, "_send_alert", alerts.append)
+    monkeypatch.setattr(
+        sdlc_progress, "_send_alert", lambda project_dict, msg: alerts.append(msg) or True
+    )
     return alerts
 
 

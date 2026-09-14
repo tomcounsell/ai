@@ -8,7 +8,7 @@ context: fork
 
 # Make a Presentation
 
-Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), set in the Cuttlefish house theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational, client-facing, or informational), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
 
 ## Repo Context Probe
 
@@ -21,7 +21,7 @@ The static-deck flow (research → structure → theme → diagrams → editoria
 | Sub-file | Load when... |
 |----------|-------------|
 | `CONTENT_GUIDE.md` | Structuring slide content — educational best practices, slide types, pacing |
-| `THEME.md` | Writing the Marp front matter — the Cuttlefish theme, its style block, slide archetypes |
+| `THEME.md` | Writing the Marp front matter — the Yudame House theme, its style block, slide archetypes |
 
 ## Quick start
 
@@ -62,8 +62,11 @@ Read `CONTENT_GUIDE.md` for educational best practices.
 |---|---|---|
 | **Educational / internal** | Technical teammates, general audience | What → How → Why it matters |
 | **Client-facing / working session** | Client decision-makers, executives | Why (their problem) → How (the approach) → What (the specifics) |
+| **Informational / descriptive** | Anyone receiving a factual report or overview | Subject first — a one-line scope/method note, then straight into the content |
 
-For client-facing decks, the first 3–4 slides must establish: (1) who the client is and what their operating reality looks like, (2) the problem they are experiencing in their own terms, (3) the governing principle or goal — before any solution, scope, or technical content appears. Opening with a solution before the client sees their problem reflected back is the single most common failure mode.
+The Why-first opening belongs to **persuasion and decision decks** — proposals, working sessions, decision briefs. For those, the first 3–4 slides must establish: (1) who the client is and what their operating reality looks like, (2) the problem they are experiencing in their own terms, (3) the governing principle or goal — before any solution, scope, or technical content appears. Opening with a solution before the client sees their problem reflected back is the single most common failure mode of a persuasion deck.
+
+An **informational / descriptive** deck — an architecture overview, a vendor inventory, audit findings, a status report — skips the problem-reflection opening entirely. Its job is to describe accurately, not to persuade or drive a decision, and it has no problem to reflect back. Lead with the subject: one line stating scope and method, then the content itself. Grafting a problem opening onto a descriptive deck manufactures a crisis the audience never raised.
 
 **Default slide structure (educational):**
 ```
@@ -92,6 +95,14 @@ N-1. Summary / next steps
 N.  Appendix
 ```
 
+**Informational / descriptive structure:**
+```
+1. Title + one-line scope/method note (what this covers, how it was gathered)
+2-N. The subject itself, one idea per slide — grouped by component, area, or finding
+N-1. Summary (3 bullet takeaway)
+N.  Appendix / further reading
+```
+
 Adjust count based on topic complexity. Aim for **one idea per slide**.
 
 Write the outline as **action titles** — each line a full sentence stating that slide's conclusion,
@@ -100,10 +111,11 @@ as a table of contents, the deck will too. See "Action titles" in `CONTENT_GUIDE
 
 ### Step 4: Apply the theme
 
-Every deck uses **Cuttlefish**, the house theme. Read `THEME.md`, copy its style block verbatim into
-the deck's front matter, and set the deck slug in the masthead rule. There is no theme detection and
-no per-deck restyling — the theme is the constant, and holding it constant is what makes a deck read
-as a Yudame artifact rather than a template.
+There is one theme, **Yudame House**, and every deck uses it. This is not a decision to make or to
+put to the user. Read `THEME.md`, paste its style block into the deck's front matter, and set the
+deck slug in the masthead rule. Choose that slug yourself, a short uppercase line naming the project
+and the deck's purpose. Nothing else in the block changes: no design-system detection, no per-deck
+restyling, no adjusting `:root`.
 
 Two rules from `THEME.md` govern everything downstream and belong in working memory now:
 
@@ -112,8 +124,8 @@ Two rules from `THEME.md` govern everything downstream and belong in working mem
 - **Light ground, square corners, hairlines over boxes.** Cream `#FAF9F6`, no shadows, no gradients,
   no rounded cards.
 
-`THEME.md`'s closing section covers the single override case: a deck whose subject *is* another
-product, presented to that product's own audience. Swap the `:root` values, keep the structure.
+A deck about another company's product still ships in Yudame House. Their brand appears as a logo
+(Step 5), never in the slide's colors or type.
 
 ### Step 5: Collect brand logos
 
@@ -139,7 +151,7 @@ When the presentation mentions companies, products, or branded technologies, pul
 
 **Colorizing SVGs:**
 
-Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Cuttlefish
+Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Yudame House
 cream ground. Set the theme ink explicitly so the logos match the rest of the deck rather than
 sitting a shade darker:
 
@@ -213,7 +225,7 @@ paginate: true
 backgroundColor: '#FAF9F6'
 color: '#2D2D2D'
 style: |
-  <the Cuttlefish style block from THEME.md, verbatim, with the deck slug set>
+  <the Yudame House style block from THEME.md, verbatim, with the deck slug set>
 ---
 
 <!-- _class: cover -->
@@ -246,8 +258,9 @@ content...
 - **Word budget by archetype.** Statement slide ≤ 12 words. Concept slide ≤ 40 words of body.
   Table ≤ 5 rows with short cells. Over budget means split the slide, not shrink the type
 - **Accent budget.** One red per slide, spent on the value that matters. Count it before moving on
-- Use `<!-- _class: section -->` for section breaks, `statement` for a single claim,
-  `figure` for a diagram plate, `data` for a table or a `.big` number
+- The only slide classes are `cover`, `section` and `statement`. Diagram, table and number slides
+  need no class; they are compositions of `.figure`, a markdown table, or `.big`. An undefined
+  `_class` is a silent no-op
 - Use tables over bullet lists when comparing things
 - Use code blocks sparingly — only when the actual code IS the point
 - Every 3rd-4th slide should be visual (figure plate, table, or `.big` number)
@@ -276,9 +289,12 @@ generic catalog does not cover them:
 ```
 Additional checks for this deck, alongside the standard pass:
 
-STRUCTURE — does it open with Why (the audience's problem and context), then How (the approach),
-then What (the specifics)? For a client-facing deck, flag it if the first three slides do not
-establish who the audience is and what problem they are experiencing before any solution appears.
+STRUCTURE — match the check to the deck's job. A persuasion / decision deck opens with Why (the
+audience's problem and context), then How (the approach), then What (the specifics); flag it if
+the first three slides do not establish who the audience is and what problem they are experiencing
+before any solution appears. An informational / descriptive deck leads with its subject after a
+one-line scope note; flag any manufactured problem opening or framing built around what the
+audience lacks.
 
 ACTION TITLES — every content slide's title should be a full sentence stating that slide's
 conclusion, under 15 words. Flag topic-label titles ("Market overview", "Architecture") outside
@@ -301,7 +317,7 @@ cycle.
 Run Marp CLI to generate outputs:
 
 `--html` enables raw HTML tags in the markdown. It is not an output-format flag — the format comes
-from `--pdf` / `--pptx` / `--images` or the `-o` extension. Every Cuttlefish archetype is built from
+from `--pdf` / `--pptx` / `--images` or the `-o` extension. Every Yudame House archetype is built from
 `<div>` and `<span>` markup, so **every** export needs it. Raw HTML happens to be on by default in
 the current CLI, which means leaving the flag off works right up until that default changes and a
 deck silently exports with its layout stripped.

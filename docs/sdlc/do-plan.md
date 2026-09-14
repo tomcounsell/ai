@@ -21,7 +21,7 @@ adopt the `run_id` that comes back, and retry the marker once under it. Never
 suppress these with `2>/dev/null` or `|| true` — a discarded diagnostic is a
 plan the ledger never heard about.
 
-Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+Run identity: every state-mutating `sdlc-tool` call in this addendum
 carries `--run-id {run_id}` — supplied by the invoking supervisor (`/do-sdlc`
 or `/sdlc` carries it from `session-ensure`). When this skill is invoked
 standalone (no supervisor), run
@@ -29,7 +29,7 @@ standalone (no supervisor), run
 use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
 stop and report). Read-only calls `stage-query`, `verdict get`, and `dispatch get` take no
 run-id. `next-skill` *accepts* an optional `--run-id` as a read-only identity
-assertion for its issue-lock peek (issue #2766) -- always pass it so the peek
+assertion for its issue-lock peek -- always pass it so the peek
 runs under this run's own stated identity instead of a session lookup that can
 legitimately miss and produce a false self-block.
 
@@ -62,7 +62,7 @@ archived). Prerequisite checker: `python scripts/check_prerequisites.py docs/pla
 
 **Plan-revising lock (Phase 4 clear).** On a revision pass, after setting
 `revision_applied: true` **and** `revision_applied_at: <ISO-8601 UTC timestamp>`
-(the latter is the #1760 event-scoped convergence latch — see the global
+(the latter is the event-scoped convergence latch — see the global
 SKILL.md Phase 4 step 2a for the exact `date -u` invocation) and pushing,
 clear the lock so the router can route to build:
 

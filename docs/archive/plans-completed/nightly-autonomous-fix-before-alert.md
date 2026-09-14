@@ -1,0 +1,1115 @@
+---
+status: docs_complete
+type: feature
+appetite: Medium
+owner: Valor Engels
+created: 2026-07-27
+tracking: https://github.com/tomcounsell/ai/issues/2334
+last_comment_id: 5086978978
+revision_applied: true
+revision_applied_at: 2026-09-02T07:29:25Z
+---
+
+# Nightly Regression: Classify Before Paging a Human (shadow tier)
+
+## Problem
+
+The nightly regression detector (`scripts/nightly_regression_tests.py`) runs the
+unit suite each night. On a newly-confirmed serial failure it does two things in
+the same run: dispatches an **investigate-only** Eng session (`maybe_dispatch_triage_session`
+L856; mandate `"...auto-hotfix — this is an investigation-and-file-an-issue task only"`
+L846) **and** pages a human up front (`send_telegram(msg, dry_run=args.dry_run)` L1220,
+on the `elif new_failures:` arm at L1207). The human is the *first responder* — they
+wake to a raw "tests are red" ping carrying the full cognitive load of "what broke and
+what do I do", even when the regression is a mechanical test carry-forward.
+
+The worked example: **#2399 → PR #2402**. 11 newly-confirmed nightly failures, all
+**test-stale** (source contracts moved in merged PRs, the tests weren't carried forward).
+A human triaged and fixed them by hand.
+
+**Current behavior:** Detection → dispatch investigate-only session **and** page a human
+immediately. Every red suite pages, regardless of what kind of red it is.
+
+**Desired end state:** Detection → classify each newly-confirmed failure as
+*newly-broken-since-the-prior-run* vs *pre-existing* vs *inconclusive* → route the
+newly-broken-and-within-caps case to a bounded autonomous fix, and page a human only as
+the escalation of last resort.
+
+**What this plan ships (deliberate scope cut — round 7).** The classification stage and
+the decision gate, running in `shadow`: every non-`off` run computes and logs the verdict
+it *would* act on, while paging exactly as today. **It does not ship the autonomous fixer.**
+The dispatch, hand-back, watchdog, PR guards, enforcement preflight, and the low-urgency
+notify tier are deferred to **#3076**, because they depend on two seams that do not exist
+on this machine and cannot be conjured by this plan (see Scope Boundary below).
+
+This is the smaller plan that is entirely real, chosen over the complete one that was
+partly fictional. The shadow verdict is the artifact that earns #3076: a month of logs
+answering "would the gate have fired, and would it have been right?" is the evidence the
+autonomous tier is currently missing.
+
+## Scope Boundary — why `active` mode is not in this plan
+
+Three consecutive critique rounds found the same failure class: a load-bearing mechanism
+asserted without a verified invocation seam (round 1's permission profile, round 5's
+`--silent` flag, round 6's `GH_TOKEN` export). Round 7 opened the source for every
+mechanism the autonomous tier depends on. Two of them have no seam:
+
+**1. There is no per-session environment seam, so the fixer's `gh` identity cannot be set.**
+The only structural never-merge guarantee requires the fixer session's `gh` to authenticate
+as a non-admin bot (`SDLC_AGENT_GH_TOKEN`), never the operator's admin credentials. Verified
+at `2d60de31d`:
+
+| Hop | Evidence | Verdict |
+|---|---|---|
+| Dispatch call site | `scripts/nightly_regression_tests.py` L909-927: `subprocess.run([sys.executable, "-m", "tools.valor_session", "create", ...], cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30)` — **no `env=` kwarg** | No seam |
+| The CLI itself | `valor-session create --help` lists `--role/--message/--chat-id/--telegram-message-id/--parent/--project-key/--slug/--model/--needs-real-chrome/--job-id/--expect-what/--json` — **no env or token flag**. It only *enqueues* an `AgentSession` | No seam, and adding `env=` above would configure the enqueuing CLI, not the session |
+| Who actually spawns `claude -p` | The **worker**, a separate launchd process | Different process entirely |
+| The worker's env overlay | `agent/session_runner/role_driver.py::subscription_auth_env` L76-100, called at L204 (`self.env = subscription_auth_env(env)`); merged into `proc_env` at `agent/session_runner/harness/claude.py` L431-433 | Process-global, derived from the worker's own `os.environ` — **not per-session** |
+| A place to persist a per-session override | `models/agent_session.py` field list — **no env/token/permission field** | No seam |
+
+`TurnRequest.env` (`agent/session_runner/harness/base.py` L52) is the one plumbing that
+*could* carry it, but nothing session-specific reaches it. Building this means a new
+per-session env override persisted on `AgentSession`, read by the worker, threaded through
+`TurnRequest.env` into the `claude -p` spawn, with its own tests. That is standalone work,
+filed as part of **#3076** — not a dispatch-site one-liner, and not something to assert in
+a Success Criterion before it exists.
+
+**2. Branch protection on `main` is absent.** `gh api repos/tomcounsell/ai/branches/main/protection`
+→ `404 Not Found` (re-verified 2026-09-02). Enabling review-required protection is a
+repo-governance action for the owner, and without it seam 1 buys nothing anyway.
+
+Because both legs of the never-merge guarantee are unavailable, an `active` mode built now
+would dispatch a `bypassPermissions` session with unrestricted bash and the operator's admin
+`gh` credentials into an unprotected `main`. The correct move is not to ship it behind a
+flag nobody can enable — that is unreachable code whose safety claims nothing tests. It is
+to cut it.
+
+**Consequently deferred to #3076** (design detail preserved there and in Critique Results
+below): the narrow-mandate draft-PR fixer dispatch, the `GH_TOKEN` export, the
+`AgentSession.nightly_fix_handback` field, `tools/nightly_fix_handback.py`, the
+escalation/fail-safe watchdog preamble, the fail-closed diff-path and merge/draft-state
+guards, the three-leg `active`-mode preflight, the per-node `fix_sessions` map, and the
+`valor-telegram send --silent` notify transport (deferred with the rest because without an
+`active` happy path it would be a flag with no consumer — a dead surface propagated to every
+machine).
+
+## Freshness Check
+
+**Baseline commit:** `b90e998920f` (`git rev-parse origin/main`, 2026-09-02, round-11 revision
+pass). Every file:line reference in this plan is resolved against that SHA and was re-read
+at revision time, not carried forward from an earlier round. `git diff --stat 5b35d5212
+b90e998920f` over `scripts/nightly_regression_tests.py`, `scripts/pytest-clean.sh`,
+`scripts/update/verify.py` and `.env.example` is empty, so every line number cited from the
+round-9 pass still holds. The round-8 revision pass
+re-opened every cited symbol at this SHA and confirmed the line numbers are unchanged from
+`2d60de31d` (`send_telegram` L609, `compute_new_failures` L654, `prior_dispatched` L669,
+`seeded_nodes` L683, `compute_dispatch_set` L728, `carry_dispatched_nodes` L754,
+`_build_triage_prompt` L830, `maybe_dispatch_triage_session` L856, `_get_head_commit` L1344,
+`MAX_DISPATCH_NODES` L185, `validate_run_integrity` L401, `reconfirm_serial` L532).
+
+**Issue filed at:** 2026-07-24T06:45:58Z · **Plan first written:** 2026-07-27
+**Disposition:** Minor drift — **the premise is intact; the plan's scope changed for
+seam reasons, not drift reasons.**
+
+The defect this plan exists to fix is unchanged: `main()` still pages up front on the
+`elif new_failures:` branch (L1207 → `send_telegram(msg, dry_run=args.dry_run)` L1220),
+and the dispatched session is still investigate-only (L846; the seed prompt repeats it at
+L1127). Nothing else has taken over the concern and no merged PR fixes it. **Proceed.**
+
+**Re-verified at `2d60de31d` — claims this plan depends on:**
+
+| Claim | Location | Status |
+|---|---|---|
+| Up-front unconditional page on newly-confirmed failures | `main()` `elif new_failures:` L1207; `send_telegram(...)` L1220 | **Holds** — the defect |
+| `send_telegram(msg, dry_run=False)` has no urgency parameter | L609 | **Holds** |
+| `send_telegram` never checks the subprocess `.returncode` and logs `"Telegram sent"` unconditionally | L626-635 (`subprocess.run(..., capture_output=True)` L626; `log(f"Telegram sent: {msg}")` L633) | **Holds** — a failed or rejected send is indistinguishable from a delivered one. Fixed by Step 1 |
+| `_spawn_pytest(argv, timeout, env=None)` hardcodes `cwd=PROJECT_DIR` | L283 (signature), L302 (`cwd=PROJECT_DIR` in the `Popen` call) | **Holds** — the classifier cannot reuse it unmodified (round-6 blocker 2) |
+| `scripts/pytest-clean.sh` derives its rootdir from the caller's cwd | L33-39: `REPO_ROOT="$(pwd)"` **only when** cwd has a `pyproject.toml` whose content matches `grep -qE "^\[tool\.pytest"`; otherwise `REPO_ROOT="$SCRIPT_ROOT"` **and it `cd`s there** | **Holds, and the condition is load-bearing (round 8)** — a tree without a `[tool.pytest…` section silently redirects the run at the real repo |
+| `pytest-clean.sh` aborts on a linked worktree with no `.venv` of its own (#3033) | L136-146: the guard is `[ -f "$REPO_ROOT/.git" ] && [ ! -d "$REPO_ROOT/.venv" ]` — it keys on `.git` being a **file** (a linked worktree's gitdir pointer) | **Holds, and the `.git`-is-a-file key is load-bearing (round 8)** — a standalone (non-worktree) fixture repo has `.git` as a directory and never trips this guard |
+| Both existing pytest spawns pass an explicit `TEST_DB_CLAIM_WAIT_S` override | `run_tests` L374 and `reconfirm_serial` L584, both `env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}`; the comment above L374 explains the claim happens in `pytest_configure`, before any per-item timer is armed | **Newly recorded (round 8)** — the classifier spawn must carry it verbatim or it buckets everything `inconclusive` under db contention |
+| `reconfirm_serial` writes `PYTEST_SERIAL_JSON_TMP` and `main()` re-reads that same file **after** the classifier would run | constant L109; `unlink` L582 and `--json-report-file=` L588 in `reconfirm_serial`; re-read at L1209 feeding `summarize_failures(new_failures, serial_report)` L1213 | **Newly recorded (round 8)** — the classifier must never write this path |
+| `check_env_completeness` treats an unmarked `.env.example` declaration as **required**; only a bare `@optional` comment line exempts it | `scripts/update/verify.py` L975-982 (`_OPTIONAL_SIGIL_RE = re.compile(r"^@optional$")` L981), consumed at L1027 | **Newly recorded (round 8)** — the sigil must be the entire comment line |
+| `pytest-clean.sh` aborts on an off-pin interpreter (#2617) | L169-175 (`scripts/check-interpreter-pin.sh`) | **Holds** — the provisioned venv must be on the `.python-version` pin |
+| `head_commit` is already persisted on every non-fatal path | `current["head_commit"] = _get_head_commit()` L1092; helper L1344 | **Holds** — consumed, never added |
+| `compute_new_failures` (L654) drives the alert; `compute_dispatch_set` (L728) answers "what has never been filed" — different sets since #2559 | L654 / L728 | **Holds** — the gate consumes `new_failures` |
+| `MAX_DISPATCH_NODES = 10` (L185) truncates `dispatch_nodes` at L1160-1166 and never touches `new_failures` | L185, L1160-1166 | **Holds** — not a fixer disqualifier; see Cap arithmetic |
+| Seed / re-baseline run flags | `is_reseed` L1026, `is_seed_run` L1027, `seeded_nodes()` L683 | **Holds** — hard gate disqualifier |
+| `validate_run_integrity()` → `integrity_warnings` | L401 (definition), L1047 (call) | **Holds** — hard gate disqualifier |
+| `reconfirm_serial()` serial gate → `confirmed_failing` | L532 | **Holds** |
+| Per-node dedup helpers this plan must not disturb | `prior_dispatched` L669, `compute_dispatch_set` L728, `carry_dispatched_nodes` L754 | **Holds** |
+| Scalar `current["dispatched_session_id"]` carried from `prev` | L1090 | **Holds** — untouched by this plan |
+| `main` branch protection is ABSENT | `gh api repos/tomcounsell/ai/branches/main/protection` → `404` | **Holds, re-verified 2026-09-02** |
+| `baseline-verifier` is reachable only via the Claude Task tool | sole caller `.claude/skills-global/do-test/baseline-verification.md` L76-81; zero `.py` callers repo-wide | **Holds** — classification is in-process Python; the subagent file stays untouched |
+| No per-session env seam anywhere in the dispatch → worker → `claude -p` chain | See the Scope Boundary table above | **Newly recorded (round 7)** — the reason `active` mode is cut |
+| `pytest-clean.sh` aborts unless the resolved pytest answers `--version` | L155-168: `PYTEST_BIN="pytest"`, overridden to `"$REPO_ROOT/.venv/bin/pytest"` when executable (L156-158), then `if ! "$PYTEST_BIN" --version >/dev/null 2>&1; then … exit 1` (L165-168) | **Newly recorded (round 11)** — a fourth wrapper precondition the fixture must satisfy |
+| `pytest-json-report` and `pytest-xdist` are **dev-extra** deps of the MAIN `pyproject.toml`, not inherited by any other venv | `pyproject.toml` L44-47 (`[project.optional-dependencies] dev`) | **Newly recorded (round 11)** — the classifier argv carries **both** `--json-report` (needs `pytest-json-report`) and `-n0` (needs `pytest-xdist`); a fixture venv missing either aborts with `unrecognized arguments` |
+| `-n0` needs `pytest-xdist`, a **fifth** obstacle no prior round named | Reproduced 2026-09-02: a fixture venv with `pytest` + `pytest-json-report` only aborts with `pytest: error: unrecognized arguments: -n0` | **Newly recorded (round 11)** — round 10 named only `pytest-json-report`; `-n0` fails the same way |
+| `uv sync` cannot provision a fixture whose `pyproject.toml` has only `[tool.pytest.ini_options]` | No `[project]` table to sync | **Newly recorded (round 11)** — the fixture must carry a `[project]` table, and provisioning uses `uv venv` + `uv pip install`, not `uv sync` |
+| `check-interpreter-pin.sh` is a **no-op** on a tree with no `.python-version` | `[ -f "$PIN_FILE" ] || exit 0` | **Newly recorded (round 11)** — the fixture deliberately carries no pin file, so #2617 never fires there; adding one would break the fixture |
+| **The whole fixture path is executable — reproduced end to end** | 2026-09-02, scratchpad: `git init` temp repo, commit A (test passes) / commit B (test fails), `git worktree add --detach`, `uv venv` + `uv pip install pytest pytest-json-report pytest-xdist`, then `scripts/pytest-clean.sh <node> -n0 --tb=no -q --json-report --json-report-file=<tmp>` → report `outcome: passed` at A and `outcome: failed` at B; a sibling `.venv`-less worktree aborts with the #3033 message | **Newly recorded (round 11)** — the falsifiability test is buildable; total provisioning **0.09 s** on a warm uv cache, no network |
+| `scripts/worktree-gc.sh` **does not exist** — replaced by `tools/disk_reclaim.py` under #2517 | `ls scripts/worktree-gc.sh` → `No such file or directory`; `tools/disk_reclaim.py::sweep_worktrees` L334-436 | **Newly recorded (round 11)** — five plan references retargeted |
+| `sweep_worktrees` iterates **every** child of `.worktrees/` and has no named-lane exclusion | L334-436; loop `for child in sorted(worktrees_root.iterdir())` L368; `branch = f"session/{slug}"` L403; `merged_via_tree(...)` L409 | **Newly recorded (round 11)** — the baseline lane is in scope and survives only by guard-order accident |
+| `grep -E` treats `\|` as a **literal pipe**, not alternation | Demonstrated: a file containing both `gh pr ready` and `gh pr merge` returns `0` for `grep -Ec "gh pr ready\|gh pr merge"` and `2` for `grep -Ec "gh pr ready\|gh pr merge"` without the backslash | **Newly recorded (round 7)** — two Verification rows were passing vacuously |
+
+**Overlapping active plans:** `nightly-serial-reconfirm.md` (the #2180 serial gate — a
+dependency, not a conflict). No in-flight lane owns `scripts/nightly_regression_tests.py`.
+
+## Prior Art
+
+- **#2192 / PR #2195** — added `maybe_dispatch_triage_session` (investigate-and-file-an-issue) plus the run lock and LLM summarizer. **Deliberately deferred auto-hotfix as a No-Go.** This plan does not reverse that No-Go; it stops short of the fixer entirely.
+- **#2399 / PR #2402** — the worked example. 11 test-stale failures across 3 groups. Two groups were mechanical carry-forward; **Group 2 hid a genuine design fork** (self-heal intended vs. a safety hole) that required a human reading #2144's intent. **Lesson:** "classifies as newly-broken" is *necessary but not sufficient* for autonomy. That is precisely why the classifier alone is a coherent shippable unit and the fixer is not.
+- **#410** — Autoexperiment (autonomous prompt-optimization loop). Prior art for a bounded autonomous loop with caps; informs the guardrail-constant design.
+- **#2559 / PR #2581** — replaced set-hash triage dedup with per-node dedup (`dispatched_nodes`, `compute_dispatch_set`, `carry_dispatched_nodes`). Its lesson applies here: a second, parallel keying scheme in the same state file is how the #2429/#2430/#2462 churn started. This plan adds **one** per-node map and prunes it with the existing rule.
+- **#2823 (collection-aware baseline)** — added seed/re-baseline runs, `MAX_DISPATCH_NODES` truncation, and `validate_run_integrity`. These are the run shapes the gate must refuse to act on.
+- **#3033 / #2617** — the `pytest-clean.sh` worktree-`.venv` and interpreter-pin aborts. Not background: they are the two guards that decide whether the classifier works or ships inert.
+- **#3076** — the deferred `active`-mode stack (dispatch, hand-back, watchdog, guards, enforcement, notify transport), filed by this revision.
+- **#2405** — Cowork parity / intra-day watchdog follow-up, still OPEN. Out of scope.
+
+## Data Flow
+
+1. **Entry point**: launchd fires `python scripts/nightly_regression_tests.py`. `load_env_or_die()`, run lock, `run_tests()`, `reconfirm_serial()` → `confirmed_failing`, `new_failures = compute_new_failures(prev, confirmed_failing)` (L654). **Unchanged.**
+2. **Classification precondition — THE canonical list** *(new)*. Classification is expensive
+   (a detached checkout plus a real pytest run on the nightly critical path), so the decision
+   to *run* it is made **before** it runs, at the call site, from these seven conditions —
+   `CLASSIFY_PRECONDITIONS`, listed in the order the gate short-circuits them so the `reason=`
+   token is identical whichever side reports it:
+
+   ```
+   NIGHTLY_FIX_MODE != "off"                          # caller's business; not a gate clause
+   and new_failures                                   # non-empty; not a gate clause
+   and not is_seed_run                                # reason=seed_run        (L1027; covers is_reseed L1026)
+   and not integrity_warnings                         # reason=integrity_warnings (L1047)
+   and not args.dry_run                               # reason=dry_run         (--dry-run stays a pure preview)
+   and prev.get("head_commit")                        # reason=no_baseline_sha
+   and len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES  # reason=over_max_failures (ceiling, checked BEFORE the run)
+   ```
+
+   All seven are checked at the call site; **none of them is discovered inside the classifier or
+   after it.** The last five are re-checked verbatim as the first five clauses of
+   `decide_fix_or_escalate`, in this same order. This is the only precondition list in the plan
+   — Test Strategy and Success Criteria assert exactly this list and nothing else.
+
+   Why each is a *precondition* and not merely a gate condition (round-8 blocker 3):
+   `--dry-run` must stay side-effect-free; a re-baseline run (`is_reseed` L1026-1027) absorbs
+   the entire currently-failing population into `new_failures`, which is exactly the unbounded
+   set `MAX_DISPATCH_NODES` exists elsewhere to contain, so classifying it would serially
+   re-run hundreds of nodes at the baseline SHA and then discard the verdict; an
+   integrity-warned run's confirmed set is untrusted, so its verdict is worthless before it is
+   computed; and `NIGHTLY_FIX_MAX_FAILURES` is a *cost* ceiling, which is meaningless if the
+   cost is already paid by the time it is consulted.
+
+3. **Classification** *(new)*: when the preconditions hold, run
+   `classify_against_baseline(new_failures, prev["head_commit"])` — a synchronous in-process
+   function that re-runs exactly those node IDs at **the prior run's HEAD SHA** in a
+   **provisioned baseline worktree** and buckets each node
+   `{newly_broken, pre_existing, inconclusive}`. No subagent, no session, no Task tool.
+4. **Decision gate** *(new)*: `decide_fix_or_escalate(classification, new_failures, caps, run_flags)` — a pure function returning `"autonomous-fix" | "escalate"`. It re-checks the same conditions (they are cheap and pure) so its unit tests stand alone and the two lists cannot drift apart in behavior.
+5. **Verdict log** *(new)*: emitted on **every** non-`off` run with non-empty `new_failures`, whether or not classification ran, under a stable greppable prefix with the first failing condition as a `reason=` token. On a skipped-classification night the `reason=` names the precondition that skipped it (e.g. `reason=seed_run`, `reason=over_max_failures`) — a silent skip would lose the plan's only deliverable on precisely the noisiest nights.
+6. **Alert** *(unchanged in this plan)*: the up-front page fires exactly as today. `off` skips steps 2-5 entirely; `shadow` runs them and still pages.
+
+There is no step 7. Acting on the verdict is #3076.
+
+## Architectural Impact
+
+- **New dependencies**: none external. Reuses `git worktree`, `uv sync`, and pytest — machinery the detector and the repo already own.
+- **Interface changes**:
+  - `send_telegram` (L609) gains a `.returncode` check it currently lacks. No signature change.
+  - `_spawn_pytest` (L283) gains a `cwd: Path | str = PROJECT_DIR` parameter. Existing callers (`run_tests` L379, `reconfirm_serial` L587) pass nothing and stay byte-identical.
+  - A new module constant `PYTEST_BASELINE_JSON_TMP = "/tmp/nightly_pytest_baseline_report.json"` beside `PYTEST_JSON_TMP` (L108) and `PYTEST_SERIAL_JSON_TMP` (L109). The classifier owns its own report file and **never writes either existing path**.
+  - `data/nightly_tests_last_run.json` gains **no new key.** `head_commit` is already persisted (L1092) — consumed, not added. The scalar `dispatched_session_id` (L1090) is untouched. (Round 9 dropped the `classify_attempts` map as structurally unreachable — see Technical Approach.)
+  - `.claude/agents/baseline-verifier.md` is **not touched** (no Python invocation seam).
+  - No `AgentSession` schema change, therefore **no Popoto migration** in this plan.
+  - `tools/disk_reclaim.py` gains a `PROTECTED_WORKTREE_SLUGS` constant and a first-guard skip in `sweep_worktrees` (L334-436). **This is the plan's only edit outside the nightly script**, and it is required, not cosmetic: the baseline lane is in that sweeper's scope and survives today only by guard-order accident. (`scripts/worktree-gc.sh`, named by rounds 6-10, was deleted under #2517 and does not exist.)
+  - `PYTEST_BASELINE_TIMEOUT_SECONDS = 1800` beside `PYTEST_TIMEOUT_SECONDS` (L165) and `PYTEST_RECONFIRM_TIMEOUT_SECONDS` (L171) — a plain module int, matching its neighbours' convention.
+- **Coupling**: the classifier is self-contained in the nightly script, plus a one-constant skip in the disk sweeper. It reads git and runs pytest — no Redis, no ORM, no session substrate, no new orchestration.
+- **Reversibility**: total. `NIGHTLY_FIX_MODE=off` skips classification and the gate entirely, leaving the detector byte-identical to today. The default `shadow` adds a bounded pytest run and a log line and changes no outbound behavior.
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 1 (confirm the baseline-worktree provisioning cost is acceptable on the nightly critical path)
+- Review rounds: 1-2
+
+Reduced from Large in round 7. The Large appetite was carried by the autonomous fixer's
+safety-review surface; with that deferred to #3076, what remains is a bounded classifier
+and a pure function. The remaining review weight is on the classifier being *real* rather
+than inert.
+
+## Prerequisites
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `uv` available to the nightly process | `uv --version` | Provisions the baseline worktree's `.venv` |
+| `git worktree` usable | `git worktree list` | The classifier checks out `prev["head_commit"]` detached |
+| Committed interpreter pin present | `cat .python-version` | `pytest-clean.sh` L169-175 aborts on an off-pin venv; the provisioned venv must match |
+| `valor-telegram` reachable | `test -x .venv/bin/valor-telegram` | Existing alert channel (unchanged) |
+
+No new secrets. No branch-protection prerequisite — nothing in this plan dispatches a
+session or opens a PR.
+
+## Solution
+
+### Key Elements
+
+- **`send_telegram` returncode check**: strictly independent, strictly an improvement. Today a rejected or failed send logs `"Telegram sent"` (L633) and the run continues believing a human was paged. Ships first, on its own.
+- **`_spawn_pytest` gains `cwd`**: the one-line seam that lets a second caller target a different tree. Default `PROJECT_DIR` keeps both existing callers byte-identical.
+- **Provisioned baseline worktree**: a persistent worktree at `.worktrees/nightly-baseline/` with **its own `.venv`**, re-pointed to `prev["head_commit"]` each run. This is not a detail — it is the difference between a working classifier and an inert one (round-6 blocker 2). A bare `git worktree add` has no `.venv`, and `pytest-clean.sh` L135-145 refuses to run there; running at `PROJECT_DIR` instead would import HEAD's source and bucket every node `pre_existing`. Both failure modes are silent and safe-looking.
+- **In-process classifier with an injection seam**: `classify_against_baseline(node_ids, baseline_sha, *, repo_root=PROJECT_DIR, worktree_path=BASELINE_WORKTREE, wrapper=PYTEST_CLEAN_SH, report_path=PYTEST_BASELINE_JSON_TMP)`, synchronous, returning three discrete buckets. The four keyword-only parameters default to production values so `main()`'s call site is a two-argument call; they exist so the falsifiability test can point the **real** function at a fixture repo without monkeypatching module globals. Every exception path lands in `inconclusive`, which the gate treats as escalate — a broken classifier fails toward paging.
+- **Its own JSON report path**: the classifier writes `PYTEST_BASELINE_JSON_TMP`, never `PYTEST_SERIAL_JSON_TMP` (L109). `main()` re-reads the serial report at L1209 to build the human's alert text (`summarize_failures`, L1213) *after* the classifier runs; sharing the path would summarize the alert from the baseline commit's results, where the newly-broken nodes passed.
+- **Pure decision gate**: `decide_fix_or_escalate(...)`, no I/O, exhaustively unit-testable.
+- **Non-stubbed classifier test**: a two-commit fixture repo where a node passes at the baseline SHA and fails at HEAD must classify `newly_broken`. Every other classifier test stubs the classifier and therefore cannot distinguish "working" from "inert but safe" — this one test is what makes the feature's core claim falsifiable. Its construction is specified concretely below, because two wrapper behaviors silently defeat the obvious construction.
+- **Greppable verdict log**: `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing condition} nodes={n}` on every non-`off` run with non-empty `new_failures` — including the nights where a precondition skipped classification. This is the plan's delivered artifact: the evidence #3076 is gated on.
+- **Guardrail constants**: **two** named, env-overridable knobs read via raw `os.environ.get` at module scope, each with a provisional/tunable comment. Deliberately not promoted to `config/settings.py` — see Technical Approach.
+
+### Flow
+
+Nightly run detects newly-confirmed failures →
+- `NIGHTLY_FIX_MODE=off`: skip classification and the gate entirely; page as today. Byte-identical to current behavior.
+- `NIGHTLY_FIX_MODE=shadow` (the default): evaluate the seven `CLASSIFY_PRECONDITIONS` (Data Flow step 2) → if any fails, log the verdict as `escalate reason=<that condition>` and **page as today**, doing no git and no pytest work → otherwise re-point and sync the baseline worktree → `classify_against_baseline(new_failures, prev["head_commit"])` → `decide_fix_or_escalate(...)` → log the verdict under the stable prefix → **page as today**. Nothing else changes.
+
+There is no third mode in this plan. `active` is #3076.
+
+### Technical Approach
+
+**Classifier — in-process Python, NOT the `baseline-verifier` subagent.**
+Verified at `2d60de31d`: `baseline-verifier` is a Claude *subagent* dispatched only through
+the Task tool; its sole caller repo-wide is `.claude/skills-global/do-test/baseline-verification.md`
+L76-81, and no `.py` file invokes it. `scripts/nightly_regression_tests.py` is a plain
+launchd Python process with no Task tool. The two escape hatches both fail: routing through
+`tools.valor_session create` would make classification *asynchronous* (a two-night handshake
+inside one nightly invocation), and the `${baseline_ref:-main}` shell default cannot be set
+by a Task dispatch, so it would always resolve to literal `main` — silently reinstating the
+exact masking this plan exists to avoid. `.claude/agents/baseline-verifier.md` is left
+untouched, so every `/do-test` caller is unaffected.
+
+The mechanic needs no LLM: it is "re-run these node IDs at a known commit and see whether
+they passed."
+
+- **The baseline ref is `prev["head_commit"]` — the *prior run's HEAD SHA*, NOT bare `main`, and NOT a "last-green" SHA.** L1092 writes `head_commit` on every non-fatal run regardless of how red that run was; nothing in the detector records greenness, so "last-green" would name a guarantee that does not exist. The correct and sufficient justification is narrower: a *newly-confirmed* failure was by definition absent from the **prior run's confirmed-failing set**, so at the prior run's HEAD SHA that specific node was not failing — which is exactly what the classifier needs, per node, and nothing more. Nightly runs on `main` HEAD and the failure IS on `main`, so diffing against `main` would mask a regression that already landed there. `head_commit` is already persisted at L1092 — consumed, not added. The SHA is interpolated as a literal; there is no shell parameter default to mis-resolve.
+- **Interpretation**:
+  - **PASSED at the prior run's HEAD, FAILS at current HEAD** → `newly_broken`. Something in that range moved a contract or introduced a regression. This is the set that would be eligible for a fix attempt under #3076.
+  - **FAILED at the prior run's HEAD too** → `pre_existing`; not caused by recent change → escalate.
+  - **`inconclusive`** — worktree provisioning failure, missing baseline SHA, pytest collection error, timeout, a node absent at baseline, or any raised exception → escalate; never guess.
+
+**Baseline worktree provisioning — the seam that decides whether the classifier is real
+(BLOCKER resolution, round 7).** Rounds 5-6 said "run the node IDs there with the same
+pytest invocation the detector uses" and stopped. That instruction is not executable.
+Verified:
+
+- `_spawn_pytest` (L283) is `_spawn_pytest(argv: list[str], timeout: int, env: dict | None = None) -> int` and bakes `cwd=PROJECT_DIR` into its `Popen` call at L302.
+- Its argv routes through `scripts/pytest-clean.sh`, which resolves `REPO_ROOT` from the **caller's cwd** (L34-38) — so a `cwd=<worktree>` spawn genuinely targets the worktree, which is what makes this approach viable at all.
+- But that same wrapper **refuses to run in a linked worktree with no `.venv` of its own** (L135-145, #3033) and **refuses an off-pin interpreter** (L169-175, #2617).
+
+So a bare `git worktree add` yields exactly the tree the wrapper rejects. The three
+outcomes rounds 5-6 left open were: run at `PROJECT_DIR` (imports HEAD's source → every
+node buckets `pre_existing` → gate escalates 100% of the time), run in a venv-less worktree
+(wrapper aborts → `inconclusive` → escalates 100% of the time), or provision the worktree
+(never mentioned). All three are indistinguishable from a working classifier under
+fully-stubbed tests.
+
+**Resolution — three concrete changes:**
+
+1. **`_spawn_pytest` gains `cwd: Path | str = PROJECT_DIR`**, forwarded to `Popen`. `run_tests` (L379) and `reconfirm_serial` (L587) pass nothing and are byte-identical. This is the seam; it does not exist today.
+2. **A persistent, provisioned baseline worktree** at `.worktrees/nightly-baseline/`:
+   - If absent: `git worktree add --detach .worktrees/nightly-baseline <baseline_sha>`, then `uv sync` inside it to create a pin-matching `.venv`.
+   - If present: `git -C .worktrees/nightly-baseline checkout --detach <baseline_sha>`, and re-run `uv sync` **only when `uv.lock` differs** between the worktree's checked-out revision and the last provisioned one (recorded in a marker file inside the worktree). This is what keeps the amortized cost near zero on the common night.
+   - It is **persistent by design** — a fresh `uv sync` every night is the cost Risk 2b was written against. **The sweeper it must be reconciled with is `tools/disk_reclaim.py::sweep_worktrees` (L334-436), not `scripts/worktree-gc.sh`, which no longer exists** (deleted under #2517; verified absent at `b90e998920f`). `sweep_worktrees` iterates every child of `repo_root/WORKTREES_DIR` (L368) with no named-lane exclusion, so the baseline lane **is** in scope. It survives today only by guard-order accident: `too_young` (L373-376) while the nightly keeps touching it, and after that `branch = f"session/nightly-baseline"` (L403) → `merged_via_tree(...)` (L409) returns `False` for a branch that does not exist, yielding `skip(slug, "unmerged")` (L412-414). That is not design and it inverts on any change that treats a branchless lane as reapable. **The exclusion must be built, not assumed** — see Step 3.
+   - Every provisioning subprocess (`git worktree add`, `git checkout --detach`, `uv sync`) carries an explicit `timeout=` on its `subprocess.run`; a hung provision is `inconclusive` exactly like a non-zero one.
+   - Any failure in provisioning (worktree add, checkout, `uv sync` non-zero) → the whole classification is `inconclusive` → escalate. It never falls back to `PROJECT_DIR`; a silent fallback is exactly the inert-but-safe-looking failure this resolution exists to prevent.
+3. **The classifier's pytest invocation** mirrors `reconfirm_serial`'s serial *shape* (L575-590) but with **its own report path** and the **same explicit env override**, stated here in full rather than elided — the round-8 blocker was caused by an elision, so nothing below is left to "the same as `reconfirm_serial`":
+
+   ```python
+   Path(report_path).unlink(missing_ok=True)          # report_path = PYTEST_BASELINE_JSON_TMP
+   argv = [
+       str(wrapper), *node_ids, "-n0", "--tb=no", "-q",
+       "--json-report", f"--json-report-file={report_path}",
+   ]
+   env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}
+   rc = _spawn_pytest(argv, env=env, timeout=PYTEST_BASELINE_TIMEOUT_SECONDS, cwd=worktree_path)
+   ```
+
+   - **`timeout=` is a declared constant, not an ellipsis** (round-10 concern; the same elision shape that produced the round-8 report-path blocker in this very code block). `PYTEST_BASELINE_TIMEOUT_SECONDS = 1800` is declared beside `PYTEST_TIMEOUT_SECONDS` (L165) and `PYTEST_RECONFIRM_TIMEOUT_SECONDS` (L171), which are both bare module ints — that is this file's convention, and it is also mechanically forced: making it a `NIGHTLY_FIX_*` env knob would break the Verification row asserting exactly two `os.environ.get("NIGHTLY_FIX` reads. Provisioning is separately bounded: every `git`/`uv sync` call runs under `subprocess.run(..., timeout=...)`, and a `TimeoutExpired` is `inconclusive`.
+
+   - **`report_path` MUST NOT be `PYTEST_SERIAL_JSON_TMP`** (L109). `reconfirm_serial` unlinks and writes that file (L582, L588) and `main()` re-reads it at L1209 — *after* the classifier runs — to build `summarize_failures(new_failures, serial_report)` (L1213), which is the human's alert text. Reusing the path would overwrite it with the **baseline commit's** results, where every newly-broken node passed, so the alert would summarize a report containing no failures for the nodes it is paging about. That silently breaks this plan's headline "changes no outbound message" guarantee. A new module constant `PYTEST_BASELINE_JSON_TMP = "/tmp/nightly_pytest_baseline_report.json"` sits beside L108-109 and is the classifier's sole report target. `PYTEST_JSON_TMP` (L108) is likewise off-limits.
+   - **`env` is not optional.** Both existing spawns pass `env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}` verbatim (`run_tests` L374, `reconfirm_serial` L584) because `tests/db_claim.py`'s 30s interactive default is wrong for an unattended 03:00 run and the claim happens in `tests/conftest.py::pytest_configure`, **before collection and therefore before any per-item timer is armed** (the comment above L374 says exactly this). A classifier spawning with the default loses the db claim under contention, errors during configure, and buckets every node `inconclusive` — a second, distinct way to ship the inert-but-safe-looking classifier of Risk 1, and one the fixture test cannot catch because the fixture repo has no `tests/conftest.py` and so makes no db claim at all. This is asserted by `Popen` call capture, not by inspection.
+   - It goes **through** `pytest-clean.sh` (`wrapper`), not around it — the wrapper's guards are load-bearing here, and bypassing them is how #3033's false-green happens.
+
+The report is parsed the same way `reconfirm_serial` parses its own; a node absent from
+the baseline report is `inconclusive`, never assumed-passed.
+
+**The injection seam that makes the falsifiability test executable (BLOCKER resolution,
+round 8).** Rounds 6-7 promoted a non-stubbed two-commit fixture test to a Success Criterion,
+but as specified it could not drive the real function. Three verified obstacles and their
+resolutions:
+
+| Obstacle (verified at `5b35d5212`) | Consequence | Resolution |
+|---|---|---|
+| The mandated signature `classify_against_baseline(node_ids, baseline_sha)` has no repo-root / worktree / wrapper / report-path parameter | A fixture repo can only be reached by monkeypatching module globals — at which point the test no longer exercises production provisioning, which is the exact thing it exists to falsify | **Widen the signature** to `classify_against_baseline(node_ids, baseline_sha, *, repo_root: Path = PROJECT_DIR, worktree_path: Path = BASELINE_WORKTREE, wrapper: Path = PYTEST_CLEAN_SH, report_path: str = PYTEST_BASELINE_JSON_TMP)`. Keyword-only, production defaults, so `main()`'s call site stays `classify_against_baseline(new_failures, prev["head_commit"])` and no other caller changes |
+| `pytest-clean.sh` L33-39 sets `REPO_ROOT="$(pwd)"` **only if** cwd's `pyproject.toml` matches `grep -qE "^\[tool\.pytest"`; otherwise it falls back to `SCRIPT_ROOT` and `cd`s there | A minimal fixture repo silently redirects the classifier's pytest at the **real** repo — the test would pass or fail for reasons having nothing to do with the fixture | The fixture repo's `pyproject.toml` must contain a literal `[tool.pytest.ini_options]` section. Asserted directly: the fixture-building helper writes it, and one test reads the file back and greps for the section, so a future edit that drops it fails loudly instead of silently redirecting |
+| The #3033 guard keys on `[ -f "$REPO_ROOT/.git" ]` — `.git` being a **file** — which is true only for a *linked worktree*; a standalone `git init` fixture has `.git` as a directory (L136-146) | The fixture never exercises the guard Risk 1 is written about, so the "provisioning failure → `inconclusive`, no `PROJECT_DIR` fallback" claim stays untested on the real path | Build the fixture as a **linked worktree** of a temp repo: `git init` a temp repo, commit A (test passes) and commit B (test fails), then `git worktree add --detach <fixture_path> <sha>`. `.git` is then a file and the guard is live — a `.venv`-less fixture worktree genuinely aborts, and provisioning it genuinely satisfies the guard |
+
+| `pytest-clean.sh` L155-168 resolves `PYTEST_BIN="$REPO_ROOT/.venv/bin/pytest"` and **aborts unless `"$PYTEST_BIN" --version` exits 0**; the classifier argv then carries `--json-report` (needs `pytest-json-report`) **and `-n0` (needs `pytest-xdist`)**, both of which are `dev`-extra deps of the MAIN `pyproject.toml` (L44-47) and inherited by no other venv | Every outcome lands in `inconclusive` — the exact bucket the test exists to distinguish a working classifier from | The fixture venv is provisioned with **all three**: `uv venv <wt>/.venv` then `uv pip install --python <wt>/.venv/bin/python pytest pytest-json-report pytest-xdist`. Asserted by a third fixture-precondition guard test (below) |
+| `uv sync` against a fixture whose `pyproject.toml` carries only `[tool.pytest.ini_options]` **fails outright** — there is no `[project]` table to sync | The plan's bare instruction "`uv sync` run" is not executable on the fixture | The fixture `pyproject.toml` carries **both** a minimal `[project]` table (`name`, `version`, `requires-python`) and `[tool.pytest.ini_options]`. Provisioning uses `uv venv` + `uv pip install`, **not `uv sync`** — `uv sync` is the production baseline-worktree path (a real checkout with a real lockfile), not the fixture path |
+| `check-interpreter-pin.sh` exits 0 immediately when the tree has no `.python-version` (`[ -f "$PIN_FILE" ] \|\| exit 0`) | Not an obstacle — a trap in the other direction | The fixture deliberately carries **no** `.python-version`, so #2617 never fires there. Do not add one "for realism": it would pin the fixture venv to the repo interpreter and turn a passing test into an environment-coupled one |
+
+**This is no longer a paper design — the whole path was executed end to end (round 11).** In a
+scratchpad on 2026-09-02: `git init` a temp repo; commit A with a passing test and commit B
+with the same test failing; `git worktree add --detach` the fixture; `uv venv` + `uv pip
+install pytest pytest-json-report pytest-xdist`; then run the **real** wrapper,
+`scripts/pytest-clean.sh <node> -n0 --tb=no -q --json-report --json-report-file=<tmp>`, from
+the fixture as cwd. Results: the JSON report records `outcome: passed` at commit A and
+`outcome: failed` at commit B — which is precisely the `newly_broken` discrimination — and a
+sibling worktree left without a `.venv` aborts with the #3033 message. Two intermediate
+failures were observed and are what the resolutions above encode: without `pytest-json-report`
+and again without `pytest-xdist`, pytest aborts with `unrecognized arguments`. **The `-n0`
+/ `pytest-xdist` obstacle is a fifth one no prior round named.**
+
+**Cost, measured rather than feared (round-10 concern):** full provisioning is **0.09 s** on a
+warm uv cache and touches the network on a cold one only. Because the fixture's `[tool.pytest.ini_options]`
+carries no `addopts`, the nested pytest run inherits none of the main suite's `-n auto`
+machinery and completes in milliseconds. The suite-wide `--timeout=420` (`pyproject.toml` L199)
+is therefore not close to binding. The residual risk is a cold cache with no network, so the
+fixture tests carry an explicit `@pytest.mark.timeout(120)` and **skip** (never fail) when
+`uv` is absent or provisioning returns non-zero — a provisioning failure in the *test harness*
+must not become a newly-confirmed nightly failure that pages a human through the very alert
+path this feature reforms.
+
+The fixture tests are marked slow and assert **on the bucket**, never on wall time. Note that
+`slow` is a declared marker (`pyproject.toml` L214) but is **not** deselected by `addopts`
+(L199 has no `-m "not slow"`), so the mark is documentation, not exclusion — these tests do
+run in every `tests/unit/` invocation. That is acceptable only because of the measured cost
+and the skip guard above; it is not acceptable on the strength of the marker alone.
+
+**Cost.** One targeted pytest run over only the failing node IDs (never the suite), plus a
+detached checkout and a conditional `uv sync`. It runs only when `new_failures` is non-empty
+and only outside `off` mode. It carries its own timeout; a timeout is `inconclusive`.
+
+**Decision gate** (`decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"`):
+pure, unit-testable, no I/O. Returns `autonomous-fix` iff **all** of:
+
+```
+not run_flags.is_seed_run              # reason=seed_run — a re-baseline declares state, it does not discover a regression
+and not run_flags.integrity_warnings   # reason=integrity_warnings — an untrusted confirmed set is no basis for a verdict
+and not run_flags.dry_run              # reason=dry_run — --dry-run stays a pure preview
+and run_flags.baseline_sha             # reason=no_baseline_sha — prev["head_commit"] present
+and len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES  # reason=over_max_failures
+and classification.pre_existing == []
+and classification.inconclusive == []
+and set(new_failures) == set(classification.newly_broken)
+```
+
+The first five clauses are **exactly** the last five `CLASSIFY_PRECONDITIONS` of Data Flow
+step 2 (the mode check and the non-empty check are the caller's business), **in the same
+order**, so the `reason=` token a skipped-classification night reports is the same token the
+gate would have reported. They are cheap and pure, so re-checking them here costs nothing and lets the
+gate be unit-tested in isolation without a classification result. The last three clauses are
+the only ones that require a classification, and they are the only ones unreachable on the
+skip path — on which `classification` is the empty three-bucket result and the verdict is
+`escalate` by the first failing precondition.
+
+The gate consumes **`new_failures`** (from `compute_new_failures`, L654) — the population
+this feature is about. It is deliberately *not* `compute_dispatch_set`'s output (L728),
+which answers the different question of what has never been filed; the two sets diverged in
+#2559 and conflating them would let a standing, already-filed failure enter the eligible
+bucket. The classifier returns discrete buckets, so "high confidence" is bucket membership,
+not a threshold float.
+
+In this plan the verdict is **computed and logged only**. `autonomous-fix` means "the gate
+would have attempted a fix" — it triggers nothing.
+
+**Cap arithmetic — `MAX_DISPATCH_NODES` is NOT a disqualifier.** `MAX_DISPATCH_NODES = 10`
+(L185) truncates `dispatch_nodes` — the output of `compute_dispatch_set` (L728), applied at
+L1160-1166 — which answers *"what has never been filed as a triage issue"*. It never touches
+`new_failures` (L654), which is not truncated anywhere. Carrying the triage cap into this
+gate would make the effective ceiling `min(NIGHTLY_FIX_MAX_FAILURES, 10)`, killing every
+configured value 11..15, **and would disqualify this plan's own motivating case**: #2399 had
+11 newly-confirmed failures. The two caps govern disjoint sets and are never reconciled
+numerically. `NIGHTLY_FIX_MAX_FAILURES` (default 15) is the sole volume cap here.
+
+**No attempt tracking — the map and its cap are deleted, not documented (round-8 resolution).**
+Earlier rounds carried a `classify_attempts: {node_id: count}` map and a
+`NIGHTLY_FIX_MAX_ATTEMPTS` cap. At this scope they are **structurally unreachable**, which is
+precisely the dead-config pattern round 4 caught once and this plan's own Success Criteria
+forbid. Verified: `compute_new_failures` (L654) admits a node only on the night it was absent
+from the prior confirmed-failing set, so a node that *stays* red never re-enters `new_failures`
+and is never re-classified; a node that goes green is pruned to zero by the keep-while-still-
+failing rule the map would have used. With the default `NIGHTLY_FIX_MAX_ATTEMPTS = 1` there is
+no reachable path on which the cap fires — the map would exist only to be pruned.
+
+Consequently this plan persists **no new key** in `data/nightly_tests_last_run.json`. Both the
+map and the constant move to **#3076** with the fixer that would actually re-attempt a node.
+If a future need is *bounding classifier cost*, the correct key is a per-run node ceiling
+enforced before `classify_against_baseline` — which this plan already has, as the
+`len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES` precondition — not per-node attempts inside
+the gate. `fix_sessions` likewise stays in #3076 with the watchdog it served.
+
+**Discoverable shadow verdict.** Every non-`off` run **with non-empty `new_failures`** logs,
+under a stable prefix — including the nights a precondition skipped classification:
+
+```
+nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing gate condition} nodes={n}
+```
+
+**Plus one sibling line, emitted only when classification actually ran** (round-10 concern —
+the verdict line alone answers "would the gate have fired?" but not "would it have been
+right?"):
+
+```
+nightly-fix shadow-buckets: newly_broken={n} pre_existing={n} inconclusive={n} not_newly_broken={comma-joined node ids}
+```
+
+It is already bounded — classification runs only when `len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES`
+(default 15), so the id list can never be long. The verdict line above stays **byte-stable**,
+so the `skip_still_logs` and verdict-format assertions are unaffected by this addition.
+
+**What the classifier discriminates that `compute_new_failures` does not.** Without this
+sentence the buckets are uninterpretable, and a month of `autonomous-fix reason=none` lines is
+equally consistent with a working classifier and with one that merely echoes
+`compute_new_failures`: `compute_new_failures` (L654) proves a node was **absent from the
+prior confirmed-failing set**; the classifier proves it **passed at that SHA**. The two differ
+exactly when the node was not collected at the prior run, was a filtered artifact, or the
+prior run was untrusted. So `pre_existing` is *expected* to be near-empty, and the real added
+signal is `inconclusive` — which is why the bucket counts, not the verdict, are the artifact
+#3076 is gated on.
+
+One `reason` token names the *first* condition that failed the short-circuit, so a month of
+logs answers "why did the gate refuse?" without re-deriving it. The token vocabulary is the
+gate's clause order: `seed_run`, `integrity_warnings`, `dry_run`, `no_baseline_sha`,
+`over_max_failures`, `pre_existing`, `inconclusive`, `not_all_newly_broken`, and `none` on an
+`autonomous-fix`. The first five are also the skip reasons, so a skipped night is fully
+legible. This line is the plan's delivered artifact and the entry condition for #3076.
+
+**Guardrail constants — raw `os.environ.get` at module scope, NOT `config/settings.py`.**
+Two knobs (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`)
+as module-level constants in `scripts/nightly_regression_tests.py`, each read via
+`os.environ.get(...)` with an in-code default and a one-line provisional/tunable comment.
+Deliberate: `config/settings.py`'s `TimeoutSettings` is the home for cross-cutting
+timeout/retry/TTL values consumed across the bridge/worker/agent runtime (per
+`docs/features/config-timeout-catalog.md`'s promote-vs-name-locally criterion). These are
+single-consumer knobs of one standalone launchd script that imports nothing from the runtime
+config surface. If a second consumer appears, promote them then. The three knobs from earlier
+rounds (`NIGHTLY_FIX_MAX_CHANGED_FILES`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS`,
+`NIGHTLY_FIX_MAX_ATTEMPTS`) are **not declared here** — the first two had only deferred
+watchdog guards as consumers, and the third has no reachable consumer at this scope at all.
+A declared constant with no reader is the dead config round 4 already caught once.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] **Baseline worktree provisioning failures** — `git worktree add` non-zero, `git checkout --detach` non-zero (unknown SHA), `uv sync` non-zero, **and any of the three raising `subprocess.TimeoutExpired` (a hung or network-stalled provision)** — each → whole classification `inconclusive` → gate returns `escalate`. Assert explicitly that the classifier does **not** fall back to running at `PROJECT_DIR`.
+- [ ] **Baseline lane is protected from the worktree sweeper** — `tools/disk_reclaim.py::sweep_worktrees` skips `nightly-baseline` with reason `protected` even when every other guard would pass it (old enough, clean, no live process, no open PR). Regression test for the round-10 blocker: today the lane survives only because `merged_via_tree` returns `False` for a branch that never existed.
+- [ ] **Classifier run failures** — pytest collection error, `TimeoutExpired`, unparseable/missing JSON report, a **test-db claim timeout** (`tests/db_claim.py` exhausting `TEST_DB_CLAIM_WAIT_S` inside `pytest_configure`), any raised exception → `inconclusive` → `escalate`.
+- [ ] **Node absent from the baseline report** → that node is `inconclusive`, never assumed-passed.
+- [ ] **Report-path isolation** — `PYTEST_SERIAL_JSON_TMP` (L109) is byte-identical before and after `classify_against_baseline(...)`, and the classifier's `Popen` argv carries `--json-report-file=<PYTEST_BASELINE_JSON_TMP>`. Asserted on both a successful and a failed classification. Regression test for the round-8 alert-corruption blocker.
+- [ ] **Classifier spawn env** — `Popen` call capture asserts the classifier's `env` carries `TEST_DB_CLAIM_WAIT_S == "300"` (matching L374/L584) and is otherwise `os.environ`-derived.
+- [ ] **`send_telegram` transport failure**: stub `subprocess.run` to return a non-zero `returncode` → a WARNING naming the return code is logged and the `"Telegram sent"` success line is NOT emitted. Regression test for the L626-635 defect.
+- [ ] **`_spawn_pytest` back-compat**: `run_tests` and `reconfirm_serial` still spawn with `cwd=PROJECT_DIR` after the parameter is added (assert on the `Popen` kwargs via call capture).
+
+### Empty/Invalid Input Handling
+- [ ] `new_failures == []` → no classification, no gate, no verdict log, no behavior change. Test.
+- [ ] `prev["head_commit"]` absent (first run after deploy, or state from an older schema) → no baseline can be established → `escalate` **without classifying** (no git, no pytest), verdict log `reason=no_baseline_sha`. Test.
+- [ ] `NIGHTLY_FIX_MODE` set to an unrecognized value → treated as `off` (fail toward today's behavior), logged once. Test.
+
+### Classification Preconditions (the single canonical list — Data Flow step 2)
+Each of these five asserts the **same** thing: no `git` subprocess and no `_spawn_pytest` call
+occurs, and the verdict line is still emitted with the matching `reason=` token.
+- [ ] `--dry-run` → skipped, `reason=dry_run`.
+- [ ] Seed / re-baseline run (`is_seed_run` L1027, including the `is_reseed` L1026 case) → skipped, `reason=seed_run`.
+- [ ] Non-empty `integrity_warnings` (L1047) → skipped, `reason=integrity_warnings`.
+- [ ] `len(new_failures) > NIGHTLY_FIX_MAX_FAILURES` → skipped **before** any pytest run, `reason=over_max_failures`. This is the re-baseline-cost case: assert with a `new_failures` list far above the cap that `_spawn_pytest` is never called.
+- [ ] Missing `prev["head_commit"]` → skipped, `reason=no_baseline_sha`.
+
+### Non-Stubbed Classifier Validation (the falsifiability test)
+- [ ] **Two-commit fixture repo, no stubbing of `classify_against_baseline`, no monkeypatching of module globals** — the real function is called with its keyword-only seam: `classify_against_baseline([node], sha_a, repo_root=tmp_repo, worktree_path=fixture_wt, wrapper=PYTEST_CLEAN_SH, report_path=tmp_report)`. The fixture must satisfy both wrapper preconditions verified in Technical Approach: (a) its `pyproject.toml` contains a literal `[tool.pytest.ini_options]` section, or `pytest-clean.sh` L33-39 falls back to `SCRIPT_ROOT` and silently runs against the real repo; (b) it is created via `git worktree add --detach` from a temp repo so `.git` is a **file** and the #3033 guard (L136-146) is live. Build commit A where a trivial test passes and commit B where it fails; assert `newly_broken` when classified at baseline A. **This is the one test that can distinguish a working classifier from an inert one** — every other classifier test stubs the classifier and would pass identically against a function that returns all-`pre_existing` or all-`inconclusive` (round-6 blocker 2).
+- [ ] Same fixture, node failing at **both** commits → `pre_existing`. Confirms the classifier is not simply echoing HEAD's result.
+- [ ] **The fixture's own preconditions are asserted, not assumed** — **three** guards, not two: (a) the fixture's `pyproject.toml` contains `[tool.pytest`; (b) `(fixture_wt / ".git").is_file()`; (c) **`(fixture_wt / ".venv/bin/pytest")` exists and answers `--version` with exit 0, and invoking it with `-n0 --json-report --json-report-file=<tmp>` does not abort on an unrecognized argument** — i.e. `pytest-json-report` *and* `pytest-xdist` are both importable in the fixture interpreter. Without (c) the wrapper aborts at L165-168 or pytest aborts on `-n0`, and every bucket is `inconclusive` — the exact value the test exists to rule out. Without any of the three, a future edit silently turns the falsifiability test into a test of the real repo, or into a test that can only ever say `inconclusive`.
+- [ ] **Fixture provisioning is `uv venv` + `uv pip install pytest pytest-json-report pytest-xdist`, never `uv sync`** — the fixture has a `[project]` table so `uv` accepts it, but no lockfile to sync. The test **skips** (never fails) when `uv` is unavailable or provisioning exits non-zero, and carries `@pytest.mark.timeout(120)`.
+- [ ] **The #3033 guard is exercised on the real path**: the same fixture worktree *without* a `.venv` yields `inconclusive` (wrapper aborts), and with `uv sync` run yields a real bucket. This is the only place Risk 1's central claim is tested against live wrapper behavior rather than a stub.
+- [ ] Marked slow; assertions are on the bucket, never on wall time.
+
+### Verdict & Gate
+- [ ] Gate returns `escalate` on each of: non-empty `pre_existing`, non-empty `inconclusive`, `new_failures` ⊄ `newly_broken`, count over `NIGHTLY_FIX_MAX_FAILURES`, and each of the four run-shape/data preconditions.
+- [ ] **The motivating case passes its own gate**: 11 all-`newly_broken` failures → `autonomous-fix`. #2399's shape must not be disqualified by the feature written for it.
+- [ ] **Truncation is NOT a disqualifier**: a run whose `dispatch_nodes` exceeded `MAX_DISPATCH_NODES` still reaches `autonomous-fix` when its `new_failures` set is clean and within cap.
+- [ ] The verdict log line is emitted on every non-`off` run with non-empty `new_failures` — including all five skipped-classification cases above — with a `reason=` token naming the first failing condition; asserted on an `autonomous-fix` run, a classified-`escalate` run, and a skipped run.
+
+### Mode Gating
+- [ ] `NIGHTLY_FIX_MODE=off`: byte-identical to today. The up-front `send_telegram` on the `new_failures` branch **fires**; no classification, no worktree, no gate, no verdict log. Asserted via `send_telegram` call capture.
+- [ ] `NIGHTLY_FIX_MODE=shadow` (the default): the classifier and gate run, the verdict is logged, **and the up-front page still fires exactly as today**. Asserted via `send_telegram` call capture.
+- [ ] **The alert text is unchanged.** In `shadow`, with classification having run, the `send_telegram` call argument on the `new_failures` branch is byte-identical to the `off`-mode call for the same inputs. This is the behavioral assertion the round-8 report-path blocker would have failed and no earlier round listed.
+
+### Persisted-State Invariance
+- [ ] `data/nightly_tests_last_run.json` gains **no new key**: the persisted dict's key set after a `shadow` run equals the `off`-mode key set. (`classify_attempts` was dropped in round 9 — see Technical Approach.)
+
+## Test Impact
+
+- [ ] `tests/unit/test_nightly_regression_tests.py` — UPDATE/ADD only. The up-front page fires in **both** modes this plan ships, so **every existing assertion expecting an immediate `send_telegram` on new failures stays valid unchanged.** Add the `send_telegram` returncode test and the `_spawn_pytest` `cwd` back-compat test. **Do not disturb** the per-node dedup tests (`compute_dispatch_set` / `carry_dispatched_nodes` / `prior_dispatched` / `seeded_nodes`), the seed/re-baseline tests, or the run-integrity tests.
+- [ ] Tests asserting the dispatch prompt contains "Do NOT attempt an auto-hotfix" — **NOT affected.** `_build_triage_prompt` (L830-855) and `maybe_dispatch_triage_session` (L856) are untouched by this plan; the mandate rewrite moves to #3076.
+- [ ] `tests/unit/` baseline-verifier tests — **NOT affected.** `.claude/agents/baseline-verifier.md` is unmodified; `/do-test` callers are untouched.
+- [ ] `tests/unit/` `valor-telegram` CLI tests — **NOT affected.** No `--silent` flag ships in this plan (deferred to #3076 with its only consumer).
+- [ ] `tests/unit/` relay tests — **NOT affected.** No `bridge/telegram_relay.py` change.
+- [ ] `tests/unit/` AgentSession model/schema tests — **NOT affected.** No schema change, therefore no migration.
+- [ ] `tests/unit/` `disk_reclaim` / `sweep_worktrees` tests — UPDATE: `tools/disk_reclaim.py` gains a `PROTECTED_WORKTREE_SLUGS` skip as the first guard in the sweep loop, so any existing test that asserts on the full skip-reason vocabulary or on a slug named `nightly-baseline` needs the new `protected` reason. Add one test asserting the lane is skipped even when every other guard would pass it.
+- [ ] New files: `tests/unit/test_nightly_classifier.py` (incl. the non-stubbed fixture-repo tests) and `tests/unit/test_nightly_decision_gate.py`.
+
+Justification for anything not affected: the base detector mechanics (`run_tests`,
+`reconfirm_serial`, run lock, TTFT gate, `load_env_or_die`, dispatch, alerting) are
+untouched — this plan layers a classification + verdict-logging stage alongside the existing
+`new_failures` branch without changing a single outbound message.
+
+## Rabbit Holes
+
+- **Building the autonomous fixer anyway.** Do not. Its two load-bearing seams do not exist (Scope Boundary); it is #3076, gated on them.
+- **Adding `--silent` / the notify tier "while we're in there".** Do not. Without an `active` happy path it has no consumer, and it is a three-hop CLI surface change propagated to every machine for a flag nothing calls.
+- **Touching `baseline-verifier`.** It has no Python invocation seam. Do not parameterize the subagent, do not add a `baseline_ref` Input field, and do not route classification through a spawned session (asynchronous — a two-night handshake).
+- **A general-purpose "is this test stale?" classifier.** The mechanical precondition (passes at the prior run's HEAD SHA, fails at current HEAD) is all this plan claims. #2399 Group 2 proved a mechanical bucket is not a staleness proof; the plan says `newly_broken`, never `test-stale`.
+- **Bypassing `pytest-clean.sh` in the baseline worktree** to dodge the `.venv` requirement. That is exactly #3033's false-green: imports resolve through the primary checkout's editable path entry and the baseline run silently exercises HEAD's source.
+- **Falling back to `PROJECT_DIR` when worktree provisioning fails.** It would look like a working classifier while classifying everything `pre_existing`. Fail to `inconclusive`.
+- **Reusing `PYTEST_SERIAL_JSON_TMP` (or `PYTEST_JSON_TMP`) for the classifier's report** because the invocation is "the same as `reconfirm_serial`'s". It is not: `main()` re-reads the serial report at L1209 to build the human's alert. Use `PYTEST_BASELINE_JSON_TMP`.
+- **Re-adding a per-node attempt map or `NIGHTLY_FIX_MAX_ATTEMPTS`.** Unreachable at this scope (`compute_new_failures` L654 admits a node once); it is #3076's, with the fixer that re-attempts.
+- **Making the fixture repo a plain `git init` directory.** `.git` is then a directory, the #3033 guard never fires, and the fixture proves less than it appears to. Use a linked worktree.
+- **A new permission subsystem.** No session is dispatched here at all.
+- **Tuning the guardrail numbers to perfection.** Ship provisional env-overridable constants; tune from real shadow data.
+
+## Risks
+
+### Risk 1: The classifier ships inert and nobody notices
+**Impact:** The feature's entire deliverable — the shadow verdict — is a constant. Either every node buckets `pre_existing` (ran against HEAD's source) or every node buckets `inconclusive` (wrapper aborted, **or the test-db claim timed out in `pytest_configure`**). All look safe, all page as today, and all would pass a fully-stubbed test suite. This is the round-6 blocker and the single largest risk in the remaining scope.
+**Mitigation:** (a) The provisioning path is specified concretely against verified wrapper behavior (`pytest-clean.sh` L33-39 cwd-derived rootdir *and its `[tool.pytest` condition*, L136-146 `.venv` requirement *and its `.git`-is-a-file key*, L169-175 pin requirement) rather than left as "run it there"; (b) `_spawn_pytest` gains the `cwd` parameter it lacks, so the classifier cannot silently inherit `PROJECT_DIR`; (c) provisioning failure is `inconclusive`, never a `PROJECT_DIR` fallback; (d) the classifier spawn carries `TEST_DB_CLAIM_WAIT_S=300` verbatim from L374/L584, asserted by `Popen` call capture, closing the db-claim variant that the fixture test structurally cannot catch (the fixture has no `tests/conftest.py`); (e) **the non-stubbed two-commit fixture test**, now given a real injection seam and a fixture built as a linked worktree with a `[tool.pytest.ini_options]` section, is the falsifier — and its own two preconditions are themselves asserted so it cannot silently degrade into a test of the real repo; a companion case (`pre_existing` when the node fails at both commits) proves the classifier is not echoing HEAD; (f) shadow verdicts that are 100% one value across a month are themselves the operational tell, and the `reason=` token names which.
+
+### Risk 2: The baseline is wrong or unavailable
+**Impact:** Wrong classification → a misleading shadow verdict.
+**Mitigation:** The baseline ref is the **prior run's HEAD SHA** (`prev["head_commit"]` L1092, never bare `main`) — a name chosen not to overclaim greenness, since L1092 writes on every non-fatal run; the soundness argument is per-node (absent from the prior confirmed-failing set), stated in Technical Approach. The SHA is interpolated as a literal so no shell default can resolve to `main`. Missing SHA → `escalate` without classifying. Every worktree/pytest failure mode lands in `inconclusive`, a hard escalate.
+
+### Risk 2b: The classifier lengthens the nightly critical path
+**Impact:** A slow or hanging baseline run delays the nightly job. The worst case is the
+re-baseline night, where `new_failures` is the entire absorbed population.
+**Mitigation:** It runs only when **all seven `CLASSIFY_PRECONDITIONS`** hold (Data Flow step 2), which is what bounds this risk rather than mode alone: a seed/re-baseline run and any run whose `new_failures` exceeds `NIGHTLY_FIX_MAX_FAILURES` are refused *before* any git or pytest work, so the unbounded-population case cannot reach the classifier at all. When it does run it re-runs **only the failing node IDs** with `-n0`, capped at `NIGHTLY_FIX_MAX_FAILURES` nodes, and carries its own timeout (a timeout is `inconclusive`). The baseline worktree is **persistent**, so the `uv sync` cost is paid once and thereafter only when `uv.lock` moves. A detached checkout of an existing worktree is near-instant.
+
+### Risk 3: The persistent baseline worktree accumulates or is garbage-collected
+**Impact:** Either disk growth or a surprise re-provision cost every night.
+**Mitigation:** One fixed path, never per-run. The sweeper is `tools/disk_reclaim.py::sweep_worktrees` (L334-436) — `scripts/worktree-gc.sh` was deleted under #2517 and does not exist. The lane is genuinely in that sweeper's scope (it iterates every `.worktrees/` child, L368) and survives today only by guard-order accident, so the build task **adds a real named-lane skip** with a unit test rather than relying on the accident. Size is one checkout plus one venv — measured at roughly **868 MB** for a lane of this shape on this machine, which is the disk cost this risk is actually about; the earlier "one checkout plus one venv" phrasing understated it.
+
+### Risk 4: The shadow verdict is greppable but never actually read
+**Impact:** #3076 stays permanently ungated on evidence nobody looks at.
+**Mitigation:** The `reason=` token makes a single `grep` over a month of logs a complete answer, and #3076 names reading them as its entry condition. This is a process risk the plan can bound but not eliminate; it is accepted.
+
+## Race Conditions
+
+### Race 1: Two nightly invocations overlap
+**Location:** `main()` entry.
+**Mitigation:** Unchanged — the existing `_acquire_run_lock()` flock serializes nightly runs; the loser is a no-op. The baseline worktree therefore has exactly one writer.
+
+### Race 2: A concurrent human `git worktree` operation touches the baseline worktree
+**Location:** `.worktrees/nightly-baseline/`.
+**Trigger:** A developer or another lane running `git worktree prune`, or `python -m tools.disk_reclaim` (whose `sweep_worktrees` L334-436 is the successor to the deleted `scripts/worktree-gc.sh`), mid-classification.
+**Data prerequisite:** The worktree must exist and be on the baseline SHA for the duration of one classification.
+**State prerequisite:** A pruned-mid-run worktree must not produce a *wrong* verdict.
+**Mitigation:** Any git or pytest failure during classification → `inconclusive` → escalate. The failure mode is a false escalation (noisy, safe), never a false `autonomous-fix`. The build task adds a named-lane skip to `sweep_worktrees` so the common case does not arise.
+
+*(The hand-back write/read race from earlier rounds is gone with the hand-back — it moves to #3076.)*
+
+## No-Gos (Out of Scope)
+
+- [SEPARATE-SLUG #3076] The autonomous fixer dispatch, the `GH_TOKEN`/per-session env seam, the `AgentSession.nightly_fix_handback` field and its helper CLI, the escalation/fail-safe watchdog, the fail-closed diff-path and merge/draft-state guards, the three-leg `active`-mode preflight, the `fix_sessions` map, and the `valor-telegram send --silent` notify transport. **Blocked on two seams that do not exist** (Scope Boundary) and on shadow evidence this plan produces.
+- [SEPARATE-SLUG #2405] Migrating the nightly dispatch to a Claude Cowork routine.
+- [SEPARATE-SLUG #2405] A dedicated intra-day launchd watchdog.
+- Any cross-run learning or auto-tuning of the guardrail constants — they ship provisional and env-overridable.
+
+The invariants "never auto-merge to main" and "never edit source files to make a failing
+test pass" remain permanent safety boundaries of the *eventual* feature. **This plan does not
+need them, because it dispatches nothing and edits nothing.** That is the point of the cut:
+rather than asserting a never-merge guarantee whose two legs are a 404 and a missing env
+seam, the plan ships the half that needs no such guarantee, and #3076 carries the half that
+does — gated in its own entry condition on both legs existing.
+
+## Update System
+
+- **Two** new env-overridable constants (`NIGHTLY_FIX_MODE`, `NIGHTLY_FIX_MAX_FAILURES`) have safe in-code defaults (`NIGHTLY_FIX_MODE` defaults to `shadow`), so no `.env` propagation is required. Document them in `.env.example` for discoverability.
+
+  **Env-completeness note (round-8 correction).** Two independent requirements apply, and
+  omitting the second makes both knobs report missing on **every** `/update`, on every machine:
+  1. The check requires a comment line immediately above each `KEY=` line.
+  2. `check_env_completeness` treats an **unmarked** declaration as *required* — the fail-closed
+     default (`scripts/update/verify.py` L975-982, consumed L1027). Only a **bare** `@optional`
+     comment line exempts it: `_OPTIONAL_SIGIL_RE = re.compile(r"^@optional$")` (L981) anchors
+     both ends, so `# @optional (tunable)` does **not** match.
+
+  3. **The declaration must be UNCOMMENTED** (round-11 correction; the round-9 spec was inert).
+     `_parse_env_example` (`scripts/update/verify.py` L1000-1039) recognizes a declaration only
+     when the **stripped** line matches `_KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")` (L971);
+     the `elif stripped.startswith("#")` arm above it swallows any *commented* placeholder into
+     the comment accumulator instead. Under a commented `# NIGHTLY_FIX_...=` placeholder the key
+     is never a declaration at all, `check_env_completeness` never reports it, and the
+     `@optional` sigil does nothing — the round-9 fix would have been a no-op.
+  4. **The block must end with a blank line.** The accumulator resets only on a blank or
+     non-comment line (L1036-1037, and the docstring says so outright), so a block running
+     straight into the next declaration bleeds its `@optional` onto that key — the
+     "a wrong marker silences a real secret forever" case the sigil comment at L973-976 names.
+
+  Each knob therefore ships as a **four-line block** matching the repo's own precedent for this
+  exact class of knob (`.env.example` L89-92: description comment, bare `# @optional`,
+  **uncommented** `SDLC_REVIEW_CROSS_VENDOR=0`, blank line): a `#` line describing the knob and
+  its default, then a line that is exactly `# @optional`, then an **uncommented**
+  `NIGHTLY_FIX_...=<default>` declaration, then a blank line. Both are behavior toggles with
+  in-code defaults and neither is a credential, so
+  `@optional` is correct here. The axes are independent: `@optional` does **not** exempt a key
+  from `tests/unit/test_env_declaration_readers.py`, which requires a reader in tracked
+  non-markdown code — satisfied by the two module-scope `os.environ.get` reads.
+- **No Popoto schema change**, therefore **no `scripts/update/migrations.py` entry.** The `AgentSession` field moved to #3076 with the hand-back.
+- **No new persisted state key** in `data/nightly_tests_last_run.json`, so no state-file migration or back-compat shim is needed on any machine.
+- **No CLI surface change.** `valor-telegram` is untouched, so nothing must land in lockstep across machines and no bridge restart is required by this plan.
+- No new launchd job: classification runs inside the existing nightly invocation, so `scripts/install_nightly_tests.sh` needs no change.
+- No new config files, no permission subsystem, no new secrets.
+- **One filesystem addition:** the persistent baseline worktree at `.worktrees/nightly-baseline/`. `.worktrees/` is already gitignored. **The build task adds a named-lane skip to `tools/disk_reclaim.py::sweep_worktrees`** (L334-436) so the lane is not swept as a stale lane worktree. `scripts/worktree-gc.sh` — named by earlier rounds — was deleted and replaced by `tools/disk_reclaim.py` under #2517 and does not exist at `b90e998920f`. This is a **second file this plan modifies**; it propagates to every machine on the next `/update` with no config or migration step.
+
+## Agent Integration
+
+**No agent integration is required — this plan dispatches no session and adds no
+agent-reachable surface.** The nightly runner is a launchd script, not a bridge tool; it
+gains an internal function and a log line. There is no new CLI entry point in
+`pyproject.toml [project.scripts]`, no bridge import, and no new `AgentSession` behavior.
+
+The existing `maybe_dispatch_triage_session` (L856) investigate-only dispatch continues
+unchanged. Rewriting that mandate into a bounded-fix mandate is #3076's work, and it is
+explicitly not started here — because without the per-session env seam the dispatched
+session's `gh` would carry the operator's admin credentials, which is the condition that
+made the never-merge guarantee vacuous in round 6.
+
+## Documentation
+
+### Feature Documentation
+- [x] Update `docs/features/nightly-regression-tests.md` — document the new classification stage: the in-process `classify_against_baseline` function and its keyword-only injection seam, the baseline ref as **"the prior run's HEAD SHA"** (`prev["head_commit"]`, never bare `main`) with the per-node soundness sentence beside it — **do not call it "last-green" or "last-known-good"**, since L1092 writes it on every non-fatal run and nothing in the detector records greenness — the **seven classification preconditions** as the single canonical list, the classifier's **own** JSON report path and why it must not share `PYTEST_SERIAL_JSON_TMP`, the **provisioned persistent baseline worktree and why it must have its own `.venv`** (#3033), the three buckets and the fail-toward-escalate rule, the pure decision gate, the `off`/`shadow` modes, the `nightly-fix shadow-verdict:` log contract including its `reason=` token vocabulary, the sibling `nightly-fix shadow-buckets:` line and **the one-sentence statement of what the classifier discriminates that `compute_new_failures` does not** (`compute_new_failures` proves a node was ABSENT from the prior confirmed-failing set; the classifier proves it PASSED at that SHA — they differ exactly when the node was not collected then, was a filtered artifact, or the prior run was untrusted), the `PYTEST_BASELINE_TIMEOUT_SECONDS` bound, and the **two** guardrail constants.
+- [x] Update the worktree/disk-reclaim doc covering `tools/disk_reclaim.py` — record `PROTECTED_WORKTREE_SLUGS` and why `nightly-baseline` is never reaped. Do **not** reference `scripts/worktree-gc.sh`; it does not exist.
+- [x] Update `docs/features/nightly-triage-dispatch.md` — state plainly that alerting behavior is **unchanged** by this plan (the up-front page fires in both shipped modes), and that the autonomous-fix tier is deferred to #3076 with its two blocking seams named. Do not describe a fixer that does not exist.
+- [x] Add/confirm entries in `docs/features/README.md` index.
+
+### Inline Documentation
+- [x] Each guardrail constant carries a grain-of-salt/provisional comment and its env-override name.
+- [x] Docstring `decide_fix_or_escalate` (the gate's exact conditions and their order, since `reason=` reports the first failure) and `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]` = the prior run's HEAD SHA, never bare `main`) plus its provisioning preconditions and the purpose of each keyword-only injection parameter.
+- [x] Comment `PYTEST_BASELINE_JSON_TMP` at its declaration with the one-line reason it exists: `main()` re-reads `PYTEST_SERIAL_JSON_TMP` at L1209 to build the alert, so the classifier must not write it.
+- [x] Docstring the `cwd` parameter added to `_spawn_pytest`, noting that the default preserves both existing callers byte-identically.
+
+## Success Criteria
+
+- [ ] `send_telegram` logs a WARNING naming the return code (and does **not** log `"Telegram sent"`) when the subprocess exits non-zero — asserted by test. This lands first and is independently valuable.
+- [ ] `_spawn_pytest` accepts a `cwd` parameter defaulting to `PROJECT_DIR`, and `run_tests` / `reconfirm_serial` still spawn with `cwd=PROJECT_DIR` (asserted via `Popen` call capture).
+- [ ] **The classifier is demonstrably not inert**: a non-stubbed test over a two-commit fixture repo — driven through `classify_against_baseline`'s keyword-only injection seam, with no monkeypatching of module globals — classifies a node that passes at the baseline SHA and fails at HEAD as `newly_broken`, and a node failing at both as `pre_existing`. The fixture is a **linked worktree** (`.git` is a file, so the #3033 guard is live) whose `pyproject.toml` contains a literal `[tool.pytest.ini_options]` section (so `pytest-clean.sh` L33-39 resolves `REPO_ROOT` to the fixture, not `SCRIPT_ROOT`) **plus a `[project]` table**, and whose `.venv` carries `pytest`, `pytest-json-report` **and `pytest-xdist`** (so the wrapper's L165-168 `--version` gate passes and neither `--json-report` nor `-n0` aborts as an unrecognized argument). **All three of those fixture properties are themselves asserted.** This criterion cannot be satisfied by a stub, and it was **executed end to end at plan time** rather than designed on paper.
+- [ ] **The baseline lane is not reapable by accident**: `tools/disk_reclaim.py::sweep_worktrees` skips `nightly-baseline` with reason `protected` even when every other guard would pass it — asserted by test. (`scripts/worktree-gc.sh` does not exist; it was replaced by `tools/disk_reclaim.py` under #2517.)
+- [ ] **Every long-running call is bounded**: the classifier spawn passes `timeout=PYTEST_BASELINE_TIMEOUT_SECONDS` (a declared module int beside L165/L171, not an env knob, not an ellipsis), and each provisioning `subprocess.run` carries an explicit `timeout=`; a `TimeoutExpired` from any of them is `inconclusive` → `escalate`.
+- [ ] **On nights where classification ran, the per-node buckets are logged**: `nightly-fix shadow-buckets: newly_broken=… pre_existing=… inconclusive=… not_newly_broken=…`, with the verdict line byte-stable alongside it. Without this the artifact answers "would the gate have fired" but not "would it have been right".
+- [ ] **The classifier writes its own report file**: `PYTEST_SERIAL_JSON_TMP` is byte-identical before and after `classify_against_baseline(...)`, the classifier's argv carries `--json-report-file=<PYTEST_BASELINE_JSON_TMP>`, and in `shadow` the `send_telegram` argument on the `new_failures` branch is byte-identical to the `off`-mode argument for the same inputs.
+- [ ] **The classifier spawn carries `TEST_DB_CLAIM_WAIT_S="300"`** (matching `run_tests` L374 and `reconfirm_serial` L584), asserted via `Popen` call capture.
+- [ ] Classification is **synchronous and in-process** — no subagent, no spawned session, no Task tool — and `.claude/agents/baseline-verifier.md` is unmodified (`git diff --name-only origin/main -- .claude/agents/` is empty).
+- [ ] The baseline worktree is provisioned with its own pin-matching `.venv`, and **every** provisioning failure (worktree add, detached checkout, `uv sync`) yields `inconclusive` → `escalate` with **no fallback to `PROJECT_DIR`** (asserted for each failure).
+- [ ] `NIGHTLY_FIX_MODE=off` reproduces current behavior exactly: the up-front page fires, and no classification, worktree, gate, or verdict log occurs. `NIGHTLY_FIX_MODE=shadow` (the default) classifies, gates, logs the verdict, **and still pages up front**. Both asserted via `send_telegram` call capture.
+- [ ] Every non-`off` run with a non-empty `new_failures` logs `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason=... nodes=...`, with `reason` naming the first failing gate condition — **including the runs where a precondition skipped classification**, whose `reason` names that precondition.
+- [ ] The motivating case passes its own gate: 11 all-`newly_broken` failures → `autonomous-fix` (asserted). `MAX_DISPATCH_NODES` truncation is not a disqualifier and `NIGHTLY_FIX_MAX_FAILURES` is not dead config.
+- [ ] On any `pre_existing` / `inconclusive` bucket the gate returns `escalate`.
+- [ ] **The seven classification preconditions are enforced at the call site, before any work.** For each of the five refusable ones (`--dry-run`, seed/re-baseline, integrity-warned, `len(new_failures) > NIGHTLY_FIX_MAX_FAILURES`, missing `prev["head_commit"]`): no `git` subprocess and no `_spawn_pytest` call occurs, the verdict is `escalate`, and the log names that reason. Asserted for each of the five. The same conditions also hold inside the pure gate, so Data Flow, Test Strategy, and this criterion assert one identical list.
+- [ ] **No attempt map and no `NIGHTLY_FIX_MAX_ATTEMPTS` ship**: `data/nightly_tests_last_run.json`'s persisted key set after a `shadow` run equals the `off`-mode key set (asserted), and neither identifier appears in the source.
+- [ ] Existing detector behavior is unchanged: `tests/unit/test_nightly_regression_tests.py` passes with no modification to any `compute_dispatch_set` / `carry_dispatched_nodes` / `seeded_nodes` / `validate_run_integrity` / dispatch-prompt assertion.
+- [ ] Every guardrail number is a named env-overridable constant read via `os.environ.get` with a provisional comment; **no constant is declared without a reader** (the two whose only consumers were the deferred guards are not declared).
+- [ ] **Nothing from the deferred #3076 stack ships**: no session dispatch change, no `nightly_fix_handback` field or migration, no watchdog, no PR guards, no preflight, no `--silent` flag (grep-verifiable — see Verification).
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
+
+## Team Orchestration
+
+The lead orchestrates; it never builds directly.
+
+### Team Members
+
+- **Builder (transport + spawn seam)**
+  - Name: `seam-builder`
+  - Role: the `send_telegram` `.returncode` check; the `_spawn_pytest` `cwd` parameter with byte-identical existing callers.
+  - Agent Type: builder
+  - Domain: subprocess handling
+  - Resume: true
+
+- **Builder (classifier + gate)**
+  - Name: `gate-builder`
+  - Role: baseline-worktree provisioning (`git worktree add --detach` + conditional `uv sync`, bounded by explicit subprocess timeouts, plus the `PROTECTED_WORKTREE_SLUGS` skip in `tools/disk_reclaim.py::sweep_worktrees`); `classify_against_baseline` including its keyword-only injection seam and its own `PYTEST_BASELINE_JSON_TMP`; the pure `decide_fix_or_escalate`; the two guardrail constants; the precondition-guarded call site, mode-scoped wiring, and verdict log in `main()`.
+  - Agent Type: builder
+  - Domain: git/subprocess + pytest-wrapper semantics
+  - Resume: true
+
+- **Test engineer**
+  - Name: `classifier-tester`
+  - Role: the **non-stubbed two-commit fixture-repo tests** (the falsifiability suite), the stubbed gate/mode units, the `sweep_worktrees` protected-lane test, and the failure-path coverage.
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: `scope-validator`
+  - Role: verify the classifier is not inert (the fixture tests genuinely exercise the real function, not a stub); verify provisioning never falls back to `PROJECT_DIR`; verify `off`/`shadow` both still page; verify **nothing from #3076 leaked in** (no dispatch-mandate change, no `nightly_fix_handback`, no watchdog, no `--silent`, no preflight); run every Verification command.
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: `nightly-doc`
+  - Role: update the two feature docs and the index; ensure neither describes a fixer that does not exist.
+  - Agent Type: documentarian
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Alert-transport returncode check (independently shippable)
+- **Task ID**: build-returncode
+- **Depends On**: none
+- **Validates**: `tests/unit/test_nightly_regression_tests.py` returncode test
+- **Assigned To**: seam-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- In `send_telegram` (`scripts/nightly_regression_tests.py` L609-635), capture the `CompletedProcess` from the `subprocess.run` at L626, log `WARNING: telegram send failed rc=... stderr=...` on non-zero, and emit the `"Telegram sent: {msg}"` line (L633) **only** on zero.
+- No signature change, no new parameter. `--silent` is **not** added — it has no consumer in this plan (deferred to #3076).
+- This is a strict improvement to the existing detector and lands first: without it, any future transport failure is invisible.
+
+### 2. `_spawn_pytest` cwd seam
+- **Task ID**: build-cwd-seam
+- **Depends On**: none
+- **Validates**: `tests/unit/test_nightly_regression_tests.py` cwd back-compat test
+- **Assigned To**: seam-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `cwd: Path | str = PROJECT_DIR` to `_spawn_pytest` (L283) and forward it to the `Popen` call (currently hardcoded `cwd=PROJECT_DIR` at L302).
+- `run_tests` (L379) and `reconfirm_serial` (L587) pass nothing — assert both remain byte-identical in behavior via `Popen` call capture.
+- Docstring the parameter, noting the default preserves existing callers.
+
+### 3. Baseline worktree provisioning + in-process classifier
+- **Task ID**: build-classifier
+- **Depends On**: build-cwd-seam
+- **Validates**: `tests/unit/test_nightly_classifier.py` (create)
+- **Assigned To**: gate-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- **`head_commit` is already persisted** (`current["head_commit"] = _get_head_commit()`, L1092; helper L1344). Do NOT re-add it. Consume `prev["head_commit"]` as the baseline ref — **the prior run's HEAD SHA**, never described as "last-green" (L1092 writes on every non-fatal run; nothing records greenness).
+- Provision a **persistent** baseline worktree at a fixed path (`.worktrees/nightly-baseline/`): create with `git worktree add --detach <path> <baseline_sha>` + `uv sync` inside it if absent; otherwise `git -C <path> checkout --detach <baseline_sha>` and re-run `uv sync` **only when `uv.lock` changed** since the last provision (marker file inside the worktree). The `.venv` is mandatory — `scripts/pytest-clean.sh` L135-145 refuses a linked worktree without one (#3033) and L169-175 refuses an off-pin interpreter (#2617).
+- **Add a named-lane skip to `tools/disk_reclaim.py::sweep_worktrees`** (L334-436) so the baseline lane is never reaped. `scripts/worktree-gc.sh` does **not** exist — it was deleted and replaced by `tools/disk_reclaim.py` under #2517; do not look for it. Declare a module constant `PROTECTED_WORKTREE_SLUGS = frozenset({"nightly-baseline"})` and skip with reason `protected` as the **first** guard inside the `for child in sorted(worktrees_root.iterdir())` loop (L368), before the `too_young` check. Today the lane survives only by guard-order accident (`too_young` while the nightly touches it, then `merged_via_tree(repo_root, "session/nightly-baseline", "main")` at L409 returning `False` for a branch that never existed → `skip(slug, "unmerged")`), which inverts the moment a branchless lane is treated as reapable. Add a unit test asserting `nightly-baseline` is skipped with reason `protected` **even when every other guard would pass it** (old enough, clean, no live process, no open PR).
+- Every provisioning subprocess (`git worktree add`, `git checkout --detach`, `uv sync`) runs under `subprocess.run(..., timeout=...)`. A `TimeoutExpired` from any of them is `inconclusive`, exactly like a non-zero exit — an unbounded `uv sync` at 03:00 on a cold or network-stalled cache otherwise has no bound and no route to a bucket.
+- Declare `PYTEST_BASELINE_TIMEOUT_SECONDS = 1800` beside `PYTEST_TIMEOUT_SECONDS` (L165) and `PYTEST_RECONFIRM_TIMEOUT_SECONDS` (L171) and pass it as the classifier spawn's `timeout=`. It is a **plain module int, not an env knob** — matching the convention of its two neighbours, and mechanically required: a `NIGHTLY_FIX_*` env knob would break this plan's own Verification row `grep -c 'os.environ.get("NIGHTLY_FIX' … == 2`.
+- Add the module constant `PYTEST_BASELINE_JSON_TMP = "/tmp/nightly_pytest_baseline_report.json"` beside `PYTEST_JSON_TMP` (L108) and `PYTEST_SERIAL_JSON_TMP` (L109), with the comment explaining why a distinct path is mandatory.
+- Write `classify_against_baseline(node_ids, baseline_sha, *, repo_root: Path = PROJECT_DIR, worktree_path: Path = BASELINE_WORKTREE, wrapper: Path = PYTEST_CLEAN_SH, report_path: str = PYTEST_BASELINE_JSON_TMP) -> {newly_broken, pre_existing, inconclusive}`. The four keyword-only parameters are the **injection seam** the falsifiability test drives; production defaults keep `main()`'s call site a two-argument call. Provision, unlink `report_path`, then spawn the serial pytest shape via `_spawn_pytest(argv, env=env, timeout=PYTEST_BASELINE_TIMEOUT_SECONDS, cwd=worktree_path)` with the **exact** argv and env in Technical Approach:
+  - `argv = [str(wrapper), *node_ids, "-n0", "--tb=no", "-q", "--json-report", f"--json-report-file={report_path}"]`
+  - `env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}` — verbatim from L374/L584. **Not optional**: without it the db claim in `pytest_configure` times out at the 30s interactive default and every node buckets `inconclusive`.
+  - **Never** pass `PYTEST_SERIAL_JSON_TMP` (L109) or `PYTEST_JSON_TMP` (L108) as `report_path`. `main()` re-reads the serial report at L1209 to build the human's alert (`summarize_failures`, L1213); overwriting it with baseline results would summarize the alert from a report where the newly-broken nodes passed.
+  - Parse the JSON report and bucket each node. Interpolate the SHA as a literal — no shell parameter expansion. Carry a timeout.
+- **Every** failure path (worktree add, checkout, `uv sync`, collection error, timeout, unparseable report, node absent from the report, any exception) → `inconclusive`. **Never fall back to running at `PROJECT_DIR`** — that fallback classifies everything `pre_existing` and looks like a working classifier.
+- **Do NOT touch `.claude/agents/baseline-verifier.md`** and do NOT route classification through a spawned session (no Python invocation seam; a session would make classification asynchronous — a two-night handshake).
+- Handle absent `prev["head_commit"]` → no classification, gate escalates with that reason.
+
+### 4. Decision gate, mode wiring, verdict log
+- **Task ID**: build-gate
+- **Depends On**: build-classifier
+- **Validates**: `tests/unit/test_nightly_decision_gate.py` (create)
+- **Assigned To**: gate-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Pure `decide_fix_or_escalate(classification, new_failures, caps, run_flags) -> "autonomous-fix" | "escalate"` with exactly the eight-clause short-circuit in Technical Approach, in that order (the order defines the `reason=` token). **Do NOT include a `MAX_DISPATCH_NODES` truncation clause**: it truncates the triage-filing set (L1160-1166), not `new_failures` (L654), and would disqualify the plan's own 11-failure motivating case while making `NIGHTLY_FIX_MAX_FAILURES` dead config.
+- **Guard the classifier call site with the seven `CLASSIFY_PRECONDITIONS`** (Data Flow step 2) evaluated *before* `classify_against_baseline` is called, so a refused night does **no** git and **no** pytest work. The first five gate clauses are the same conditions, so the two lists cannot diverge in behavior; the gate re-checks them because they are pure and cheap, which keeps its unit tests standalone.
+- **Two** module-scope guardrail constants via `os.environ.get` with provisional comments: `NIGHTLY_FIX_MODE` (`off`|`shadow`, default `shadow`; unrecognized → treated as `off`) and `NIGHTLY_FIX_MAX_FAILURES` (default 15). **Declare no constant without a reader** — `NIGHTLY_FIX_MAX_CHANGED_FILES`, `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS`, and `NIGHTLY_FIX_MAX_ATTEMPTS` are not declared here.
+- Wire classification + gate into `main()` alongside the `elif new_failures:` arm (L1207), **without changing the alert**: `send_telegram(msg, dry_run=args.dry_run)` (L1220) fires in both `off` and `shadow` exactly as today, with byte-identical text. `off` additionally skips classification and the gate entirely.
+- Log the verdict on every non-`off` run with non-empty `new_failures`, **including precondition-skipped nights**: `nightly-fix shadow-verdict: {autonomous-fix|escalate} reason={first failing condition} nodes={n}`. Keep this line byte-stable.
+- **Additionally**, only on nights where classification actually ran, log the sibling bucket line `nightly-fix shadow-buckets: newly_broken={n} pre_existing={n} inconclusive={n} not_newly_broken={comma-joined node ids}`. Without it a month of logs cannot answer whether the gate would have been *right*, only whether it would have *fired*. Bounded by precondition 6.
+- **Add no key to `data/nightly_tests_last_run.json`.** No `classify_attempts` map and no `NIGHTLY_FIX_MAX_ATTEMPTS` — unreachable at this scope (`compute_new_failures` L654 admits a node only once), so they are #3076's along with `fix_sessions` and the watchdog. Leave the scalar `dispatched_session_id` (L1090) untouched.
+
+### 5. Tests
+- **Task ID**: build-tests
+- **Depends On**: build-returncode, build-gate
+- **Assigned To**: classifier-tester
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- **Non-stubbed** (`tests/unit/test_nightly_classifier.py`): a two-commit fixture repo where a trivial test passes at commit A and fails at commit B, driven through `classify_against_baseline`'s **keyword-only injection seam** (`repo_root=`, `worktree_path=`, `wrapper=`, `report_path=`) with **no monkeypatching of module globals**. The fixture MUST be (a) a **linked worktree** created via `git worktree add --detach` from a temp repo, so `.git` is a file and `pytest-clean.sh` L136-146's #3033 guard is live, and (b) carry a `pyproject.toml` containing a literal `[tool.pytest.ini_options]` section, so L33-39 resolves `REPO_ROOT` to the fixture instead of falling back to `SCRIPT_ROOT` and silently running against the real repo. Assert `newly_broken` at baseline A and `pre_existing` for a node failing at both. The fixture `pyproject.toml` carries a minimal **`[project]`** table (`name`, `version`, `requires-python`) alongside `[tool.pytest.ini_options]`, and carries **no `.python-version`**. Provision its venv with **`uv venv` + `uv pip install pytest pytest-json-report pytest-xdist`, NOT `uv sync`** — `uv sync` has nothing to sync without a lockfile, `--json-report` needs `pytest-json-report`, and `-n0` needs `pytest-xdist`; both are `dev`-extra deps of the MAIN `pyproject.toml` (L44-47) that no other venv inherits, and either one missing aborts the wrapper into all-`inconclusive`. **Add THREE guard tests asserting the fixture's own properties** (`(fixture/".git").is_file()`; the `pyproject.toml` contains `[tool.pytest`; and `(fixture/".venv/bin/pytest")` exists, answers `--version` with exit 0, and accepts `-n0 --json-report` without an unrecognized-argument abort) so a future edit cannot silently degrade this into a test of the real repo or into one that can only say `inconclusive`. Also assert the `.venv`-less fixture worktree yields `inconclusive`. Mark slow; carry `@pytest.mark.timeout(120)`; **skip rather than fail** when `uv` is unavailable or provisioning exits non-zero. Assert on buckets, never wall time. **This whole path was executed end to end at revision time** (see Technical Approach): report `outcome: passed` at commit A, `outcome: failed` at commit B, full provisioning 0.09 s on a warm cache. **These are the feature's falsifiability guarantee**; a fully-stubbed suite cannot distinguish a working classifier from an inert one.
+- Report-path isolation and spawn env: `PYTEST_SERIAL_JSON_TMP` byte-identical before/after classification (on both a successful and a failed run); classifier argv carries `--json-report-file=<PYTEST_BASELINE_JSON_TMP>`; classifier `env` carries `TEST_DB_CLAIM_WAIT_S == "300"`. All via `Popen` call capture.
+- Stubbed classifier failure paths: worktree-add non-zero, checkout non-zero (unknown SHA), `uv sync` non-zero, collection error, timeout, db-claim timeout, unparseable/missing report, node absent from the report → `inconclusive` → `escalate`; plus an explicit assertion that no spawn ever used `cwd=PROJECT_DIR` on the classifier path.
+- Precondition units: for each of the five refusable preconditions, assert **no** `git` subprocess and **no** `_spawn_pytest` call, verdict `escalate`, and the matching `reason=` token. The `over_max_failures` case uses a `new_failures` list far above the cap (the re-baseline shape).
+- Gate units (`tests/unit/test_nightly_decision_gate.py`): every escalate branch; the four run-shape/data disqualifiers plus the cap; the **positive motivating case** (11 all-`newly_broken` → `autonomous-fix`); the **negative** that a `MAX_DISPATCH_NODES`-truncated run is not disqualified; empty `new_failures`; unrecognized `NIGHTLY_FIX_MODE` → treated as `off`.
+- Mode gating: `send_telegram` **is** called on the `new_failures` branch under **both** `off` and `shadow`, **with byte-identical text**; classification and the verdict log occur under `shadow` only.
+- Persisted-state invariance: the `shadow`-run key set of `data/nightly_tests_last_run.json` equals the `off`-run key set.
+- Transport + seam: `send_telegram` non-zero returncode → WARNING, no success line; `run_tests` / `reconfirm_serial` still spawn with `cwd=PROJECT_DIR`.
+- Verdict-log format asserted on both an `autonomous-fix` and an `escalate` run, including the `reason=` token.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-tests
+- **Assigned To**: nightly-doc
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/nightly-regression-tests.md` and `docs/features/nightly-triage-dispatch.md` + the index, per the Documentation section. Neither doc may describe a fixer, a watchdog, a hand-back, or a notify tier — those do not exist; point to #3076.
+
+### 7. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-tests, document-feature
+- **Assigned To**: scope-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification command; confirm all Success Criteria; confirm no #3076 surface leaked into the diff.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `pytest tests/unit/ -x -q -k nightly` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| `send_telegram` no longer claims success on a failed send | `pytest tests/unit/test_nightly_regression_tests.py -q -k "telegram_returncode"` | exit code 0 |
+| `_spawn_pytest` gained a `cwd` seam; existing callers unchanged | `pytest tests/unit/test_nightly_regression_tests.py -q -k "spawn_pytest_cwd"` | exit code 0 |
+| **The classifier is not inert** (non-stubbed fixture repo, driven through the injection seam) | `pytest tests/unit/test_nightly_classifier.py -q -k "fixture_repo"` — a node passing at baseline and failing at HEAD classifies `newly_broken`; failing at both classifies `pre_existing` | exit code 0 |
+| The fixture actually exercises the real wrapper path | `pytest tests/unit/test_nightly_classifier.py -q -k "fixture_preconditions"` — asserts (a) `.git` is a **file** (so the #3033 guard is live), (b) the fixture `pyproject.toml` contains `[tool.pytest` (so `REPO_ROOT` is the fixture, not `SCRIPT_ROOT`), and (c) `.venv/bin/pytest` exists, answers `--version` with exit 0, and accepts `-n0 --json-report` without an unrecognized-argument abort (so the wrapper's L165-168 gate passes and the bucket is not forced to `inconclusive`) | exit code 0 |
+| The baseline lane is protected from the worktree sweeper | `pytest tests/unit/ -q -k "protected_worktree or nightly_baseline_skip"` — `sweep_worktrees` skips `nightly-baseline` with reason `protected` even when every other guard would pass it | exit code 0 |
+| The retired sweeper script is not referenced by anything this plan writes | `grep -rl "worktree-gc.sh" scripts/ docs/features/` (pipe-free by the standing rule below; **deliberately excludes `tools/disk_reclaim.py`**, which carries two legitimate historical references to its own predecessor at L263 and L617 — verified present today, so a `tools/`-wide form would fail on untouched prose) | empty output |
+| The classifier's timeout is a declared constant, not an ellipsis | `grep -c "PYTEST_BASELINE_TIMEOUT_SECONDS" scripts/nightly_regression_tests.py` | output ≥ 2 (declaration + use) |
+| Per-node buckets are logged when classification ran | `grep -c "shadow-buckets" scripts/nightly_regression_tests.py` | output > 0 |
+| Classifier never falls back to the main checkout | `pytest tests/unit/test_nightly_classifier.py -q -k "no_project_dir_fallback"` | exit code 0 |
+| **The classifier does not clobber the alert's input report** | `pytest tests/unit/test_nightly_classifier.py -q -k "report_path_isolation"` — `PYTEST_SERIAL_JSON_TMP` byte-identical across classification; classifier argv carries `--json-report-file=<PYTEST_BASELINE_JSON_TMP>` | exit code 0 |
+| The classifier writes a distinct report path | `grep -c "PYTEST_BASELINE_JSON_TMP" scripts/nightly_regression_tests.py` | output ≥ 3 (declaration + unlink + argv) |
+| **Classifier spawn carries the db-claim override** | `pytest tests/unit/test_nightly_classifier.py -q -k "claim_wait"` — `Popen` env has `TEST_DB_CLAIM_WAIT_S == "300"` | exit code 0 |
+| In-process classifier present and synchronous | `grep -c "classify_against_baseline" scripts/nightly_regression_tests.py` | output ≥ 2 (definition + call) |
+| `baseline-verifier` untouched | `git diff --name-only origin/main -- .claude/agents/` | empty output |
+| Baseline worktree is provisioned with its own venv | `pytest tests/unit/test_nightly_classifier.py -q -k "provision"` — asserts `uv sync` is invoked with `cwd=<worktree>` and that a non-zero return code yields `inconclusive` with no `PROJECT_DIR` fallback | exit code 0 |
+| Up-front page fires in BOTH shipped modes, with identical text (behavioral) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "mode_gating"` — asserts `send_telegram` **is** called on the `new_failures` branch under `off` **and** under `shadow`, with a byte-identical message argument | exit code 0 |
+| **Classification preconditions are enforced before any work** | `pytest tests/unit/test_nightly_classifier.py -q -k "precondition"` — for each of `dry_run`, `seed_run`, `integrity_warnings`, `over_max_failures`, `no_baseline_sha`: no `git` subprocess, no `_spawn_pytest` call, verdict `escalate`, matching `reason=` token | exit code 0 |
+| Verdict is still logged on a precondition-skipped night | `pytest tests/unit/test_nightly_classifier.py -q -k "skip_still_logs"` | exit code 0 |
+| No new persisted state key | `pytest tests/unit/test_nightly_regression_tests.py -q -k "state_key_invariance"` — `shadow`-run key set == `off`-run key set | exit code 0 |
+| Shadow verdict is greppable in logs | `grep -c "shadow-verdict" scripts/nightly_regression_tests.py` | output > 0 |
+| The motivating case passes its own gate | `pytest tests/unit/test_nightly_decision_gate.py -q -k "eleven or motivating"` — 11 all-`newly_broken` → `autonomous-fix` | exit code 0 |
+| Truncation is not a disqualifier | `grep -c "dispatch_truncated" scripts/nightly_regression_tests.py` | match count == 0 |
+| Run-shape/data disqualifiers gate the verdict (four, not a truncation clause) | `pytest tests/unit/test_nightly_decision_gate.py -q -k "seed or integrity or dry_run or no_baseline"` | exit code 0 |
+| Guardrail constants are env-overridable (module-scope) | `grep -c 'os.environ.get("NIGHTLY_FIX' scripts/nightly_regression_tests.py` | output == 2 |
+| No constant declared without a reader (the three deferred knobs are absent) | `grep -c -e NIGHTLY_FIX_MAX_CHANGED_FILES -e NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS -e NIGHTLY_FIX_MAX_ATTEMPTS scripts/nightly_regression_tests.py` | match count == 0 |
+| No attempt map ships | `grep -c "classify_attempts" scripts/nightly_regression_tests.py` | match count == 0 |
+| Both `.env.example` knobs parse as **real, `@optional`-marked declarations** | `.venv/bin/python -c "from pathlib import Path; from scripts.update.verify import _parse_env_example; print(sum(1 for k,_,o,_ in _parse_env_example(Path('.env.example')) if k.startswith('NIGHTLY_FIX_') and o))"` — asks the **actual parser** `/update` uses, so it cannot pass under a commented placeholder the parser never sees | output == 2 (verified to print `0` on `.env.example` today, so it discriminates) |
+| Retired `dispatched_hash` not resurrected | `grep -c -e dispatched_hash -e failing_set_hash scripts/nightly_regression_tests.py` | match count == 0 |
+| Pre-existing detector behavior untouched (dedup, seed umbrella, run integrity, dispatch prompt) | `pytest tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
+| **#3076 surface did not leak in — no fixer dispatch** | `grep -c -e nightly_fix_handback -e maybe_dispatch_fix_session -e "pr diff --name-only" -e branches/main/protection -e SDLC_AGENT_GH_TOKEN scripts/nightly_regression_tests.py` | match count == 0 |
+| **#3076 surface did not leak in — no notify transport** | `grep -c '"--silent"' tools/valor_telegram.py` | match count == 0 |
+| **#3076 surface did not leak in — no schema change** | `git diff --name-only origin/main -- models/ scripts/update/migrations.py` | empty output |
+| Investigate-only triage mandate is unchanged by this plan | `grep -c "auto-hotfix" scripts/nightly_regression_tests.py` | output > 0 (L846 intact) |
+
+**Note on `grep` alternation (round-7 correction).** `grep -E` treats `\|` as a **literal
+pipe**, not alternation — verified on a file containing both `gh pr ready` and `gh pr merge`:
+the `-E`-with-backslash form returns `0`, the unescaped `-E` form returns `2`. Two rows in
+earlier rounds used `grep -Ec "a\|b"` and therefore passed vacuously regardless of file
+contents, including a never-raw-Redis safety guard.
+
+**Root cause, found in round 8: the escaping is a markdown artifact, and round 7's sweep did
+not actually take.** A literal `|` inside a markdown table cell terminates the cell, so every
+alternation written into this table gets backslash-escaped by the author for *rendering*
+reasons — and the escaped text is then what a builder copies into a shell, where under `-E` it
+means a literal pipe. Round 7 recorded the rule and left three rows still carrying `\|` under
+`-E` (the dead-constant row, the `dispatched_hash` row, and the #3076-leak row), all with
+`== 0` expectations, all vacuous. Recording a rule does not enforce it when the rendering
+pressure that caused the bug is still present.
+
+**The standing fix is structural, not a rule: never put alternation in a `grep` command inside
+a table cell.** Use repeated `-e` patterns — `grep -c -e A -e B file` — which is exactly
+equivalent, needs no `|` at any level, and therefore cannot be corrupted by markdown escaping.
+Every alternation row in the table above now uses that form. This is load-bearing for any row
+whose expectation is `== 0`.
+
+**Note on unsatisfiable anti-criteria (round-7 correction).** Earlier rounds asserted
+`grep -Ec "gh pr ready\|gh pr merge" == 0` while simultaneously requiring the dispatch mandate
+to *explicitly forbid* those verbs — a prompt string in the same file. A correct implementation
+would have turned the safety anti-criterion red, pressuring a builder to weaken the mandate or
+obfuscate the strings. Both rows are **removed** along with the mandate rewrite they guarded
+(#3076). When #3076 reinstates them, the criterion must be behavioral ("the runner never
+*executes* those verbs", asserted over the runner's `subprocess` argv literals plus a positive
+assertion that the mandate string contains the prohibition), never a whole-file string absence.
+
+## Critique Results
+
+<!-- Rounds 1-10 findings are all RESOLVED. Round 11 (2026-09-02, FULL depth, baseline
+     2aaad3a51) returned NEEDS REVISION — 1 blocker, 1 concern, 3 nits — whose rows are
+     `pending` at the bottom of the table.
+     Round 10 (2026-09-02, FULL depth, baseline 7ad96644b) returned NEEDS REVISION — 2
+     blockers, 4 concerns, 2 nits — all resolved in the round-11 revision at baseline
+     b90e998920f. Round 8 (baseline b2e15a9a0) returned NEEDS REVISION — 3 blockers,
+     2 concerns, 2 nits — all resolved in the round-9 revision at baseline 5b35d5212.
+     Round 6 (baseline 33fe1d2c7) also returned NEEDS REVISION and was fully resolved in the
+     round-7 revision at baseline 2d60de31d, two of its blockers by cutting scope rather than
+     by asserting a mechanism. Standing deviation, recorded inline here rather than by
+     reference to an ephemeral run dir: in rounds 6, 8 and 10 the Agent/Task tool was
+     unavailable, so the three FULL lenses were applied by the driving agent directly. -->
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History & Consistency + Scope & Value (round 1, all 3 agreed) | The "structural never-merge" resolution has no implementation seam. `tools.valor_session create` exposes no permission flag; `AgentSession` has no permission field; every `claude-cli` spawn is hardcoded `--permission-mode bypassPermissions` (`agent/session_runner/harness/claude.py` L154-168); `PermissionRequest` hooks do not fire under `claude -p`. | **RESOLVED (round 2), and the underlying tier is now DEFERRED (round 7)** | The permission profile was deleted in round 2. Round 7 established that the *entire* enforcement stack it was replaced by is also unbuildable here (no per-session env seam, branch protection 404), so the fixer tier moved to **#3076** rather than shipping behind an unreachable flag. |
+| CONCERN | Risk & Robustness (round 2) | The `gh pr diff --name-only` guard's failure path was unspecified and could vacuously satisfy "every path under `tests/`". | **RESOLVED (round 2); DEFERRED (round 7)** | Guard was made fail-closed in round 2; the guard itself moves to #3076 with the watchdog. The fail-closed design is recorded there. |
+| CONCERN | Scope & Value (round 2) | The notify-vs-page tiering was verified only by a prose grep, but `send_telegram` has no urgency parameter. | **RESOLVED (round 2), re-resolved (round 5), DEFERRED (round 7)** | Rounds 2-5 progressively established the tier needed a real three-hop transport. Round 7 defers the whole notify tier to #3076 — without an `active` happy path it has no consumer, and a `--silent` flag nothing calls is a dead CLI surface on every machine. |
+| CONCERN | History & Consistency (round 2) | The plan was internally inconsistent about how settled the permission mechanism was. | **RESOLVED (round 2)** | Resolved Decision #2 rewritten to a single honest enforcement decision; the "build-time detail" hedge removed. |
+| BLOCKER | Risk & Robustness (round 3) | Round 2's "draft-PR structural no-auto-merge" guarantee is only prompt-strength — under `bypassPermissions` the session's bash can run `gh pr ready` then `gh pr merge`. | **RESOLVED (round 3); DEFERRED (round 7)** | The honest limitation was stated in round 3 and the real guarantee moved server-side. Round 7 verified that guarantee's legs do not exist here and cut the tier that needs them. |
+| CONCERN | Risk & Robustness (round 3) | `fix_attempt_count` dedup reset semantics unspecified; unbounded growth. | **RESOLVED (round 3-4); CARRIED (round 7)** | Keyed map with increment-per-attempt and prune-when-green survived as `classify_attempts` through round 7. **Round 9 removed it entirely** — unreachable at this scope, so the unbounded-growth concern it answered cannot arise here. It moves to #3076 with the fixer. |
+| CONCERN | Scope & Value (round 3) | The bespoke AST verify script was redundant with behavioral mode-gating tests. | **RESOLVED (round 3)** | Script and its Verification row removed; the anti-criterion is behavioral. |
+| CONCERN | History & Consistency (round 3) | The shadow→active flip prerequisite was prose-only and unenforceable. | **RESOLVED (round 3); SUPERSEDED (round 7)** | The runtime preflight moved to #3076 with `active` mode. The flip is now gated by #3076's entry condition (both seams existing) plus this plan's shadow-log evidence. |
+| CONCERN | Risk & Robustness (round 3) | Ambiguity about which PR the watchdog inspects. | **RESOLVED (round 3); DEFERRED (round 7)** | The hand-back-`pr_url`-only rule is recorded in #3076. |
+| NIT | History & Consistency (round 3) | `.env.example` requires a comment line above each `KEY=`. | **RESOLVED (round 3); CARRIED (round 7)** | Update System specifies two-line blocks for the three surviving constants. |
+| BLOCKER | Risk & Robustness (round 4) | The branch-protection preflight ignored `enforce_admins`, so an admin-scoped token could merge a zero-approval PR. | **RESOLVED (round 4), REVERSED (round 5), DEFERRED (round 7)** | Round 5 replaced the repo-wide `enforce_admins` requirement with a non-admin fixer identity. Round 7 found that identity has no injection seam, so the whole enforcement design moves to #3076 where the seam is a prerequisite. |
+| CONCERN | Risk & Robustness (round 4) | A scalar `dispatched_session_id` would be orphaned by a second dispatch. | **RESOLVED (round 4); DEFERRED (round 7)** | The keyed `fix_sessions` map existed to serve the watchdog; both move to #3076. **Round 9:** this plan now adds **no** per-node map at all and leaves the live scalar (L1090) untouched. |
+| CONCERN | Scope & Value (round 4) | `NIGHTLY_FIX_MAX_CHANGED_FILES` was declared but never wired (dead constant). | **RESOLVED (round 4); RE-RESOLVED (round 7)** | Round 4 wired it into the diff-path guard. Round 7 defers that guard, so the constant is **not declared here** — the lesson generalized into a Success Criterion and a Verification row asserting no constant ships without a reader. |
+| CONCERN | History & Consistency (round 4) | `fix_attempt_count` vs `fix_attempts` naming/semantics contradiction. | **RESOLVED (round 4); CARRIED (round 7)** | One name, one semantics through round 7 (`classify_attempts`). **Round 9 removed the map**, so the contradiction has no surface left in this plan; #3076 inherits the single-name rule. |
+| BLOCKER | Risk & Robustness (round 5) | `valor-telegram send --silent` does not exist; `disable_notification` has zero hits; and `send_telegram` never checks `.returncode`, so a dropped notify would log success. | **RESOLVED (round 5); SPLIT (round 7)** | The `.returncode` half is a genuine standalone defect and **ships here as Step 1**. The `--silent` transport half moves to #3076 with its only consumer. |
+| BLOCKER | Risk & Robustness (round 5) | `baseline-verifier` is Task-tool-only with zero `.py` callers; the classification stage had no invocation seam. | **RESOLVED (round 5); CARRIED and COMPLETED (round 7)** | Classification is in-process. Round 7 completed the resolution by supplying the *execution* seam round 5 left open — see the next row. |
+| BLOCKER | History & Consistency (round 5) | `NIGHTLY_FIX_MODE=off` carried two incompatible semantics (pages as today vs. no longer pages). | **RESOLVED (round 5); SIMPLIFIED (round 7)** | With `active` cut, both shipped modes page exactly as today, so the contradiction cannot recur. Every existing `send_telegram`-on-new-failures test stays valid unmodified. |
+| BLOCKER | History & Consistency (round 5) | The `enforce_admins` prerequisite is repo-wide and breaks direct-to-`main` `docs/plans/` commits and `/do-merge`. | **RESOLVED (round 5); DEFERRED (round 7)** | The two-leg design is recorded in #3076. Nothing in this plan requires any branch protection. |
+| CONCERN | Risk & Robustness (round 5) | The watchdog never handled an absent `AgentSession` record (`query.filter` returns `[]`, not `None`). | **RESOLVED (round 5); DEFERRED (round 7)** | The absent-record-first ordering and the empty-list return shape are recorded in #3076 with the watchdog. |
+| CONCERN | Scope & Value (round 5) | The plan's own motivating case (#2399, 11 failures) could not pass its own gate under the `MAX_DISPATCH_NODES` disqualifier. | **RESOLVED (round 5); CARRIED (round 7)** | The truncation clause stays removed; the positive 11-failure test and the `dispatch_truncated == 0` row survive into this plan's gate. |
+| NIT | Scope & Value (round 5) | The shadow verdict was not discoverable. | **RESOLVED (round 5); PROMOTED (round 7)** | The greppable verdict line is now the plan's **primary deliverable**, not a nicety — it is #3076's entry condition. |
+| NIT | History & Consistency (round 5) | Freshness Check baseline stale. | **RESOLVED (round 5), recurred, RESOLVED again (round 7)** | See the round-6 nit below. |
+| BLOCKER | Risk & Robustness (round 6) | Leg B of the only structural never-merge guarantee has no invocation seam: `maybe_dispatch_triage_session` spawns `tools.valor_session create` with no `env=` (L913-931), that CLI has no env/token flag, and it only *enqueues* — the worker, a separate launchd process, later spawns `claude -p`. The fixer would use the operator's ambient admin credentials, making both legs vacuous. Third recurrence of the same failure class. | **RESOLVED (round 7) — by CUTTING, not by asserting** | Every hop was opened and read at `2d60de31d`; the finding is confirmed exactly, and the chain is now documented as a table in **Scope Boundary** with file:line for each hop, including the two the finding did not name: `role_driver.py::subscription_auth_env` L76-100 (called L204) is a *process-global* overlay, and `models/agent_session.py` has **no** env/token/permission field, so there is nowhere to persist a per-session override. `TurnRequest.env` (`harness/base.py` L52) is the plumbing that could carry it, but nothing session-specific reaches it. Per the supervisor directive to prefer cutting over asserting: the entire fixer/enforcement tier is **removed from this plan** and filed as **#3076**, whose first blocking item is building that seam with its own tests. **No Success Criterion in this plan asserts any env export.** |
+| BLOCKER | Risk & Robustness (round 6) | The in-process classifier has no working-tree or venv story and can ship completely inert while passing every one of its own criteria: `_spawn_pytest` hardcodes `cwd=PROJECT_DIR` (L297-306) and routes through `pytest-clean.sh`, which aborts on an off-pin venv — and a bare `git worktree add` has no `.venv`. Every resolution either classifies against HEAD's source (all `pre_existing`) or aborts (all `inconclusive`), and no listed test detects it because every classifier test stubs the classifier. | **RESOLVED (round 7)** | Confirmed at `2d60de31d`: `_spawn_pytest` is `(argv, timeout, env=None)` with `cwd=PROJECT_DIR` at L302. Also read the wrapper, which the finding's remedy depends on: `pytest-clean.sh` resolves `REPO_ROOT` from the **caller's cwd** (L34-38), so a `cwd=<worktree>` spawn genuinely targets the worktree — and it refuses a linked worktree with no `.venv` (L135-145, #3033) and an off-pin interpreter (L169-175, #2617). Three concrete changes now specified: (1) `_spawn_pytest` gains `cwd: Path \| str = PROJECT_DIR` (Step 2, with a back-compat test on both existing callers); (2) a **persistent provisioned** baseline worktree at a fixed path with its own pin-matching `.venv` via `uv sync`, re-synced only when `uv.lock` moves, reconciled with `worktree-gc.sh` (Step 3, and Risk 2b re-costed accordingly); (3) the classifier goes **through** the wrapper, never around it, and **never falls back to `PROJECT_DIR`** — provisioning failure is `inconclusive`. The finding's own remedy is adopted verbatim as a required test: a **non-stubbed two-commit fixture repo** where a node passing at baseline and failing at HEAD must classify `newly_broken`, plus a companion `pre_existing` case, promoted to a Success Criterion and a Verification row. Risk 1 is rewritten around this exact failure mode. |
+| BLOCKER | History & Consistency (round 6) | Two Verification anti-criteria are self-defeating. (a) `grep -Ec "gh pr ready\|gh pr merge"` and the raw-Redis guard use BRE alternation under `-E`, where `\|` is a literal pipe — both return 0 unconditionally. (b) Even corrected, `== 0` is unsatisfiable: Step 3 requires the mandate to explicitly forbid those verbs, and the mandate is a prompt string in that same file. | **RESOLVED (round 7)** | The regex claim was reproduced before acting: on a file containing both strings, `grep -Ec "gh pr ready\|gh pr merge"` returns `0` and the unescaped `-E` form returns `2`. Every `-E` row in the new Verification table uses **unescaped** alternation, and a standing note records the rule so it cannot silently recur. For (b): both offending rows are **removed** along with the dispatch-mandate rewrite they guarded (deferred to #3076), and the note prescribes the correct shape for when #3076 reinstates them — a behavioral assertion over the runner's `subprocess` argv literals plus a *positive* assertion that the mandate contains the prohibition, never a whole-file string absence. The raw-Redis row is dropped outright: this plan adds no Redis or ORM code (no schema change, no hand-back), so the guard has nothing to guard. |
+| CONCERN | Risk & Robustness (round 6) | Step 4 consumes Step 0's `send_telegram(..., silent=True)` transport but no dependency edge orders them; Step 0 declares `Depends On: none, Parallel: true`, so Step 4 could land first and raise `TypeError` on a path no default-mode test exercises. | **RESOLVED (round 7) — dissolved with the coupling** | `send_telegram`'s signature (L609) is unchanged by this plan: no `silent` parameter is added, no caller passes one, so the `TypeError` is unreachable. The returncode fix (Step 1) is genuinely independent. The remaining ordering constraint is real and **declared**: Step 3 (`build-classifier`) depends on Step 2 (`build-cwd-seam`), because `classify_against_baseline` cannot target the worktree until `_spawn_pytest` accepts `cwd`; Step 4 depends on Step 3; Step 5 depends on both Step 1 and Step 4. |
+| CONCERN | Scope & Value (round 6) | Day-one value is thin and unvalidated: leg A 404s, leg B is opt-in, so `active` is unreachable; what ships is a returncode fix, a flag nothing uses, and a log line, while the fixer/watchdog/preflight stack is unreachable code. No criterion checks the shadow verdict is *correct*, only greppable. | **RESOLVED (round 7)** | The finding's second option is taken: **split the lane.** Everything unreachable is removed from this plan and filed as #3076 — no dead flag, no unreachable code, no safety claim without a mechanism. What remains is three things that are all real and all reachable on the default path: the `send_telegram` returncode fix (a live defect: L633 logs `"Telegram sent"` unconditionally), the classifier, and the shadow gate. On correctness: the finding's suggested end-to-end check against #2399's real commits was considered and **not** adopted as a suite test — it needs a historical SHA, a live test DB, and a long run, which is a flaky nightly-suite dependency. The **two-commit fixture-repo test** is adopted instead: it exercises the same claim (`passes at baseline, fails at HEAD → newly_broken`) deterministically and in-suite, and it is precisely the test that would have caught the inert-classifier blocker. The unit-level 11-failure motivating case is retained for gate *arithmetic*, now clearly labeled as such. |
+| NIT | History & Consistency (round 6) | Freshness Check named two different stale baselines (`0b6688433` L63, `3b6eb651b` L78); `origin/main` was `33fe1d2c7`. | **RESOLVED (round 7)** | One baseline SHA stated once — `2d60de31d` (`git rev-parse origin/main` at revision time) — and the second sentence deleted rather than a third added. Every file:line reference in the plan was re-read against that SHA during this pass, not carried forward. |
+| NIT | History & Consistency (round 6) | Inline Documentation still tasked documenting "the baseline-ref parameterization of `baseline-verifier`", which round 5 deleted. | **RESOLVED (round 7)** | Replaced with `classify_against_baseline`'s baseline-ref contract (`prev["head_commit"]`, never bare `main`) and its provisioning preconditions, plus a new bullet for `_spawn_pytest`'s `cwd` parameter. |
+| BLOCKER | Risk & Robustness (round 8) | The classifier's pytest invocation is specified by quoting `reconfirm_serial`'s argv verbatim with the report path elided (`--json-report-file=...`, Technical Approach and Step 3). `reconfirm_serial` writes `PYTEST_SERIAL_JSON_TMP` (L582; constant L109), and `main()` re-reads that exact file **after** the classifier would run, at L1209, to build `summarize_failures(new_failures, serial_report)` (L1213). A builder copying the quoted invocation overwrites the serial report with the baseline commit's results — where the newly-broken nodes passed — so the human's alert is summarized from a report containing no failures for those nodes. This breaks the plan's headline guarantee that it "changes no outbound message", and no listed test asserts on the alert's content. | **RESOLVED (round 9)** | Confirmed at `5b35d5212`: `PYTEST_SERIAL_JSON_TMP` is L109, unlinked L582 and written L588 by `reconfirm_serial`, re-read at L1209 feeding `summarize_failures` L1213 inside the `elif new_failures:` arm — exactly as reported. Remedy adopted verbatim and the elision that caused it removed: Technical Approach now states the classifier's **full** argv and env as a code block instead of quoting `reconfirm_serial` with the path elided, `PYTEST_BASELINE_JSON_TMP` is a declared module constant in Architectural Impact and Step 3, and `PYTEST_JSON_TMP` (L108) is named off-limits too. Three new assertions: report-path isolation (serial report byte-identical across classification, on both a successful and a failed run), the classifier's argv carrying its own path, and — the behavioral one no round had listed — **the `send_telegram` message argument in `shadow` is byte-identical to `off` for the same inputs**, which is the actual "changes no outbound message" claim. A Rabbit Hole names the trap. |
+| BLOCKER | Risk & Robustness (round 8) | The non-stubbed two-commit fixture test — the plan's declared falsifiability guarantee — cannot exercise the real path as specified. (a) The mandated signature `classify_against_baseline(node_ids, baseline_sha)` has no repo-root / worktree / wrapper injection seam, so a fixture repo requires overriding module globals, at which point production provisioning is not what runs. (b) `pytest-clean.sh` L33-39 sets `REPO_ROOT="$(pwd)"` only when cwd has a `pyproject.toml` containing `[tool.pytest`, else it falls back to `SCRIPT_ROOT` and `cd`s there — a minimal fixture repo silently redirects the classifier's pytest at the real repo. (c) The #3033 guard the whole design leans on keys on `.git` being a **file** (pytest-clean.sh L136-146), which is false for a standalone fixture repo, so the fixture never exercises the guard Risk 1 is written about. | **RESOLVED (round 9)** | All three sub-claims re-verified by opening `scripts/pytest-clean.sh` at `5b35d5212`: L33-39 gates `REPO_ROOT="$(pwd)"` on `grep -qE "^\[tool\.pytest" pyproject.toml` and otherwise `cd`s to `SCRIPT_ROOT`; L136-146's guard is `[ -f "$REPO_ROOT/.git" ] && [ ! -d "$REPO_ROOT/.venv" ]`, keyed on `.git` being a **file**. Remedy adopted with one addition. The signature is widened to `classify_against_baseline(node_ids, baseline_sha, *, repo_root=PROJECT_DIR, worktree_path=BASELINE_WORKTREE, wrapper=PYTEST_CLEAN_SH, report_path=PYTEST_BASELINE_JSON_TMP)` — `report_path` added so blocker 1's constant is injectable too — keyword-only with production defaults, so `main()`'s call site stays a two-argument call. The fixture is a **linked worktree** (`git worktree add --detach` off a temp repo) carrying a `pyproject.toml` with a literal `[tool.pytest.ini_options]` section. **The addition:** both fixture properties are themselves asserted by dedicated tests (`.git` is a file; the `pyproject.toml` contains `[tool.pytest`), because a fixture whose preconditions are merely *intended* degrades silently into a test of the real repo — the same class of silent degradation as the inert classifier it exists to catch. Plus a case asserting the `.venv`-less fixture worktree yields `inconclusive`, which is the only place the #3033 guard is exercised on the live path. Marked slow; asserts on buckets, never wall time. Both obstacles now appear as verified rows in the Freshness Check table. |
+| BLOCKER | History & Consistency (round 8) | Two incompatible preconditions for *running* the classifier. Data Flow step 2 gates it on only `NIGHTLY_FIX_MODE != "off"` and non-empty `new_failures`, with the three run-shape disqualifiers living inside `decide_fix_or_escalate` — which by construction runs after classification. But Failure Path Test Strategy requires `--dry-run` to skip classification "entirely (no worktree, no pytest)" and Success Criteria requires a seed/re-baseline run to "never classify". The clash is operational, not just editorial: on a re-baseline night (`is_reseed`, L1026-1027) `prev["head_commit"]` exists and `new_failures` is the entire newly-absorbed population — the very set `MAX_DISPATCH_NODES` exists to contain — while `NIGHTLY_FIX_MAX_FAILURES` is a gate condition, not a classification precondition. The detector would serially re-run hundreds of nodes at the baseline SHA on the nightly critical path and then discard the verdict. Risk 2b's cost argument does not cover this case. | **RESOLVED (round 9)** | Confirmed at `5b35d5212`: `is_reseed` L1026 / `is_seed_run` L1027, `integrity_warnings` L1047, and `new_failures = compute_new_failures(prev, confirmed_failing)` L1094 computed unconditionally. Remedy adopted, with the seventh condition the finding implied but did not list — `prev.get("head_commit")` being present, which Test Strategy already required to skip classification. **Data Flow step 2 is rewritten as `CLASSIFY_PRECONDITIONS`, an explicit seven-item code block declared in the plan as THE single canonical list**, with a paragraph justifying why each is a precondition rather than a gate condition (a cost ceiling consulted after the cost is paid is not a ceiling). Test Strategy's old "Run-Shape Disqualifiers" block is replaced by a "Classification Preconditions" block asserting exactly those five refusable conditions, each with the same assertion shape (no `git` subprocess, no `_spawn_pytest` call, matching `reason=` token), and Success Criteria states the same list once and points at it. The gate re-checks the first five clauses so its unit tests stay standalone and the two lists cannot diverge behaviorally. The skip path still emits the verdict line — the log contract is now stated as "every non-`off` run **with non-empty `new_failures`**, including precondition-skipped nights", with a documented `reason=` token vocabulary, and Risk 2b is rewritten to cite the preconditions (not mode alone) as what bounds the re-baseline-night cost. |
+| CONCERN | Risk & Robustness (round 8) | The classifier spawn's `env=` is elided. Both existing spawns deliberately pass `env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}` (L374, L584) because the 30s interactive default in `tests/db_claim.py` is wrong for an unattended 03:00 run and the claim happens in `pytest_configure`, before any per-item timer. A classifier spawning with the default fails to claim a db under contention, errors during configure, and buckets every node `inconclusive` — indistinguishable from Risk 1's inert classifier, silently "safe", and undetected by the fixture test, which has no `tests/conftest.py` and therefore no db claim. | **RESOLVED (round 9)** | Confirmed at `5b35d5212`: `run_tests` L374 and `reconfirm_serial` L584 both set `env = {**os.environ, "TEST_DB_CLAIM_WAIT_S": "300"}`, and the comment above L374 states the claim happens in `pytest_configure` before any per-item timer is armed. Adopted verbatim: the env line is now part of the explicit code block in Technical Approach (with the reasoning), a bullet in Step 3 marked "not optional", a named `inconclusive` cause in Exception Handling Coverage, a `Popen`-call-capture test, a Success Criterion, and a Verification row. Risk 1 is amended to list the db-claim timeout as a **third** inert-classifier variant and to note explicitly that the fixture test cannot catch it (the fixture has no `tests/conftest.py`, so it makes no db claim) — which is why this one is closed by call capture rather than by the falsifiability test. |
+| CONCERN | Scope & Value (round 8) | `classify_attempts` and `NIGHTLY_FIX_MAX_ATTEMPTS` are structurally unreachable at this scope — the dead-config pattern round 4 caught and this plan's own Success Criterion forbids. `compute_new_failures` (L654) admits a node only on the night it was absent from the prior confirmed set; a node that stays red is never in `new_failures` again so is never re-classified, and a node that goes green is pruned to 0 by the plan's own keep-while-still-failing rule. With the default `NIGHTLY_FIX_MAX_ATTEMPTS = 1`, no reachable path makes the cap fire; the map exists only to be pruned. | **RESOLVED (round 9) — deleted, not documented** | Confirmed at `5b35d5212`: `compute_new_failures` (L654) admits a node only on the night it was absent from the prior confirmed set, so a still-red node never re-enters `new_failures` and the cap can never fire at the default of 1. Per the supervisor directive to delete dead config rather than document it, the map and `NIGHTLY_FIX_MAX_ATTEMPTS` are **removed entirely** and moved to #3076 with the fixer that would re-attempt. Consequences applied throughout: no new key in `data/nightly_tests_last_run.json` (Architectural Impact and Update System both say so), the gate clause is gone, "Attempt-Map Semantics" is replaced by a "Persisted-State Invariance" check (`shadow` key set == `off` key set), the `-k "attempts"` row is replaced by a `classify_attempts` absence row, and the `os.environ.get("NIGHTLY_FIX` count row is `== 2`. The finding's alternative is also adopted as the stated substitute: the real cost bound is the per-run node ceiling `len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES`, now enforced **before** `classify_against_baseline` as precondition 6 (blocker 3), which is where a ceiling belongs. |
+| CONCERN | History & Consistency (round 8) | Update System specifies the `.env.example` two-line comment block but omits the marker that decides whether the key is required. Per `scripts/update/verify.py` L975-982 / `check_env_completeness` L1072-1081, an unmarked declaration is **required** (fail-closed default) and only a bare `# @optional` line exempts it. All three knobs are behavior toggles with in-code defaults (`NIGHTLY_FIX_MODE` defaults to `shadow`), so as written every machine without all three in its vault `.env` reports them missing on every `/update`. | **RESOLVED (round 9)** | Confirmed at `5b35d5212`: `scripts/update/verify.py` L975-982 documents the fail-closed default and L981 is `_OPTIONAL_SIGIL_RE = re.compile(r"^@optional$")`, consumed at L1027. Adopted verbatim; Update System now specifies a **three-line block** per knob, calls out that the anchored regex rejects `# @optional (tunable)`, and states the two axes are independent (`@optional` does not exempt the key from `tests/unit/test_env_declaration_readers.py`, which the `os.environ.get` reads satisfy). Now two knobs, not three, since `NIGHTLY_FIX_MAX_ATTEMPTS` was deleted. A Verification row asserts the sigil sits directly above each placeholder. |
+| NIT | Scope & Value (round 8) | The Verification row `grep -c "uv" scripts/nightly_regression_tests.py` (expected `> 0`) is a two-character substring check standing in for the most load-bearing claim in the plan (Risk 1). It is satisfied by a comment, or by an implementation that shells `uv` and ignores its return code. It returns `0` on the file today so it is not vacuous, but it is far weaker than the claim it guards. | **RESOLVED (round 9)** | Adopted verbatim: the `grep -c "uv"` half is dropped and the row is now the `-k "provision"` test alone, with the two assertions the finding names (`uv sync` invoked with `cwd=<worktree>`; non-zero return code → `inconclusive` with no `PROJECT_DIR` fallback) written into the row. |
+| NIT | History & Consistency (round 8) | `prev["head_commit"]` is called "the last-known-good SHA" (Data Flow step 2) and "the last-green nightly SHA" (Resolved Decision 1), but L1092 writes it on every non-fatal run regardless of how red it was — nothing in the detector records greenness. No false `newly_broken` is reachable, because the plan's real justification is the different and correct one in Technical Approach, but the Documentation task propagates "the last-green baseline ref" into `docs/features/nightly-regression-tests.md` where a reader will infer a guarantee that does not exist. | **RESOLVED (round 9)** | Confirmed at `5b35d5212`: `current["head_commit"] = _get_head_commit()` (L1092) is written on every non-fatal run and nothing in the detector records greenness. Adopted verbatim — "last-green" / "last-known-good" is replaced by "the prior run's HEAD SHA" in Data Flow, Technical Approach, Resolved Decision 1, Risk 2, and the Documentation bullet, each keeping the per-node soundness sentence beside it. The Documentation task now **explicitly forbids** the doc from using either old name, since that bullet is how the overclaim would have escaped into `docs/features/nightly-regression-tests.md`. |
+| BLOCKER | Risk & Robustness (round 10) | The fixture worktree carrying the plan's only falsifiability guarantee cannot execute the wrapper as specified. Rounds 6 and 8 verified three `pytest-clean.sh` preconditions; a fourth is unverified and fatal. After the #3033 guard the wrapper resolves `PYTEST_BIN="$REPO_ROOT/.venv/bin/pytest"` and aborts unless `"$PYTEST_BIN" --version` exits 0, and the classifier argv carries `--json-report`, which pytest rejects as an unrecognized argument unless `pytest-json-report` is importable in that interpreter. The plan specifies only that the fixture gets "`uv sync` run" — and `uv sync` against a fixture `pyproject.toml` carrying only `[tool.pytest.ini_options]` fails outright, there being no `[project]` table to sync. Every outcome lands in `inconclusive`, the exact bucket the test exists to distinguish a working classifier from. | **RESOLVED (round 11) — by BUILDING IT, not by asserting** | `scripts/pytest-clean.sh` L155-168 sets `PYTEST_BIN="pytest"`, overrides it to `"$REPO_ROOT/.venv/bin/pytest"` when executable, then `if ! "$PYTEST_BIN" --version >/dev/null 2>&1; then ... exit 1`. `pytest-json-report>=1.5` is a dependency of the MAIN pyproject (L48) only, so a fixture venv does not inherit it. Give the fixture a `[project]` table with `requires-python` and `dependencies = ["pytest", "pytest-json-report"]`, or provision via `uv venv` + `uv pip install pytest pytest-json-report`. Add a THIRD fixture-precondition guard test beside the two already mandated: assert `(fixture_wt/".venv/bin/pytest")` exists and that invoking it with `--json-report --json-report-file=<tmp>` does not abort on an unrecognized argument. **Adopted, and then executed rather than asserted.** The supervisor's fallback was to cut the falsifiability test if a working fixture was not cheaply achievable; it is achievable, and the entire path was run end to end in a scratchpad at revision time: temp repo, commit A (test passes) / commit B (test fails), `git worktree add --detach`, `uv venv` + `uv pip install`, then the **real** `scripts/pytest-clean.sh` from the fixture cwd — JSON report `outcome: passed` at A, `outcome: failed` at B, and a sibling `.venv`-less worktree aborting with the #3033 message. So the test is **kept, not cut**. Two corrections to the finding's remedy came out of running it: (i) a **fifth** obstacle the finding did not name — `-n0` requires `pytest-xdist`, which aborts identically to the missing `pytest-json-report`, so the guard test and the provisioning both cover both packages; (ii) provisioning is `uv venv` + `uv pip install`, **not** `uv sync` — the finding's own `[project]`-table option is adopted so `uv` accepts the fixture, but there is still no lockfile to sync. Also recorded: `check-interpreter-pin.sh` no-ops on a tree with no `.python-version`, so the fixture must **not** carry one. Measured provisioning cost 0.09 s on a warm cache, which is also what closes the round-10 slow-suite concern. |
+| BLOCKER | Risk & Robustness (round 10) | `scripts/worktree-gc.sh` does not exist — it was deleted and replaced by `tools/disk_reclaim.py` under issue #2517. The plan names it five times: the Solution bullet, Step 3's build instruction ("Reconcile the fixed path with `scripts/worktree-gc.sh`"), Risk 3's entire mitigation, Race 2's trigger, and the Update System filesystem bullet — and it asserts "the worktree-gc exclusion the repo already honors for named worktrees", a mechanism with no implementation anywhere. Fourth instance of the failure class the Scope Boundary section is written about. | **RESOLVED (round 11)** | Retarget all five references at `tools/disk_reclaim.py::sweep_worktrees` (L334-436), which iterates every child of `repo_root/WORKTREES_DIR` (`.worktrees/`), so the lane IS in scope. It survives today only incidentally: `too_young` while the nightly keeps touching it, then `branch = f"session/{slug}"` → `merged_via_tree(repo_root, "session/nightly-baseline", "main")` returns `False` for a branch that does not exist (`agent/worktree_manager.py` L61-70 returns `False` on non-zero `git merge-tree`), yielding `skip(slug, "unmerged")`. That is guard-order accident, not design, and it inverts on any change that treats a branchless lane as reapable. Add a named-lane skip in `sweep_worktrees` plus a unit test asserting `nightly-baseline` is skipped. Cost the plan understates: the lane is a checkout plus a `.venv` measuring 868 MB on this machine today. **Adopted verbatim.** Re-verified at `b90e998920f`: `ls scripts/worktree-gc.sh` → `No such file or directory`, and `sweep_worktrees` (L334-436) iterates every `.worktrees/` child at L368 with no named-lane exclusion, reaching `branch = f"session/{slug}"` at L403 and `merged_via_tree` at L409. All five references are retargeted at `tools/disk_reclaim.py::sweep_worktrees` (Solution bullet, Step 3, Risk 3, Race 2, Update System), the asserted-but-unimplemented "exclusion the repo already honors" claim is **deleted**, and the exclusion is now **built**: a `PROTECTED_WORKTREE_SLUGS` constant skipping with reason `protected` as the **first** guard in the sweep loop, with a unit test asserting the skip holds even when every other guard would pass the lane. This makes `tools/disk_reclaim.py` the plan's only edit outside the nightly script — recorded in Architectural Impact, Test Impact, Update System, Documentation, and a Verification row. Risk 3 now carries the 868 MB figure instead of "one checkout plus one venv". |
+| CONCERN | Scope & Value (round 10) | The delivered artifact cannot answer the question it is delivered for. The verdict line carries a verdict, one `reason=` token and a node count, not the per-node bucket assignment, so a month of logs answers "would the gate have fired" but not "would it have been right". Compounding it, the plan never states what the classifier discriminates that `compute_new_failures` (L654) does not: by the plan's own soundness argument a node in `new_failures` "was by definition absent from the prior run's confirmed-failing set", so `pre_existing` should be near-empty and the real added signal is `inconclusive`. A month of `autonomous-fix reason=none nodes=N` lines is equally consistent with a working classifier and with one that merely echoes `compute_new_failures` — the inert-classifier failure Risk 1 spends its whole budget on. | **RESOLVED (round 11)** | Add one sibling line under a second stable prefix, emitted only when classification actually ran: `nightly-fix shadow-buckets: newly_broken=<n> pre_existing=<n> inconclusive=<n> not_newly_broken=<comma-joined node ids>`. It is already bounded, since classification runs only when `len(new_failures) <= NIGHTLY_FIX_MAX_FAILURES` (default 15). Keep the existing verdict line byte-stable so the `-k "skip_still_logs"` and verdict-format assertions are unaffected. State the discrimination in one sentence in Documentation: `compute_new_failures` proves a node was ABSENT from the prior confirmed-failing set; the classifier proves it PASSED at that SHA, and the two differ exactly when the node was not collected then, was a filtered artifact, or the prior run was untrusted. |
+| CONCERN | Risk & Robustness (round 10) | No timeout is named anywhere for the classifier and none at all for provisioning. The pytest spawn's bound is the literal ellipsis `timeout=...` in both the Technical Approach code block and Step 3 — the same elision shape that produced the round-8 report-path blocker in the same code block — and `git worktree add`, `git checkout --detach` and `uv sync` are unbounded subprocesses on the nightly critical path. Risk 2b's "it carries its own timeout" covers only the pytest spawn, so a hung or network-stalled `uv sync` at 03:00 has no bound and no `inconclusive` route. | **RESOLVED (round 11)** | The convention in this file is a plain module int, not an env knob: `PYTEST_TIMEOUT_SECONDS = 5400` (L165) and `PYTEST_RECONFIRM_TIMEOUT_SECONDS = 1800` (L171) are bare literals. Declare `PYTEST_BASELINE_TIMEOUT_SECONDS = 1800` beside them — mechanically load-bearing, because making it a `NIGHTLY_FIX_*` env knob would break the plan's own Verification row `grep -c 'os.environ.get("NIGHTLY_FIX' scripts/nightly_regression_tests.py` → `== 2`. Give every provisioning call an explicit `subprocess.run(..., timeout=...)` and list a hung provision as a named `inconclusive` cause in Exception Handling Coverage, which today names `uv sync` non-zero but not `uv sync` hanging. |
+| CONCERN | History & Consistency (round 10) | The `.env.example` specification rests on a false model of the parser, so the round-9 resolution of the round-8 concern is inert as written. `_parse_env_example` recognizes a declaration only when the STRIPPED line matches `^([A-Z][A-Z0-9_]*)=`; a line beginning with `#` is appended to the comment block instead. Under the mandated COMMENTED placeholder the key is never a declaration, `check_env_completeness` never reports it missing on any machine, and the `@optional` sigil does nothing — contradicting the plan's own stated mechanism. The repo convention for this class of knob is an UNCOMMENTED declaration, under which the plan's `awk '/^# NIGHTLY_FIX_/…'` verification row prints `0`, not `2`. Separately, either form needs a trailing blank line: the accumulator resets only on a blank or non-comment line, so a block running into the next declaration bleeds its `@optional` onto that key — the "a wrong marker silences a real secret forever" case. | **RESOLVED (round 11)** | `scripts/update/verify.py` L971 `_KEY_RE = re.compile(r"^([A-Z][A-Z0-9_]*)=")`, matched at the `elif m := _KEY_RE.match(stripped)` arm of `_parse_env_example` (L1015-1037); the `elif stripped.startswith("#")` arm above it swallows any commented placeholder, and the docstring states the bleed outright. Precedent to copy verbatim: `.env.example` L89-92, L291-294, L565-569 — description comment, bare `# @optional`, uncommented `KEY=value`, blank line. Replace the awk row with `.venv/bin/python -c "from pathlib import Path; from scripts.update.verify import _parse_env_example; print(sum(1 for k,_,o,_ in _parse_env_example(Path('.env.example')) if k.startswith('NIGHTLY_FIX_') and o))"` → `2`; the awk row prints `0` on `.env.example` today and would keep printing `0` after a correct implementation. |
+| CONCERN | Risk & Robustness (round 10) | The falsifiability suite runs a `git init`, a `git worktree add`, a real `uv sync` and a nested full pytest inside `tests/unit/`. `slow` is a declared marker but is not deselected by `addopts` (`pyproject.toml` L199), so it runs in every `tests/unit/` invocation including the nightly detector's own, is network-dependent on a cold uv cache, and is subject to the suite-wide `--timeout=420`. A flaky failure there is a newly-confirmed nightly failure, which pages a human through the very alert path this feature reforms. | **RESOLVED (round 11)** | `addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile --timeout=420 --timeout-method=thread"` — there is no `-m "not slow"`, so `slow` marks documentation, not exclusion. Either provision the fixture venv from the already-warm local uv cache and assert the provision completes well inside 420 s, or give the test an explicit `@pytest.mark.timeout(...)` above the suite default plus a skip guard when provisioning is unavailable. |
+| NIT | Scope & Value (round 10) | Round 9 deleted the attempt map and `NIGHTLY_FIX_MAX_ATTEMPTS` outright, and the plan asserts three times that neither ships, but Step 4's heading still reads "Decision gate, mode wiring, verdict log, attempt map" and the classifier-tester role still says "the stubbed gate/mode/attempt-map units". A builder reading its own task heading is told to build what the Success Criteria forbid. | **RESOLVED (round 11)** | Retitle Step 4 to "Decision gate, mode wiring, verdict log" and drop "attempt-map" from the classifier-tester role. |
+| NIT | History & Consistency (round 10) | Freshness Check states baseline `5b35d5212`; `origin/main` is `7ad96644b`, two commits later, one of them this plan's own round-9 revision (`bf0f179aa`). `git diff --stat 5b35d5212 origin/main` over `scripts/nightly_regression_tests.py`, `scripts/pytest-clean.sh`, `scripts/update/verify.py` and `.env.example` is empty, so every cited line number still holds and only the stated SHA is stale. | **RESOLVED (round 11)** | Restate the baseline as the SHA measured at this revision pass. The Critique Results comment also pointed at `.critique-runs/…/ROUND8-NOTE.md` as the durable home of the Agent-tool deviation note, but run dirs are garbage-collected by design (that one was swept at the start of round 10); the note is now inline in the comment instead. |
+| BLOCKER | Risk & Robustness + History & Consistency (round 11) | Production baseline-worktree provisioning is specified as a bare `uv sync`, which cannot install pytest. `pytest`, `pytest-xdist` and `pytest-json-report` live in `[project.optional-dependencies] dev` (`pyproject.toml` L43-49) — an **extra**; `[dependency-groups] dev` (L112-115) contains only `ipykernel`. `uv sync` installs default dependency-groups and never extras, so `<worktree>/.venv/bin/pytest` never exists, `pytest-clean.sh` L163-168 aborts with "no usable pytest found", every node buckets `inconclusive`, and the classifier ships 100% inert — the exact Risk 1 failure this plan is built to prevent. The round-11 falsifiability test structurally cannot catch it: the plan deliberately provisions the *fixture* with `uv venv` + `uv pip install pytest pytest-json-report pytest-xdist`, "**NOT `uv sync`**", so the production command has no test coverage at all. This is the same defect class round 11 just found for the fixture, not carried across to production. | pending | Do not hand-roll provisioning. Call `agent.worktree_manager.provision_worktree_venv(worktree_dir)` (L1124-1230); the nightly script already imports from `agent/` (`from agent.llm.wrapper import run_typed`, L98) and the module imports cleanly under the plist env in about 2s. It encodes the four things a bare `uv sync` omits: (a) `--all-extras`; (b) `env.pop("VIRTUAL_ENV", None)` — the #2050 shared-`.venv`-strip hazard, whose PreToolUse guard `.claude/hooks/validators/validate_no_uv_sync_in_worktree.py` sees only Claude Bash tool calls and is structurally blind to a launchd `subprocess.run`; (c) `UV_PROJECT_ENVIRONMENT=<worktree>/.venv` as an absolute path, so the target env never depends on uv's project discovery; (d) `--python <worktree_interpreter_pin(...)>` (#2572), which is what keeps `check-interpreter-pin.sh` (pytest-clean.sh L169-175) from aborting. The helper is fail-open and returns `False` on uv-missing / non-zero / timeout — map `False` to `inconclusive`, never a `PROJECT_DIR` fallback. One behavior difference MUST be handled explicitly: `provision_worktree_venv` short-circuits to `True` whenever `.venv/.provisioned` exists and the interpreter pin matches, so it will **not** re-sync after `git checkout --detach <new sha>` moves `uv.lock`. Implement the plan's "re-sync only when `uv.lock` differs" by `unlink`ing `<worktree>/.venv/.provisioned` before the call when the checked-out `uv.lock` hash differs from the hash recorded beside it, and delete the plan's separate ad-hoc marker-file design in favor of this one. |
+| CONCERN | Risk & Robustness (round 11) | Even once provisioning is corrected, nothing tests the **production** provisioning invocation. The falsifiability test uses a deliberately different path (`uv venv` + `uv pip install`, "never `uv sync`"), so a future edit reverting to a bare `uv sync` — or dropping `--all-extras` — leaves the whole suite green while the nightly classifier goes permanently `inconclusive`. Risk 1's mitigation (e) claims the fixture test is the falsifier, but it falsifies only the classifier's parsing and bucketing, not the environment the production classifier actually runs in. | pending | Add a call-capture unit test over the provisioning step (patch `agent.worktree_manager.subprocess.run` if the helper is reused) asserting three properties of the captured call: the argv contains `--all-extras`, `"VIRTUAL_ENV" not in env`, and `env["UV_PROJECT_ENVIRONMENT"] == str(worktree_path / ".venv")`. Add two Verification rows using repeated `-e` (never table-cell alternation, per the standing rule): `grep -c provision_worktree_venv scripts/nightly_regression_tests.py` with expected `>= 1`, and a row asserting no hand-rolled bare sync — `grep -c -e '"uv", "sync"' scripts/nightly_regression_tests.py` with expected `== 0`. Also update Risk 1's mitigation list so it no longer implies the fixture test covers production provisioning. |
+| NIT | History & Consistency (round 11) | Freshness Check's "Overlapping active plans" names `nightly-serial-reconfirm.md`, but no such file exists under `docs/plans/` at `2aaad3a51` (it is presumably in `docs/plans/done/` or archived). A dangling plan reference in the one section whose job is freshness. | pending | Either repoint the reference at the issue (#2180) or at the archived path, or drop the row; do not leave a `docs/plans/` filename that resolves to nothing. |
+| NIT | Scope & Value (round 11) | The Documentation section's second checkbox says "Update the worktree/disk-reclaim doc covering `tools/disk_reclaim.py`" without naming a path, while every other doc checkbox names its file. The doc is `docs/features/scheduled-disk-reclaim.md`. | pending | Replace the unnamed reference with `docs/features/scheduled-disk-reclaim.md` so the documentarian does not have to re-derive it. |
+| NIT | History & Consistency (round 11) | Update System cites the `.env.example` precedent as "L89-92: description comment, bare `# @optional`, uncommented `SDLC_REVIEW_CROSS_VENDOR=0`, blank line" — but there is no blank line at L93; L93 is the next key's own comment. The mandated fourth line is harmless and defensible (the accumulator is reset by the `KEY=` branch itself at `scripts/update/verify.py` L1036-1037), but the cited precedent does not demonstrate it. | pending | Either drop "blank line" from the parenthetical describing L89-92, or keep the requirement and state plainly that it is belt-and-braces rather than precedent — the accumulator already resets on the `KEY=` line. |
+
+---
+
+## Resolved Decisions
+
+1. **Baseline semantics + classifier mechanism.** The baseline ref is **the prior run's HEAD SHA** (`prev["head_commit"]`, L1092) — deliberately *not* called "last-green", since L1092 writes on every non-fatal run and nothing records greenness. It is sound per-node: a newly-confirmed failure was absent from the prior run's confirmed-failing set, so that node was not failing at that SHA. Not `main` — nightly runs on main and the failure IS on main, so diffing against `main` would mask a regression that already landed. The mechanism is an **in-process Python classifier**: `baseline-verifier` is Task-tool-only with zero `.py` callers, so a launchd script has no seam, and a `${baseline_ref:-main}` shell default could never be set by a prose dispatch. `.claude/agents/baseline-verifier.md` is untouched.
+2. **The classifier's execution environment (round 7, completed round 9).** It runs through `scripts/pytest-clean.sh` with `cwd` pointed at a **persistent, `uv sync`-provisioned** baseline worktree — never at `PROJECT_DIR`, never around the wrapper. This required adding a `cwd` parameter to `_spawn_pytest`, which did not exist. Round 9 supplied the three details the round-7 specification elided, each of which independently produces a silently-wrong or silently-inert classifier: it writes **its own** report path (`PYTEST_BASELINE_JSON_TMP`, never `PYTEST_SERIAL_JSON_TMP` — `main()` re-reads that at L1209 to build the alert), it passes `TEST_DB_CLAIM_WAIT_S=300` verbatim from L374/L584, and it exposes a keyword-only injection seam so the falsifiability test drives the real function. Any provisioning failure is `inconclusive`, never a fallback.
+2b. **Classification preconditions are one list, checked at the call site (round 9).** The seven `CLASSIFY_PRECONDITIONS` in Data Flow step 2 are the plan's single canonical list; Test Strategy and Success Criteria assert exactly it. A refused night does no git and no pytest work, and still logs its verdict with the refusing condition as `reason=`. The pure gate re-checks the same conditions so it stays independently unit-testable.
+3. **Enforcement of "never auto-merge" — deferred, not solved (round 7).** The only structural guarantee has two legs: review-required protection on `main` (404 today) and a non-admin fixer identity (no per-session env seam exists anywhere in the dispatch → worker → `claude -p` chain). Rather than assert either, the plan **cuts the tier that needs them**. #3076 owns it and names both as blocking prerequisites.
+4. **Guardrail constants home.** **Two** knobs as module-scope `os.environ.get` reads with provisional comments, deliberately not promoted to `config/settings.py` (single-consumer script). Provisional defaults: `NIGHTLY_FIX_MODE=shadow`, `NIGHTLY_FIX_MAX_FAILURES=15`. Three knobs are **not declared**: `NIGHTLY_FIX_MAX_CHANGED_FILES` and `NIGHTLY_FIX_HANDBACK_TIMEOUT_HOURS` (only consumers were the deferred guards) and `NIGHTLY_FIX_MAX_ATTEMPTS` (round 9 — no reachable consumer at this scope, since `compute_new_failures` L654 admits a node only once). Both surviving knobs ship in `.env.example` as three-line blocks carrying a bare `# @optional` line.
+5. **Rollout.** `NIGHTLY_FIX_MODE` ships defaulting to `shadow` (classify + log the verdict, page as today). `off` restores byte-identical current behavior. There is no `active` in this plan; the flip is #3076's, gated on its two seams plus this plan's shadow evidence.
+6. **Alerting is unchanged, and that claim is now tested.** Both shipped modes fire the existing up-front page. This plan changes no outbound message, which is why every existing `send_telegram` assertion stays valid unmodified. Round 9 found this was asserted only about the *call*, not the *content* — which is exactly how the report-path collision would have slipped through — so the claim is now backed by a byte-identical-message assertion between `off` and `shadow` for the same inputs.
+
+No open questions remain.
+
+**2026-09-02 round-7 revision (baseline `2d60de31d`).** Three blockers resolved, two of
+them by **cutting scope rather than asserting capability**, per the supervisor directive
+following a third consecutive recurrence of "load-bearing mechanism asserted without a
+verified seam". (1) The `GH_TOKEN`-into-the-fixer seam was traced hop by hop and confirmed
+absent at every one — dispatch call site, CLI surface, process boundary, worker env overlay,
+and model schema — so the entire fixer/enforcement/watchdog/notify tier is deferred to the
+newly filed **#3076**, which names the missing seam as its first blocking item. (2) The
+classifier's inert-shipping hazard is closed with three concrete, source-verified changes
+(a `cwd` parameter on `_spawn_pytest`, a persistent `uv sync`-provisioned baseline worktree,
+and no-fallback-to-`PROJECT_DIR`) plus a **non-stubbed two-commit fixture test** that is the
+first thing in six rounds able to distinguish a working classifier from an inert one.
+(3) The two self-defeating Verification rows are removed with the mandate they guarded, and
+the `grep -E` alternation bug is reproduced, documented, and swept from every remaining row.
+Both concerns resolved (the Step 0/Step 4 ordering hazard dissolves with the transport
+coupling; day-one value is now three reachable things instead of one reachable thing and a
+stack of unreachable code). Both nits resolved. Appetite reduced Large → Medium to match.
+
+**2026-09-02 round-9 revision (baseline `5b35d5212`).** Three blockers, two concerns, and two
+nits from round 8, all resolved by opening the source rather than reasoning from the plan.
+Every line number in the plan was re-checked at this SHA and is unchanged from `2d60de31d`.
+
+1. **Report-path collision (blocker 1).** The classifier had been specified by quoting
+   `reconfirm_serial`'s argv with the report path elided — and that elision would have made the
+   classifier overwrite `PYTEST_SERIAL_JSON_TMP` (L109), which `main()` re-reads at L1209 to
+   build the human's alert text (L1213). The fix is a distinct `PYTEST_BASELINE_JSON_TMP`
+   constant, and the deeper fix is that Technical Approach and Step 3 now state the **complete**
+   argv and env as a code block instead of deferring to "the same as `reconfirm_serial`".
+   The plan's "changes no outbound message" claim is now backed by a byte-identical-message
+   assertion, not just a call-capture assertion.
+2. **Injection seam (blocker 2).** `classify_against_baseline` gains four keyword-only
+   parameters with production defaults, so the falsifiability test drives the real function
+   with no monkeypatching. The fixture is specified as a linked worktree with a
+   `[tool.pytest.ini_options]` section — both properties verified necessary against
+   `pytest-clean.sh` L33-39 and L136-146 — and **both are themselves asserted**, so the test
+   cannot silently degrade into a test of the real repo.
+3. **One precondition list (blocker 3).** `CLASSIFY_PRECONDITIONS` is declared once in Data
+   Flow as seven explicit conditions checked at the call site before any git or pytest work;
+   Test Strategy and Success Criteria now assert exactly that list, and the pure gate re-checks
+   the same conditions. The re-baseline-night cost the finding identified is refused by
+   preconditions 4 and 6 rather than discovered after the cost is paid.
+4. **Concerns.** The classifier spawn's `env` now carries `TEST_DB_CLAIM_WAIT_S=300` verbatim
+   from L374/L584 (a third inert-classifier variant, and the one the fixture test structurally
+   cannot catch). The `classify_attempts` map and `NIGHTLY_FIX_MAX_ATTEMPTS` are **deleted**
+   rather than documented, per the supervisor directive — this plan now persists no new state
+   key at all, and the cost bound they pretended to provide is the per-run ceiling in
+   precondition 6.
+5. **Nits, plus one found in passing.** The `grep -c "uv"` substring row is gone; "last-green"
+   is replaced by "the prior run's HEAD SHA" everywhere including the Documentation task, which
+   now forbids the old name. In passing: round 7 claimed to have swept the `grep -E "a\|b"`
+   alternation bug but three `== 0` rows still carried it — because the escaping is forced by
+   markdown table cells, so a recorded rule could never hold against that pressure. All
+   alternation rows now use pipe-free `grep -c -e A -e B`, and the note records the structural
+   fix instead of the rule.
+
+**2026-09-02 round-11 revision (baseline `b90e998920f`).** Two blockers, four concerns, and two
+nits from round 10, all resolved. Both blockers were "the thing you referenced does not exist
+or cannot run", so both were closed by opening the real source and, for the fixture, by
+**executing the path rather than specifying it**.
+
+1. **The falsifiability fixture (blocker 1) — kept, because it was made to run.** The
+   supervisor's fallback was to cut the test if a working fixture was not cheaply achievable.
+   It is achievable, and the whole path was executed end to end at revision time: a temp repo
+   with commit A (test passes) and commit B (test fails), a `git worktree add --detach`
+   fixture, `uv venv` + `uv pip install pytest pytest-json-report pytest-xdist`, and then the
+   **real** `scripts/pytest-clean.sh` run from the fixture as cwd — producing `outcome: passed`
+   at A and `outcome: failed` at B, with a sibling `.venv`-less worktree aborting on #3033 as
+   designed. Running it surfaced a **fifth** obstacle no round had named: `-n0` requires
+   `pytest-xdist`, which aborts with `unrecognized arguments` exactly like the missing
+   `pytest-json-report` round 10 found. Corrections encoded: the fixture `pyproject.toml`
+   carries a `[project]` table *and* `[tool.pytest.ini_options]`; provisioning is `uv venv` +
+   `uv pip install`, never `uv sync` (nothing to sync without a lockfile); the fixture carries
+   no `.python-version`, because `check-interpreter-pin.sh` no-ops without one and adding one
+   would couple the test to the repo interpreter. A **third** fixture-precondition guard test
+   is added beside the two already mandated. Measured cost: **0.09 s** on a warm uv cache.
+2. **`scripts/worktree-gc.sh` (blocker 2) — the exclusion is now built, not asserted.** The
+   script was deleted and replaced by `tools/disk_reclaim.py` under #2517; `ls` confirms it is
+   absent at this baseline. All five references are retargeted at
+   `tools/disk_reclaim.py::sweep_worktrees` (L334-436), and the plan's claim of "the
+   worktree-gc exclusion the repo already honors" — a mechanism with no implementation — is
+   deleted. The lane genuinely *is* in that sweeper's scope and survives only by guard-order
+   accident (`too_young`, then `merged_via_tree` returning `False` for a branch that never
+   existed), which inverts the moment a branchless lane is treated as reapable. So the plan now
+   ships a real `PROTECTED_WORKTREE_SLUGS` skip as the first guard in the sweep loop, with a
+   unit test asserting it holds when every other guard would pass. `tools/disk_reclaim.py` is
+   consequently declared as this plan's only edit outside the nightly script.
+3. **Concerns.** The verdict artifact gains a sibling `nightly-fix shadow-buckets:` line (per-node
+   counts plus the not-newly-broken ids, bounded by precondition 6) with the verdict line kept
+   byte-stable, plus a one-sentence statement of what the classifier discriminates that
+   `compute_new_failures` does not — without which a month of logs cannot answer "would it have
+   been right?". The classifier's `timeout=...` ellipsis becomes a declared
+   `PYTEST_BASELINE_TIMEOUT_SECONDS = 1800` (a plain module int, matching L165/L171's
+   convention and mechanically required by this plan's own `== 2` env-read row), and every
+   provisioning subprocess gains an explicit `timeout=` with `TimeoutExpired` routed to
+   `inconclusive`. The slow-suite concern is closed by the measured 0.09 s cost plus an explicit
+   `@pytest.mark.timeout(120)` and a **skip-not-fail** guard, so a provisioning failure in the
+   test harness can never become a nightly failure that pages a human.
+4. **The `.env.example` fix was inert, and is now correct.** Round 9's three-line block put a
+   **commented** placeholder under the `@optional` sigil — but `_parse_env_example`
+   (`verify.py` L1000-1039) only recognizes a declaration when the stripped line matches
+   `_KEY_RE` (L971), and the `startswith("#")` arm above it swallows a commented placeholder
+   into the comment accumulator. The key would never have been a declaration, so the sigil did
+   nothing and the `awk` verification row was vacuous — it prints `0` on `.env.example` today
+   and would still print `0` after a correct implementation. Replaced with a four-line block
+   matching the repo's own precedent for this exact class of knob (`.env.example` L89-92:
+   description, bare `# @optional`, **uncommented** declaration, blank line — the trailing blank
+   being load-bearing, since the accumulator otherwise bleeds the sigil onto the next key), and
+   the awk row is replaced by one that calls **the actual parser** `/update` uses.
+5. **Nits.** Step 4 retitled (the "attempt map" it named was deleted in round 9) and
+   "attempt-map" dropped from the classifier-tester role. Freshness baseline restated as
+   `b90e998920f`, with the empty diff over the four cited files recorded so the round-9 line
+   numbers are known to still hold.

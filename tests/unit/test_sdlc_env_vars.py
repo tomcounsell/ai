@@ -5,6 +5,8 @@ Tests the _extract_sdlc_env_vars function in sdk_client.py.
 
 from unittest.mock import MagicMock, patch
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 
 class TestExtractSdlcEnvVars:
     """Test _extract_sdlc_env_vars in agent/sdk_client.py."""
@@ -36,6 +38,7 @@ class TestExtractSdlcEnvVars:
 
         with patch("models.agent_session.AgentSession") as mock_as:
             mock_as.query.filter.return_value = [session]
+            wire_session_lookup(mock_as)
             result = _extract_sdlc_env_vars("test-session-id", gh_repo="tomcounsell/ai")
 
         assert result["SDLC_PR_NUMBER"] == "220"
@@ -51,6 +54,7 @@ class TestExtractSdlcEnvVars:
         from agent.sdk_client import _extract_sdlc_env_vars
 
         mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("nonexistent-session")
         assert result == {}
 
@@ -61,6 +65,7 @@ class TestExtractSdlcEnvVars:
 
         session = self._make_session()  # all fields default to None
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("test-session")
 
         assert "SDLC_PR_NUMBER" not in result
@@ -83,6 +88,7 @@ class TestExtractSdlcEnvVars:
             slug="fix-bug",
         )
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("test-session")
 
         assert result["SDLC_PR_NUMBER"] == "42"
@@ -98,6 +104,7 @@ class TestExtractSdlcEnvVars:
 
         session = self._make_session(plan_url="docs/plans/my-feature.md")
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("test-session")
         assert result["SDLC_PLAN_PATH"] == "docs/plans/my-feature.md"
 
@@ -107,6 +114,7 @@ class TestExtractSdlcEnvVars:
         from agent.sdk_client import _extract_sdlc_env_vars
 
         mock_as.query.filter.side_effect = Exception("Redis connection refused")
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("test-session")
         assert result == {}
 
@@ -117,6 +125,7 @@ class TestExtractSdlcEnvVars:
 
         session = self._make_session(pr_url="https://github.com/tomcounsell/ai/pull/1")
         mock_as.query.filter.return_value = [session]
+        wire_session_lookup(mock_as)
         result = _extract_sdlc_env_vars("test-session", gh_repo=None)
         assert "SDLC_REPO" not in result
 
@@ -206,6 +215,7 @@ class TestNoSelfIdenticalOrArms:
 
         with patch("models.agent_session.AgentSession") as mock_as:
             mock_as.query.filter.return_value = [session]
+            wire_session_lookup(mock_as)
             result = _extract_sdlc_env_vars("test-session-id")
 
         assert result["SDLC_SLUG"] == "lane-identity"

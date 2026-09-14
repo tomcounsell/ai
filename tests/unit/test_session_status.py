@@ -46,7 +46,7 @@ def _make_fake_session(
     started_at=None,
     updated_at=None,
     project_key="test",
-    history=None,
+    session_events=None,
 ):
     """Create a mock AgentSession for report testing."""
     now = time.time()
@@ -58,7 +58,7 @@ def _make_fake_session(
     mock.started_at = started_at or now - 200
     mock.updated_at = updated_at or now - 10
     mock.project_key = project_key
-    mock._get_history_list.return_value = history or []
+    mock.session_events = session_events or []
     return mock
 
 

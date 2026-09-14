@@ -432,16 +432,40 @@ async def _looks_like_refusal_llm(text: str) -> bool:
     text — is treated as ``CONTENT`` (fail-open at the parse boundary; a
     classifier that returns garbage must never suppress a legitimate
     extraction).
+
+    The prompt defines both labels and names the refusal families outright,
+    because a one-line question let the "nothing to record" family through:
+    Haiku read "Nothing noteworthy happened in this exchange. The conversation
+    was purely administrative housekeeping and doesn't warrant a memory
+    entry." as an observation *about* the conversation and answered CONTENT
+    (#3143). The deciding question, whether a future reader learns a fact
+    about the work or only that this input had nothing in it, is what
+    separates that family from a genuine observation that happens to be
+    negative in tone (a job produced no output, an approach was rejected).
     """
     from config.models import MODEL_FAST
 
     prompt = (
-        "Is the following text a refusal or meta-commentary about the ABSENCE "
-        "of content (e.g. 'there is nothing to extract', 'no observations "
-        "found'), as opposed to a genuine observation about a real event, "
-        "decision, or pattern?\n\n"
+        "You are auditing one piece of output from a memory-extraction step. "
+        "The extractor was asked to pull observations (decisions, corrections, "
+        "patterns, surprises) out of an agent session.\n\n"
+        "Classify the text as exactly one of:\n\n"
+        "REFUSAL: the extractor declined, or reported that there is nothing to "
+        "record. Every phrasing of that verdict counts: nothing noteworthy or "
+        "worth writing down, nothing to extract, no observations found, the "
+        "input was empty, routine, administrative, procedural, "
+        "acknowledgement-only, or boilerplate, or the exchange does not "
+        "warrant a memory entry. A REFUSAL describes the input's lack of "
+        "substance and teaches a future reader nothing about the project.\n\n"
+        "CONTENT: a genuine observation. It states something specific that "
+        "happened, was decided, was corrected, or was learned, which a future "
+        "reader could act on. Content stays CONTENT when negative in tone: a "
+        "bug was found, an approach was rejected, a job produced no output.\n\n"
+        "Deciding question: would a future reader learn a specific fact about "
+        "the work from this text, or only that this particular input had "
+        "nothing in it? The first is CONTENT; the second is REFUSAL.\n\n"
         "Reply with EXACTLY one word: REFUSAL or CONTENT.\n\n"
-        f"---\n\n{text[:4000]}"
+        f"<text>\n{text[:4000]}\n</text>"
     )
     raw = await _llm_call(
         model=MODEL_FAST,

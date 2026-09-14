@@ -80,7 +80,7 @@ class TestDetermineDeliveryActionTerminalStatuses:
     @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
     def test_terminal_status_returns_already_completed(self, terminal_status):
         """Each terminal status should return deliver_already_completed."""
-        from agent.agent_session_queue import determine_delivery_action
+        from agent.output_router import determine_delivery_action
 
         action = determine_delivery_action(
             msg="some output",
@@ -96,7 +96,7 @@ class TestDetermineDeliveryActionTerminalStatuses:
 
     def test_non_terminal_does_not_return_already_completed(self):
         """Non-terminal statuses should NOT return deliver_already_completed."""
-        from agent.agent_session_queue import determine_delivery_action
+        from agent.output_router import determine_delivery_action
 
         action = determine_delivery_action(
             msg="some output",
@@ -114,15 +114,30 @@ class TestEnqueueNudgeTerminalGuard:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("terminal_status", sorted(TERMINAL_STATUSES))
     async def test_nudge_main_path_skips_terminal(self, terminal_status):
-        """_enqueue_nudge() entry guard blocks terminal sessions from being nudged."""
-        from agent.agent_session_queue import _enqueue_nudge
+        """_enqueue_nudge() entry guard blocks terminal sessions from being nudged.
+
+        The entry guard's specific value is bailing out BEFORE the Redis
+        re-read, so the observable consequence of it failing is the re-read
+        happening at all (#3066). The authoritative re-read returns a LIVE
+        session here, so the downstream re-read guard cannot mask a
+        neutralized entry guard the way a None re-read routes everything
+        into the fallback branch's own check.
+        """
+        from agent.session_executor import _enqueue_nudge
 
         session = _mock_agent_session(status=terminal_status)
+        live_session = _mock_agent_session(status="running")
 
-        # If the guard works, it returns early without querying Redis or calling
-        # transition_status. We patch AgentSession.query to detect any leak.
-        with patch("agent.agent_session_queue.AgentSession") as mock_as:
-            mock_as.query.filter.return_value = []
+        with (
+            patch("agent.session_executor.AgentSession") as mock_as,
+            patch(
+                "models.session_lifecycle.get_authoritative_session",
+                return_value=live_session,
+            ) as mock_get_auth,
+            patch("models.session_lifecycle.transition_status") as mock_transition,
+            patch("agent.session_executor._call_ensure_worker") as mock_ensure,
+        ):
+            mock_as.async_create = MagicMock()
             await _enqueue_nudge(
                 session=session,
                 branch_name="session/test",
@@ -131,20 +146,22 @@ class TestEnqueueNudgeTerminalGuard:
                 output_msg="agent output",
                 nudge_feedback="continue",
             )
-            # Should NOT have queried Redis (guard returns before that)
-            mock_as.query.filter.assert_not_called()
+            mock_get_auth.assert_not_called()
+            mock_transition.assert_not_called()
+            mock_ensure.assert_not_called()
+            mock_as.async_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_nudge_fallback_path_skips_terminal(self):
         """_enqueue_nudge() fallback path blocks terminal sessions from async_create."""
-        from agent.agent_session_queue import _enqueue_nudge
+        from agent.session_executor import _enqueue_nudge
 
         # Session is completed but Redis returns empty (triggering fallback path)
         session = _mock_agent_session(status="completed")
 
         with (
-            patch("agent.agent_session_queue.AgentSession") as mock_as,
-            patch("agent.agent_session_queue._diagnose_missing_session", return_value="diag"),
+            patch("agent.session_executor.AgentSession") as mock_as,
+            patch("agent.session_executor._diagnose_missing_session", return_value="diag"),
             patch(
                 "agent.agent_session_queue.continuation_agent_session_fields",
                 return_value={},
@@ -166,7 +183,7 @@ class TestEnqueueNudgeTerminalGuard:
     @pytest.mark.asyncio
     async def test_nudge_reread_guard_catches_late_terminal(self):
         """Main path re-read guard catches session that became terminal after entry check."""
-        from agent.agent_session_queue import _enqueue_nudge
+        from agent.session_executor import _enqueue_nudge
 
         # Session starts as "running" (passes entry guard) but Redis returns
         # a version that is now "completed" (another process finalized it).
@@ -194,7 +211,7 @@ class TestCheckRevivalTerminalFilter:
 
     def test_revival_skips_completed_session_branch(self):
         """check_revival() returns None when all candidate branches have terminal siblings."""
-        from agent.agent_session_queue import check_revival
+        from agent.session_revival import check_revival
 
         pending_session = _mock_agent_session(
             session_id="chat-123-msg-1", status="pending", chat_id="12345"
@@ -229,7 +246,7 @@ class TestCheckRevivalTerminalFilter:
 
     def test_revival_passes_non_terminal_branches(self):
         """check_revival() returns revival info for branches without terminal siblings."""
-        from agent.agent_session_queue import check_revival
+        from agent.session_revival import check_revival
 
         pending_session = _mock_agent_session(
             session_id="chat-123-msg-2", status="pending", chat_id="12345"
@@ -318,7 +335,7 @@ class TestStartupRecoverySkipsTerminal:
         Also asserts that local sessions in the stale set are abandoned (not re-queued),
         and that bridge sessions are recovered.
         """
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         # The function queries AgentSession.query.filter(status="running").
         # Terminal sessions are never queried, so they cannot be recovered.
@@ -334,7 +351,7 @@ class TestStartupRecoverySkipsTerminal:
         """Startup recovery does not call update_session('pending') for local teammate sessions."""
         import time
 
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
             _recover_interrupted_agent_sessions_startup,
         )
@@ -367,7 +384,7 @@ class TestStartupRecoverySkipsTerminal:
         """Startup recovery calls update_session('pending') for local eng sessions (#1092)."""
         import time
 
-        from agent.agent_session_queue import (
+        from agent.session_health import (
             AGENT_SESSION_HEALTH_MIN_RUNNING,
             _recover_interrupted_agent_sessions_startup,
         )
@@ -409,7 +426,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """Create a mock session that is old enough to be considered stale."""
         import time
 
-        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+        from agent.session_health import AGENT_SESSION_HEALTH_MIN_RUNNING
 
         defaults = dict(
             session_id="test-session",
@@ -425,7 +442,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """Local non-ENG session (session_id starts with 'local') is finalized as 'abandoned'."""
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         local_session = self._stale_session(
             session_id="local-abc123",
@@ -463,7 +480,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         local_session = self._stale_session(
             session_id="local-teammate-abc",
@@ -496,7 +513,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         local_session = self._stale_session(
             session_id="local-dev-abc",
@@ -534,7 +551,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         local_session = self._stale_session(
             session_id="local-legacy-abc",
@@ -565,7 +582,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """Bridge session (session_id does NOT start with 'local') is reset to pending."""
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         bridge_session = self._stale_session(
             session_id="tg-xyz789",
@@ -596,7 +613,7 @@ class TestStartupRecoveryLocalSessionGuard:
         """
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         local_pm_session = self._stale_session(
             session_id="local-pm-abc",
@@ -664,7 +681,7 @@ class TestStartupRecoveryLedgerGuard:
     def _stale_ledger_session(self, **kwargs):
         import time
 
-        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+        from agent.session_health import AGENT_SESSION_HEALTH_MIN_RUNNING
 
         defaults = dict(
             session_id="sdlc-local-9042",
@@ -685,7 +702,7 @@ class TestStartupRecoveryLedgerGuard:
         call, and it does not count toward the recovered total."""
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         ledger_session = self._stale_ledger_session()
 
@@ -715,7 +732,7 @@ class TestStartupRecoveryLedgerGuard:
         decision), not something the guard needs to dedup."""
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         dup_a = self._stale_ledger_session(agent_session_id="agent-ledger-dup-a")
         dup_b = self._stale_ledger_session(agent_session_id="agent-ledger-dup-b")
@@ -793,7 +810,7 @@ class TestSessionWatchdogSafe:
 
     def test_watchdog_unhealthy_flag_routes_to_deliver(self):
         """Watchdog sets unhealthy flag which routes to deliver, not nudge."""
-        from agent.agent_session_queue import determine_delivery_action
+        from agent.output_router import determine_delivery_action
 
         action = determine_delivery_action(
             msg="some output",
@@ -924,7 +941,7 @@ class TestStartupRecoveryOwnershipGuard:
     def _run_recovery(self, sessions):
         import time
 
-        from agent.agent_session_queue import _recover_interrupted_agent_sessions_startup
+        from agent.session_health import _recover_interrupted_agent_sessions_startup
 
         with (
             patch("agent.session_health.AgentSession") as mock_as,
@@ -965,7 +982,7 @@ class TestStartupRecoveryOwnershipGuard:
     def test_stale_legacy_session_without_stamp_still_recovered(self):
         import time
 
-        from agent.agent_session_queue import AGENT_SESSION_HEALTH_MIN_RUNNING
+        from agent.session_health import AGENT_SESSION_HEALTH_MIN_RUNNING
 
         session = self._recent_bridge_session(
             worker_pid=None,

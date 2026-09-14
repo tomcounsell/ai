@@ -88,6 +88,33 @@ with no findings.
 then `rm -rf .venv && uv sync --all-extras` per checkout. Doctor names every
 env still on the old version.
 
+#### A pin bump strands the old interpreter's bytecode (#2883)
+
+Replacing the venv does **not** clean the source tree. Bytecode caches are
+namespaced per interpreter (`module.cpython-314.pyc`), so a pin bump *orphans*
+the previous interpreter's caches rather than replacing them. CPython never
+stats, validates, or deletes a cache whose magic tag is not its own, which makes
+an orphaned `.pyc` immortal — nothing invalidates it and no import heals it.
+
+That is not merely untidy. These files are real Python to any tool that reads
+the filesystem rather than tracked content: a stale pre-fix `.pyc` under
+`tools/__pycache__` already failed a clean source tree once (#2807/#2809).
+`PYTHONDONTWRITEBYTECODE=1` in `scripts/pytest-clean.sh` prevents new ones but
+cannot remove those on disk, and does not apply to a bare `python -m tools.x`.
+`tools/disk_reclaim.py` cannot find them either — it is size-ranked and these
+are kilobytes.
+
+`python -m tools.doctor` reports them (`stale_bytecode`), broken down by
+interpreter tag, with the sweep command. It is reported rather than swept
+automatically because deletion is the operator's call; the check skips `.venv/`
+and `.worktrees/`, which are replaced wholesale and already covered by
+`worktree_interpreters`.
+
+```bash
+find . -name '*.pyc' -not -path './.venv/*' -not -path './.worktrees/*' \
+  | grep -v cpython-<pin> | xargs rm -f
+```
+
 ### Enforcement on the ambient paths
 
 Pinning is not enough on its own, because a venv built before the pin landed
@@ -99,9 +126,17 @@ than as a downstream symptom:
   `.worktrees/*/.venv`, and every `.claude/worktrees/*/.venv` (harness-created
   agent worktrees, which nothing provisions and where the bare `uv sync` this
   issue is about is exactly what gets typed).
-- `scripts/pytest-clean.sh` **aborts** before running anything if the venv is
-  off the pin. A suite that runs to green on the wrong interpreter produces a
-  verdict that looks authoritative and is worthless.
+- `python -m tools.doctor` (`stale_bytecode`) reports source-tree `.pyc` caches
+  orphaned by a pin bump — the dimension the interpreter check does not cover,
+  since a wrong *venv* and stranded *bytecode* are different failures. See
+  [A pin bump strands the old interpreter's bytecode](#a-pin-bump-strands-the-old-interpreters-bytecode-2883).
+- `scripts/pytest-clean.sh` **aborts** before running anything in two cases. If
+  the venv is off the pin: a suite that runs to green on the wrong interpreter
+  produces a verdict that looks authoritative and is worthless. And if the
+  caller is a **linked worktree without an executable `.venv/bin/pytest`**
+  (#3033) — absent venv, half-provisioned venv from a failed `uv sync`, or a
+  sync without `--extra dev` — see
+  [The absent-venv case](#the-absent-venv-case-3033) below.
 - `.githooks/pre-commit` blocks with an explicit "broken environment, NOT a
   lint failure" message when `ruff` is missing from the resolved interpreter,
   and warns (without blocking) on an off-pin venv.
@@ -115,9 +150,107 @@ Provisioning failures (uv missing, sync error, timeout, marker write failure)
 log a WARNING tagged `[worktree-venv-provision-failed]` — greppable by
 `checking-system-logs` and log-scanning reflections — with the worktree path
 and a stderr tail, then return `False`. Worktree creation never fails on a
-provisioning error: the lane still works against the shared env, and the
-#2050 guard keeps blocking `uv sync` there because no worktree-local `.venv`
-exists.
+provisioning error, and the #2050 guard keeps blocking `uv sync` there because
+no worktree-local `.venv` exists.
+
+What such a lane must NOT do is run its test suite. Fail-open provisioning is
+why a venv-less worktree can exist at all; it is not a licence to test in one.
+The guard below is what makes the fail-open safe.
+
+### The absent-venv case (#3033)
+
+A linked worktree with **no `.venv`** does not fail to import — it resolves
+imports through the primary checkout's editable path entry. The branch's tests
+then exercise `main`'s code, always find a real module, and never raise. The run
+reports green on code it never loaded.
+
+That direction matters: the failure is biased toward green, so it hides exactly
+the regressions the run exists to catch. In PR #3028 it produced a confidently
+false "1545 unit tests pass" in the PR body, and the one genuinely failing test
+surfaced only because a reviewer forced `PYTHONPATH`.
+
+The off-pin check does not cover this. Off-pin means a *wrong* venv; absent
+means *no* venv, which degrades silently rather than mismatching.
+
+`scripts/pytest-clean.sh` therefore refuses to run from a linked worktree unless
+an executable `.venv/bin/pytest` exists, naming the worktree, what is missing,
+and the remedy (`uv sync --extra dev` in the worktree). Mere `.venv` presence is
+not enough — that weaker check was bypassed two ways in practice: a failed
+`uv sync` creates `.venv` before dying, and a sync without `--extra dev`
+provisions a venv with no pytest in it, both of which fell through to PATH and
+silently tested the primary checkout. The abort message distinguishes a missing
+venv from an incomplete one. The guard keys on `.git` being a **file** — a
+linked worktree's gitdir pointer — so a primary checkout is unaffected, and the
+wrapper invokes pytest through the venv (`.venv/bin/python -m pytest`), never by
+PATH resolution.
+
+The wrapper also exports `PYTHONPATH` with the invoking checkout's root
+prepended (preserving any caller value). This closes the third observed
+mechanism: even a fully provisioned worktree resolves `tools.*` through the
+primary checkout's editable-install `.pth` entry, so without the pin a
+venv-equipped worktree can still import `main`'s code. With it, the checkout
+being tested always wins import resolution.
+
+Verified live (2026-08-31): in a real venv-less worktree,
+`import tools.sdlc_stage_query` resolved to the primary checkout and the
+pre-guard script reported "8 passed". `tests/unit/test_worktree_venv_absent_guard.py`
+pins that the guard fires, names all three facts, and does not over-reach onto
+worktrees that have a venv or onto the primary checkout.
+
+### Bare scripts from a worktree (#3141)
+
+`scripts/pytest-clean.sh` protects test runs. A bare `python scripts/<tool>.py`
+has no wrapper, and it is exposed the same way with one more twist. The `c`
+launcher activates `~/src/ai/.venv`, so `python` typed inside a worktree is the
+primary checkout's interpreter; `sys.path[0]` is only the script's directory,
+and every `agent.*`/`tools.*` import resolves through that venv's editable
+`.pth` entry to `main`. The #3069 lane ran `capture_persona_baseline.py` this
+way and it reported the regenerated baseline "unchanged" because it had
+composed the prompt from the wrong checkout.
+
+A `sys.path.insert(0, REPO_ROOT)` at the top of the script does not close it.
+The flush-guard boot shim (`zzz_redis_flush_guard.pth`) imports `tools` during
+`site` processing, before the script's first line, so `sys.modules["tools"]`
+is already `main`'s package and every later `tools.*` import lands inside it
+whatever `sys.path` says. Measured 2026-09-05: such a script got `agent` from
+the worktree and `tools` from the primary checkout.
+
+The fix is one more startup shim, one step earlier. `tools/checkout_pin.py` is
+the single source; `scripts/update/redis_flush_guard_pth.py` copies it into
+every repo venv's `site-packages` as `_valor_checkout_pin.py` beside a
+one-line `_valor_checkout_pin.pth`, which sorts before
+`zzz_redis_flush_guard.pth`. At interpreter start `pin()` reads `sys.argv[0]`;
+for a script path it walks up to the nearest `.git` and, when that directory's
+`pyproject.toml` declares this project and the directory is absent from
+`sys.path`, inserts it at index 0. `-c`, `-m`, stdin, scripts outside a
+checkout of this project, console scripts under a venv, and a script in the
+venv's own checkout all leave `sys.path` untouched. Stdlib only, never raises.
+
+It reaches venvs the same three ways the flush guard does: `/update` Step 3.05
+(`install_fleet`), the worktree venv bootstrap in `agent/worktree_manager.py`,
+and the flush guard's own self-heal, which installs the whole file set. One
+venv by hand: `python -m scripts.update.redis_flush_guard_pth --venv <path>`.
+
+Verified live (2026-09-05) from a worktree through the primary venv, with a
+line appended to `config/personas/engineer.md` in the worktree only:
+`capture_persona_baseline.py --check` reported "current" before the shim and
+"STALE (32730 -> 32786)" after it; the same command on the primary checkout's
+own script stayed "current". `tests/unit/test_checkout_pin.py` pins the
+decision table and runs the two-checkout scenario in a real subprocess with
+the `.pth` present and absent. The venv running that suite ships
+`_valor_checkout_pin.pth` itself (installed by the fleet-wide install path
+above), so the probe subprocess runs through an explicit bootstrap script
+under `-S -P` rather than a bare `[sys.executable, script]` invocation: the
+bootstrap's `argv[0]` sits outside any checkout, and that is what would disarm
+the ambient pin during the child's `site` processing were it to run; under the
+shipped `-S -P` invocation there is no *ambient* `site` processing to disarm
+(the bootstrap still calls `site.addsitedir` on the fake site dir itself), so
+the "without the pin" run stays a real negative control. `-S` is hermeticity
+against a future ambient shim that does not read `argv[0]`; `-P` is not that —
+it keeps the bootstrap's own directory off the child's `sys.path` so the
+probe's search path matches real CPython startup, which is what makes the
+sibling test's whole-`sys.path` comparison meaningful. Neither flag is the
+mechanism that fixes this (#3201).
 
 ### Guard relaxation (#2050 coordination)
 

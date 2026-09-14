@@ -126,7 +126,7 @@ def run() -> dict:
     Raises exceptions on sub-step failure (propagates to scheduler for
     last_status=error tracking).
     """
-    from bridge.utc import utc_now
+    from utils.utc import utc_now
 
     findings: list[str] = []
     yesterday = (utc_now() - timedelta(days=1)).strftime("%Y-%m-%d")

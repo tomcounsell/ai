@@ -1438,3 +1438,58 @@ class TestConcernRoundCounter:
         session.stage_states = json.dumps({"_concern_round_count": "not-a-number"})
         record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
         assert self._count(session) == 1
+
+
+class TestRevisionRoundCounter:
+    """#2885 via #3065: ``record_verdict`` owns the revision-round counter.
+
+    ``_revision_round_count`` feeds G2's critique cycle cap. It must advance
+    on every revision-demanding CRITIQUE round (NEEDS REVISION / MAJOR
+    REWORK) and on nothing else — with-concerns rounds have their own bound
+    (#2787) and must not consume this one, and vice versa.
+    """
+
+    def _count(self, session) -> int:
+        return json.loads(session.stage_states).get("_revision_round_count", 0)
+
+    def test_needs_revision_increments(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert self._count(session) == 1
+
+    def test_major_rework_increments(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "MAJOR REWORK")
+        assert self._count(session) == 1
+
+    def test_with_concerns_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (with concerns)")
+        assert self._count(session) == 0
+
+    def test_accepted_verdict_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "CRITIQUE", "READY TO BUILD (no concerns)")
+        assert self._count(session) == 0
+
+    def test_review_stage_does_not_increment(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record_verdict(session, "REVIEW", "CHANGES REQUESTED")
+        assert self._count(session) == 0
+
+    def test_counter_absent_from_returned_record(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        record = record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert "_revision_round_count" not in record
+
+    def test_monotonic_across_rounds(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        for verdict in ("NEEDS REVISION", "READY TO BUILD (with concerns)", "MAJOR REWORK"):
+            record_verdict(session, "CRITIQUE", verdict)
+        assert self._count(session) == 2
+
+    def test_corrupt_existing_counter_recovers_to_one(self, fake_session_reload_patched):
+        session = fake_session_reload_patched
+        session.stage_states = json.dumps({"_revision_round_count": []})
+        record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+        assert self._count(session) == 1

@@ -254,8 +254,10 @@ class TestCreateDevRoleRequiresSlug:
 class TestCreateChildSessionGate:
     """Stopgap (#1633): cmd_create refuses NEW parent-attached session creation.
 
-    The granite PTY container (PR #1612) owns the PM/Dev split from a bounded
-    pool; parent-linked child sessions double-consume pool slots. The gate
+    Dependent work runs as subagents within the session (D1 topology: the PM
+    continues its dev subagent across turns), and child-session fanout has no
+    per-parent bound -- only the worker's global MAX_CONCURRENT_SESSIONS slot
+    registry, shared machine-wide (see models/child_session_gate.py). The gate
     fires before any filesystem or Redis work and is bypassed only by
     VALOR_ALLOW_CHILD_SESSIONS=1 (loud stderr warning). Parentless creation
     and existing-child lifecycle commands are untouched.
@@ -275,7 +277,10 @@ class TestCreateChildSessionGate:
 
         async def _fake_push(**kwargs):
             push_calls.append(kwargs)
-            return 1
+            # (queue depth, agent_session_id) — a bare int here raises
+            # "cannot unpack non-sequence int" at the enqueue_agent_session
+            # call site (#3183 lane 5b).
+            return 1, "0" * 32
 
         monkeypatch.setattr(queue_mod, "_push_agent_session", _fake_push)
 
@@ -374,7 +379,10 @@ class TestCreateTelegramMessageIdFlag:
 
         async def _fake_push(**kwargs):
             push_calls.append(kwargs)
-            return 1
+            # (queue depth, agent_session_id) — a bare int here raises
+            # "cannot unpack non-sequence int" at the enqueue_agent_session
+            # call site (#3183 lane 5b).
+            return 1, "0" * 32
 
         import agent.agent_session_queue as queue_mod
 

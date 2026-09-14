@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.agent_session_queue import (
+from agent.session_executor import (
     _HARNESS_EXHAUSTION_MSG,
     _HARNESS_NOT_FOUND_PREFIX,
     _handle_harness_not_found,

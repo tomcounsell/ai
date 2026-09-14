@@ -220,34 +220,61 @@ class TestSlugFlagOnCreate:
 
 
 class TestPMSystemPromptWorktreeInstruction:
-    """Fix C: PM system prompt includes worktree CWD instruction for dev sessions."""
+    """Fix C: the Eng persona directs slug-scoped work into the lane worktree.
+
+    These assertions are anchored on the substance of the instruction — the
+    ``.worktrees/{slug}/`` lane path, the ``git worktree`` provisioning command,
+    the ``session/{slug}`` lane branch, and the rule that a child session works
+    inside its own lane — rather than on an issue number or one phrasing.
+    Persona prose gets rewritten (PR #3139 rewrote it wholesale and dropped both
+    literals these tests used to pin); the instruction is what must survive.
+    """
+
+    PERSONA_PATH = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
+
+    # Any one of these on a line that also names the lane path expresses the cwd
+    # rule ("children run in ...", "do not write outside ...", "stay within ...").
+    CWD_SCOPE_WORDS = ("run in", "runs in", "within", "inside", "outside", "cd ")
+
+    def _persona_text(self) -> str:
+        assert self.PERSONA_PATH.exists(), f"Engineer persona not found at {self.PERSONA_PATH}"
+        return self.PERSONA_PATH.read_text()
 
     def test_pm_prompt_contains_worktree_instruction(self):
-        """The PM persona prompt must contain worktree isolation instructions."""
-        pm_prompt_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
-        assert pm_prompt_path.exists(), f"PM prompt not found at {pm_prompt_path}"
+        """The Eng persona must direct slug-scoped work into a lane worktree."""
+        content = self._persona_text()
 
-        content = pm_prompt_path.read_text()
-
-        # Check for the key elements of the worktree instruction
-        assert ".worktrees/" in content, "PM prompt must reference .worktrees/ path"
-        assert "Issue #887" in content or "issue #887" in content, (
-            "PM prompt must reference issue #887"
+        assert ".worktrees/{slug}/" in content, (
+            "Engineer persona must name the lane worktree path form `.worktrees/{slug}/`"
         )
-        # Engineer persona uses "child session" terminology (merged from dev-session)
+        assert "git worktree add" in content, (
+            "Engineer persona must give the `git worktree add` provisioning command"
+        )
+        assert "session/{slug}" in content, (
+            "Engineer persona must tie the lane worktree to the `session/{slug}` branch"
+        )
         assert "dev-session" in content or "child session" in content, (
-            "Engineer prompt must mention dev-session or child session"
+            "Engineer persona must say whose work the lane worktree isolates "
+            "(dev-session / child session)"
         )
-        assert "worktree" in content.lower(), "PM prompt must mention worktree isolation"
 
     def test_pm_prompt_contains_cwd_guidance(self):
-        """The PM prompt must instruct about CWD for Agent tool calls."""
-        pm_prompt_path = Path(__file__).parent.parent.parent / "config" / "personas" / "engineer.md"
-        content = pm_prompt_path.read_text()
+        """The Eng persona must state the cwd rule for a spawned child session."""
+        content = self._persona_text()
 
-        # The prompt should tell the PM to use the worktree path as working directory
-        assert "working" in content.lower() and "directory" in content.lower(), (
-            "PM prompt must mention working directory"
+        assert "working dir" in content.lower(), (
+            "Engineer persona must tell a spawn prompt to name the child's working directory"
+        )
+
+        scoped_lines = [
+            line
+            for line in content.splitlines()
+            if ".worktrees/{slug}" in line
+            and any(word in line.lower() for word in self.CWD_SCOPE_WORDS)
+        ]
+        assert scoped_lines, (
+            "Engineer persona must scope a child session to its lane worktree: no line "
+            "pairs `.worktrees/{slug}` with any of " + repr(self.CWD_SCOPE_WORDS)
         )
 
 
@@ -496,4 +523,39 @@ class TestSyntheticSlugLogMarker:
             "expected at least 2 occurrences of the literal `[synthetic-slug]` "
             "log marker in agent/session_executor.py — synthesis log + "
             "cleanup log"
+        )
+
+
+class TestSyntheticSlugStaysLocal:
+    """Issue #3176: ``slug`` is never written back onto a hydrated
+    ``AgentSession`` row. ``models/agent_session.py`` declares
+    ``slug = KeyField(null=True)``, so assigning it on a saved instance
+    writes a new row at a new Redis primary key and orphans the original —
+    the lane-visibility fix uses ``exec_cwd`` (a plain field) instead.
+    """
+
+    def test_no_slug_assignment_on_hydrated_row(self):
+        """Source-level anti-criterion: no line in the three files this
+        plan changes assigns ``<name>.slug = ...`` on a hydrated instance."""
+        pattern = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\.slug\s*=[^=]")
+        for rel_path in (
+            "agent/session_executor.py",
+            "agent/worktree_manager.py",
+            "tools/agent_session_scheduler.py",
+        ):
+            src_path = Path(__file__).parent.parent.parent / rel_path
+            for line in src_path.read_text().splitlines():
+                assert not pattern.match(line), (
+                    f"{rel_path} assigns .slug on a hydrated row: {line!r} — "
+                    "slug is a KeyField; a mid-flight write forks the Redis row"
+                )
+
+    def test_synthesis_site_documents_the_keyfield_hazard(self):
+        """The comment at the synthesis site must explain why slug stays
+        local, so a future reader does not "finish the job" (spike-3)."""
+        src_path = Path(__file__).parent.parent.parent / "agent" / "session_executor.py"
+        src = src_path.read_text()
+        assert "KeyField" in src, (
+            "expected a comment near the synthetic-slug synthesis site "
+            "explaining the KeyField hazard (spike-3)"
         )

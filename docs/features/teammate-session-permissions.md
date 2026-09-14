@@ -1,16 +1,11 @@
 # Teammate Session Permissions
 
-**Status:** Shipped
-**Tracking:** [#1410](https://github.com/tomcounsell/ai/issues/1410)
-
 Teammate sessions (`SESSION_TYPE=teammate`) get a single hard rule enforced
 in code: **writes to source-code paths require spawning a Dev session.**
 Everything else — running scripts, restarting services, editing docs, updating
-`.claude/` skills, writing to the knowledge base — is in scope. Before this
-feature, teammate behavior was governed by prose-only constraints in
-`build_teammate_instructions()`, which a motivated or forgetful model could
-bypass. This feature replaces prose-only constraints with a code-level
-allowlist plus a capable prompt that encourages operational work.
+`.claude/` skills, writing to the knowledge base — is in scope. Teammate
+behavior is governed by a code-level allowlist plus a capable prompt that
+encourages operational work.
 
 ## The Hard Rule
 
@@ -131,19 +126,16 @@ not. Same trade-off: audit-only.
 
 ## MultiEdit Coverage
 
-Before this feature, the Write/Edit branch did not cover `MultiEdit`,
-which meant PM sessions could bypass the docs/ allowlist via MultiEdit
-(latent bug). The teammate enforcement work also fixed this gap: the
-branch is now `tool_name in ("Write", "Edit", "MultiEdit")`. A
-regression test in `tests/unit/test_pm_session_permissions.py` locks the
-PM fix in.
+The write gate covers `MultiEdit` — the branch is
+`tool_name in ("Write", "Edit", "MultiEdit")` — so PM sessions cannot
+bypass the docs/ allowlist via MultiEdit. A regression test in
+`tests/unit/test_pm_session_permissions.py` locks the behavior in.
 
-## Prompt Rewrite
+## Prompt Structure
 
-`build_teammate_instructions()` in `agent/teammate_handler.py` was
-rewritten to drop the prior restrictive prose (the no-write / no-Agent /
-no-Dev-spawn prohibitions) in favor of three new blocks that explain
-the code-level enforcement and encourage operational work:
+`build_teammate_instructions()` in `agent/teammate_handler.py` provides
+three blocks that explain the code-level enforcement and encourage
+operational work:
 
 - **TOOL POSTURE** — describes the one-rule enforcement and the audit log.
   Tells the model to suggest spawning a Dev session when it hits a block,
@@ -156,8 +148,8 @@ the code-level enforcement and encourage operational work:
   confirmation.
 
 The IDENTITY, CONVERSATIONAL RULES, RESEARCH FIRST, and DELIVERY REVIEW
-sections are preserved verbatim. The delivery-review section in
-particular comes from PR #1333 (tool-call contract) and must not drift.
+sections sit alongside these blocks. The delivery-review section in
+particular (the tool-call contract) must not drift.
 
 ## Key Files
 

@@ -34,7 +34,6 @@ def _make_session(suffix: str) -> AgentSession:
         session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
-        agent_session_id=f"thread-rollup-fields-{suffix}",
     )
 
 

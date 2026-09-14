@@ -16,6 +16,8 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
+from models.session_event import format_event_lines  # noqa: E402 -- needs sys.path above
+
 
 def format_duration(seconds: float) -> str:
     """Format seconds into human-readable duration."""
@@ -79,7 +81,7 @@ def get_session_report(include_completed: bool = False, stalled_only: bool = Fal
         stall_marker = " STALLED" if is_stalled else ""
 
         # Last history entry for context
-        history = s._get_history_list() if hasattr(s, "_get_history_list") else []
+        history = format_event_lines(s.session_events)
         last_entry = history[-1] if history else "no history"
 
         session_id = s.session_id or s.agent_session_id or "unknown"

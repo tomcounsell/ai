@@ -135,7 +135,7 @@ Skills that MUST invoke this gate (cold-read, per the rule above) before content
 | Caller | Gate point |
 |--------|-----------|
 | `email` | before sending or finalizing any draft to an external recipient |
-| `do-presentation` | after the self-review pass, before export |
+| `do-presentation` | the sole editorial gate, run once on the finished draft, before export |
 | `linkedin` / `x-com` | before `authenticity-pass`, for anything going live |
 
 Conversational chat (Telegram replies, inline answers to the user) is exempt by design.

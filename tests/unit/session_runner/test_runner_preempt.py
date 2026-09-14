@@ -20,13 +20,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import pathlib
 import signal
+import time
+import uuid
 from unittest.mock import patch
 
 from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessTurnOutcome
 from agent.session_runner.router import ExitReason, TurnFailure
 from agent.session_runner.runner import (
+    ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE,
+    ENG_ABSOLUTE_TIMEOUT_S,
+    ENG_IDLE_TIMEOUT_S,
     TIMEOUT_NEEDS_ATTENTION_MESSAGE,
     SessionRunner,
     _TurnHandle,
@@ -287,13 +293,76 @@ async def test_timeout_expiry_is_graceful_preempt_not_error():
         kill_fn=fake_kill,
         killpg_fn=fake_kill,
         pid_alive_fn=lambda pid: False,
-        turn_timeout_s=0.12,
+        idle_timeout_s=0.12,
     )
+    # Unique id: the notice is deduped per session (#3270 A6b), so a shared
+    # fixture id would let a previous test run's dedupe key suppress this send.
+    session.session_id = f"dbg-a6b-single-{uuid.uuid4()}"
     summary = await runner.run("long task")
     assert kills and kills[0][1] == signal.SIGTERM
     assert summary.exit_reason == "turn_timeout"
     assert summary.exit_reason != "error"
     assert deliveries == [TIMEOUT_NEEDS_ATTENTION_MESSAGE]
+    # The delivered text must assert nothing false (#3289). Nothing is
+    # paused or suspended: the process group was SIGTERM'd, given a flush
+    # grace, then SIGKILL'd, and any foreground subagent died with it. The
+    # inactivity claim is true here because the IDLE deadline is what fired.
+    assert deliveries == [
+        "I stopped this run after a long stretch with no activity. The work "
+        "so far is saved. Reply and I'll pick it up from there."
+    ]
+    timeout_records = [
+        e
+        for e in session.session_events
+        if e["type"] == "runner_turn" and e["turn_end_source"] == "timeout"
+    ]
+    assert len(timeout_records) == 1
+
+
+async def test_absolute_ceiling_preempt_delivers_the_absolute_variant_notice():
+    """The absolute ceiling must not tell the human "no activity" (#3294).
+
+    The absolute deadline fires by construction on a turn that kept BOTH
+    activity signals fresh for the whole ceiling -- the idle deadline could
+    never catch it. Delivering the idle text there states something false.
+    Here the idle deadline is set out of reach so only the ceiling can fire.
+
+    The EXIT is unchanged: both deadlines are ``ExitReason.TURN_TIMEOUT`` and
+    both record ``turn_end_source="timeout"``; only the human-facing text
+    differs.
+    """
+    driver = KillableDriver()
+    kills = []
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        driver.kill_event.set()
+
+    runner, deliveries, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        idle_timeout_s=3600.0,  # unreachable: the ceiling is the only deadline
+        absolute_timeout_s=0.12,
+    )
+    session.session_id = f"dbg-abs-notice-{uuid.uuid4()}"
+    summary = await runner.run("endless streaming task")
+
+    assert kills and kills[0][1] == signal.SIGTERM
+    assert summary.exit_reason == "turn_timeout", (
+        "the absolute ceiling must keep mapping to TURN_TIMEOUT"
+    )
+    assert deliveries == [ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE], (
+        f"absolute-ceiling preempt delivered the wrong notice: {deliveries!r}"
+    )
+    assert "no activity" not in deliveries[0], (
+        "the absolute-ceiling notice claims inactivity on a turn that was continuously active"
+    )
+    # The clauses that stay true on both deadlines.
+    assert "saved" in deliveries[0]
+    assert "Reply" in deliveries[0]
     timeout_records = [
         e
         for e in session.session_events
@@ -785,3 +854,266 @@ async def test_stamp_failure_never_breaks_the_turn():
 
     assert summary.exit_reason is ExitReason.PM_USER
     assert deliveries == ["done"]
+
+
+async def _run_until_timeout(session_id: str, row_id: str, deliveries: list[str]) -> None:
+    """Drive one turn to TURN_TIMEOUT for a given (thread, row) identity."""
+    driver = KillableDriver()
+
+    def fake_kill(pid, sig):
+        driver.kill_event.set()
+
+    runner, _, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        deliveries=deliveries,
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        idle_timeout_s=0.12,
+    )
+    session.session_id = session_id
+    session.id = row_id
+    summary = await runner.run("long task")
+    assert summary.exit_reason == "turn_timeout"
+
+
+async def test_timeout_notice_delivered_once_across_two_runs_of_one_row():
+    """A6b (#3270): the needs-attention notice is once per stranded ROW.
+
+    The incident: a stranded conversation row was re-enqueued on a ~hourly
+    cadence and every re-run timed out and re-posted the byte-identical
+    ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` into the human's chat. Re-runs of that
+    row keep its record ``id``, so two runs must produce exactly ONE delivery.
+    """
+    session_id = f"dbg-a6b-{uuid.uuid4()}"
+    row_id = f"row-{uuid.uuid4()}"
+    deliveries: list[str] = []
+
+    await _run_until_timeout(session_id, row_id, deliveries)
+    await _run_until_timeout(session_id, row_id, deliveries)
+
+    assert deliveries.count(TIMEOUT_NEEDS_ATTENTION_MESSAGE) == 1, (
+        f"timeout notice re-delivered once per run: {deliveries!r}"
+    )
+
+
+async def test_timeout_notice_redelivered_for_a_later_unrelated_request():
+    """A6b must not silence a NEW request that happens to time out too.
+
+    A resumed session reuses its thread ``session_id`` but is minted a fresh
+    AgentSession record ``id``. A ``session_id``-only dedupe key would suppress
+    the notice for a request the human made hours later -- and that suppression
+    is unrecoverable, because ``TURN_TIMEOUT`` is not ``wrapup_eligible``, so
+    nothing else would be said. The human would get pure silence.
+    """
+    session_id = f"dbg-a6b-{uuid.uuid4()}"
+    deliveries: list[str] = []
+
+    await _run_until_timeout(session_id, f"row-{uuid.uuid4()}", deliveries)
+    await _run_until_timeout(session_id, f"row-{uuid.uuid4()}", deliveries)
+
+    assert deliveries.count(TIMEOUT_NEEDS_ATTENTION_MESSAGE) == 2, (
+        "a later, unrelated request in the same thread was silenced by the "
+        f"A6b dedupe: {deliveries!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Activity-aware turn deadlines (#3289)
+#
+# Turn time is SIMULATED, never slept: the watcher reads its elapsed time
+# from the ``started_at`` it is handed and its idle time from two activity
+# stamps, so backdating those three values is a complete simulation of an
+# arbitrarily long turn. Every assertion below therefore runs in well under
+# a second while exercising the real ``_preempt_watcher`` predicate, the
+# real ``_turn_idle_seconds`` normalization, the real hook-edge marker
+# reader, and the real kill path.
+# --------------------------------------------------------------------------
+
+# The single hard deadline this fix replaced: every non-teammate turn was
+# SIGTERM'd at 7200s of wall clock no matter how much work was in flight.
+OLD_HARD_CAP_S = 7200.0
+
+WATCHER_FAST = {
+    "steer_poll_interval_s": 0.02,
+    "steer_debounce_s": 0.02,
+    "term_grace_s": 0.0,
+}
+
+
+def _stamp_tool_activity(base_dir, session_id: str, *, age_s: float = 0.0) -> None:
+    """Stamp the REAL hook-edge tool-activity marker for ``session_id``.
+
+    Uses the production writer (``liveness_hook.stamp``) and the production
+    path helper (``hook_edge.tool_activity_path``) rather than hand-rolling
+    the file format, so this stays coupled to the real hook contract.
+    """
+    from agent.session_runner.hook_edge import tool_activity_path
+    from agent.session_runner.liveness_hook import stamp
+
+    session_dir = pathlib.Path(base_dir) / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    stamp(str(tool_activity_path(session_dir / "pm_hook_edges.ndjson")), time.time() - age_s)
+
+
+def _make_watcher_runner(tmp_path, monkeypatch, session_id: str, **kwargs):
+    """A runner whose hook-edge root is ``tmp_path`` and whose deadlines are
+    the REAL role defaults (no timeout kwargs) unless a test overrides them."""
+    import agent.session_runner.adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "_hook_edge_base_dir", lambda: str(tmp_path))
+
+    driver = KillableDriver()
+    kills: list[tuple[int, int]] = []
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        driver.kill_event.set()
+
+    runner, deliveries, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        **{**WATCHER_FAST, **kwargs},
+    )
+    session.session_id = session_id
+    return runner, session, kills
+
+
+async def _drive_watcher(
+    runner,
+    *,
+    elapsed_s: float,
+    stream_idle_s: float = 0.0,
+    refresh_stream: bool = False,
+    window_s: float = 0.15,
+) -> _TurnHandle:
+    """Run the REAL preempt watcher over one simulated turn; return its handle.
+
+    ``elapsed_s`` backdates ``started_at`` (simulated wall-clock age of the
+    turn) and ``stream_idle_s`` backdates the in-memory stream stamp. With
+    ``refresh_stream`` the production 0-arg stdout callback is invoked on a
+    tight loop, which is what a turn that keeps streaming looks like to the
+    watcher.
+    """
+    loop = asyncio.get_running_loop()
+    runner._generation += 1
+    handle = _TurnHandle(generation=runner._generation, pid=4242, pgid=4242)
+    runner._current_handle = handle
+
+    gate = asyncio.Event()
+    turn_task = asyncio.create_task(gate.wait())
+    now = loop.time()
+    runner._last_activity_mono = now - stream_idle_s
+
+    refresher = None
+    if refresh_stream:
+
+        async def _stream() -> None:
+            while True:
+                runner._on_stdout_event_liveness()
+                await asyncio.sleep(0.005)
+
+        refresher = asyncio.create_task(_stream())
+
+    watcher = asyncio.create_task(runner._preempt_watcher(handle, turn_task, now - elapsed_s))
+    try:
+        await asyncio.wait({watcher}, timeout=window_s)
+    finally:
+        for task in (refresher, watcher, turn_task):
+            if task is None:
+                continue
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+    return handle
+
+
+async def test_streaming_turn_survives_past_old_cap(tmp_path, monkeypatch):
+    """A turn whose parent stream keeps producing events is never preempted,
+    however long it has been running — the old fixed 7200s wall-clock cap
+    killed it regardless."""
+    runner, _, kills = _make_watcher_runner(tmp_path, monkeypatch, "sess-streaming-past-cap")
+    assert runner._absolute_timeout_s > OLD_HARD_CAP_S, (
+        "the simulated elapsed time below must sit between the old cap and "
+        "the new ceiling for this test to mean anything"
+    )
+
+    handle = await _drive_watcher(runner, elapsed_s=OLD_HARD_CAP_S + 100, refresh_stream=True)
+
+    assert handle.killed is False
+    assert handle.kill_cause is None
+    assert kills == []
+
+
+async def test_nested_subagent_silence_survives_past_old_cap(tmp_path, monkeypatch):
+    """THE regression test for #3289.
+
+    A foreground subagent appears in the parent stream as one ``tool_use``
+    and, much later, one ``tool_result`` — 27% of measured Task windows had
+    ZERO parent-stream records for their whole duration. So the parent
+    stream is silent here (stale by well over the idle deadline) while the
+    hook-edge tool-activity marker, which ticks on the subagent's OWN tool
+    calls, stays fresh. That turn is demonstrably doing work and must not be
+    preempted, even past the old 7200s cap that used to kill it.
+
+    Proven RED against the pre-fix runner (plan Task 8): with a single
+    fixed wall-clock deadline, this scenario is SIGTERM'd at 7200s.
+    """
+    session_id = "sess-nested-subagent-alive"
+    runner, _, kills = _make_watcher_runner(tmp_path, monkeypatch, session_id)
+    _stamp_tool_activity(tmp_path, session_id, age_s=0.0)
+
+    handle = await _drive_watcher(
+        runner,
+        elapsed_s=OLD_HARD_CAP_S + 100,
+        stream_idle_s=OLD_HARD_CAP_S + 100,  # parent stream dark the whole time
+    )
+
+    assert handle.killed is False, (
+        "a turn whose nested subagent is still making tool calls was preempted"
+    )
+    assert kills == []
+
+
+async def test_fully_silent_turn_preempts_at_idle_deadline(tmp_path, monkeypatch):
+    """Neither signal advances: no stream events, no tool-activity marker.
+    The preempt fires at the idle deadline — and not before it."""
+    runner, _, kills = _make_watcher_runner(tmp_path, monkeypatch, "sess-fully-silent")
+
+    just_inside = await _drive_watcher(
+        runner,
+        elapsed_s=ENG_IDLE_TIMEOUT_S - 60,
+        stream_idle_s=ENG_IDLE_TIMEOUT_S - 60,
+    )
+    assert just_inside.killed is False, "preempted BEFORE the idle deadline"
+    assert kills == []
+
+    past = await _drive_watcher(
+        runner,
+        elapsed_s=ENG_IDLE_TIMEOUT_S + 1,
+        stream_idle_s=ENG_IDLE_TIMEOUT_S + 1,
+    )
+    assert past.killed is True
+    assert past.kill_cause == "timeout_idle"
+    assert kills and kills[0][1] == signal.SIGTERM
+
+
+async def test_absolute_ceiling_preempts_endless_streamer(tmp_path, monkeypatch):
+    """Both signals advance forever — a runaway that streams but never ends.
+    The idle deadline can never catch it, so the absolute ceiling does."""
+    session_id = "sess-endless-streamer"
+    runner, _, kills = _make_watcher_runner(tmp_path, monkeypatch, session_id)
+    _stamp_tool_activity(tmp_path, session_id, age_s=0.0)
+
+    below = await _drive_watcher(runner, elapsed_s=ENG_ABSOLUTE_TIMEOUT_S - 60, refresh_stream=True)
+    assert below.killed is False, "preempted BEFORE the absolute ceiling"
+    assert kills == []
+
+    past = await _drive_watcher(runner, elapsed_s=ENG_ABSOLUTE_TIMEOUT_S + 1, refresh_stream=True)
+    assert past.killed is True
+    assert past.kill_cause == "timeout_absolute"
+    assert kills and kills[0][1] == signal.SIGTERM

@@ -158,13 +158,13 @@ class TestEnqueueContinuationSessionLookupLogging:
         from unittest.mock import AsyncMock as _AsyncMock
 
         with (
-            caplog.at_level(logging.ERROR, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.ERROR, logger="agent.session_executor"),
             patch(
                 "agent.agent_session_queue.enqueue_agent_session",
                 new_callable=_AsyncMock,
             ),
         ):
-            from agent.agent_session_queue import _enqueue_nudge
+            from agent.session_executor import _enqueue_nudge
 
             await _enqueue_nudge(
                 session=mock_session_entry,
@@ -243,7 +243,7 @@ class TestCheckRevivalBranchLogging:
         """When subprocess fails checking branch existence, a warning is emitted."""
         import time as _time
 
-        from agent.agent_session_queue import check_revival
+        from agent.session_revival import check_revival
         from models.agent_session import AgentSession
 
         # Create a session in Redis that belongs to this chat so the branch
@@ -263,9 +263,9 @@ class TestCheckRevivalBranchLogging:
         )
 
         with (
-            patch("agent.agent_session_queue._load_cooldowns", return_value={}),
+            patch("agent.session_revival._load_cooldowns", return_value={}),
             patch("subprocess.run", side_effect=Exception("git not found")),
-            caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"),
+            caplog.at_level(logging.WARNING, logger="agent.session_revival"),
         ):
             result = check_revival(
                 project_key="test-revival-project",

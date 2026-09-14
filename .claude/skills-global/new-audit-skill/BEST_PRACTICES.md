@@ -29,7 +29,7 @@ Every audit skill answers five questions:
 |-------------|-------------|---------|
 | **Report only** | Domain expert (human) must decide. Audit surfaces info they can't easily see themselves. | `audit-models` — pauses for architect review |
 | **Auto-fix trivial** | Some findings have obvious mechanical fixes (rename, add field). Complex ones need human. | `audit-skills --fix` — fixes missing name fields |
-| **Full apply** | All corrections are safe and reversible. Skill commits results. | `docs-auditor` (substrate) — applies UPDATE/DELETE verdicts, commits |
+| **Full apply, gated** | All corrections are safe and reversible, but the write still needs a review gate in front of it before it becomes a permanent record — no skill in this repo commits its own applied output unreviewed. | `docs-auditor` (substrate) — applies fixes to the working tree and leaves it dirty; the caller (a human merge on the rotation PR, or the `/do-docs` skill's own commit step) owns the commit |
 
 **Rule of thumb**: Auto-fix only when the fix is unambiguous and the blast radius is contained to the audited files.
 

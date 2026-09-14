@@ -25,6 +25,18 @@
         <!-- Mirrors runtime os.environ.setdefault("VALOR_WORKER_MODE","standalone") in
              worker/__main__.py:703 for observability: 'ps eww' on the launchd process
              now shows VALOR_WORKER_MODE=standalone without any code-path change. -->
+        <key>CLAUDE_CODE_DISABLE_1M_CONTEXT</key>
+        <string>1</string>
+        <key>MAX_MCP_OUTPUT_TOKENS</key>
+        <string>25000</string>
+        <!-- Claude Code crash mitigation for launchd-spawned `claude -p` children,
+             which never read the shell so cannot inherit the vault zshenv.sh exports.
+             Terminal side mirrors these in ~/Desktop/Valor/zshenv.sh. Disabling the
+             1M-context beta keeps autonomous sessions in the low-crash zone (>200k
+             peak ctx correlated with ~41% crash rate vs ~2% below); the MCP cap
+             bounds tool-result bloat into context. `_inject_env_into_plist` does not
+             overwrite existing keys, so a real .env value still wins. See ai repo
+             memory project_claude_cli_silent_exit_findings. -->
     </dict>
     <key>RunAtLoad</key>
     <true/>

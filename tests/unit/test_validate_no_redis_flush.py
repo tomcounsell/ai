@@ -53,6 +53,22 @@ BLOCKED = [
     # Casing must not be an escape hatch for the CLI forms.
     "redis-cli -n 0 FlushDB",
     "REDIS-CLI flushall",
+    # Quoted code fed to an interpreter EXECUTES -- quoting is no escape
+    # hatch when an interpreter token sits in executable position (#3021).
+    'python -c "import redis; redis.Redis().flushdb()"',
+    "python3 -c 'r.flushall()'",
+    'bash -c "redis-cli -n 0 FLUSHDB"',
+    'echo "redis-cli FLUSHALL" | bash',
+    "echo 'redis-cli -n 0 flushdb' | sh",
+    # Command substitution inside double quotes executes.
+    'echo "$(redis-cli FLUSHALL)"',
+    # Heredoc piped into an interpreter executes its body.
+    "bash <<'EOF'\nredis-cli -n 0 flushdb\nEOF",
+    "python3 <<'EOF'\nimport redis\nredis.Redis().flushdb()\nEOF",
+    # Unquoted heredoc: $(...) inside can execute, body stays in scope.
+    "cat <<EOF > /tmp/out.txt\nresult: $(redis-cli -n 0 FLUSHALL)\nEOF",
+    # Unterminated heredoc body stays in scope -- fail closed.
+    "cat <<'EOF' > notes.md\nredis-cli -n 0 FLUSHDB",
 ]
 
 ALLOWED = [
@@ -69,6 +85,16 @@ ALLOWED = [
     "redis-cli PING",
     # Attribute access without a call.
     'python -c "print(redis.Redis.flushdb)"',
+    # Inert prose contexts (#3021): quoted string literals with no
+    # interpreter anywhere in executable position are data, not commands.
+    "git commit -m 'guard: stop blocking redis-cli FLUSHALL prose'",
+    'gh issue create --title "flush" --body "the incident ran redis-cli -n 0 FLUSHDB by mistake"',
+    'gh pr comment 123 --body "never call r.flushdb() outside a claimed test db"',
+    "echo 'seen redis-cli FLUSHALL in the audit log' >> notes.txt",
+    # Quoted-delimiter heredoc writing a doc file: pure text, nothing
+    # consumes it as code.
+    "cat <<'EOF' > n.md\nNever run redis-cli -n 0 FLUSHALL.\nr.flushdb() is blocked.\nEOF",
+    "gh issue create --body-file - <<'EOF'\nPostmortem: redis-cli FLUSHDB wiped db 0.\nEOF",
 ]
 
 

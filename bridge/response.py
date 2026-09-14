@@ -529,3 +529,272 @@ async def react_if_worker_down(client, chat_id, message_id, session_id) -> None:
         record_worker_down_reaction(session_id, chat_id, message_id)
     except Exception as e:
         logger.debug(f"react_if_worker_down failed (non-fatal): {e}")
+
+
+# =============================================================================
+# Polls (native Telegram polls, group chats only)
+# =============================================================================
+#
+# Raw MTProto. `InputMediaPoll` needs no new dependency — Telethon 1.42 already
+# ships every TL type used here, and this module already talks raw MTProto for
+# reactions above.
+
+
+# `PollAnswer.option` is an arbitrary bytes blob Telegram echoes back verbatim on
+# read, and its only protocol constraint is uniqueness per option. We spend that
+# blob on a correlation id so a poll discovered on the wire can be matched back
+# to the outbox payload that produced it (Race 6).
+#
+# THE CEILING IS 8 BYTES, NOT 100. Measured empirically against live MTProto on
+# 2026-09-02 while running the Task 1 gate: 8 bytes is accepted, 9 is rejected
+# with `A poll option used invalid data (the data may be too long)` at the wire.
+# The TL schema's `option:bytes` carries no visible bound and every reference the
+# plan consulted said 100, so this is only knowable by probing. Treat the number
+# below as a hard, verified protocol constant — a value that exceeds it fails at
+# the wire with no local signal, which is exactly the failure mode that would
+# ship a silently unroutable poll.
+#
+# The layout is therefore packed binary rather than the `f"{index}:{hex}"` text
+# form the plan sketched, which cannot fit: 1 byte of option index, then the
+# first 7 bytes of the 32-hex `poll_id_hint`. 56 bits is far more than orphan
+# adoption needs to disambiguate a bounded window of recent outbound polls in one
+# chat. A 2+-candidate collision is caught at scan time: the adoption rule bails
+# with a warning on an ambiguous match and adopts nothing. A single false-positive
+# match (the truncated prefix happens to match a different poll's hint) is caught
+# one step later, at promotion: `promote_pending_poll`'s underlying `SET NX`
+# refuses to overwrite that poll's already-registered row, so the caller treats
+# the adoption as failed rather than silently swallowing the question.
+_OPTION_MAX_BYTES = 8
+_OPTION_HINT_BYTES = _OPTION_MAX_BYTES - 1  # 7 — the index takes the first byte
+
+
+def encode_option(index: int, correlation_id: str | None = None) -> bytes:
+    """Encode a poll option index (plus optional correlation id) into option bytes.
+
+    Layout: ``bytes([index])`` followed by the first ``_OPTION_HINT_BYTES`` bytes
+    of ``correlation_id`` decoded from hex. The bare one-byte form (no
+    correlation id) is a probe-only affordance.
+
+    The inverse of :func:`decode_option`. Both live here, next to the only
+    producer, so the translator, the orphan-adoption scan and the gate probes all
+    parse one encoding rather than three copies of it.
+    """
+    if not 0 <= index <= 255:
+        raise ValueError(f"poll option index {index} does not fit in one byte")
+    raw = bytes([index])
+    if correlation_id:
+        raw += _hint_bytes(correlation_id)
+    if len(raw) > _OPTION_MAX_BYTES:  # unreachable by construction; a guard, not a branch
+        raise ValueError(
+            f"poll option bytes exceed Telegram's verified {_OPTION_MAX_BYTES}-byte "
+            f"ceiling ({len(raw)} bytes)"
+        )
+    return raw
+
+
+def decode_option(raw: bytes | None) -> tuple[int | None, str | None]:
+    """Decode option bytes back into ``(index, correlation_id_prefix)``.
+
+    The returned correlation id is the **7-byte prefix as 14 hex chars**, not the
+    full 32-hex ``poll_id_hint`` — the ceiling does not allow carrying the whole
+    id. Callers match with :func:`correlation_matches` rather than comparing to a
+    full hint directly.
+
+    Returns ``(index, None)`` for the bare probe-only form and ``(None, None)``
+    when the bytes are absent or unparseable — a poll we did not send, or one
+    from before this encoding existed. Never raises: this runs against whatever
+    Telegram hands back.
+    """
+    if not raw:
+        return (None, None)
+    try:
+        data = bytes(raw)
+    except Exception:  # noqa: BLE001 — arbitrary server bytes
+        return (None, None)
+    if not data:
+        return (None, None)
+    index = data[0]
+    tail = data[1:]
+    return (index, tail.hex() if tail else None)
+
+
+def correlation_matches(decoded_prefix: str | None, poll_id_hint: str | None) -> bool:
+    """Whether option bytes decoded off the wire belong to ``poll_id_hint``.
+
+    The option can only carry a 7-byte prefix of the hint, so an exact
+    string compare against the full 32-hex hint would never match. This is the
+    one place that asymmetry is handled; orphan adoption and the relay's
+    already-sent lookup both go through it rather than comparing by hand.
+    """
+    if not decoded_prefix or not poll_id_hint:
+        return False
+    try:
+        return decoded_prefix == _hint_bytes(poll_id_hint).hex()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hint_bytes(correlation_id: str) -> bytes:
+    """First ``_OPTION_HINT_BYTES`` bytes of a hex correlation id."""
+    return bytes.fromhex(correlation_id[: _OPTION_HINT_BYTES * 2])
+
+
+async def send_poll(
+    client: TelegramClient,
+    chat_id: int,
+    question: str,
+    options: list[str],
+    *,
+    reply_to: int | None = None,
+    correlation_id: str | None = None,
+) -> tuple[int, int] | None:
+    """Send a native single-choice poll and return ``(msg_id, server_poll_id)``.
+
+    **The caller-supplied ``Poll.id`` is a placeholder.** Telegram assigns the
+    real poll id server-side and it is only knowable by reading it back off the
+    sent message's ``MessageMediaPoll.poll.id``. Every downstream consumer — the
+    registry, the vote translator, the reconciliation loop — keys on the
+    server-assigned id, so this function returning it is load-bearing, not a
+    convenience.
+
+    **Group-only in practice.** A send into a 1:1 DM is rejected by MTProto with
+    ``MediaInvalidError``; that is a settled fact of the protocol, not a
+    transient failure to retry against. Enforcement lives in
+    ``bridge/poll_gating.py``, which every production caller passes through
+    first.
+
+    Follows the local error idiom (log, return ``None``, never raise) — but the
+    ``None`` stays **distinguishable** so the relay's retry / dead-letter path
+    still engages rather than silently dropping a blocked agent's question.
+
+    Args:
+        correlation_id: The outbox payload's ``poll_id_hint``, embedded in every
+            option's bytes so orphan adoption can match this poll exactly. Every
+            production caller supplies it; ``None`` is a probe-only affordance
+            and is logged loudly.
+    """
+    from telethon.tl.functions.messages import SendMediaRequest
+    from telethon.tl.types import (
+        InputMediaPoll,
+        Poll,
+        PollAnswer,
+        TextWithEntities,
+    )
+
+    if correlation_id is None:
+        logger.warning(
+            "poll_sent_without_correlation_id chat_id=%s — orphan adoption cannot "
+            "match this poll; every production caller must thread poll_id_hint",
+            chat_id,
+        )
+
+    def _text(value: str) -> TextWithEntities:
+        # Layer 1.42 takes TextWithEntities, not bare str. Pre-1.42 examples that
+        # pass strings TypeError here.
+        return TextWithEntities(text=value, entities=[])
+
+    try:
+        media = InputMediaPoll(
+            poll=Poll(
+                # Placeholder — the server assigns the real id, read back below.
+                id=0,
+                question=_text(question),
+                answers=[
+                    PollAnswer(text=_text(opt), option=encode_option(i, correlation_id))
+                    for i, opt in enumerate(options)
+                ],
+                closed=False,
+                public_voters=False,
+                multiple_choice=False,
+                quiz=False,
+            )
+        )
+        result = await client(
+            SendMediaRequest(
+                peer=chat_id,
+                media=media,
+                message="",
+                random_id=_random_id(),
+                reply_to=_reply_to(reply_to),
+            )
+        )
+    except Exception as e:  # noqa: BLE001 — surfaced to the relay as a retryable None
+        logger.warning("send_poll failed chat_id=%s: %s", chat_id, e)
+        return None
+
+    msg_id, server_poll_id = _read_back_poll_ids(result)
+    if msg_id is None or server_poll_id is None:
+        logger.warning(
+            "send_poll: could not read back msg_id/poll_id from the send result chat_id=%s",
+            chat_id,
+        )
+        return None
+    return (msg_id, server_poll_id)
+
+
+async def close_poll(client: TelegramClient, chat_id: int, msg_id: int, poll_media) -> bool:
+    """Close a poll by editing it with ``closed=True``.
+
+    Closing is how a poll is marked answered at the source: it makes
+    retract-and-revote impossible and gives the human a visible "already
+    answered" state. In a group this is also the first-voter-wins boundary, and
+    that is deliberate — the poll exists to unblock one agent, not to take a
+    vote of the room.
+
+    Fail-quiet: returns ``False`` on any error. A failure to close never blocks
+    the translation that already claimed the vote.
+    """
+    from telethon.tl.functions.messages import EditMessageRequest
+    from telethon.tl.types import InputMediaPoll, Poll
+
+    try:
+        poll = getattr(poll_media, "poll", None) or poll_media
+        closed = Poll(
+            id=poll.id,
+            question=poll.question,
+            answers=poll.answers,
+            closed=True,
+            public_voters=getattr(poll, "public_voters", False),
+            multiple_choice=getattr(poll, "multiple_choice", False),
+            quiz=getattr(poll, "quiz", False),
+        )
+        await client(EditMessageRequest(peer=chat_id, id=msg_id, media=InputMediaPoll(poll=closed)))
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.debug("close_poll failed chat_id=%s msg_id=%s: %s", chat_id, msg_id, e)
+        return False
+
+
+def _random_id() -> int:
+    import random
+
+    return random.getrandbits(63)
+
+
+def _reply_to(reply_to: int | None):
+    if not reply_to:
+        return None
+    from telethon.tl.types import InputReplyToMessage
+
+    return InputReplyToMessage(reply_to_msg_id=int(reply_to))
+
+
+def _read_back_poll_ids(result) -> tuple[int | None, int | None]:
+    """Pull ``(msg_id, server_poll_id)`` out of a ``SendMediaRequest`` result.
+
+    The result is an ``Updates`` container; the poll arrives inside whichever
+    update carries the new message. Walk rather than index — the update order is
+    not part of the protocol contract.
+    """
+    from telethon.tl.types import MessageMediaPoll
+
+    for update in getattr(result, "updates", []) or []:
+        message = getattr(update, "message", None)
+        if message is None or isinstance(message, str):
+            continue
+        media = getattr(message, "media", None)
+        if isinstance(media, MessageMediaPoll):
+            poll = getattr(media, "poll", None)
+            if poll is not None:
+                return (getattr(message, "id", None), getattr(poll, "id", None))
+    return (None, None)

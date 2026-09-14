@@ -4,7 +4,7 @@ Tests the send_to_chat nudge behavior: completion detection, rate-limit
 backoff, max nudge safety cap, and empty output handling.
 """
 
-from agent.agent_session_queue import MAX_NUDGE_COUNT, NUDGE_MESSAGE, determine_delivery_action
+from agent.output_router import MAX_NUDGE_COUNT, NUDGE_MESSAGE, determine_delivery_action
 
 
 class TestNudgeConstants:

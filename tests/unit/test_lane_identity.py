@@ -213,7 +213,7 @@ class TestMetaContamination:
         monkeypatch.setenv("GH_REPO", _TEST_REPO)
 
         with (
-            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)),
             patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
         ):
             meta = _compute_meta({}, None, _ISSUE_MENTIONED)
@@ -251,7 +251,7 @@ class TestMetaLaneSlugRead:
         from tools.sdlc_stage_query import _compute_meta
 
         with (
-            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None, None)),
             patch("tools.sdlc_stage_query._lookup_pr", return_value=None),
         ):
             return _compute_meta({}, session, _ISSUE_META)

@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+from tests.unit.session_lookup_mock import wire_session_lookup
+
 # Add repo root to sys.path so `from agent.* import ...` works when this module
 # is imported standalone (pytest already provides the rootdir, but this keeps
 # the file runnable via `python -m unittest`). The previous form pointed at the
@@ -183,6 +185,7 @@ class TestGetPriorSessionUuidStatusFilter:
 
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = sessions
+        wire_session_lookup(mock_cls)
 
         with patch.dict(
             "sys.modules",

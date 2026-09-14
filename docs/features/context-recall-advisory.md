@@ -8,7 +8,7 @@ The PM decides whether to run it. Nothing reads history on its behalf.
 
 The gap is symmetric.
 
-**Inbound.** A human sends `"yes"`, `"go ahead"`, `"not that one"`, `"the second one"`. These are short, referent-free, and meaningful only against the preceding conversation. The intake classifier already inspected every one of them and formed a judgment — then threw it away. Only `intent` was branched on; `confidence` and `reason` reached a single `logger.info` and stopped there. The PM received the literal string `yes`.
+**Inbound.** A human sends `"yes"`, `"go ahead"`, `"not that one"`, `"the second one"`. These are short, referent-free, and meaningful only against the preceding conversation. When one of them lands in a chat that holds an active session with a non-empty `context_summary`, the intake classifier already inspected it and formed a judgment, then threw that judgment away. Only `intent` was branched on; `confidence` and `reason` reached a single `logger.info` and stopped there. The PM received the literal string `yes`.
 
 **Outbound.** The PM writes `"which PR do you mean?"` and sends it. That burns a full human round trip asking for context sitting in a message store the PM could have read itself. Nothing inspected outbound text for this.
 
@@ -28,17 +28,22 @@ So the canonical motivating case — a bare `"yes"` arriving into a chat with a 
 ## Architecture
 
 ```
-INBOUND (Telegram only)                    OUTBOUND (Telegram + email)
+INBOUND (Telegram only)                     OUTBOUND (Telegram + email)
         |                                           |
-intake classifier                          TelegramRelayOutputHandler.send()
-(granite, one pass —                               |
- no second LLM call)                        draft_message() -> MessageDraft
+ gate 1: if active_sessions:                TelegramRelayOutputHandler.send()
+ (bridge/telegram_bridge.py; a chat                 |
+  with no live-or-recent session            draft_message() -> MessageDraft
+  stops here)                                       |
+        |                                   _prefilter(): non-empty,
+intake classifier                           <=200 chars, contains "?"
+ gate 2: if not session_context:                    |
+ (tools/classifier.py; an empty             check_outbound_context_recall()
+  context_summary hard-returns              (Haiku via agent.llm.run_typed)
+  context_recall_advised=False                      |
+  before the granite call)                          |
+ granite, one pass, no second LLM call              |
         |                                           |
- context_recall_advised?                    _prefilter(): non-empty,
-        |                                   <=200 chars, contains "?"
-        |                                           |
-        |                                   check_outbound_context_recall()
-        |                                   (Haiku via agent.llm.run_typed)
+ context_recall_advised?                            |
         |                                           |
         +----------> build_context_recall_advisory() <----------+
                      (bridge/context_recall.py — the SINGLE
@@ -94,11 +99,9 @@ The check **sets** `needs_self_draft` rather than riding an existing one, becaus
 
 | Rejected | Why |
 |----------|-----|
-| Extending the promise gate's LLM pass | Its verdict is consumed by `cli_check_or_exit`, which calls `sys.exit(1)` on a block across five CLI call sites. A context-recall block would hard-fail a legitimate `python -m tools.send_message "which one do you mean?"`. There is also no shared call to piggyback on: the drafter path uses the regex-only `_evaluate_promise_heuristic`, never the LLM. |
-| `bridge/read_the_room.py` | Default-off, and it excludes DMs outright — precisely where "which one?" is most likely. It has no PM feedback path at all. |
-| An LLM call inside `draft_message` | The drafter is deliberately LLM-free; putting a model call inside it would reverse a shipped architectural decision. |
-
-Both modules are byte-identical to `main`.
+| Extending the promise gate's LLM pass | Its verdict is consumed by `cli_check_or_exit`, which calls `sys.exit(1)` on a block across five CLI call sites. A context-recall block would hard-fail a legitimate `python -m tools.send_message "which one do you mean?"`. The two checks also stay separate calls on purpose: a prefiltered text always contains a `?`, and the drafter's zero-LLM short path requires that no `?` be present, so every text context-recall evaluates takes the drafter's **main** path and gets its own promise-gate Haiku verdict (see [Promise Gate](promise-gate.md)). Folding context recall into that verdict would couple a send-or-bounce decision to a CLI exit path. |
+| `bridge/read_the_room.py` | Excludes DMs outright — precisely where "which one?" is most likely. It has no PM feedback path at all. |
+| An LLM call inside `draft_message` | The drafter's main path already runs one model call, the promise-gate verdict, and its short path is zero-LLM by test-enforced guarantee. A second call inside the drafter would either double the main path's latency budget or breach the short path's guarantee. Context recall runs as its own step after `draft_message` returns, on the delivery text. |
 
 ## Failing open
 
@@ -108,7 +111,7 @@ Self-draft budget exhaustion is also safe. `SELF_DRAFT_MAX_ATTEMPTS` is 2, and o
 
 ## Configuration
 
-Four keys in `.env.example`, with **no `config/settings.py` field** — matching the `READ_THE_ROOM_ENABLED` and `DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED` precedents. The two switches are read fresh from the environment on every call rather than cached at import, so either can be flipped without a process restart.
+Four keys in `.env.example`, with **no `config/settings.py` field** — matching the `DRAFTER_REDUNDANCY_SUPPRESSION_ENABLED` precedent. The two switches are read fresh from the environment on every call rather than cached at import, so either can be flipped without a process restart.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
@@ -125,13 +128,17 @@ All four must also be added to the vault `~/Desktop/Valor/.env`, or `check_env_c
 
 `tests/unit/test_context_recall_wiring.py` covers the seams: both inbound delivery branches, banner ordering, abort survival, budget exhaustion, a failing advisory steering push, and fail-open for a raising check and a failing import (`TestPersistRoutingFieldsSurvivesAFailingCheck`, plus `test_raising_check_sends_the_message`). Two pins are worth knowing about. `TestEmittedCommandIsRunnable` parses the emitted command with `valor_telegram`'s own argparse via `build_parser()`, so the advisory cannot silently rot if `read`'s flags change. `TestCallSitesWireUpBeforeDispatch` is a source-index pin asserting both `bridge/telegram_bridge.py::main()` call sites exist and precede the dispatch that consumes them — earlier rounds of this feature had helpers that were unit-tested while the call sites themselves could be deleted with the suite still green.
 
-**Pytest guard.** `tests/conftest.py` carries an autouse fixture that stubs the outbound check inert, so the suite makes no live Haiku calls. Without it, any `send()` test whose drafted text is a short question issued a real billed request, and the multi-second network await reordered a concurrency test into a coin flip. It mirrors the `SENTRY_DSN=""` pre-seed in the same file, which exists for the identical class of problem — a module-import side effect leaking real traffic out of the suite. Production code is untouched and the feature still defaults to enabled in production. Set `CONTEXT_RECALL_OUTBOUND_STUB=0` to run the real check and reproduce the original symptom.
+**Pytest guard.** `tests/conftest.py` carries an autouse fixture that stubs the outbound check inert, so the suite makes no live Haiku calls. Without it, any `send()` test whose drafted text is a short question issued a real billed request, and the multi-second network await reordered a concurrency test into a coin flip. It mirrors the `SENTRY_DSN=""` pre-seed in the same file, which exists for the identical class of problem — a module-import side effect leaking real traffic out of the suite. Production code is untouched and the feature still defaults to enabled in production. Set `CONTEXT_RECALL_OUTBOUND_STUB=0` to run the real check and reproduce the original symptom. Three properties of that switch matter to a test author, each verified against `tests/conftest.py`:
+
+- Only the literal string `0` disables the stub. The read is `os.environ.get("CONTEXT_RECALL_OUTBOUND_STUB", "1") == "0"`, so `false`, `no`, and `off` leave the stub active.
+- It is read once at conftest import, at module scope, into `_CONTEXT_RECALL_OUTBOUND_STUB_DISABLED`. That makes it a whole-run switch: set it in the environment before pytest starts. `monkeypatch.setenv` inside a test arrives after the read and leaves the stub in place.
+- The fixture lives in the root `tests/conftest.py` and no subdirectory conftest redefines it, so it covers integration tests as well as unit tests (`tests/integration/conftest.py` is a one-line comment). A live outbound context-recall integration test is inert until the whole run is started with the switch set.
 
 ## Out of scope
 
 - Making the PM automatically read history. This feature raises a flag and hands over the command.
 - Inbound classification for email. The intake classifier has no email caller.
-- Enabling `READ_THE_ROOM_ENABLED` or changing its DM exclusion.
+- Changing Read-the-Room's DM exclusion.
 
 ## Files
 

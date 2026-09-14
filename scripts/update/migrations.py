@@ -18,7 +18,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from scripts.update import warn_state
+
 logger = logging.getLogger(__name__)
+
+# The only literal occurrence of the retired warn_state key permitted in the
+# repo (issue #3004's acceptance grep is bounded on exactly this file, exactly
+# once). Every other module refers to the key only through this name.
+_ORPHANED_WARN_KEY = "redis-acl-drift"
 
 
 @dataclass
@@ -327,6 +334,35 @@ def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | No
         for session in list(AgentSession.query.all())[:5]:
             _ = session.active_run_id  # noqa: B018 -- read-only healing probe
             _ = session.pr_number  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def _migrate_confirm_codex_dev_lane_fields_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession Codex dev-lane fields (issue #2001) read on legacy rows.
+
+    One idempotent migration registering the five new nullable fields
+    (dev_harness, codex_thread_id, codex_version, codex_turn_count,
+    dev_lane_fence). Purely additive, no backfill. Mirrors
+    ``_migrate_confirm_run_identity_fields_readable``: a read-only probe
+    over a small sample of existing records proving Popoto's lazy-load
+    descriptor healing resolves cleanly for rows written before the fields
+    existed. Writes nothing. Returns None on success, error string on
+    failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.dev_harness  # noqa: B018 -- read-only healing probe
+            _ = session.codex_thread_id  # noqa: B018 -- read-only healing probe
+            _ = session.codex_version  # noqa: B018 -- read-only healing probe
+            _ = session.codex_turn_count  # noqa: B018 -- read-only healing probe
+            _ = session.dev_lane_fence  # noqa: B018 -- read-only healing probe
         return None
     except Exception as e:
         return str(e)
@@ -1108,22 +1144,19 @@ def _migrate_job_promises_to_expectations(project_dir: Path) -> str | None:
 def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     """Repair tz-skewed ``Job.last_active_at`` sorted-set scores (issue #2636).
 
-    popoto 1.8.0 decodes stored datetimes without tzinfo, so before the
-    ``Job.save()`` UTC-reattach override shipped, any re-save of a reloaded Job
-    (``mark_at_rest()``, ``_write_goal_data()``) recomputed its ``$SortF``
-    partition score as ``naive.timestamp()`` — local time, skewed from the
-    correct UTC epoch by the writing host's UTC offset. The hash field stayed
-    correct; only the score drifted. The bounded ``recent_for_room`` read
-    trusts scores, so existing skew must be swept out once per machine.
+    Before popoto#519/1.8.2, a ``SortedField(type=datetime)`` score was
+    computed from the in-memory value's own tzinfo rather than being a pure
+    function of the stored value, so a re-save of a reloaded Job
+    (``mark_at_rest()``, ``_write_goal_data()``) could recompute its
+    ``$SortF`` partition score as ``naive.timestamp()`` — local time, skewed
+    from the correct UTC epoch by the writing host's UTC offset. The hash
+    field stayed correct; only the score drifted. The bounded
+    ``recent_for_room`` read trusts scores, so this one-shot migration swept
+    that historical skew out once per machine.
 
-    The sweep itself is ``Job.renormalize_last_active_scores()`` — the ONE
-    shared implementation, also run by ``Job.repair_indexes()`` (at worker
-    startup via ``scripts/popoto_index_cleanup.run_cleanup``) after every
-    ``rebuild_indexes()`` (whose ``field.on_save`` re-scoring of
-    naive-decoded instances bypasses the save() override and would otherwise
-    re-skew every score on a non-UTC host). See that classmethod's docstring
-    for the loop contract: derived partition key, 1-second tolerance,
-    fresh re-read, structural clobber-proof
+    The sweep itself is ``Job.renormalize_last_active_scores()``. See that
+    classmethod's docstring for the loop contract: derived partition key,
+    1-second tolerance, fresh re-read, structural clobber-proof
     ``fresh.save(update_fields=["last_active_at"])`` (ORM-only — the only
     write is ``instance.save()``), instant-preserving (never a constant
     stamp, spike-4), absent-member skip, per-row failure tolerance.
@@ -1133,17 +1166,21 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
     share this Redis, and re-running on every machine's ``/update`` is safe
     and expected; each pass only rewrites rows whose score still disagrees
     with their own hash (e.g. re-skewed by a peer still on pre-override code).
-    Single unbounded pass, no cursor — DECIDED on the measured population
-    (92 Jobs / 0.03s full hydrate, 2026-08-17); the total count is logged
-    each run.
+    The pass is cursored (``SSCAN`` over the class set) and pipelined per
+    chunk (#2848), so its cost is round trips proportional to the population
+    divided by ``Job._RENORMALIZE_BATCH_SIZE`` with per-chunk memory
+    independent of the population; the total count is logged each run.
 
     Returns None on success; an error string only if the import/call path
     itself fails. An enumeration failure *inside* the sweep (e.g. Redis
     unreachable) is swallowed by ``renormalize_last_active_scores`` as
     ``(0, 0)``: this migration logs a 0-scanned pass, returns None, and is
-    recorded applied. That is accepted — the ``Job.repair_indexes`` sweep,
-    run at worker startup via ``scripts/popoto_index_cleanup.run_cleanup``,
-    is the retry/backstop that eventually repairs the scores.
+    recorded applied — an applied migration is never re-run. That is
+    accepted; the honest recovery path is a **manual** re-run of
+    ``Job.renormalize_last_active_scores()`` on the affected machine, which
+    assumes popoto is already at or above the ``pyproject.toml`` floor —
+    the repair write goes through the same ``convert_to_numeric`` path, so
+    it cannot converge on a still-downgraded host.
     """
     try:
         import sys
@@ -1163,7 +1200,322 @@ def _migrate_backfill_job_last_active_scores(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_clear_orphaned_warn_state_key(project_dir: Path) -> str | None:
+    """Pop the orphaned warn_state key left by the deleted server-side
+    access-control layer (issue #3004).
+
+    Nothing emits or clears this key anymore, so without this one-shot sweep
+    it would sit in ``data/update_warn_state.json`` forever and relay to
+    Telegram on every ``--cron`` run's suppressed-trailer -- the exact
+    permanent-noise symptom issue #3004 exists to remove.
+
+    Uses ``warn_state``'s own documented resolved-path
+    (``should_emit(key, "", project_dir)``): pops the key if present, rewrites
+    the state file through ``_save``, and is a no-op on a machine that never
+    warned. Fail-soft and idempotent by construction -- ``warn_state``'s
+    ``_load``/``_save`` already swallow ``OSError``.
+
+    Returns None unconditionally; a bookkeeping cleanup must never fail
+    ``/update``. A failure is logged, never swallowed silently, because
+    ``run_pending_migrations`` records a ``None`` return as permanently
+    completed -- a silently-swallowed exception here would never retry.
+    """
+    try:
+        warn_state.should_emit(_ORPHANED_WARN_KEY, "", project_dir)
+        return None
+    except Exception as e:
+        logger.warning("clear_orphaned_warn_state_key: %s", e)
+        return None
+
+
+def _migrate_clear_docs_audit_liveness_keys(project_dir: Path) -> str | None:
+    """Sweep the two orphaned ``docs_audit:last_completed_run_*`` Redis keys
+    left by the deleted docs-auditor liveness channel (issue #2743).
+
+    Nothing writes these keys anymore — the docs-auditor rotation now reports
+    its outcome through its return value alone, which the reflection scheduler
+    already forwards into ``Reflection.last_run_summary.output_summary`` for the
+    dashboard to render. Without this one-shot sweep the two keys would sit in
+    every machine's Redis forever, with no TTL and no reader.
+
+    The two key strings are hard-coded rather than imported: the constants that
+    named them (``REDIS_LAST_COMPLETED_TS_KEY``, ``REDIS_LAST_COMPLETED_SUMMARY_KEY``)
+    are deleted along with the function that wrote them.
+
+    Returns None unconditionally; a bookkeeping cleanup must never fail
+    ``/update``. A failure is logged, never swallowed silently, because
+    ``run_pending_migrations`` records a ``None`` return as permanently
+    completed -- a silently-swallowed exception here would never retry.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        deleted = POPOTO_REDIS_DB.delete(
+            "docs_audit:last_completed_run_ts",
+            "docs_audit:last_completed_run_summary",
+        )
+        logger.info(
+            "[migration:clear_docs_audit_liveness_keys] deleted %d orphaned key(s)",
+            deleted,
+        )
+        return None
+    except Exception as e:
+        logger.warning("clear_docs_audit_liveness_keys: %s", e)
+        return None
+
+
+def _migrate_side_effect_job_model(project_dir: Path) -> str | None:
+    """Land the ``SideEffectJob`` model and back-enqueue recent extractions (#3183).
+
+    Post-session memory extraction became a durable job row in this release.
+    A session whose execution finished shortly before the deploy scheduled its
+    extraction as an in-process task that the restart cancelled, so this
+    migration re-enqueues extraction for sessions completed in the last 24
+    hours that have no extraction record.
+
+    The back-enqueue goes through ``agent.side_effects.enqueue`` so it inherits
+    the ``sideeffect:idem:{kind}:{session_id}`` single-winner guard. That is
+    load-bearing, not incidental: ``data/migrations_completed.json`` is a
+    per-machine marker, so every bridge machine on the fleet runs this once
+    against the SAME shared Redis. Without the guard the fleet would create one
+    duplicate job per machine.
+
+    Returns None unconditionally; a best-effort back-enqueue must never fail
+    ``/update``.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from datetime import timedelta
+
+        from agent.side_effects import enqueue
+        from models.agent_session import AgentSession
+        from models.memory import Memory
+
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
+        enqueued = 0
+        for session in AgentSession.query.filter(status="completed"):
+            completed_at = getattr(session, "completed_at", None)
+            if not isinstance(completed_at, datetime):
+                continue
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=UTC)
+            if completed_at < cutoff:
+                continue
+            session_id = getattr(session, "session_id", None)
+            if not session_id:
+                continue
+            if Memory.query.filter(agent_id=f"extraction-{session_id}").count():
+                continue
+            try:
+                # `run_post_session_extraction` requires `response_text`
+                # positionally (agent/memory_extraction.py:1663-1669); the
+                # migration has no access to a completed session's actual
+                # response text, so it passes the minimum payload that
+                # satisfies the signature. An empty string short-circuits the
+                # observation-extraction step (the <50-char guard) but still
+                # runs outcome detection for any injected thoughts, and --
+                # unlike a payload-less enqueue -- it does not raise
+                # `TypeError` on every attempt, dead-letter, and re-enqueue
+                # itself forever through the replay reflection (#3183 review).
+                # merge_on_lost_race=False: this placeholder payload exists
+                # only to satisfy the handler's signature. On a lost race
+                # (a live per-turn job for this session_id is already
+                # pending -- exactly what "back-enqueue recent extractions"
+                # means on machines 2..N of a fleet update) it must not
+                # overwrite that row's real response_text with an empty one
+                # (#3183 review round 2 blocker).
+                enqueue(
+                    "memory_extraction",
+                    session_id,
+                    getattr(session, "project_key", None),
+                    {"response_text": ""},
+                    merge_on_lost_race=False,
+                )
+                enqueued += 1
+            except Exception as e:  # noqa: BLE001 -- one session never stops the sweep
+                logger.warning("side_effect_job_model: enqueue for %s failed: %s", session_id, e)
+        logger.info("[migration:side_effect_job_model] back-enqueued %d extraction(s)", enqueued)
+        return None
+    except Exception as e:
+        logger.warning("side_effect_job_model: %s", e)
+        return None
+
+
+def _migrate_dead_letter_stage_backfill(project_dir: Path) -> str | None:
+    """Stamp ``stage`` on pre-#3183 dead letters and re-save every row.
+
+    Rows written before this release carry only the Telegram send shape, so
+    they are ``stage="telegram_send"``, replayable, with ``attempts`` seeded at
+    the relay's retry cap.
+
+    EVERY row is re-saved, not only the ones missing ``stage``: ``DeadLetter``
+    had no ``class Meta`` block before this release, so existing rows carry no
+    TTL and acquire the new 30-day one only when they are written again.
+
+    Returns None unconditionally; a bookkeeping backfill must never fail
+    ``/update``.
+    """
+    try:
+        import sys
+        import time
+
+        sys.path.insert(0, str(project_dir))
+        from bridge.telegram_relay import MAX_RELAY_RETRIES
+        from models.dead_letter import DeadLetter
+
+        stamped = 0
+        for letter in DeadLetter.query.all():
+            if not getattr(letter, "stage", None):
+                letter.stage = "telegram_send"
+                letter.replayable = True
+                letter.attempts = letter.attempts or MAX_RELAY_RETRIES
+                stamped += 1
+            if getattr(letter, "created_at", None) is None:
+                letter.created_at = time.time()
+            # Unconditional save: this is what applies Meta.ttl to legacy rows.
+            letter.save()
+        logger.info(
+            "[migration:dead_letter_stage_backfill] stamped %d row(s); re-saved all for TTL",
+            stamped,
+        )
+        return None
+    except Exception as e:
+        logger.warning("dead_letter_stage_backfill: %s", e)
+        return None
+
+
+def _migrate_retire_task_type_profile(project_dir: Path) -> str | None:
+    """Delete the orphaned TaskTypeProfile keyspace (issue #3177).
+
+    Subtractive counterpart to the additive Improvement* registration below.
+    ``models/task_type_profile.py`` was deleted whole, which leaves its hashes
+    and its ``delegation_recommendation`` index sets unreachable through the
+    ORM. This runs the standalone script, which re-declares a minimal stub so
+    the ORM can reach the keyspace once more and delete rows properly, index
+    membership included (see scripts/migrate_retire_task_type_profile.py).
+
+    Idempotent: a second run enumerates zero rows. Returns None on success,
+    error string on failure.
+    """
+    return _run_migration_script(
+        project_dir,
+        "migrate_retire_task_type_profile.py",
+        label="retire_task_type_profile",
+        args=("--apply",),
+    )
+
+
+def _confirm_models_readable(project_dir: Path, model_names: tuple[str, ...]) -> str | None:
+    """Import each named model from ``models`` and prove its keyspace resolves.
+
+    Shared by every additive-schema marker migration below, so a new marker is
+    just a new model-name tuple rather than a second copy of this body.
+    Read-only: for each name it imports the class and pulls at most one row
+    from a project-scoped query, without hydrating the rest of the partition.
+    Writes nothing. Returns None on success, error string on unexpected
+    failure.
+    """
+    try:
+        import importlib
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        models_module = importlib.import_module("models")
+        for name in model_names:
+            model = getattr(models_module, name)
+            next(iter(model.query.filter(project_key="valor")), None)
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def _migrate_confirm_improvement_models_readable(project_dir: Path) -> str | None:
+    """Confirm the eight new Improvement* models (issue #3177) import and read.
+
+    Purely additive: eight brand-new model classes, no field added to and no
+    field removed from an existing model, so there is nothing to backfill and
+    no index set to strip. This entry exists so ``run_pending_migrations()``
+    carries a durable marker for the schema version that introduced them:
+    without it there is no record on a machine that the improvement keyspace
+    was ever registered, and a later subtractive migration has no predecessor
+    to reason from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        (
+            "ImprovementCharter",
+            "ImprovementEvidence",
+            "ImprovementModelRevision",
+            "ImprovementCase",
+            "ImprovementInvestigation",
+            "ImprovementExperiment",
+            "ImprovementEvaluation",
+            "ImprovementRelease",
+        ),
+    )
+
+
+def _migrate_confirm_improvement_v2_fields(project_dir: Path) -> str | None:
+    """Confirm the charter-v2 fields on the Improvement* models (issue #3255).
+
+    Purely additive to four existing models: ``ImprovementCharter`` gains
+    ``digest``, ``effective``, and ``text``; ``ImprovementCase`` gains
+    ``priority_area``, ``ranking_rationale``, and ``charter_digest``;
+    ``ImprovementInvestigation`` and ``ImprovementRelease`` gain
+    ``charter_digest``. The one removal, ``ImprovementCase.objective``, was a
+    plain unindexed field with no writer, so there is nothing to backfill and
+    no index set to strip.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the v2 vocabulary: without it there
+    is no record on a machine that the charter-digest fields were ever
+    registered, and a later subtractive migration has no predecessor to reason
+    from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        (
+            "ImprovementCharter",
+            "ImprovementCase",
+            "ImprovementInvestigation",
+            "ImprovementRelease",
+        ),
+    )
+
+
+def _migrate_confirm_improvement_infrastructure_ledger_readable(
+    project_dir: Path,
+) -> str | None:
+    """Confirm the InfrastructureReservation ledger model (issue #3274) reads cleanly.
+
+    Purely additive: one brand-new Popoto model, no field added to and no
+    field removed from an existing model, so there is nothing to backfill and
+    no index set to strip. This entry exists so ``run_pending_migrations()``
+    carries a durable marker for the schema version that introduced the unit-3
+    ledger: without it there is no record on a machine that the infrastructure
+    keyspace was ever registered, and a later subtractive migration has no
+    predecessor to reason from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        ("InfrastructureReservation",),
+    )
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
+    "side_effect_job_model": (
+        _migrate_side_effect_job_model,
+        "Land SideEffectJob and back-enqueue extraction for recently completed sessions",
+    ),
+    "dead_letter_stage_backfill": (
+        _migrate_dead_letter_stage_backfill,
+        "Stamp DeadLetter.stage on legacy rows and re-save every row so Meta.ttl applies",
+    ),
     "agent_session_keyfield_rename": (
         _migrate_agent_session_keyfield_rename,
         "Rename AgentSession job_id/parent_job_id KeyFields in Redis",
@@ -1278,10 +1630,45 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         "Rewrite Job goal promises as inbound expectations and clear the retired "
         "has_open_promises index sets (issue #2708)",
     ),
+    "retire_task_type_profile": (
+        _migrate_retire_task_type_profile,
+        "Delete the orphaned TaskTypeProfile keyspace and its index sets after "
+        "the model was removed whole (issue #3177)",
+    ),
+    "confirm_improvement_models_readable": (
+        _migrate_confirm_improvement_models_readable,
+        "Register the eight additive Improvement* models (issue #3177) and "
+        "confirm their keyspace resolves",
+    ),
+    "confirm_improvement_v2_fields": (
+        _migrate_confirm_improvement_v2_fields,
+        "Register the charter-v2 fields on ImprovementCharter, ImprovementCase, "
+        "ImprovementInvestigation, and ImprovementRelease (issue #3255) and "
+        "confirm their keyspace resolves",
+    ),
+    "confirm_improvement_infrastructure_ledger_readable": (
+        _migrate_confirm_improvement_infrastructure_ledger_readable,
+        "Register the additive InfrastructureReservation ledger model (issue #3274) "
+        "and confirm its keyspace resolves",
+    ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,
         "Repair tz-skewed Job.last_active_at sorted-set scores via field-scoped "
         "ORM re-saves (issue #2636)",
+    ),
+    "confirm_codex_dev_lane_fields_readable": (
+        _migrate_confirm_codex_dev_lane_fields_readable,
+        "Confirm AgentSession Codex dev-lane fields (issue #2001) read cleanly on legacy rows",
+    ),
+    "clear_orphaned_warn_state_key": (
+        _migrate_clear_orphaned_warn_state_key,
+        "Clear the orphaned warn_state key left by the deleted server-side "
+        "access-control layer (issue #3004)",
+    ),
+    "clear_docs_audit_liveness_keys": (
+        _migrate_clear_docs_audit_liveness_keys,
+        "Sweep the two orphaned docs_audit:last_completed_run_* Redis keys left "
+        "by the deleted docs-auditor liveness channel (issue #2743)",
     ),
 }
 

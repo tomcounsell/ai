@@ -2,8 +2,7 @@
 
 Two-layer audit of every skill the repo has: a deterministic lint (20 rules, script-run,
 no model judgment) and an opt-in architecture pass (`--arch`, model judgment against a
-fixed rubric). Renovated 2026-07 as groundwork for the skills-architecture-audit plan
-(issue #1883).
+fixed rubric).
 
 ## Overview
 
@@ -52,7 +51,7 @@ this repo and may reference `valor-*`, `sdlc-tool`, etc. freely.
 **JSON contract** (consumed by the skills-audit reflection):
 `{"summary": {"total_skills", "pass", "warn", "fail", "description_total_chars",
 "description_budget"}, "findings": [{"skill", "rule", "severity", "message", "dir"}]}`.
-Legacy aliases `results` and `skills_audited` are kept. The `dir` field labels the root:
+The `results` and `skills_audited` aliases are kept. The `dir` field labels the root:
 `global` | `project` | `user`.
 
 **Repo-root resolution**: prefers cwd when it has skills roots (so hardlinked copies run
@@ -142,7 +141,7 @@ python .claude/skills-global/audit-skills/scripts/audit_skills.py --json
 
 ## Reflection Issue Filing
 
-The `skills-audit` reflection (`reflections.audits.skills_audit.run`, registered in `config/reflections.yaml`) runs the audit nightly across every local project. As of issue #1395 Phase 2, it also **files a GitHub issue** for each FAIL finding that persists across two consecutive runs, so structural problems can no longer accumulate silently in reflection telemetry.
+The `skills-audit` reflection (`reflections.audits.skills_audit.run`, registered in `config/reflections.yaml`) runs the audit nightly across every local project. It **files a GitHub issue** for each FAIL finding that persists across two consecutive runs, so structural problems do not accumulate silently in reflection telemetry.
 
 ### Streak gate
 
@@ -198,12 +197,6 @@ schema), consolidation (merge direction + trigger-precision-preserving
 description text), model tier (sonnet mechanical / opus multi-step / fable
 frontier-judgment), and efficiency (token cost estimate per invocation).
 
-The first full run (2026-07) is recorded at
-[`docs/audits/skills-architecture-audit-2026-07.md`](../audits/skills-architecture-audit-2026-07.md) —
-65 rows (60 live skills + 5 tracking-artifact orphans), zero restructuring
-actions survived adversarial review this cycle (the fleet was largely
-pre-renovated by PR #1894), with ~14 minor findings and 6 cross-cluster
-observations flagged as candidate follow-up issues rather than executed. A
-disposition report of this shape is a one-shot analysis, not part of the
+A disposition report of this shape is a one-shot analysis, not part of the
 regular lint cadence — re-run manually when the fleet has drifted enough to
-warrant a fresh pass (see the report's own header for the baseline commit).
+warrant a fresh pass.

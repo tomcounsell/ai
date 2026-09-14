@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from scripts.check_issue_disposition import EXEMPT_PREFIXES
+
 # Files that legitimately reference the old path (migration code, tests, plans)
 ALLOWED_FILES = {
     "tests/unit/test_no_legacy_paths.py",
@@ -30,9 +32,15 @@ def test_no_legacy_claude_code_paths():
     # git grep exits 1 when no matches found (good), 0 when matches found
     if result.returncode == 0:
         files = set(result.stdout.strip().splitlines())
-        # Filter out plan docs (they describe the migration)
+        # Filter out plan docs (they describe the migration) at BOTH ends of the
+        # plan lifecycle. This used to hardcode "docs/plans/", so archiving a
+        # plan that mentions the legacy path moved it out of the exemption and
+        # turned this guard red for a reason unrelated to the regression it
+        # exists to catch (#3031, tripped by docs/archive/plans-completed/sdlc-2880.md).
+        # EXEMPT_PREFIXES is the single definition of "this is a plan document",
+        # kept covering both ends by tests/unit/test_plan_migration_invariant.py.
         unexpected = {
-            f for f in files if f not in ALLOWED_FILES and not f.startswith("docs/plans/")
+            f for f in files if f not in ALLOWED_FILES and not f.startswith(EXEMPT_PREFIXES)
         }
         if unexpected:
             raise AssertionError(

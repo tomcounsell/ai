@@ -79,6 +79,18 @@ Before writing, run the reconnaissance routine to surface unknowns and conflicts
 
 This step catches stale assumptions, dead code, existing coverage, and architectural conflicts BEFORE they get baked into the issue. Skip only for trivially simple issues (typo fixes, config changes).
 
+### Step 3.5: Try to Kill the Issue
+
+Recon establishes what the affected area looks like. This step asks a different question: **is the problem real?** Spend a few minutes actively trying to disprove your own claim before you write it up.
+
+- **Reproduce it, or name the artifact that shows it** — command output, a log line, a failing test, a timeline entry. Something a reader can re-run.
+- **Hunt for the counter-case** — if you are claiming a pattern, go find the instances that would falsify it and check them. Three similar cases that did *not* exhibit the behavior turn a "systemic bug" into a one-off.
+- **Ask whether the codebase already decided this** — a test, comment, or doc encoding the opposite intent means you are proposing a change, not reporting a defect.
+
+This matters most when the finding arrives second-hand — from a subagent, a review, or a passing observation in another task. A report is a claim, not a verified fact, and the two minutes to check is almost always cheaper than the investigation you hand to the next reader by filing.
+
+An issue that survives this is worth filing. One that doesn't should be stated plainly where it came up, then dropped. `CHECKLIST.md`'s Falsification Checks are the concrete form of this step.
+
 ### Step 4: Write the Issue Body
 
 Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
@@ -165,3 +177,6 @@ This skill is invoked by the repo's SDLC router (in this repo: `/sdlc`) at **Ste
 - **Solution-only issues** — "Add a YAML config" without stating what problem the config solves. Always lead with the problem.
 - **Copy-paste from chat** — Raw conversation messages aren't issues. Rewrite from the reader's perspective.
 - **Missing links** — If you reference a file, repo, PR, or concept, link to it. The reader shouldn't have to search.
+- **Hypothesis filed as defect** — "X could pass the gate", "Y would sever the link". State what you observed; if you only reasoned it, reproduce it first or leave it in the conversation.
+- **Pattern claimed from one instance** — "this is systemic" after seeing it once. Check the cases that would falsify it; if most of them behave correctly, you have a one-off.
+- **Second-hand finding filed unchecked** — a subagent or review reports a problem and it becomes a ticket verbatim. Verify the central claim yourself; the report is a claim, not a fact.

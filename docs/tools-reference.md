@@ -102,6 +102,30 @@ Deliberately an adjacency check rather than a count of `fence_is_live` occurrenc
 
 Enforced on every suite run by `tests/unit/test_fence_census.py`, not by a CI workflow. A site that reads a fenced pid but drives no decision (log/reason-string interpolation) is exempted with the marker `# fence-census: log-only, not a decision consumer` on the read's own line or the line directly above.
 
+### Module-Scope Env Read Census (`scripts/scan_module_scope_env.py`)
+
+AST census of *module-scope* environment reads — a call to `os.environ.get`/`os.getenv`/`os.environ.setdefault`/`os.environ.pop` at the top level of a `.py` file (executes at import time, not at call time). Single detector implementation shared with the regression guard `.claude/hooks/validators/validate_no_module_scope_env.py`, so the count and the guard can never disagree. Git-tracked `*.py` only, via `git ls-files` — a filesystem walk sweeps `.worktrees/` and inflates the count ~66x. See [Module-Scope Env Read Guard](features/module-scope-env-guard.md).
+
+```bash
+python scripts/scan_module_scope_env.py              # non-test census: 72 modules / 190 sites (baseline)
+python scripts/scan_module_scope_env.py --tests      # include test files: 79 modules / 202 sites
+python scripts/scan_module_scope_env.py --by-file    # per-file breakdown
+python scripts/scan_module_scope_env.py --json       # machine-readable
+```
+
+Syntactic only: blind to an import-time env read made indirectly through a function call, and does not descend into class bodies at all. A future "0 sites" result proves the syntactic class is drained, not that every import-time env read is gone.
+
+### LLM Coupled-Set Compatibility Probe (`agent.llm.compat`)
+
+Verifies the anthropic / pydantic-ai-slim / openai pinned set is mutually compatible, from construction through (optionally) a real network round-trip. This is the module behind the boot-time degraded-stack gate (#3001); the CLI exists for hand-run rollback verification and incident diagnosis.
+
+```bash
+python -m agent.llm.compat --json                   # offline: construction + attribute-walk probe
+python -m agent.llm.compat --json --allow-network   # adds one real billed API call (semaphore + timeouts via run_typed)
+```
+
+Fails closed: any exception resolves to degraded and alerts; a missing API key reports its own distinct status rather than reading as an incompatible pair.
+
 ### Design System Sync (`tools.design_system_sync`)
 
 Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.
@@ -198,6 +222,37 @@ valor-telegram send --chat "Dev: Valor" "Reading the docs now, will come back wi
 
 See `docs/features/promise-gate.md` for the full architecture (LLM-first with regex fail-closed-only fallback, two-channel telemetry, mixed `session_id` provenance per CLI, latency budget, failure modes).
 
+`python -m tools.promise_gate_measurement` reports latency (elapsed and queue-wait) percentiles by audit source/transport from `logs/classification_audit.jsonl` plus `ask_coverage` contradiction flags from the separate `--ask-coverage-file` sample; it is the recorded entry criterion for the deferred #3035 phase-4 decision — see `docs/features/promise-gate.md` §Phase-4 measurement tool.
+
+### Ask as a Poll (`valor-ask-poll`)
+
+Ask a blocked agent's question as a **native Telegram poll**, so the human unblocks it with one tap
+instead of composing prose. Invoked by `/ask-me` on the headless bridge branch; see
+[Telegram Poll Questions](features/telegram-poll-questions.md).
+
+```bash
+valor-ask-poll \
+  --question "Which approach should the retry path take?" \
+  --option "Exponential backoff with a cap (Recommended)" \
+  --option "Fixed 5s interval, fail after 3"
+```
+
+- **Put the recommended option first.** The literal final option
+  `Other: wait for followup message` is appended automatically (and de-duplicated and moved last if
+  you supply it yourself).
+- Limits: 2–10 options, each ≤ 100 chars; question ≤ 300 chars.
+- Reads `TELEGRAM_CHAT_ID`, `VALOR_SESSION_ID` and `TELEGRAM_REPLY_TO` from the environment. There
+  is no chat-id or message-id flag — a flag would let an agent pass a stale id. A missing
+  `TELEGRAM_CHAT_ID` or `VALOR_SESSION_ID` exits non-zero rather than degrading under a misleading
+  reason.
+- **Degrades to numbered prose** on every surface that cannot take a poll: a 1:1 DM, a `teammate`
+  session, email, local, system. You never branch on the surface yourself — always call this, and it
+  degrades and logs the reason.
+
+**It does not end the turn.** `/ask-me` must invoke `AskUserQuestion` as its final act afterwards;
+the `needs_human` edge only fires on a `PreToolUse` match against that tool name, and this CLI's
+invocation has tool name `Bash`.
+
 ### TTS (`tools.tts`)
 
 Dual-backend text-to-speech producing OGG/Opus audio. Kokoro ONNX is the
@@ -287,6 +342,42 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
+### Improvement Controller (`valor-improve`) — planned, lane 3
+
+Not yet implemented. The entry point arrives with the improvement controller's
+lane-3 child issue; it is listed here so the surface is agreed before it is
+built rather than discovered afterwards. See
+[Improvement Controller](features/improvement-controller.md).
+
+```bash
+valor-improve case show --case ID     # the journal head, its revision, and the journal tail
+valor-improve case explain --case ID  # why this case exists, and on what evidence
+valor-improve propose                 # the only way a research session writes a proposed action
+valor-improve release compare         # a release against the incumbent it would replace
+valor-improve pause --case ID --reason TEXT   # break-glass. Never self-clearing
+valor-improve resume --case ID        # re-reads the head first; refuses a case with unreconciled intents
+valor-improve doctor                  # paused heads, stale intents, outstanding reservations
+valor-improve export / import         # move improvement records between machines
+valor-improve replay-projection       # rebuild a Popoto projection from the journal
+```
+
+Research sessions reach research state only through this CLI, which enforces
+journal authorization and never exposes a raw transition. `pause`, `resume`, and
+`doctor` are the break-glass path; the manual procedure lives in
+[Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
+
+**What is available today** is the evidence side, and it has no CLI: the
+`improvement-evidence-collect` reflection runs on a 900s tick and writes
+`ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
+Read it directly if you need to:
+
+```python
+from models.improvement_evidence import ImprovementEvidence
+
+rows = ImprovementEvidence.recent("valor", limit=50)
+corrections = [r for r in rows if r.kind == "correction"]
+```
+
 ### Agent Session Scheduler (`tools.agent_session_scheduler`)
 
 Agent-initiated queue operations. Schedule SDLC sessions, push arbitrary messages,
@@ -358,6 +449,12 @@ python -m tools.valor_session create --role eng --slug fix-the-bug --message "Fi
 # Explicit project key override (useful in scripts/CI where cwd may not match)
 python -m tools.valor_session create --role eng --slug ad-hoc-task --message "..." --project-key valor
 
+# Opt-in Codex dev lane (eng only, immutable after creation; see docs/features/codex-exec-dev-lane.md)
+python -m tools.valor_session create --role eng --slug codex-task --message "..." --dev-harness codex
+
+# One-way operator downgrade back to the Claude dev lane (refused while the lane lease is held)
+python -m tools.valor_session update-dev-harness --id <SESSION_ID> --to claude
+
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>
 python -m tools.valor_session kill --all
@@ -370,16 +467,16 @@ python -m tools.valor_session status --id <SESSION_ID> --json
 
 See `docs/features/session-steering.md` for full documentation.
 
-### Session Progress (`valor progress`)
+### Session Progress (`valor-session progress`)
 
 Answers one question about a session — *is it still working?* — and answers it truthfully rather than confidently. Read-only: it never steers, kills, or writes, so any agent may run it against any session, including one it does not own.
 
 ```bash
-valor progress <SESSION_ID>            # session_id or agent_session_id
-valor progress <SESSION_ID> --json
-valor progress <SESSION_ID> --window 300
+valor-session progress --id <SESSION_ID>            # session_id or agent_session_id
+valor-session progress --id <SESSION_ID> --json
+valor-session progress --id <SESSION_ID> --window 300
 
-# Equivalent long form
+# Equivalent module form
 python -m tools.valor_session progress --id <SESSION_ID>
 ```
 
@@ -447,6 +544,60 @@ touches a `memory/` store at any age.
 
 See [`docs/features/scheduled-disk-reclaim.md`](features/scheduled-disk-reclaim.md)
 for the guard table, the arming rationale, and the reflection registration block.
+
+### Toolbelt Baseline (`tools.belt_baseline`)
+
+Publishes the pre-activation context-cost measurement that the persona-toolbelt
+targets are judged against: per-tool attributed tokens, tool-call turns, the
+tool-definition-bearing prompt prefix, and PreToolUse denial counts. Reads only
+the per-session telemetry JSONL under `logs/session_telemetry/`, so the same
+stream that produced a number can always reproduce it.
+
+```bash
+python -m tools.belt_baseline                       # whole stream
+python -m tools.belt_baseline --since 30d           # measurement window
+python -m tools.belt_baseline --merged-pr-count 42  # normalize per merged PR
+python -m tools.belt_baseline --full --json         # every tool, machine-readable
+```
+
+Denials split **belt-relevant** vs **belt-irrelevant**. A belt cannot prevent a
+denial whose cause it does not control, so `BELT_IRRELEVANT_CAUSES` keeps
+exactly two causes out of the denominator: `sensitive_path` (no belt makes
+`.env` writable) and `teammate_write` (hook-enforced until the
+`valor-docs-write` wrapper makes the restriction belt-expressible).
+`denials_belt_relevant` counts everything else, `tool_budget` included: a
+narrower belt means fewer tool calls, hence fewer spend-cap trips, so budget
+denials move with belt width and are exactly the signal being measured. It is
+the field the escalation rollback gate consumes. An unrecognised cause counts
+as belt-relevant, so a cause added later stays in the baseline until the plan
+is amended to exclude it.
+
+An empty or missing stream exits **3** and says the window was not measured. That
+is deliberate: a zero baseline would make the −40% context target trivially
+"met". Exit codes are stable — 0 report produced, 1 telemetry unreadable, 2 usage
+error, 3 nothing measured.
+
+Per-tool numbers come from `agent/tool_cost_attribution.py`
+(`assistant-usage-delta/v1`) and are a **ranking aid, not billing** — they
+attribute the growth of the prompt prefix between assistant messages to the tools
+called in between. `total_cost_usd` remains the only authority on spend.
+
+### Toolbelt Skew Report (`tools.belt_skew_report`)
+
+The cross-session view of `belt_enforce_skew` events that
+`read_session_timeline` (one session at a time) cannot provide. Run it during the
+`TOOLBELTS_ENFORCE` activation window to see whether the fleet has converged and
+which host is behind.
+
+```bash
+python -m tools.belt_skew_report                # every session file
+python -m tools.belt_skew_report --since 12h    # just the flip window
+python -m tools.belt_skew_report --full --json
+```
+
+Zero skew events is reported as an explicit "NO SKEW EVENTS FOUND", never as
+blank output. Exit codes: 0 report produced (empty state included), 1 telemetry
+unreadable, 2 usage error.
 
 ### SDLC Stage Marker (`sdlc-tool stage-marker`)
 
@@ -520,6 +671,23 @@ states = query_stage_states(issue_number=704)
 ```
 
 Always exits 0 and returns `{}` on any error (missing session, Redis down, malformed data). See `docs/features/pipeline-state-machine.md` for how the router uses this tool.
+
+### Dead Letters (`tools.dead_letters`)
+
+Operator break-glass for the pipeline's dead-letter rows: what has been lost,
+and re-running the stages whose loss can be replayed. Deliberately not an MCP
+tool — replaying is a rare, destructive-adjacent action a human takes after
+reading the dashboard tile.
+
+```bash
+python -m tools.dead_letters list                      # row counts per stage
+python -m tools.dead_letters replay --stage extraction # re-run one stage's replayable rows
+python -m tools.dead_letters evict                     # trim each stage back to its cap
+```
+
+`replay --stage telegram_send` is refused: it needs a live Telethon client, and
+the bridge already replays that stage on every connect. See
+[Pipeline Dead Letters](features/pipeline-dead-letters.md).
 
 ## OfficeCLI
 

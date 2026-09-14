@@ -64,7 +64,11 @@ All secrets go in `~/Desktop/Valor/.env`. See `.env.example` for the full list o
 Required variables:
 
 ```bash
-# Anthropic API (required)
+# Anthropic API (required) — auxiliary key for direct API calls made OUTSIDE the
+# agent harness. Agent turns run on the Claude subscription (OAuth via `claude`
+# CLI login) and the session runner strips this key from every spawned CLI.
+# Readers resolve it via utils/api_keys.py::get_anthropic_api_key or read the
+# env var directly; see docs/README.md for what depends on it.
 ANTHROPIC_API_KEY=sk-ant-...
 
 # Telegram User Account (from my.telegram.org)

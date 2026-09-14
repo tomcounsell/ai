@@ -1,10 +1,10 @@
 # Trace & Verify: Root Cause Analysis Protocol
 
-Replaces narrative-only "5 Whys" root cause analysis with a data-driven verification protocol. The key insight: **5 Whys is a thinking tool, not a verification tool.** It generates hypotheses but does not validate them. Trace & Verify adds the missing forward-verification step.
+A data-driven root cause analysis protocol. The key insight: **5 Whys is a thinking tool, not a verification tool.** It generates hypotheses but does not validate them. Trace & Verify adds the forward-verification step.
 
 ## Background
 
-The 5 Whys methodology failed across two PRs (#205 and #208) to catch a session ID mismatch between Claude Code hooks and AgentSession in Redis. The proposed fixes were logically sound but operationally broken -- hooks fired with one ID while sessions were keyed by another. A forward data trace would have caught this immediately. See issue #212 for the full post-mortem.
+5 Whys does not catch a session ID mismatch between Claude Code hooks and AgentSession in Redis, where hooks fire with one ID while sessions are keyed by another. A forward data trace catches this immediately.
 
 ## Why 5 Whys Fails for Integration Bugs
 
@@ -80,7 +80,7 @@ Use this when investigating a bug:
 - Bug investigation during `/do-patch`
 - Sentry error triage and root cause analysis
 - Any debugging where the fix involves multiple components
-- Post-incident analysis as a replacement for narrative-only 5 Whys
+- Post-incident analysis instead of narrative-only 5 Whys
 
 ## When Not to Use
 
@@ -91,5 +91,3 @@ Use this when investigating a bug:
 ## Related
 
 - [do-patch Skill](do-patch-skill.md) -- Uses Trace & Verify in Step 1
-- Issue #212 -- Origin of this protocol
-- Issue #209 -- The session ID mismatch that 5 Whys missed

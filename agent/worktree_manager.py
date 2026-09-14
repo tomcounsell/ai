@@ -20,6 +20,30 @@ logger = logging.getLogger(__name__)
 WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
+# Branches minted by scripts/nightly_regression_tests.py's triage dispatch
+# (`valor_session create --slug nightly-triage-<hash8>`): one lane per night's
+# findings, each a single-shot Eng session that files issues and then goes
+# quiet. Nothing returns to the lane once that session ends, so the boot-time
+# stale-branch sweep reaps its worktree along with the branch (issue #3162).
+# The slug group is what the sweep hands to :func:`reap_idle_worktree`.
+NIGHTLY_TRIAGE_BRANCH_RE = re.compile(r"^session/(nightly-triage-[a-zA-Z0-9._-]+)$")
+
+
+def stale_nightly_triage_slug(branch: str, age_hours: float, max_age_hours: float) -> str | None:
+    """Slug of a nightly-triage lane whose branch has aged past the sweep window.
+
+    Returns ``None`` for every other branch namespace and for a nightly-triage
+    branch still inside the window. ``age_hours`` is measured from the branch
+    tip's commit time, the same clock ``cleanup_stale_branches`` already uses
+    to select ``session/*`` branches, so one threshold governs both the branch
+    and its worktree.
+    """
+    match = NIGHTLY_TRIAGE_BRANCH_RE.match(branch)
+    if match is None or age_hours <= max_age_hours:
+        return None
+    return match.group(1)
+
+
 # ---------------------------------------------------------------------------
 # Unmerged-branch guard (issue #1646)
 # ---------------------------------------------------------------------------
@@ -430,17 +454,103 @@ def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
     )
 
 
-def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
+def _fetch_live_sessions() -> tuple[list, str]:
+    """Fetch every non-terminal ``AgentSession`` row, once, materialized.
+
+    This is the single place that decides what "live session" means at the
+    Redis boundary, and the single place where Redis is actually touched for
+    a busy-guard decision. It narrows on the indexed ``status`` field
+    (``status__in=NON_TERMINAL_STATUSES``) instead of hydrating the whole
+    table and discarding terminal rows in Python — a strict push-down of a
+    filter the matching loop already performed, so it cannot change which
+    sessions are considered.
+
+    The ``list(...)`` wrapper is load-bearing, not stylistic:
+    ``AgentSession.query.filter(...)`` returns a lazy
+    ``popoto.models.query.QueryBuilder`` that re-runs the whole query on every
+    iteration and issues no Redis command itself, so a ``try`` around
+    ``filter()`` alone would catch nothing — the connection error surfaces
+    during iteration. Materializing here, inside this function's own
+    ``try``, is what turns a Redis outage into ``("error", ...)`` instead of
+    an exception that escapes every caller. Handing a bare, unmaterialized
+    builder to a caller that loops it once per slug would also reintroduce
+    one full Redis query per slug — the exact amplification this function
+    exists to remove, one layer down. Mirrors the established shape at
+    ``models/agent_session.py:1389`` (``rows = list(cls.query.filter(...))``).
+
+    Returns:
+        ``(rows, error_reason)``. On success, ``rows`` is a materialized
+        ``list`` of ``AgentSession`` instances and ``error_reason`` is
+        ``""``. On failure, ``rows`` is ``[]`` and ``error_reason`` is
+        ``"model_import_failed:{Type}"`` or ``"query_failed:{Type}"``.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import NON_TERMINAL_STATUSES
+    except Exception as e:
+        logger.warning("_fetch_live_sessions: model imports failed (%s)", e)
+        return ([], f"model_import_failed:{type(e).__name__}")
+
+    try:
+        rows = list(AgentSession.query.filter(status__in=sorted(NON_TERMINAL_STATUSES)))
+    except Exception as e:
+        logger.warning("_fetch_live_sessions: AgentSession query failed (%s)", e)
+        return ([], f"query_failed:{type(e).__name__}")
+
+    return (rows, "")
+
+
+def _scan_worktree_sessions(
+    repo_root: Path, slug: str, *, sessions: list | None = None
+) -> tuple[str, str, str]:
     """Check whether any non-terminal AgentSession references this worktree.
 
-    Walks the AgentSession table looking for rows whose ``working_dir`` lives
-    inside ``.worktrees/{slug}/`` (or is exactly that directory) and whose
-    ``status`` is not in ``TERMINAL_STATUSES``. The first match wins.
+    Matches rows whose ``exec_cwd`` or ``working_dir`` lives inside
+    ``.worktrees/{slug}/`` (or is exactly that directory) and whose
+    ``status`` is not in ``TERMINAL_STATUSES``. Both fields are read, in
+    that order, per row: ``exec_cwd`` (execution-scoped -- stamped by the
+    executor before harness launch and again by ``stamp_execution_spawn``,
+    reset to its declared default on every continuation via
+    ``_EXECUTION_FENCE_RESET_FIELDS``) is checked first, and
+    ``working_dir`` (enqueue-scoped -- set once when the row is created and
+    never reset) is the existing fallback. This closes the blind spot where
+    a slugless eng session synthesizes its lane at execution time: its
+    stored ``working_dir`` still names the main checkout, so only
+    ``exec_cwd`` records where it actually ran. ``slug`` is deliberately
+    not read as a third arm: a MERGE-stage session for slug X runs on the
+    main checkout and calls ``cleanup_after_merge(X)`` -> ``remove_worktree``
+    -> this scan; a ``slug ==`` match would make that session block its own
+    lane's removal on every merge. The first match, over either field,
+    wins.
 
-    Imports of ``models.agent_session`` and ``models.session_lifecycle`` are
-    deferred to function body to keep ``worktree_manager.py``'s import-time
-    graph unchanged (worktree_manager is loaded by tooling that should not
-    pay the Popoto bootstrap cost just to validate slugs).
+    When ``sessions`` is ``None`` (the default, used by every single-slug
+    caller), this fetches the candidate rows itself via
+    :func:`_fetch_live_sessions` — one indexed, materialized query per call.
+    When ``sessions`` is given (used by :func:`worktree_busy_probe_many`),
+    this matches against that pre-fetched list instead of querying again, so
+    batch and single-slug callers share one matcher and cannot drift apart.
+
+    Import of ``models.session_lifecycle`` is deferred to function body to
+    keep ``worktree_manager.py``'s import-time graph unchanged
+    (worktree_manager is loaded by tooling that should not pay the Popoto
+    bootstrap cost just to validate slugs). This import is unconditional —
+    it happens whether or not ``sessions`` was injected — because the
+    injected-``sessions=`` path never calls ``_fetch_live_sessions`` and so
+    would otherwise leave ``TERMINAL_STATUSES`` unbound in this frame.
+
+    Narrowing on the index accepts a fail-open reading for any status outside
+    ``ALL_STATUSES``: such a row is absent from the ``status__in`` union, so it
+    is never fetched and the lane reads clear. That trade is deliberate --
+    spike 4 found no live out-of-enum values and no write site for one outside
+    ``models/session_lifecycle.py``, whose setter rejects unknown statuses --
+    and it is settled at the query, not here. The Python
+    ``status not in TERMINAL_STATUSES`` check below therefore cannot exclude a
+    row on either shipped path: ``TERMINAL_STATUSES`` and
+    ``NON_TERMINAL_STATUSES`` are disjoint, so every fetched row passes it by
+    construction, and ``worktree_busy_probe_many`` injects index-filtered rows
+    too. It is kept because it is cheap and it is the correct predicate for a
+    caller that injects rows of its own -- the only path that can present an
+    out-of-enum status -- not because it is what holds the fail-closed line.
 
     Path comparison normalizes both sides via ``os.path.normpath`` (no symlink
     resolution) then matches the worktree's path components segment-by-segment
@@ -457,6 +567,8 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     Args:
         repo_root: Path to the main repository.
         slug: Work item slug whose worktree we want to remove.
+        sessions: Pre-fetched, materialized rows to match against instead of
+            fetching. ``None`` (default) fetches internally.
 
     Returns:
         ``(state, a, b)`` where ``state`` is one of ``"clear"``, ``"busy"``, or
@@ -464,7 +576,6 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
         agent_session_id. For ``"error"``, ``a`` is the reason.
     """
     try:
-        from models.agent_session import AgentSession
         from models.session_lifecycle import TERMINAL_STATUSES
     except Exception as e:
         logger.warning("_scan_worktree_sessions: model imports failed (%s)", e)
@@ -474,44 +585,48 @@ def _scan_worktree_sessions(repo_root: Path, slug: str) -> tuple[str, str, str]:
     worktree_norm = os.path.normpath(str(worktree_dir))
     worktree_parts = Path(worktree_norm).parts
 
-    try:
-        sessions = AgentSession.query.all()
-    except Exception as e:
-        logger.warning("_scan_worktree_sessions: AgentSession query failed (%s)", e)
-        return ("error", f"query_failed:{type(e).__name__}", "")
+    if sessions is None:
+        sessions, error_reason = _fetch_live_sessions()
+        if error_reason:
+            return ("error", error_reason, "")
 
     for session in sessions:
         try:
-            wd = getattr(session, "working_dir", None)
-            if not wd:
-                continue
             status = getattr(session, "status", None)
             if not status or status in TERMINAL_STATUSES:
                 continue
 
-            # Normalize without resolving symlinks (Risk 5: realpath could
-            # amplify the match into unrelated directories).
-            try:
-                # Try resolving an absolute path; fall back to normpath for
-                # relative working_dir values like ".worktrees/sdlc-1218".
-                if os.path.isabs(wd):
-                    session_norm = os.path.normpath(wd)
-                else:
-                    session_norm = os.path.normpath(str((repo_root / wd).resolve()))
-            except Exception:
-                session_norm = os.path.normpath(str(wd))
-
-            session_parts = Path(session_norm).parts
-            # Segment-aware containment: the worktree's parts must be a prefix
-            # of the session's parts. This rejects ".worktrees/sdlc-1218-other"
-            # while accepting ".worktrees/sdlc-1218/subdir".
-            if (
-                len(session_parts) >= len(worktree_parts)
-                and session_parts[: len(worktree_parts)] == worktree_parts
+            for wd in (
+                getattr(session, "exec_cwd", None),
+                getattr(session, "working_dir", None),
             ):
-                session_id = getattr(session, "session_id", "") or ""
-                agent_session_id = getattr(session, "agent_session_id", "") or ""
-                return ("busy", session_id, agent_session_id)
+                if not wd:
+                    continue
+
+                # Normalize without resolving symlinks (Risk 5: realpath
+                # could amplify the match into unrelated directories).
+                try:
+                    # Try resolving an absolute path; fall back to normpath
+                    # for relative values like ".worktrees/sdlc-1218".
+                    if os.path.isabs(wd):
+                        session_norm = os.path.normpath(wd)
+                    else:
+                        session_norm = os.path.normpath(str((repo_root / wd).resolve()))
+                except Exception:
+                    session_norm = os.path.normpath(str(wd))
+
+                session_parts = Path(session_norm).parts
+                # Segment-aware containment: the worktree's parts must be a
+                # prefix of the session's parts. This rejects
+                # ".worktrees/sdlc-1218-other" while accepting
+                # ".worktrees/sdlc-1218/subdir".
+                if (
+                    len(session_parts) >= len(worktree_parts)
+                    and session_parts[: len(worktree_parts)] == worktree_parts
+                ):
+                    session_id = getattr(session, "session_id", "") or ""
+                    agent_session_id = getattr(session, "agent_session_id", "") or ""
+                    return ("busy", session_id, agent_session_id)
         except Exception as e:
             logger.debug("_scan_worktree_sessions: skipping session row (%s)", e)
             continue
@@ -550,6 +665,52 @@ def worktree_busy_probe(repo_root: Path, slug: str) -> tuple[str, str]:
     if state == "error":
         return ("error", a)
     return ("clear", "")
+
+
+def worktree_busy_probe_many(repo_root: Path, slugs: list[str]) -> dict[str, tuple[str, str]]:
+    """Tri-state busy check for many slugs, fetched once instead of per-slug.
+
+    This is :func:`worktree_busy_probe` for a whole sweep: fetches the
+    non-terminal session rows exactly once via :func:`_fetch_live_sessions`,
+    then matches each requested slug against that same materialized list by
+    calling :func:`_scan_worktree_sessions` with ``sessions=`` pre-populated.
+    It shares one matcher with the single-slug path — it does not
+    re-implement containment matching — so batch and single-slug results
+    cannot drift apart as either is maintained.
+
+    Never raises: every Redis touch happens inside ``_fetch_live_sessions``'s
+    own ``try``, and the per-row matching keeps its own ``try``. If the fetch
+    fails, every requested slug gets ``("error", reason)`` — the failure is
+    fanned out to all of them rather than defaulting any of them to
+    ``"clear"``, so a Redis outage during a sweep skips every lane instead of
+    silently clearing one.
+
+    Args:
+        repo_root: Path to the main repository.
+        slugs: Worktree slugs to check. An empty list returns ``{}`` and
+            issues no query.
+
+    Returns:
+        ``{slug: (state, detail)}`` with the same tri-state each single-slug
+        :func:`worktree_busy_probe` call would have produced for that slug.
+    """
+    if not slugs:
+        return {}
+
+    rows, error_reason = _fetch_live_sessions()
+    if error_reason:
+        return dict.fromkeys(slugs, ("error", error_reason))
+
+    result: dict[str, tuple[str, str]] = {}
+    for slug in slugs:
+        state, a, b = _scan_worktree_sessions(repo_root, slug, sessions=rows)
+        if state == "busy":
+            result[slug] = ("busy", a or b or "unknown")
+        elif state == "error":
+            result[slug] = ("error", a)
+        else:
+            result[slug] = ("clear", "")
+    return result
 
 
 def _worktree_has_live_process(worktree_dir: Path) -> int | None:
@@ -978,6 +1139,84 @@ def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: st
             logger.info(f"Manually removed stale worktree directory: {worktree_path}")
             # Prune again to clean up the now-missing reference.
             prune_worktrees(repo_root)
+
+
+def reap_idle_worktree(repo_root: Path, slug: str) -> tuple[bool, str]:
+    """Remove ``.worktrees/{slug}`` once nothing can still want it.
+
+    Built for the unattended stale-branch sweep (``cleanup_stale_branches``
+    at bridge boot), so every guard fails closed and the caller gets
+    ``(removed, reason)`` instead of an exception. A question a guard cannot
+    answer reads as "keep", the posture ``tools/disk_reclaim.py`` takes, and
+    the opposite of the interactive :func:`remove_worktree`.
+
+    Guards, cheapest first:
+
+    - the lane directory exists and is the worktree git registers for
+      ``session/{slug}`` (a branch checked out anywhere else is left alone);
+    - ``git status --porcelain`` is empty;
+    - no live OS process has its cwd inside the lane;
+    - no non-terminal ``AgentSession`` claims the lane
+      (:func:`worktree_busy_probe`, an unanswerable query keeps the lane).
+
+    The clean-tree guard is also what keeps this path clear of issue #3167.
+    A clean tree has nothing to preserve, so this function never calls
+    ``preserve_uncommitted_worktree_changes``. A worktree that lost tracked
+    files to an interrupted teardown reads as maximally dirty here and is
+    skipped, where the preserve path would commit the deletion.
+
+    Returns:
+        ``(True, "removed")`` on success, otherwise ``(False, reason)`` with
+        ``reason`` in ``missing``, ``not_registered_at_lane_path``,
+        ``git_status_unavailable``, ``uncommitted_changes``,
+        ``process_scan_error:<type>``, ``live_process:<pid>``,
+        ``busy_check_error:<detail>``, ``live_session:<id>``, or
+        ``git_worktree_remove_failed:<stderr>``.
+    """
+    _validate_slug(slug)
+    worktree_dir = repo_root / WORKTREES_DIR / slug
+    if not worktree_dir.is_dir():
+        return (False, "missing")
+
+    registered = _find_worktree_for_branch(repo_root, f"session/{slug}")
+    if registered is None or Path(registered).resolve() != worktree_dir.resolve():
+        return (False, "not_registered_at_lane_path")
+
+    status = subprocess.run(
+        ["git", "-C", str(worktree_dir), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=settings.timeouts.git_subprocess_s,
+    )
+    if status.returncode != 0:
+        return (False, "git_status_unavailable")
+    if status.stdout.strip():
+        return (False, "uncommitted_changes")
+
+    try:
+        live_pid = _worktree_has_live_process(worktree_dir)
+    except Exception as e:
+        return (False, f"process_scan_error:{type(e).__name__}")
+    if live_pid is not None:
+        return (False, f"live_process:{live_pid}")
+
+    state, detail = worktree_busy_probe(repo_root, slug)
+    if state == "error":
+        return (False, f"busy_check_error:{detail}")
+    if state == "busy":
+        return (False, f"live_session:{detail}")
+
+    result = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_dir)],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=settings.timeouts.git_subprocess_s,
+    )
+    if result.returncode != 0:
+        return (False, f"git_worktree_remove_failed:{result.stderr.strip()}")
+    logger.info(f"Reaped idle worktree: {worktree_dir}")
+    return (True, "removed")
 
 
 # Success marker for per-worktree venv provisioning (issue #2052). Written
@@ -1409,9 +1648,9 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     Session worktrees under ``.worktrees/{slug}`` are force-removed on session
     exit (normal, exception, or cancellation). The unmerged-branch guard (#1646)
     protects only *committed* work; staged, unstaged, and untracked edits are
-    otherwise discarded with no backstop. This helper captures ALL uncommitted
-    work as a WIP commit on ``session/{slug}`` plus a durable named ref
-    ``refs/session-wip/{slug}`` before any ``git worktree remove --force``.
+    otherwise discarded with no backstop. This helper captures uncommitted work
+    as a WIP commit on the worktree's checked-out branch plus a durable named
+    ref ``refs/session-wip/{name}`` before any ``git worktree remove --force``.
 
     Mechanism (WIP commit + named ref, NOT ``git stash``). The reason is NOT
     that a worktree's stash is worktree-local: ``refs/stash`` lives in the
@@ -1422,37 +1661,106 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
     is meaningless and a teardown backstop keyed on it would race every peer
     (issue #2650, shape 1). A WIP commit under a slug-scoped named ref is
     single-owner by construction, and it captures untracked files, which
-    ``git stash`` declines by default. Instead:
+    ``git stash`` declines by default.
 
     1. ``git -C <worktree> status --porcelain`` — if empty, no-op.
-    2. ``git -C <worktree> add -A`` — captures untracked + tracked edits.
-    3. ``git -C <worktree> commit --no-verify --no-gpg-sign`` — the WIP commit
+    2. **Wipe check (#3167).** ``git -C <worktree> ls-tree --name-only -d HEAD``
+       lists the directories HEAD tracks; if any is absent from disk, the tree
+       is a wipe (partially or fully deleted from under the worktree, e.g. by a
+       racing teardown pass or a `shutil.rmtree` that raised partway through),
+       not a tree whose deletions should be committed. This check runs BEFORE
+       staging: the signal is available without mutating the index, and after
+       ``git add -A`` the deletion signal is partly erased from the index
+       anyway. An earlier design considered a deletions/insertions ratio
+       (refusing when deletions dwarf insertions); it is rejected because the
+       reported incident's own commit carried 223,142 insertions alongside its
+       902,840 deletions — ``git add -A`` also stages untracked build
+       artifacts, which count as insertions and defeat any "insertions are
+       negligible" test.
+       - **No missing directory**: fall through to step 3 unchanged.
+       - **A directory is missing**: first ``git -C <worktree> reset -q`` (a
+         mixed reset — index to HEAD, working tree untouched). This is
+         index-recovery, not hygiene: without it, a wipe a *previous* teardown
+         pass already staged (``add -A`` succeeded, the following commit
+         failed) leaves both the "deleted" and "modified/others" plumbing
+         reads blind to it, and the additive salvage below would silently
+         discard real coexisting work. Then compute the additive-only
+         candidate set — ``ls-files --modified --others --exclude-standard``
+         minus ``ls-files --deleted`` — and stage exactly those paths (never
+         ``add -A``, which would restage the declined deletions). If the
+         candidate set is empty (the pure-wipe case), no staging or commit
+         happens at all. Otherwise the WIP commit carries the coexisting
+         additions/edits with **zero deletions**, plus a trailer recording
+         that deletions were declined. Either way the declined deletions are
+         logged at ERROR under ``[worktree-wip-refused-wipe]`` with enough
+         detail (slug, branch, HEAD sha, missing directories, path counts) to
+         reconstruct the event after the worktree is destroyed.
+       - **Fail-open asymmetry**: a failure reading the wipe signal itself
+         (before any directory is known missing) is not evidence of a wipe, so
+         it falls open to step 3 — this function's hardest contract is that it
+         never blocks or hangs teardown. A failure *after* a missing directory
+         is already confirmed (during the reset or the salvage reads) refuses
+         instead of falling through, because falling open there would commit
+         the very wipe just detected.
+    3. ``git -C <worktree> add -A`` — captures untracked + tracked edits.
+    4. ``git -C <worktree> commit --no-verify --no-gpg-sign`` — the WIP commit
        (``--no-verify`` avoids pre-commit hooks hanging teardown;
        ``--no-gpg-sign`` avoids signing prompts).
-    4. ``git -C <repo_root> update-ref refs/session-wip/{slug} <sha>`` — writes
+    5. ``git -C <repo_root> update-ref refs/session-wip/{name} <sha>`` — writes
        to the *common* ref store, so the ref survives both worktree removal and
-       the unmerged-branch-guard branch deletion.
+       the unmerged-branch-guard branch deletion. ``{name}`` is derived from
+       the worktree's checked-out branch (``session/<name>`` -> ``<name>``),
+       falling back to the ``slug`` argument on a detached HEAD, a non-session
+       branch, or a failed read — `_cleanup_stale_worktree` passes the foreign
+       *directory* name as `slug`, which can disagree with the branch the
+       commit actually lands on.
 
     Non-blocking contract: any subprocess failure, timeout, or exception is
     caught, logged at ERROR with the ``[worktree-wip-preserve-failed]`` tag,
     and returned in the result dict — this function NEVER raises into the
     teardown path and must never hang teardown.
 
-    Recovery: ``git checkout refs/session-wip/{slug}`` (or diff/cherry-pick the
+    Recovery: ``git checkout refs/session-wip/{name}`` (or diff/cherry-pick the
     WIP commit). ``git reset --soft HEAD~1`` on the resumed session unstages the
-    WIP commit to restore the dirty tree. Refs live in ``refs/session-wip/*``
-    and are reclaimed manually (no automated GC — see the plan No-Gos).
+    WIP commit to restore the dirty tree. This promise now holds even on a
+    half-deleted tree, because the ref never carries a wipe. Refs live in
+    ``refs/session-wip/*`` and are reclaimed manually (no automated GC — see
+    the plan No-Gos).
 
     Args:
         repo_root: Path to the main repository (common ref store owner).
-        slug: Work item slug (validated).
+        slug: Work item slug (validated). Used to name the ref only when the
+            worktree's checked-out branch cannot be resolved to a
+            ``session/<name>`` form.
         worktree_dir: Path to the worktree to preserve.
 
     Returns:
-        A result dict. On a clean tree: ``{"preserved": False, "was_clean":
-        True}``. On success: ``{"preserved": True, "was_clean": False, "sha":
-        <sha>, "ref": "refs/session-wip/{slug}", "errors": []}``. On failure:
-        ``{"preserved": False, "was_clean": False, "errors": [<msg>, ...]}``.
+        A result dict, always carrying ``"errors"`` (``[]`` unless a git
+        subprocess itself broke) and ``"ref"``.
+
+        - Clean tree: ``{"preserved": False, "was_clean": True, "ref": ...,
+          "errors": []}``.
+        - Ordinary dirty tree (no missing tracked directory): ``{"preserved":
+          True, "was_clean": False, "sha": <sha>, "ref": ..., "errors": []}``.
+        - Wipe, with coexisting additive work: ``{"preserved": True,
+          "was_clean": False, "refused": "missing-tracked-dirs", "missing":
+          [<dir>, ...], "deleted_paths": <int>, "sha": <sha>, "ref": ...,
+          "errors": []}``. The commit's diff against its parent has zero
+          deletions.
+        - Pure wipe (nothing coexisting): ``{"preserved": False, "was_clean":
+          False, "refused": "missing-tracked-dirs", "missing": [...],
+          "deleted_paths": <int>, "ref": ..., "errors": []}``. No commit, no
+          ref write, branch head unmoved.
+        - A failure salvaging a detected wipe (block B) returns the pure-wipe
+          shape above minus ``"deleted_paths"`` (the salvage step failed
+          before that count could be determined) plus ``"guard_error":
+          <str>``, still with ``"errors": []`` — the outcome is a refusal,
+          not a broken-git failure.
+        - Git subprocess failure (the pre-existing contract): ``{"preserved":
+          False, "was_clean": False, "ref": ..., "errors": [<msg>, ...]}``,
+          with no ``"refused"`` key. ``"refused"`` is therefore the sole
+          discriminator between a refusal and a git failure — never populate
+          ``"errors"`` on a refusal.
     """
     _validate_slug(slug)
     ref = f"refs/session-wip/{slug}"
@@ -1471,6 +1779,309 @@ def preserve_uncommitted_worktree_changes(repo_root: Path, slug: str, worktree_d
             # Clean tree — nothing to preserve.
             return {"preserved": False, "was_clean": True, "ref": ref, "errors": []}
 
+        # Resolve the worktree's checked-out branch once — reused both to name
+        # the WIP ref correctly (the recon-found slug/branch mismatch: a
+        # foreign worktree directory name can disagree with the branch that
+        # actually receives the commit) and as a field in the wipe-refusal log
+        # record below. A failed read (or a non-`session/` branch, or a
+        # detached HEAD) falls back to the `slug` argument — `ref` above
+        # already carries that default. The `session/` prefix match is the
+        # load-bearing gate, not VALID_SLUG_RE alone: a detached HEAD's
+        # `rev-parse --abbrev-ref HEAD` returns the literal string "HEAD",
+        # which passes VALID_SLUG_RE and would otherwise produce
+        # `refs/session-wip/HEAD`.
+        try:
+            branch_result = subprocess.run(
+                ["git", "-C", str(worktree_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+            )
+            branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+        except Exception as branch_exc:
+            # A non-zero rc already falls back to the `slug` default above; an
+            # exception (e.g. TimeoutExpired) must degrade the same way rather
+            # than propagate to the outer handler, which would skip the
+            # ordinary path's `add -A` + WIP commit + ref write entirely and
+            # lose legitimate uncommitted work (#3167 follow-up).
+            logger.warning(
+                "[worktree-wip-branch-resolve-failed] slug=%s worktree=%s error=%s — "
+                "falling back to slug-derived ref.",
+                slug,
+                worktree_dir,
+                branch_exc,
+            )
+            branch = ""
+        session_match = re.match(r"^session/(.+)$", branch) if branch else None
+        if session_match and VALID_SLUG_RE.match(session_match.group(1)):
+            ref = f"refs/session-wip/{session_match.group(1)}"
+
+        # --- Wipe check (#3167), block A: detection ---
+        # A worktree missing a directory HEAD tracks is definitionally not a
+        # tree whose deletions should be committed. Runs BEFORE any staging:
+        # the signal is available without mutating the index, and staging
+        # first would leave a fully-staged wipe sitting in the index if the
+        # subsequent force-remove then fails and the directory survives.
+        missing: list[str] = []
+        try:
+            ls_tree = subprocess.run(
+                ["git", "-C", str(worktree_dir), "ls-tree", "--name-only", "-d", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=settings.timeouts.git_subprocess_s,
+            )
+            if ls_tree.returncode != 0:
+                raise RuntimeError(f"git ls-tree failed: {ls_tree.stderr.strip()}")
+            tracked_dirs = [d for d in ls_tree.stdout.splitlines() if d.strip()]
+            missing = sorted(d for d in tracked_dirs if not (worktree_dir / d).is_dir())
+        except Exception as guard_exc:
+            # Detection failure is not evidence of a wipe. Fall open to
+            # today's unconditional preserve rather than trade a rare
+            # committed wipe for a routine loss of the backstop on legitimate
+            # work every time a git read hiccups (e.g. an unborn HEAD).
+            logger.warning(
+                "[worktree-wip-guard-failed] slug=%s worktree=%s stage=detection "
+                "error=%s — wipe-detection read failed; falling through to "
+                "unconditional preserve.",
+                slug,
+                worktree_dir,
+                guard_exc,
+            )
+            missing = []
+
+        if missing:
+            # --- Wipe check, block B: response ---
+            # HEAD has already proven a tracked directory is missing from
+            # disk. The only open question is how much coexisting work can be
+            # salvaged — a failure anywhere in this block REFUSES rather than
+            # falling through, because falling open here would answer "a git
+            # read timed out" with "so commit the deletions".
+            try:
+                head_result = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if head_result.returncode != 0:
+                    raise RuntimeError(f"git rev-parse HEAD failed: {head_result.stderr.strip()}")
+                head_sha = head_result.stdout.strip()
+
+                # Step zero, and load-bearing rather than hygienic: a mixed
+                # reset (index to HEAD, working tree untouched) so the index
+                # equals HEAD before anything is staged. Without this, a wipe
+                # a previous pass already staged makes both plumbing reads
+                # below come back empty, silently discarding any real
+                # coexisting work. A mixed reset cannot itself destroy
+                # anything — deleted paths stay deleted on disk, edits stay
+                # edited, untracked files stay untracked. A failed reset must
+                # not fall forward: `git commit` commits the ENTIRE index, not
+                # only paths just staged, so an unchecked reset failure would
+                # let the additive commit below carry a pre-staged wipe.
+                reset = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "reset", "-q"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if reset.returncode != 0:
+                    raise RuntimeError(f"git reset failed: {reset.stderr.strip()}")
+
+                candidates_result = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "ls-files",
+                        "--modified",
+                        "--others",
+                        "--exclude-standard",
+                        "-z",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if candidates_result.returncode != 0:
+                    raise RuntimeError(
+                        f"git ls-files (modified/others) failed: {candidates_result.stderr.strip()}"
+                    )
+                deleted_result = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "ls-files", "--deleted", "-z"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if deleted_result.returncode != 0:
+                    raise RuntimeError(
+                        f"git ls-files --deleted failed: {deleted_result.stderr.strip()}"
+                    )
+
+                deleted_paths = [p for p in deleted_result.stdout.split("\0") if p]
+                deleted_set = set(deleted_paths)
+                candidates = [p for p in candidates_result.stdout.split("\0") if p]
+                additive = [p for p in candidates if p not in deleted_set]
+                preserved_paths = len(additive)
+
+                # Captured before staging/committing — the record is the sole
+                # durable evidence of the refusal on the pure-wipe branch, and
+                # the force-remove that follows destroys the worktree within
+                # milliseconds.
+                logger.error(
+                    "[worktree-wip-refused-wipe] slug=%s branch=%s head=%s missing=%s "
+                    "preserved_paths=%d deleted_paths=%d — auto-preserve declined to "
+                    "commit a wipe; teardown proceeds.",
+                    slug,
+                    branch or "<unknown>",
+                    head_sha,
+                    ",".join(missing),
+                    preserved_paths,
+                    len(deleted_paths),
+                )
+
+                if not additive:
+                    # Pure wipe. Do not call `git add` with an empty
+                    # pathspec — it exits 0 having staged nothing, and the
+                    # following `git commit` then fails with "nothing to
+                    # commit", logging a misleading
+                    # [worktree-wip-preserve-failed].
+                    return {
+                        "preserved": False,
+                        "was_clean": False,
+                        "refused": "missing-tracked-dirs",
+                        "missing": missing,
+                        "deleted_paths": len(deleted_paths),
+                        "ref": ref,
+                        "errors": [],
+                    }
+
+                # Stage exactly the additive set, on stdin — never a temp
+                # file, which would either race the very deletion that
+                # triggered this path (inside the worktree) or leak (in
+                # /tmp, with a cleanup obligation inside a never-raise
+                # contract). This call deliberately omits `text=True`:
+                # `input` must be bytes for a NUL-delimited pathspec: str
+                # encoding would mangle the separator. `git add` spells the
+                # NUL-delimited pathspec flag `--pathspec-file-nul`, not
+                # `-z` (that exits non-zero with "unknown switch `z`").
+                # Never use `git add -A` here — it restages the very
+                # deletions this branch exists to decline.
+                stage = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "add",
+                        "--pathspec-from-file=-",
+                        "--pathspec-file-nul",
+                        "--",
+                    ],
+                    input=b"\0".join(p.encode() for p in additive) + b"\0",
+                    capture_output=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if stage.returncode != 0:
+                    stage_err = stage.stderr.decode(errors="replace").strip()
+                    raise RuntimeError(f"git add (additive) failed: {stage_err}")
+
+                ts = datetime.datetime.now(datetime.UTC).isoformat()
+                subject = f"WIP: auto-preserved before teardown [{slug}] [{ts}]"
+                # Trailer, not a different subject: keeps the subject
+                # byte-identical to an ordinary preserve (anything keyed on
+                # that string keeps working) while recording the refusal in
+                # the durable commit itself, not only the rotating log.
+                trailer = (
+                    f"Auto-preserve declined deletions (#3167)\n"
+                    f"Missing-tracked-dirs: {','.join(missing)}\n"
+                    f"Declined-deletions: {len(deleted_paths)}"
+                )
+                commit = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_dir),
+                        "commit",
+                        "--no-verify",
+                        "--no-gpg-sign",
+                        "-m",
+                        subject,
+                        "-m",
+                        trailer,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if commit.returncode != 0:
+                    raise RuntimeError(f"git commit (additive) failed: {commit.stderr.strip()}")
+
+                rev = subprocess.run(
+                    ["git", "-C", str(worktree_dir), "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if rev.returncode != 0:
+                    raise RuntimeError(f"git rev-parse HEAD failed: {rev.stderr.strip()}")
+                sha = rev.stdout.strip()
+
+                update = subprocess.run(
+                    ["git", "-C", str(repo_root), "update-ref", ref, sha],
+                    capture_output=True,
+                    text=True,
+                    timeout=settings.timeouts.git_subprocess_s,
+                )
+                if update.returncode != 0:
+                    raise RuntimeError(f"git update-ref failed: {update.stderr.strip()}")
+
+                logger.warning(
+                    "[worktree-wip-preserved] slug=%s ref=%s sha=%s — uncommitted work "
+                    "(additive only; deletions declined) preserved before teardown; "
+                    "recover with `git checkout %s`.",
+                    slug,
+                    ref,
+                    sha,
+                    ref,
+                )
+                return {
+                    "preserved": True,
+                    "was_clean": False,
+                    "refused": "missing-tracked-dirs",
+                    "missing": missing,
+                    "deleted_paths": len(deleted_paths),
+                    "sha": sha,
+                    "ref": ref,
+                    "errors": [],
+                }
+            except Exception as response_exc:
+                logger.warning(
+                    "[worktree-wip-guard-failed] slug=%s worktree=%s stage=response "
+                    "error=%s — wipe-response step failed; refusing rather than "
+                    "falling through.",
+                    slug,
+                    worktree_dir,
+                    response_exc,
+                )
+                logger.error(
+                    "[worktree-wip-refused-wipe] slug=%s branch=%s missing=%s "
+                    "preserved_paths=0 guard_error=%s — auto-preserve declined to "
+                    "commit a wipe after a salvage-step failure; teardown proceeds.",
+                    slug,
+                    branch or "<unknown>",
+                    ",".join(missing),
+                    response_exc,
+                )
+                return {
+                    "preserved": False,
+                    "was_clean": False,
+                    "refused": "missing-tracked-dirs",
+                    "missing": missing,
+                    "ref": ref,
+                    "errors": [],
+                    "guard_error": str(response_exc),
+                }
+
+        # --- No missing tracked directory: today's unconditional path ---
         add = subprocess.run(
             ["git", "-C", str(worktree_dir), "add", "-A"],
             capture_output=True,

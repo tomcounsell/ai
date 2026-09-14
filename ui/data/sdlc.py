@@ -24,6 +24,13 @@ from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
+# The single definition of "this pipeline is live". Read by
+# PipelineProgress.is_active and by the dashboard retention filter, which is
+# the point: they were two literals that disagreed on "in_progress", so a
+# session could be live on one path and inactive on the other. One name, one
+# membership test, one place to add a status.
+ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
+
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))
 
@@ -443,6 +450,18 @@ class PipelineProgress(BaseModel):
     # Claude Code resume
     claude_session_uuid: str | None = None
 
+    # Durable Job (models/job.py) this session's Room owns, resolved lazily —
+    # only populated by get_pipeline_detail, not the list views, since it costs
+    # a Job.query.filter(room_id=...) lookup. Distinct from the dashboard's own
+    # unpersisted JobGroup key (ui/data/jobs.py); see docs/features/dashboard.md
+    # and docs/features/durability-model.md.
+    room_id: str | None = None
+    job_id: str | None = None
+    job_status: str | None = None
+    job_goal: str | None = None
+    job_goal_is_placeholder: bool | None = None
+    job_open_expectations: int | None = None
+
     @property
     def duration(self) -> float | None:
         """Total duration in seconds from start to completion or now."""
@@ -454,7 +473,19 @@ class PipelineProgress(BaseModel):
 
     @property
     def is_active(self) -> bool:
-        return self.status in ("pending", "running", "active", "waiting_for_children")
+        """Whether this pipeline is live. Single definition, deliberately.
+
+        This property and the module-level retention filter used to carry two
+        different literals: the constant included ``in_progress`` and this
+        property did not, so a session in that status was live on one code path
+        and inactive on the other. They now read the same ACTIVE_STATUSES,
+        keeping the union, which means this property gained ``in_progress`` as
+        a deliberate and tested change rather than a silent one.
+
+        ``StageState.is_active`` is unrelated: it compares a *stage* status,
+        not a session status, and is left alone.
+        """
+        return self.status in ACTIVE_STATUSES
 
     @property
     def is_complete(self) -> bool:
@@ -809,8 +840,9 @@ def _safe_float(val) -> float | None:
     """
     if isinstance(val, datetime.datetime):
         if val.tzinfo is None:
-            # Popoto strips timezone on serialize/deserialize; all datetimes in this
-            # system are UTC, so re-attach UTC before converting to avoid local-tz offset
+            # This helper's contract spans int/float/str sources too (below),
+            # so a tzinfo-less value can still arrive from a producer that
+            # is not popoto at all; read it as UTC.
             val = val.replace(tzinfo=datetime.UTC)
         return val.timestamp()
     if isinstance(val, int | float):
@@ -970,7 +1002,8 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
     stages = _resolve_display_stages(session)
 
-    history_list = session.history if isinstance(session.history, list) else None
+    events = session.session_events
+    history_list = events if isinstance(events, list) else None
     events = _parse_history(history_list)
 
     from agent.session_health import _is_ledger
@@ -1239,9 +1272,6 @@ def _session_to_pipeline(session) -> PipelineProgress:
 # === Public query functions ===
 
 
-ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
-
-
 def best_timestamp(p: PipelineProgress) -> float:
     """Pick the best available timestamp for ordering/filtering."""
     return p.completed_at or p.updated_at or p.started_at or p.created_at or 0
@@ -1374,12 +1404,30 @@ def get_pipeline_detail(agent_session_id: str) -> PipelineProgress | None:
         PipelineProgress with full details, or None if not found.
     """
     from models.agent_session import AgentSession
+    from models.room import room_id_for_session
 
     try:
         session = AgentSession.get_by_id(agent_session_id)
         if session is None:
             return None
-        return _session_to_pipeline(session)
+        pipeline = _session_to_pipeline(session)
+        rid = room_id_for_session(session)
+        if rid:
+            pipeline.room_id = rid
+            try:
+                from models.job import Job
+
+                jobs = Job.recent_for_room(rid, limit=1)
+                if jobs:
+                    job = jobs[0]
+                    pipeline.job_id = job.id
+                    pipeline.job_status = job.status
+                    pipeline.job_goal = job.current_goal()
+                    pipeline.job_goal_is_placeholder = job.goal_is_placeholder()
+                    pipeline.job_open_expectations = len(job.open_expectations())
+            except Exception as e:
+                logger.warning(f"Failed to resolve Job for room {rid}: {e}")
+        return pipeline
     except Exception as e:
         logger.warning(f"Failed to get pipeline detail for {agent_session_id}: {e}")
         return None

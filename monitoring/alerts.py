@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from bridge.utc import utc_now
+from utils.utc import utc_now
 
 logger = logging.getLogger(__name__)
 

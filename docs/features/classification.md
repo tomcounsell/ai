@@ -39,9 +39,9 @@ This ensures reply-to-resume messages always carry the correct classification, p
 - `classification_type` - The classified type: `bug`, `feature`, or `chore` (nullable)
 - `classification_confidence` - Confidence score from 0.0 to 1.0 (nullable)
 
-The unified `AgentSession` model carries classification fields through the full lifecycle — from enqueue through completion — eliminating the previous need for a separate passthrough field.
+The unified `AgentSession` model carries classification fields through the full lifecycle — from enqueue through completion.
 
-Both fields are nullable and backward-compatible with existing sessions/jobs.
+Both fields are nullable.
 
 ### Do-Plan Pre-Population
 
@@ -54,9 +54,8 @@ Once a plan's status has moved past `Planning`, the `type:` field should be trea
 
 **Locked statuses:** `Ready`, `In Progress`, `Complete`
 
-This is not currently enforced by any registered hook — `validate_type_immutability.py` was
-never wired into `.claude/hooks/manifest.toml` and was deleted as dead code (see
-[Hook Manifest](hook-manifest.md)). To reclassify an approved plan, first set status back to
+This is not enforced by any registered hook; no type-immutability validator is wired into
+`.claude/hooks/manifest.toml` (see [Hook Manifest](hook-manifest.md)). To reclassify an approved plan, first set status back to
 `Planning`, then run `/reclassify`.
 
 ### Reclassify Skill

@@ -14,9 +14,27 @@ a recovery respawn, the local `sdlc-local-{N}` anchor, a dev sub-session spawned
 Expanding a Job row reveals its runs; clicking a Job row or a run row opens that session's
 detail modal.
 
-Grouping is presentation-level. Nothing is persisted and no schema changed; the Job key is
-derived in `ui/data/jobs.py` from fields already on `AgentSession`. The durable Job
-read-model is #2494's work.
+Grouping is presentation-level: this table's `JobGroup` key is recomputed on every render
+in `ui/data/jobs.py` from fields already on `AgentSession`, never persisted, and unrelated to
+any stored id.
+
+This collides in name with `models/job.py::Job`, the durable, room-scoped obligation record
+(`id` AutoKeyField, `room_id`, goal, expectations) — see
+[Durability Model](durability-model.md) for the full Room/Job/AgentSession shape. The two are
+not the same object and carry no shared identifier: a dashboard Job row's `JobGroup.key`
+cannot be used to look up a `models.job.Job`, and `group_into_jobs()` never reads
+`models/job.py`.
+
+The session detail modal (`ui/templates/_partials/session_modal_content.html`) resolves and
+renders the real Job separately, for the one session currently open: `get_pipeline_detail()`
+(`ui/data/sdlc.py`) walks `AgentSession` → `room_id_for_session()` (`models/room.py`) →
+`Job.recent_for_room(room_id, limit=1)`, and — only when a Job resolves — populates
+`PipelineProgress.job_id` / `job_status` / `job_goal` / `job_goal_is_placeholder` /
+`job_open_expectations`. This lookup is intentionally *not* run for the flat list/table views
+(`load_pipelines()`, `group_into_jobs()`): it costs a Redis read per session, so it only runs
+on the detail fetch behind a click. The modal's copy button
+(`copySessionDetails()`) includes the resolved Job id alongside the session id/thread/project
+so pasting it elsewhere carries enough vocabulary to distinguish the two "Job" concepts.
 
 ### Job identity precedence
 
@@ -126,6 +144,28 @@ Sessions with status `dormant` are listed in the Name column, indicating the age
 Of the 9 non-terminal lifecycle states, most render with distinct glyphs in the row template (see [Session Lifecycle](session-lifecycle.md) for state semantics):
 `running`, `pending`, `dormant`, `active`, `waiting_for_children`, `paused`, `paused_circuit`, `superseded`. `paused_budget` (#1821) has no dedicated glyph yet and renders as plain status text. Terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`, `superseded`) collapse the row into the terminal-status presentation.
 
+## Pipeline Integrity Tiles
+
+`/_partials/pipeline-integrity/` (refreshed every 30s) answers two questions a
+log line cannot.
+
+**Dead letters by stage.** One count per terminal sink — every stage renders,
+including the ones at zero, because a stage that vanishes from the tile reads
+as a stage nobody watches. Counts come from the advisory
+`{project}:dead_letters:count` hash rather than a census, so the tile costs two
+Redis reads no matter how many rows exist. See
+[Pipeline Dead Letters](pipeline-dead-letters.md).
+
+**Lock degradation.** One row per coordination lock, showing its declared
+policy and how often Redis has failed it: `claim_pending_run` (fails closed —
+pickup stalls until Redis recovers), `claim_message` and `pop_lock` (fail open —
+work may be duplicated). Fail-closed sorts first. See
+[Bridge/Worker Architecture](bridge-worker-architecture.md#declared-policy-per-lock).
+
+Data: `ui/data/dead_letters.py`, `ui/data/locks.py`. Template:
+`ui/templates/_partials/pipeline_integrity.html`. Both degrade to zeros rather
+than erroring when Redis is unreachable.
+
 ## Liveness Signals
 
 The dashboard exposes session liveness as state-of-truth so operators can answer "is this session actually progressing right now, or is it claimed-running-but-dead (ghost)?" without leaving the dashboard.
@@ -173,6 +213,22 @@ observability feed — see [Headless Session
 Runner](headless-session-runner.md#simple-resume-d3-four-scalars). It is
 never the resume path's source of truth (the on-disk Claude transcripts are);
 it exists for dashboard visibility and as a disaster-recovery seed.
+
+### Modal Job block
+
+Gated on `pipeline.job_id` being non-null (the room resolved to at least one
+`models/job.py::Job`), the modal renders a `Job` sub-table between the id-chip
+row and Links: a status badge (`active`/`at-rest`), an `N open expectations`
+badge when `job_open_expectations > 0`, and the current goal text (clipped at
+160 chars, full text in the tooltip) tagged `unauthored` when
+`job_goal_is_placeholder` — i.e. the PM has not yet run
+`job_tool author-goal` and the goal is still the router's mint placeholder.
+The id-chip row also gets a third `job {id[:8]}…` chip. This is the one place
+in the dashboard that reads the real, durable `Job` — the Jobs table itself
+never does (see [§Jobs Table](#jobs-table)). The copy button
+(`copySessionDetails()`) includes the resolved Job id in its output alongside
+the session id/thread/project, labeled to distinguish it from the dashboard's
+own `JobGroup` grouping.
 
 ### Process-alive probe
 
@@ -281,9 +337,11 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 
 **Session runner identity:** `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version`, plus the bounded turn-history mirror
 
+**Real Job (detail-fetch only, see [§Jobs Table](#jobs-table)):** `room_id`, `job_id`, `job_status`, `job_goal`, `job_goal_is_placeholder`, `job_open_expectations`. Populated only by `get_pipeline_detail()`, never by `load_pipelines()` — the list/table views and `/dashboard.json`'s `sessions`/`jobs` arrays leave these `None`.
+
 ## JSON API
 
-`GET /dashboard.json` returns all fields above for each session, plus health, reflections, and machine info. The `children` array is recursively serialized. All fields are additive -- no breaking changes from prior versions.
+`GET /dashboard.json` returns all fields above for each session, plus health, reflections, and machine info. The `children` array is recursively serialized. All fields are additive -- no breaking changes from prior versions. The real-Job fields are the one exception: they are detail-fetch-only (see above) and are always `null` in this bulk payload, including inside `jobs[].sessions`.
 
 The `jobs` array sits alongside `sessions`, which keeps its exact prior shape. Each Job
 carries `key`, `kind`, `display_name`, `full_display_name`, `issue_number`, `pr_number`,
@@ -308,6 +366,7 @@ Inactive sessions are filtered by a configurable retention period (env var `DASH
 ## Related
 
 - Issues: #657, #2519 (Jobs as the top-level list)
+- [Durability Model](durability-model.md) -- the real `Room`/`Job`/`AgentSession` shape this table's `JobGroup` grouping is not
 - `ui/data/sdlc.py` -- Session data layer
 - `ui/data/jobs.py` -- Job identity and grouping
 - `models/session_enumeration.py` -- Shared enumeration seam

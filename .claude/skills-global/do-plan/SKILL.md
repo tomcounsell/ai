@@ -219,6 +219,8 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
 
 Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
+**Write incrementally, never as one large Write.** First write the document as a section skeleton (all headings, one-line placeholders), commit it, then fill sections with Edit calls, committing every 2–3 sections. This makes a mid-write crash recoverable instead of total: a planning agent that dies mid-flight leaves a committed skeleton plus partial sections a successor can resume from, rather than nothing. Observed 2026-09-02 (#3078): two consecutive planning agents died mid-flight and the lane recovered only because the third attempt used exactly this protocol. The same rule applies to revision passes on large plans.
+
 **Conditional INFRA doc creation (only if the context file declares an infra-docs convention):** If the plan introduces new dependencies, services, external API calls, or deployment changes AND the repo keeps durable infrastructure docs, create one (this repo: `docs/infra/{slug}.md`) using this structure:
 
 ```markdown

@@ -18,6 +18,7 @@ from agent.hooks.pre_tool_use import _start_pipeline_stage
 from agent.pipeline_ledger import PipelineLedger
 from models.agent_session import AgentSession, SessionType
 from models.session_lifecycle import release_issue_lock, touch_issue_lock
+from tests.unit.session_lookup_mock import wire_session_lookup
 
 _LEDGER_CUTOVER_REPO = "test-owner/post-hook-cutover-repo"
 _LEDGER_CUTOVER_ISSUE = 900401
@@ -75,6 +76,7 @@ class TestCompletePipelineStage:
 
         mock_as_module = MagicMock()
         mock_as_module.AgentSession.query.filter.return_value = [mock_session]
+        wire_session_lookup(mock_as_module.AgentSession)
 
         return mock_session, mock_sm_instance, mock_psm_module, mock_as_module
 
@@ -121,6 +123,7 @@ class TestCompletePipelineStage:
         """When session is not in Redis, logs a warning and does not crash."""
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.query.filter.return_value = []
+        wire_session_lookup(mock_as_mod.AgentSession)
         mock_psm_mod = MagicMock()
 
         with (
@@ -164,6 +167,7 @@ class TestCompletePipelineStage:
         """If Redis lookup raises, the exception is caught and logged."""
         mock_as_mod = MagicMock()
         mock_as_mod.AgentSession.query.filter.side_effect = RuntimeError("Redis down")
+        wire_session_lookup(mock_as_mod.AgentSession)
         mock_psm_mod = MagicMock()
 
         with (
