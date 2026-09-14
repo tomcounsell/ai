@@ -55,10 +55,12 @@ def export_namespace(project_key: str, root: Path) -> Path:
         "exported_at": stamp,
         "cases": {},
         "slots": r.hgetall(keys.slots_key(project_key)),
+        "ns_pause": r.hgetall(keys.pause_key(project_key)),
         "unit2": {
             k: r.hgetall(k) for k in r.scan_iter(match=f"improve:{project_key}:budget:unit2:*")
         },
     }
+    digests: list[dict] = []
     for case_id in _case_ids(project_key):
         head = r.hgetall(keys.head_key(project_key, case_id))
         journal = r.lrange(keys.journal_key(project_key, case_id), 0, -1)
@@ -71,10 +73,28 @@ def export_namespace(project_key: str, root: Path) -> Path:
                 aid: r.hgetall(keys.intent_key(project_key, case_id, aid)) for aid in intent_ids
             },
         }
+        # Blocker fix (#3315 review): `artifacts.json` hardcoded an empty
+        # list because nothing journaled a store reference to begin with;
+        # `journal.transition` now carries `artifact_ref` on every entry, so
+        # this walks the tail rather than re-deriving it another way.
+        for raw_entry in journal:
+            entry = json.loads(raw_entry)
+            ref = entry.get("artifact_ref")
+            if ref:
+                digests.append(
+                    {
+                        "case_id": case_id,
+                        "action_id": entry.get("action_id"),
+                        "artifact_ref": ref,
+                        "payload_digest": entry.get("payload_digest"),
+                    }
+                )
 
     (out_dir / "namespace.json").write_text(json.dumps(namespace, indent=2, sort_keys=True))
     (out_dir / "artifacts.json").write_text(
-        json.dumps({"schema": SCHEMA_VERSION, "project_key": project_key, "digests": []}, indent=2)
+        json.dumps(
+            {"schema": SCHEMA_VERSION, "project_key": project_key, "digests": digests}, indent=2
+        )
     )
     return out_dir
 
@@ -109,6 +129,11 @@ def import_namespace(
     r.set(keys.schema_key(project_key), str(SCHEMA_VERSION))
     if data.get("slots"):
         r.hset(keys.slots_key(project_key), mapping=data["slots"])
+    if data.get("ns_pause"):
+        r.hset(keys.pause_key(project_key), mapping=data["ns_pause"])
+    for key, mapping in data.get("unit2", {}).items():
+        if mapping:
+            r.hset(key, mapping=mapping)
     for case_id, case_data in data.get("cases", {}).items():
         if case_data.get("head"):
             r.hset(keys.head_key(project_key, case_id), mapping=case_data["head"])

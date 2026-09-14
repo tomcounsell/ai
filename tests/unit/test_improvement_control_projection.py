@@ -32,6 +32,10 @@ class TestApply:
         apply(PK, case.id)
         reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
         assert reloaded.revision == 1
+        # Blocker fix (#3315 review): no script wrote the head's own `state`
+        # field, so `read_head` always returned "" and this clobbered
+        # `ImprovementCase.state` to "" on every apply.
+        assert reloaded.state == "investigating"
 
     def test_apply_on_a_case_with_no_head_is_a_no_op(self):
         case = new_case_row()
@@ -42,6 +46,10 @@ class TestApply:
 
 class TestReplay:
     def test_replay_corrects_a_direct_save_with_a_wrong_state(self):
+        """Task 5 / blocker fix (#3315 review): this test's name always
+        promised a corrupted `state`, but it corrupted `revision` instead --
+        the only reason the suite stayed green while the head's `state` was
+        always "" (blocker 1). It now actually corrupts `state`."""
         case = new_case_row()
         transition(
             PK,
@@ -55,11 +63,12 @@ class TestReplay:
         apply(PK, case.id)
         # A direct ORM save bypassing the journal (forbidden in production,
         # simulated here to prove replay corrects it).
-        case.revision = 999
+        case.state = "rejected"
         case.save()
         result = replay(PK, case.id)
         assert result.fold_reached_head is True
         reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
+        assert reloaded.state == "investigating"
         assert reloaded.revision == 1
 
     def test_replay_reports_but_does_not_raise_when_the_tail_is_trimmed(self):

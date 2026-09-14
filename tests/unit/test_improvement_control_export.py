@@ -104,6 +104,41 @@ class TestRoundTrip:
         )
         assert blocked.reason == "INTENT_STATE"
 
+    def test_unit2_and_ns_pause_round_trip(self, tmp_root):
+        """Tech debt (#3315 review): unit-2 window/reservation hashes and the
+        namespace pause hash were exported but never restored by
+        `import_namespace`, silently dropping the day's spend accounting and
+        any operator-wide pause on a restore."""
+        from tools.improvement_control.journal import pause
+        from tools.paid_inference_meter import Reservation, reserve
+
+        pk = fresh_pk()
+        res = reserve(pk, 1.0, purpose="rsi")
+        assert isinstance(res, Reservation)
+        pause_result = pause(pk, None, reason="operator pause", by="operator")
+        assert pause_result.accepted
+
+        unit2_before = {
+            k: text_redis().hgetall(k)
+            for k in text_redis().scan_iter(match=f"improve:{pk}:budget:unit2:*")
+        }
+        ns_pause_before = text_redis().hgetall(keys.pause_key(pk))
+        assert unit2_before
+        assert ns_pause_before
+
+        out = export_namespace(pk, tmp_root)
+        _flush_namespace(pk)
+        refusal = import_namespace(out, project_key=pk)
+        assert refusal is None
+
+        unit2_after = {
+            k: text_redis().hgetall(k)
+            for k in text_redis().scan_iter(match=f"improve:{pk}:budget:unit2:*")
+        }
+        ns_pause_after = text_redis().hgetall(keys.pause_key(pk))
+        assert unit2_after == unit2_before
+        assert ns_pause_after == ns_pause_before
+
     def test_import_refuses_a_non_empty_namespace_without_force(self, tmp_root):
         pk = fresh_pk()
         case = ImprovementCase.create(

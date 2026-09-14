@@ -21,7 +21,12 @@ import logging
 from dataclasses import dataclass, field
 
 from tools.improvement_control import keys
-from tools.improvement_control.intents import cancel, list_intents, mark_reconciliation_required
+from tools.improvement_control.intents import (
+    cancel,
+    dead_letter_exhausted,
+    list_intents,
+    mark_reconciliation_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,10 +220,17 @@ def _force_reconciliation_and_terminal(
     result.forced_reconciliation.append(intent.action_id)
     result.released_slots.append(intent.action_id)
 
+    # Tech debt fix (#3315 review): `dead_letter_exhausted` had no caller, so
+    # an exhausted intent with no bound row (an `admitted` intent that never
+    # materialized) wrote no `DeadLetter` at all, and when a row DID exist,
+    # `finalize_session`'s own generic write recorded it `replayable=True`
+    # while this dedicated helper says `replayable=False` for the same
+    # exhaustion. One writer now, one `replayable` value, on every branch.
     row = _bound_row(intent.agent_session_id)
     if row is not None and row.status not in terminal_statuses:
-        finalize_session(row, "abandoned", reason=reason, dead_letter_stage="improve_intent")
+        finalize_session(row, "abandoned", reason=reason)
         result.forced_terminal.append(intent.action_id)
+    dead_letter_exhausted(project_key, case_id, intent, reason=reason)
 
 
 def _sweep_unit2(project_key: str, now: float) -> list[str]:

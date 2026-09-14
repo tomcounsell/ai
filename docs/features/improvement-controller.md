@@ -348,9 +348,10 @@ intents, lane-slot reservations, the case lease, and the unit-2 window.
   entry in the same call. A lease check followed by an unguarded effect is not fencing; the
   mutation-review round (lane 3's Task 12) confirmed a named test fails for each of the
   generation, revision, `from_state`, and compare-and-delete checks across every script.
-- Payloads are written to the content store and hashed before `propose` references their
-  digest. A refused proposal's artifact is kept as `ImprovementEvidence(kind="other",
-  detail="intent_state:<reason>")` rather than lost.
+- Payloads are written to `VerifyingArtifactStore` and hashed before `propose` references
+  their digest on the journal entry (`artifact_ref` alongside `payload_digest`). A refused
+  proposal's artifact reference is kept as `ImprovementEvidence(kind="other",
+  text="intent_state:<reason>", detail=<artifact_ref>)` rather than lost.
 
 **The raw-Redis guard is a text heuristic, not a namespace check.** It fires when
 one command string contains both a Popoto-context substring and a block pattern,

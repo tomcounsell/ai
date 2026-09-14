@@ -85,14 +85,3 @@ def lease_key(project_key: str, case_id: str) -> str:
 
 def lease_gen_key(project_key: str, case_id: str) -> str:
     return assert_control_key(f"improve:{project_key}:{case_id}:lease:gen")
-
-
-def intent_scan_pattern(project_key: str) -> str:
-    """The one sanctioned scan pattern: the reconcile pass walks every case.
-
-    Every other reader enumerates one case's intents through its ``intents``
-    set (:func:`intents_set_key`); this pattern exists only for
-    ``recovery.py``'s cross-case sweep, which is the one place a per-case
-    index is the wrong tool because it walks every case, not one.
-    """
-    return assert_control_key(f"improve:{project_key}:*:intent:*")

@@ -18,11 +18,12 @@ cannot point a script at an unrelated namespace (in particular, never at
 
 **Private alias, not a raw Popoto client.** Every module in this package binds
 its own Redis handle by calling ``utils.redis_client.text_redis()`` through a
-private alias (``journal._control_redis()``). No module here imports
-``POPOTO_REDIS_DB`` or anything from ``popoto.redis_db`` directly, and none of
-these keys are Popoto-managed rows — they are plain Redis structures (hashes,
-lists, sets, strings) that Popoto's ORM never touches. That split matters
-operationally: ``.claude/hooks/validators/validate_no_raw_redis_delete.py`` is
+private alias (``journal._control_redis()``). No module here reaches for
+Popoto's own module-level connection constant or the module that exposes it,
+and none of these keys are Popoto-managed rows — they are plain Redis
+structures (hashes, lists, sets, strings) that Popoto's ORM never touches.
+That split matters operationally:
+``.claude/hooks/validators/validate_no_raw_redis_delete.py`` is
 a **text heuristic** over Bash commands, not an AST check, so a builder's own
 manual verification (a stray ``python -c "...improve:...delete..."``) can trip
 it. Keep every compare-and-delete exercised from pytest files, never from an

@@ -24,7 +24,9 @@ def new_case(state: str = "investigating") -> ImprovementCase:
     )
 
 
-def propose(case_id: str, action_id: str, *, expected_revision: int = 0) -> None:
+def propose(
+    case_id: str, action_id: str, *, expected_revision: int = 0, action_type: str = "investigate"
+) -> None:
     r = transition(
         PK,
         case_id,
@@ -33,6 +35,7 @@ def propose(case_id: str, action_id: str, *, expected_revision: int = 0) -> None
         event="action_proposed",
         payload_digest="sha256:d",
         action_id=action_id,
+        action_type=action_type,
     )
     assert r.accepted, r
 
@@ -44,14 +47,21 @@ def fake_lease() -> CaseLease:
 class CountingPush:
     """A fake `_push_agent_session` that creates a real AgentSession row and
     counts how many times it is asked to bind a given idempotency key, the
-    same shape the real create-or-bind seam guarantees."""
+    same shape the real create-or-bind seam guarantees.
+
+    Also records every call's kwargs (``self.push_kwargs``), so a test can
+    assert on ``extra_context_overrides`` and ``working_dir`` without a
+    separate mock (Success Criterion 5, tech debt fix, #3315 review).
+    """
 
     def __init__(self):
         self.calls = 0
         self._bound: dict[str, str] = {}
+        self.push_kwargs: list[dict] = []
 
     async def __call__(self, *, idempotency_key: str, status: str, **kwargs):
         self.calls += 1
+        self.push_kwargs.append({"idempotency_key": idempotency_key, "status": status, **kwargs})
         if idempotency_key in self._bound:
             return (1, self._bound[idempotency_key])
         session_id = f"improve-test-{uuid.uuid4().hex[:8]}"
@@ -127,8 +137,13 @@ class TestReconciliationRequiredSkip:
 class TestAdmitMaterializeActivate:
     def test_happy_path_admits_materializes_and_activates(self, monkeypatch):
         monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: True)
+        published = []
+        monkeypatch.setattr(
+            "agent.agent_session_queue.publish_session_notify",
+            lambda s: published.append(s.session_id),
+        )
         case = new_case()
-        propose(case.id, "a1")
+        propose(case.id, "a1", action_type="experiment")
         push = CountingPush()
         result = adapter.tick(PK, lease=fake_lease(), push=push)
         assert case.id in result.admitted
@@ -138,8 +153,33 @@ class TestAdmitMaterializeActivate:
         assert len(intents) == 1
         assert intents[0].state == "running"
 
+        # Success Criterion 7: published exactly once per activation, after
+        # the row is pending.
+        assert len(published) == 1
+
+        # Success Criterion 5: the recorded extra_context_overrides carry
+        # exactly these four keys and no `generation` (Decision 12: a
+        # generation copied at admit time would be stale by design the
+        # moment any later acquirer writes). Tech debt fix (#3315 review):
+        # `action_type` now flows all the way from `propose --action-type`
+        # through the journal entry into the admitted intent.
+        assert push.push_kwargs[0]["extra_context_overrides"].keys() == {
+            "research_case_id",
+            "experiment_id",
+            "action_id",
+            "idempotency_key",
+        }
+        assert "generation" not in push.push_kwargs[0]["extra_context_overrides"]
+        assert "parent_agent_session_id" not in push.push_kwargs[0]
+        assert intents[0].action_type == "experiment"
+
     def test_no_live_worker_leaves_the_intent_materialized(self, monkeypatch):
         monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: False)
+        published = []
+        monkeypatch.setattr(
+            "agent.agent_session_queue.publish_session_notify",
+            lambda s: published.append(s.session_id),
+        )
         case = new_case()
         propose(case.id, "a1")
         push = CountingPush()
@@ -147,6 +187,8 @@ class TestAdmitMaterializeActivate:
         assert result.skipped.get(case.id) == "no_live_worker"
         intents = list_intents(PK, case.id)
         assert intents[0].state == "materialized"
+        # Success Criterion 7: never published on the no-live-worker path.
+        assert published == []
 
     def test_race_2_crash_after_bind_then_retry_yields_one_row(self, monkeypatch):
         """A crash between admission and session creation: the next tick
@@ -266,3 +308,33 @@ class TestActivateRace7:
         assert result.skipped.get(case.id) == "session_row_missing"
         intents = list_intents(PK, case.id)
         assert intents[0].state == "materialized"
+
+
+class TestTickIsolatesFailures:
+    def test_tick_isolates_one_bad_case(self, monkeypatch):
+        """Failure Path Test Strategy: `scheduler_adapter.tick`'s per-case
+        `except Exception` -- one case's failure is logged and the tick
+        continues to the rest (tech debt fix, #3315 review: this test did
+        not exist)."""
+        good_case = new_case()
+        bad_case = new_case()
+        propose(good_case.id, "a-good")
+        propose(bad_case.id, "a-bad")
+
+        real_admit = adapter.admit
+
+        def flaky_admit(project_key, case_id, action_id, **kwargs):
+            if case_id == bad_case.id:
+                raise RuntimeError("simulated admit failure")
+            return real_admit(project_key, case_id, action_id, **kwargs)
+
+        monkeypatch.setattr(adapter, "admit", flaky_admit)
+        monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: False)
+        push = CountingPush()
+
+        result = adapter.tick(PK, lease=fake_lease(), push=push)
+
+        assert bad_case.id in result.errors
+        assert result.errors[bad_case.id] == "RuntimeError"
+        assert good_case.id in result.admitted
+        assert bad_case.id not in result.admitted

@@ -10,7 +10,7 @@ from models.improvement_case import ImprovementCase
 from models.improvement_charter import ImprovementCharter
 from tools import improvement as cli
 from tools.improvement_control.intents import admit, mark_reconciliation_required
-from tools.improvement_control.journal import transition
+from tools.improvement_control.journal import read_head, transition
 
 PK = "valor"  # the CLI is hardcoded to PROJECT_KEY = "valor"
 
@@ -183,6 +183,48 @@ class TestDoctor:
         assert "paused" in payload
         assert "wedged" in payload
         del pk_isolated
+
+    def test_doctor_outage_break_glass_drill(self, capsys, monkeypatch):
+        """Blocker fix (#3315 review): issue acceptance criterion 4 / plan
+        Success Criterion 2's break-glass drill, end to end. `doctor` reports
+        `namespace unreachable: <error>` with exit 2 during the outage and
+        writes nothing; once the namespace is reachable again it reads the
+        same pre-outage head."""
+        import redis.exceptions
+
+        digest = pinned_digest()
+        case = new_case(digest=digest)
+        r = transition(
+            PK,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d1",
+            action_id="a1",
+        )
+        assert r.accepted
+
+        def _raise(*_a, **_k):
+            raise redis.exceptions.ConnectionError("simulated outage")
+
+        monkeypatch.setattr("tools.improvement_control.journal._control_redis", _raise)
+        monkeypatch.setattr("tools.improvement_control.intents._control_redis", _raise)
+
+        code = cli.main(["doctor"])
+        out = capsys.readouterr().out
+        assert code == 2
+        assert out.startswith("namespace unreachable:")
+
+        monkeypatch.undo()
+
+        code_after = cli.main(["doctor"])
+        out_after = capsys.readouterr().out
+        assert code_after == 0
+        assert not out_after.startswith("namespace unreachable")
+        head = read_head(PK, case.id)
+        assert head is not None
+        assert head.revision == r.revision
 
 
 class TestBudget:

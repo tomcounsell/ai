@@ -54,9 +54,12 @@ _ALLOWED: dict[str, frozenset[str]] = {
 
 #: Namespace-shared prelude every effect script runs before its own effect:
 #: schema check, namespace pause, per-case pause, generation fence, revision
-#: fence. Concatenated into each script body so a mutation to one script's
-#: copy cannot silently spare another's (Task 12 mutates each script
-#: independently and expects each to have its own compare).
+#: fence. One Python string constant, concatenated into each of the four
+#: script bodies below at import time -- a mutation to THIS constant hits
+#: all four at once, by design; Task 12's per-script mutation testing targets
+#: each script's own compare *after* concatenation (`generation >=
+#: highest_accepted`, `expected_revision == revision`, `from_state`), not
+#: this shared prelude.
 _LUA_FENCE_PRELUDE = """
 local schema = redis.call("GET", KEYS[1])
 if schema and schema ~= ARGV[1] then
@@ -182,22 +185,31 @@ return {1, "OK", new_revision}
 """
 )
 
-#: KEYS: [schema, ns_pause, head, journal, intent]
+#: KEYS: [schema, ns_pause, head, journal, intent, slots]
 #: ARGV: [schema_version, expected_revision, generation, action_id,
-#:        from_state, journal_max_entries]
+#:        from_state, to_state, event, journal_max_entries, reason]
 #: Generic CAS mover for the remaining single-hop transitions
 #: (record_running, mark_reconciliation_required). `from_state` is derived
-#: by the Python wrapper from `_ALLOWED`, never chosen by the caller.
+#: by the Python wrapper from `_ALLOWED`, never chosen by the caller. The
+#: slot key is always passed (harmless for `record_running`, which never
+#: reaches `to_state == "reconciliation_required"`) so the slot release and
+#: the `reason` write land in the SAME script call as the state move --
+#: tech debt fix, #3315 review: these were a second, unconditional `HDEL`
+#: run by the caller after this script returned, leaving a window where a
+#: crash between the two calls stranded the slot, and `reason` was accepted
+#: by the Python wrapper and never written anywhere.
 _LUA_MOVE_INTENT = (
     _LUA_FENCE_PRELUDE.replace("ARGV[2]", "tonumber(ARGV[2])").replace(
         "ARGV[3]", "tonumber(ARGV[3])"
     )
     + """
 local intent_key = KEYS[5]
+local slots_key = KEYS[6]
 local action_id = ARGV[4]
 local from_state = ARGV[5]
 local to_state = ARGV[6]
 local event = ARGV[7]
+local reason = ARGV[9]
 local now = redis.call("TIME")
 local now_s = tonumber(now[1])
 local new_revision = revision + 1
@@ -209,7 +221,12 @@ end
 
 redis.call("HSET", KEYS[3], "revision", new_revision, "highest_accepted", generation,
   "epoch", generation, "updated_at", now_s)
-redis.call("HSET", intent_key, "state", to_state, "updated_ts", now_s)
+if to_state == "reconciliation_required" then
+  redis.call("HSET", intent_key, "state", to_state, "updated_ts", now_s, "reason", reason)
+  redis.call("HDEL", slots_key, action_id)
+else
+  redis.call("HSET", intent_key, "state", to_state, "updated_ts", now_s)
+end
 
 local entry = cjson.encode({revision = new_revision, action_id = action_id,
   event = event, generation = generation, ts = now_s})
@@ -453,22 +470,28 @@ def _move(
     from_state: str,
     to_state: str,
     event: str,
+    reason: str = "",
 ) -> IntentResult:
     """Generic single-hop CAS mover. ``from_state`` is always explicit here —
     ``reconciliation_required`` has three valid predecessors (admitted,
     materialized, running), so a target-state-only lookup into ``_ALLOWED``
-    cannot recover the caller's actual state and must never be attempted."""
+    cannot recover the caller's actual state and must never be attempted.
+
+    The slot key is always passed; the script only touches it when
+    ``to_state == "reconciliation_required"`` (see the script's own comment).
+    """
     if to_state not in _ALLOWED.get(from_state, frozenset()):
         raise ValueError(f"{from_state!r} -> {to_state!r} is not a declared transition")
     try:
         raw = _control_redis().eval(
             _LUA_MOVE_INTENT,
-            5,
+            6,
             keys.schema_key(project_key),
             keys.pause_key(project_key),
             keys.head_key(project_key, case_id),
             keys.journal_key(project_key, case_id),
             keys.intent_key(project_key, case_id, action_id),
+            keys.slots_key(project_key),
             str(keys.SCHEMA_VERSION),
             int(expected_revision),
             int(generation),
@@ -477,11 +500,12 @@ def _move(
             to_state,
             event,
             _journal_max_entries(),
+            reason,
         )
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         return _unavailable(exc)
-    accepted, reason, revision = raw
-    return IntentResult(bool(accepted), reason, int(revision))
+    accepted, reason_out, revision = raw
+    return IntentResult(bool(accepted), reason_out, int(revision))
 
 
 def record_running(
@@ -514,8 +538,14 @@ def mark_reconciliation_required(
 
     ``from_state`` must be one of the three states ``_ALLOWED`` permits into
     ``reconciliation_required``; the script still enforces it as a CAS.
+
+    The slot release and the ``reason`` write happen inside the same script
+    call as the state move (tech debt fix, #3315 review): previously this was
+    a second, unconditional ``HDEL`` run after the CAS script returned (a
+    crash between the two left a wedged intent still holding its slot), and
+    ``reason`` was accepted here and never written anywhere.
     """
-    result = _move(
+    return _move(
         project_key,
         case_id,
         action_id,
@@ -524,13 +554,8 @@ def mark_reconciliation_required(
         from_state=from_state,
         to_state="reconciliation_required",
         event="intent_reconciliation_required",
+        reason=reason,
     )
-    if result.accepted:
-        try:
-            _control_redis().hdel(keys.slots_key(project_key), action_id)
-        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
-            logger.warning("[improvement-control] slot release on reconcile failed: %s", exc)
-    return result
 
 
 def cancel(

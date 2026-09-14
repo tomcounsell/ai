@@ -56,6 +56,21 @@ def apply(project_key: str, case_id: str) -> None:
             case_id,
         )
         return
+    if not head.state:
+        # Defense in depth (blocker fix, #3315 review): `transition` now
+        # seeds the head's `state` on its first accepted write, so this
+        # branch should only ever fire for a head written before the fix
+        # landed. Never clobber a real projection value with an empty one.
+        logger.warning(
+            "[improvement-control] projection.apply: head has no state for %s/%s; "
+            "leaving ImprovementCase.state=%r unchanged",
+            project_key,
+            case_id,
+            case.state,
+        )
+        case.revision = head.revision
+        case.save()
+        return
     case.state = head.state
     case.revision = head.revision
     case.save()

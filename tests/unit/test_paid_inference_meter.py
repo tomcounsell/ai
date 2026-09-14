@@ -4,7 +4,7 @@ judge's record-only receipt (Task 8, Decision 7)."""
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -19,6 +19,7 @@ from tools.paid_inference_meter import (
     settle,
     settle_from_response,
     status_dict,
+    sweep_unsettled_reservations,
 )
 
 
@@ -153,6 +154,28 @@ class TestWindowAttributionAcrossMidnight:
     def test_unknown_boundary_raises(self):
         with pytest.raises(ValueError):
             current_day(datetime.now(UTC), "PST")
+
+
+class TestSweepUnsettledReservations:
+    def test_sweep_uses_the_injected_clock_not_the_wall_clock(self):
+        """Tech debt fix (#3315 review): `now` was accepted but ignored, so
+        `today_key` always came from the wall clock and the reconcile pass's
+        deterministic-clock seam did nothing for this branch."""
+        pk = fresh_pk()
+        day1 = datetime(2020, 1, 1, tzinfo=UTC)
+        day2 = day1 + timedelta(days=2)
+        res = reserve(pk, 1.0, purpose="rsi", now=day1)
+        assert isinstance(res, Reservation)
+
+        # Still inside day1's own window per the injected clock: not closed,
+        # nothing swept.
+        receipted_same_day = sweep_unsettled_reservations(pk, now=day1.timestamp())
+        assert receipted_same_day == []
+
+        # Two days later per the injected clock: day1's window has closed
+        # unsettled, receipted "unknown".
+        receipted_later = sweep_unsettled_reservations(pk, now=day2.timestamp())
+        assert receipted_later == [res.reservation_id]
 
 
 class TestNoOpenRouterLookupOrHttpClient:

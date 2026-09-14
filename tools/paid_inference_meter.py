@@ -354,7 +354,10 @@ def sweep_unsettled_reservations(project_key: str, *, now: float | None = None) 
 
     if now is None:
         now = time.time()
-    today_key, _, _ = current_day(datetime.now(UTC), "UTC")
+    # Tech debt fix (#3315 review): `now` was accepted (and passed by
+    # `recovery._sweep_unit2`) but ignored, so the reconcile pass's
+    # deterministic-clock seam did nothing for this branch.
+    today_key, _, _ = current_day(datetime.fromtimestamp(now, UTC), "UTC")
     receipted: list[str] = []
     pattern = RESERVATION_KEY_PREFIX.format(project=project_key) + "*"
     for key in _redis().scan_iter(match=pattern):

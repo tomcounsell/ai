@@ -56,6 +56,17 @@ def _control_redis():
     return text_redis()
 
 
+def _project_root() -> str:
+    """The repo checkout this process is running from, the same pattern
+    ``agent/reflection_scheduler.py:781`` uses for its own dispatch. Tech
+    debt fix (#3315 review): the adapter previously passed ``working_dir="."``,
+    which the worker resolves against its own cwd rather than the checkout
+    the case was proposed from."""
+    from pathlib import Path
+
+    return str(Path(__file__).resolve().parent.parent.parent)
+
+
 def _open_case_rows(project_key: str):
     """One filter call per state (Popoto's IndexedField filter is exact-match,
     not IN) -- the same pattern ``ui/data/improvement.py``'s goals partial uses."""
@@ -67,11 +78,11 @@ def _open_case_rows(project_key: str):
     return rows
 
 
-def _unadmitted_proposal(project_key: str, case_id: str) -> tuple[str, str] | None:
+def _unadmitted_proposal(project_key: str, case_id: str) -> tuple[str, str, str] | None:
     """The case's last journal event, if it is an un-admitted `action_proposed`.
 
-    Returns ``(action_id, action_type)`` or ``None``. "Un-admitted" means no
-    intent row exists yet for that action id.
+    Returns ``(action_id, action_type, request_digest)`` or ``None``.
+    "Un-admitted" means no intent row exists yet for that action id.
     """
     tail = _control_redis().lrange(keys.journal_key(project_key, case_id), -1, -1)
     if not tail:
@@ -85,8 +96,12 @@ def _unadmitted_proposal(project_key: str, case_id: str) -> tuple[str, str] | No
     existing = _control_redis().hget(keys.intent_key(project_key, case_id, action_id), "state")
     if existing is not None:
         return None  # already admitted (or further along) on a prior tick
+    # Tech debt fix (#3315 review): `action_type` is now carried on the
+    # journal entry (`journal.transition`'s own fix); the fallback stays for
+    # any entry written before that change landed.
     action_type = entry.get("action_type") or "investigate"
-    return action_id, action_type
+    request_digest = entry.get("payload_digest") or ""
+    return action_id, action_type, request_digest
 
 
 def _default_push():
@@ -111,7 +126,7 @@ def tick(project_key: str = "valor", *, lease=None, push=None, now=None) -> Tick
     for case in _open_case_rows(project_key):
         case_id = case.id
         try:
-            _tick_one_case(project_key, case_id, lease, push, settings, result)
+            _tick_one_case(project_key, case, lease, push, settings, result)
         except Exception as e:
             logger.warning(
                 "[improvement-controller] tick failed for case=%s: %s: %s",
@@ -123,7 +138,8 @@ def tick(project_key: str = "valor", *, lease=None, push=None, now=None) -> Tick
     return result
 
 
-def _tick_one_case(project_key, case_id, lease, push, settings, result: TickResult) -> None:
+def _tick_one_case(project_key, case, lease, push, settings, result: TickResult) -> None:
+    case_id = case.id
     case_intents = list_intents(project_key, case_id)
 
     # A case with any reconciliation_required intent is skipped, reason
@@ -145,21 +161,37 @@ def _tick_one_case(project_key, case_id, lease, push, settings, result: TickResu
         if stalled is not None:
             _activate(project_key, case_id, stalled, generation, result)
             return
-        _admit_and_dispatch(project_key, case_id, generation, push, settings, result)
+        _admit_and_dispatch(project_key, case, generation, push, settings, result)
     finally:
         lease.release(lease_key, generation)
 
 
-def _admit_and_dispatch(
-    project_key, case_id, generation, push, settings, result: TickResult
-) -> None:
+def _admit_and_dispatch(project_key, case, generation, push, settings, result: TickResult) -> None:
+    case_id = case.id
     proposal = _unadmitted_proposal(project_key, case_id)
     if proposal is None:
         return
-    action_id, action_type = proposal
+    action_id, action_type, request_digest = proposal
     if action_type not in ALLOWED_ACTION_TYPES:
         result.skipped[case_id] = f"action_type_not_allowed:{action_type}"
         return
+
+    charter_digest = getattr(case, "charter_digest", None) or ""
+    # Tech debt fix (#3315 review): Data Flow step 6 lists a "charter digest
+    # pinned" check among the adapter's admission checks; only the CLI's own
+    # propose-time check ran. Permissive when either side is absent (a case
+    # with no `charter_digest` recorded, or a project with nothing pinned) so
+    # this stays a real drift check rather than a hard dependency every
+    # caller -- including every existing unit test's bare `new_case()` -- must
+    # now satisfy; `propose` already refuses a proposal with no matching
+    # pinned charter before it is ever journaled.
+    if charter_digest:
+        from models.improvement_charter import ImprovementCharter
+
+        pinned = ImprovementCharter.pinned(project_key)
+        if pinned is not None and charter_digest != pinned.digest:
+            result.skipped[case_id] = "charter_digest_stale"
+            return
 
     head = read_head(project_key, case_id)
     expected_revision = head.revision if head is not None else 0
@@ -170,6 +202,8 @@ def _admit_and_dispatch(
         expected_revision=expected_revision,
         generation=generation,
         action_type=action_type,
+        request_digest=request_digest,
+        charter_digest=charter_digest,
         max_concurrent=settings.improvement.max_concurrent_research_sessions,
     )
     if not admit_result.accepted:
@@ -178,14 +212,20 @@ def _admit_and_dispatch(
     result.admitted.append(case_id)
 
     idempotency_key = f"improve:{project_key}:{case_id}:{action_id}"
+    # Tech debt fix (#3315 review): the message previously named no skill and
+    # no brief reference (Data Flow step 9). `request_digest` (the proposal's
+    # own payload digest) stands in for lane 5's not-yet-built `brief_ref`
+    # until that lane exists -- it is the only concrete "what to look at"
+    # reference this lane has today.
+    message_text = f"/improve-research case={case_id} action={action_id} type={action_type}"
+    if request_digest:
+        message_text += f" brief_ref={request_digest}"
     depth, agent_session_id = asyncio.run(
         push(
             project_key=project_key,
             session_id=str(uuid.uuid4()),
-            working_dir=".",
-            message_text=(
-                f"Improvement research: case={case_id} action={action_id} type={action_type}"
-            ),
+            working_dir=_project_root(),
+            message_text=message_text,
             sender_name="improvement-controller",
             chat_id="0",
             telegram_message_id=0,

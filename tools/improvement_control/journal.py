@@ -36,7 +36,8 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
 #: presents one, head advance, and the bounded journal append — all in one
 #: atomic call. KEYS: [schema, ns_pause, head, journal, intent]. ARGV:
 #: [schema_version, expected_revision, generation, action_id, event,
-#: payload_digest, agent_session_id, journal_max_entries].
+#: payload_digest, agent_session_id, journal_max_entries, case_state,
+#: action_type, artifact_ref].
 _LUA_TRANSITION = """
 local schema_key = KEYS[1]
 local ns_pause_key = KEYS[2]
@@ -52,6 +53,9 @@ local event = ARGV[5]
 local payload_digest = ARGV[6]
 local agent_session_id = ARGV[7]
 local max_entries = tonumber(ARGV[8])
+local case_state = ARGV[9]
+local action_type = ARGV[10]
+local artifact_ref = ARGV[11]
 
 local schema = redis.call("GET", schema_key)
 if schema then
@@ -63,7 +67,7 @@ else
 end
 
 local ns_pause_reason = redis.call("HGET", ns_pause_key, "reason")
-if ns_pause_reason and ns_pause_reason ~= "" and event ~= "ns_resumed" then
+if ns_pause_reason and ns_pause_reason ~= "" then
   return {0, "PAUSED", -1}
 end
 
@@ -96,6 +100,13 @@ local now = redis.call("TIME")
 local now_s = tonumber(now[1])
 local new_revision = revision + 1
 
+-- Blocker fix (#3315 review): no script ever wrote the head's own `state`
+-- field, so `read_head` always returned "" and `projection.apply`/`replay`
+-- clobbered `ImprovementCase.state` with it. Seeded once, on whichever
+-- transition call is the case's first (HSETNX never overwrites a value a
+-- later writer already set); this lane never changes case lifecycle state
+-- itself, so there is nothing to keep resyncing after the seed.
+redis.call("HSETNX", head_key, "state", case_state)
 redis.call(
   "HSET", head_key,
   "revision", new_revision,
@@ -118,6 +129,8 @@ local entry = cjson.encode({
   event = event,
   payload_digest = payload_digest,
   generation = generation,
+  action_type = action_type,
+  artifact_ref = artifact_ref,
   ts = now_s,
 })
 redis.call("RPUSH", journal_key, entry)
@@ -189,6 +202,22 @@ def journal_length(project_key: str, case_id: str) -> int:
     return int(_control_redis().llen(keys.journal_key(project_key, case_id)))
 
 
+def _current_case_state(project_key: str, case_id: str) -> str:
+    """The case's own ``ImprovementCase.state`` at call time, seeded onto the
+    head by :func:`transition`'s script (blocker fix, #3315 review: the head
+    otherwise never carries a ``state`` at all). A missing or unreadable row
+    seeds "" -- no worse than the pre-fix behavior, and every production
+    caller of ``transition`` acts on a case that already has an ORM row.
+    """
+    try:
+        from models.improvement_case import ImprovementCase
+
+        case = ImprovementCase.query.get(project_key=project_key, id=case_id)
+    except Exception:
+        return ""
+    return (getattr(case, "state", "") or "") if case is not None else ""
+
+
 def transition(
     project_key: str,
     case_id: str,
@@ -200,6 +229,8 @@ def transition(
     action_id: str = "",
     agent_session_id: str | None = None,
     journal_max_entries: int | None = None,
+    action_type: str = "",
+    artifact_ref: str = "",
 ) -> TransitionResult:
     """Advance the case head by one event, or refuse with a reason code.
 
@@ -209,6 +240,11 @@ def transition(
     the same call, refusing ``INTENT_STATE`` otherwise (Race 4b). Omit it for
     a controller write (the lease generation is the only fence in that case,
     Decision 12).
+
+    ``action_type`` is recorded on the journal entry only (tech debt, #3315
+    review: it was parsed by the CLI and silently dropped, so the adapter's
+    ``_unadmitted_proposal`` always defaulted to ``"investigate"``); it
+    carries no fencing meaning of its own.
     """
     if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
         return TransitionResult(False, "INVALID_ARGUMENT", -1)
@@ -228,6 +264,8 @@ def transition(
 
         journal_max_entries = settings.improvement.journal_max_entries
 
+    case_state = _current_case_state(project_key, case_id)
+
     try:
         raw = _control_redis().eval(
             _LUA_TRANSITION,
@@ -245,6 +283,9 @@ def transition(
             payload_digest,
             agent_session_id or "",
             int(journal_max_entries),
+            case_state,
+            action_type,
+            artifact_ref,
         )
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         logger.warning("[improvement-control] journal unavailable: %s", exc)

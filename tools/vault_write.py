@@ -24,7 +24,13 @@ Runner = Callable[[list[str]], "subprocess.CompletedProcess"]
 
 
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    import os
+
+    # Nit fix (#3315 review): CLAUDE.md's sanctioned `op` shape always sets
+    # OP_CACHE=false explicitly; the default runner previously inherited the
+    # ambient environment and set nothing itself.
+    env = {**os.environ, "OP_CACHE": "false"}
+    return subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
 
 
 @dataclass(frozen=True)

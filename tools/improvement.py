@@ -75,11 +75,20 @@ def _validate_case_for_proposal(case_id: str) -> str | None:
 
 def cmd_propose(args) -> int:
     from tools.improvement_control.journal import read_head, transition
+    from tools.improvement_control.scheduler_adapter import ALLOWED_ACTION_TYPES
 
     case_id = args.case
     payload_path = args.payload
+    action_type = args.action_type
+    if action_type not in ALLOWED_ACTION_TYPES:
+        _emit(
+            args,
+            f"refused: INVALID_ACTION_TYPE ({action_type})",
+            {"accepted": False, "reason": "INVALID_ACTION_TYPE"},
+        )
+        return 1
     try:
-        payload_text = open(payload_path).read()
+        payload_bytes = open(payload_path, "rb").read()
     except OSError as e:
         _emit(
             args,
@@ -87,13 +96,13 @@ def cmd_propose(args) -> int:
             {"accepted": False, "reason": str(e)},
         )
         return 1
-    if not payload_text.strip():
+    if not payload_bytes.strip():
         _emit(args, "refused: EMPTY_PAYLOAD", {"accepted": False, "reason": "EMPTY_PAYLOAD"})
         return 1
 
     import hashlib
 
-    payload_digest = "sha256:" + hashlib.sha256(payload_text.encode()).hexdigest()
+    payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
 
     session = _own_session()
     agent_session_id = None
@@ -117,6 +126,19 @@ def cmd_propose(args) -> int:
         )
         return 1
 
+    # Data Flow step 2, blocker fix (#3315 review): the payload is written and
+    # re-hashed through the verifying store BEFORE the lease is taken, so a
+    # refused proposal's content is still on disk and loadable via the
+    # reference kept on the evidence row below -- previously only the digest
+    # was journaled and the content itself existed nowhere.
+    from models.verifying_artifact_store import VerifyingArtifactStore
+
+    store = VerifyingArtifactStore()
+    artifact_key = f"{case_id}-{action_id or 'noaction'}-{payload_digest.split(':', 1)[-1][:16]}"
+    artifact_ref = store.save(
+        payload_bytes, key=artifact_key, model_class_name="ImprovementProposal"
+    )
+
     lease, lease_key, generation = _acquire_lease(case_id)
     if generation is None:
         _emit(args, "refused: case busy", {"accepted": False, "reason": "CASE_BUSY"})
@@ -133,6 +155,8 @@ def cmd_propose(args) -> int:
             payload_digest=payload_digest,
             action_id=action_id or "",
             agent_session_id=agent_session_id,
+            action_type=action_type,
+            artifact_ref=artifact_ref,
         )
     finally:
         lease.release(lease_key, generation)
@@ -150,7 +174,7 @@ def cmd_propose(args) -> int:
                 classification="unknown",
                 source_ref=f"propose-refused:{case_id}:{action_id}",
                 text=f"intent_state:{result.reason}",
-                detail=payload_digest,
+                detail=artifact_ref,
             )
         _emit(args, f"refused: {result.reason}", {"accepted": False, "reason": result.reason})
         return 1
@@ -158,7 +182,12 @@ def cmd_propose(args) -> int:
     _emit(
         args,
         f"accepted: revision={result.revision}",
-        {"accepted": True, "revision": result.revision, "action_id": action_id},
+        {
+            "accepted": True,
+            "revision": result.revision,
+            "action_id": action_id,
+            "artifact_ref": artifact_ref,
+        },
     )
     return 0
 
@@ -289,23 +318,30 @@ def cmd_doctor(args) -> int:
         print(f"namespace unreachable: {e}")
         return 2
 
+    # Blocker fix (#3315 review): `read_head`/`list_intents` used to run
+    # OUTSIDE this guard, so a control-namespace `ConnectionError` mid-loop
+    # raised a traceback (exit 1) instead of reporting the same break-glass
+    # message the import-time guard above already gives (issue acceptance
+    # criterion 4 / plan Success Criterion 2's outage drill). One guard now
+    # covers the ORM query and every per-case read, so a reachable-then-lost
+    # namespace never gets to print a partial "clean" or wedged/paused list.
     try:
         cases = []
         for state in OPEN_CASE_STATES:
             cases.extend(ImprovementCase.query.filter(project_key=PROJECT_KEY, state=state))
+
+        paused = []
+        wedged = []
+        for case in cases:
+            head = read_head(PROJECT_KEY, case.id)
+            if head is not None and head.paused:
+                paused.append(case.id)
+            for intent in list_intents(PROJECT_KEY, case.id):
+                if intent.state == "reconciliation_required":
+                    wedged.append((case.id, intent.action_id))
     except Exception as e:
         print(f"namespace unreachable: {e}")
         return 2
-
-    paused = []
-    wedged = []
-    for case in cases:
-        head = read_head(PROJECT_KEY, case.id)
-        if head is not None and head.paused:
-            paused.append(case.id)
-        for intent in list_intents(PROJECT_KEY, case.id):
-            if intent.state == "reconciliation_required":
-                wedged.append((case.id, intent.action_id))
 
     if not paused and not wedged:
         _emit(
