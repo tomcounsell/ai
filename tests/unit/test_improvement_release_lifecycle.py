@@ -641,6 +641,31 @@ class TestExpose:
         assert exc.value.code == "PR_CREATE_FAILED"
         assert "pr_number" not in json_field(get_release(approved.id, PK).exposure)
 
+    def test_open_pr_keeps_a_withdraw_landing_during_pr_create(self, approved):
+        """Race 1 on ``open_pr``: a ``withdraw`` during ``gh pr create`` survives the save.
+
+        ``open_pr`` records the PR without a transition; the row it read is
+        stale by the time the subprocess returns. The persisted row keeps the
+        withdrawn state, its reason, and both history events, and still
+        carries the PR it opened.
+        """
+
+        def create(argv):
+            withdraw(approved.id, project_key=PK, reason="pulled", now=NOW)
+            return (0, "https://github.com/tomcounsell/ai/pull/3299\n", "")
+
+        runner = RecordingRunner([(["gh", "pr", "create"], create)])
+        open_pr(approved.id, project_key=PK, runner=runner, now=NOW + timedelta(seconds=1))
+        row = get_release(approved.id, PK)
+        assert row.state == "withdrawn"
+        outcome = json_field(row.outcome)
+        assert outcome["withdrawn"] == {"reason": "pulled", "at": NOW.isoformat()}
+        events = [e["event"] for e in outcome["history"]]
+        assert events.count("withdrawn") == 1, events
+        assert events.count("pr_opened") == 1, events
+        assert events.index("withdrawn") < events.index("pr_opened")
+        assert json_field(row.exposure)["pr_number"] == 3299
+
 
 # ---------------------------------------------------------------------------
 # close_window
@@ -741,6 +766,78 @@ class TestCloseWindow:
         closed = close_window(release.id, project_key=PK, now=merged_at + timedelta(days=7))
         assert closed.state == "accepted"
         assert _outcome(release.id)["claim_level_2_supported"] is False
+
+    def _measure_after(self, monkeypatch, side_effect):
+        """Patch ``lifecycle.measure`` so ``side_effect`` runs before the real measurement."""
+        real = lifecycle.measure
+
+        def measure(*args, **kwargs):
+            side_effect()
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(lifecycle, "measure", measure)
+
+    def test_regressed_close_keeps_a_concurrent_rollback(self, approved, monkeypatch):
+        """Race 1 on the non-held path: a ``rollback`` transition during the measurement survives.
+
+        The regressed close records its verdict without a transition; the row
+        it read is stale by then. The persisted row keeps ``rolled_back``, the
+        rollback record, both events, and the close's own verdict keys.
+        """
+        release, merged_at = self._exposed(approved, window=(15, 20))
+        rolled = {"rollback": {"revert_sha": REVERT_SHA, "pushed_to": "main"}}
+
+        def concurrent_rollback():
+            row = get_release(release.id, PK)
+            lifecycle._transition(
+                row,
+                to="rolled_back",
+                allowed_from=("observing",),
+                event="rolled_back",
+                now=NOW,
+                outcome={**lifecycle._outcome(row), **rolled},
+            )
+
+        self._measure_after(monkeypatch, concurrent_rollback)
+        close_window(release.id, project_key=PK, now=merged_at + timedelta(days=7))
+        row = get_release(release.id, PK)
+        assert row.state == "rolled_back"
+        outcome = json_field(row.outcome)
+        assert outcome["rollback"] == rolled["rollback"]
+        assert outcome["verdict"] == "regressed"
+        assert outcome["rollback_recommended"] is True
+        events = [e["event"] for e in outcome["history"]]
+        assert events.count("rolled_back") == 1, events
+        assert events.count("window_closed") == 1, events
+
+    def test_held_close_keeps_a_concurrent_rollback_failure_persist(self, approved, monkeypatch):
+        """Race 1 on ``_transition``: a rollback failure persisted during the measurement survives.
+
+        The mirror of the rollback-side case: ``rollback_attempt`` and its
+        event land first, then the close's transition to ``accepted`` keeps
+        them beside its own verdict.
+        """
+        release, merged_at = self._exposed(approved)
+        attempt = {"at": NOW.isoformat(), "code": "ROLLBACK_STEP_FAILED", "detail": "conflict"}
+
+        def concurrent_failure_persist():
+            row = get_release(release.id, PK)
+            outcome = lifecycle._outcome(row)
+            lifecycle._append_history(outcome, "rollback_step_failed", NOW, detail="conflict")
+            outcome["rollback_attempt"] = attempt
+            lifecycle._save_outcome_only(row, outcome)
+
+        self._measure_after(monkeypatch, concurrent_failure_persist)
+        closed = close_window(release.id, project_key=PK, now=merged_at + timedelta(days=7))
+        assert closed.state == "accepted"
+        outcome = _outcome(release.id)
+        assert outcome["rollback_attempt"] == attempt
+        assert outcome["verdict"] == "held"
+        assert outcome["claim_level_2_supported"] is True
+        events = [e["event"] for e in outcome["history"]]
+        assert events.count("rollback_step_failed") == 1, events
+        assert events.count("window_closed") == 1, events
+        assert events.index("rollback_step_failed") < events.index("window_closed")
 
     def test_due_windows(self, approved):
         release, merged_at = self._exposed(approved)
@@ -1052,12 +1149,18 @@ class TestRollback:
     def test_rollback_failure_persist_keeps_a_concurrent_transition(self, approved, tmp_path):
         """Race 1 on the failure path: a state change during the steps survives the persist.
 
-        A ``withdraw``-shaped transition lands between the rollback's read and
-        its failure write; the persisted row keeps that state and both history
-        events, in order.
+        A ``close_window``-shaped transition lands between the rollback's read
+        and its failure write; the persisted row keeps that state, every
+        outcome key the transition wrote, and both history events, in order.
         """
         release = self._exposed(approved)
         real = _rollback_runner()
+        concurrent = {
+            "verdict": "held",
+            "closed_at": NOW.isoformat(),
+            "claim_level_2_supported": True,
+            "rollback_recommended": False,
+        }
 
         def runner(argv, *, cwd=None, timeout=None):
             if argv[:2] == ["git", "revert"]:
@@ -1068,7 +1171,8 @@ class TestRollback:
                     allowed_from=("observing",),
                     event="window_closed",
                     now=NOW,
-                    detail={"verdict": "kept", "reason": "concurrent"},
+                    outcome={**lifecycle._outcome(row), **concurrent},
+                    detail={"verdict": "held", "reason": "concurrent"},
                 )
                 return CommandResult(argv, 1, "", "CONFLICT (content): tools/x.py", 0.0)
             return real(argv, cwd=cwd, timeout=timeout)
@@ -1092,3 +1196,31 @@ class TestRollback:
         assert events.count("rollback_step_failed") == 1, events
         assert events.index("window_closed") < events.index("rollback_step_failed")
         assert outcome["rollback_attempt"]["code"] == "ROLLBACK_STEP_FAILED"
+        assert {k: outcome.get(k) for k in concurrent} == concurrent, (
+            "the transition's non-history keys survive beside rollback_attempt"
+        )
+
+    def test_rollback_failure_persist_overwrites_its_own_previous_attempt(self, approved, tmp_path):
+        """A second failed attempt replaces ``rollback_attempt``; the history keeps both events."""
+        release = self._exposed(approved)
+        for attempt, detail in enumerate(("first conflict", "second conflict")):
+            runner = RecordingRunner(
+                [
+                    (["git", "rev-parse", "--show-toplevel"], (0, "/repo\n", "")),
+                    (["git", "revert"], (1, "", detail)),
+                ]
+            )
+            with pytest.raises(ReleaseRefused):
+                rollback(
+                    release.id,
+                    project_key=PK,
+                    reason="r",
+                    runner=runner,
+                    root=tmp_path,
+                    repo=tmp_path,
+                    now=NOW + timedelta(minutes=attempt),
+                )
+        outcome = _outcome(release.id)
+        assert outcome["rollback_attempt"]["detail"].endswith("second conflict")
+        events = [e["event"] for e in outcome["history"]]
+        assert events.count("rollback_step_failed") == 2, events

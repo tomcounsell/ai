@@ -53,11 +53,18 @@ string, so a writer that assigned a dict directly would store its Python repr;
 `ReleaseRefused(code, detail)` from a closed vocabulary. A refusal writes
 nothing, with one exception described under Rollback. `_transition` re-reads
 the row immediately before `save()` and refuses `WRONG_STATE` when the state
-moved under the caller, and merges the re-read row's history events into its
-own, which recovers a second writer whose re-read lands after the first's
-save. Popoto has no compare-and-set, so the sub-millisecond interleave (both
-re-read, then both save) remains a lost write: the last save wins and the
-earlier event is gone.
+moved under the caller, then merges its outcome onto the re-read row's
+(`_merge_outcome`): the re-read row is the base, every key and history event
+another writer landed since the caller read the row survives, and the keys
+the caller itself added or changed take the caller's value. That recovers a
+second writer whose re-read lands after the first's save, in either order. A
+write that records an event without moving the state (`open_pr`, the
+non-held `close_window`, a rollback failure) goes through
+`_save_outcome_only`, which applies the same merge and saves only the columns
+it wrote (`update_fields`), so a transition another caller landed keeps its
+state as well. Popoto has no compare-and-set, so the sub-millisecond
+interleave (both re-read, then both save) remains a lost write: the last save
+wins and the earlier event is gone.
 
 | From | Event | To | Guard |
 |---|---|---|---|
@@ -455,9 +462,11 @@ and on `ROLLBACK_PUSH_REFUSED` under `outcome.rollback_attempt` as `{at,
 code, detail, target, steps, transcript}`, beside a `rollback_step_failed` or
 `rollback_push_refused` history event. Each new attempt overwrites
 `rollback_attempt`; the history keeps one event per attempt. That write
-re-reads the row, merges its history, and saves `outcome` alone
-(`update_fields`), so a transition another caller landed while the steps ran
-keeps its state and its event.
+re-reads the row, merges onto it (the re-read row's keys and history
+survive; `rollback_attempt` and the new event are the caller's), and saves
+`outcome` alone (`update_fields`), so a `close_window` that landed while the
+steps ran keeps its state, its verdict keys, and its event beside the
+attempt.
 
 On success `outcome.rollback` carries `reason`, `merge_sha`,
 `merge_commit_parents`, `revert_sha`, `parent_sha`, `pushed_to`,

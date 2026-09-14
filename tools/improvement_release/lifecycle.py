@@ -233,6 +233,25 @@ def _merge_history(outcome: dict, current: dict) -> None:
         outcome["history_truncated"] = True
 
 
+def _merge_outcome(outcome: dict, current: dict, *, base: dict) -> dict:
+    """Three-way merge of the caller's ``outcome`` onto the re-read row's (Race 1).
+
+    ``base`` is the outcome the caller read before its edits, ``current`` the
+    row as re-read before the save. The result starts from ``current``, so
+    every key another caller wrote since survives; a key the caller added or
+    changed relative to ``base`` takes the caller's value, so its own edits
+    survive too (a repeated write such as a second ``rollback_attempt`` still
+    overwrites). History is folded together by :func:`_merge_history`.
+    """
+    merged = {key: value for key, value in current.items() if key != "history"}
+    for key, value in outcome.items():
+        if key != "history" and (key not in base or base[key] != value):
+            merged[key] = value
+    merged["history"] = list(outcome.get("history") or [])
+    _merge_history(merged, current)
+    return merged
+
+
 def _require_state(release: Any, allowed: tuple[str, ...], event: str) -> None:
     state = getattr(release, "state", None)
     if state not in allowed:
@@ -258,12 +277,13 @@ def _transition(
 
     ``outcome`` is the caller's already-updated dict (defaults to the row's);
     the transition event lands on it, then ``extra_events`` in order, and the
-    row is saved once. History events the re-read row carries and the caller's
-    dict lacks are merged in first (:func:`_merge_history`), which recovers a
-    second writer whose re-read lands after the first writer's save: the
-    second write keeps the first's event and the record shows both. The
-    sub-millisecond interleave (both re-read, then both save) is still a lost
-    write; Popoto has no compare-and-set, and the last save wins.
+    row is saved once. The dict is first merged onto the re-read row's
+    (:func:`_merge_outcome`): keys and history events another writer landed
+    since this caller read the row survive beside the caller's own edits,
+    which recovers a second writer whose re-read lands after the first
+    writer's save. The sub-millisecond interleave (both re-read, then both
+    save) is still a lost write; Popoto has no compare-and-set, and the last
+    save wins.
     """
     at = _now(now)
     current = get_release(release.id, release.project_key)
@@ -273,8 +293,8 @@ def _transition(
             f"{event} needs state in {list(allowed_from)}; release {release.id} is "
             f"{current.state!r} (re-read before save)",
         )
-    outcome = outcome if outcome is not None else _outcome(release)
-    _merge_history(outcome, _outcome(current))
+    base = _outcome(release)
+    outcome = _merge_outcome(outcome if outcome is not None else base, _outcome(current), base=base)
     entry_fields = {"from": current.state, "to": to, **fields}
     if detail is not None:
         entry_fields["detail"] = detail
@@ -288,26 +308,24 @@ def _transition(
     return release
 
 
-def _save_outcome(release: ImprovementRelease, outcome: dict) -> ImprovementRelease:
-    release.outcome = _dump(outcome)
-    if release.save() is False:
-        raise RuntimeError("ImprovementRelease.save() returned False")
-    return release
+def _save_outcome_only(
+    release: ImprovementRelease, outcome: dict, *, fields: tuple[str, ...] = ("outcome",)
+) -> ImprovementRelease:
+    """Write ``fields`` (``outcome`` and any other column set) after re-reading the row (Race 1).
 
-
-def _save_outcome_only(release: ImprovementRelease, outcome: dict) -> ImprovementRelease:
-    """Write ``outcome`` alone, after re-reading the row (Race 1, no transition).
-
-    For a caller that records an event without moving the state: history
-    events the re-read row carries and ``outcome`` lacks are merged in
-    (:func:`_merge_history`), and the save is partial (``update_fields``), so
-    a transition another caller landed since this one read the row keeps its
-    state and its event.
+    For a caller that records an event without moving the state: ``outcome``
+    is merged onto the re-read row's (:func:`_merge_outcome`), so keys and
+    history events another writer landed since this caller read the row
+    survive beside the caller's own edits, and the save is partial
+    (``update_fields=fields``), so a transition another caller landed keeps
+    its state. ``fields`` names every column written, ``outcome`` included; a
+    caller that also set another column on ``release`` (``open_pr`` and
+    ``exposure``) lists it here.
     """
     current = get_release(release.id, release.project_key)
-    _merge_history(outcome, _outcome(current))
-    release.outcome = _dump(outcome)
-    if release.save(update_fields=["outcome"]) is False:
+    merged = _merge_outcome(outcome, _outcome(current), base=_outcome(release))
+    release.outcome = _dump(merged)
+    if release.save(update_fields=list(fields)) is False:
         raise RuntimeError("ImprovementRelease.save() returned False")
     return release
 
@@ -749,7 +767,7 @@ def open_pr(
     _append_history(
         outcome, "pr_opened", at, pr_number=exposure["pr_number"], pr_url=exposure["pr_url"]
     )
-    return _save_outcome(release, outcome)
+    return _save_outcome_only(release, outcome, fields=("exposure", "outcome"))
 
 
 def _pr_view(runner: Runner, pr_number: int, *, repo: str | None) -> dict:
@@ -927,7 +945,7 @@ def close_window(
         at,
         detail={"verdict": outcome["verdict"], "reason": outcome["reason"]},
     )
-    return _save_outcome(release, outcome)
+    return _save_outcome_only(release, outcome)
 
 
 def due_windows(project_key: str, now: datetime | None = None) -> list[ImprovementRelease]:
