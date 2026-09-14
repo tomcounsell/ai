@@ -594,10 +594,26 @@ built here so the recursive comparison can run on real arms later.
    named opportunities and returns lane 6's `ArmResult`: per-opportunity gains taken from
    `accept` evaluations **already on record** for those cases and budget use from lane 3's meter
    keyed by `arm_run_id`. Its docstring states the limit: a multi-tick arm that dispatches and
-   evaluates inside `run` is #3311's. `tools/improvement.py`'s CLI entry calls
-   `register_arm_runner(PlannerArmRunner())` when lane 6's `tools.improvement_recursion.arms` is
-   importable, so `compare run` under the same CLI finds it; a test asserts `get_arm_runner()`
-   returns it after CLI init and that nothing registers at import time.
+   evaluates inside `run` is #3311's. **Lane 6 has no PR and the two lanes build concurrently
+   with no stated order**, so nothing in this lane imports `tools.improvement_recursion.arms`
+   at module level and nothing re-declares its types: `PlannerArmRunner.run` does
+   `from tools.improvement_recursion.arms import ArmResult, BudgetUse` inside the method body
+   and raises `ArmRunnerUnavailable("ARM_RUNNER_UNAVAILABLE: lane 6 not merged")` on
+   `ImportError`; `tools/improvement.py`'s CLI entry does
+   `try: from tools.improvement_recursion.arms import register_arm_runner`
+   `except ImportError: register_arm_runner = None` and calls
+   `register_arm_runner(PlannerArmRunner())` only when it is not `None`, so `compare run` under
+   the same CLI finds it once lane 6 lands. Tests, written so they hold before and after lane 6
+   merges: `tests/unit/test_improvement_planner.py::test_arm_runner_registers_from_cli_entry`
+   installs a fake module via `monkeypatch.setitem(sys.modules,
+   "tools.improvement_recursion.arms", types.SimpleNamespace(register_arm_runner=<records into a
+   list>, get_arm_runner=<reads it>, ArmResult=<dataclass>, BudgetUse=<dataclass>))` before
+   invoking `tools.improvement.main([...])`, and asserts the fake registry holds a
+   `PlannerArmRunner`; `test_arm_runner_nothing_registers_at_import` removes the module from
+   `sys.modules` (and blocks its import via a `meta_path` finder that raises `ImportError` for
+   that name), asserts `import tools.improvement` succeeds, and that `PlannerArmRunner().run(...)`
+   raises `ArmRunnerUnavailable`. When lane 6 merges, the fake is swapped for the real import
+   and both assertions stand; the build never stubs lane 6's types in production code.
 3. **`candidate_ref` and `base_revision` on the manifest.** This lane's manifest is
    `{"protocol_ref", "base_revision", "candidate_ref", "candidate", "incumbent", "envelope",
    "corpus_digest"}`. `base_revision` is the checkout SHA at freeze (lane 4's key); `candidate_ref`
@@ -1211,6 +1227,7 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the two entries this lane registers (`retire_sdlc_reflection` and `improvement_investigation_stage_field`).
 - [ ] (lane 4) `tests/unit/test_improvement_eval_arena.py::test_carries_the_four_arm_keys` (`:48`) — no change; the arm env is untouched. The arm worker's job-spec test file gains cases for the `rrf_k` and `min_rrf_score` pass-throughs, asserting an absent key leaves `retrieve_memories` at its defaults.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change: lane 7 already tests the `on_escalation` sink both present and absent (`tools/infrastructure_budget.py:568-574`); this lane supplies the callable and adds one integration case in its own digest test file.
+- [ ] `tests/unit/test_improvement_resources.py` (`:75`, `:142`, `:200`) — no change to existing cases: each asserts `set(report) == set(RESOURCES)`, which follows the tuple when `meta_model_api` is appended; the file gains one case asserting a vault title containing "Meta Model API" classifies under `meta_model_api` and one asserting a title with neither keyword set reports `absent` for it.
 
 ## Rabbit Holes
 
@@ -1485,11 +1502,16 @@ records an override, plus this plan's own.
 - [ ] Lane 6's three seams exist: every model revision carries `research_process_spec` in the
   canonical bytes and a `research_process_digest` computed only by lane 6's function (`None`
   until lane 6 merges; no second hashing routine in this lane), `PlannerArmRunner` registers
-  from the CLI entry when lane 6's module is importable, and every manifest carries
-  `base_revision` and `candidate_ref`
+  from the CLI entry when lane 6's module is importable and this lane imports cleanly when it is
+  not (method-body import, `ArmRunnerUnavailable`, tests via a fake `sys.modules` entry), and
+  every manifest carries `base_revision` and `candidate_ref`
 - [ ] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
-  passes, and the two human-paced waits (vault request, amendment request) survive the
-  investigation TTL through `case.blocked_by`, `case.summary`, and the tick's keep-alive save
+  passes; a seeded row carrying `priority_area` opens a case on the first tick
+  (`test_seeded_inspiration_opens_a_case`); and the two human-paced waits (vault request,
+  amendment request) survive the investigation TTL through `case.blocked_by` (shape
+  `vault:{resource_name}`, validated against `RESOURCES`), `case.summary`, and the tick's
+  keep-alive save, with the block cleared on a `verified` probe of `meta_model_api`
+  (`test_blocked_case_unblocks_on_verified_probe`)
 - [ ] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
   `batch_size` equals the number of queries actually generated
 - [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
@@ -1599,6 +1621,10 @@ task 0 passes.
 - `ImprovementSettings.promise_detector_enabled` and `cheap_inference_model`, `.env.example`
   declarations with `# @optional`
 - Migrations `improvement_investigation_stage_field` and `retire_sdlc_reflection`, registered
+- `tools/improvement_resources.py`: append `"meta_model_api"` to `RESOURCES` and its
+  `(("meta", "model", "api"), ("muse", "api"))` entry to `_VAULT_TITLE_KEYWORDS`; nothing else
+  in the module changes; `tests/unit/test_improvement_resources.py` gains one case asserting a
+  title containing "Meta Model API" classifies as `meta_model_api`
 - Module docstrings state every TTL and index decision
 
 ### 2. Observer adapters and the retirement
@@ -1652,7 +1678,11 @@ task 0 passes.
   empty `prediction`), `case open`
 - Rewrite `.claude/skills/improve-research/SKILL.md` to the brief-first contract, stating the
   eight kinds, the claim rule, the assumption rule, and the six prohibitions in its own text
-- The resource-acquisition disposition vocabulary and the vault-request record shape
+- The resource-acquisition disposition vocabulary and the vault-request record shape:
+  `resolve(..., disposition="vault_request_written", resource_name=...)` validates the name
+  against `tools.improvement_resources.RESOURCES` (`UNKNOWN_RESOURCE` on a miss), writes
+  `case.blocked_by = f"vault:{resource_name}"` and the request text onto `case.summary`;
+  `test_blocked_by_names_a_known_resource`
 
 ### 5. Planner tick, ranking, and registration
 - **Task ID**: build-planner
@@ -1668,16 +1698,29 @@ task 0 passes.
   the lexicographic order with `blocked`, `write_snapshot`, `load_snapshot`, `latest_snapshot`,
   the diff
 - `reflections/improvement_plan.py`: `open_cases` clustering unconsumed rows (ids absent from
-  every case's `evidence_ids`, watermark as scan bound only) with the identity rules and the
-  novelty check, `test_cluster_opens_across_two_ticks`; the pure `plan_tick` core and its
+  every case's `evidence_ids`, watermark as scan bound only) with the seeded-row cold-start rule
+  first (`detail` JSON carrying `seed` plus a `priority_area` in `PRIORITY_AREAS` opens a one-row
+  case with `dedup_identity=f"seed:{seed}"`, bypassing the URL route and
+  `CASE_OPEN_MIN_EVIDENCE`), then the identity rules and the novelty check, and the intake-pool
+  rule in the docstring; `test_cluster_opens_across_two_ticks` and
+  `test_seeded_inspiration_opens_a_case`; the pure `plan_tick` core and its
   `run_improvement_planner` wrapper with the fail-soft steps, the `enabled` gate, the paused-head
-  refusal, the keep-alive save for awaiting and vault-request rows, the `blocked_by` unblock on a
-  `verified` probe, the idempotent single proposal, the `apply_verdict` backstop
+  refusal, the keep-alive save for awaiting and vault-request rows, the `blocked_by` unblock
+  (`probe()` once per tick, `blocked_by.removeprefix("vault:")` looked up in the report,
+  cleared on `"verified"` after a `case_unblocked` journal event;
+  `test_blocked_case_unblocks_on_verified_probe` with an injected `runner`), the idempotent
+  single proposal, the `apply_verdict` backstop with its **function-local** import of
+  `tools.improvement_experiment.apply_verdict` (task 6 lands after this task) and the
+  `ImportError` finding
 - `rank()` reads `case.blocked_by` for `blocked`; `process_spec_json` in
   `tools/improvement_ranking.py` (canonical bytes only; the digest comes from lane 6's import or
   stays `None`), called by `revise-model`; `test_process_spec_canonical_bytes` with the fixture
-  spec lane 6 can copy; `tools/improvement_plan_arm.py::PlannerArmRunner` and its conditional
-  registration from the CLI entry (tests for both, including "nothing registers at import")
+  spec lane 6 can copy; `tools/improvement_plan_arm.py::PlannerArmRunner` with the method-body
+  import of `ArmResult`/`BudgetUse` and `ArmRunnerUnavailable("ARM_RUNNER_UNAVAILABLE: lane 6
+  not merged")` on `ImportError`; the CLI entry's `try`/`except ImportError` around
+  `register_arm_runner`; `test_arm_runner_registers_from_cli_entry` (fake
+  `tools.improvement_recursion.arms` via `monkeypatch.setitem(sys.modules, ...)`) and
+  `test_arm_runner_nothing_registers_at_import` (module absent, import succeeds, `run` raises)
 - `register_improvement_planner` and `register_improvement_assumption_digest` in
   `reflection_register.py` and `scripts/update/run.py`; parametrize the six registration tests
 - CLI `ranking [--at DIGEST]`
@@ -1805,7 +1848,10 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Every retrieval freeze cites #2082 and sizes the batch from the queries produced | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "prior_answers_names_2082 or batch_size_equals_queries_produced or shortfall_refuses" -q` | exit code 0 |
 | The incumbent dict carries no `None`-valued key | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "incumbent_has_no_none_keys" -q` | exit code 0 |
 | A one-row-per-tick cluster still opens | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k cluster_opens_across_two_ticks -q` | exit code 0 |
-| A vault request survives the investigation TTL on the case | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_investigations.py -k "blocked_by_survives_expiry or awaiting_row_kept_alive" -q` | exit code 0 |
+| A vault request survives the investigation TTL on the case and unblocks on a verified probe | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_investigations.py -k "blocked_by_survives_expiry or awaiting_row_kept_alive or unblocks_on_verified_probe or blocked_by_names_a_known_resource" -q` | exit code 0 |
+| `meta_model_api` is a probeable resource | `python -c "from tools.improvement_resources import RESOURCES, _VAULT_TITLE_KEYWORDS as K; assert 'meta_model_api' in RESOURCES and 'meta_model_api' in K, (RESOURCES, K)"` | exit code 0 |
+| A seeded inspiration row opens a case on the first tick | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k seeded_inspiration_opens_a_case -q` | exit code 0 |
+| Lane 6's module is never imported at module level in this lane | `grep -rEn "^(from\|import) tools\.improvement_recursion" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py tools/improvement_plan_arm.py tools/improvement.py \| wc -l` | match count == 0 |
 | The report names seeded cases | `scripts/pytest-clean.sh tests/unit/test_improvement_report.py -k seeded_inputs_line -q` | exit code 0 |
 | Tick status counts failures per adapter, never skips | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -k "all_skipped_is_success or all_failed_is_error" -q` | exit code 0 |
 | The three-adapter status literal is gone | `grep -n "len(findings) == 3" reflections/improvement_collect.py \| wc -l` | match count == 0 |
