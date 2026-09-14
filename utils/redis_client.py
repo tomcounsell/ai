@@ -172,9 +172,16 @@ def scan_keys(client: redis.Redis, match: str) -> tuple[list[Any], bool]:
         ``(keys, truncated)``. ``truncated`` is True when the sweep stopped at
         ``settings.redis.scan_key_limit`` with the cursor still open -- the
         caller has a partial view and should expect the remainder on its next
-        pass. A sweep that completes on exactly the limit is not truncated.
-        Callers that drain a queue can ignore the flag; callers that reason
-        about the *absence* of a key must not.
+        pass. The limit bounds that truncating path, not the length of the
+        returned list: the cursor is checked first, so a sweep that closes the
+        cursor on the same round trip that carries it past the limit returns
+        every key it saw -- possibly more than ``scan_key_limit`` of them --
+        with ``truncated`` False. ``count`` is a hint, not a page-size
+        guarantee, so a final page can overshoot by more than one. Trimming
+        that list would turn a true report of a complete sweep into a silent
+        partial result claiming completeness. Callers that drain a queue can
+        ignore the flag; callers that reason about the *absence* of a key must
+        not.
     """
     from config.settings import settings
 

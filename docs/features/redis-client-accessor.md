@@ -104,8 +104,15 @@ instead, `settings.redis.scan_count` keys per round trip, so no single command
 can blow the timeout.
 
 It returns `(keys, truncated)`. `truncated` is True only when the sweep stopped
-at `settings.redis.scan_key_limit` **with the cursor still open**; a sweep that
-completes on exactly the limit is not truncated. Keys are deduplicated in
+at `settings.redis.scan_key_limit` **with the cursor still open**. The limit
+bounds that truncating path, not the length of the list: the cursor is checked
+first, so a sweep that closes the cursor on the same round trip that carries it
+past the limit returns every key it saw — possibly more than `scan_key_limit`
+of them — with `truncated` False, and `scan_count` is a hint rather than a
+page-size guarantee, so the overshoot is not bounded to one key. Trimming that
+list would turn a true report of a complete sweep into a silent partial result
+claiming completeness, which is strictly worse than a few extra keys. Keys are
+deduplicated in
 first-seen order, because `SCAN` guarantees at-least-once and not exactly-once
 delivery — a key present for the whole iteration can still come back twice if
 the keyspace rehashes mid-sweep, which `keys(pattern)` never did.
@@ -158,7 +165,7 @@ against observation, do not treat them as derived values.
 | `REDIS__MAX_CONNECTIONS` | 128 | Pool ceiling for the `text_redis()` client. redis-py's default is effectively unbounded (2\*\*31), which lets a burst of coroutines and threadpool workers exceed the server's `maxclients`. Mirrors popoto's own cap. |
 | `REDIS__HEALTH_CHECK_INTERVAL_S` | 30 | Seconds between liveness PINGs on an idle pooled connection; 0 disables. |
 | `REDIS__SCAN_COUNT` | 500 | `SCAN` batch hint — bounds per-round-trip work against `TIMEOUTS__REDIS_SOCKET_S`. |
-| `REDIS__SCAN_KEY_LIMIT` | 10000 | Ceiling on keys one `scan_keys` call returns before reporting truncation. |
+| `REDIS__SCAN_KEY_LIMIT` | 10000 | Where `scan_keys` gives up and reports truncation. Bounds the truncating path, not the returned list — a completed sweep can exceed it. |
 
 Launchd-managed processes (bridge, worker, email) do not read `.env`, so an
 override reaches them only through their plist — step 4 of

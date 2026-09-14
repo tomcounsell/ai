@@ -727,11 +727,16 @@ class RedisSettings(BaseModel):
         ge=100,
         le=1000000,
         description=(
-            "Hard ceiling on keys returned by one `utils.redis_client.scan_keys` "
-            "call. A sweep that hits this stops early and reports truncation "
-            "rather than walking a multi-million-key production keyspace in one "
-            "poll cycle; the caller picks the remainder up on its next cycle. "
-            "Provisional. Env: REDIS__SCAN_KEY_LIMIT."
+            "Where `utils.redis_client.scan_keys` stops early and reports "
+            "truncation rather than walking a multi-million-key production "
+            "keyspace in one poll cycle; the caller picks the remainder up on "
+            "its next cycle. It bounds the truncating path, not the return "
+            "value: a sweep whose cursor closes on the same round trip that "
+            "carries it past this returns every key it saw, untruncated. "
+            "Trimming that list would turn a true report of a complete sweep "
+            "into a silent partial result claiming completeness, which is "
+            "worse than a few extra keys. Provisional. "
+            "Env: REDIS__SCAN_KEY_LIMIT."
         ),
     )
 
