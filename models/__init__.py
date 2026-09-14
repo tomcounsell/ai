@@ -47,6 +47,9 @@ from models.improvement_charter import ImprovementCharter  # noqa: E402
 from models.improvement_evaluation import ImprovementEvaluation  # noqa: E402
 from models.improvement_evidence import ImprovementEvidence  # noqa: E402
 from models.improvement_experiment import ImprovementExperiment  # noqa: E402
+from models.improvement_infrastructure_ledger import (  # noqa: E402
+    InfrastructureReservation,
+)
 from models.improvement_investigation import ImprovementInvestigation  # noqa: E402
 from models.improvement_model_revision import ImprovementModelRevision  # noqa: E402
 from models.improvement_release import ImprovementRelease  # noqa: E402
@@ -81,6 +84,7 @@ __all__ = [
     "ImprovementInvestigation",
     "ImprovementModelRevision",
     "ImprovementRelease",
+    "InfrastructureReservation",
     "Job",
     "PRReviewAudit",
     "Reflection",
