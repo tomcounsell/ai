@@ -189,7 +189,7 @@ improve:{project}:{case}:lease:gen           string  monotonic counter
 
 #### Decision 3: one script per effect
 
-Each of `transition`, `admit`, `record_materialized`, `record_running`, `release_slot`, `cancel`, `reserve_unit2`, `settle_unit2`, `mark_reconciliation_required` is one `EVAL` that re-checks the generation (`>= highest_accepted`) and the expected revision where a revision is involved, re-checks the intent's `from_state` where an intent is involved (Decision 13), re-checks the intent binding where a session is the writer (Decision 12), then records the effect and appends the journal entry in the same call. Reason codes are a closed vocabulary: `SCHEMA_MISMATCH`, `PAUSED`, `STALE_GENERATION`, `REVISION_MISMATCH`, `SLOT_EXHAUSTED`, `BUDGET_EXHAUSTED`, `INTENT_STATE`, `UNAVAILABLE`. A Redis connection error is caught at the package boundary and surfaced as `TransitionResult(accepted=False, reason="UNAVAILABLE")`; no caller sees an exception and no caller falls back to the projection.
+Each of `transition`, `admit`, `record_materialized`, `record_running`, `release_slot`, `cancel`, `reserve_unit2`, `settle_unit2`, `mark_reconciliation_required` is one `EVAL` that re-checks the generation (`>= highest_accepted`) and the expected revision where a revision is involved, re-checks the intent's `from_state` where an intent is involved (Decision 13), re-checks the intent binding where a session is the writer (Decision 12), then records the effect and appends the journal entry in the same call. Reason codes are a closed vocabulary: `SCHEMA_MISMATCH`, `PAUSED`, `STALE_GENERATION`, `REVISION_MISMATCH`, `SLOT_EXHAUSTED`, `BUDGET_EXHAUSTED`, `INTENT_STATE`, `UNAVAILABLE` from the scripts, plus `INVALID_ARGUMENT` and `NOT_A_RESEARCH_SESSION`, which the Python layer returns before any Redis call. A Redis connection error is caught at the package boundary and surfaced as `TransitionResult(accepted=False, reason="UNAVAILABLE")`; no caller sees an exception and no caller falls back to the projection.
 
 #### Decision 4: the status trio and its owner value
 
@@ -285,14 +285,15 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 - [ ] `on_session_terminal` swallowing nothing: it returns `SlotReleaseResult(released: bool, reason)`; a `False` with `reason="NOT_HOLDER"` is a WARNING, because a slot held by someone else at a session's end is the Race 3 signature.
 - [ ] `scheduler_adapter.tick` per-case `except Exception`: each case's failure is logged at WARNING with the case id and the tick continues; `test_tick_isolates_one_bad_case` seeds two cases, breaks one, asserts the other dispatched.
 - [ ] `vault_write` `except subprocess.CalledProcessError` and `FileNotFoundError` (no `op` binary): both return `state="refused"` with a secret-free detail; `test_vault_write.py::test_refused_output_contains_no_credential_bytes` seeds a distinctive value and greps the result, the log capture, and the evidence row.
-- [ ] `paid_inference_meter.settle_from_response` `except (AttributeError, KeyError, TypeError)` on a malformed response: leaves the reservation open (reconcile receipts it `unknown`), logs WARNING; tested with a response object lacking `usage`.
+- [ ] `paid_inference_meter._read_cost` `except (AttributeError, KeyError, TypeError)` returns `None`; `settle_from_response` then tries `_estimate`, and a response with no `usage` at all (no tokens either) leaves the reservation open (reconcile receipts it `unknown`) and logs WARNING; tested with a response object lacking `usage`, one with `usage` but no `cost`, and one with `usage.cost`.
 - [ ] `reflections/improvement_intent_reconcile.run_*` mirrors `run_improvement_collect`'s shape: per-intent try/except, counts returned in the result dict, never raises to the scheduler.
 
 ### Empty/Invalid Input Handling
 
 - [ ] `propose` with an empty or whitespace `--payload` file, a case whose `ranking_rationale` is `None` or `""`, a `priority_area` outside `PRIORITY_AREAS`, or a `charter_digest` that is not the pinned one: each refuses with its reason code and writes nothing (journal length unchanged, artifact store untouched). One parametrized test.
-- [ ] `transition` with `expected_revision=None`, a negative generation, an unknown event name, or an empty `payload_digest`: `INVALID_ARGUMENT` before any Redis call.
-- [ ] `admit` on a case with no head: `INTENT_STATE` (a case must be `investigating` or `experimenting` to admit). `resume` on a case that is not paused: prints "not paused" and exits 0 without a journal write.
+- [ ] `transition` with `expected_revision=None`, a negative generation, an unknown event name, an empty `payload_digest`, or `agent_session_id` given without an `action_id`: `INVALID_ARGUMENT` before any Redis call.
+- [ ] `admit` on a case with no head: `INTENT_STATE` (a case must be `investigating` or `experimenting` to admit). `admit` on a case with any `reconciliation_required` intent: `INTENT_STATE`, no slot consumed (`test_admit_refuses_while_reconciliation_required`). `resume` on a case that is not paused: prints "not paused" and exits 0 without a journal write. `resume` on a case with `reconciliation_required` intents and no `--force`: prints the action ids and exits 1 without a journal write. `cancel` on an intent in any state other than `reconciliation_required`: `INTENT_STATE`.
+- [ ] `propose` under `AGENT_SESSION_ID` whose row has no `action_id` in `extra_context` (a session that is not a research session): refuses with `NOT_A_RESEARCH_SESSION` before touching the lease or the journal.
 - [ ] `export` on an empty namespace writes an archive with zero cases and says so; `import` of an archive whose `schema` differs from `SCHEMA_VERSION` refuses.
 - [ ] `reserve(requested_max_usd=0)`, negative, NaN, or infinite: `Refusal(reason="INVALID_AMOUNT")`, mirroring `infrastructure_budget._valid_rate`.
 - [ ] `write_credential(title="", value="")` or whitespace: `state="refused"`, reason `EMPTY`, no `op` call (asserted with a recording runner).
@@ -308,14 +309,14 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 ## Test Impact
 
 - [ ] `tests/unit/test_recovery_ownership.py::test_owners_are_known_values` — UPDATE: `known_owners` gains `"reflection"`, the owner value for `admitted` (the `improvement-intent-reconcile` reflection). `test_keys_match_non_terminal_statuses` stays as written and is the guard that forces the two edits to land together.
-- [ ] `tests/unit/test_session_lifecycle_consolidation.py` (non-terminal enumeration at `:407-421`) — UPDATE: the enumerated set gains `admitted` and the count becomes ten.
+- [ ] `tests/unit/test_session_lifecycle_consolidation.py::test_thirteen_total_statuses` (`:418-424`) — UPDATE: `assert len(ALL_STATUSES) == 14` becomes `== 15` and the docstring's "5 terminal + 9 non-terminal" becomes "5 terminal + 10 non-terminal", naming `admitted` (#3215) beside `paused_budget` (#1821). `test_non_terminal_statuses` (`:395-407`) gains `"admitted"` in its set literal.
 - [ ] `tests/unit/test_ui_sdlc_data.py` — UPDATE: the `ACTIVE_STATUSES` assertion gains `admitted`.
 - [ ] `tests/unit/test_session_recovery_drip_budget.py` — UPDATE: add one case asserting an `admitted` session is never dripped to `pending` (same shape as the `paused_budget` case at `:96`).
-- [ ] `tests/unit/test_improvement_models.py` — UPDATE: the `EVIDENCE_KINDS` assertion gains `resource_acquired`.
+- [ ] `tests/unit/test_improvement_models.py` — UPDATE: the `EVIDENCE_KINDS` assertion gains `resource_acquired`; the `INVESTIGATION_KINDS` and `INVESTIGATION_STATES` pins (`:60-62`) gain `charter_amendment` and `awaiting_authorization` (6 and 5 values, inside `test_declared_vocabularies_are_small`'s default maximum at `:172`, so no `VOCABULARY_MAXIMUMS` entry). Shared with lane 4; the second lane to land rebases.
 - [ ] `tests/unit/test_ui_app.py` and the `ui/data/improvement.py` getter-list pin — UPDATE: the exact getter list gains `get_control_status`; the new partial renders with an empty namespace, a seeded paused case, and an unreachable namespace.
 - [ ] `tests/unit/test_reflection_register.py` — UPDATE: `register_improvement_intent_reconcile` is idempotent, pinned to the `valor` owner, and carries `cadence="300s"`.
 - [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` gains `lease_ttl_seconds=90`, `journal_max_entries=1000`, `max_dispatch_attempts=3`; `IMPROVEMENT__LEASE_TTL_SECONDS` overrides.
-- [ ] `tests/unit/test_improvement_resources.py` — UPDATE: the vault-write probe row now reads `verified` because `tools/vault_write.py` exists; the test that asserted `absent` flips.
+- [ ] `tests/unit/test_improvement_resources.py` — UPDATE: no existing test covers `_probe_vault_write` (`tools/improvement_resources.py:198-201`, a file-existence check). Add `test_vault_write_probe_reports_verified_once_the_writer_exists`, which asserts `probe()["vault_write"]["state"] == "verified"` now that `tools/vault_write.py` exists, so the probe's `absent` branch is the one that can no longer be reached on main.
 - [ ] `tests/unit/test_validate_no_raw_redis_delete.py::test_model_list_is_complete` — no change expected; this lane adds no `popoto.Model` subclass. Listed so the builder runs it after adding `tools/improvement_control/`.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change; unit 3's key and scripts stay where lane 7 put them (see No-Gos).
 
@@ -335,7 +336,7 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 
 ### Risk 1: The interim lease outlives #3220
 **Impact:** two lease implementations drift, and a builder on #3220 leaves `CaseLease` in place because deleting it looks like scope creep.
-**Mitigation:** `test_interim_lease_retired_when_redis_lease_exists` fails the suite the moment `models/redis_lease.py` exists; the module docstring names the test, the swap point, and #3220; the plan's Documentation task writes the same instruction into the feature doc's dependency table; a comment on #3220 (Task 12) tells its builder exactly which three edits close the hand-off.
+**Mitigation:** `test_interim_lease_retired_when_redis_lease_exists` fails the suite the moment `models/redis_lease.py` exists, with the path anchored to the repo root via `Path(__file__).resolve().parents[2]` so the test bites from any cwd; the module docstring names the test, the swap point, and #3220; the plan's Documentation task writes the same instruction into the feature doc's dependency table; a comment on #3220 (Task 12) tells its builder exactly which edits close the hand-off, including deleting the retirement test and the lane-time Verification row that would otherwise become a permanent failure.
 
 ### Risk 2: A fence check followed by an unguarded effect
 **Impact:** a stale controller passes `transition` and then performs the enqueue or the slot write outside the script, and two sessions run for one action.
@@ -384,12 +385,19 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 **State prerequisite:** the slot field for that action id exists and `max_concurrent_research_sessions == 1`, so nothing else can be admitted.
 **Mitigation:** step 7 runs on every `finalize_session` path; the reconcile pass releases a slot whose intent has been `running` past the staleness threshold with a terminal or missing session row. Test ("unreleased lane slot on restart"): seed a slot and a `running` intent whose `agent_session_id` has no row, run the reconcile pass, assert the slot is free and the intent is `reconciliation_required`.
 
-### Race 4: Result submitted under a replaced generation
-**Location:** `journal.transition`; `valor-improve propose --action-id`.
-**Trigger:** controller A stalls past lease expiry, B acquires generation g+1 and transitions, A's research session submits with g.
-**Data prerequisite:** the session's `generation` in `extra_context`.
+### Race 4a: A stalled controller writes under a replaced generation
+**Location:** `journal.transition` and every intent script; any controller (adapter tick, reconcile pass, operator `pause`/`resume`, the CLI's `propose` write).
+**Trigger:** controller A acquires generation g, stalls past lease expiry, B acquires g+1 and transitions, A wakes and writes with g.
+**Data prerequisite:** the head's `highest_accepted`.
 **State prerequisite:** `head.highest_accepted == g+1`.
-**Mitigation:** the script refuses `g < highest_accepted` with `STALE_GENERATION`; the CLI stores the artifact as `ImprovementEvidence(kind="other", detail="stale_generation")` and exits 1. The holder's own second write (`g == highest_accepted`) is accepted. Test ("stale-generation rejection at an effect boundary"): both branches.
+**Mitigation:** the script refuses `g < highest_accepted` with `STALE_GENERATION` and writes nothing. The holder's own second write (`g == highest_accepted`) is accepted. Test (`test_stale_controller_generation_is_refused`, Decision 12): two `CaseLease` holders on one case, both branches.
+
+### Race 4b: A research session submits after its intent was replaced
+**Location:** `journal.transition` with `agent_session_id`; `valor-improve propose` under `AGENT_SESSION_ID`.
+**Trigger:** session S is dispatched under action id A1; the reconcile pass judges A1 stale (worker outage, row missing) and moves it to `reconciliation_required`; an operator cancels it and the adapter re-dispatches under A2 bound to S2; S comes back and runs `propose`.
+**Data prerequisite:** `action_id` in S's `extra_context`; `intent:{A1}.state` and `intent:{A1}.agent_session_id`.
+**State prerequisite:** `intent:{A1}.state != "running"` (or its bound id is not S).
+**Mitigation:** the session presents no generation (it would be stale on every run); the script compares the intent's state and bound session id inside the same call as the head advance and refuses `INTENT_STATE`. The CLI stores the artifact as `ImprovementEvidence(kind="other", detail="intent_state:<state>")` and exits 1; S2's `propose` under A2 is accepted. Test (`test_stale_session_intent_is_refused`, Decision 12).
 
 ### Race 5: Liveness check passes, worker dies before pickup
 **Location:** `scheduler_adapter.activate`.
@@ -403,7 +411,7 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 **Trigger:** the reconcile reflection judges an `admitted` intent stale while a delayed tick is materializing it.
 **Data prerequisite:** the intent's `state` and `updated_ts`.
 **State prerequisite:** both run under their own lease generation.
-**Mitigation:** both are CAS scripts on the intent's `state`; whichever lands second gets `INTENT_STATE` and stops. A materialize that loses releases nothing (it held nothing new); a reconcile that loses leaves the slot with the live intent.
+**Mitigation:** both are CAS scripts on the intent's `state` with an explicit `from_state` (`admitted` for both, Decision 13); whichever lands second finds the state moved and gets `INTENT_STATE`. A materialize that loses releases nothing (it held nothing new); a reconcile that loses leaves the slot with the live intent. Test: `test_reconcile_and_materialize_race_leaves_one_winner`.
 
 ## No-Gos (Out of Scope)
 
