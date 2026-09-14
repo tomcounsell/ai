@@ -104,7 +104,10 @@ reconciliation on the issue itself.
 - #3274 (lane 7): CLOSED 2026-09-14, merged as PR #3299 (`37dc10b33`). Added `spend_receipt` and
   `resource_probe` to `EVIDENCE_KINDS` (`models/improvement_evidence.py:78-79`), the
   `improvement-assumption-digest` optional sink (`tools/infrastructure_budget.py:568-574`), and
-  the retention root outside the checkout. Consumed, not changed.
+  the retention root outside the checkout. Consumed, with one two-line addition to
+  `tools/improvement_resources.py` (a seventh `RESOURCES` name and its keyword set) so the
+  `blocked_by` unblock has a probe entry to read; `probe()`'s signature and the six existing
+  entries are untouched.
 - #3218 (lane 6): OPEN; its plan is on main
   (`docs/plans/improvement-controller-lane-6-promotion-rollback-and-recursion.md`, first landed at
   `ee656d8af`) and its 2026-09-14 comment on #3217 (id 5662856978) names three seams this lane
@@ -327,8 +330,10 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
 2. **The planner tick** (`reflections/improvement_plan.py::run_improvement_planner`, same cadence,
    registered as `improvement-planner-tick`). In order: (a) `ImprovementCharter.load_from_file`
    then `pinned`; (b) **case opening**: take every evidence row inside the scan bound that no
-   case has consumed (an id absent from every case's `evidence_ids`), cluster by dedup identity
-   and route to `priority_area` by heuristics (correction classified `architectural` →
+   case has consumed (an id absent from every case's `evidence_ids`); a row whose `detail` JSON
+   carries `seed` plus a valid `priority_area` opens a one-row case on its own (the cold-start
+   rule); the rest are clustered by dedup identity
+   and routed to `priority_area` by heuristics (correction classified `architectural` →
    `orchestration`/`memory`; `lesson` → the stage's area; `inspiration` with a URL → an
    `inspiration_intake` investigation, not yet a case; `promise` → `personas`), run the novelty
    check (any `rejected` case or resolved investigation whose `summary`/`interpretation` shares
@@ -419,7 +424,11 @@ hypothesis with a falsifier, frozen, and measured by the harness, and the record
   `ImprovementModelRevision` gains `research_process_spec`. `ui/data/improvement.py` exports
   seven getters. `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
   adapter tuple grows from three to five and its status rule counts failures per adapter instead
-  of against the literal three.
+  of against the literal three. `tools.improvement_resources.RESOURCES` grows from six names to
+  seven (`meta_model_api`) with its `_VAULT_TITLE_KEYWORDS` entry; `probe()` is unchanged.
+  `tools/improvement_plan_arm.py` imports lane 6's `tools.improvement_recursion.arms` only inside
+  `PlannerArmRunner.run` and the CLI entry's registration block, so the module imports cleanly
+  with or without lane 6 merged.
 - **Coupling**: the planner reads records and writes journal events; it never imports the
   research skill, the bridge, or the harness internals. The research session reaches state only
   through `valor-improve`. The harness is called at one function (`evaluate`) plus three helpers
@@ -647,10 +656,20 @@ built here so the recursive comparison can run on real arms later.
   each needs its own index set; a `lesson` coerced to `other` is unqueryable as a lesson.
 - New plain fields on `ImprovementCase`, `null=True`: `evaluation_ids` (JSON list),
   `rejected_reason` (free text set by `apply_verdict`), `dedup_identity` (the evidence cluster
-  identity the novelty check compares; a plain string, never indexed), and `blocked_by` (free
-  text, e.g. `"vault request: Meta Model API key"`; set by `resolve()` on a
-  `vault_request_written` disposition, cleared by the tick when
-  `tools.improvement_resources.probe` reports the item `verified`). The block lives on the
+  identity the novelty check compares; a plain string, never indexed), and `blocked_by` (a
+  plain string of the exact shape `f"vault:{resource_name}"` where `resource_name` is a member of
+  `tools.improvement_resources.RESOURCES`, e.g. `"vault:meta_model_api"`; set by `resolve()` on a
+  `vault_request_written` disposition, which refuses any name outside `RESOURCES` with reason
+  code `UNKNOWN_RESOURCE`; cleared by the tick when `tools.improvement_resources.probe()`
+  reports `report[resource_name]["state"] == "verified"`). The human-readable item title
+  ("Meta Model API key") lives on `case.summary`, never in `blocked_by`, because the probe is
+  keyed by resource name and matches vault titles by `_VAULT_TITLE_KEYWORDS`, not by the text a
+  case happens to hold. **One edit to lane 7's `tools/improvement_resources.py`** makes the name
+  probeable: `"meta_model_api"` appended to `RESOURCES` (`:52-59`) and
+  `"meta_model_api": (("meta", "model", "api"), ("muse", "api"))` added to
+  `_VAULT_TITLE_KEYWORDS` (`:66-71`); `probe()`'s signature and every existing entry are
+  untouched, and `tests/unit/test_improvement_resources.py` compares `set(report)` to
+  `set(RESOURCES)` (`:75`, `:142`, `:200`) so it passes unchanged. The block lives on the
   immortal case because `ImprovementInvestigation` carries a 30-day TTL
   (`models/improvement_investigation.py:96-99`) and a human-paced wait has no deadline; `rank()`
   reads `case.blocked_by` and never an investigation row. All four join `FORBIDDEN_INDEX_NAMES`.
@@ -715,7 +734,32 @@ built here so the recursive comparison can run on real arms later.
   `consumed = {eid for c in ImprovementCase.query.filter(project_key=pk) for eid in (c.evidence_ids or [])}`;
   `pending = [e for e in rows if e.id not in consumed]`. Clustering a window instead would let a
   cluster that accrues one row per tick never reach two rows inside one window (the critique's
-  finding), so the window is not the unit. `pending` is grouped by a **dedup identity**: for
+  finding), so the window is not the unit.
+- **Seeded rows first (cold start).** Before the URL routing and before clustering, every
+  pending row's `detail` is parsed as JSON (a parse failure or a non-object is "not seeded", never
+  an error). A row whose `detail` carries a `seed` key **and** a `priority_area` value in
+  `PRIORITY_AREAS` (`models/improvement_case.py:72-84`) is a one-row cluster that opens a case
+  with that `priority_area`, `dedup_identity=f"seed:{meta['seed']}"`, and the row id consumed in
+  the same `save()`, bypassing both the URL-to-intake route and `CASE_OPEN_MIN_EVIDENCE`. The
+  novelty check still runs on that identity, so re-seeding the same seed attaches to the existing
+  case rather than opening a second. A seeded row that lacks `priority_area` (or names one outside
+  the tuple) gets no special treatment and takes the ordinary route; the module docstring says so.
+  This is what lets the first real cycle produce a case id on the first tick from one
+  adapter-written row: without it the tick writes an empty `order` with a one-entry
+  `intake_pool`, proposes nothing, and runbook step 4 has no case to dispatch for. The seed
+  marker also keeps the report honest (`is_seeded()`, below). `tests/unit/test_improvement_planner.py::test_seeded_inspiration_opens_a_case`
+  seeds one adapter-shaped `inspiration` row with `detail={"seed": "charter-s3:inference",
+  "priority_area": "inference", "url": "https://..."}`, ticks, and asserts exactly one case with
+  `priority_area="inference"` holding that row id, `dedup_identity="seed:charter-s3:inference"`,
+  and zero `inspiration_intake` investigations.
+- **The intake-pool rule.** An `inspiration_intake` investigation opened from an unseeded URL row
+  is never the subject of a tick proposal: the tick proposes for cases only. It is worked by a
+  research session already dispatched for a case in the same `priority_area` (the brief lists the
+  intake pool for that area), and that investigation's `resolve()` may call `open_cases` with the
+  extracted substance as the cluster's identity, at which point a case exists and the next tick
+  ranks it. With no session running, the pool waits; the snapshot's `intake_pool` shows it waiting.
+  Stated in the module docstring so the cold-start behavior is documented, not discovered.
+- `pending` rows that were not seeded are grouped by a **dedup identity**: for
   `correction` rows, the classification plus the normalized first eight words of `text`; for
   `lesson` rows, the `stage_guess` plus the same normalized prefix; for `promise` rows, the
   constant `"unqualified-promises"` (one case, growing evidence); for `inspiration` rows with a
@@ -865,8 +909,12 @@ built here so the recursive comparison can run on real arms later.
   any of `charter_passage`, `confidence`, `consequence`, `overturning_observation`; a resolve with
   an assumption also writes the assumption's summary onto the case's `summary` tail so it survives
   the 30-day TTL. The same rule covers the two human-paced waits: a `resource_acquisition`
-  resolve with disposition `vault_request_written` writes the request text (item title,
-  fingerprint field, terms clause) onto `case.summary` and sets `case.blocked_by`; a
+  resolve with disposition `vault_request_written` takes a required `resource_name`, refuses it
+  with `UNKNOWN_RESOURCE` unless it is in `tools.improvement_resources.RESOURCES`, writes the
+  request text (item title, fingerprint field, terms clause) onto `case.summary`, and sets
+  `case.blocked_by = f"vault:{resource_name}"`
+  (`tests/unit/test_improvement_investigations.py::test_blocked_by_names_a_known_resource`
+  asserts the refusal and the written shape); a
   `charter_amendment` open writes the amendment request text onto `case.summary`. Both survive
   the investigation row's expiry, and the tick's keep-alive `save()` (Planner tick, above) keeps
   the rows themselves alive while the wait lasts, so the digest can still render the request and
@@ -903,10 +951,14 @@ built here so the recursive comparison can run on real arms later.
   The evidence is an `inspiration` row written **by the adapter**, not by hand: the builder saves
   one `Memory` with `source="human"` into the partition `human_memories` enumerates
   (`reflections/improvement_collect.py:205`), whose `content` cites charter §3 and whose
-  `reference` is the JSON `{"seed": "charter-s3:inference", "seeded_by": "build task 9", "plan":
-  "#3217", "url": "<the source URL>"}`, then runs `run_improvement_collect()`; `collect_inspirations`
-  (`:329`) writes the row with `source_ref="memory:<id>"` and `detail=reference`. **Seeded rows
-  are marked so the records alone can tell them from observed ones**: a row is seeded when
+  `reference` is the JSON `{"seed": "charter-s3:inference", "priority_area": "inference",
+  "seeded_by": "build task 9", "plan": "#3217", "url": "<the source URL>"}`, then runs
+  `run_improvement_collect()`; `collect_inspirations` (`:329`) writes the row with
+  `source_ref="memory:<id>"` and `detail=reference`. The `priority_area` key is what makes the
+  planner open a case from this one row (Case opening, "Seeded rows first"): without it the row
+  would route to an `inspiration_intake` investigation and no case would exist for the session
+  to be dispatched on. **Seeded rows are marked so the records alone can tell them from observed
+  ones**: a row is seeded when
   `source_ref.startswith("seed:")` (rows written directly, as the integration tests do with
   `source_ref="seed:charter-s3:inference"`) or when `detail` parses as JSON carrying a `seed` key
   (rows the adapter wrote from a seeded memory). `tools/improvement_report.py::is_seeded(evidence)`
@@ -927,12 +979,16 @@ built here so the recursive comparison can run on real arms later.
   clause that confines it to open-source work. The request reaches Tom in the three-day digest
   under its own heading. **No controller module places a credential**, writes `.env`, or invokes
   `op`; the Verification table asserts it.
-- `resolve()` on the `vault_request_written` disposition sets
-  `case.blocked_by="vault request: Meta Model API key"` and copies the request text onto
-  `case.summary`; the case then ranks at position 1 **blocked** until the tick's read-only `probe`
-  reports the item `verified`, at which point the tick clears `blocked_by` and lane 5b (No-Gos)
-  owns the experiment that would use it. The wait has no deadline and survives the
-  investigation TTL because the block and the request text live on the case.
+- `resolve()` on the `vault_request_written` disposition, called with
+  `resource_name="meta_model_api"`, sets `case.blocked_by="vault:meta_model_api"` and copies the
+  request text (title "Meta Model API key", fingerprint field, terms clause) onto `case.summary`;
+  the case then ranks at position 1 **blocked** until the tick's read-only `probe()` reports
+  `report["meta_model_api"]["state"] == "verified"` (the title match is
+  `_VAULT_TITLE_KEYWORDS["meta_model_api"]`, so the item Tom places must carry "Meta Model API"
+  or "Muse API" in its title, and the request text says so), at which point the tick clears
+  `blocked_by`, journals `case_unblocked`, and lane 5b (No-Gos) owns the experiment that would
+  use it. The wait has no deadline and survives the investigation TTL because the block and the
+  request text live on the case.
 
 #### Experiments
 
@@ -1063,9 +1119,13 @@ demonstrates the cycle's shape, not an acquired ability.**
    resource-acquisition action") through the ORM, then run the evidence tick once
    (`python -c "from reflections.improvement_collect import run_improvement_collect as r; print(r())"`)
    and confirm `counts["inspirations"] >= 1` and that the new `inspiration` row's `detail`
-   carries the `seed` key. The adapter writes the row; the runbook never writes
-   `ImprovementEvidence` directly, so the memory-inspiration path is the one exercised.
-3. Run the planner tick once; confirm a snapshot exists and `valor-improve ranking` prints it.
+   carries both the `seed` key and `"priority_area": "inference"`. The adapter writes the row;
+   the runbook never writes `ImprovementEvidence` directly, so the memory-inspiration path is the
+   one exercised.
+3. Run the planner tick once; confirm a snapshot exists whose `order` holds exactly one
+   `inference` case (opened by the seeded-row rule, `dedup_identity="seed:charter-s3:inference"`)
+   and an empty `intake_pool`, that the tick proposed one investigation action for it, and that
+   `valor-improve ranking` prints it. That case id is the one steps 4 through 6 use.
 4. Let lane 3's adapter dispatch the research session (or, if the adapter is not yet enabled on
    this machine, run `valor-session create` for the research skill with the case id, which is the
    same top-level path the adapter uses and is recorded as such in the report).
