@@ -1581,24 +1581,24 @@ executed against the tree at plan time to confirm it runs and produces the shape
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Harness unit tests pass | `scripts/pytest-clean.sh tests/unit/ -k improvement_eval -q` | exit code 0 |
+| Harness unit tests pass (pure modules; the arena, corpus, and runner suites spawn Redis arms and take about seven minutes under `-n 6`, past the runner's 120s cap, so they are exercised by the end-to-end row below and recorded in the build's mutation proof record) | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_correction.py tests/unit/test_improvement_eval_statistics.py tests/unit/test_improvement_eval_blinding.py -q` | exit code 0 |
 | Judge and calibration tests pass | `scripts/pytest-clean.sh tests/unit/test_serves_charter_judge.py tests/unit/test_improvement_eval_calibration.py -q` | exit code 0 |
 | Record and migration tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_models.py tests/unit/test_migrations.py -q` | exit code 0 |
 | Harness env integration test passes | `scripts/pytest-clean.sh tests/integration/test_session_spawning.py -q` | exit code 0 |
 | End-to-end evaluation test passes | `scripts/pytest-clean.sh tests/integration/test_improvement_eval_end_to_end.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/improvement_eval/ models/improvement_evaluation.py scripts/update/migrations.py agent/session_executor.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/improvement_eval/ models/improvement_evaluation.py` | exit code 0 |
-| `metrics.py` unmodified (criterion 7) | `.venv/bin/python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('tools/memory_eval/metrics.py').read_bytes()).hexdigest())"` | output is `424dbce86534f955d39f2e56be92ba40b090172045b81e06e6dd8241a84702e7` |
+| `metrics.py` unmodified (criterion 7) | `.venv/bin/python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('tools/memory_eval/metrics.py').read_bytes()).hexdigest())"` | output contains 424dbce86534f955d39f2e56be92ba40b090172045b81e06e6dd8241a84702e7 |
 | `metrics.py` unmodified — human cross-check | `git diff --exit-code origin/main -- tools/memory_eval/metrics.py` | exit code 0 |
 | `metrics.py` is imported (criterion 7) | `grep -rE "from tools\.memory_eval(\.metrics)? import" tools/improvement_eval/ \| wc -l` | output > 0 |
-| `charter_digest` on the evaluation record | `python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
+| `charter_digest` on the evaluation record | `.venv/bin/python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
 | `charter_digest` pinned as never-indexed | `grep -c '"charter_digest"' tests/unit/test_improvement_models.py` | output > 0 |
-| Migration function registered in `MIGRATIONS` | `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` | output contains `True` |
+| Migration function registered in `MIGRATIONS` | `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` | output contains True |
 | `VALOR_PROJECT_KEY` in `_harness_env` | `grep -c '"VALOR_PROJECT_KEY"' agent/session_executor.py` | output > 0 |
-| Judge id disjoint from the existing roster | `python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
+| Judge id disjoint from the existing roster | `.venv/bin/python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
 | §7 guard is called, not reimplemented | `grep -r "is_open_source" tools/improvement_eval/ \| wc -l` | output > 0 |
 | Anti-criterion: arena never touches the db-claim pool | `grep -r "db_claim" tools/improvement_eval/ \| wc -l` | match count == 0 |
-| Anti-criterion: the parent never reassigns `REDIS_URL` | `grep -rE "os\.environ\[[\"']REDIS_URL[\"']\][[:space:]]*=\|os\.environ\.setdefault\([[:space:]]*[\"']REDIS_URL\|putenv\([[:space:]]*[\"']REDIS_URL" tools/improvement_eval/ \| wc -l` | match count == 0 (the arm's `REDIS_URL` is a **key in a subprocess env dict**, which this regex deliberately permits and the old `REDIS_URL[^\"]*=` form would have flagged) |
+| Anti-criterion: the parent never reassigns `REDIS_URL` (the arm's `REDIS_URL` is a **key in a subprocess env dict**, which this regex deliberately permits and the old `REDIS_URL[^\"]*=` form would have flagged) | `grep -rE "os\.environ\[[\"']REDIS_URL[\"']\][[:space:]]*=\|os\.environ\.setdefault\([[:space:]]*[\"']REDIS_URL\|putenv\([[:space:]]*[\"']REDIS_URL" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: the parent's canonical pool is never re-pointed | `grep -rE "set_REDIS_DB_settings" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: retrieval never ranks through the unpinnable decay clock | `grep -rE "top_by_decay" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: no raw Redis command on Popoto-managed keys | `grep -rE "\.(hgetall\|hget\|hmget\|hscan\|scan_iter\|zadd\|zrem\|sadd\|srem)\(" tools/improvement_eval/ \| wc -l` | match count == 0 |
