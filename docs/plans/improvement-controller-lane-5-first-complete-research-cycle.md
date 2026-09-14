@@ -560,11 +560,20 @@ built here so the recursive comparison can run on real arms later.
    nothing), `revision_cadence_seconds=settings.improvement.controller_tick_seconds`,
    `planner_prompt_digest=sha256` of the brief template text, `skill_digest=sha256` of
    `.claude/skills/improve-research/SKILL.md`, `extra={"ranking_module_digest": sha256 of
-   tools/improvement_ranking.py}`. When `tools.improvement_recursion.process.research_process_digest`
-   is importable it is called; otherwise `tools/improvement_ranking.py::process_digest` computes
-   the identical canonical form (`json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`,
-   `"sha256:<hex>"`) so the two agree byte for byte once both exist. A test pins the canonical form
-   against a fixture spec.
+   tools/improvement_ranking.py}`. **One implementation of the digest, lane 6's.** This lane
+   stores the canonical spec JSON on the revision in a new plain field
+   `research_process_spec = Field(null=True)` (bytes:
+   `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`, built by
+   `tools/improvement_ranking.py::process_spec_json(spec)`), and sets `research_process_digest`
+   only by calling `from tools.improvement_recursion.process import research_process_digest`;
+   when that import fails the digest stays `None`. A second hashing routine here would be the
+   drift the verifying store exists to prevent (one field-order or float-formatting difference
+   makes every pre-merge digest incomparable with every post-merge one). Once lane 6 lands, a
+   one-line backfill (`valor-improve revise-model backfill-digests`, or the planner tick's
+   amendment-resolution pass, whichever ships first) computes the digest for every revision with a
+   spec and no digest. `tests/unit/test_improvement_ranking.py::test_process_spec_canonical_bytes`
+   pins the spec bytes against a fixture spec, and the fixture is written so lane 6 can copy it
+   verbatim into its own canonical-form test.
 2. **Arm runner.** The planner tick's core is a pure function,
    `reflections/improvement_plan.py::plan_tick(project_key, *, process_spec, case_ids=None,
    budget_cap=None, arm_run_id=None) -> TickResult`, and `run_improvement_planner` is its
@@ -587,9 +596,16 @@ built here so the recursive comparison can run on real arms later.
 #### Consumed from lane 4 (#3216), exact calls
 
 - `tools.improvement_eval.corpus.export_corpus(project_key) -> CorpusExport` (`corpus.py:145`):
-  the frozen corpus and its digest; its `records` are what the known-item builder samples from.
+  the frozen corpus and its digest. The dataclass (`corpus.py:130-142`) carries `jsonl_text`, not
+  a records list; `tools/improvement_experiment.py::known_item_records(export) ->
+  list[KnownItemRecord]` parses the body lines (skipping line one, the manifest) into
+  `KnownItemRecord(memory_id=values["memory_id"], content=values["content"],
+  importance=values["importance"])`, the three attributes `build_known_item_set` reads
+  (`query_set.py:135-148`), so every `gold_id` names a record in the frozen corpus.
 - `tools.improvement_eval.runner.capture_baseline(project_key, queries, *, incumbent, export)`
-  (`runner.py:309`): the incumbent's ranked ids on the frozen corpus.
+  (`runner.py:309`): the incumbent's ranked ids on the frozen corpus. `_retrieve_job`
+  (`runner.py:291-299`) copies every present `arm_params` key into the job, and a present `None`
+  is not "absent", so the incumbent dict is exactly `{"limit": 10}`: no `None`-valued keys, ever.
 - `tools.improvement_eval.runner.freeze_protocol(protocol, *, store) -> "$CF:..."` (`runner.py:181`).
 - `tools.improvement_eval.runner.compute_contract_digest(experiment)` (`runner.py:168`): computed
   once at freeze and stored; the runner recomputes it at Gate 0.
@@ -628,7 +644,16 @@ built here so the recursive comparison can run on real arms later.
   each needs its own index set; a `lesson` coerced to `other` is unqueryable as a lesson.
 - New plain fields on `ImprovementCase`, `null=True`: `evaluation_ids` (JSON list),
   `rejected_reason` (free text set by `apply_verdict`), `dedup_identity` (the evidence cluster
-  identity the novelty check compares; a plain string, never indexed).
+  identity the novelty check compares; a plain string, never indexed), and `blocked_by` (free
+  text, e.g. `"vault request: Meta Model API key"`; set by `resolve()` on a
+  `vault_request_written` disposition, cleared by the tick when
+  `tools.improvement_resources.probe` reports the item `verified`). The block lives on the
+  immortal case because `ImprovementInvestigation` carries a 30-day TTL
+  (`models/improvement_investigation.py:96-99`) and a human-paced wait has no deadline; `rank()`
+  reads `case.blocked_by` and never an investigation row. All four join `FORBIDDEN_INDEX_NAMES`.
+- New plain field on `ImprovementModelRevision`, `null=True`: `research_process_spec` (the
+  canonical spec JSON, "Provided to lane 6" item 1). `research_process_digest` is set only through
+  lane 6's function and is `None` until lane 6 merges.
 - `ImprovementExperiment` is unchanged; `candidate_surfaces` holds the envelope keys the candidate
   varies, and `manifest` holds `{"protocol_ref", "base_revision", "candidate_ref", "candidate":
   {...}, "incumbent": {...}, "envelope": "retrieval_parameters", "corpus_digest"}` (the two ref
@@ -656,7 +681,15 @@ built here so the recursive comparison can run on real arms later.
   `detail` = the judge's quoted span, `confidence` = the judge's stated confidence. The judge routes
   through lane 3's meter under the purpose `promise_detector`; when the meter refuses (unit 2
   exhausted or `metering="unknown"`), the adapter writes nothing and records
-  `findings.append("promises-skipped: unit 2 unavailable")`, which the tick summary reports.
+  `skipped.append("promises-skipped: unit 2 unavailable")`, which the tick summary reports.
+- **Tick status rule**: `run_improvement_collect` today sets `"status": "error" if
+  len(findings) == 3` (`reflections/improvement_collect.py:515`), a literal tied to three
+  adapters. It becomes two lists, `failed` (an adapter raised) and `skipped` (an adapter declined
+  by rule: the meter refused, the detector is off), with
+  `status = "error" if len(failed) == n_adapters else "success"` where `n_adapters` is the length
+  of the adapter tuple; both lists are returned on the result. A routine unit-2 refusal is a skip
+  and never counts toward `error`; a test asserts five skips plus zero failures is `success` and
+  five failures is `error`.
   Gated additionally by `ImprovementSettings.promise_detector_enabled` (new, default `False`,
   `IMPROVEMENT__PROMISE_DETECTOR_ENABLED`, declared `# @optional` in `.env.example` with a
   `Field(description=...)` sentence). **Off by default because it spends money**; turning it on
@@ -670,15 +703,28 @@ built here so the recursive comparison can run on real arms later.
 
 #### Case opening and the novelty check
 
-- `reflections/improvement_plan.py::open_cases(project_key, charter)` reads evidence rows newer
-  than the last tick's watermark (stored on the controller head payload, not in a file), groups
-  them by a **dedup identity**: for `correction` rows, the classification plus the normalized first
-  eight words of `text`; for `lesson` rows, the `stage_guess` plus the same normalized prefix; for
-  `promise` rows, the constant `"unqualified-promises"` (one case, growing evidence); for
-  `inspiration` rows with a URL, no case: an `inspiration_intake` investigation is opened instead,
-  `stage="draft"`, with the URL in `sources`, for the research session to fulfil.
+- `reflections/improvement_plan.py::open_cases(project_key, charter)` clusters **unconsumed**
+  rows, not a time window. A watermark on the controller head payload (never a file) is only a
+  scan bound: the tick reads evidence rows with `observed_at` newer than
+  `watermark - EVIDENCE_TTL` (the rows still alive under the 30-day TTL), then drops every id that
+  any case already holds:
+  `consumed = {eid for c in ImprovementCase.query.filter(project_key=pk) for eid in (c.evidence_ids or [])}`;
+  `pending = [e for e in rows if e.id not in consumed]`. Clustering a window instead would let a
+  cluster that accrues one row per tick never reach two rows inside one window (the critique's
+  finding), so the window is not the unit. `pending` is grouped by a **dedup identity**: for
+  `correction` rows, the classification plus the normalized first eight words of `text`; for
+  `lesson` rows, the `stage_guess` plus the same normalized prefix; for `promise` rows, the
+  constant `"unqualified-promises"` (one case, growing evidence); for `inspiration` rows with a
+  URL, no case: an `inspiration_intake` investigation is opened instead, `stage="draft"`, with the
+  URL in `sources`, for the research session to fulfil (its evidence id is consumed by that
+  investigation's `evidence_ids`, so it is not re-clustered).
 - A cluster becomes a case when it has at least `CASE_OPEN_MIN_EVIDENCE = 2` rows (provisional,
-  tunable) or a single `architectural` correction. The case carries `priority_area` from a rule
+  tunable) or a single `architectural` correction, and every cluster row id is appended to
+  `case.evidence_ids` in the same `save()` that opens the case, so the next tick sees them
+  consumed. A pending row already attached to an open case with the same identity is appended to
+  that case (`evidence_attached`), never re-clustered into a second. `tests/unit/test_improvement_planner.py::test_cluster_opens_across_two_ticks`
+  seeds one row, ticks, seeds a second row with the same identity, ticks, and asserts exactly one
+  case holding both ids. The case carries `priority_area` from a rule
   table in the module docstring (architectural correction → `orchestration`; `lesson` for
   `do-build`/`do-patch` → `orchestration`, for `do-test`/`do-pr-review` → `evaluators`, for
   `do-plan`/`do-plan-critique` → `research_process`, for `do-docs`/`do-merge` → `other`;
@@ -714,10 +760,12 @@ built here so the recursive comparison can run on real arms later.
   - **unlocked capacity**: high for `inference`, `cloud_execution`, `research_process`; medium for
     `skills`, `evaluators`, `memory`, `orchestration`; low otherwise.
 - Order: by a lexicographic key `(blocked, -opportunity_cost, -unlocked_capacity, -quality,
-  resource_cost, -uncertainty, created_at)`, where `blocked` is true when the case's next action
-  cannot run (resource cost high for a missing credential or arm shape). Blocked cases keep their
-  position in the printed list with a `blocked_by` reason; the tick's single proposal goes to the
-  first unblocked case. **This is how "cheap inference ranks first and journey preservation is
+  resource_cost, -uncertainty, created_at)`, where `blocked` is `bool(case.blocked_by)`: the
+  reason is a field on the immortal case, written by `resolve()` for a vault request and cleared
+  by the tick on a `verified` probe, so a 30-day investigation TTL cannot silently lift a block.
+  `rank()` reads no investigation row to decide it. Blocked cases keep their position in the
+  printed list with the `blocked_by` text; the tick's single proposal goes to the first unblocked
+  case. **This is how "cheap inference ranks first and journey preservation is
   eligible" both hold at once**: the inference case sits at position 1 blocked on a vault request,
   and the first experimentable case is the first unblocked position.
 - Ordinal, not numeric: no weights, no sums. The parent plan says "ordinal until calibration
@@ -744,8 +792,13 @@ built here so the recursive comparison can run on real arms later.
 - Gate: `settings.improvement.enabled`, same shape as the evidence tick (`status="skipped"`).
 - Order per tick, each step fail-soft and reported in `counts`: `load_from_file` then `pinned`
   (a missing or unreadable charter ends the tick with `status="error"` and writes nothing, because
-  a case with no digest cannot be ranked); `open_cases`; `rank` + `write_snapshot` +
-  `ranking_recorded`; `propose_one_action`.
+  a case with no digest cannot be ranked); **keep-alive and unblock** (every investigation in
+  `awaiting_authorization` and every `resource_acquisition` investigation with disposition
+  `vault_request_written` gets a `save()` so its TTL restarts from this tick; every case with a
+  `blocked_by` naming a vault item is probed read-only through `tools.improvement_resources.probe`
+  and unblocked on `verified`; the amendment-resolution hook resolves awaiting rows when the
+  pinned digest changed); `open_cases`; `rank` + `write_snapshot` + `ranking_recorded`;
+  `propose_one_action`; the `apply_verdict` backstop.
 - **One proposal per tick, idempotent.** The action id is
   `sha256(case_id + snapshot_ref + action_kind)[:16]`, so a re-run of the same tick proposes the
   same action and lane 3's intent record dedups it. A case with an intent already `admitted`,
@@ -790,7 +843,13 @@ built here so the recursive comparison can run on real arms later.
   and `state="resolved"`, and refuses a `provisional_assumption` whose `assumption_detail` lacks
   any of `charter_passage`, `confidence`, `consequence`, `overturning_observation`; a resolve with
   an assumption also writes the assumption's summary onto the case's `summary` tail so it survives
-  the 30-day TTL.
+  the 30-day TTL. The same rule covers the two human-paced waits: a `resource_acquisition`
+  resolve with disposition `vault_request_written` writes the request text (item title,
+  fingerprint field, terms clause) onto `case.summary` and sets `case.blocked_by`; a
+  `charter_amendment` open writes the amendment request text onto `case.summary`. Both survive
+  the investigation row's expiry, and the tick's keep-alive `save()` (Planner tick, above) keeps
+  the rows themselves alive while the wait lasts, so the digest can still render the request and
+  a decline can still be recorded against the original row.
 - The assumption guard: `assumption_detail.consequence` is checked against four refusal patterns
   (redefines the intended outcome, erases a requirement, grants authority, increases a budget)
   by a rule the module states; a match is refused with a reason code and the session is told to
@@ -819,11 +878,21 @@ built here so the recursive comparison can run on real arms later.
 
 #### The first resource-acquisition action
 
-- The build seeds one case in `priority_area="inference"` from the charter §3 first priority
-  (evidence: an `inspiration` row the builder writes citing charter §3, so the case has real
-  evidence and the novelty check has an identity). Its investigation of kind
-  `resource_acquisition` targets "Muse Spark 1.3 (Meta) and any other nearly-free token source" and
-  the research session records what current documentation says with URLs and dates.
+- The build seeds one case in `priority_area="inference"` from the charter §3 first priority.
+  The evidence is an `inspiration` row written **by the adapter**, not by hand: the builder saves
+  one `Memory` with `source="human"` into the partition `human_memories` enumerates
+  (`reflections/improvement_collect.py:205`), whose `content` cites charter §3 and whose
+  `reference` is the JSON `{"seed": "charter-s3:inference", "seeded_by": "build task 9", "plan":
+  "#3217", "url": "<the source URL>"}`, then runs `run_improvement_collect()`; `collect_inspirations`
+  (`:329`) writes the row with `source_ref="memory:<id>"` and `detail=reference`. **Seeded rows
+  are marked so the records alone can tell them from observed ones**: a row is seeded when
+  `source_ref.startswith("seed:")` (rows written directly, as the integration tests do with
+  `source_ref="seed:charter-s3:inference"`) or when `detail` parses as JSON carrying a `seed` key
+  (rows the adapter wrote from a seeded memory). `tools/improvement_report.py::is_seeded(evidence)`
+  is the single definition, and the report's "What this does not establish" names every case any
+  of whose evidence is seeded. The case's investigation of kind `resource_acquisition` targets
+  "Muse Spark 1.3 (Meta) and any other nearly-free token source" and the research session records
+  what current documentation says with URLs and dates.
 - The action ends in one of two dispositions and no third: (a) a source needing **no new
   credential** (an OpenRouter `:free` model through the key already in the vault) is integrated as
   a config entry behind `ImprovementSettings.cheap_inference_model` (new, default `""` meaning
@@ -837,31 +906,58 @@ built here so the recursive comparison can run on real arms later.
   clause that confines it to open-source work. The request reaches Tom in the three-day digest
   under its own heading. **No controller module places a credential**, writes `.env`, or invokes
   `op`; the Verification table asserts it.
-- The case then ranks at position 1 **blocked** with `blocked_by="vault request: Meta Model API
-  key"` until `probe` reports the item `verified`, at which point the block lifts on the next tick
-  and lane 5b (No-Gos) owns the experiment that would use it.
+- `resolve()` on the `vault_request_written` disposition sets
+  `case.blocked_by="vault request: Meta Model API key"` and copies the request text onto
+  `case.summary`; the case then ranks at position 1 **blocked** until the tick's read-only `probe`
+  reports the item `verified`, at which point the tick clears `blocked_by` and lane 5b (No-Gos)
+  owns the experiment that would use it. The wait has no deadline and survives the
+  investigation TTL because the block and the request text live on the case.
 
 #### Experiments
 
 - **Envelope**: `tools/improvement_experiment.py::ENVELOPES = {"retrieval_parameters": {"limit":
   (1, 50), "rrf_k": (1, 200), "min_rrf_score": (0.0, 1.0)}}`. `validate_candidate(candidate)`
   refuses any key outside the envelope, any value outside its range, and a candidate identical to
-  the incumbent. The incumbent is the production defaults (`limit=10`, `rrf_k=None`,
-  `min_rrf_score=None`), read from `retrieve_memories`'s signature at freeze time and recorded in
-  the manifest, never assumed.
+  the incumbent. The incumbent dict is exactly `{"limit": 10}`: the production default for the
+  one key `handle_job` reads today, taken from `retrieve_memories`'s signature at freeze time and
+  recorded in the manifest. `rrf_k` and `min_rrf_score` are **omitted** from the incumbent, never
+  written as `None`, because `_retrieve_job` (`runner.py:291-299`) copies every present key into
+  the job and the arm worker would then forward `None` explicitly; the same dict is passed to
+  `capture_baseline` and written to `protocol["incumbent"]`, and `validate_candidate` refuses a
+  candidate carrying a `None` value for the same reason.
 - **Freeze** (`freeze_experiment(case_id, project_key, *, hypothesis, mechanism, falsifier,
-  candidate, n_queries=30, seed)`): novelty check against `rejected` cases and #2082's plan
-  (`docs/plans/hybrid-retrieval-eval.md`, cited in `prior_answers` if the candidate varies only
-  `retrieval_mode`-adjacent behavior); `export_corpus`; `build_known_item_set(export.records,
-  n_queries=, seed=)` under unit-2 reservation `known_item_generation`; `capture_baseline`;
-  protocol `{"batch_size": n_queries, "endpoints": ["recall_at_5", "mrr"], "thresholds":
-  {"mrr": {"margin": 0.02, "alpha": 0.05}, "recall_at_5": {"margin": 0.02, "alpha": 0.05}},
-  "holdout_partition": f"known-item-{seed}", "queries", "baseline", "incumbent", "candidate",
-  "infra_failure_cap": 0}`; `freeze_protocol`; manifest; `contract_digest`; `state="frozen"`,
-  `frozen_at`; journal event `experiment_frozen` with the digest. The margins are provisional and
-  named in the protocol, which is what makes them part of the contract. `n_queries=30` is a
-  minimum-worthwhile-effect placeholder the protocol discloses; small samples yield
-  `inconclusive`, and the plan says so rather than pretending 30 is powered.
+  candidate, n_queries=30, seed)`), in order:
+  1. Novelty check against `rejected` cases in the same `dedup_identity`.
+  2. Prior answer, unconditional for this envelope: `if envelope == "retrieval_parameters":
+     prior_answers.append({"ref": "#2082", "doc": "docs/features/hybrid-retrieval-eval.md",
+     "plan": "docs/archive/plans-completed/hybrid-retrieval-eval.md", "why": "prior paired
+     evaluation of retrieval over this corpus"})`, stored on the experiment's `notes` JSON and
+     shown in the brief. No trigger heuristic decides whether #2082 is relevant; it is the one
+     prior evaluation of retrieval on this corpus and every retrieval experiment cites it.
+  3. `export_corpus`; `records = known_item_records(export)` from `export.jsonl_text` ("Consumed
+     from lane 4").
+  4. `items = build_known_item_set(records, n_queries=n_queries, seed=seed)` under unit-2
+     reservation `known_item_generation`. The builder skips degenerate generations and returns
+     fewer than requested; `queries = [{"trial_id": f"q{i:03d}", "query_text": it.query,
+     "gold_id": it.gold_memory_id} for i, it in enumerate(items)]`. Below `MIN_QUERIES = 20`
+     the freeze refuses with `KNOWN_ITEM_SHORTFALL` (reason names produced versus requested),
+     leaves the experiment in `proposed`, and writes no protocol; the session may re-run with a
+     different seed or a larger `n_queries`.
+  5. `capture_baseline(project_key, queries, incumbent={"limit": 10}, export=export)`.
+  6. Protocol `{"batch_size": len(queries), "endpoints": ["recall_at_5", "mrr"], "thresholds":
+     {"mrr": {"margin": 0.02, "alpha": 0.05}, "recall_at_5": {"margin": 0.02, "alpha": 0.05}},
+     "holdout_partition": f"known-item-{seed}", "queries", "baseline", "incumbent", "candidate",
+     "infra_failure_cap": 0}`. `batch_size` is the count actually produced, set **after**
+     generation, because `FixedBatchStoppingRule.is_complete` (`correction.py:95-97`,
+     `runner.py:768-770`) returns `inconclusive` unconditionally on any shortfall against the
+     declared batch; a test freezes with a builder fixture that drops two generations and asserts
+     `protocol["batch_size"] == len(protocol["queries"])`.
+  7. `freeze_protocol`; manifest; `contract_digest`; `state="frozen"`, `frozen_at`; journal event
+     `experiment_frozen` with the digest.
+
+  The margins are provisional and named in the protocol, which is what makes them part of the
+  contract. `n_queries=30` is a minimum-worthwhile-effect placeholder the protocol discloses;
+  small samples yield `inconclusive`, and the plan says so rather than pretending 30 is powered.
 - **Evaluate** (`valor-improve experiment evaluate --id`): a unit-2 reservation `evaluation_judges`
   sized from `n_queries * 2 * judge_price_estimate`, then `runner.evaluate`. The session runs it
   with `run_in_background` and polls `valor-improve experiment show --id` (prints state, verdict,
@@ -930,15 +1026,24 @@ demonstrates the cycle's shape, not an acquired ability.**
   derived, not authored: **"What was measured"** (endpoints, corpus digest, query count, holdout
   partition), **"What this does not establish"** (always includes: no claim above "loop
   operational"; the sample size and margin; that a retrieval-parameter gain says nothing about
-  agent behavior; any `metering="estimated"` receipts), and **"What would change the answer"** (the
-  falsifier, the overturning observations of every assumption cited, and a larger sample). The
-  builder posts the first real cycle's report on #3217 verbatim.
+  agent behavior; any `metering="estimated"` receipts; and a **seeded-inputs line** naming every
+  case any of whose evidence rows `is_seeded()` reports, with the `seed` marker text, so a reader
+  of the report knows which cases the builder planted and which the observer collected), and
+  **"What would change the answer"** (the falsifier, the overturning observations of every
+  assumption cited, and a larger sample). A test seeds one marked and one unmarked row on two
+  cases and asserts the line names exactly the marked case. The builder posts the first real
+  cycle's report on #3217 verbatim.
 
 #### Running the first real cycle (the build's last task, on the owning machine)
 
 1. `IMPROVEMENT__ENABLED=true` for the run, in the shell that runs the ticks, never in `.env`.
-2. Seed the one `inference` inspiration row and let the evidence tick run once
-   (`python -c "from reflections.improvement_collect import run_improvement_collect as r; print(r())"`).
+2. Seed one `Memory` (`source="human"`, `project_key="valor"`, `content` citing charter §3's
+   first priority with the source URL, `reference` = the seed JSON from "The first
+   resource-acquisition action") through the ORM, then run the evidence tick once
+   (`python -c "from reflections.improvement_collect import run_improvement_collect as r; print(r())"`)
+   and confirm `counts["inspirations"] >= 1` and that the new `inspiration` row's `detail`
+   carries the `seed` key. The adapter writes the row; the runbook never writes
+   `ImprovementEvidence` directly, so the memory-inspiration path is the one exercised.
 3. Run the planner tick once; confirm a snapshot exists and `valor-improve ranking` prints it.
 4. Let lane 3's adapter dispatch the research session (or, if the adapter is not yet enabled on
    this machine, run `valor-session create` for the research skill with the case id, which is the
@@ -1087,8 +1192,8 @@ same contract shape. The plan does not pretend 30 is powered.
 **Impact:** Ten judge calls per tick is 960 calls a day at a cheap model's price, and unit 2 is
 shared with the evaluator.
 **Mitigation:** Off by default (`promise_detector_enabled=False`); reserves through lane 3's meter
-under its own purpose so it cannot starve `evaluation_judges`; skips with a `findings` entry when
-the meter refuses; the sample cap is a named constant. The cheap model is the one in
+under its own purpose so it cannot starve `evaluation_judges`; records a `skipped` entry (never a
+failure) when the meter refuses; the sample cap is a named constant. The cheap model is the one in
 `ImprovementSettings.cheap_inference_model` when set, else `OPENROUTER_GEMMA4_FREE`.
 
 ### Risk 6: The digest becomes a question by accident
@@ -1141,7 +1246,10 @@ ranking. The backstop in the next tick applies any `complete` evaluation whose c
 **Mitigation:** `record_claims` re-reads the row and refuses on a missing row or a non-`open`
 state with a reason code; the session opens a new investigation citing the old id in
 `prior_answers`. The TTL is thirty days and a session is hours, so this is a correctness rule more
-than an expected event.
+than an expected event. The two rows that legitimately outlive thirty days (an amendment request
+in `awaiting_authorization`, a `vault_request_written` disposition) are kept alive by the tick's
+per-tick `save()` and their substance is copied onto the immortal case (Investigations, above),
+so expiry of either is a stopped tick, never a silent lift.
 
 ### Race 4: The digest and a resolving session touch the same watermark
 **Location:** `reflections/improvement_assumption_digest.py`
