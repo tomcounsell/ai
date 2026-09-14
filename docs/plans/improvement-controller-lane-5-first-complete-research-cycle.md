@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -219,7 +219,8 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
   LLM-generates one query per record whose answer is that record, skipping degenerate generations
   (`:100`). It routes through `agent.llm.run_typed` (`agent/llm/wrapper.py:139`, Haiku by default
   via the Anthropic API key, so **paid inference, unit 2**). `tools/memory_eval/hybrid_eval.py:183`
-  is its one caller. The protocol shape lane 4 fixed (`runner.py:96-106`) takes exactly
+  is its one caller. The protocol shape lane 4 fixed (the "Protocol shape (JSON)" block in the
+  module docstring, `runner.py:70-80` on `fe6f55072`; `:96-106` is the import block) takes exactly
   `{"trial_id", "query_text", "gold_id"}` per query.
 - **Confidence**: high
 - **Impact on plan**: the experiment freeze reuses `build_known_item_set` on the **exported**
@@ -662,7 +663,8 @@ built here so the recursive comparison can run on real arms later.
   keys per lane 6's request, "Provided to lane 6").
 - Two migrations in `scripts/update/migrations.py`, registered in `MIGRATIONS`, idempotent:
   `improvement_investigation_stage_field` (additive confirm, on the
-  `_migrate_confirm_improvement_v2_fields` precedent at `:1429`) and `retire_sdlc_reflection`
+  `_migrate_confirm_improvement_v2_fields` precedent at `:1463`, registered in `MIGRATIONS` at
+  `:1644`) and `retire_sdlc_reflection`
   (removes `data/sdlc_reflection_last_run.json` if present and records the retirement).
 
 #### Observer adapters
@@ -800,7 +802,24 @@ built here so the recursive comparison can run on real arms later.
   `blocked_by` naming a vault item is probed read-only through `tools.improvement_resources.probe`
   and unblocked on `verified`; the amendment-resolution hook resolves awaiting rows when the
   pinned digest changed); `open_cases`; `rank` + `write_snapshot` + `ranking_recorded`;
-  `propose_one_action`; the `apply_verdict` backstop.
+  `propose_one_action`; the `apply_verdict` backstop. The backstop imports
+  `tools.improvement_experiment.apply_verdict` **inside the step function**, never at module
+  level: task 6 creates that module after task 5 lands, and a module-level import would make
+  task 5's tests fail until task 6 exists. An `ImportError` there is reported as
+  `findings=["verdict backstop unavailable: tools.improvement_experiment not built"]` and the
+  tick continues; once task 6 lands the step runs for real, and the integration test exercises
+  it.
+- **Unblock step, exactly**: `report = tools.improvement_resources.probe()` once per tick (the
+  function takes no item argument, `tools/improvement_resources.py:204`, and returns one entry
+  per name in `RESOURCES`); for every open case with `blocked_by`:
+  `name = case.blocked_by.removeprefix("vault:")`; `if report.get(name, {}).get("state") ==
+  "verified": case.blocked_by = None; case.save()` after a `case_unblocked` journal event
+  carrying the resource name. A `blocked_by` that does not start with `vault:` or names a
+  resource outside `RESOURCES` cannot exist (`resolve()` refuses to write one, Investigations
+  below), so the step has no other branch. `tests/unit/test_improvement_planner.py::test_blocked_case_unblocks_on_verified_probe`
+  seeds a case with `blocked_by="vault:meta_model_api"`, injects a `runner` whose `op item list`
+  payload carries a title containing "Meta Model API", ticks, and asserts `blocked_by is None`
+  and the journal event; its sibling asserts an `absent` probe leaves the block in place.
 - **One proposal per tick, idempotent.** The action id is
   `sha256(case_id + snapshot_ref + action_kind)[:16]`, so a re-run of the same tick proposes the
   same action and lane 3's intent record dedups it. A case with an intent already `admitted`,
