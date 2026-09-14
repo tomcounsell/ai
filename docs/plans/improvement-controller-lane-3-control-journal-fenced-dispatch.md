@@ -121,15 +121,16 @@ Sequencing inside the lane: substrate first (journal, lease, intents, status tri
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Create-or-bind seam on `main` | `grep -c "idempotency_key: str | None = None" agent/agent_session_queue.py` | Dispatch materializes through it; output > 0 |
-| `DeadLetter.stage` on `main` | `grep -c 'stage = IndexedField' models/dead_letter.py` | Exhausted intents write `stage="improvement-intent"`; output > 0 |
-| Charter v2 vocabulary on `main` | `grep -c "charter_digest = Field" models/improvement_case.py` | `propose` refuses against it; output > 0 |
-| Unit-3 meter on `main` | `test -f tools/infrastructure_budget.py` | `valor-improve budget` reads it; exit code 0 |
-| Redis 5+ (effects replication) | `redis-cli INFO server \| grep -E '^redis_version:[5-9]\|^redis_version:[1-9][0-9]'` | `TIME` inside a writing `EVAL`; exit code 0 |
-| `#3220` still open at build start | `gh issue view 3220 --json state -q .state` | If `CLOSED`, delete the interim lease before building anything else (Task 2); output contains OPEN or CLOSED, either is fine, the builder branches on it |
-| `op` non-interactive auth (vault writer integration test only) | `OP_CACHE=false op whoami` | `test_vault_write_integration` skips with a named reason when this fails; no build step depends on it |
+| Create-or-bind seam on main | `grep -q "idempotency_key: str" agent/agent_session_queue.py` | Dispatch materializes through it |
+| DeadLetter stage field on main | `grep -q "stage = IndexedField" models/dead_letter.py` | Exhausted intents write `stage="improvement-intent"` |
+| Charter v2 vocabulary on main | `grep -q "charter_digest = Field" models/improvement_case.py` | `propose` refuses against it |
+| Unit-3 meter on main | `test -f tools/infrastructure_budget.py` | `valor-improve budget` reads it |
+| Redis 5 or later (effects replication) | `.venv/bin/python -c "from utils.redis_client import text_redis; v = text_redis().info('server')['redis_version']; assert int(v.split('.')[0]) >= 5, v"` | `TIME` inside a writing `EVAL` |
+| Issue 3220 state is readable | `gh issue view 3220 --json state -q .state` | Task 2 branches on OPEN or CLOSED; either passes |
 
 Run all checks via `python scripts/check_prerequisites.py docs/plans/improvement-controller-lane-3-control-journal-fenced-dispatch.md`.
+
+`op` non-interactive auth is deliberately absent from the table: only `tests/integration/test_vault_write_integration.py` needs it, and that test skips with a named reason when `OP_CACHE=false op whoami` fails. No build step depends on it.
 
 ## Solution
 
@@ -407,21 +408,249 @@ Lane 2b left promoting `tools/improvement_eligibility.py`'s cache into the contr
 
 ## Success Criteria
 
-_Filled in the next revision of this document._
+- [ ] `valor-improve` exists as a console script, `tools/improvement.py` is referenced from `pyproject.toml`, and `.claude/skills/improve-research/SKILL.md` references `valor-improve propose`
+- [ ] The four fault-injection tests pass: stale-generation rejection at an effect boundary (Race 4), a crash between admission and session creation (Race 2), an unreleased lane slot on restart (Race 3), and journal unavailability with the break-glass recovery exercised end to end (`doctor` reports unreachable, namespace restored, `doctor` reads the pre-outage heads)
+- [ ] `admitted` is in `NON_TERMINAL_STATUSES`, `RECOVERY_OWNERSHIP`, and `ACTIVE_STATUSES` in one commit, `tests/unit/test_recovery_ownership.py` is green, and `admitted` is never selected by the worker, the health check, startup recovery, or the resume drip (each asserted)
+- [ ] Two ticks admitting the same case produce exactly one dispatch and one `AgentSession` row (Race 1)
+- [ ] `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation
+- [ ] A session on the research path attempting `valor-session create --parent` receives the existing `ChildSessionsDisabledError` message
+- [ ] The seam and the lease are consumed with no change to `agent/agent_session_queue.py`; `LeaseProtocol` matches #3220's three declared calls and the conformance suite passes against `CaseLease`
+- [ ] `tools/paid_inference_meter.py` settles a call from `usage.cost`, marks a token-only response `metering="estimated"`, receipts an unsettled reservation `metering="unknown"` on reconcile, and never counts `purpose="sdlc_review"` against the pool
+- [ ] `tools/vault_write.py` writes a `resource_acquired` row with title and fingerprint, emits no credential byte on any path, and `render_resource_acquired_section` renders a seeded row
+- [ ] `valor-improve budget` prints all three units with window boundaries, and unit 3's figures match `tools.infrastructure_budget.status_dict`
+- [ ] `export` then `import` into an empty namespace round-trips a seeded case byte-for-byte on the head and journal
+- [ ] `docs/features/session-recovery-mechanisms.md` documents `admitted` and the reconcile pass; `docs/tools-reference.md` no longer says "planned"
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-_Filled in the next revision of this document._
+The lead orchestrates only. One worktree (`.worktrees/sdlc-3215`, branch `session/sdlc-3215`), a declared file split per builder (Decision 10), commits announced before push, and the mutation review runs in its own checkout.
+
+### Team Members
+
+- **Builder (substrate)**
+  - Name: substrate-builder
+  - Role: `tools/improvement_control/{__init__,keys,journal,lease,intents,projection}.py`, the status trio, `finalize_session` step 7, `config/settings.py` fields, and their unit tests
+  - Agent Type: builder
+  - Domain: Redis/Popoto data, async/concurrency
+  - Resume: true
+
+- **Builder (dispatch and recovery)**
+  - Name: dispatch-builder
+  - Role: `scheduler_adapter.py`, `recovery.py`, `reflections/improvement_intent_reconcile.py`, `agent/session_health.py::any_worker_alive`, the two registrations, the four fault-injection tests
+  - Agent Type: builder
+  - Domain: async/concurrency
+  - Resume: true
+
+- **Builder (money and vault)**
+  - Name: budget-builder
+  - Role: `tools/paid_inference_meter.py`, `tools/vault_write.py`, the `resource_acquired` kind, the judge's record-only call, their tests
+  - Agent Type: builder
+  - Domain: security/untrusted-input
+  - Resume: true
+
+- **Builder (surfaces)**
+  - Name: surface-builder
+  - Role: `tools/improvement.py`, `pyproject.toml`, `export.py`, the research skill, `ui/data/improvement.py::get_control_status`, the control partial, integration tests
+  - Agent Type: builder
+  - Resume: true
+
+- **Test engineer (mutation)**
+  - Name: fence-mutator
+  - Role: mutate each script's generation compare, revision compare, and compare-and-delete one at a time in a private worktree and confirm a named test fails for each; report the matrix
+  - Agent Type: test-engineer
+  - Resume: true
+
+- **Validator**
+  - Name: lane3-validator
+  - Role: run the Verification table, the prerequisite checker, and the Success Criteria; read-only
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: lane3-docs
+  - Role: the Documentation section
+  - Agent Type: documentarian
+  - Resume: true
 
 ## Step by Step Tasks
 
-_Filled in the next revision of this document._
+### 1. Keys, journal, and the transition script
+- **Task ID**: build-journal
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_control_journal.py` (create)
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/improvement_control/__init__.py` with the package docstring (namespace, private alias rule, reason-code vocabulary, #3220 hand-off).
+- `keys.py`: `SCHEMA_VERSION = 1`, builders for every key in Decision 2, and `assert_control_key(key)` raising on any key outside the `improve:` prefix.
+- `journal.py`: `_control_redis()` over `utils.redis_client.text_redis()`; `ensure_schema(project_key)`; `read_head(project_key, case_id) -> Head | None`; `journal_tail(project_key, case_id, n)`; `transition(...) -> TransitionResult` as one `EVAL` (schema, pause, `generation >= highest_accepted`, `expected_revision == revision`, head advance, `RPUSH` + `LTRIM` to `journal_max_entries`, one `TIME` read); `pause(project_key, case_id | None, reason, by)` and `resume(...)` as transitions with events `paused`/`resumed`; connection errors → `UNAVAILABLE`.
+- Add `lease_ttl_seconds=90`, `journal_max_entries=1000`, `max_dispatch_attempts=3` to `ImprovementSettings` with `Field(description=...)` sentences; update `tests/unit/test_settings.py`.
+- Tests: accept and every reason code; bounded journal; unavailability (Failure Path); `INVALID_ARGUMENT` on empty inputs; the holder's own second write accepted.
+
+### 2. Lease protocol and interim lease
+- **Task ID**: build-lease
+- **Depends On**: none
+- **Validates**: `tests/unit/test_improvement_control_lease.py` (create)
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- First run `gh issue view 3220 --json state -q .state`. If `CLOSED` and `models/redis_lease.py` exists, implement `default_lease()` over it and skip `CaseLease`; the conformance suite still applies.
+- `lease.py`: `LeaseProtocol` (`acquire(key, ttl) -> int | None`, `renew(key, generation) -> bool`, `release(key, generation) -> bool`), `CaseLease` (three Lua scripts: generation from `INCR` of `{key}:gen`, expiry from `TIME`, renew and release compare the stored generation), `default_lease()` as the single swap point, module docstring naming #3220 and the retirement test.
+- Tests: the conformance suite (increasing generations, re-acquire after lapse, stale renew and release return False and change nothing, compare-and-delete leaves a newer holder's lease intact), `assert_control_key` refusing `lease:session:x`, and `test_interim_lease_retired_when_redis_lease_exists`.
+
+### 3. The `admitted` status trio (one commit)
+- **Task ID**: build-admitted-status
+- **Depends On**: none
+- **Validates**: `tests/unit/test_recovery_ownership.py`, `tests/unit/test_session_lifecycle_consolidation.py`, `tests/unit/test_ui_sdlc_data.py`, `tests/unit/test_session_recovery_drip_budget.py`, `tests/unit/test_improvement_control_admitted.py` (create)
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `models/session_lifecycle.py:74` `NON_TERMINAL_STATUSES` gains `"admitted"` with its comment; `:92` `RECOVERY_OWNERSHIP["admitted"] = "reflection"`; `ui/data/sdlc.py:32` gains `"admitted"`. Update the four listed tests (Test Impact) in the same commit.
+- `test_improvement_control_admitted.py`: `admitted` not in `RESUMABLE_STATUSES`; the resume drip leaves an `admitted` row untouched; `worker/__main__.py`'s pending query and `_agent_session_health_check`'s queries exclude it (assert by seeding one `admitted` row and running the selection code).
+- Commit message: `Add the admitted session status: lifecycle, ownership, dashboard, in one change (Refs #3215)`.
+
+### 4. Intents, slots, and the terminal hook
+- **Task ID**: build-intents
+- **Depends On**: build-journal, build-lease, build-admitted-status
+- **Validates**: `tests/unit/test_improvement_control_intents.py` (create), `tests/unit/test_session_lifecycle.py` (update)
+- **Assigned To**: substrate-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `intents.py`: `DispatchIntent` dataclass and the state vocabulary (`prepared, admitted, materialized, running, result_recorded, settled, cancelled, reconciliation_required`); `prepare`, `admit` (one script: slot count, revision, generation, intent write, slot reservation, journal `intent_admitted`), `record_materialized`, `record_running`, `record_result`, `cancel`, `mark_reconciliation_required` (CAS on state, slot release, journal event), `on_session_terminal(session, status) -> SlotReleaseResult`, `dead_letter_exhausted(intent)` writing `DeadLetter(stage="improvement-intent", payload_json=..., replayable=False)`.
+- `models/session_lifecycle.py::finalize_session` step 7 exactly as Decision 6.
+- Tests: Race 1 (two admits, one intent, one slot); slot exhausted at `max_concurrent_research_sessions`; compare-and-delete on slot release refusing a foreign action id; `test_finalize_survives_slot_release_failure`; `test_finalize_without_provenance_never_imports_control` (assert `sys.modules` lacks the package after finalizing a plain session in a subprocess); dead letter on exhaustion.
+
+### 5. Projection, replay, export, import
+- **Task ID**: build-projection-export
+- **Depends On**: build-intents
+- **Validates**: `tests/unit/test_improvement_control_projection.py` (create), `tests/unit/test_improvement_control_export.py` (create)
+- **Assigned To**: surface-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `projection.py`: `apply(project_key, case_id)` (ORM `save()` of `state`, `revision`, `updated_at` from the head; never reads the projection first), `replay(project_key, case_id)` (fold the journal, compare to the head, write the head's truth, return the diff).
+- `export.py`: `export_namespace(project_key, root) -> Path` writing `namespace.json` (schema, heads, journals, intents, slots, unit-2 keys) and `artifacts.json` (digests and paths under `POPOTO_IMPROVEMENT_CONTENT_PATH`); `import_namespace(archive, *, force=False)` refusing a non-empty namespace or a schema mismatch.
+- Tests: a direct `ImprovementCase.save()` with a wrong state is corrected by `replay`; round trip of a seeded case is byte-equal on head and journal; import refuses non-empty and schema mismatch.
+
+### 6. Scheduler adapter and the controller tick
+- **Task ID**: build-dispatch
+- **Depends On**: build-intents
+- **Validates**: `tests/unit/test_improvement_control_dispatch.py` (create), `tests/unit/test_session_health_worker_liveness.py` (create)
+- **Assigned To**: dispatch-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `agent/session_health.py::any_worker_alive() -> bool`: scan `WORKER_REGISTERED_PID_KEY_PREFIX*`, return True on the first pid whose `_worker_pid_heartbeat_fresh` is True; no other change to the module.
+- `scheduler_adapter.py`: `tick(project_key, *, lease=None, push=None, now=None) -> TickResult` iterating open cases (`OPEN_CASE_STATES`), acquiring the case lease, admitting each unadmitted `action_proposed` after the four checks (charter digest pinned, journal authorization, reservation available, action type allowed), materializing through `_push_agent_session(idempotency_key=f"improve:{p}:{c}:{action_id}", status="admitted", session_type="eng", chat_id="0", telegram_message_id=0, sender_name="improvement-controller", extra_context_overrides={...})` via `asyncio.run` from the sync reflection, activating only after `any_worker_alive()`, and releasing the lease in `finally`. Per-case exception isolation.
+- `reflections/improvement_controller_tick.py::run_improvement_controller_tick()` (sync, returns counts), registered as `improvement-controller-tick` with `cadence=f"{controller_tick_seconds}s"` through a new `register_improvement_controller_tick` in `reflection_register.py` and a call in `run.py`. Guarded by `ImprovementSettings.enabled`.
+- Tests: Race 2 (crash after bind, retry yields one row, `attempts == 2`); no live worker leaves `materialized` and journals the reason; a second tick on an already-`running` intent is a no-op; the research path never passes `parent_agent_session_id` (assert the recorded call kwargs).
+
+### 7. Reconcile reflection
+- **Task ID**: build-recovery
+- **Depends On**: build-dispatch
+- **Validates**: `tests/unit/test_improvement_control_recovery.py` (create), `tests/unit/test_reflection_register.py` (update)
+- **Assigned To**: dispatch-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `recovery.py::reconcile(project_key, *, now, lease_ttl) -> ReconcileResult`: stale `admitted`/`materialized` intents (older than `4 * lease_ttl_seconds`) → `mark_reconciliation_required` + slot release + `finalize_session(row, "abandoned", reason=..., dead_letter_stage="improvement-intent")` when a row exists and `attempts >= max_dispatch_attempts`, otherwise `attempts += 1` and leave it for the next tick; `running` intents whose session row is terminal or missing past the threshold → the same; unit-2 reservations whose day closed unsettled → release + `spend_receipt` with `metering="unknown"`.
+- `reflections/improvement_intent_reconcile.py::run_improvement_intent_reconcile()`; `register_improvement_intent_reconcile` (`cadence="300s"`) and its `run.py` call; the register test.
+- Tests: Race 3 (unreleased slot on restart); the crash-between-admission-and-creation case swept when the retry budget is exhausted; a fresh `admitted` intent is left alone; the unknown-metering receipt.
+
+### 8. Unit-2 meter and the judge's record-only receipt
+- **Task ID**: build-meter
+- **Depends On**: build-journal
+- **Validates**: `tests/unit/test_paid_inference_meter.py` (create), `tests/unit/test_cross_vendor_judge.py` (update if it exists)
+- **Assigned To**: budget-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `tools/paid_inference_meter.py` per Decision 7. `PRICE_TABLE` entries carry `usd_per_mtoken_in`, `usd_per_mtoken_out`, and the module-level `PRICE_TABLE_RETRIEVED_AT` date and source URL.
+- `tools/cross_vendor_judge.py`: after the usage log at `:263`, `record_receipt(purpose="sdlc_review", model=..., prompt_tokens=..., completion_tokens=..., metering="estimated")`; no other change.
+- Tests: exact settlement from `usage.cost`; estimated from tokens; malformed response leaves the reservation open; `purpose="sdlc_review"` never reduces headroom; two concurrent reservations whose sum exceeds the pool admit exactly one; window attribution across midnight UTC; `INVALID_AMOUNT`.
+
+### 9. Vault writer and the `resource_acquired` kind
+- **Task ID**: build-vault
+- **Depends On**: none
+- **Validates**: `tests/unit/test_vault_write.py` (create), `tests/unit/test_improvement_models.py` (update), `tests/unit/test_improvement_resources.py` (update)
+- **Assigned To**: budget-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `models/improvement_evidence.py`: append `"resource_acquired"` with the ownership comment satisfied.
+- `tools/vault_write.py` per Decision 8, with an injectable `runner` like `tools/improvement_resources.py` so unit tests never call `op`; `render_resource_acquired_section(rows) -> str`.
+- `tests/integration/test_vault_write_integration.py`: skipped with a named reason unless `OP_CACHE=false op whoami` succeeds; when it runs, creates and then deletes one item titled `test-lane3-<uuid>` in `m-valor`.
+- Tests: no credential byte in result, logs, or evidence (seeded distinctive value); refusal on missing `op`, non-zero exit, empty inputs; the digest section renders one seeded row.
+
+### 10. `valor-improve` CLI and the research skill
+- **Task ID**: build-cli
+- **Depends On**: build-projection-export, build-dispatch, build-meter, build-vault
+- **Validates**: `tests/unit/test_improvement_cli.py` (create), `tests/integration/test_improvement_control_cli.py` (create)
+- **Assigned To**: surface-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `tools/improvement.py::main` with the twelve subcommands and `--json`; `pyproject.toml` script; `propose` refusals per Data Flow step 1; `propose-amendment` writing an `ImprovementInvestigation(kind="charter_amendment", state="awaiting_authorization")` and one `send_eng_telegram` message; `budget` composing unit 1 (slots), unit 2 (meter), unit 3 (`infrastructure_budget.status_dict`) with window boundaries; `doctor` per Error State Rendering.
+- `.claude/skills/improve-research/SKILL.md`: the brief contract, the `WebSearch`/`WebFetch` instruction, `valor-improve propose` as the only write, the three nevers.
+- Integration tests: `propose` end to end shows the journal event; `valor-session create --parent` on the research path receives `ChildSessionsDisabledError`'s message; `doctor` on a seeded paused case; the outage drill (Success Criteria).
+
+### 11. Dashboard control panel
+- **Task ID**: build-dashboard
+- **Depends On**: build-intents
+- **Validates**: `tests/unit/test_ui_app.py` (update), `tests/unit/test_ui_improvement_data.py` (update or create)
+- **Assigned To**: surface-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `ui/data/improvement.py::get_control_status(project_key)` returning intents by state, slots, unit-2 status, paused heads, and `reconciliation_required` intents, with the getter-list pin updated; `ui/templates/improvement/control.html` with the three-state rendering; the inline route in `ui/app.py` beside the goals partial.
+
+### 12. Mutation review of the fences
+- **Task ID**: validate-fences
+- **Depends On**: build-cli, build-recovery
+- **Assigned To**: fence-mutator
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- In a private worktree: for each script (`transition`, `admit`, `release_slot`, `reserve_unit2`, `settle_unit2`, `mark_reconciliation_required`, lease `renew`/`release`), flip the generation compare to `>`, then delete the revision compare, then make the compare-and-delete unconditional; record which named test fails for each mutation. Any mutation with no failing test is a blocker with the test to add.
+- Post a comment on #3220 naming `LeaseProtocol`, `default_lease()`, and `test_interim_lease_retired_when_redis_lease_exists` as the three edits that close the hand-off.
+
+### 13. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-cli, build-dashboard, build-recovery
+- **Assigned To**: lane3-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Every item in the Documentation section; rebase onto lane 4's feature-doc edits if they have landed.
+
+### 14. Final validation
+- **Task ID**: validate-all
+- **Depends On**: validate-fences, document-feature
+- **Assigned To**: lane3-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the Verification table, the prerequisite checker, and every Success Criterion; report pass/fail with evidence.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Placeholder until the tasks are written | `true` | exit code 0 |
+| Lane tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_control_journal.py tests/unit/test_improvement_control_lease.py tests/unit/test_improvement_control_admitted.py tests/unit/test_improvement_control_intents.py tests/unit/test_improvement_control_projection.py tests/unit/test_improvement_control_export.py tests/unit/test_improvement_control_dispatch.py tests/unit/test_improvement_control_recovery.py tests/unit/test_paid_inference_meter.py tests/unit/test_vault_write.py tests/unit/test_improvement_cli.py tests/unit/test_recovery_ownership.py tests/unit/test_session_lifecycle_consolidation.py tests/unit/test_ui_sdlc_data.py tests/unit/test_session_recovery_drip_budget.py tests/unit/test_improvement_models.py tests/unit/test_improvement_resources.py tests/unit/test_reflection_register.py tests/unit/test_settings.py tests/unit/test_session_lifecycle.py tests/unit/test_ui_app.py -q` | exit code 0 |
+| Integration tests pass | `scripts/pytest-clean.sh tests/integration/test_improvement_control_cli.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check tools/improvement_control tools/improvement.py tools/paid_inference_meter.py tools/vault_write.py reflections/improvement_intent_reconcile.py reflections/improvement_controller_tick.py models/session_lifecycle.py ui/data/improvement.py ui/data/sdlc.py agent/session_health.py` | exit code 0 |
+| Format clean | `python -m ruff format --check tools/improvement_control tools/improvement.py tools/paid_inference_meter.py tools/vault_write.py reflections/improvement_intent_reconcile.py reflections/improvement_controller_tick.py` | exit code 0 |
+| Console script declared | `grep -c 'valor-improve = "tools.improvement:main"' pyproject.toml` | output > 0 |
+| Skill references propose | `grep -c "valor-improve propose" .claude/skills/improve-research/SKILL.md` | output > 0 |
+| Status trio landed together | `grep -c '"admitted"' models/session_lifecycle.py ui/data/sdlc.py` | output contains models/session_lifecycle.py:2 |
+| Dashboard active set has admitted | `grep -c '"admitted"' ui/data/sdlc.py` | output > 0 |
+| Lease protocol matches #3220 | `grep -cE "def (acquire|renew|release)\(" tools/improvement_control/lease.py` | output > 2 |
+| Accept rule is `>=` in every effect script | `grep -c "highest_accepted" tools/improvement_control/journal.py tools/improvement_control/intents.py` | output contains journal.py |
+| Reconcile registered | `grep -c "register_improvement_intent_reconcile" scripts/update/run.py scripts/update/reflection_register.py` | output contains run.py:1 |
+| Evidence kind added | `grep -c '"resource_acquired"' models/improvement_evidence.py` | output > 0 |
+| Recovery doc names admitted | `grep -c "admitted" docs/features/session-recovery-mechanisms.md` | output > 0 |
+| Tools reference no longer says planned | `grep -c "planned, lane 3" docs/tools-reference.md` | match count == 0 |
+| Anti-criterion: queue seam untouched | `git diff --stat main -- agent/agent_session_queue.py agent/session_executor.py models/agent_session.py scripts/update/migrations.py tools/infrastructure_budget.py \| grep -c "|"` | match count == 0 |
+| Anti-criterion: no second general lease | `ls models/redis_lease.py 2>/dev/null \| wc -l` | match count == 0 |
+| Anti-criterion: no Popoto client in the control package | `grep -rc "POPOTO_REDIS_DB\|from popoto.redis_db" tools/improvement_control/ tools/paid_inference_meter.py` | match count == 0 |
+| Anti-criterion: no child-gate bypass | `grep -rc "VALOR_ALLOW_CHILD_SESSIONS\|parent_agent_session_id=" tools/improvement_control/ tools/improvement.py reflections/improvement_controller_tick.py reflections/improvement_intent_reconcile.py` | match count == 0 |
+| Anti-criterion: only the vault writer touches op | `grep -rlE "\bop (item|whoami|read|signin)" tools/improvement_control/ tools/improvement.py tools/paid_inference_meter.py reflections/improvement_intent_reconcile.py reflections/improvement_controller_tick.py \| wc -l` | match count == 0 |
+| Anti-criterion: no direct case save outside the projection | `grep -rc "ImprovementCase.*\.save()\|case\.save()" tools/improvement_control/journal.py tools/improvement_control/intents.py tools/improvement_control/scheduler_adapter.py tools/improvement_control/recovery.py tools/improvement.py` | match count == 0 |
+| Anti-criterion: deprecated OpenRouter flag absent | `grep -rc '"include": True' tools/paid_inference_meter.py` | match count == 0 |
+| Anti-criterion: no `.env` write on the improvement path | `grep -rlE "\.env['\"]" tools/improvement_control/ tools/improvement.py tools/vault_write.py tools/paid_inference_meter.py \| wc -l` | match count == 0 |
+| Anti-criterion: no routine question path | `grep -rc "AskUserQuestion\|ask_poll\|poll_registry" tools/improvement_control/ tools/improvement.py reflections/improvement_controller_tick.py` | match count == 0 |
 
 ## Critique Results
 
@@ -433,4 +662,9 @@ _Filled in the next revision of this document._
 
 ## Open Questions
 
-_Filled in the next revision of this document._
+Charter §9 applies to this plan too: each item below is a decision already made with its default, written so the critique can overturn it with evidence rather than so a human has to answer it. Silence keeps the default.
+
+1. **The lease hedge (Decision 1).** Default: `LeaseProtocol` plus the deletable `CaseLease`, retired by a test the moment `models/redis_lease.py` exists. The alternative, blocking this lane and therefore lanes 4 through 6 on #3220 (open, no branch), was rejected because the accept rule the lane depends on lives in the journal scripts either way. If the critique judges the interim implementation a fork in the sense #3220 forbids, the fallback is to build #3220's `models/redis_lease.py` first as its own lane and re-plan this one against it.
+2. **Unit 3 stays on its key (No-Gos, #3274).** Default: no migration; `valor-improve budget` reads unit 3 through `infrastructure_budget.status_dict`. Lane 7's plan expected the move; the feature doc sentence is corrected here. Overturn if a namespace-wide `export` that omits unit 3's counter is judged incomplete; the export already includes the unit-3 ledger rows through the ORM, and the counter is rebuilt from them by `infrastructure_budget` on the next admission.
+3. **The cross-vendor judge is receipted, not gated (Decision 7).** Default: `purpose="sdlc_review"` receipts are informational. Overturn only if charter §8 is read to put ordinary review spend inside the $10/day RSI pool, which would let RSI exhaustion refuse client review.
+4. **`RECOVERY_OWNERSHIP["admitted"] = "reflection"` (Decision 4).** Default: a new owner value, because none of `worker`, `bridge-watchdog`, `none`, `human` is true. Overturn to `"worker"` if a reviewer prefers no vocabulary growth; the constant is informational either way.
