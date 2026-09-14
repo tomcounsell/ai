@@ -196,27 +196,266 @@ Findings saved to the memory store per the repo addendum (fire-and-forget).
 
 ## Spike Results
 
-(filled below)
+All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3216` at
+`fe6f55072`, run at plan time; none needed a prototype.
+
+### spike-1: Does a labeled query set exist for the harness's endpoints, or must this lane invent one?
+- **Assumption**: "The first experiment can compute `recall_at_k` and `mrr` only if some
+  query-to-gold-memory labeling exists; otherwise the harness has endpoints and no ground truth."
+- **Method**: code-read
+- **Finding**: `tools/memory_eval/query_set.py::build_known_item_set(records, *, n_queries, seed)`
+  (`:128`) already builds the objective label: it samples memories biased toward importance and
+  LLM-generates one query per record whose answer is that record, skipping degenerate generations
+  (`:100`). It routes through `agent.llm.run_typed` (`agent/llm/wrapper.py:139`, Haiku by default
+  via the Anthropic API key, so **paid inference, unit 2**). `tools/memory_eval/hybrid_eval.py:183`
+  is its one caller. The protocol shape lane 4 fixed (`runner.py:96-106`) takes exactly
+  `{"trial_id", "query_text", "gold_id"}` per query.
+- **Confidence**: high
+- **Impact on plan**: the experiment freeze reuses `build_known_item_set` on the **exported**
+  corpus records (so every `gold_id` exists in the frozen corpus), freezes the generated queries
+  into the protocol beside `capture_baseline`'s output, and settles the generation cost against
+  unit 2 through lane 3's meter. No second labeling mechanism is built.
+
+### spike-2: Can the candidate arm vary anything but `limit`?
+- **Assumption**: "Lane 4's arm boundary is a JSON job spec, so a retrieval-parameter candidate is
+  expressible without touching the gates."
+- **Method**: code-read
+- **Finding**: `_retrieve_job` (`runner.py:291-299`) copies every `arm_params` key into the job
+  except `mode`, but `handle_job` (`arm_worker.py:82-121`) reads only `limit` (`:114`) before
+  calling `retrieve_ranked_ids(query_text, project_key, limit=)` (`retrieval.py:30`), and
+  `retrieve_memories` accepts `rrf_k` and `min_rrf_score` as well (`agent/memory_retrieval.py:246-252`).
+  `retrieval_mode` is read from settings inside `retrieve_memories` (`:276`) and is **not** a
+  per-call parameter; varying it would mean varying the arm's environment, which lane 4's arena
+  test `test_carries_the_four_arm_keys` pins.
+- **Confidence**: high
+- **Impact on plan**: this lane's candidate envelope is exactly `{limit, rrf_k, min_rrf_score}`.
+  The build adds the two pass-throughs to `handle_job` and `retrieve_ranked_ids`, and nothing else
+  inside `tools/improvement_eval/`. `retrieval_mode` is out of the envelope and the experiment
+  validator refuses a manifest naming it.
+
+### spike-3: Does the schema gate admit eight investigation kinds and the parent plan's lifecycle?
+- **Assumption**: "Eight kinds fit; the eleven-value lifecycle does not."
+- **Method**: code-read
+- **Finding**: `DEFAULT_VOCABULARY_MAXIMUM = 8` (`tests/unit/test_improvement_models.py:92`);
+  `INVESTIGATION_KINDS` has five (`models/improvement_investigation.py:45-51`), so eight fits
+  without an exemption. `INVESTIGATION_STATES` has four (`:54`). The parent plan's lifecycle
+  (`draft → deduplicated → policy_checked → running → recorded → interpreted → applied` plus
+  `cancelled`, `superseded`, `failed`, `awaiting_authorization`) is eleven values, which the gate
+  refuses on an index without a named exemption, and the exemption's own message says an index set
+  per value "stops being cheap well before this".
+- **Confidence**: high
+- **Impact on plan**: the indexed `state` gains exactly one value, `awaiting_authorization`, used
+  only by `charter_amendment` rows; the fine-grained step lives in a new plain field `stage`
+  (never indexed; added to `FORBIDDEN_INDEX_NAMES`). Readers that need "what is the investigation
+  doing" read `stage`; readers that need "is it open" read the index. A migration adds the field
+  as additive-only, on the `_migrate_confirm_improvement_v2_fields` precedent.
+
+### spike-4: Where does an immutable ranking snapshot live, and how is it referenced?
+- **Assumption**: "The verifying artifact store can hold a content-addressed document outside a
+  `ContentField`, the way lane 4 stores a protocol."
+- **Method**: code-read
+- **Finding**: `freeze_protocol` (`runner.py:181-194`) calls
+  `verifying_artifact_store.save(payload, key=f"protocol-{digest[:16]}", model_class_name="ImprovementProtocol")`
+  and returns a `$CF:<sha256>:...` reference; `VerifyingArtifactStore.load` re-hashes on every path
+  (`models/verifying_artifact_store.py:70-118`). The retention root sits outside the checkout
+  since lane 7.
+- **Confidence**: high
+- **Impact on plan**: `tools/improvement_ranking.py::write_snapshot` uses the identical call with
+  `key=f"ranking-{digest[:16]}"` and `model_class_name="ImprovementRankingSnapshot"`; the
+  `ranking_recorded` journal event carries the reference; `valor-improve ranking --at DIGEST`
+  loads by reference and a corrupted snapshot raises `ArtifactIntegrityError` rather than
+  rendering.
+
+### spike-5: Can a function reflection carry a three-day cadence and a long-running evaluation?
+- **Assumption**: "The registration seam accepts an arbitrary cadence, and a reflection tick can
+  host the evaluation."
+- **Method**: code-read
+- **Finding**: `register_reflection` (`scripts/update/reflection_register.py:484-495`) takes
+  `cadence: str | None` free-form and an optional `timeout`; `"259200s"` is legal. Function
+  reflections default to `DEFAULT_FUNCTION_TIMEOUT = 1800` (`agent/reflection_scheduler.py:40`).
+  A Bash tool call inside an eng session is bounded by
+  `TOOL_TIMEOUT_DECLARED_MAX_SEC + TOOL_TIMEOUT_DECLARED_GRACE_SEC = 660s`
+  (`docs/features/config-timeout-catalog.md:131`), while the eng turn itself has a 40-minute idle
+  deadline and a 6-hour absolute one.
+- **Confidence**: high
+- **Impact on plan**: the planner tick never runs an evaluation. `valor-improve experiment evaluate`
+  is invoked by the research session in the background (`run_in_background`) and polled, so
+  neither the 1800-second reflection cap nor the 660-second tool cap bounds the trial count. The
+  digest reflection registers with `cadence="259200s"` and no custom timeout.
+
+### spike-6: Do outbound messages have a production writer the no-promises detector can read?
+- **Assumption**: "`chat_message_log` entries with `direction="out"` are written on every outbound
+  Telegram message, so the detector reads a field something fills in."
+- **Method**: code-read
+- **Finding**: writers at `bridge/telegram_bridge.py:3226`, `bridge/telegram_relay.py:390`,
+  `:1308`, `:1511`; the field contract at `models/agent_session.py:685`;
+  `agent/session_completion.py:364` already filters on `direction == "out"` for another purpose.
+- **Confidence**: high
+- **Impact on plan**: `collect_promises` reads the same session window as `collect_corrections`
+  (`_recent_sessions`, `SESSION_SCAN_LIMIT`) and the outbound entries, samples them under a
+  per-tick cap, and the detector's inputs are named in the module docstring and pinned by a test in
+  the `TestDetectorInputsHaveProductionWriters` style.
 
 ## Data Flow
 
-(filled below)
+1. **Entry point: the evidence tick** (`reflections/improvement_collect.py::run_improvement_collect`,
+   every `controller_tick_seconds`). Five adapters now: corrections, inspirations, expectation
+   coverage, **lessons** (merged PR bodies via `gh`, the seven prefixes `sdlc_reflection.py`
+   scraped, one `lesson` row per PR line, dedup on `source_ref="pr:{number}:{sha256(line)[:16]}"`),
+   and **promises** (sampled outbound `chat_message_log` entries judged by a cheap model, one
+   `promise` row per flagged message, dedup on `source_session_id` plus entry hash). Gated on
+   `ImprovementSettings.enabled`.
+2. **The planner tick** (`reflections/improvement_plan.py::run_improvement_planner`, same cadence,
+   registered as `improvement-planner-tick`). In order: (a) `ImprovementCharter.load_from_file`
+   then `pinned`; (b) **case opening**: cluster unconsumed evidence by `priority_area` heuristics
+   (correction classified `architectural` → `orchestration`/`memory`; `lesson` → the stage's area;
+   `inspiration` with a URL → an `inspiration_intake` investigation, not yet a case; `promise` →
+   `personas`), run the novelty check (any `rejected` case or resolved investigation whose
+   `summary`/`interpretation` shares the evidence cluster's dedup identity refuses re-opening and
+   records why on the existing case), and write `ImprovementCase` rows with `charter_digest`,
+   `priority_area`, and a `ranking_rationale` that names the charter passage; (c) **ranking**:
+   `tools/improvement_ranking.py::rank(open_cases)` scores five ordinal factors per case
+   (opportunity cost, quality, resource cost, uncertainty, unlocked capacity), each derived from
+   named record fields and each stated as a rule in the module docstring, orders by the §3 starting
+   hypotheses first and evidence second, and writes the immutable snapshot (ordered ids, factors,
+   rationale, charter digest, diff against the previous snapshot); (d) `ranking_recorded` journal
+   event on the case-independent controller head (lane 3's journal) carrying the snapshot
+   reference; (e) **one action proposal** for the top-ranked case that is not blocked: an
+   investigation intent if the case is `observed`/`investigating`, an experiment intent if a
+   proposed experiment exists and no frozen one does. The proposal is a journal event; lane 3's
+   scheduler adapter admits, reserves the lane slot, and dispatches the research session.
+3. **The research session** (`claude -p`, skill `.claude/skills/improve-research/SKILL.md`,
+   dispatched by lane 3). Its first action is `valor-improve brief --case ID`, which prints the
+   bounded brief: the pinned charter verbatim, then the case, its evidence, prior investigations
+   and rejected cases in the same area, the current ranking position, and the §9 resolution rule.
+   It then runs investigations through `valor-improve investigation open --kind K` /
+   `record --claims JSON` / `resolve --interpretation ... [--assumption ...]`. `web_research` and
+   `resource_acquisition` use `WebSearch`/`WebFetch`; `inspiration_intake` uses
+   `valor-youtube-transcribe` or `valor-ingest`; `trace_analysis` reads transcripts and events;
+   `memory_retrieval` uses `memory_search`; `probe` runs a bounded command; `skill_acquisition`
+   searches the library and the web; `charter_amendment` goes through lane 3's
+   `propose-amendment`. Every claim is `{claim, url, retrieved_at}` or it is stored as a note.
+   Unresolvable uncertainty becomes a `provisional_assumption` with charter passage, evidence,
+   confidence, consequence, and overturning observation. Model revisions go through
+   `valor-improve revise-model --summary --rationale --prediction`, and a revision with no
+   prediction is refused.
+4. **Hypothesis to frozen contract** (`tools/improvement_experiment.py`). The session proposes a
+   hypothesis through lane 3's `valor-improve propose` (journal-authorized); `valor-improve
+   experiment freeze --case ID` validates the candidate against this lane's envelope (retrieval
+   parameters only), exports the corpus (`export_corpus`), builds the known-item query set on the
+   exported records (`build_known_item_set`, unit-2 metered), captures the baseline
+   (`capture_baseline`), freezes the protocol (`freeze_protocol`), writes the manifest with the
+   `protocol_ref`, computes and stores `contract_digest`, sets `state="frozen"` and `frozen_at`,
+   and records `model_revision_id` and `charter_version`. Hashing happens before any arm runs.
+5. **Evaluation** (`valor-improve experiment evaluate --id`, run in the background from the
+   session): calls `tools.improvement_eval.runner.evaluate(experiment_id, project_key)`. Every
+   gate, the arena, blinding, Holm, and the verdict are lane 4's; this lane passes arguments and
+   reads the result.
+6. **Verdict to selection** (`tools/improvement_experiment.py::apply_verdict`): `reject` moves the
+   case to `rejected` with the evaluation id on the case (the memory that stops re-proposal);
+   `accept` leaves the case at `evaluating` with the verdict recorded, for lane 6; `inconclusive`
+   returns the case to `investigating` with the evaluation attached and raises its `uncertainty`
+   factor; `infra_failure` and `invalidated` leave the case where it was, mark the experiment
+   `aborted`, and record a `probe` investigation naming the failure. Each transition is a journal
+   event first and an ORM `save()` second.
+7. **The next tick** re-ranks. The rejected case has left the open set; the snapshot's diff names
+   it under `left` with the evaluation id as the reason. The novelty check refuses a new case with
+   the same identity. That diff is the demonstration the acceptance criterion asks for.
+8. **Outputs**: the dashboard partials (`/_partials/improvement/ranking/`, `/hypotheses/`,
+   `/rejected/`) read the latest snapshot, the experiments in `proposed`/`frozen`/`running`, and
+   the `rejected` cases with their evaluations; `valor-improve ranking [--at DIGEST]` prints any
+   snapshot; the three-day digest (`reflections/improvement_assumption_digest.py`) sends new
+   assumptions, `resource_acquired` rows, and lane 7's overrun payloads to Telegram via
+   `send_host_eng_telegram` as a status report; `valor-improve report --case ID` generates the
+   qualified-result report from the records.
 
 ## Why Previous Fixes Failed
 
-(filled below)
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #932, `scripts/sdlc_reflection.py` | Scraped `- lesson:` lines from merged PR bodies and appended them verbatim to `docs/sdlc/{stage}.md` under "Reflection Notes (auto-generated)" every three days | A lesson entered the docs on the strength of having been typed. Nothing checked whether the lesson was true, whether it changed any later behavior, or whether it contradicted an earlier lesson. The 300-line cap (`:197-205`) silently skipped whole stages once a file filled, so the mechanism also degraded without notice. It measured that PR authors write bullet points |
+| #410 / PR #411, autoexperiment | Hypothesize, edit, run a single judge, accept on strict inequality | No isolation, no blinding, no correction for repeated selection, and a judge whose noise exceeded the effects it scored. Never ran on this machine; retired in lane 1 |
+| `TaskTypeProfile.rework_rate` (deleted in lane 2) | Aggregated a session flag into a delegation recommendation | The flag had no writer, so the aggregate was structurally zero and the recommendation was derived from nothing |
+
+**Root cause pattern:** each earlier mechanism produced an output whose input had no validated
+connection to behavior. This lane's rule is the inverse: a lesson, an inspiration, or a claim is
+evidence only; it changes the system's behavior only after it has been ranked, turned into a
+hypothesis with a falsifier, frozen, and measured by the harness, and the record shows every step.
 
 ## Architectural Impact
 
-(filled below)
+- **New dependencies**: none. `gh` (already used by `reflections/sdlc_progress.py::_run_gh`),
+  `WebSearch`/`WebFetch` (already the research session's tools), `agent.llm.run_typed` (already
+  the known-item builder's route), and lane 4's harness. No new package.
+- **Interface changes**: `tools/improvement_eval/arm_worker.py::handle_job` and
+  `retrieval.py::retrieve_ranked_ids` gain two optional keys (`rrf_k`, `min_rrf_score`), defaulting
+  to `retrieve_memories`'s own defaults; an absent key produces byte-identical behavior to lane 4's
+  code. `INVESTIGATION_KINDS` grows from five to eight; `INVESTIGATION_STATES` from four to five;
+  `EVIDENCE_KINDS` from seven (eight with lane 3) to ten. `ui/data/improvement.py` exports seven
+  getters. `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
+  adapter tuple grows from three to five.
+- **Coupling**: the planner reads records and writes journal events; it never imports the
+  research skill, the bridge, or the harness internals. The research session reaches state only
+  through `valor-improve`. The harness is called at one function (`evaluate`) plus three helpers
+  (`capture_baseline`, `freeze_protocol`, `compute_contract_digest`). Coupling to lane 3 is through
+  the CLI's argparse tree, the journal's `transition`, and the scheduler adapter's intent record,
+  each stated as a requirement in Technical Approach.
+- **Data ownership**: this lane is the first writer of `ImprovementCase`,
+  `ImprovementModelRevision`, `ImprovementInvestigation`, and `ImprovementExperiment`, and the
+  owner of the ranking snapshot artifact. It writes `ImprovementEvaluation` never (lane 4's runner
+  is the single writer) and `ImprovementRelease` never (lane 6). The charter file and model stay
+  unwritten.
+- **Reversibility**: the two new evidence kinds and the `stage` field are additive; removing them
+  leaves orphan index sets that `Model.rebuild_indexes()` clears. The deletion of
+  `scripts/sdlc_reflection.py` is reversible by revert; its launchd job is booted out fleet-wide
+  by the obsolete-service sweep and would need reinstalling. Ranking snapshots are immutable
+  artifacts and are never deleted.
 
 ## Appetite
 
-(filled below)
+**Size:** Large
+
+**Team:** Lead orchestrator, five builders in three waves, one validator per wave, one
+documentarian, one final validator.
+
+**Interactions:**
+- PM check-ins: 2-3 (the reconciliation of the issue body against charter v2 in Freshness Check;
+  the deferral of the `skill_acquisition` evaluation step; the interpretation of the first real
+  cycle's result)
+- Review rounds: 2+ (the parent plan's lanes have each taken two or more)
+
+This lane is the integration point of four others, and its appetite is dominated by sequencing:
+the build cannot start until lanes 3 and 4 merge, and the first real cycle on this machine is a
+run the builder observes rather than a test the builder writes. Everything that can be exercised
+against seeded records in a test database is; the real cycle is run once, its records are the
+evidence, and its report is posted to #3217. Scope that would push past Large is named in No-Gos
+and carried to a filed follow-up, not squeezed in.
 
 ## Prerequisites
 
-(filled below)
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Lane 4 merged: the harness surface | `python -c "from tools.improvement_eval.runner import evaluate, capture_baseline, freeze_protocol, compute_contract_digest; from tools.improvement_eval.arm_worker import handle_job"` | The four calls this lane makes and the one file it edits inside the harness |
+| Lane 4 merged: `charter_digest` on the evaluation record | `python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | `apply_verdict` records the charter the verdict was measured under |
+| Lane 3 merged: the CLI module | `python -c "import tools.improvement"` | The argparse tree this lane's subcommands attach to |
+| Lane 3 merged: the control journal | `python -c "import importlib.util as u; assert any(u.find_spec(n) for n in ('tools.improvement_journal','agent.improvement_journal','tools.improvement_control','models.improvement_journal')), 'no control journal module found'"` | `ranking_recorded` and every case transition are journal events first |
+| Lane 3 merged: the paid-inference meter | `python -c "import tools.paid_inference_meter"` | The known-item builder, the promise judge, and the `serves_charter` judge settle against unit 2 |
+| Lane 3 merged: the research skill exists | `test -f .claude/skills/improve-research/SKILL.md` | This lane extends it with the brief contract and the eight kinds |
+| Lane 3 merged: `resource_acquired` evidence kind | `python -c "from models.improvement_evidence import EVIDENCE_KINDS as K; assert 'resource_acquired' in K"` | The digest renders it in its own section |
+| `redis-server` binary | `redis-server --version` | Lane 4's per-arm private Redis |
+| Python pin matches the repo | `python -c "import pathlib,sys; want=pathlib.Path('.python-version').read_text().strip(); got='.'.join(map(str,sys.version_info[:3])); sys.exit(0 if got.startswith(want) else 1)"` | Worktree venv is on the committed pin |
+| Known-item builder importable | `python -c "from tools.memory_eval.query_set import build_known_item_set"` | spike-1: the labeled query set is reused, not rebuilt |
+| Verifying artifact store writable | `python -c "from models.verifying_artifact_store import verifying_artifact_store as s; import os; os.makedirs(s.base_path, exist_ok=True)"` | Ranking snapshots and protocols land here |
+| `gh` authenticated | `gh auth status` | The lesson adapter reads merged PR bodies |
+| Anthropic API key present in the vault `.env` | `python -c "from config.settings import settings; assert settings.api.anthropic_api_key"` | `build_known_item_set` routes through `run_typed` |
+
+The three lane-3 rows are written against the names the parent plan and #3215's body use
+(`tools/improvement.py`, `tools/paid_inference_meter.py`, `.claude/skills/improve-research/SKILL.md`).
+The journal row is deliberately tolerant of the module name because lane 3 has not planned yet;
+if lane 3 lands the journal under another name, the build corrects this row in its first commit
+and the correction is the record of the contract's actual shape. **The build does not start until
+every row passes**; `python scripts/check_prerequisites.py docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`
+is the gate, and a failing lane-3 or lane-4 row means "wait for that merge", never "stub it".
 
 ## Solution
 
