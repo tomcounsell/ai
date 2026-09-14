@@ -76,6 +76,7 @@ matching the same safety contract as ``bridge.dedup.record_last_event``.
 
 import json
 import logging
+import os
 import time
 
 import redis
