@@ -513,10 +513,11 @@ def run(
     Refuses ``NOT_FOUND``, ``WRONG_STATE`` (not ``frozen``),
     ``CONTRACT_DIGEST_MISMATCH``, ``ARMS_IDENTICAL``, and ``REVISION_CONFLICT``
     before anything runs; ``ArmRunnerAbsent`` propagates from the runner
-    lookup (``runner`` > ``arm_runner_spec`` > the registry). Any exception
-    from an arm or the accounting read writes ``infra_failure`` and moves the
-    experiment to ``aborted``. On ``accept`` the winning arm becomes the
-    ``current`` model revision.
+    lookup (``runner`` > ``arm_runner_spec`` > the registry). No pinned
+    charter (``CHARTER_NOT_PINNED``, before either arm runs) and any exception
+    from an arm or the accounting read write ``infra_failure`` and move the
+    experiment to ``aborted``, lane 4's shape. On ``accept`` the winning arm
+    becomes the ``current`` model revision.
     """
     from models.improvement_charter import ImprovementCharter
     from tools.improvement_eval.runner import compute_contract_digest, load_protocol
@@ -559,18 +560,9 @@ def run(
     experiment.state = "running"
     experiment.save()
 
-    results: dict[str, ArmResult] = {}
-    use: dict[str, BudgetUse] = {}
-    try:
-        for arm in order:
-            arm_run_id = f"{experiment.id}:{arm}"
-            results[arm] = active.run(arms[arm], list(opportunity_ids), cap, arm_run_id)
-            use[arm] = accounted_use(reader, arm_run_id, results[arm].budget_use)
-    except Exception as exc:  # noqa: BLE001 -- an arm failure is infra_failure, never a result
-        logger.warning(
-            "comparison %s infra_failure: %s: %s", experiment.id, type(exc).__name__, exc
-        )
-        notes.insert(0, f"infra_failure: {type(exc).__name__}: {exc}")
+    def _infra_failure(reason: str) -> Any:
+        logger.warning("comparison %s infra_failure: %s", experiment.id, reason)
+        notes.insert(0, f"infra_failure: {reason}")
         _finish_experiment(experiment, "aborted")
         return _write_evaluation(
             experiment=experiment,
@@ -586,6 +578,23 @@ def run(
             notes=notes,
             now=at,
         )
+
+    # Lane 4's charter pin: a missing charter is a harness failure written as
+    # infra_failure before either arm runs, never a silent None on the row.
+    if charter is None:
+        return _infra_failure(
+            f"CHARTER_NOT_PINNED: no ImprovementCharter is pinned for {project_key!r}"
+        )
+
+    results: dict[str, ArmResult] = {}
+    use: dict[str, BudgetUse] = {}
+    try:
+        for arm in order:
+            arm_run_id = f"{experiment.id}:{arm}"
+            results[arm] = active.run(arms[arm], list(opportunity_ids), cap, arm_run_id)
+            use[arm] = accounted_use(reader, arm_run_id, results[arm].budget_use)
+    except Exception as exc:  # noqa: BLE001 -- an arm failure is infra_failure, never a result
+        return _infra_failure(f"{type(exc).__name__}: {exc}")
 
     comparable, reasons = budgets_comparable(use["a"], use["b"], cap)
     budget = {

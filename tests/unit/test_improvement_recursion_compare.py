@@ -544,6 +544,26 @@ def test_arm_exception_is_infra_failure_never_a_result(charter):
     assert current_revisions(PK) == []
 
 
+def test_no_pinned_charter_is_infra_failure_before_any_arm_runs():
+    """Lane 4's shape: a missing charter pin is a harness failure, never a silent ``None``."""
+    assert ImprovementCharter.pinned(PK) is None
+    calls = []
+
+    class _Counting:
+        def run(self, *args):
+            calls.append(args)
+            return ArmResult(gains={}, budget_use=USE)
+
+    experiment = _freeze(_cases(2))
+    evaluation = run(experiment.id, runner=_Counting(), project_key=PK)
+    row = _reload_evaluation(evaluation)
+    assert row.verdict == "infra_failure"
+    assert row.charter_digest is None
+    assert "CHARTER_NOT_PINNED" in notes_of(row)[0]
+    assert calls == [], "no arm ran"
+    assert _reload_experiment(experiment).state == "aborted"
+
+
 def test_arm_assignment_digest_is_deterministic_under_rng_seed(charter):
     _, first, _ = _run_fixture(MIXED_GAINS, rng_seed=11)
     _, second, _ = _run_fixture(MIXED_GAINS, rng_seed=11)
