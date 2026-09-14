@@ -81,16 +81,17 @@ there is no PID here for the refusal to gate on. That branch bypasses the
 refusal entirely; it is inherent to using launchctl directly, not a gap in
 this module.
 
-### Ordering constraint: the gate runs before `bootout`
+### Ordering constraint: the gate runs before the launchd teardown
 
 In every teardown path that owns a launchd job — `stop_bridge`, `stop_worker`,
 `disable_worker`, `stop_email`, and `disable_email` in
-`scripts/valor-service.sh` — the refusal gate runs **before** the
-`launchctl bootout` call, never after. `bootout` unloads the job and sends it
-a SIGTERM; when the resolved PID is the caller's own ancestor, that SIGTERM
-lands on the very session running the teardown command. A gate placed after
-`bootout` would never get a chance to refuse — the session is already dead by
-the time it would run. Placing the gate first means a refusal leaves the
+`scripts/valor-service.sh` — the refusal gate runs **before** the launchd
+teardown call, never after. That call is `launchctl bootout` everywhere except
+`stop_bridge`, which uses `launchctl unload`; the mechanism is identical. Both
+unload the job and send it a SIGTERM; when the resolved PID is the caller's own
+ancestor, that SIGTERM lands on the very session running the teardown command.
+A gate placed after the teardown would never get a chance to refuse — the
+session is already dead by the time it would run. Placing the gate first means a refusal leaves the
 launchd job fully intact: nothing is torn down.
 
 This ordering is a standing constraint on anyone editing these five
