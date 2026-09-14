@@ -70,7 +70,10 @@ models, or APIs are installed or authorized by skill discovery itself.
 Codex writes it into installed skill folders and fingerprinting it would make every
 managed skill look locally edited. Excluded from the fingerprint does not mean
 disposable: a managed update carries any `metadata.json` in the destination over into
-the replacement directory rather than dropping it. `__pycache__`, `*.pyc`, and
+the replacement directory rather than dropping it, except when it is a symlink: a
+symlinked `metadata.json` is dropped, never followed, since the fingerprint exclusion
+means swapping the installed file for a symlink raises no preflight conflict and
+following it would dereference an arbitrary readable file into the managed tree. `__pycache__`, `*.pyc`, and
 `.DS_Store` are excluded and genuinely disposable.
 
 ## Maintenance and verification
@@ -106,8 +109,8 @@ python3 -m unittest discover -s scripts/tests -p test_codex_skills.py
 They exercise dry-run, complete copied resources, idempotent reruns, managed updates,
 unmanaged/edited/symlink conflict preservation, missing resources, source drift,
 broken/nonportable links, project/global scope, native-only installation, ordinary
-YAML scalar/block forms, `metadata.json` survival across a managed update, and
-rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
+YAML scalar/block forms, `metadata.json` survival across a managed update, refusal to
+dereference a symlinked `metadata.json`, and rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
 paragraphs. The skill helpers' syntax and archive CLI help are checked without contacting its service. Live deployment, mail,
 social publication, managed-agent launches, and other external effects are not run as
 part of conversion validation.

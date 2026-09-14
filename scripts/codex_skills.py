@@ -181,8 +181,16 @@ def restore_metadata(backup: Path, destination: Path) -> None:
 
     metadata.json is excluded from files() fingerprints (see files() docstring), so a
     managed update that replaces the destination directory must not silently delete it.
+
+    A symlinked metadata.json is skipped rather than carried over. It is excluded from
+    the fingerprint, so swapping the installed file for a symlink raises no conflict at
+    preflight; following it would dereference an arbitrary readable file into the
+    managed tree on the next unattended update. rglob does not recurse into symlinked
+    directories, so the file check is the whole surface.
     """
     for path in backup.rglob("metadata.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
         target_path = destination / path.relative_to(backup)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target_path)

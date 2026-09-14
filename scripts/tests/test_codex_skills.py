@@ -92,6 +92,22 @@ class SkillInstallationTests(unittest.TestCase):
             (installed / "SKILL.md").read_text(), (self.native / "SKILL.md").read_text()
         )
 
+    def test_symlinked_metadata_json_is_not_dereferenced(self):
+        skills.install(self.root, self.target)
+        outside = self.target.parent / "outside.txt"
+        outside.write_text("content from outside the managed tree")
+        metadata_path = self.target / "example" / "metadata.json"
+        metadata_path.symlink_to(outside)
+        # Skill content changes upstream, so the next install replaces the directory.
+        (self.native / "SKILL.md").write_text(
+            (self.native / "SKILL.md").read_text() + "New step.\n"
+        )
+        self.assertEqual(skills.install(self.root, self.target)["changed"], ["example"])
+        # The symlink is dropped, never followed: its target's bytes must not appear.
+        self.assertFalse(metadata_path.exists())
+        self.assertFalse(metadata_path.is_symlink())
+        self.assertEqual(outside.read_text(), "content from outside the managed tree")
+
     def test_local_edits_are_preserved(self):
         skills.install(self.root, self.target)
         installed = self.target / "example/SKILL.md"
