@@ -315,8 +315,201 @@ class TestNoRawClientsInProduction:
         assert len(_raw_client_constructions(path)) >= 2
 
 
+_OFFLOADERS = {"to_thread", "run_in_executor"}
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    """Every bare callee name invoked anywhere inside ``node``."""
+    names = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            func = sub.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+    return names
+
+
+def _blocking_pool_consumers(tree: ast.AST, seeds: set[str] = frozenset()) -> set[str]:
+    """Names that block the caller when called in ``tree``, transitively.
+
+    A helper that calls a helper that calls the accessor is just as blocking as
+    a direct call, and this defect arrived one frame up from the wrapped site --
+    so the closure matters more than the direct match. ``seeds`` carries names
+    already known to block because they were imported from another module; they
+    are part of the answer even though this module does not define them.
+    """
+    funcs = {
+        node.name: _called_names(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)  # sync defs only
+    }
+    tainted = set(seeds) | {name for name, calls in funcs.items() if "bytes_redis" in calls}
+    changed = True
+    while changed:
+        changed = False
+        for name, calls in funcs.items():
+            if name not in tainted and calls & tainted:
+                tainted.add(name)
+                changed = True
+    return tainted
+
+
+def _sync_def_names(tree: ast.AST) -> set[str]:
+    """Names of sync functions this module actually defines."""
+    return {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+
+
+def _imported_names(tree: ast.AST) -> list[tuple[str, str, str]]:
+    """``(source_module, original_name, local_name)`` for every from-import.
+
+    Lazy function-body imports count: ``bridge/email_bridge.py`` reaches the
+    blocking pool through exactly such an import.
+    """
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                out.append((node.module, alias.name, alias.asname or alias.name))
+    return out
+
+
+def _unwrapped_async_calls(tree: ast.AST, tainted: set[str]) -> list[tuple[int, str]]:
+    """Calls to ``tainted`` names inside an ``async def``, not handed to a thread."""
+    offloaded: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in _OFFLOADERS:
+                # Everything in the argument list runs off the loop, whether it
+                # is called there or merely referenced for the threadpool.
+                for sub in ast.walk(node):
+                    offloaded.add(id(sub))
+
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call) or id(sub) in offloaded:
+                continue
+            func = sub.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in tainted:
+                hits.append((sub.lineno, name))
+    return hits
+
+
+class TestBlockingPoolNeverReachesAnEventLoop:
+    """``bytes_redis()`` is popoto's own client, on a ``BlockingConnectionPool``.
+
+    On pool exhaustion a checkout *blocks* rather than raising, and
+    ``socket_timeout`` does not cover a pool checkout -- ceiling 20s. Reached
+    from a coroutine, that stalls the whole bridge event loop. ``text_redis()``
+    is deliberately NOT in scope here: it carries its own bounded pool, which
+    raises on exhaustion under a socket timeout, so it is a different and much
+    smaller hazard.
+
+    The defect this guard was written for sat one frame above a correctly
+    wrapped call: ``resolve_customer`` offloaded all four of its own Redis
+    touches, while a sibling coroutine called a sync helper that reached the
+    same pool. Pinning the one line would not have caught the next one.
+    """
+
+    def test_no_coroutine_reaches_the_blocking_pool_synchronously(self):
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+
+        trees: dict[pathlib.Path, ast.AST] = {}
+        for package in _PRODUCTION_PACKAGES:
+            for path in sorted((repo_root / package).rglob("*.py")):
+                try:
+                    trees[path] = ast.parse(path.read_text())
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+
+        # Taint is MODULE-QUALIFIED. `_get_redis` is a name six modules share,
+        # and only `bridge.routing`'s returns `bytes_redis()`; a global name set
+        # would report the other five as offenders. Taint crosses a module
+        # boundary only along a real import edge.
+        modname = {
+            path: ".".join(path.relative_to(repo_root).with_suffix("").parts) for path in trees
+        }
+        by_name = {modname[path]: (path, tree) for path, tree in trees.items()}
+
+        # `blocks_here` is what stalls the loop when called in that module,
+        # imported names included. `exports` is the subset the module actually
+        # defines -- only those propagate outward along an import edge.
+        blocks_here: dict[str, set[str]] = {mod: set() for mod in by_name}
+        changed = True
+        while changed:
+            changed = False
+            exports = {mod: blocks_here[mod] & _sync_def_names(by_name[mod][1]) for mod in by_name}
+            for mod, (_path, tree) in by_name.items():
+                seeds = {
+                    local
+                    for source, original, local in _imported_names(tree)
+                    if original in exports.get(source, ())
+                }
+                grown = _blocking_pool_consumers(tree, seeds)
+                if grown - blocks_here[mod]:
+                    blocks_here[mod] |= grown
+                    changed = True
+
+        offenders = []
+        for mod, (path, tree) in by_name.items():
+            # The accessor itself is the root of the class, under whatever
+            # local name the module imported it as.
+            names = blocks_here[mod] | {
+                local
+                for source, original, local in _imported_names(tree)
+                if source == "utils.redis_client" and original == "bytes_redis"
+            }
+            for lineno, name in _unwrapped_async_calls(tree, names):
+                offenders.append(f"{path.relative_to(repo_root)}:{lineno} {name}()")
+
+        assert not offenders, (
+            "These coroutines reach popoto's BlockingConnectionPool synchronously. "
+            "A checkout there blocks the event loop for up to 20s and is not "
+            "covered by socket_timeout. Wrap the call in asyncio.to_thread(). "
+            f"Found: {offenders}"
+        )
+
+    def test_the_taint_closure_follows_indirect_callers(self):
+        """The transitive step is the load-bearing half; prove it independently."""
+        tree = ast.parse(
+            "def leaf():\n"
+            "    return bytes_redis()\n\n"
+            "def middle():\n"
+            "    return leaf()\n\n"
+            "def unrelated():\n"
+            "    return 1\n"
+        )
+        assert _blocking_pool_consumers(tree) == {"leaf", "middle"}
+
+    def test_an_offloaded_reference_counts_as_safe(self):
+        """``to_thread(helper, arg)`` hands over a reference, never an ast.Call."""
+        tree = ast.parse(
+            "async def f():\n"
+            "    await asyncio.to_thread(helper)\n"
+            "    return await asyncio.to_thread(helper, 1)\n"
+        )
+        assert _unwrapped_async_calls(tree, {"helper"}) == []
+
+    def test_a_direct_call_in_a_coroutine_is_reported(self):
+        tree = ast.parse("async def f():\n    return helper()\n")
+        assert _unwrapped_async_calls(tree, {"helper"}) == [(2, "helper")]
+
+
 @pytest.fixture(autouse=True)
 def _reset_text_client_cache():
     yield
+    # Close before dropping the reference: the cache holds the only handle to
+    # this client's pool, so nulling it without closing leaks a live pool per
+    # test -- the same hazard `test_ignores_redis_url_entirely` handles inline.
+    client = redis_client._cached_text_client
     redis_client._cached_text_client = None
     redis_client._cached_text_identity = None
+    if client is not None:
+        client.close()

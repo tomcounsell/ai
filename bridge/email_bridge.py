@@ -1395,7 +1395,14 @@ async def _process_inbound_email(
             )
             if imap_uid is not None and imap_config is not None:
                 await _unmark_seen(imap_config, imap_uid)
-            _arm_resolver_unavailable_alert_if_persistent(project_key, message_id)
+            # Off the loop in one piece. The helper makes four Redis round
+            # trips, and the first reaches popoto's BlockingConnectionPool via
+            # bridge/routing.py::get_resolver_failure_count -- a checkout there
+            # blocks rather than raising and is not covered by socket_timeout.
+            # Wrapping only that leg would leave the other three on the loop.
+            await asyncio.to_thread(
+                _arm_resolver_unavailable_alert_if_persistent, project_key, message_id
+            )
             return
         if customer_id is None:
             # Resolver ran successfully and definitively found no match —
