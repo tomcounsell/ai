@@ -11,24 +11,13 @@ release table cannot be read.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from tools.improvement_release.evaluation_read import effect_of, interval_of
+from tools.improvement_release.evaluation_read import effect_of, interval_of, json_field
 
 logger = logging.getLogger(__name__)
-
-
-def _json(value: Any) -> Any:
-    """A JSON field as popoto hands it back: parse a string, pass a dict through."""
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except ValueError:
-            return None
-    return value
 
 
 def _aware(stamp: Any) -> datetime | None:
@@ -100,13 +89,13 @@ def _release_row(release: Any, project_key: str, now: datetime) -> dict:
     case_id = getattr(release, "case_id", None) or getattr(experiment, "case_id", None)
     case = _lookup(ImprovementCase, project_key, case_id)
     endpoint = load_primary_endpoint(experiment)
-    drill = _json(getattr(release, "rollback_drill", None)) or {}
-    outcome = _json(getattr(release, "outcome", None)) or {}
+    drill = json_field(getattr(release, "rollback_drill", None)) or {}
+    outcome = json_field(getattr(release, "outcome", None)) or {}
     return {
         "id": str(release.id),
         "state": getattr(release, "state", None),
         "kind": getattr(release, "kind", None),
-        "surfaces": _json(getattr(release, "surfaces", None)) or [],
+        "surfaces": json_field(getattr(release, "surfaces", None)) or [],
         "candidate_ref": getattr(release, "candidate_ref", None),
         "created_at": _aware(getattr(release, "created_at", None)),
         "evaluation": {

@@ -15,6 +15,7 @@ holds a parsed ``dict`` all answer ``None`` (or ``[]`` for notes).
 
 from __future__ import annotations
 
+import ast
 import json
 from typing import Any
 
@@ -22,16 +23,31 @@ from typing import Any
 BUDGET_PREFIX = "budget="
 
 
-def _load(raw: Any) -> dict:
-    """Parse ``raw`` to a dict; anything that is not a JSON object is ``{}``."""
-    if isinstance(raw, dict):
+def json_field(raw: Any) -> Any:
+    """A JSON-shaped popoto field as its value, or ``None``.
+
+    A plain ``Field`` hands a queried row back a string: the ``json.dumps``
+    form every writer in this lane uses, or the Python repr popoto stores
+    when a dict or list is assigned directly. Both parse here; a dict or
+    list passes through; anything else is ``None``.
+    """
+    if isinstance(raw, dict | list):
         return raw
     if not isinstance(raw, str) or not raw:
-        return {}
+        return None
     try:
-        value = json.loads(raw)
+        return json.loads(raw)
     except ValueError:
-        return {}
+        pass
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return None
+
+
+def _load(raw: Any) -> dict:
+    """Parse ``raw`` to a dict; anything that is not a JSON object is ``{}``."""
+    value = json_field(raw)
     return value if isinstance(value, dict) else {}
 
 
@@ -61,4 +77,4 @@ def budget_of(evaluation: Any) -> dict | None:
     return None
 
 
-__all__ = ["BUDGET_PREFIX", "budget_of", "effect_of", "interval_of", "notes_of"]
+__all__ = ["BUDGET_PREFIX", "budget_of", "effect_of", "interval_of", "json_field", "notes_of"]
