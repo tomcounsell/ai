@@ -213,6 +213,15 @@ git worktree prune
 rm -rf .worktrees/dev-<8hex>   # the path named in the WARNING
 ```
 
+**Turn timeout (issue #3289).** A synthetic-slug session whose run ends with
+`ExitReason.TURN_TIMEOUT` gets the same treatment, for a different reason: the
+timeout notice tells the user "the work so far is saved," and deleting the
+worktree here would make that sentence a lie — every uncommitted change in the
+lane would go with it before the user could reply. The executor's
+synthetic-slug cleanup checks `_turn_timed_out` and skips deletion, logging a
+WARNING with the worktree path. The turn ended, not the work; reclaim the
+directory manually the same way once the lane is done being resumed.
+
 ## Simple Resume (D3, four scalars)
 
 `AgentSession` carries exactly four flat resume fields plus a bounded
