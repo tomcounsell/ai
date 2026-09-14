@@ -484,15 +484,23 @@ table. Migration: `confirm_improvement_release_lane6_fields`, additive, preceden
 `_migrate_confirm_improvement_v2_fields`.
 
 **Transitions.** One private `_transition(release, *, to, allowed_from, event)` writes
-`state`, appends `{event, at, detail}` to a bounded `history` list inside `outcome` (the record's
-existing free JSON field; no new index), and `save()`s. Every public function checks its
-preconditions first and raises `ReleaseRefused(code, detail)` from a closed vocabulary of codes
-(`EVALUATION_NOT_ACCEPT`, `CHARTER_DRIFT`, `SURFACE_DENIED`, `MANIFEST_LACKS_BASE_REVISION`,
+`state`, appends `{event, at, detail}` to the `history` list inside `outcome` (the record's
+existing free JSON field; no new index), and `save()`s. The list is bounded at `HISTORY_MAX = 50`
+entries (a module constant in `lifecycle.py`): on the 51st append the oldest entry is dropped and
+`outcome["history_truncated"] = True` is set once and never cleared, so a reader knows the list is
+a tail. Fifty is generous for a record whose ordinary life is eight events; the bound exists
+because `rollback_push_refused` events carry up to 2 KB of stderr each and `outcome` is a plain
+JSON field on an immortal row. Every public function checks its preconditions first and raises
+`ReleaseRefused(code, detail)` from a closed vocabulary of codes (`EVALUATION_NOT_ACCEPT`,
+`CHARTER_DRIFT`, `SURFACE_DENIED`, `MANIFEST_LACKS_BASE_REVISION`, `BASE_REVISION_CONFLICT`,
 `CANDIDATE_REF_CONFLICT`, `DRILL_REQUIRED`, `DRILL_STALE`, `APPROVER_NOT_HUMAN`, `PR_NOT_MERGED`,
-`WINDOW_OPEN`, `WINDOW_EXCEEDS_EVIDENCE_TTL`, `WRONG_STATE`, `EVALUATOR_RELEASE_NEEDS_CALIBRATION`,
-`ROLLBACK_PUSH_REFUSED`). Refusals never write state; the one exception is `ROLLBACK_PUSH_REFUSED`,
-which appends a history event naming the orphaned revert SHA before raising, because a revert
-commit that exists and never reached `main` is exactly the fact the record must carry.
+`EVIDENCE_EXPIRED`, `WINDOW_OPEN`, `WINDOW_EXCEEDS_EVIDENCE_TTL`, `WRONG_STATE`,
+`EVALUATOR_RELEASE_NEEDS_CALIBRATION`, `ROLLBACK_PUSH_REFUSED`). `EVIDENCE_EXPIRED` is both a
+refusal code (at `expose`, where the baseline cannot be measured) and an `outcome.reason` (at
+`close_window`, where the window is scored `undetermined`); one name, one meaning, two surfaces.
+Refusals never write state; the one exception is `ROLLBACK_PUSH_REFUSED`, which appends a history
+event naming the orphaned revert SHA before raising, because a revert commit that exists and never
+reached the target branch is exactly the fact the record must carry.
 
 | From | Event | To | Guard |
 |---|---|---|---|
@@ -500,9 +508,9 @@ commit that exists and never reached `main` is exactly the fact the record must 
 | `proposed` | `drill` | `proposed` | writes `rollback_drill`; no state change |
 | `proposed` | `approve` | `approved` | drill passed after last plan write; human approver; gate recorded |
 | `approved` | `open_pr` | `approved` | records `exposure.pr_number` |
-| `approved` | `expose` | `observing` | PR merged; baseline frozen; `exposed_at`; window end restamped from `exposed_at` |
+| `approved` | `expose` | `observing` | PR merged; `exposed_at = mergedAt`; baseline rows inside TTL; baseline frozen over `[mergedAt - baseline_days, mergedAt)`; window end restamped to `mergedAt + window_days` |
 | `observing` | `close_window` | `accepted` on `held`, else stays | window elapsed or forced with reason; evidence inside TTL and untruncated |
-| `observing`, `accepted` | `rollback` | `rolled_back` | revert executed, verified, pushed, and confirmed on the remote by `ls-remote` |
+| `observing`, `accepted` | `rollback` | `rolled_back` | worktree from freshly fetched `origin/<target>`; revert executed, verified, pushed to `<target>`, and confirmed by `ls-remote refs/heads/<target>` |
 | `proposed`, `approved` | `withdraw` | `withdrawn` | reason recorded |
 
 **Proposal gates, in order.** (1) Evaluation exists, `state == "complete"`, `verdict == "accept"`.
@@ -513,9 +521,14 @@ effects". (3) `kind` in `RELEASE_KINDS`; `evaluator` additionally requires `cali
 that the replacement better assesses progress), refused as `EVALUATOR_RELEASE_NEEDS_CALIBRATION`
 otherwise; `infrastructure` needs no comparison per the parent plan but still needs a drill.
 (4) `surfaces` non-empty, each a normalized repo-relative path with no `..` or glob, none denied.
-(5) `base_revision` from the manifest, or from the argument when the manifest lacks it, refused as
-`CANDIDATE_REF_CONFLICT` when both exist and differ and as `MANIFEST_LACKS_BASE_REVISION` when
-neither exists. (6) `candidate_ref` resolves (`git rev-parse --verify`) through the runner.
+(5) `base_revision` from the manifest, or from the `--base-revision` argument when the manifest
+lacks it, refused as `BASE_REVISION_CONFLICT` when both exist and differ and as
+`MANIFEST_LACKS_BASE_REVISION` when neither exists. (6) `candidate_ref`: when the manifest carries
+a `candidate_ref` key (lane 5's manifests do, `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:591-596`;
+lane 4's do not) and it differs from `--candidate-ref`, refused as `CANDIDATE_REF_CONFLICT`; the
+two conflict codes are distinct so the operator reads a refusal about the ref that actually
+disagrees. The resolved `candidate_ref` must then resolve (`git rev-parse --verify`) through the
+runner.
 (7) Rollback plan validates: `{"kind": "git_revert", "verify": [cmd, ...], "propagation":
 "/update"}`; `verify` may be empty, in which case the drill records `verify: not_exercised`.
 (8) Observation plan validates: `window_days >= 1`, `baseline_window_days >= 1`,
@@ -564,16 +577,27 @@ neither exists. (6) `candidate_ref` resolves (`git rev-parse --verify`) through 
    not rehearse the `-m 1` merge-commit revert that `rollback()` runs on `main`. The feature doc
    states that the two operations differ and why the drill still stands as evidence (the same
    step executor, the same restoration checks, the same declared surfaces).
-The real `rollback()` reuses the same step executor against a worktree of `main` with
-`git revert -m 1 <merge_sha>` when the merge commit has two parents and plain `git revert` when the
-PR was squash-merged, commits with `Roll back improvement release <id>: <reason> (Refs #3218)`
-so `.githooks/commit-msg` accepts it, and pushes through the runner (`git push origin HEAD:main`,
-or `HEAD:<name>` under `--branch <name>`). The transition to `rolled_back` happens only after the
-push returns 0 and `git ls-remote origin main` (or the named branch) resolves to `revert_sha`; any
+The real `rollback()` reuses the same step executor against a worktree built from the remote, not
+the local checkout. With `target = branch or "main"`, the sequence is: `git fetch origin
+<target>`; `git worktree add --detach <path> origin/<target>` under the retention root;
+`parent_sha = git rev-parse origin/<target>` recorded in `outcome.history`; `git revert -m 1
+<merge_sha>` when the merge commit has two parents and plain `git revert` when the PR was
+squash-merged; commit as `Roll back improvement release <id>: <reason> (Refs #3218)` so
+`.githooks/commit-msg` accepts it; `git push origin HEAD:<target>` through the runner. The fetch
+comes first because a local `main` behind `origin/main` is the ordinary state of a machine during
+an incident: a revert committed on that stale parent is rejected non-fast-forward on every push,
+and every re-run would refuse `ROLLBACK_PUSH_REFUSED` with the same stderr until the operator
+guessed the cause. Under `--branch <name>` where `<name>` does not exist on the remote, the fetch
+fails; the worktree is then built from `origin/main` and the record carries `pushed_to: <name>`.
+The transition to `rolled_back` happens only after the push returns 0 and `git ls-remote origin
+refs/heads/<target>` resolves to `revert_sha`, checked against the same ref the push targeted; any
 other outcome is `ROLLBACK_PUSH_REFUSED` with the state unchanged and the orphaned `revert_sha`
-recorded in `outcome.history`. It records the same shape plus `revert_sha`, `pushed_to`, and
-`propagation: "requires /update on fleet machines"`. Under `--branch`, `propagation` also names
-the PR the operator must open, and the CLI prints the `gh pr create` command.
+and `parent_sha` recorded in `outcome.history`. It records the same shape plus `revert_sha`,
+`parent_sha`, `pushed_to`, and `propagation: "requires /update on fleet machines"`. Under
+`--branch`, `propagation` also names the PR the operator must open, and the CLI prints the `gh pr
+create` command. The recording runner in the lifecycle tests returns 0 for the fetch and the
+worktree add, so the fixtures for a refused push and a moved remote head exercise the push gate
+unchanged.
 
 **Promotion gate (`promotion.py`).**
 ```python
@@ -636,9 +660,44 @@ because a late operator-invoked close would otherwise count a window whose early
 and report the gap as a number. The partial's window row surfaces both reasons. Charter §11's
 "do not treat fewer detected bugs as improvement when detection declined" is the `undetermined`
 branch, and `claim_level_2_supported` is true only on `held` with `window_shortfall_days == 0` and
-the evaluation's held-out effect still positive. The falsifier written to `outcome` is the
-observation that would overturn the claim: "architectural correction rate over a later
-`window_days` window exceeds the baseline band with coverage at or above baseline".
+`effect_of(evaluation, primary_endpoint) > 0`, where `primary_endpoint` is read from the frozen
+protocol (`load_protocol(experiment)["primary_endpoint"]`, lane 4's `runner.py:197`) and
+`effect_of` is the reader described next. The falsifier written to `outcome` is the observation
+that would overturn the claim: "architectural correction rate over a later `window_days` window
+exceeds the baseline band with coverage at or above baseline".
+
+**Evaluation read (`evaluation_read.py`).** Lane 4's single evaluation writer stores `effect` and
+`confidence_interval` as JSON strings (`json.dumps(ctx.effect, sort_keys=True)`,
+`origin/session/sdlc-3216:tools/improvement_eval/runner.py:499-505`) of dicts keyed by endpoint
+name (`ctx.effect = {o.name: o.mean for o in outcomes}`, `:782`; the per-endpoint interval is
+`{"lower", "upper", "n", "raw_p_value", "adjusted_p_value"}`, `:783-790`), and `notes` as a
+newline-joined string (`:508`). Nothing in this lane reads those fields directly. One small module
+`tools/improvement_release/evaluation_read.py` owns the shape:
+```python
+def _load(raw) -> dict:
+    return json.loads(raw) if isinstance(raw, str) else (raw or {})
+
+def effect_of(evaluation, endpoint: str) -> float | None:
+    return _load(evaluation.effect).get(endpoint)
+
+def interval_of(evaluation, endpoint: str) -> dict | None:
+    return _load(evaluation.confidence_interval).get(endpoint)
+
+def notes_of(evaluation) -> list[str]:
+    return (evaluation.notes or "").split("\n") if evaluation.notes else []
+
+def budget_of(evaluation) -> dict | None:   # the comparison's `budget=<json>` line, or None
+```
+`lifecycle.close_window`, `lineage.release_lineage`, and `report.claim_report` all read through
+these four functions, so lane 4's `frozen-holdout/1` rows and this lane's `recursive-comparison/1`
+rows parse through one path. The comparison writes the same shape it reads: `compare.run` stores
+`effect=json.dumps({"validated_gain": mean_delta}, sort_keys=True)`,
+`confidence_interval=json.dumps({"validated_gain": {"lower", "upper", "n", "raw_p_value",
+"adjusted_p_value"}}, sort_keys=True)`, and `notes="\n".join([...])` with the budget accounting as
+one `budget=<json>` line. The lineage test and the level-2 report test seed their evaluation rows
+with exactly the expressions `_write_evaluation` uses (`runner.py:485-508`: `json.dumps(...,
+sort_keys=True)` for both fields, `"\n".join(notes)` for `notes`), never a hand-built dict, so the
+reader is exercised against the real string form and a shape change in lane 4 is a red test here.
 
 **Research process digest (`process.py`).**
 ```python
