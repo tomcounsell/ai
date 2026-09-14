@@ -1209,6 +1209,99 @@ class TestStageArtifactVerification:
         assert [c for c in calls if c[:2] == ["git", "ls-remote"]] == [], calls
         assert [c for c in calls if c[:1] == ["gh"]] == [], calls
 
+    def test_patch_probe_uses_the_pr_head_branch_not_the_derived_name(self, monkeypatch, tmp_path):
+        """A lane whose branch is not `session/{slug}` verifies on the PR's
+        own headRefName rather than the slug-derived guess (#3171).
+
+        The derived name is an assumption about how the branch was created.
+        #3171 records slug `sdlc-3003` but was branched as
+        `redis-client-accessor-3003`, so `session/sdlc-3003` resolves to
+        nothing on origin. Because the PATCH probe is fail-CLOSED, that miss
+        is indistinguishable from "never pushed" and re-dispatches /do-patch
+        against a branch that is pushed and green -- until G4 hard-blocks the
+        lane. Asking the PR removes the guess.
+        """
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "sdlc-3003")
+
+        real_branch = "redis-client-accessor-3003"
+        probed = []
+
+        def _fake_run(cmd, **kwargs):
+            cmd = list(cmd)
+            proc = MagicMock()
+            proc.returncode = 0
+            if cmd[:3] == ["gh", "pr", "view"] and "headRefName" in cmd:
+                proc.stdout = json.dumps({"headRefName": real_branch})
+            elif cmd[:3] == ["gh", "pr", "view"]:
+                proc.stdout = json.dumps({"state": "OPEN"})
+            elif cmd[:2] == ["git", "ls-remote"]:
+                probed.append(cmd[-1])
+                # Only the REAL branch exists on origin. The derived
+                # `session/sdlc-3003` does not -- that is the whole defect.
+                proc.stdout = f"abc123\trefs/heads/{real_branch}" if cmd[-1] == real_branch else ""
+            else:
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=3003,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": 3171},
+        )
+
+        assert real_branch in probed, probed
+        assert "session/sdlc-3003" not in probed, probed
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
+    def test_patch_probe_falls_back_to_derived_name_when_pr_cannot_answer(
+        self, monkeypatch, tmp_path
+    ):
+        """A failed headRefName lookup falls back to the derived name.
+
+        "Could not determine" must not silently skip the gate: the fallback
+        keeps the pre-#3171 behaviour rather than trading a false refusal for
+        a false pass.
+        """
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("tools.lane_identity.resolve_lane_slug", lambda *a, **k: "my-slug")
+
+        probed = []
+
+        def _fake_run(cmd, **kwargs):
+            cmd = list(cmd)
+            proc = MagicMock()
+            if cmd[:3] == ["gh", "pr", "view"] and "headRefName" in cmd:
+                proc.returncode = 1  # the PR cannot answer
+                proc.stdout = ""
+                return proc
+            proc.returncode = 0
+            if cmd[:3] == ["gh", "pr", "view"]:
+                proc.stdout = json.dumps({"state": "OPEN"})
+            elif cmd[:2] == ["git", "ls-remote"]:
+                probed.append(cmd[-1])
+                proc.stdout = ""
+            else:
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=9001,
+            stage_states={"PATCH": "completed"},
+            meta={"pr_number": 4242},
+        )
+
+        assert probed == ["session/my-slug"], probed
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+
     def test_unverifiable_build_skip_logs_at_debug_not_warning(self, monkeypatch, caplog):
         """The skip is a normal, expected state and logs at DEBUG.
 
