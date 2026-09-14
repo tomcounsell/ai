@@ -115,6 +115,7 @@ FORBIDDEN_INDEX_NAMES = (
     "source_session_id",
     "source_ref",
     "contract_digest",
+    "charter_digest",
     "model_revision_id",
     "supersedes_id",
 )

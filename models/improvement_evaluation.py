@@ -63,6 +63,10 @@ class ImprovementEvaluation(Model):
         verdict: One of :data:`EVALUATION_VERDICTS`. Low-cardinality index.
         experiment_id: The ``ImprovementExperiment`` measured. Not indexed.
         contract_digest: The frozen contract this ran under.
+        charter_digest: The ``sha256:<hex>`` of the charter the evaluation ran
+            under. Per charter §12, actions complete under the digest they
+            carry, so the verdict can be re-read against the exact authority
+            it was measured under.
         evaluator_version: Which evaluator produced the numbers.
         holdout_partition: Which holdout split was used, and its rotation epoch.
         blinded: Whether judges saw candidate identity.
@@ -82,9 +86,13 @@ class ImprovementEvaluation(Model):
     verdict = IndexedField(default="inconclusive")
     experiment_id = Field(null=True)
     contract_digest = Field(null=True)
+    charter_digest = Field(null=True)
     evaluator_version = Field(null=True)
     holdout_partition = Field(null=True)
-    blinded = Field(null=True)
+    # `type=bool` is load-bearing: without it a queried row hydrates the value
+    # as the string "False", which is truthy, and a failed blinding would read
+    # as a success to every consumer.
+    blinded = Field(type=bool, null=True)
     arm_assignment_digest = Field(null=True)
     trials = IntField(default=0)
     effect = Field(null=True)

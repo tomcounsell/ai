@@ -164,6 +164,12 @@ class TestCorrelationReachesTheSubprocess:
         source = inspect.getsource(se._execute_agent_session)
         assert '"VALOR_CORRELATION_ID": cid or ""' in source
 
+    def test_harness_env_declares_project_key(self):
+        from agent import session_executor as se
+
+        source = inspect.getsource(se._execute_agent_session)
+        assert '"VALOR_PROJECT_KEY"' in source
+
 
 @pytest.mark.asyncio
 async def test_run_due_is_a_noop_at_limit_zero(monkeypatch):

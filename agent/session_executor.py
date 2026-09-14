@@ -28,6 +28,7 @@ from agent.worktree_manager import (
     validate_workspace,
 )
 from config.enums import ClassificationType, SessionType
+from config.project_key_resolver import resolve_project_key
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -2316,6 +2317,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # rides back out on the outbox payload; without it in the env, the
             # journey has a hole exactly where the work happens.
             "VALOR_CORRELATION_ID": cid or "",
+            # Memory partition for the harness subprocess: memory_search and
+            # reflections read VALOR_PROJECT_KEY with a "valor" fallback, so
+            # without this every non-valor session's harness reads and writes
+            # the wrong partition. Resolved through the single choke point so
+            # new resolution hints propagate here automatically.
+            "VALOR_PROJECT_KEY": resolve_project_key(project_key=project_key) or "",
         }
         # SESSION_TYPE drives pre_tool_use hook behavior (_is_pm_session in
         # agent/hooks/pre_tool_use.py:97-99). Without it, PM Bash restrictions

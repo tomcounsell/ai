@@ -19,7 +19,7 @@ Column meanings, stated once so nothing is graded on a sliding scale:
 | **Measured** | Someone has read a number off it that came from real traffic, not a fixture |
 | **Effect** | What we can honestly say about whether it helps. `unknown` is the correct answer for everything shipped this week |
 
-State as of lane 2 (#3177). Later lanes update this file rather than starting a
+State as of lane 4 (#3177). Later lanes update this file rather than starting a
 new one.
 
 ## Lane 1 — autoexperiment retirement
@@ -42,7 +42,7 @@ later reconstructs one from the corpora.
 | Eight `Improvement*` Popoto models | yes | yes (schema is live once merged) | no | n/a — storage, not behavior |
 | `ImprovementSettings` in `config/settings.py` | yes | yes, `enabled=False` | no | n/a |
 | `IMPROVEMENT__ENABLED` declared and read | yes | unset everywhere | no | n/a |
-| `VerifyingArtifactStore` | yes | no writer yet — lanes 4 and 5 write the first artifact | no | unknown |
+| `VerifyingArtifactStore` | yes | yes: lane 4's harness writes corpora, protocols, judge responses, and calibration sets to it | no | unknown |
 | Correction detector (`collect_corrections`) | yes | registered on the next `/update` of the owning machine; writes only once `IMPROVEMENT__ENABLED=true` | **no** | unknown |
 | Memory-inspiration adapter (`collect_inspirations`) | yes | same | **no** | unknown |
 | Expectation coverage adapter | yes | same | **no** | unknown |
@@ -124,14 +124,38 @@ available from the deleted instrumentation.** Its historical values were zeros
 produced by an absent writer, not observations of low rework, and treating them
 as a baseline would manufacture an improvement out of nothing.
 
+## Lane 4 — frozen evaluation inputs
+
+| Component | Implemented | Deployed | Measured | Effect |
+|---|---|---|---|---|
+| `tools/improvement_eval/runner.py`: gate ordering, three exit handlers, single `ImprovementEvaluation` writer | yes | no — nothing calls `evaluate()` in a request path or on a schedule until lane 3's control loop | no | n/a |
+| Frozen corpus export, canonical digest, ORM restore (`corpus.py`) | yes | no | no | n/a |
+| Per-arm private Redis with a subprocess-only client (`arena.py`, `arm_worker.py`) | yes | no | **measurable**: two arms re-export and hash their own corpus at run time, and the run refuses on a mismatch | unknown |
+| Writer kill switch plus digest re-check (`writer_guard.py`) | yes | no | **measurable**: an escaped write surfaces as `infra_failure`, proven by mutation | unknown |
+| Baseline parity gate before the candidate arm (`retrieval.py`) | yes | no | **measurable**: a parity miss is an `infra_failure` and the candidate is never invoked, proven by mutation | unknown |
+| Blinding: seeded assignment, blinded ids, identity scan (`blinding.py`) | yes | no | **measurable**: `blinded` is a typed boolean written from the scan, never assumed | unknown |
+| `serves-charter` judge with charter §7 routing (`judges/serves_charter.py`) | yes | no | no — no real provider call has been made; every test injects the transport | unknown |
+| Calibration against a frozen reference set (`calibration.py`) | yes | no | **no, and blocked**: the architectural `ImprovementEvidence` bucket held 0 rows on the build machine; the floor is 20, so the judge returns `infra_failure` until evidence accrues | unknown |
+| Holm correction and fixed-batch stopping (`correction.py`, `statistics.py`) | yes | no | no | n/a |
+| `ImprovementEvaluation.charter_digest` and its migration | yes | on the next `/update` per machine | no | n/a |
+| `VALOR_PROJECT_KEY` in `_harness_env` | yes | with the next worker restart | no | fixes a real partition leak for non-`valor` sessions; unmeasured |
+
+**The honest reading of this lane.** The apparatus is implemented and every
+guard has a red-state proof, which makes the *properties* (byte-identical
+reads, parity, blinding, an honest `infra_failure`) measurable at run time.
+No candidate has been evaluated: the arms compare retrieval on a seeded corpus
+in tests, and the control loop that would freeze a real experiment is lane
+3's. A calibrated judge needs twenty retained architectural corrections and
+there are none yet, so the first real run will report `infra_failure` from the
+calibration floor, on purpose.
+
 ## Not built, by lane
 
 | Component | Owning lane | Blocked on |
 |---|---|---|
 | Control journal, Lua transition, dispatch intents, `admitted` status | 3 | #3183's create-or-bind seam and dead-letter record; #3183's lane 6 for the fencing lease |
 | `valor-improve` CLI, break-glass `pause`/`resume`/`doctor` | 3 | lane 3 |
-| Frozen corpora, per-arm isolation, judge envelope, `tools/improvement_eval/` | 4 | lane 3 |
-| Observer→planner loop, investigations, first journey-preservation experiment | 5 | lane 4 |
+| Observer→planner loop, investigations, first journey-preservation experiment | 5 | lane 3 (the harness it drives is built) |
 | Release records, exposure, rollback, recursive comparison | 6 | lane 5 |
 
 ## Five questions the plan asked, and where they stand
@@ -145,8 +169,10 @@ as a baseline would manufacture an improvement out of nothing.
    engaged and never lifted.
 3. **Dispatch intent persistence** — deferred to lane 3, consuming #3183's
    idempotent create-or-bind seam rather than a second one.
-4. **Memory arm isolation** — deferred to lane 4. Partition-by-key exists today;
-   snapshot, freeze, and copy-on-write do not.
+4. **Memory arm isolation** — decided by lane 4: snapshot-and-restore into a
+   private `redis-server` per arm, reached only by a child process, with a
+   writer kill switch as the second guard. Copy-on-write and shared-instance
+   freeze were rejected (spike-3).
 5. **`rework_rate`** — decided and executed: deleted, see the retired table
    above.
 

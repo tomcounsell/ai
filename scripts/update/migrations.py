@@ -1507,6 +1507,26 @@ def _migrate_confirm_improvement_infrastructure_ledger_readable(
     )
 
 
+def _migrate_improvement_evaluation_charter_digest(project_dir: Path) -> str | None:
+    """Confirm the charter_digest field on ImprovementEvaluation (issue #3216).
+
+    Purely additive to one existing model: ``ImprovementEvaluation`` gains
+    ``charter_digest``, a plain unindexed field matching the one the other
+    three records already carry, so there is nothing to backfill and no index
+    set to strip.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the evaluation's charter pin:
+    without it there is no record on a machine that the field was ever
+    registered, and a later subtractive migration has no predecessor to reason
+    from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        ("ImprovementEvaluation",),
+    )
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "side_effect_job_model": (
         _migrate_side_effect_job_model,
@@ -1650,6 +1670,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_confirm_improvement_infrastructure_ledger_readable,
         "Register the additive InfrastructureReservation ledger model (issue #3274) "
         "and confirm its keyspace resolves",
+    ),
+    "confirm_improvement_evaluation_charter_digest": (
+        _migrate_improvement_evaluation_charter_digest,
+        "Register the charter_digest field on ImprovementEvaluation (issue "
+        "#3216) and confirm its keyspace resolves",
     ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,

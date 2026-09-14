@@ -551,8 +551,10 @@ bigger arm.
   process, never imports `tests/db_claim.py`.
 - **`tools/improvement_eval/arm_worker.py`** — the arm-side entry point, run as
   `python -m tools.improvement_eval.arm_worker` in a child process whose env dict carries
-  `REDIS_URL=unix://<arm.sock>`, `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`, and
-  `POPOTO_EMBEDDING_INVALIDATION=none`. Reads a job spec on stdin, restores the corpus, runs the
+  `REDIS_URL=unix://<arm.sock>`, `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`,
+  `POPOTO_EMBEDDING_INVALIDATION=none`, and `RETRIEVAL_MODE=current` (the four-signal RRF path is
+  the measured subject; the hybrid path's post-retrieve writes would trip the digest re-check).
+  Reads a job spec on stdin, restores the corpus, runs the
   retrieval, re-exports for the digest check, and writes JSON on stdout. Every Redis touch inside it
   goes through the ORM against the child's own canonical pool.
 - **`tools/improvement_eval/writer_guard.py`** — the writer kill switch. A client wrapper that
@@ -820,9 +822,11 @@ is where a later dashboard will read them from:
 - [ ] `infra_failure` is a distinct verdict value produced by six named conditions with a test each,
       never merged into `reject` (`test_infra_failure_and_reject_have_disjoint_causes`). A consumer
       cannot present it as evidence about the candidate without deliberately choosing to.
-- [ ] `blinded` is written only from `scan_for_identity`'s result and is never null on a completed
-      evaluation, so `blinded=False` is a queryable fact rather than an absence a renderer has to
-      infer. `test_identity_leak_sets_blinded_false` pins it.
+- [ ] `blinded` is written only from `scan_for_identity`'s result and is never null on an
+      evaluation that reached the judges (a run that ended before any scan, an `infra_failure` or
+      every trial excluded within the cap, leaves it null: there is no blinding fact to state), so
+      `blinded=False` is a queryable fact rather than an absence a renderer has to infer.
+      `test_identity_leak_sets_blinded_false` pins it on a queried row.
 
 ### Mutation proofs (each guard, measured)
 
@@ -848,6 +852,49 @@ test is observed to fail, the mutation is reverted, and the test is observed to 
 | §7 routing | Ignore `is_open_source` and always use any provider | `test_client_project_judge_stays_on_subscription_providers` |
 | Calibration floor | Return a judge verdict below the floor | `test_reference_set_below_floor_yields_infra_failure` |
 | `metrics.py` untouched | Edit `tools/memory_eval/metrics.py` | `test_metrics_module_is_unmodified` |
+
+### Mutation proof record (build, 2026-09-14)
+
+Every row was run as apply → named test → revert → named test, from the lane worktree with
+`scripts/pytest-clean.sh`. The "Relevance carry-over" mutation lives in popoto's import path
+(`popoto/transfer/import_.py`, `skip_auto_now=True`), so it was applied to the worktree venv's copy
+(a single-link file) and reverted the same way. The "Corpus identity" row is proven twice: the arm
+worker's per-arm re-export (the named test) and the runner's comparison of those digests against the
+export (`test_unequal_corpus_digests`), because the named test alone reaches only the first.
+
+| Guard | Mutation applied | Test | Red line observed (mutant) | Reverted |
+|---|---|---|---|---|
+| Holm monotonicity | Drop the cumulative maximum (`correction.py`) | `test_holm_adjusted_values_are_non_decreasing` | `assert False` | green |
+| Holm suppression | Return raw p-values unchanged (`correction.py`) | `test_holm_suppresses_the_spurious_winner` | `AssertionError: assert ['endpoint-3'] == []` | green |
+| Artifact integrity | Catch ArtifactIntegrityError and continue (`runner.py`) | `test_corrupted_archive_invalidates_without_verdict` | `AssertionError: assert 'complete' == 'invalidated'` | green |
+| Parity gate ordering | Move the parity check after the candidate arm (`runner.py`) | `test_parity_miss_never_invokes_the_candidate_arm` | `AssertionError: assert 'baseline parity' in 'infra_failure: unexpected AssertionError: candidate arm was invoked'` | green |
+| Corpus identity (arm re-export) | Skip the per-arm re-export; echo the input digest (`arm_worker.py`) | `test_two_arms_read_a_byte_identical_corpus` | `assert '' == '{"consistent...on": "1.9.0"}'` | green |
+| Corpus identity (runner comparison) | Skip the per-arm digest comparison (`runner.py`) | `test_unequal_corpus_digests` | `AssertionError: assert 'accept' == 'infra_failure'` | green |
+| Retrieval reproducibility | Rank through Query.top_by_decay instead of retrieve_memories (`retrieval.py`) | `test_two_arms_rank_identically_across_a_clock_gap` | `AssertionError: assert ['c620feb8287...2e8eb2b618b2'] == ['1d5e5d61b02...77b8e258e1ea']` | green |
+| Relevance carry-over | Drop skip_auto_now from the restore (popoto import path) (`import_.py`) | `test_restore_without_skip_auto_now_fails_baseline_parity` | `AssertionError: assert False` | green |
+| Parent pool isolation | Call set_REDIS_DB_settings in the parent (`arena.py`) | `test_parent_pool_kwargs_survive_an_arena_context` | `AssertionError: assert {'socket_conn...vm1/arm.sock'} == {'db': 1, 'ho...eout': 5, ...}` | green |
+| Blinding | Return blinded=True unconditionally (`runner.py`) | `test_identity_leak_sets_blinded_false` | `assert True is False` | green |
+| Writer kill switch (wrapper) | Remove the client wrapper (leave the digest re-check) (`writer_guard.py`) | `test_arm_write_is_refused` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| Writer kill switch (digest re-check) | Remove the digest re-check (leave the wrapper) (`arm_worker.py`) | `test_escaped_write_surfaces_as_infra_failure` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| Verdict disjointness | Merge infra_failure into reject (`runner.py`) | `test_infra_failure_and_reject_have_disjoint_causes` | `AssertionError: assert 'reject' == 'infra_failure'` | green |
+| Gate 0 crash disposition | Let Gate 0 accept state=running (`runner.py`) | `test_crashed_run_leaves_a_documented_repair` | `AssertionError: assert 'accept' == 'infra_failure'` | green |
+| Corpus restore fidelity | Drop on_embedding_mismatch="carry" (popoto default: error) (`corpus.py`) | `test_restore_without_carry_fails_baseline_parity` | `popoto.exceptions.ModelException: embedding provenance mismatch on field 'embedding': source={'provider': 'FakeEmbeddingProvider', 'model': 'fake-test…` | green |
+| Section 7 routing | Ignore is_open_source and always use any provider (`serves_charter.py`) | `test_client_project_judge_stays_on_subscription_providers` | `AssertionError: assert 'openai' == 'claude-subscription'` | green |
+| Calibration floor | Return a judge verdict below the floor (`calibration.py`) | `test_reference_set_below_floor_yields_infra_failure` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| metrics.py untouched | Edit tools/memory_eval/metrics.py (`metrics.py`) | `test_metrics_module_is_unmodified` | `assert '"""Retrieval...rank(0.95)}\n' == '"""Retrieval...rank(0.95)}\n'` | green |
+| RRF path pin (review round 2) | Drop `env["RETRIEVAL_MODE"]` from `build_child_env` (`arena.py`) | `test_bm25_hit_beyond_the_assembler_pool_runs_ok` | `InfraFailure: arm worker reported an error: InfraFailure: writer guard: corpus digest changed during arm retrieve job` | green |
+| Arm-param allowlist (review round 2) | Skip the `ARM_PARAM_KEYS` check in `_retrieve_job` (`runner.py`) | `test_clock_skew_in_a_protocol_arm_dict_is_refused`, `test_mode_override_is_refused` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` (both) | green |
+| Arm-param validation at load (review round 3) | Drop the two `_validate_arm_params` calls at protocol load, leaving the per-trial check (`runner.py`) | `test_disallowed_candidate_param_is_infra_failure_even_under_a_high_cap` | `AssertionError: assert 'inconclusive' == 'infra_failure'` | green |
+
+The first sweep found one guard that reached no code: `test_two_arms_rank_identically_across_a_clock_gap`
+stayed green under a correct decay-clock mutant because its fixture seeded both records at one instant,
+so a 30-day skew moved nothing. The fixture now spaces an old, important record 60 days behind a fresh,
+unimportant one and asserts in-process that decay ranking flips across the gap before asserting the arms
+agree; the row above is the rerun against that fixture. Review round 2 found a second inert guard:
+the BM25 test seeded three hits at `limit=2`, inside the hybrid assembler's `2 * limit` pool, so no hit
+went unselected and nothing was written; it stayed green with the pin removed. The test now runs at
+`limit=1` and asserts the digest failure with the pin patched to `auto` before asserting the pinned
+job is `ok`; the two round-2 rows above are the reruns.
 
 ## Test Impact
 
@@ -994,8 +1041,8 @@ external event ever gates five of the nine tasks again, and the claim and the gr
 often and a loop that never learns anything. If most runs end in `infra_failure`, the separation from
 `reject` has bought nothing.
 
-**Mitigation:** `infra_failure` is raised from exactly six named conditions and from nowhere else,
-each with its own test. The final catch-all handler in `runner.py` writes `infra_failure` with the
+**Mitigation:** `infra_failure` is written for six named categories of condition, each with its own
+test, and every raise site names its transport or protocol failure in `notes`. The final catch-all handler in `runner.py` writes `infra_failure` with the
 exception type in `notes`, so an unnamed cause is visible as an unnamed cause rather than blending
 into the six. The dashboard renders `infra_failure` counts beside the others, which makes a rising
 rate an observable fact rather than a suspicion.
@@ -1171,8 +1218,12 @@ Nothing else in the update path changes:
   existing settings and the existing `is_open_source` guard; no `.env` key is added, so
   `.env.example` and `config/settings.py` are untouched and `tests/unit/test_env_completeness.py`
   stays green without edits.
-- **No service restart.** `tools/improvement_eval/` is not imported by the bridge, the worker, or
-  any agent code path, so `./scripts/valor-service.sh restart` is not required by this change.
+- **No service restart for the package; a worker restart for the two `agent/` edits.**
+  `tools/improvement_eval/` is not imported by the bridge, the worker, or any agent code path, so
+  the harness itself needs no restart. The lane also changes `agent/session_executor.py`
+  (`VALOR_PROJECT_KEY` in `_harness_env`) and `agent/memory_retrieval.py` (the confidence-signal
+  key tie-break), both of which the worker imports, so deploying needs `worker-restart` on every
+  machine (`/update` handles it when its restart step is enabled).
 - **`POPOTO_IMPROVEMENT_CONTENT_PATH`** already exists and already defaults to
   `data/improvement_content` inside the repo (`models/verifying_artifact_store.py:52-56`). The new
   artifacts this lane writes (corpus exports, calibration sets, raw judge responses) land under that
@@ -1495,7 +1546,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 ### 6. The runner
 - **Task ID**: build-runner
 - **Depends On**: validate-components, build-charter-judge
-- **Validates**: `tests/unit/test_improvement_eval_runner.py` (create), `tests/integration/test_improvement_eval_end_to_end.py` (create)
+- **Validates**: `tests/unit/test_improvement_eval_runner.py` and `tests/unit/test_improvement_eval_runner_guards.py` (create; split so neither file alone outlasts `pytest-clean.sh`'s idle-controller window under `--dist loadfile`), `tests/integration/test_improvement_eval_end_to_end.py` (create)
 - **Assigned To**: runner-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -1545,24 +1596,24 @@ executed against the tree at plan time to confirm it runs and produces the shape
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Harness unit tests pass | `scripts/pytest-clean.sh tests/unit/ -k improvement_eval -q` | exit code 0 |
+| Harness unit tests pass (pure modules; the arena, corpus, and runner suites spawn Redis arms and take about seven minutes under `-n 6`, past the runner's 120s cap, so they are exercised by the end-to-end row below and recorded in the build's mutation proof record) | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_correction.py tests/unit/test_improvement_eval_statistics.py tests/unit/test_improvement_eval_blinding.py -q` | exit code 0 |
 | Judge and calibration tests pass | `scripts/pytest-clean.sh tests/unit/test_serves_charter_judge.py tests/unit/test_improvement_eval_calibration.py -q` | exit code 0 |
 | Record and migration tests pass | `scripts/pytest-clean.sh tests/unit/test_improvement_models.py tests/unit/test_migrations.py -q` | exit code 0 |
 | Harness env integration test passes | `scripts/pytest-clean.sh tests/integration/test_session_spawning.py -q` | exit code 0 |
 | End-to-end evaluation test passes | `scripts/pytest-clean.sh tests/integration/test_improvement_eval_end_to_end.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/improvement_eval/ models/improvement_evaluation.py scripts/update/migrations.py agent/session_executor.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/improvement_eval/ models/improvement_evaluation.py` | exit code 0 |
-| `metrics.py` unmodified (criterion 7) | `.venv/bin/python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('tools/memory_eval/metrics.py').read_bytes()).hexdigest())"` | output is `424dbce86534f955d39f2e56be92ba40b090172045b81e06e6dd8241a84702e7` |
+| `metrics.py` unmodified (criterion 7) | `.venv/bin/python -c "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('tools/memory_eval/metrics.py').read_bytes()).hexdigest())"` | output contains 424dbce86534f955d39f2e56be92ba40b090172045b81e06e6dd8241a84702e7 |
 | `metrics.py` unmodified — human cross-check | `git diff --exit-code origin/main -- tools/memory_eval/metrics.py` | exit code 0 |
 | `metrics.py` is imported (criterion 7) | `grep -rE "from tools\.memory_eval(\.metrics)? import" tools/improvement_eval/ \| wc -l` | output > 0 |
-| `charter_digest` on the evaluation record | `python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
+| `charter_digest` on the evaluation record | `.venv/bin/python -c "from models.improvement_evaluation import ImprovementEvaluation as E; assert hasattr(E,'charter_digest')"` | exit code 0 |
 | `charter_digest` pinned as never-indexed | `grep -c '"charter_digest"' tests/unit/test_improvement_models.py` | output > 0 |
-| Migration function registered in `MIGRATIONS` | `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` | output contains `True` |
+| Migration function registered in `MIGRATIONS` | `.venv/bin/python -c "from scripts.update.migrations import MIGRATIONS; print(any('improvement_evaluation_charter_digest' in k or 'improvement_evaluation_charter_digest' in getattr(v[0],'__name__','') for k,v in MIGRATIONS.items()))"` | output contains True |
 | `VALOR_PROJECT_KEY` in `_harness_env` | `grep -c '"VALOR_PROJECT_KEY"' agent/session_executor.py` | output > 0 |
-| Judge id disjoint from the existing roster | `python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
+| Judge id disjoint from the existing roster | `.venv/bin/python -c "from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID as s; from tools.cross_vendor_judge import CROSS_VENDOR_JUDGE_ID as c; assert s not in {c,'code-quality','risk'}"` | exit code 0 |
 | §7 guard is called, not reimplemented | `grep -r "is_open_source" tools/improvement_eval/ \| wc -l` | output > 0 |
 | Anti-criterion: arena never touches the db-claim pool | `grep -r "db_claim" tools/improvement_eval/ \| wc -l` | match count == 0 |
-| Anti-criterion: the parent never reassigns `REDIS_URL` | `grep -rE "os\.environ\[[\"']REDIS_URL[\"']\][[:space:]]*=\|os\.environ\.setdefault\([[:space:]]*[\"']REDIS_URL\|putenv\([[:space:]]*[\"']REDIS_URL" tools/improvement_eval/ \| wc -l` | match count == 0 (the arm's `REDIS_URL` is a **key in a subprocess env dict**, which this regex deliberately permits and the old `REDIS_URL[^\"]*=` form would have flagged) |
+| Anti-criterion: the parent never reassigns `REDIS_URL` (the arm's `REDIS_URL` is a **key in a subprocess env dict**, which this regex deliberately permits and the old `REDIS_URL[^\"]*=` form would have flagged) | `grep -rE "os\.environ\[[\"']REDIS_URL[\"']\][[:space:]]*=\|os\.environ\.setdefault\([[:space:]]*[\"']REDIS_URL\|putenv\([[:space:]]*[\"']REDIS_URL" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: the parent's canonical pool is never re-pointed | `grep -rE "set_REDIS_DB_settings" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: retrieval never ranks through the unpinnable decay clock | `grep -rE "top_by_decay" tools/improvement_eval/ \| wc -l` | match count == 0 |
 | Anti-criterion: no raw Redis command on Popoto-managed keys | `grep -rE "\.(hgetall\|hget\|hmget\|hscan\|scan_iter\|zadd\|zrem\|sadd\|srem)\(" tools/improvement_eval/ \| wc -l` | match count == 0 |
@@ -1606,6 +1657,13 @@ Round 3 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency
 | NIT | Risk & Robustness | `canonical_corpus_digest` specifies the manifest remainder dumped with `sort_keys=True` and record lines sorted by key but does not state the record bodies are dumped with `sort_keys=True`, leaving intra-record field order as a residual nondeterminism source. | **Revision 4.** Each record body dumped with `sort_keys=True` in all five digest definitions (Data Flow 3/5, Technical Approach, Solution Key Elements, Task 1). | (nit — no implementation note required) |
 | NIT | Scope & Value | The 3a/3b split unblocks Task 5 but Task 6 still joins 3b before the runner, so the critical path stays pinned to the charter judge while carrying two task tracks, unstated. | **Revision 4.** Tradeoff stated in Task 3a: the split unblocks Task 5 only. | (nit — no implementation note required) |
 | NIT | History & Consistency | None of the seven round-2 disposition claims asserts the stale `b05dde885` head string is retired from build-against instructions, so that check has no positive claim to verify against. | **Revision 4.** Freshness Check states the only remaining `b05dde885` mentions are historical citations and nothing builds against it. | (nit — no implementation note required) |
+
+Round 4 — FULL roster (Risk & Robustness, Scope & Value, History & Consistency), independent roster (3 critics on opus) over revision 4 at `8bad4a96d`, plus one bounded fence-only re-dispatch for two result files whose content was complete but lacked the terminal fence. Roster gate `complete: true`, `ungrounded: []`. **READY TO BUILD**: 0 blockers, 0 concerns, 2 nits. Adjudication: the Risk digest-instability finding is rejected — it asks for record sorting by a stable key and `exported_at` exclusion, both already specified (record lines sorted by each record's `key`; `exported_at` popped by name; the remaining manifest asserted byte-equal between arms, which fails closed on any future volatile key). The Risk sensitivity-path finding and the History naming finding are downgraded to nits: the drift pre-assertion fails closed (a mutant that does not perturb fails the test's own drift assertion before the gate assertion), Task 1 already pins the `retrieve_memories` adapter, and the `experiment_id` parameter name mirrors the established `evaluate(experiment_id, project_key)` signature with the "`id`, not `experiment_id`" annotation carried in Race 1b, the Documentation checkbox, and Task 6. Scope & Value verified all five revision-4 dispositions with no findings.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|---|---|---|---|---|
+| NIT | Risk & Robustness | The sensitivity pre-assertion should name the exercised retrieval entry point and the per-path perturbation in Task 1, rather than leaving the fixture to infer which path the gate exercises. (Downgraded from CONCERN: the pre-assertion fails closed and Task 1 already pins the adapter.) | pending — build-stage polish | In the Task 1 retrieval bullet, name `agent.memory_retrieval.retrieve_memories` as the exercised entry point and state the perturbation that proves sensitivity for the stored-score path. |
+| NIT | History & Consistency | Helper parameter named `experiment_id` risks reading as a model field that does not exist. (Downgraded from CONCERN: naming mirrors the established signature and the "`id`, not `experiment_id`" annotation is already carried in three places.) | pending — build-stage polish | Optional: render as `experiment_id_value`, or keep the name with the existing annotation. |
 
 ---
 

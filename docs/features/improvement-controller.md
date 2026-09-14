@@ -11,14 +11,15 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 
 ## What exists today
 
-Lanes 1, 2, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
-verifying artifact store, and three dashboard panels. Unit 3 (USD 50 per week for infrastructure) has a
+Lanes 1, 2, 4, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
+verifying artifact store, three dashboard panels, and the evaluation harness
+(`tools/improvement_eval/`, see [Improvement Evaluation](improvement-evaluation.md)).
+Unit 3 (USD 50 per week for infrastructure) has a
 meter with an admission gate, a teardown policy, a generated charter section 2 progress report, two new
 evidence kinds (`spend_receipt` and `resource_probe`), and an artifact retention root outside the
 checkout. The cloud sandbox itself is decided and unbuilt; see
 [Improvement Cloud Execution](improvement-cloud-execution.md). The control journal, the
-research sessions, the evaluation harness, and releases arrive with lanes 3
-through 6, each as its own child issue.
+research sessions, and releases arrive with lanes 3, 5, and 6, each as its own child issue.
 
 Read the capability matrix before believing anything is working. It grades each
 component on four separate axes (implemented, deployed, measured, effect) and
@@ -370,8 +371,9 @@ the work is ranked under, the §3 early priorities marked as starting hypotheses
 rather than an allocation, open cases with their `priority_area` and
 `ranking_rationale`, and unresolved assumptions. Every heading no lane writes
 yet says so and names the lane that will fill it: acquired abilities and
-resource use come with lane 3, evaluations with lane 4, rejected approaches with
-lane 5. Each section renders one of three distinguishable states: content,
+resource use come with lane 3, the evaluation panel with lane 3's operator
+surface (the harness itself writes `ImprovementEvaluation` rows today),
+rejected approaches with lane 5. Each section renders one of three distinguishable states: content,
 "nothing yet, written by lane N", or "unavailable" when the read failed. A bare
 zero would claim a measurement was taken.
 
