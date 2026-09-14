@@ -52,8 +52,10 @@ Three accessors, one pool of truth:
     timeout where the old hand-built clients carried none. A ``KEYS`` that
     crosses that timeout raises ``TimeoutError`` on whatever path issued it --
     which, on a send path with a blanket handler, is indistinguishable from an
-    empty queue. ``scan_keys`` bounds both the per-round-trip work and the total
-    returned, so neither failure mode is reachable.
+    empty queue. ``scan_keys`` bounds the per-round-trip work and the number of
+    keys returned, which is what closes that failure mode. It does not bound the
+    *traversal*: a sweep that matches nothing still walks the whole keyspace,
+    a page per round trip. See the function's own docstring.
 
 Popoto-managed keys never go through any of these. Model rows are read and
 written through the ORM (``Model.query.filter()``, ``instance.save()``,
@@ -152,11 +154,26 @@ def scan_keys(client: redis.Redis, match: str) -> tuple[list[Any], bool]:
     work per round trip (``settings.redis.scan_count``) so no single command
     can blow the timeout.
 
+    Keys are deduplicated in first-seen order. ``SCAN`` guarantees *at-least*
+    once delivery, not exactly-once: a key present for the whole iteration can
+    still be returned by two different rounds when the keyspace rehashes
+    mid-sweep. ``keys(pattern)`` never did that, so callers that render what
+    they are given -- ``bridge/email_dead_letter.py::list_dead_letters`` -- would
+    have started showing duplicate entries.
+
+    What this does NOT bound is the *traversal*. The exits are a full cursor
+    cycle or ``scan_key_limit`` **matched** keys, so a sweep whose pattern
+    matches nothing still walks the entire keyspace, one ``scan_count`` page per
+    round trip. That is not a regression -- ``KEYS`` was also O(keyspace), and
+    far worse for a single-threaded server -- but on an idle outbox it is the
+    common case, not the rare one.
+
     Returns:
         ``(keys, truncated)``. ``truncated`` is True when the sweep stopped at
         ``settings.redis.scan_key_limit`` with the cursor still open -- the
         caller has a partial view and should expect the remainder on its next
-        pass. Callers that drain a queue can ignore it; callers that reason
+        pass. A sweep that completes on exactly the limit is not truncated.
+        Callers that drain a queue can ignore the flag; callers that reason
         about the *absence* of a key must not.
     """
     from config.settings import settings
@@ -164,15 +181,18 @@ def scan_keys(client: redis.Redis, match: str) -> tuple[list[Any], bool]:
     count = int(settings.redis.scan_count)
     limit = int(settings.redis.scan_key_limit)
 
-    keys: list[Any] = []
+    seen: dict[Any, None] = {}  # insertion-ordered set
     cursor = 0
     while True:
         cursor, batch = client.scan(cursor=cursor, match=match, count=count)
-        keys.extend(batch)
-        if len(keys) >= limit:
-            return keys[:limit], True
+        for key in batch:
+            seen.setdefault(key, None)
+        # Cursor first: a completed sweep is never truncated, however many keys
+        # it happened to return.
         if cursor == 0:
-            return keys, False
+            return list(seen), False
+        if len(seen) >= limit:
+            return list(seen)[:limit], True
 
 
 def bytes_redis() -> redis.Redis:

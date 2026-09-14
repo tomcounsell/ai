@@ -75,6 +75,34 @@ class TestScanKeysIsBounded:
         assert truncated is True
         assert len(keys) < 25_000
 
+    def test_a_sweep_that_completes_on_exactly_the_limit_is_not_truncated(self):
+        """``truncated`` means "there is more", not "I returned a round number".
+
+        A caller that reasons about the *absence* of a key is told to distrust a
+        truncated result, so a false positive here costs real signal -- and the
+        relays log a warning on it every poll.
+        """
+        from config.settings import settings
+
+        limit = int(settings.redis.scan_key_limit)
+        client = FakeScanClient(f"email:outbox:{i}" for i in range(limit))
+        keys, truncated = scan_keys(client, "email:outbox:*")
+        assert len(keys) == limit
+        assert truncated is False
+
+    def test_keys_repeated_across_scan_rounds_are_returned_once(self):
+        """Redis SCAN guarantees at-least-once, not exactly-once, delivery.
+
+        A key present for a whole iteration can still be handed back twice when
+        the keyspace rehashes mid-sweep. A repeat LPOP is harmless, but
+        ``list_dead_letters`` renders what it is given, and ``keys(pattern)``
+        never did this.
+        """
+        client = FakeScanClient(["email:outbox:a", "email:outbox:b", "email:outbox:a"])
+        keys, truncated = scan_keys(client, "email:outbox:*")
+        assert keys == ["email:outbox:a", "email:outbox:b"]
+        assert truncated is False
+
 
 class TestTimeoutIsNotAnEmptyOutbox:
     """The blocker this file exists for: 0 must mean 'nothing to send'."""
@@ -115,6 +143,75 @@ class TestTimeoutIsNotAnEmptyOutbox:
             assert asyncio.run(email_relay.process_outbox()) == 0
 
 
+_CLIENT_PRODUCERS = {
+    "_get_redis",
+    "_get_redis_connection",
+    "text_redis",
+    "bytes_redis",
+    "derived_redis",
+}
+
+
+def _client_bound_names(tree) -> set[str]:
+    """Local names holding a Redis client in ``tree``.
+
+    Assignment targets are enough for the send paths: every client reaches a
+    local through one, including the offloaded spelling
+    ``r = await asyncio.to_thread(_get_redis_connection)`` -- so the producer is
+    matched anywhere inside the assigned value, not only as its callee.
+    """
+    import ast
+
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if value is None:
+            continue
+        referenced = {
+            sub.id if isinstance(sub, ast.Name) else sub.attr
+            for sub in ast.walk(value)
+            if isinstance(sub, (ast.Name, ast.Attribute))
+        }
+        if not referenced & _CLIENT_PRODUCERS:
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _keys_offenders(tree, module_path: str) -> list[str]:
+    """``KEYS`` and unbounded ``scan_iter`` sites in ``tree``."""
+    import ast
+
+    clients = _client_bound_names(tree)
+    offenders = []
+    for node in ast.walk(tree):
+        # `.keys` is matched as a bare ATTRIBUTE, not as a call. Both relays
+        # spelled it `asyncio.to_thread(r.keys, PATTERN)` -- a reference handed
+        # to the threadpool, never an `ast.Call` here. A matcher that only
+        # looked at calls reported both send paths clean while the full-keyspace
+        # KEYS sat in plain sight. The base must resolve to a Redis client
+        # though, or every `payload.keys()` in the module reads as an outage.
+        if isinstance(node, ast.Attribute) and node.attr == "keys":
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in clients:
+                offenders.append(f"{module_path}:{node.lineno} KEYS")
+            elif isinstance(base, ast.Attribute) and base.attr in _CLIENT_PRODUCERS:
+                offenders.append(f"{module_path}:{node.lineno} KEYS")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "scan_iter"
+            and not any(kw.arg == "count" for kw in node.keywords)
+        ):
+            offenders.append(f"{module_path}:{node.lineno} unbounded scan_iter")
+    return offenders
+
+
 class TestNoProductionKeysCall:
     """A full-keyspace KEYS must not come back to either send path."""
 
@@ -129,24 +226,37 @@ class TestNoProductionKeysCall:
         repo_root = Path(__file__).resolve().parents[2]
         tree = ast.parse((repo_root / module_path).read_text())
 
-        offenders = []
-        for node in ast.walk(tree):
-            # `.keys` is matched as a bare ATTRIBUTE, not as a call. Both relays
-            # spelled it `asyncio.to_thread(r.keys, PATTERN)` -- a reference
-            # handed to the threadpool, never an `ast.Call` here. A matcher that
-            # only looked at calls reported both send paths clean while the
-            # full-keyspace KEYS sat in plain sight.
-            if isinstance(node, ast.Attribute) and node.attr == "keys":
-                offenders.append(f"{module_path}:{node.lineno} KEYS")
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "scan_iter"
-                and not any(kw.arg == "count" for kw in node.keywords)
-            ):
-                offenders.append(f"{module_path}:{node.lineno} unbounded scan_iter")
+        offenders = _keys_offenders(tree, module_path)
 
         assert not offenders, (
             "Send-path modules must sweep keys via utils.redis_client.scan_keys. "
             f"Found: {offenders}"
         )
+
+    def test_an_ordinary_dict_keys_is_not_a_full_keyspace_scan(self, tmp_path):
+        """The guard must stay narrow enough to survive ordinary Python.
+
+        Matching every ``.keys`` attribute caught the defect, but the first
+        ``payload.keys()`` added to any of these modules would have turned it
+        red with a "full-keyspace KEYS" message pointing at nothing.
+        """
+        import ast
+
+        tree = ast.parse(
+            "def f(payload):\n"
+            "    r = _get_redis()\n"
+            "    for name in payload.keys():\n"
+            "        r.get(name)\n"
+        )
+        assert _keys_offenders(tree, "sample.py") == []
+
+    def test_a_client_bound_keys_reference_is_still_caught(self):
+        """...and narrow must not mean blind: the defect's own spelling."""
+        import ast
+
+        tree = ast.parse(
+            "async def f():\n"
+            "    r = await asyncio.to_thread(_get_redis_connection)\n"
+            "    return await asyncio.to_thread(r.keys, PATTERN)\n"
+        )
+        assert _keys_offenders(tree, "sample.py") == ["sample.py:3 KEYS"]
