@@ -66,6 +66,13 @@ mandating a specific documentation layout. Reviews distinguish actual independen
 from a single-reviewer pass. No external services, browser extensions, credentials,
 models, or APIs are installed or authorized by skill discovery itself.
 
+`metadata.json` is deliberately excluded from the installer's fingerprints, because
+Codex writes it into installed skill folders and fingerprinting it would make every
+managed skill look locally edited. Excluded from the fingerprint does not mean
+disposable: a managed update carries any `metadata.json` in the destination over into
+the replacement directory rather than dropping it. `__pycache__`, `*.pyc`, and
+`.DS_Store` are excluded and genuinely disposable.
+
 ## Maintenance and verification
 
 `.agents/skills-manifest.json` maps every source skill to its native target, records
@@ -76,6 +83,10 @@ drift. It does not make network calls or execute imported helper code. Reference
 links inside fenced examples are excluded. Backtick CLI paths and semantic tool
 availability still require review; a passing structural check is not live capability
 verification.
+
+`check` runs automatically as part of the default test suite via
+`tests/unit/test_codex_skills_manifest.py`, so a Claude source edited without a
+corresponding hash refresh fails there rather than rotting unnoticed.
 
 After a Claude skill changes, review the corresponding Codex procedure and its
 resources, then update only that entry's source hashes to acknowledge the reviewed
@@ -95,7 +106,8 @@ python3 -m unittest discover -s scripts/tests -p test_codex_skills.py
 They exercise dry-run, complete copied resources, idempotent reruns, managed updates,
 unmanaged/edited/symlink conflict preservation, missing resources, source drift,
 broken/nonportable links, project/global scope, native-only installation, ordinary
-YAML scalar/block forms, and rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
+YAML scalar/block forms, `metadata.json` survival across a managed update, and
+rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
 paragraphs. The skill helpers' syntax and archive CLI help are checked without contacting its service. Live deployment, mail,
 social publication, managed-agent launches, and other external effects are not run as
 part of conversion validation.

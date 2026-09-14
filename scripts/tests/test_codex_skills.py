@@ -77,6 +77,21 @@ class SkillInstallationTests(unittest.TestCase):
         self.assertEqual(skills.install(self.root, self.target)["changed"], ["example"])
         self.assertEqual(skills.files(self.target / "example"), skills.files(self.native))
 
+    def test_metadata_json_survives_a_managed_update(self):
+        skills.install(self.root, self.target)
+        installed = self.target / "example"
+        metadata_path = installed / "metadata.json"
+        metadata_path.write_text('{"codex": "wrote this"}')
+        # Skill content changes upstream, so the next install replaces the directory.
+        (self.native / "SKILL.md").write_text(
+            (self.native / "SKILL.md").read_text() + "New step.\n"
+        )
+        self.assertEqual(skills.install(self.root, self.target)["changed"], ["example"])
+        self.assertEqual(metadata_path.read_text(), '{"codex": "wrote this"}')
+        self.assertEqual(
+            (installed / "SKILL.md").read_text(), (self.native / "SKILL.md").read_text()
+        )
+
     def test_local_edits_are_preserved(self):
         skills.install(self.root, self.target)
         installed = self.target / "example/SKILL.md"

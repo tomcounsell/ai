@@ -176,6 +176,18 @@ def save_state(target: Path, state: dict) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def restore_metadata(backup: Path, destination: Path) -> None:
+    """Carry over metadata.json files Codex writes into installed skill folders.
+
+    metadata.json is excluded from files() fingerprints (see files() docstring), so a
+    managed update that replaces the destination directory must not silently delete it.
+    """
+    for path in backup.rglob("metadata.json"):
+        target_path = destination / path.relative_to(backup)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target_path)
+
+
 def install(root: Path, target: Path, dry_run: bool = False) -> dict:
     report = check(root)
     if not report["ok"]:
@@ -245,6 +257,8 @@ def install(root: Path, target: Path, dry_run: bool = False) -> dict:
                 destination.rename(backup)
             try:
                 stage.rename(destination)
+                if backup.exists():
+                    restore_metadata(backup, destination)
                 state["skills"][name] = wanted
                 save_state(target, state)
             except Exception:
