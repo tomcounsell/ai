@@ -242,9 +242,19 @@ def _seed_memory(project_key, content):
 
 
 def _retrieve_ids(query_text, project_key, limit=10):
+    """Rank in-process the way an arm does: RRF path, no query-embedding provider.
+
+    An arm subprocess never has an embedding provider configured, so its RRF
+    fusion carries no cosine signal. The parent may or may not have one
+    depending on which test imported what first; neutralizing it here keeps
+    the in-process ranking comparable to the arm's.
+    """
     from tools.improvement_eval.retrieval import retrieve_ranked_ids
 
-    with mock.patch("agent.memory_retrieval._retrieve_memories_hybrid", return_value=[]):
+    with (
+        mock.patch("agent.memory_retrieval._retrieve_memories_hybrid", return_value=[]),
+        mock.patch("popoto.fields.embedding_field._default_embedding_provider", None),
+    ):
         return retrieve_ranked_ids(query_text, project_key, limit=limit)
 
 
