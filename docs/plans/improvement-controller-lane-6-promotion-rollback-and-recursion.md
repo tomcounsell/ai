@@ -100,11 +100,14 @@ be provably unworked, and the two arms' budgets have to be accounted in the same
 **Cited sibling issues/PRs re-checked:**
 - #3177 (parent): open. Its plan is the family plan; lane 6 is its last numbered lane.
 - #3217 (lane 5, dependency): open, no commits on `session/sdlc-3217`. Its plan is on `main`
-  (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`, revised `c3852d389`,
-  critique round 2 at `1c7ed2137`) and carries a "Provided to lane 6 (#3218)" section (`:553-596`)
-  that commits to this lane's digest function, an arm runner registered from its own CLI, and
-  `candidate_ref` on the manifest. Treated as a seam, not a blocker (see Technical Approach, "What
-  this lane assumes from lane 5").
+  (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`, revised through
+  `1c3d17185`) and carries a "Provided to lane 6 (#3218)" section (items 1-3; `:563-622` at
+  `1c3d17185`) that commits to this lane's digest function, an arm runner that imports
+  `ArmResult` and `BudgetUse` from `tools.improvement_recursion.arms` inside its method body and
+  registers from its own CLI, and `candidate_ref` on the manifest. Lane 5 is still revising, so the
+  body below cites that section by heading and item with the commit in parentheses; the line
+  numbers in this entry were re-derived at `1c3d17185` during the round-3 revision. Treated as a
+  seam, not a blocker (see Technical Approach, "What this lane assumes from lane 5").
 - #3216 (lane 4): open, PR #3309 open at `fe6f55072`, critique round 4 READY TO BUILD, build
   checkpoints landed. This lane's proposal reads its `accept` verdict, so #3216 is a build
   prerequisite.
@@ -216,7 +219,8 @@ Two spikes ran as code reads against `main` and lane 4's head; both resolved wit
 - **Impact on plan**: `propose()` takes `candidate_ref` explicitly, requires `base_revision` from the
   manifest or the argument (and refuses `BASE_REVISION_CONFLICT` when both are present and
   disagree), and refuses with `MANIFEST_LACKS_BASE_REVISION` rather than guessing. Lane 5's plan on
-  `main` (`:591-596`) now writes `candidate_ref` on its manifest as well, so a manifest
+  `main` ("Provided to lane 6 (#3218)" item 3, `1c3d17185`) now writes `candidate_ref` on its
+  manifest as well, so a manifest
   `candidate_ref` that exists and differs from `--candidate-ref` is a second, distinct refusal,
   `CANDIDATE_REF_CONFLICT`; a manifest without the key (lane 4's shape) still proposes from the
   argument alone.
@@ -524,8 +528,8 @@ otherwise; `infrastructure` needs no comparison per the parent plan but still ne
 (5) `base_revision` from the manifest, or from the `--base-revision` argument when the manifest
 lacks it, refused as `BASE_REVISION_CONFLICT` when both exist and differ and as
 `MANIFEST_LACKS_BASE_REVISION` when neither exists. (6) `candidate_ref`: when the manifest carries
-a `candidate_ref` key (lane 5's manifests do, `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:591-596`;
-lane 4's do not) and it differs from `--candidate-ref`, refused as `CANDIDATE_REF_CONFLICT`; the
+a `candidate_ref` key (lane 5's manifests do, `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`,
+"Provided to lane 6 (#3218)" item 3, `1c3d17185`; lane 4's do not) and it differs from `--candidate-ref`, refused as `CANDIDATE_REF_CONFLICT`; the
 two conflict codes are distinct so the operator reads a refusal about the ref that actually
 disagrees. The resolved `candidate_ref` must then resolve (`git rev-parse --verify`) through the
 runner.
@@ -714,17 +718,18 @@ def research_process_digest(spec: ResearchProcessSpec) -> str: ...  # "sha256:<h
 ```
 The digest hashes exactly `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":")).encode("utf-8")`,
 so key order never changes it. That byte form is a contract with lane 5, not a private choice:
-lane 5's plan on `main` (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:559-578`)
-stores the same bytes on every revision as `research_process_spec`, built by
+lane 5's plan on `main` (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`,
+"Provided to lane 6 (#3218)" item 1, `1c3d17185`) stores the same bytes on every revision as `research_process_spec`, built by
 `tools/improvement_ranking.py::process_spec_json(spec)` and pinned by its
 `test_process_spec_canonical_bytes`, and sets `research_process_digest` **only** by importing this
 function (`from tools.improvement_recursion.process import research_process_digest`), leaving the
 digest `None` when the import fails and backfilling once this lane merges. Lane 5 ships no hashing
 routine of its own and carries a Verification row asserting no `def process_digest` exists in its
-modules (`:1724`), so there is one implementation of the digest, this one. Validation: `unknown =
+modules (Verification row "This lane hashes no process spec itself", `1c3d17185`), so there is one
+implementation of the digest, this one. Validation: `unknown =
 set(split) - set(INVESTIGATION_KINDS)` raises `ValueError`; the sum check `0.99 <=
 sum(split.values()) <= 1.01` applies **only to a non-empty split**. Lane 5 writes every revision
-with `investigation_budget_split={}` (`:561`), and an empty split is a legitimate "no split
+with `investigation_budget_split={}` (item 1 of the same section), and an empty split is a legitimate "no split
 declared", so the canonical function must digest it rather than refuse it. Two tests pin this.
 The first: `ResearchProcessSpec(..., investigation_budget_split={})` digests to a `sha256:`
 string. The second is the cross-lane byte check, written against the function lane 5 actually
@@ -741,15 +746,32 @@ def test_digest_matches_lane5_canonical_bytes():
     assert research_process_digest(spec) == expected
 ```
 It skips with a named reason while `tools/improvement_ranking.py` is absent and bites the day lane
-5 lands; the fixture values are lane 5's (`:561-565`), so a builder on either side can copy them
-verbatim. The comparison accepts any `sha256:` string from a revision row and needs only that the
+5 lands; the fixture values are lane 5's (item 1 of "Provided to lane 6 (#3218)", `1c3d17185`),
+so a builder on either side can copy them verbatim. The comparison accepts any `sha256:` string from a revision row and needs only that the
 two arms differ, so a revision written before this lane merged (digest `None`) is simply not an
 incumbent the comparison can name, and `INCUMBENT_PROCESS_UNKNOWN` says so.
 
 **What this lane assumes from lane 5, and what it does without it.** Lane 5 (#3217) is open with
 no commits; its plan on `main` names what it provides to this lane in one section ("Provided to
-lane 6 (#3218)", `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:553-596`:
-the digest at `:559-578`, the arm runner at `:579-590`, the manifest keys at `:591-596`). The
+lane 6 (#3218)" in `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`,
+`1c3d17185`: item 1 the digest, item 2 the arm runner, item 3 the manifest keys; lane 5 is still
+revising, so the items are cited by heading rather than line). `tools.improvement_recursion.arms`
+is the **only** module of this lane that lane 5 imports, and it takes exactly four names from it:
+`ArmResult` and `BudgetUse` (inside `PlannerArmRunner.run`'s method body), and
+`register_arm_runner` and `get_arm_runner` (from `tools/improvement.py`'s CLI entry and its
+tests). `arms.py` therefore exports all four at runtime: `BudgetUse` and `BudgetCap` are defined
+in `budget.py` and re-exported from `arms.py` through a plain module-level
+`from tools.improvement_recursion.budget import BudgetCap, BudgetUse` (never under
+`TYPE_CHECKING`, which would satisfy a type checker and fail lane 5's import at call time), with
+`__all__ = ["ArmRunner", "ArmResult", "ArmRunnerAbsent", "BudgetCap", "BudgetUse",
+"ReplayArmRunner", "get_arm_runner", "register_arm_runner", "resolve_arm_runner"]`. The
+dependency runs arms → budget only: `ArmResult` holds a `BudgetUse`, and `budget.py` imports
+nothing from `arms.py`. `tests/unit/test_improvement_recursion_arms.py::test_arms_exports_lane5_seam`
+performs lane 5's exact import (`from tools.improvement_recursion.arms import ArmResult,
+BudgetUse, get_arm_runner, register_arm_runner  # noqa: F401`) and asserts
+`BudgetUse is tools.improvement_recursion.budget.BudgetUse`, so a `BudgetUse` that lives only in
+`budget.py`, or is imported into `arms.py` under `TYPE_CHECKING`, fails this lane's own suite
+rather than surfacing as lane 5's "lane 6 not merged" on every production arm call. The
 comparison needs three things a running loop provides, and each is a seam:
 - *A research process to run.* `ArmRunner` is a `Protocol` with one method,
   `run(process_digest, opportunity_ids, budget_cap, arm_run_id) -> ArmResult`. `ReplayArmRunner`
@@ -761,7 +783,7 @@ comparison needs three things a running loop provides, and each is a seam:
   omitted, `get_arm_runner()` returns the runner registered in-process by `register_arm_runner(...)`
   and raises `ArmRunnerAbsent` otherwise. The flag exists because lane 5 registers
   `PlannerArmRunner` from the research CLI's entry (`tools/improvement.py`, lane 5 plan
-  `:579-590`), a process `valor-improve-release compare run` never runs in; without the flag the production
+  "Provided to lane 6 (#3218)" item 2, `1c3d17185`), a process `valor-improve-release compare run` never runs in; without the flag the production
   comparison would be `ARM_RUNNER_ABSENT` forever and the verification row would pass for the
   wrong reason. The import is lazy, at the moment `compare run` executes, so the incident binary
   imports nothing from the research CLI at module load and the coupling argument in Agent
@@ -946,7 +968,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 **Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit1` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until lane 3 meters unit 1, no level-3 claim can be made here, and the report says so in the `why_not` field.
 
 ### Risk 4: The canonical bytes drift between lane 5's spec JSON and this lane's digest
-**Impact:** Lane 5 stores the canonical spec bytes (`process_spec_json`) and computes the digest only through this lane's function (lane 5 plan `:559-578`), so there is one hashing routine. The remaining hazard is the byte form itself: a `separators`, `sort_keys`, or float-formatting difference between `process_spec_json` and `research_process_digest`'s `json.dumps` call makes every stored spec un-rehashable to its own digest, and a revision written before this lane merged carries `research_process_digest=None` until backfilled.
+**Impact:** Lane 5 stores the canonical spec bytes (`process_spec_json`) and computes the digest only through this lane's function (lane 5 plan, "Provided to lane 6 (#3218)" item 1, `1c3d17185`), so there is one hashing routine. The remaining hazard is the byte form itself: a `separators`, `sort_keys`, or float-formatting difference between `process_spec_json` and `research_process_digest`'s `json.dumps` call makes every stored spec un-rehashable to its own digest, and a revision written before this lane merged carries `research_process_digest=None` until backfilled.
 **Mitigation:** `test_digest_matches_lane5_canonical_bytes` (Technical Approach, "Research process digest") asserts `research_process_digest(spec) == "sha256:" + sha256(process_spec_json(spec))` on lane 5's own fixture values under `importorskip`, so the two byte forms are pinned to each other the day both exist. The comparison accepts any `sha256:` digest for an arm and needs only that the two differ; a `None` incumbent is `INCUMBENT_PROCESS_UNKNOWN`, a named refusal, until lane 5's backfill runs.
 
 ### Risk 5: The lane ships before #3216 merges and builds on a moving head
@@ -1162,11 +1184,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 ### 5. Process digest, freshness, budget, arms
 - **Task ID**: build-recursion-core
 - **Depends On**: none
-- **Validates**: `tests/unit/test_improvement_recursion_process.py`, `tests/unit/test_improvement_recursion_freshness.py`, `tests/unit/test_improvement_recursion_budget.py` (create all)
+- **Validates**: `tests/unit/test_improvement_recursion_process.py`, `tests/unit/test_improvement_recursion_freshness.py`, `tests/unit/test_improvement_recursion_budget.py`, `tests/unit/test_improvement_recursion_arms.py` (create all)
 - **Assigned To**: recursion-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Write `process.py`, `freshness.py`, `budget.py` (`BudgetCap`, `BudgetUse`, `BudgetReader`, `LedgerBudgetReader`, `budgets_comparable`), `arms.py` (`ArmRunner`, `ArmResult`, `ReplayArmRunner`, `register_arm_runner`, `get_arm_runner`, `ArmRunnerAbsent`).
+- Write `process.py`, `freshness.py`, `budget.py` (`BudgetCap`, `BudgetUse`, `BudgetReader`, `LedgerBudgetReader`, `budgets_comparable`; imports nothing from `arms.py`), `arms.py` (`ArmRunner`, `ArmResult`, `ReplayArmRunner`, `register_arm_runner`, `get_arm_runner`, `resolve_arm_runner`, `ArmRunnerAbsent`, plus a runtime re-export of `BudgetCap` and `BudgetUse` via a module-level `from tools.improvement_recursion.budget import BudgetCap, BudgetUse`, never under `TYPE_CHECKING`, and `__all__ = ["ArmRunner", "ArmResult", "ArmRunnerAbsent", "BudgetCap", "BudgetUse", "ReplayArmRunner", "get_arm_runner", "register_arm_runner", "resolve_arm_runner"]`). Lane 5's `PlannerArmRunner.run` and `tools/improvement.py` import `ArmResult`, `BudgetUse`, `register_arm_runner`, and `get_arm_runner` from `arms` and nothing from `budget`.
+- `test_arms_exports_lane5_seam`: `from tools.improvement_recursion.arms import ArmResult, BudgetUse, get_arm_runner, register_arm_runner  # noqa: F401` (lane 5's exact import) then `import tools.improvement_recursion.budget as budget; assert BudgetUse is budget.BudgetUse`. Mutation check: moving the import under `if TYPE_CHECKING:` must fail this test.
 - Tests: canonical digest independent of key order; invalid split refused; empty split digests; `test_digest_matches_lane5_canonical_bytes` under `pytest.importorskip("tools.improvement_ranking", reason="lane 5 (#3217) not landed")` asserts `research_process_digest(spec) == "sha256:" + hashlib.sha256(process_spec_json(spec).encode("utf-8")).hexdigest()` on lane 5's fixture values (never a `process_digest` function; lane 5 ships none); freshness excludes cases with an experiment, an investigation, or a prior comparison, with reasons; `LedgerBudgetReader` sums seeded `InfrastructureReservation` rows whose `resource` carries the `arm:<arm_run_id>:` prefix (admitted through lane 7's `admit()` with a `ResourceDecl` named that way, never by writing `reason`), returns `None` on zero matched rows and `None` for unit 1; `budgets_comparable` on unknown, exceeded, mismatched, ok, and an explicit zero cap.
 - `ReplayArmRunner` admits its fixture spend through `admit()` under the arm-prefixed resource name so the ledger reader is exercised on the same path a production runner uses; `arms.py` also exposes `resolve_arm_runner(spec: str)` for the `--arm-runner module:attr` form.
 
