@@ -761,7 +761,8 @@ class TestRollback:
             commit[-1]
             == f"Roll back improvement release {release.id}: regressed window (Refs #3218)"
         )
-        assert ["git", "push", "origin", "HEAD:main"] in argvs
+        push = next(a for a in argvs if a[:2] == ["git", "push"])
+        assert push == ["git", "push", "origin", "HEAD:refs/heads/main"]
         assert ["git", "ls-remote", "origin", "refs/heads/main"] in argvs
         assert any(a[:3] == ["git", "worktree", "remove"] for a in argvs)
 
@@ -831,7 +832,8 @@ class TestRollback:
         assert "gh pr create --head hotfix/x" in record["pr_command"]
         argvs = runner.argvs()
         assert ["git", "fetch", "origin", "main"] in argvs
-        assert ["git", "push", "origin", "HEAD:hotfix/x"] in argvs
+        push = next(a for a in argvs if a[:2] == ["git", "push"])
+        assert push == ["git", "push", "origin", "HEAD:refs/heads/hotfix/x"]
         assert ["git", "ls-remote", "origin", "refs/heads/hotfix/x"] in argvs
         # squash merge: one parent, plain revert
         assert ["git", "revert", "--no-commit", MERGE_SHA] in argvs

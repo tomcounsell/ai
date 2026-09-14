@@ -1017,10 +1017,13 @@ def rollback(
             "informational: main has moved since base_revision, so a difference is expected"
         )
 
-        push = step(["git", "push", "origin", f"HEAD:{target}"], cwd=cwd, name="push")
+        # Fully qualified: from a detached worktree, "HEAD:<name>" is refused with
+        # "not a full refname" whenever refs/heads/<name> does not exist yet on
+        # the remote, which is exactly the --branch <new-name> case.
+        push = step(["git", "push", "origin", f"HEAD:refs/heads/{target}"], cwd=cwd, name="push")
         refused_detail = None
         if push["returncode"] != 0:
-            refused_detail = f"git push origin HEAD:{target} exited {push['returncode']}"
+            refused_detail = f"git push origin HEAD:refs/heads/{target} exited {push['returncode']}"
         else:
             remote = step(
                 ["git", "ls-remote", "origin", f"refs/heads/{target}"], cwd=cwd, name="ls_remote"
