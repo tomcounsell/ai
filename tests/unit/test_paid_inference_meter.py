@@ -58,6 +58,23 @@ class TestReserveAndSettle:
         status = status_dict(pk)
         assert status["reserved_usd"] == pytest.approx(0.0)
 
+    def test_settle_is_one_script_and_a_second_settle_counts_nothing(self):
+        """The release, the settled increment, and the state flip land in one
+        Lua call under a CAS on the reservation's state, so a repeated
+        settle (a crash-then-resweep) never double-counts `settled_cents`
+        or writes a second receipt."""
+        from models.improvement_evidence import ImprovementEvidence
+
+        pk = fresh_pk()
+        r = reserve(pk, 1.0, purpose="rsi", daily_paid_inference_usd=10.0)
+        settle(pk, r.reservation_id, 0.5, metering="exact")
+        settle(pk, r.reservation_id, 0.5, metering="exact")
+        status = status_dict(pk)
+        assert status["settled_usd"] == pytest.approx(0.5)
+        assert status["reserved_usd"] == pytest.approx(0.0)
+        receipts = list(ImprovementEvidence.query.filter(project_key=pk, kind="spend_receipt"))
+        assert len(receipts) == 1
+
 
 class TestConcurrentReservations:
     def test_two_reservations_summing_over_the_pool_admit_exactly_one(self):
@@ -158,9 +175,9 @@ class TestWindowAttributionAcrossMidnight:
 
 class TestSweepUnsettledReservations:
     def test_sweep_uses_the_injected_clock_not_the_wall_clock(self):
-        """Tech debt fix (#3315 review): `now` was accepted but ignored, so
-        `today_key` always came from the wall clock and the reconcile pass's
-        deterministic-clock seam did nothing for this branch."""
+        """`today_key` comes from the injected `now`, the reconcile pass's
+        deterministic-clock seam, never the wall clock; the unknown receipt
+        it writes names the window the reservation was charged to."""
         pk = fresh_pk()
         day1 = datetime(2020, 1, 1, tzinfo=UTC)
         day2 = day1 + timedelta(days=2)
@@ -176,6 +193,13 @@ class TestSweepUnsettledReservations:
         # unsettled, receipted "unknown".
         receipted_later = sweep_unsettled_reservations(pk, now=day2.timestamp())
         assert receipted_later == [res.reservation_id]
+
+        from tools.paid_inference_meter import unknown_receipts
+
+        rows = unknown_receipts(pk)
+        assert len(rows) == 1
+        assert rows[0]["day_key"] == "2020-01-01"
+        assert rows[0]["usd"] == pytest.approx(1.0)
 
 
 class TestNoOpenRouterLookupOrHttpClient:

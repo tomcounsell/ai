@@ -101,8 +101,28 @@ class TestStaleSweepBudget:
 
         age_intent(case.id, "a1", LEASE_TTL * 4 + 1)
         r_pass3 = reconcile(PK, now=now, lease_ttl=LEASE_TTL, lease=fake_lease())
-        assert list_intents(PK, case.id)[0].state == "reconciliation_required"
+        wedged = list_intents(PK, case.id)[0]
+        assert wedged.state == "reconciliation_required"
+        assert wedged.reason == "max_dispatch_attempts"
         assert "a1" in r_pass3.forced_reconciliation
+        assert "a1" not in r_pass3.forced_terminal  # no bound row to finalize
+
+        # The no-row branch still writes the one improve_intent dead letter:
+        # an `admitted` intent that never materialized has no session to
+        # finalize, and the exhaustion must be on record regardless.
+        import json
+
+        from models.dead_letter import DeadLetter
+
+        rows = [
+            row
+            for row in DeadLetter.query.filter(project_key=PK, stage="improve_intent")
+            if json.loads(row.payload_json).get("case_id") == case.id
+        ]
+        assert len(rows) == 1
+        assert json.loads(rows[0].payload_json)["action_id"] == "a1"
+        assert rows[0].replayable is False
+        assert rows[0].reason == "max_dispatch_attempts"
         del r1  # only used to admit; assertions are on the re-read intent
 
 
@@ -128,7 +148,11 @@ class TestRace3UnreleasedSlotOnRestart:
 
         assert "a1" in result.released_slots
         assert not text_redis().hexists(keys.slots_key(PK), "a1")
-        assert list_intents(PK, case.id)[0].state == "reconciliation_required"
+        wedged = list_intents(PK, case.id)[0]
+        assert wedged.state == "reconciliation_required"
+        # The move script writes the reason in the same call as the state
+        # move and the slot release; `case explain` reads it from here.
+        assert wedged.reason == "session_gone_or_terminal"
 
 
 class TestRunningWithLiveRowIsUntouched:

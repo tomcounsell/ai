@@ -16,16 +16,25 @@ from utils.redis_client import text_redis
 PK = "test-3215-dispatch"
 
 
-def new_case(state: str = "investigating") -> ImprovementCase:
+def new_case(state: str = "investigating", *, charter_digest: str | None = None) -> ImprovementCase:
     from datetime import UTC, datetime
 
     return ImprovementCase.create(
-        project_key=PK, state=state, title="t", created_at=datetime.now(UTC)
+        project_key=PK,
+        state=state,
+        title="t",
+        created_at=datetime.now(UTC),
+        charter_digest=charter_digest,
     )
 
 
 def propose(
-    case_id: str, action_id: str, *, expected_revision: int = 0, action_type: str = "investigate"
+    case_id: str,
+    action_id: str,
+    *,
+    expected_revision: int = 0,
+    action_type: str = "investigate",
+    artifact_ref: str = "",
 ) -> None:
     r = transition(
         PK,
@@ -36,6 +45,7 @@ def propose(
         payload_digest="sha256:d",
         action_id=action_id,
         action_type=action_type,
+        artifact_ref=artifact_ref,
     )
     assert r.accepted, r
 
@@ -50,8 +60,8 @@ class CountingPush:
     same shape the real create-or-bind seam guarantees.
 
     Also records every call's kwargs (``self.push_kwargs``), so a test can
-    assert on ``extra_context_overrides`` and ``working_dir`` without a
-    separate mock (Success Criterion 5, tech debt fix, #3315 review).
+    assert on ``extra_context_overrides``, ``working_dir``, and
+    ``message_text`` without a separate mock (Success Criterion 5).
     """
 
     def __init__(self):
@@ -136,14 +146,19 @@ class TestReconciliationRequiredSkip:
 
 class TestAdmitMaterializeActivate:
     def test_happy_path_admits_materializes_and_activates(self, monkeypatch):
+        import os
+
+        from tools.improvement_control import keys
+
         monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: True)
         published = []
         monkeypatch.setattr(
             "agent.agent_session_queue.publish_session_notify",
-            lambda s: published.append(s.session_id),
+            lambda s: published.append((s.session_id, s.status)),
         )
-        case = new_case()
-        propose(case.id, "a1", action_type="experiment")
+        charter_digest = f"sha256:{uuid.uuid4().hex}"
+        case = new_case(charter_digest=charter_digest)
+        propose(case.id, "a1", action_type="experiment", artifact_ref="$CF:abc:brief.txt")
         push = CountingPush()
         result = adapter.tick(PK, lease=fake_lease(), push=push)
         assert case.id in result.admitted
@@ -154,24 +169,60 @@ class TestAdmitMaterializeActivate:
         assert intents[0].state == "running"
 
         # Success Criterion 7: published exactly once per activation, after
-        # the row is pending.
-        assert len(published) == 1
+        # the row is pending (the recorder captures the status at publish time).
+        (session_id,) = push._bound.values()
+        assert published == [(session_id, "pending")]
 
         # Success Criterion 5: the recorded extra_context_overrides carry
         # exactly these four keys and no `generation` (Decision 12: a
         # generation copied at admit time would be stale by design the
-        # moment any later acquirer writes). Tech debt fix (#3315 review):
-        # `action_type` now flows all the way from `propose --action-type`
-        # through the journal entry into the admitted intent.
-        assert push.push_kwargs[0]["extra_context_overrides"].keys() == {
+        # moment any later acquirer writes). `action_type` flows from the
+        # journal entry into the admitted intent.
+        kwargs = push.push_kwargs[0]
+        assert kwargs["extra_context_overrides"].keys() == {
             "research_case_id",
             "experiment_id",
             "action_id",
             "idempotency_key",
         }
-        assert "generation" not in push.push_kwargs[0]["extra_context_overrides"]
-        assert "parent_agent_session_id" not in push.push_kwargs[0]
+        assert "generation" not in kwargs["extra_context_overrides"]
+        assert "parent_agent_session_id" not in kwargs
         assert intents[0].action_type == "experiment"
+
+        # Data Flow step 9: the worker gets an absolute checkout path and a
+        # message that names the research skill and the loadable brief.
+        assert os.path.isabs(kwargs["working_dir"])
+        assert os.path.isdir(kwargs["working_dir"])
+        assert kwargs["message_text"].startswith("/improve-research ")
+        assert kwargs["message_text"].endswith(" brief_ref=$CF:abc:brief.txt")
+
+        # Data Flow step 6: admit received the case's charter digest and the
+        # entry's payload digest, and wrote both onto the intent hash.
+        raw = text_redis().hgetall(keys.intent_key(PK, case.id, "a1"))
+        assert raw["charter_digest"] == charter_digest
+        assert raw["request_digest"] == "sha256:d"
+
+    def test_charter_drift_between_propose_and_admit_skips_the_case(self):
+        """Data Flow step 6's charter check: a case whose recorded digest no
+        longer matches the pinned charter is skipped, nothing admitted."""
+        from datetime import UTC, datetime
+
+        from models.improvement_charter import ImprovementCharter
+
+        ImprovementCharter.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            digest=f"sha256:{uuid.uuid4().hex}",
+            state="active",
+        )
+        case = new_case(charter_digest=f"sha256:{uuid.uuid4().hex}")
+        propose(case.id, "a1")
+        push = CountingPush()
+        result = adapter.tick(PK, lease=fake_lease(), push=push)
+        assert result.skipped.get(case.id) == "charter_digest_stale"
+        assert case.id not in result.admitted
+        assert list_intents(PK, case.id) == []
+        assert push.calls == 0
 
     def test_no_live_worker_leaves_the_intent_materialized(self, monkeypatch):
         monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: False)
@@ -314,8 +365,7 @@ class TestTickIsolatesFailures:
     def test_tick_isolates_one_bad_case(self, monkeypatch):
         """Failure Path Test Strategy: `scheduler_adapter.tick`'s per-case
         `except Exception` -- one case's failure is logged and the tick
-        continues to the rest (tech debt fix, #3315 review: this test did
-        not exist)."""
+        continues to the rest."""
         good_case = new_case()
         bad_case = new_case()
         propose(good_case.id, "a-good")

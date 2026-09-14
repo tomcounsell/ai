@@ -46,11 +46,18 @@ schedule, a next-attempt time) belongs on
 | `session_init_hang` | A session whose runner produced zero output | no |
 | `session_corrupt_row` | The corrupted-pop reaper, before it deletes the row | no |
 | `archive_restore` | The session archive's quarantine cap — observability mirror | no |
-| `improve_intent` | Reserved for the improvement control plane (#3177) | — |
+| `improve_intent` | An exhausted improvement dispatch intent (`tools/improvement_control/recovery.py::reconcile`, via `intents.dead_letter_exhausted`) | no |
 
 `session_init_hang` is deliberately not replayable: the #2181 circuit breaker
 exists because re-spawning that identical zero-output input reproduces the
 identical hang. The row is evidence for a human, never something to auto-retry.
+
+`improve_intent` is not replayable either: the intent it records has already
+been moved to `reconciliation_required` and its lane slot released, and the only
+way forward is an operator's `valor-improve resume --case ID --force`, after
+which the controller re-admits the case under a new action id. The row is the
+audit trail of the exhaustion, written once per intent on every branch (bound
+session row or none).
 
 `archive_restore` mirrors only. `agent/session_archive.py`'s
 `_restore_quarantine` SQLite table stays authoritative — it is the cold-start

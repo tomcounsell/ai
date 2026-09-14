@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from models.improvement_case import ImprovementCase
-from tools.improvement_control.journal import transition
+from tools.improvement_control import keys
+from tools.improvement_control.journal import read_head, set_state, transition
 from tools.improvement_control.projection import apply, replay
+from utils.redis_client import text_redis
 
 PK = "test-3215-projection"
 
@@ -17,24 +19,28 @@ def new_case_row() -> ImprovementCase:
     )
 
 
+def propose(case_id: str, *, expected_revision: int = 0, action_id: str = "a1") -> int:
+    r = transition(
+        PK,
+        case_id,
+        expected_revision=expected_revision,
+        generation=1,
+        event="action_proposed",
+        payload_digest="d1",
+        action_id=action_id,
+    )
+    assert r.accepted, r
+    return r.revision
+
+
 class TestApply:
     def test_apply_writes_state_and_revision_from_the_head(self):
         case = new_case_row()
-        transition(
-            PK,
-            case.id,
-            expected_revision=0,
-            generation=1,
-            event="action_proposed",
-            payload_digest="d1",
-            action_id="a1",
-        )
+        propose(case.id)
         apply(PK, case.id)
         reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
         assert reloaded.revision == 1
-        # Blocker fix (#3315 review): no script wrote the head's own `state`
-        # field, so `read_head` always returned "" and this clobbered
-        # `ImprovementCase.state` to "" on every apply.
+        # The first accepted transition seeds the head's `state` from the row.
         assert reloaded.state == "investigating"
 
     def test_apply_on_a_case_with_no_head_is_a_no_op(self):
@@ -43,13 +49,64 @@ class TestApply:
         reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
         assert reloaded.revision == 0
 
+    def test_apply_on_a_head_with_empty_state_leaves_the_row_state_alone(self):
+        """An empty head `state` never clobbers a real projection value;
+        `revision` is still written, and `replay` reports the state the
+        row actually holds afterwards."""
+        case = new_case_row()
+        propose(case.id)
+        text_redis().hset(keys.head_key(PK, case.id), "state", "")
+        assert read_head(PK, case.id).state == ""
+
+        apply(PK, case.id)
+        reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
+        assert reloaded.state == "investigating"
+        assert reloaded.revision == 1
+
+        result = replay(PK, case.id)
+        assert result.projection_state_after == "investigating"
+
+
+class TestHeadStateContract:
+    def test_next_accepted_write_reseeds_an_empty_head_state(self):
+        """A head whose stored `state` is empty is re-seeded from the row on
+        its next accepted transition rather than pinned to "" forever."""
+        case = new_case_row()
+        rev = propose(case.id)
+        text_redis().hset(keys.head_key(PK, case.id), "state", "")
+        propose(case.id, expected_revision=rev, action_id="a2")
+        assert read_head(PK, case.id).state == "investigating"
+
+    def test_state_changed_is_the_writer_of_head_state_and_apply_projects_it(self):
+        case = new_case_row()
+        rev = propose(case.id)
+        r = set_state(PK, case.id, generation=1, state="experimenting", by="test")
+        assert r.accepted, r
+        assert r.revision == rev + 1
+        assert read_head(PK, case.id).state == "experimenting"
+
+        apply(PK, case.id)
+        reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
+        assert reloaded.state == "experimenting"
+        assert reloaded.revision == rev + 1
+
+        # A seed never overwrites what `state_changed` wrote.
+        propose(case.id, expected_revision=rev + 1, action_id="a2")
+        assert read_head(PK, case.id).state == "experimenting"
+
+    def test_state_changed_refuses_a_name_outside_case_states(self):
+        case = new_case_row()
+        propose(case.id)
+        r = set_state(PK, case.id, generation=1, state="not-a-state", by="test")
+        assert r.accepted is False
+        assert r.reason == "INVALID_ARGUMENT"
+        assert read_head(PK, case.id).state == "investigating"
+
 
 class TestReplay:
     def test_replay_corrects_a_direct_save_with_a_wrong_state(self):
-        """Task 5 / blocker fix (#3315 review): this test's name always
-        promised a corrupted `state`, but it corrupted `revision` instead --
-        the only reason the suite stayed green while the head's `state` was
-        always "" (blocker 1). It now actually corrupts `state`."""
+        """A direct ORM save of `state` is overwritten by the next replay:
+        the head is the authority for lifecycle state."""
         case = new_case_row()
         transition(
             PK,

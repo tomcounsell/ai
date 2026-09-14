@@ -105,10 +105,9 @@ class TestRoundTrip:
         assert blocked.reason == "INTENT_STATE"
 
     def test_unit2_and_ns_pause_round_trip(self, tmp_root):
-        """Tech debt (#3315 review): unit-2 window/reservation hashes and the
-        namespace pause hash were exported but never restored by
-        `import_namespace`, silently dropping the day's spend accounting and
-        any operator-wide pause on a restore."""
+        """Unit-2 window/reservation hashes and the namespace pause hash are
+        restored with the day's spend accounting intact, and every restored
+        unit-2 hash carries its retention TTL again."""
         from tools.improvement_control.journal import pause
         from tools.paid_inference_meter import Reservation, reserve
 
@@ -138,6 +137,84 @@ class TestRoundTrip:
         ns_pause_after = text_redis().hgetall(keys.pause_key(pk))
         assert unit2_after == unit2_before
         assert ns_pause_after == ns_pause_before
+        for k in unit2_after:
+            assert text_redis().ttl(k) > 0
+
+    def test_import_refuses_a_foreign_key_before_writing_anything(self, tmp_root):
+        """An archive naming a unit-2 key outside `improve:{pk}:budget:unit2:`
+        (or carrying another project's key) is refused `FOREIGN_KEY` with
+        nothing written, so a hand-edited archive cannot HSET an arbitrary
+        key through the package's private alias."""
+        import json
+
+        from tools.paid_inference_meter import Reservation, reserve
+
+        pk = fresh_pk()
+        res = reserve(pk, 1.0, purpose="rsi")
+        assert isinstance(res, Reservation)
+        out = export_namespace(pk, tmp_root)
+        _flush_namespace(pk)
+
+        namespace_path = out / "namespace.json"
+        data = json.loads(namespace_path.read_text())
+        foreign = f"lease:session:foreign-{uuid.uuid4().hex[:8]}"
+        data["unit2"][foreign] = {"cents": "100"}
+        namespace_path.write_text(json.dumps(data))
+
+        refusal = import_namespace(out, project_key=pk)
+        assert refusal is not None
+        assert refusal.reason == "FOREIGN_KEY"
+        assert not text_redis().exists(foreign)
+        assert not text_redis().exists(keys.schema_key(pk))
+
+        # The same archive, with only the foreign key removed, restores.
+        del data["unit2"][foreign]
+        namespace_path.write_text(json.dumps(data))
+        assert import_namespace(out, project_key=pk) is None
+
+        # And an archive for another project is foreign as a whole.
+        assert import_namespace(out, project_key=fresh_pk(), force=True).reason == "FOREIGN_KEY"
+
+    def test_import_force_replaces_history_rather_than_appending(self, tmp_root):
+        """`--force` onto a live namespace deletes the case's journal, intents
+        set, and intent hashes before restoring, so the journal is the
+        archive's bytes and the fold can still reach the head."""
+        pk = fresh_pk()
+        case = ImprovementCase.create(
+            project_key=pk, state="investigating", title="t", created_at=datetime.now(UTC)
+        )
+        r1 = transition(
+            pk,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d1",
+            action_id="a1",
+        )
+        r2 = admit(
+            pk,
+            case.id,
+            "a1",
+            expected_revision=r1.revision,
+            generation=1,
+            action_type="investigate",
+            max_concurrent=5,
+        )
+        assert r2.accepted
+        journal_before = text_redis().lrange(keys.journal_key(pk, case.id), 0, -1)
+        out = export_namespace(pk, tmp_root)
+
+        # Live state moves on after the export: one more intent on the case.
+        r3 = mark_reconciliation_required(
+            pk, case.id, "a1", expected_revision=r2.revision, generation=1, from_state="admitted"
+        )
+        assert r3.accepted
+
+        assert import_namespace(out, project_key=pk, force=True) is None
+        journal_after = text_redis().lrange(keys.journal_key(pk, case.id), 0, -1)
+        assert journal_after == journal_before
+        assert text_redis().hgetall(keys.intent_key(pk, case.id, "a1"))["state"] == "admitted"
 
     def test_import_refuses_a_non_empty_namespace_without_force(self, tmp_root):
         pk = fresh_pk()

@@ -272,11 +272,8 @@ def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
         project_key = getattr(session, "project_key", None)
         # `session_init_hang` alone is non-replayable (#2181: re-spawning the
         # identical input reproduces the identical hang). Every other stage
-        # -- `session_recovery_cap`'s two production callers above, and any
-        # caller outside this module that passes its own reserved stage
-        # (e.g. `improve_intent`, #3215) -- is replayable and passes its own
-        # `stage` through unchanged rather than being coerced to
-        # `session_recovery_cap`.
+        # this function is passed is replayable and goes through unchanged
+        # rather than being coerced to `session_recovery_cap`.
         dead_letters.record(
             stage,
             payload,

@@ -58,10 +58,9 @@ def _control_redis():
 
 def _project_root() -> str:
     """The repo checkout this process is running from, the same pattern
-    ``agent/reflection_scheduler.py:781`` uses for its own dispatch. Tech
-    debt fix (#3315 review): the adapter previously passed ``working_dir="."``,
-    which the worker resolves against its own cwd rather than the checkout
-    the case was proposed from."""
+    ``agent/reflection_scheduler.py`` uses for its own dispatch. Always an
+    absolute path: the worker resolves a relative ``working_dir`` against
+    its own cwd, never against the checkout the case was proposed from."""
     from pathlib import Path
 
     return str(Path(__file__).resolve().parent.parent.parent)
@@ -78,11 +77,22 @@ def _open_case_rows(project_key: str):
     return rows
 
 
-def _unadmitted_proposal(project_key: str, case_id: str) -> tuple[str, str, str] | None:
+@dataclass(frozen=True)
+class Proposal:
+    """One un-admitted ``action_proposed`` journal entry, as the adapter reads it."""
+
+    action_id: str
+    action_type: str
+    request_digest: str
+    artifact_ref: str
+
+
+def _unadmitted_proposal(project_key: str, case_id: str) -> Proposal | None:
     """The case's last journal event, if it is an un-admitted `action_proposed`.
 
-    Returns ``(action_id, action_type, request_digest)`` or ``None``.
     "Un-admitted" means no intent row exists yet for that action id.
+    ``action_type`` and ``artifact_ref`` come from the journal entry itself
+    (``journal.transition`` records both on every ``action_proposed``).
     """
     tail = _control_redis().lrange(keys.journal_key(project_key, case_id), -1, -1)
     if not tail:
@@ -96,12 +106,12 @@ def _unadmitted_proposal(project_key: str, case_id: str) -> tuple[str, str, str]
     existing = _control_redis().hget(keys.intent_key(project_key, case_id, action_id), "state")
     if existing is not None:
         return None  # already admitted (or further along) on a prior tick
-    # Tech debt fix (#3315 review): `action_type` is now carried on the
-    # journal entry (`journal.transition`'s own fix); the fallback stays for
-    # any entry written before that change landed.
-    action_type = entry.get("action_type") or "investigate"
-    request_digest = entry.get("payload_digest") or ""
-    return action_id, action_type, request_digest
+    return Proposal(
+        action_id=action_id,
+        action_type=entry.get("action_type") or "investigate",
+        request_digest=entry.get("payload_digest") or "",
+        artifact_ref=entry.get("artifact_ref") or "",
+    )
 
 
 def _default_push():
@@ -171,20 +181,20 @@ def _admit_and_dispatch(project_key, case, generation, push, settings, result: T
     proposal = _unadmitted_proposal(project_key, case_id)
     if proposal is None:
         return
-    action_id, action_type, request_digest = proposal
+    action_id = proposal.action_id
+    action_type = proposal.action_type
+    request_digest = proposal.request_digest
     if action_type not in ALLOWED_ACTION_TYPES:
         result.skipped[case_id] = f"action_type_not_allowed:{action_type}"
         return
 
     charter_digest = getattr(case, "charter_digest", None) or ""
-    # Tech debt fix (#3315 review): Data Flow step 6 lists a "charter digest
-    # pinned" check among the adapter's admission checks; only the CLI's own
-    # propose-time check ran. Permissive when either side is absent (a case
-    # with no `charter_digest` recorded, or a project with nothing pinned) so
-    # this stays a real drift check rather than a hard dependency every
-    # caller -- including every existing unit test's bare `new_case()` -- must
-    # now satisfy; `propose` already refuses a proposal with no matching
-    # pinned charter before it is ever journaled.
+    # Data Flow step 6's charter-drift check: a case whose recorded
+    # `charter_digest` no longer matches the pinned charter is skipped. A
+    # case with no digest recorded, or a project with nothing pinned, passes
+    # (`propose` already refuses a proposal with no matching pinned charter
+    # before it is ever journaled, so this is a drift check between propose
+    # time and admit time, never a second hard dependency).
     if charter_digest:
         from models.improvement_charter import ImprovementCharter
 
@@ -212,14 +222,14 @@ def _admit_and_dispatch(project_key, case, generation, push, settings, result: T
     result.admitted.append(case_id)
 
     idempotency_key = f"improve:{project_key}:{case_id}:{action_id}"
-    # Tech debt fix (#3315 review): the message previously named no skill and
-    # no brief reference (Data Flow step 9). `request_digest` (the proposal's
-    # own payload digest) stands in for lane 5's not-yet-built `brief_ref`
-    # until that lane exists -- it is the only concrete "what to look at"
-    # reference this lane has today.
+    # Data Flow step 9: the message names the research skill and, when the
+    # proposal's payload is in the verifying store, its loadable `$CF:`
+    # reference as `brief_ref` (the skill's "Your brief" section says how to
+    # load it). A bare digest is never sent: `VerifyingArtifactStore.load`
+    # resolves references, not digests.
     message_text = f"/improve-research case={case_id} action={action_id} type={action_type}"
-    if request_digest:
-        message_text += f" brief_ref={request_digest}"
+    if proposal.artifact_ref:
+        message_text += f" brief_ref={proposal.artifact_ref}"
     depth, agent_session_id = asyncio.run(
         push(
             project_key=project_key,

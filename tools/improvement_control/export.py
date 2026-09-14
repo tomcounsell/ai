@@ -23,7 +23,7 @@ SCHEMA_VERSION = 1
 
 @dataclass(frozen=True)
 class ImportRefusal:
-    reason: str  # "NAMESPACE_NOT_EMPTY" | "SCHEMA_MISMATCH"
+    reason: str  # "NAMESPACE_NOT_EMPTY" | "SCHEMA_MISMATCH" | "ARCHIVE_NOT_FOUND" | "FOREIGN_KEY"
 
 
 def _control_redis():
@@ -73,10 +73,9 @@ def export_namespace(project_key: str, root: Path) -> Path:
                 aid: r.hgetall(keys.intent_key(project_key, case_id, aid)) for aid in intent_ids
             },
         }
-        # Blocker fix (#3315 review): `artifacts.json` hardcoded an empty
-        # list because nothing journaled a store reference to begin with;
-        # `journal.transition` now carries `artifact_ref` on every entry, so
-        # this walks the tail rather than re-deriving it another way.
+        # `artifacts.json` is the tail's own `artifact_ref` fields, one row
+        # per entry that carries one; the journal is the only index of what
+        # the verifying store holds for a case.
         for raw_entry in journal:
             entry = json.loads(raw_entry)
             ref = entry.get("artifact_ref")
@@ -112,9 +111,19 @@ def import_namespace(
 ) -> ImportRefusal | None:
     """Restore ``namespace.json`` from ``archive`` (a directory from :func:`export_namespace`).
 
-    Refuses onto a non-empty namespace unless ``force``, and refuses a
-    schema mismatch unconditionally. Returns ``None`` on success.
+    Refuses onto a non-empty namespace unless ``force``, refuses a schema
+    mismatch unconditionally, and refuses (``FOREIGN_KEY``) an archive whose
+    ``project_key`` differs from the argument or whose unit-2 section names a
+    key outside ``improve:{project_key}:budget:unit2:``, before writing
+    anything. Every restored key goes through the package's own builders or
+    :func:`keys.assert_control_key`; unit-2 hashes get their retention TTL
+    re-applied. With ``force``, each archived case's journal, intents set,
+    and intent hashes are deleted before they are restored, so a restore
+    onto live state replaces history rather than appending to it. Returns
+    ``None`` on success.
     """
+    from tools.paid_inference_meter import KEY_EXPIRY_SECONDS
+
     namespace_path = Path(archive) / "namespace.json"
     try:
         data = json.loads(namespace_path.read_text())
@@ -122,6 +131,12 @@ def import_namespace(
         return ImportRefusal("ARCHIVE_NOT_FOUND")
     if data.get("schema") != SCHEMA_VERSION:
         return ImportRefusal("SCHEMA_MISMATCH")
+    if data.get("project_key") != project_key:
+        return ImportRefusal("FOREIGN_KEY")
+    unit2_prefix = f"improve:{project_key}:budget:unit2:"
+    unit2 = data.get("unit2", {}) or {}
+    if any(not isinstance(k, str) or not k.startswith(unit2_prefix) for k in unit2):
+        return ImportRefusal("FOREIGN_KEY")
     if not force and not _namespace_is_empty(project_key):
         return ImportRefusal("NAMESPACE_NOT_EMPTY")
 
@@ -131,16 +146,24 @@ def import_namespace(
         r.hset(keys.slots_key(project_key), mapping=data["slots"])
     if data.get("ns_pause"):
         r.hset(keys.pause_key(project_key), mapping=data["ns_pause"])
-    for key, mapping in data.get("unit2", {}).items():
+    for key, mapping in unit2.items():
         if mapping:
-            r.hset(key, mapping=mapping)
+            r.hset(keys.assert_control_key(key), mapping=mapping)
+            r.expire(key, KEY_EXPIRY_SECONDS)
     for case_id, case_data in data.get("cases", {}).items():
+        journal_key = keys.journal_key(project_key, case_id)
+        intents_key = keys.intents_set_key(project_key, case_id)
+        if force:
+            live_intents = set(r.smembers(intents_key)) | set(case_data.get("intent_hashes", {}))
+            r.delete(journal_key, intents_key)
+            for aid in live_intents:
+                r.delete(keys.intent_key(project_key, case_id, aid))
         if case_data.get("head"):
             r.hset(keys.head_key(project_key, case_id), mapping=case_data["head"])
         for entry in case_data.get("journal", []):
-            r.rpush(keys.journal_key(project_key, case_id), entry)
+            r.rpush(journal_key, entry)
         for action_id in case_data.get("intents", []):
-            r.sadd(keys.intents_set_key(project_key, case_id), action_id)
+            r.sadd(intents_key, action_id)
         for action_id, intent_hash in case_data.get("intent_hashes", {}).items():
             if intent_hash:
                 r.hset(keys.intent_key(project_key, case_id, action_id), mapping=intent_hash)

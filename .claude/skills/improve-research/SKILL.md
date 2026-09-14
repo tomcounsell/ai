@@ -28,6 +28,17 @@ That prints the case's state, why it is where it is, and whether its
 content (the ranking rationale, the hypothesis to test); you read it from the
 case record, you do not write it.
 
+Your dispatch message may carry `brief_ref=$CF:...`, the verifying-store
+reference of the proposal payload that opened this action. Load it, verified
+against its digest, with:
+
+```bash
+"$CLAUDE_PROJECT_DIR/.venv/bin/python" -c 'import sys; from models.verifying_artifact_store import VerifyingArtifactStore; sys.stdout.buffer.write(VerifyingArtifactStore().load(sys.argv[1]))' "$brief_ref"
+```
+
+An `ArtifactIntegrityError` means the payload on disk is not what was hashed
+at write time; treat the brief as absent rather than trusting the bytes.
+
 ## Research
 
 Use `WebSearch` and `WebFetch` for current practice, pricing, and technique

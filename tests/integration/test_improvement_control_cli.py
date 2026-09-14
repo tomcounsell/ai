@@ -34,6 +34,14 @@ def _require_binary():
         )
 
 
+@pytest.fixture(autouse=True)
+def _content_root(monkeypatch, tmp_path):
+    """The binary's `propose` writes a real artifact; `run()` inherits this
+    process's environment, so the override reaches the subprocess and keeps
+    test payloads out of the production retention root."""
+    monkeypatch.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", str(tmp_path / "content"))
+
+
 def pinned_digest() -> str:
     pinned = ImprovementCharter.pinned(PK)
     if pinned is not None:
@@ -136,6 +144,10 @@ class TestProposeEndToEnd:
 
         tail = journal_tail(PK, case.id, 1)
         assert tail[-1]["event"] == "action_proposed"
+        assert tail[-1]["artifact_ref"] == out["artifact_ref"]
+        # The subprocess honored the content-root override: the artifact is
+        # under this test's tmp_path, never the production retention root.
+        assert list((tmp_path / "content").rglob("*.txt"))
 
     def test_stale_session_intent_is_refused_and_the_redispatched_one_is_accepted(self, tmp_path):
         """Race 4b end to end."""

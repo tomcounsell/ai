@@ -57,10 +57,9 @@ def apply(project_key: str, case_id: str) -> None:
         )
         return
     if not head.state:
-        # Defense in depth (blocker fix, #3315 review): `transition` now
-        # seeds the head's `state` on its first accepted write, so this
-        # branch should only ever fire for a head written before the fix
-        # landed. Never clobber a real projection value with an empty one.
+        # A head whose row was unreadable at every write so far carries no
+        # `state` (the script re-seeds it on the next accepted write). An
+        # empty head value never clobbers a real projection value.
         logger.warning(
             "[improvement-control] projection.apply: head has no state for %s/%s; "
             "leaving ImprovementCase.state=%r unchanged",
@@ -108,7 +107,9 @@ def replay(project_key: str, case_id: str) -> ReplayResult:
 
     if head is not None:
         apply(project_key, case_id)
-        after = head.state
+        # `apply` leaves the projection's state alone when the head has
+        # none, so the reported "after" is whatever the row still holds.
+        after = head.state or (before or "")
     else:
         after = before or ""
 

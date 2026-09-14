@@ -126,18 +126,24 @@ def cmd_propose(args) -> int:
         )
         return 1
 
-    # Data Flow step 2, blocker fix (#3315 review): the payload is written and
-    # re-hashed through the verifying store BEFORE the lease is taken, so a
-    # refused proposal's content is still on disk and loadable via the
-    # reference kept on the evidence row below -- previously only the digest
-    # was journaled and the content itself existed nowhere.
+    # Data Flow step 2: the payload lands in the verifying store BEFORE the
+    # lease is taken, so an accepted proposal's journal entry and a refused
+    # proposal's evidence row both carry a loadable `artifact_ref`.
     from models.verifying_artifact_store import VerifyingArtifactStore
 
     store = VerifyingArtifactStore()
     artifact_key = f"{case_id}-{action_id or 'noaction'}-{payload_digest.split(':', 1)[-1][:16]}"
-    artifact_ref = store.save(
-        payload_bytes, key=artifact_key, model_class_name="ImprovementProposal"
-    )
+    try:
+        artifact_ref = store.save(
+            payload_bytes, key=artifact_key, model_class_name="ImprovementProposal"
+        )
+    except OSError as e:
+        _emit(
+            args,
+            f"refused: ARTIFACT_WRITE_FAILED ({e})",
+            {"accepted": False, "reason": "ARTIFACT_WRITE_FAILED"},
+        )
+        return 1
 
     lease, lease_key, generation = _acquire_lease(case_id)
     if generation is None:
@@ -179,6 +185,7 @@ def cmd_propose(args) -> int:
         _emit(args, f"refused: {result.reason}", {"accepted": False, "reason": result.reason})
         return 1
 
+    _project(case_id)
     _emit(
         args,
         f"accepted: revision={result.revision}",
@@ -190,6 +197,15 @@ def cmd_propose(args) -> int:
         },
     )
     return 0
+
+
+def _project(case_id: str) -> None:
+    """Data Flow step 5: copy the head onto ``ImprovementCase`` once a
+    transition has been accepted. Every accepting writer in this CLI calls
+    it after its lease is released."""
+    from tools.improvement_control.projection import apply
+
+    apply(PROJECT_KEY, case_id)
 
 
 def cmd_propose_amendment(args) -> int:
@@ -220,6 +236,8 @@ def cmd_propose_amendment(args) -> int:
         )
     finally:
         lease.release(lease_key, generation)
+    if result.accepted:
+        _project(case_id)
 
     ImprovementInvestigation.create(
         project_key=PROJECT_KEY,
@@ -269,6 +287,8 @@ def cmd_pause(args) -> int:
     finally:
         if generation:
             lease.release(lease_key, generation)
+    if result.accepted and args.case:
+        _project(args.case)
     _emit(args, f"paused: {result.accepted}", {"accepted": result.accepted})
     return 0 if result.accepted else 1
 
@@ -294,17 +314,30 @@ def cmd_resume(args) -> int:
     if generation is None:
         _emit(args, "refused: case busy", {"accepted": False, "reason": "CASE_BUSY"})
         return 1
+    resume_result = None
     try:
         if args.force:
             for aid in blocking:
                 cancel_wedge(PROJECT_KEY, case_id, aid, generation=generation, by="operator")
         head = read_head(PROJECT_KEY, case_id)
         if head is not None and head.paused:
-            journal_resume(PROJECT_KEY, case_id, generation=generation, by="operator")
-            _emit(args, "resumed", {"accepted": True, "cancelled": len(blocking)})
-            return 0
+            resume_result = journal_resume(
+                PROJECT_KEY, case_id, generation=generation, by="operator"
+            )
     finally:
         lease.release(lease_key, generation)
+    if resume_result is not None and not resume_result.accepted:
+        _emit(
+            args,
+            f"refused: {resume_result.reason}",
+            {"accepted": False, "reason": resume_result.reason},
+        )
+        return 1
+    if resume_result is not None or blocking:
+        _project(case_id)
+    if resume_result is not None:
+        _emit(args, "resumed", {"accepted": True, "cancelled": len(blocking)})
+        return 0
     print(f"not paused; cancelled {len(blocking)} intent(s)")
     return 0
 
@@ -318,13 +351,10 @@ def cmd_doctor(args) -> int:
         print(f"namespace unreachable: {e}")
         return 2
 
-    # Blocker fix (#3315 review): `read_head`/`list_intents` used to run
-    # OUTSIDE this guard, so a control-namespace `ConnectionError` mid-loop
-    # raised a traceback (exit 1) instead of reporting the same break-glass
-    # message the import-time guard above already gives (issue acceptance
-    # criterion 4 / plan Success Criterion 2's outage drill). One guard now
-    # covers the ORM query and every per-case read, so a reachable-then-lost
-    # namespace never gets to print a partial "clean" or wedged/paused list.
+    # One guard covers the ORM query and every per-case read: a namespace
+    # that becomes unreachable mid-loop reports `namespace unreachable` with
+    # exit 2 (the break-glass drill, Success Criterion 2) and never prints a
+    # partial "clean" or a partial wedged/paused list.
     try:
         cases = []
         for state in OPEN_CASE_STATES:
@@ -419,7 +449,6 @@ def cmd_budget(args) -> int:
     from tools.improvement_control.intents import list_intents
 
     slot_count = 0
-    unknown_receipts = []
     for state in OPEN_CASE_STATES:
         for case in ImprovementCase.query.filter(project_key=PROJECT_KEY, state=state):
             for intent in list_intents(PROJECT_KEY, case.id):
@@ -428,6 +457,7 @@ def cmd_budget(args) -> int:
 
     unit2 = paid_inference_meter.status_dict(PROJECT_KEY)
     unit3 = infrastructure_budget.status_dict(project_key=PROJECT_KEY)
+    unknown_receipts = paid_inference_meter.unknown_receipts(PROJECT_KEY)
 
     payload = {
         "unit1_slots_in_use": slot_count,
@@ -436,11 +466,25 @@ def cmd_budget(args) -> int:
         "unit3": unit3,
         "unit2_receipted_unknown": unknown_receipts,
     }
+    # Charter §8: an unknown-metered receipt is printed in its own block with
+    # the window it was charged to, so it never reads as zero spend.
+    unknown_lines = [
+        f"  window={r['day_key'] or '?'} usd={r['usd']} case={r['case_id'] or '-'} "
+        f"receipt={r['source_ref']}"
+        for r in unknown_receipts
+    ]
+    unknown_block = (
+        "unit2 unknown-metered receipts (charged at reservation, actual spend unknown):\n"
+        + "\n".join(unknown_lines)
+        if unknown_lines
+        else "unit2 unknown-metered receipts: none"
+    )
     _emit(
         args,
         f"unit1: {slot_count}/{settings.improvement.max_concurrent_research_sessions} slots\n"
         f"unit2: reserved=${unit2['reserved_usd']:.2f} settled=${unit2['settled_usd']:.2f} "
         f"window={unit2['day_key']}\n"
+        f"{unknown_block}\n"
         f"unit3: {unit3}",
         payload,
     )

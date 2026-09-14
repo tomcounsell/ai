@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 #: modules in this package (`intents.py`) append their own journal entries
 #: for intent-lifecycle events (`intent_admitted`, `intent_cancelled`, ...)
 #: through their own scripts; those event names are not in this set because
-#: they never flow through this function.
+#: they never flow through this function. `state_changed` is the one writer
+#: of the head's `state` field after the seed (see :func:`set_state`).
 KNOWN_EVENTS: frozenset[str] = frozenset(
-    {"action_proposed", "paused", "resumed", "amendment_proposed"}
+    {"action_proposed", "paused", "resumed", "amendment_proposed", "state_changed"}
 )
 
 #: One EVAL per Decision 3: schema check, pause check, generation compare,
@@ -38,6 +39,16 @@ KNOWN_EVENTS: frozenset[str] = frozenset(
 #: [schema_version, expected_revision, generation, action_id, event,
 #: payload_digest, agent_session_id, journal_max_entries, case_state,
 #: action_type, artifact_ref].
+#:
+#: Head `state` contract: the head is the authority for case lifecycle state
+#: and has exactly two writers inside this script. A `state_changed` event
+#: sets it to the event's `payload_digest` (the new state name); every other
+#: accepted transition seeds it from the ORM row's own `state` (ARGV
+#: `case_state`) only while the stored value is empty, so a head written
+#: before its row existed is re-seeded on its next accepted write rather
+#: than pinned to "" forever. `projection.apply`/`replay` copy the head's
+#: `state` and `revision` onto `ImprovementCase`; a direct ORM save of
+#: `state` is overwritten by the next apply.
 _LUA_TRANSITION = """
 local schema_key = KEYS[1]
 local ns_pause_key = KEYS[2]
@@ -100,13 +111,14 @@ local now = redis.call("TIME")
 local now_s = tonumber(now[1])
 local new_revision = revision + 1
 
--- Blocker fix (#3315 review): no script ever wrote the head's own `state`
--- field, so `read_head` always returned "" and `projection.apply`/`replay`
--- clobbered `ImprovementCase.state` with it. Seeded once, on whichever
--- transition call is the case's first (HSETNX never overwrites a value a
--- later writer already set); this lane never changes case lifecycle state
--- itself, so there is nothing to keep resyncing after the seed.
-redis.call("HSETNX", head_key, "state", case_state)
+-- Head `state`: written by `state_changed`, otherwise seeded from the ORM
+-- row while the stored value is empty (module docstring for the contract).
+local stored_state = redis.call("HGET", head_key, "state")
+if event == "state_changed" then
+  redis.call("HSET", head_key, "state", payload_digest)
+elseif (not stored_state or stored_state == "") and case_state ~= "" then
+  redis.call("HSET", head_key, "state", case_state)
+end
 redis.call(
   "HSET", head_key,
   "revision", new_revision,
@@ -203,11 +215,10 @@ def journal_length(project_key: str, case_id: str) -> int:
 
 
 def _current_case_state(project_key: str, case_id: str) -> str:
-    """The case's own ``ImprovementCase.state`` at call time, seeded onto the
-    head by :func:`transition`'s script (blocker fix, #3315 review: the head
-    otherwise never carries a ``state`` at all). A missing or unreadable row
-    seeds "" -- no worse than the pre-fix behavior, and every production
-    caller of ``transition`` acts on a case that already has an ORM row.
+    """The case's own ``ImprovementCase.state`` at call time, the value the
+    transition script seeds onto a head whose stored ``state`` is empty. A
+    missing or unreadable row yields "", which the script treats as "nothing
+    to seed with" and leaves the stored value alone.
     """
     try:
         from models.improvement_case import ImprovementCase
@@ -241,10 +252,10 @@ def transition(
     a controller write (the lease generation is the only fence in that case,
     Decision 12).
 
-    ``action_type`` is recorded on the journal entry only (tech debt, #3315
-    review: it was parsed by the CLI and silently dropped, so the adapter's
-    ``_unadmitted_proposal`` always defaulted to ``"investigate"``); it
-    carries no fencing meaning of its own.
+    ``action_type`` and ``artifact_ref`` are recorded on the journal entry
+    only: the adapter reads ``action_type`` from the entry when it admits the
+    proposal, and ``export`` walks the tail for every ``artifact_ref``.
+    Neither carries fencing meaning of its own.
     """
     if not isinstance(expected_revision, int) or isinstance(expected_revision, bool):
         return TransitionResult(False, "INVALID_ARGUMENT", -1)
@@ -347,4 +358,31 @@ def resume(
         generation=generation,
         event="resumed",
         payload_digest="",
+    )
+
+
+def set_state(
+    project_key: str, case_id: str, *, generation: int, state: str, by: str
+) -> TransitionResult:
+    """Move the case to lifecycle ``state`` through the journal.
+
+    The lifecycle owner's one door to the head's ``state`` field: a
+    ``state_changed`` event whose ``payload_digest`` is the new state name.
+    Refuses ``INVALID_ARGUMENT`` for a name outside ``CASE_STATES``. The
+    caller projects the new state with ``projection.apply`` once accepted.
+    """
+    from models.improvement_case import CASE_STATES
+
+    del by  # recorded on the caller's own audit trail, not the journal entry
+    if state not in CASE_STATES:
+        return TransitionResult(False, "INVALID_ARGUMENT", -1)
+    head = read_head(project_key, case_id)
+    expected_revision = head.revision if head is not None else 0
+    return transition(
+        project_key,
+        case_id,
+        expected_revision=expected_revision,
+        generation=generation,
+        event="state_changed",
+        payload_digest=state,
     )

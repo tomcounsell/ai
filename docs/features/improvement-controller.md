@@ -39,9 +39,11 @@ scoped skill; authority lives in code. Not built yet (lane 5).
 **Control journal.** A small non-Popoto Redis namespace, `improve:{project}:{case}:*`,
 whose Lua transition script is the sole authority for research-state
 transitions, leases, dispatch intents, and budget reservations. The flat Popoto
-records below are its queryable projection, updated after the journal commits.
-Decisions read the journal head, never the projection. Shipped in lane 3
-(`tools/improvement_control/`).
+records below are its queryable projection: every accepting `valor-improve` writer
+(`propose`, `propose-amendment`, `pause --case`, `resume`) calls
+`projection.apply` once its transition has committed, and `replay-projection`
+reconciles on demand. Decisions read the journal head, never the projection.
+Shipped in lane 3 (`tools/improvement_control/`).
 
 **Existing execution infrastructure.** Jobs, AgentSessions, the reflection
 scheduler, worktree and venv isolation, the SDLC pipeline, the content store,
@@ -312,8 +314,17 @@ intents, lane-slot reservations, the case lease, and the unit-2 window.
 
 - `{case_id}:head` holds `{revision, state, epoch, highest_accepted, owner, updated_at,
   paused, pause_reason}`; `{case_id}:journal` is a bounded list of
-  `{revision, action_id, event, payload_digest, generation, ts}`, `LTRIM`med to
-  `journal_max_entries`. `{case_id}:intents` is the per-case set of action ids
+  `{revision, action_id, event, payload_digest, generation, action_type, artifact_ref, ts}`,
+  `LTRIM`med to `journal_max_entries`. **Head `state` contract:** the head is the
+  authority for case lifecycle state and its `state` field has exactly two writers,
+  both inside the transition script. The `state_changed` event
+  (`journal.set_state(project_key, case_id, generation=, state=, by=)`, the lifecycle
+  owner's one door) sets it to the event's payload; every other accepted transition
+  seeds it from the `ImprovementCase` row's own `state` only while the stored value is
+  empty, so a head written before its row existed is re-seeded on its next accepted
+  write. `projection.apply` and `replay` copy `state` and `revision` onto the row and
+  never write `state` from an empty head; a direct ORM save of `state` is overwritten
+  by the next apply. `{case_id}:intents` is the per-case set of action ids
   (the one index every reader — `resume --force`, `doctor`, `case explain`,
   `get_control_status` — enumerates through; no reader ever runs `KEYS` or `SCAN`).
   `{case_id}:intent:{action_id}` is one dispatch intent (Decision 13's six-state
@@ -351,7 +362,18 @@ intents, lane-slot reservations, the case lease, and the unit-2 window.
 - Payloads are written to `VerifyingArtifactStore` and hashed before `propose` references
   their digest on the journal entry (`artifact_ref` alongside `payload_digest`). A refused
   proposal's artifact reference is kept as `ImprovementEvidence(kind="other",
-  text="intent_state:<reason>", detail=<artifact_ref>)` rather than lost.
+  text="intent_state:<reason>", detail=<artifact_ref>)` rather than lost. A store write
+  that fails (`OSError`: full disk, missing content root) is refused
+  `ARTIFACT_WRITE_FAILED` before the lease is taken, never a traceback.
+- `import` refuses `FOREIGN_KEY` before writing anything when the archive's `project_key`
+  differs from the target or its unit-2 section names a key outside
+  `improve:{project_key}:budget:unit2:`; every restored key goes through the package's
+  own key builders, unit-2 hashes get their 30-day retention TTL re-applied, and
+  `--force` deletes each archived case's journal, intents set, and intent hashes before
+  restoring them, so a forced restore replaces history rather than appending to it.
+- `budget` prints `metering="unknown"` receipts in their own block (`unit2_receipted_unknown`
+  in `--json`, each with the `day_key` window it was charged to), read from
+  `ImprovementEvidence(kind="spend_receipt")` rows, so an unknown never reads as zero.
 
 **The raw-Redis guard is a text heuristic, not a namespace check.** It fires when
 one command string contains both a Popoto-context substring and a block pattern,
@@ -386,7 +408,11 @@ on what it actually finds (an `admitted` row flips to `pending` and publishes a 
 `pending` row from a retry republishes without flipping; a terminal row settles through
 the same terminal hook the worker uses; a missing row is left for the reconcile pass). The
 publish (`agent.agent_session_queue.publish_session_notify`) runs strictly after the row is
-`pending`, so the worker's own pickup loop finds it within one notify hop.
+`pending`, so the worker's own pickup loop finds it within one notify hop. The dispatched
+session's `message_text` is `/improve-research case=... action=... type=...` with the
+checkout's absolute path as `working_dir`; when the proposal's payload is in the verifying
+store the message also carries `brief_ref=<$CF: reference>`, which the skill loads through
+`VerifyingArtifactStore().load(ref)`.
 
 The only write a research session ever makes is `valor-improve propose`, which resolves
 its own row through `AGENT_SESSION_ID`, presents its intent binding, and writes one
@@ -501,8 +527,9 @@ controller: it acquires each case's own lease before touching its intents. `admi
 `materialized` intents past `4 * lease_ttl_seconds` get their `stale_sweeps` counter
 incremented (a pass-owned counter, distinct from `record_materialized`'s `attempts`);
 at `max_dispatch_attempts` sweeps the intent moves to `reconciliation_required`, its
-slot releases, and a still-live bound row is forced `abandoned` through the existing
-`finalize_session()` (dead-lettered under the `improve_intent` stage). A `running`
+slot releases, `intents.dead_letter_exhausted` writes the one `improve_intent` dead
+letter (`replayable=False`, on every branch, bound row or none), and a still-live bound
+row is forced `abandoned` through the existing `finalize_session()`. A `running`
 intent whose bound row is missing or already terminal is acted on the **first**
 qualifying sweep — no budget applies, since the session holding the slot is already
 gone. It never mints a second identity, and it reads intents rather than a status

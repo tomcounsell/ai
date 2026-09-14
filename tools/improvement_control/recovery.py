@@ -220,12 +220,11 @@ def _force_reconciliation_and_terminal(
     result.forced_reconciliation.append(intent.action_id)
     result.released_slots.append(intent.action_id)
 
-    # Tech debt fix (#3315 review): `dead_letter_exhausted` had no caller, so
-    # an exhausted intent with no bound row (an `admitted` intent that never
-    # materialized) wrote no `DeadLetter` at all, and when a row DID exist,
-    # `finalize_session`'s own generic write recorded it `replayable=True`
-    # while this dedicated helper says `replayable=False` for the same
-    # exhaustion. One writer now, one `replayable` value, on every branch.
+    # `dead_letter_exhausted` is the one dead-letter writer for an exhausted
+    # intent, on every branch: with no bound row (an `admitted` intent that
+    # never materialized) and with one. `finalize_session` is passed no
+    # `dead_letter_stage`, so a still-live row's forced `abandoned` never
+    # writes a second, replayable row for the same exhaustion.
     row = _bound_row(intent.agent_session_id)
     if row is not None and row.status not in terminal_statuses:
         finalize_session(row, "abandoned", reason=reason)

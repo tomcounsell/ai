@@ -189,15 +189,13 @@ return {1, "OK", new_revision}
 #: ARGV: [schema_version, expected_revision, generation, action_id,
 #:        from_state, to_state, event, journal_max_entries, reason]
 #: Generic CAS mover for the remaining single-hop transitions
-#: (record_running, mark_reconciliation_required). `from_state` is derived
-#: by the Python wrapper from `_ALLOWED`, never chosen by the caller. The
-#: slot key is always passed (harmless for `record_running`, which never
-#: reaches `to_state == "reconciliation_required"`) so the slot release and
-#: the `reason` write land in the SAME script call as the state move --
-#: tech debt fix, #3315 review: these were a second, unconditional `HDEL`
-#: run by the caller after this script returned, leaving a window where a
-#: crash between the two calls stranded the slot, and `reason` was accepted
-#: by the Python wrapper and never written anywhere.
+#: (record_running, mark_reconciliation_required). `from_state` is passed
+#: explicitly by the wrapper, checked against `_ALLOWED` in Python, and
+#: CAS-checked by the script. The slot key is always passed (harmless for
+#: `record_running`, which never reaches `to_state == "reconciliation_required"`)
+#: so the slot release and the `reason` write land in the SAME script call
+#: as the state move: no window in which a crash leaves a wedged intent
+#: still holding its slot.
 _LUA_MOVE_INTENT = (
     _LUA_FENCE_PRELUDE.replace("ARGV[2]", "tonumber(ARGV[2])").replace(
         "ARGV[3]", "tonumber(ARGV[3])"
@@ -540,10 +538,8 @@ def mark_reconciliation_required(
     ``reconciliation_required``; the script still enforces it as a CAS.
 
     The slot release and the ``reason`` write happen inside the same script
-    call as the state move (tech debt fix, #3315 review): previously this was
-    a second, unconditional ``HDEL`` run after the CAS script returned (a
-    crash between the two left a wedged intent still holding its slot), and
-    ``reason`` was accepted here and never written anywhere.
+    call as the state move, so an accepted move always leaves the slot free
+    and the reason on the intent hash (``list_intents(...).reason``).
     """
     return _move(
         project_key,

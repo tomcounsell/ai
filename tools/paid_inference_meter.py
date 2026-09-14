@@ -79,6 +79,25 @@ redis.call('HSET', KEYS[1], 'reserved_cents', rest)
 return rest
 """
 
+#: KEYS: [window, reservation]. ARGV: [reserved_cents, settled_cents].
+#: One call moves the reservation's cents out of `reserved_cents`, adds the
+#: settled amount, and marks the reservation `settled`, guarded by a CAS on
+#: the reservation's `state`: a second settle of the same reservation is a
+#: no-op (returns 0), so a crash between any two of those writes cannot
+#: count `settled_cents` twice on the next sweep.
+_LUA_SETTLE = """
+if redis.call('HGET', KEYS[2], 'state') ~= 'reserved' then
+  return 0
+end
+local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_cents') or '0')
+local rest = reserved - tonumber(ARGV[1])
+if rest < 0 then rest = 0 end
+redis.call('HSET', KEYS[1], 'reserved_cents', rest)
+redis.call('HINCRBY', KEYS[1], 'settled_cents', tonumber(ARGV[2]))
+redis.call('HSET', KEYS[2], 'state', 'settled')
+return 1
+"""
+
 
 def _redis():
     """Private alias, never a raw Popoto client (Verification anti-criterion:
@@ -213,10 +232,15 @@ def settle(project_key: str, reservation_id: str, usd: float, *, metering: str) 
         return
     cents = _valid_amount(usd) or 0
     window_key = WINDOW_KEY_PREFIX.format(project=project_key) + row["day_key"]
-    _redis().eval(_LUA_RELEASE_RESERVED, 1, window_key, int(row["cents"]))
-    _redis().hincrby(window_key, "settled_cents", cents)
     res_key = RESERVATION_KEY_PREFIX.format(project=project_key) + reservation_id
-    _redis().hset(res_key, "state", "settled")
+    moved = _redis().eval(_LUA_SETTLE, 2, window_key, res_key, int(row["cents"]), cents)
+    if not moved:
+        logger.debug(
+            "[paid-inference-meter] settle() on reservation_id=%s already %s; no-op",
+            reservation_id,
+            row.get("state"),
+        )
+        return
 
     record_receipt(
         project_key=project_key,
@@ -227,6 +251,7 @@ def settle(project_key: str, reservation_id: str, usd: float, *, metering: str) 
         metering=metering,
         usd=cents / 100,
         case_id=row.get("case_id") or None,
+        day_key=row.get("day_key") or None,
     )
 
 
@@ -299,10 +324,12 @@ def record_receipt(
     metering: str,
     usd: float | None = None,
     case_id: str | None = None,
+    day_key: str | None = None,
 ) -> None:
     """Write one ``spend_receipt`` evidence row. ``purpose="sdlc_review"``
     receipts (the cross-vendor judge) are record-only -- this function never
-    checks or touches the unit-2 pool itself."""
+    checks or touches the unit-2 pool itself. ``day_key`` names the window
+    the amount was charged to when the receipt settles a reservation."""
     import json
 
     from models.improvement_evidence import ImprovementEvidence
@@ -324,9 +351,42 @@ def record_receipt(
                 "metering": metering,
                 "usd": usd,
                 "case_id": case_id,
+                "day_key": day_key,
             }
         ),
     )
+
+
+def unknown_receipts(project_key: str) -> list[dict]:
+    """Every ``spend_receipt`` row settled at ``metering="unknown"`` for the
+    project, newest first, for ``valor-improve budget``'s own block (charter
+    §8: an unknown is charged at its reservation and printed as unknown,
+    never folded into the settled figure as if it were exact)."""
+    import json
+
+    from models.improvement_evidence import ImprovementEvidence
+
+    out: list[dict] = []
+    for row in ImprovementEvidence.query.filter(project_key=project_key, kind="spend_receipt"):
+        try:
+            detail = json.loads(row.detail or "{}")
+        except (TypeError, ValueError):
+            continue
+        if detail.get("metering") != "unknown":
+            continue
+        out.append(
+            {
+                "source_ref": row.source_ref,
+                "day_key": detail.get("day_key"),
+                "usd": detail.get("usd"),
+                "case_id": detail.get("case_id"),
+                "created_at": row.created_at.isoformat()
+                if hasattr(row.created_at, "isoformat")
+                else str(row.created_at),
+            }
+        )
+    out.sort(key=lambda r: r["created_at"], reverse=True)
+    return out
 
 
 def status_dict(project_key: str, *, now: datetime | None = None) -> dict:
@@ -348,15 +408,13 @@ def status_dict(project_key: str, *, now: datetime | None = None) -> dict:
 
 def sweep_unsettled_reservations(project_key: str, *, now: float | None = None) -> list[str]:
     """Receipt any reservation whose day window has closed unsettled, at
-    ``metering="unknown"``. Called by the reconcile pass (best-effort import
-    from there, since this module may not yet exist in every deployment)."""
+    ``metering="unknown"``. Called by the reconcile pass; ``now`` is the
+    pass's own clock, so "today" is decided by the injected time rather
+    than the wall clock."""
     import time
 
     if now is None:
         now = time.time()
-    # Tech debt fix (#3315 review): `now` was accepted (and passed by
-    # `recovery._sweep_unit2`) but ignored, so the reconcile pass's
-    # deterministic-clock seam did nothing for this branch.
     today_key, _, _ = current_day(datetime.fromtimestamp(now, UTC), "UTC")
     receipted: list[str] = []
     pattern = RESERVATION_KEY_PREFIX.format(project=project_key) + "*"
