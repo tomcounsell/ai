@@ -12,6 +12,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/service_pids.sh"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
 
 # ── Ensure .env → ~/Desktop/Valor/.env symlink ──────────────────────
@@ -357,13 +359,15 @@ PYEOF
     # as `[update] Worker restarted` on runs with BEFORE_SHA == AFTER_SHA).
     # A live worker process means "loaded" regardless of what the grep says.
     WORKER_ALIVE=false
-    # -i is load-bearing: the launchd-spawned worker's argv[0] is the .app
-    # bundle binary `Python` (capital P), so a case-sensitive match finds
-    # nothing and the liveness cross-check silently fails in the cron context
-    # (observed: the gated branch never executed; every cycle fell through to
-    # the fallback kickstart). Mirrors service.py::get_worker_pid's -fi.
-    if pgrep -fi "python -m worker" >/dev/null 2>&1 \
-        || pgrep -fi "python.*worker/__main__" >/dev/null 2>&1; then
+    # Ancestor-safe (#3265): this cross-check runs under /update, which is
+    # itself executed by an agent session hosted BY the worker. BSD `pgrep`
+    # hides the caller's ancestors, so the probe read "worker down" in exactly
+    # the situation it exists to protect — and the fallback branch then
+    # kickstart -k'd the live worker. `service_pids_worker` reads `ps`, which
+    # has no ancestor filter. It also subsumes the old `-fi`: the matcher
+    # compares argv[0]'s basename case-insensitively, so the launchd-spawned
+    # worker's `Python.app` binary (capital P) still matches.
+    if service_pids_worker >/dev/null 2>&1; then
         WORKER_ALIVE=true
     fi
     if launchctl list | grep -q "$WORKER_LABEL" || $WORKER_ALIVE; then
