@@ -103,11 +103,11 @@ reconciliation on the issue itself.
   `resource_probe` to `EVIDENCE_KINDS` (`models/improvement_evidence.py:78-79`), the
   `improvement-assumption-digest` optional sink (`tools/infrastructure_budget.py:568-574`), and
   the retention root outside the checkout. Consumed, not changed.
-- #3218 (lane 6): OPEN; its plan exists on `session/sdlc-3218`
-  (`docs/plans/improvement-controller-lane-6-promotion-rollback-and-recursion.md`) and its
-  2026-09-14 comment on #3217 (id 5662856978) names three seams this lane provides (Technical
-  Approach, "Provided to lane 6"). Owns releases and the recursive comparison; this lane writes no
-  `ImprovementRelease`.
+- #3218 (lane 6): OPEN; its plan is on main
+  (`docs/plans/improvement-controller-lane-6-promotion-rollback-and-recursion.md`, first landed at
+  `ee656d8af`) and its 2026-09-14 comment on #3217 (id 5662856978) names three seams this lane
+  provides (Technical Approach, "Provided to lane 6"). Owns releases and the recursive comparison;
+  this lane writes no `ImprovementRelease`.
 - #3177 (parent): OPEN.
 
 **Commits on main since the issue was filed touching referenced files:**
@@ -128,9 +128,9 @@ reconciliation on the issue itself.
   job spec by two pass-through keys and changes no gate.
 - `recursive-self-improvement.md` (parent, Planning): its lane-5 paragraph is this plan's scope
   statement. This plan carries `tracking:` to #3217, not #3177.
-- `improvement-controller-lane-6-promotion-rollback-and-recursion.md` (on `session/sdlc-3218`,
-  not yet on main): treats this lane as a seam, not a blocker, and asks for three things this plan
-  provides. Coordination, not conflict.
+- `improvement-controller-lane-6-promotion-rollback-and-recursion.md` (on main, in critique):
+  treats this lane as a seam, not a blocker, and asks for three things this plan provides.
+  Coordination, not conflict.
 - `sdlc-control-plane-asserted-facts.md`: no overlap.
 
 **Notes:** Lane 3 has no plan document yet, so its surface is consumed here as a requirements
@@ -159,10 +159,13 @@ what this lane needs, not what it is called.
 - **#410 / PR #411** (autoexperiment): the retired hypothesize-edit-evaluate loop. Its failure
   shape (single noisy judge, strict-inequality acceptance, no isolation) is why every verdict here
   comes from lane 4's harness and nowhere else.
-- **PR #2135** (hybrid retrieval eval, `docs/plans/hybrid-retrieval-eval.md`, #2082 adopt verdict):
-  the one prior evaluation of retrieval parameters in this repo. Its existence is exactly what the
-  novelty check must surface: a hypothesis that re-derives #2082's comparison is a prior answer,
-  and the research session must cite it before proposing anything in the same envelope.
+- **PR #2135** (hybrid retrieval eval, #2082 adopt verdict; live doc
+  `docs/features/hybrid-retrieval-eval.md`, plan archived at
+  `docs/archive/plans-completed/hybrid-retrieval-eval.md` in `449df07a0`): the one prior
+  evaluation of retrieval parameters in this repo. Its existence is exactly what the novelty check
+  must surface: a hypothesis that re-derives #2082's comparison is a prior answer, so every freeze
+  in the `retrieval_parameters` envelope cites it in `prior_answers` unconditionally (Technical
+  Approach, "Experiments") and the brief shows it before the session proposes.
 
 ## Research
 
@@ -218,9 +221,15 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
   `{"trial_id", "query_text", "gold_id"}` per query.
 - **Confidence**: high
 - **Impact on plan**: the experiment freeze reuses `build_known_item_set` on the **exported**
-  corpus records (so every `gold_id` exists in the frozen corpus), freezes the generated queries
-  into the protocol beside `capture_baseline`'s output, and settles the generation cost against
-  unit 2 through lane 3's meter. No second labeling mechanism is built.
+  corpus (so every `gold_id` exists in the frozen corpus), freezes the generated queries into the
+  protocol beside `capture_baseline`'s output, and settles the generation cost against unit 2
+  through lane 3's meter. No second labeling mechanism is built. Critique correction:
+  `CorpusExport` carries `jsonl_text`, not `records` (`corpus.py:130-142`), so the freeze parses
+  the JSONL body lines (line one is the manifest; each later line is
+  `{"key", "values", "state", "model_state"}` per popoto's `export_records`) into a small
+  `KnownItemRecord(memory_id, content, importance)` adapter the builder samples from, and because
+  the builder returns fewer than `n_queries` on degenerate generations, `batch_size` is set from
+  the queries actually produced, never from the request.
 
 ### spike-2: Can the candidate arm vary anything but `limit`?
 - **Assumption**: "Lane 4's arm boundary is a JSON job spec, so a retrieval-parameter candidate is
@@ -310,16 +319,19 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
    scraped, one `lesson` row per PR line, dedup on `source_ref="pr:{number}:{sha256(line)[:16]}"`),
    and **promises** (sampled outbound `chat_message_log` entries judged by a cheap model, one
    `promise` row per flagged message, dedup on `source_session_id` plus entry hash). Gated on
-   `ImprovementSettings.enabled`.
+   `ImprovementSettings.enabled`. The tick summary keeps adapter failures and adapter skips in
+   separate lists; `status="error"` only when every adapter failed.
 2. **The planner tick** (`reflections/improvement_plan.py::run_improvement_planner`, same cadence,
    registered as `improvement-planner-tick`). In order: (a) `ImprovementCharter.load_from_file`
-   then `pinned`; (b) **case opening**: cluster unconsumed evidence by `priority_area` heuristics
-   (correction classified `architectural` → `orchestration`/`memory`; `lesson` → the stage's area;
-   `inspiration` with a URL → an `inspiration_intake` investigation, not yet a case; `promise` →
-   `personas`), run the novelty check (any `rejected` case or resolved investigation whose
-   `summary`/`interpretation` shares the evidence cluster's dedup identity refuses re-opening and
-   records why on the existing case), and write `ImprovementCase` rows with `charter_digest`,
-   `priority_area`, and a `ranking_rationale` that names the charter passage; (c) **ranking**:
+   then `pinned`; (b) **case opening**: take every evidence row inside the scan bound that no
+   case has consumed (an id absent from every case's `evidence_ids`), cluster by dedup identity
+   and route to `priority_area` by heuristics (correction classified `architectural` →
+   `orchestration`/`memory`; `lesson` → the stage's area; `inspiration` with a URL → an
+   `inspiration_intake` investigation, not yet a case; `promise` → `personas`), run the novelty
+   check (any `rejected` case or resolved investigation whose `summary`/`interpretation` shares
+   the evidence cluster's dedup identity refuses re-opening and records why on the existing case),
+   and write `ImprovementCase` rows with `charter_digest`, `priority_area`, every cluster row id
+   in `evidence_ids`, and a `ranking_rationale` that names the charter passage; (c) **ranking**:
    `tools/improvement_ranking.py::rank(open_cases)` scores five ordinal factors per case
    (opportunity cost, quality, resource cost, uncertainty, unlocked capacity), each derived from
    named record fields and each stated as a rule in the module docstring, orders by the §3 starting
@@ -348,11 +360,14 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
 4. **Hypothesis to frozen contract** (`tools/improvement_experiment.py`). The session proposes a
    hypothesis through lane 3's `valor-improve propose` (journal-authorized); `valor-improve
    experiment freeze --case ID` validates the candidate against this lane's envelope (retrieval
-   parameters only), exports the corpus (`export_corpus`), builds the known-item query set on the
-   exported records (`build_known_item_set`, unit-2 metered), captures the baseline
-   (`capture_baseline`), freezes the protocol (`freeze_protocol`), writes the manifest with the
-   `protocol_ref`, computes and stores `contract_digest`, sets `state="frozen"` and `frozen_at`,
-   and records `model_revision_id` and `charter_version`. Hashing happens before any arm runs.
+   parameters only), cites #2082 in `prior_answers`, exports the corpus (`export_corpus`), parses
+   `export.jsonl_text` into known-item records, builds the query set on them
+   (`build_known_item_set`, unit-2 metered), refuses with `KNOWN_ITEM_SHORTFALL` below
+   `MIN_QUERIES`, captures the baseline (`capture_baseline`, incumbent exactly `{"limit": 10}`),
+   freezes the protocol with `batch_size = len(queries)` (`freeze_protocol`), writes the manifest
+   with the `protocol_ref`, computes and stores `contract_digest`, sets `state="frozen"` and
+   `frozen_at`, and records `model_revision_id` and `charter_version`. Hashing happens before any
+   arm runs.
 5. **Evaluation** (`valor-improve experiment evaluate --id`, run in the background from the
    session): calls `tools.improvement_eval.runner.evaluate(experiment_id, project_key)`. Every
    gate, the arena, blinding, Holm, and the verdict are lane 4's; this lane passes arguments and
@@ -397,9 +412,11 @@ hypothesis with a falsifier, frozen, and measured by the harness, and the record
   `retrieval.py::retrieve_ranked_ids` gain two optional keys (`rrf_k`, `min_rrf_score`), defaulting
   to `retrieve_memories`'s own defaults; an absent key produces byte-identical behavior to lane 4's
   code. `INVESTIGATION_KINDS` grows from five to eight; `INVESTIGATION_STATES` from four to five;
-  `EVIDENCE_KINDS` from seven (eight with lane 3) to ten. `ui/data/improvement.py` exports seven
-  getters. `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
-  adapter tuple grows from three to five.
+  `EVIDENCE_KINDS` from seven (eight with lane 3) to ten. `ImprovementCase` gains `blocked_by`;
+  `ImprovementModelRevision` gains `research_process_spec`. `ui/data/improvement.py` exports
+  seven getters. `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
+  adapter tuple grows from three to five and its status rule counts failures per adapter instead
+  of against the literal three.
 - **Coupling**: the planner reads records and writes journal events; it never imports the
   research skill, the bridge, or the harness internals. The research session reaches state only
   through `valor-improve`. The harness is called at one function (`evaluate`) plus three helpers
