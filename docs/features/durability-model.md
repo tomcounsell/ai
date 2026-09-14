@@ -30,8 +30,28 @@ The append (`Room.append_inbox`, written by `bridge/room_inbox.py`) collapses
 the intake loss window to a single Redis write. Cutover is 3-phase; phase 1
 (shadow — append written alongside the untouched dispatch flow) shipped in
 PR #2622, and Milestone 3 added shadow bind-or-mint Job routing at the same
-seam. Dispatch still runs the legacy session path until the authoritative
-flip ships as its own release.
+seam. Shadow coverage spans the **inbound Telegram message** paths — live
+intake plus the three recovery re-enqueue scanners (`bridge/catchup.py`,
+`bridge/reconciler.py`, `bridge/agent_catchup.py`), which append alongside
+their untouched enqueue with the same entry shape, because recovery and live
+intake are one code path: the 2026-08-18 phase-2 gate run caught re-enqueued
+messages bypassing the inbox. Coverage is that set and no wider. A parity
+reader spot-checking dispatched sessions against inbox entries must expect
+**no entry** for these paths, none of which is an inbound-message intake:
+
+- `bridge/email_bridge.py` — inbound user email enqueues with no Room-inbox
+  append, so an email-originated message has no inbox entry in shadow.
+- `edit_handler` in `bridge/telegram_bridge.py` — an edited message respawns a
+  session through `dispatch_telegram_session` without passing the live-intake
+  append in `handler`.
+- `bridge/poll_vote.py` — poll-vote resume runs from an `events.Raw` handler
+  and calls `resume_completed_session` directly, so it never reaches the
+  `events.NewMessage` append.
+- `bridge/update.py` — the update-failure fix session calls
+  `enqueue_agent_session` from a command event, not a message intake.
+
+Dispatch still runs the legacy session path until the authoritative flip ships
+as its own release.
 
 ## Job routing (`bridge/job_router.py`)
 
