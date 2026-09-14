@@ -99,8 +99,12 @@ be provably unworked, and the two arms' budgets have to be accounted in the same
 
 **Cited sibling issues/PRs re-checked:**
 - #3177 (parent): open. Its plan is the family plan; lane 6 is its last numbered lane.
-- #3217 (lane 5, dependency): open, no commits on `session/sdlc-3217`, no plan document. Treated
-  as a seam, not a blocker (see Technical Approach, "What this lane assumes from lane 5").
+- #3217 (lane 5, dependency): open, no commits on `session/sdlc-3217`. Its plan is on `main`
+  (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md`, revised `c3852d389`,
+  critique round 2 at `1c7ed2137`) and carries a "Provided to lane 6 (#3218)" section (`:553-596`)
+  that commits to this lane's digest function, an arm runner registered from its own CLI, and
+  `candidate_ref` on the manifest. Treated as a seam, not a blocker (see Technical Approach, "What
+  this lane assumes from lane 5").
 - #3216 (lane 4): open, PR #3309 open at `fe6f55072`, critique round 4 READY TO BUILD, build
   checkpoints landed. This lane's proposal reads its `accept` verdict, so #3216 is a build
   prerequisite.
@@ -210,9 +214,12 @@ Two spikes ran as code reads against `main` and lane 4's head; both resolved wit
   incumbent's SHA, not the candidate's.
 - **Confidence**: high
 - **Impact on plan**: `propose()` takes `candidate_ref` explicitly, requires `base_revision` from the
-  manifest or the argument (and refuses when both are present and disagree), and refuses with
-  `MANIFEST_LACKS_BASE_REVISION` rather than guessing. Lane 5, which constructs manifests, is asked
-  through the issue to add `candidate_ref`; nothing here depends on it doing so.
+  manifest or the argument (and refuses `BASE_REVISION_CONFLICT` when both are present and
+  disagree), and refuses with `MANIFEST_LACKS_BASE_REVISION` rather than guessing. Lane 5's plan on
+  `main` (`:591-596`) now writes `candidate_ref` on its manifest as well, so a manifest
+  `candidate_ref` that exists and differs from `--candidate-ref` is a second, distinct refusal,
+  `CANDIDATE_REF_CONFLICT`; a manifest without the key (lane 4's shape) still proposes from the
+  argument alone.
 
 ### spike-2: Can the two promotion preconditions be checked, or only declared?
 - **Assumption**: "Both preconditions are events outside the repo, so the gate can only be a
@@ -265,14 +272,23 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    charter digest, rollback plan, drill record, comparison if any) and runs `gh pr create` from
    `candidate_ref` through an injected runner; records `exposure.pr_number`. Merging is the
    pipeline's and a human's; this lane never calls `gh pr merge`.
-6. **`lifecycle.expose`**: resolves the PR's merge commit through `gh pr view --json mergeCommit,state`
-   (injected runner), refuses when not merged, computes the **baseline** from
-   `observation.metrics` over the `baseline_window_days` before now using `observation.measure`,
-   writes `exposure.merge_sha`, `exposed_at`, `outcome.baseline`, **restamps
-   `observation_window_ends_at = exposed_at + window_days`** (the window is measured from
-   exposure, so its end is anchored to exposure; the approve-time value is provisional) and appends
-   `{"event": "window_restamped", "from": <approve-time value>, "to": <new value>}` to
-   `outcome.history`, transitions to `observing`.
+6. **`lifecycle.expose`**: resolves the PR through `gh pr view --json mergeCommit,mergedAt,state`
+   (injected runner), refuses `PR_NOT_MERGED` when `state != "MERGED"`, and **anchors exposure on
+   the merge, not on the call**: `exposed_at = datetime.fromisoformat(mergedAt.replace("Z",
+   "+00:00"))`. Exposure is the merge reaching the fleet, and `expose` is operator-invoked, so any
+   delay between the two would otherwise put post-merge rows inside the baseline and start the
+   window after the change was live. The **baseline** is `observation.measure(project_key,
+   exposed_at - timedelta(days=baseline_window_days), exposed_at)`, the half-open span
+   `[merged_at - baseline_days, merged_at)`, so no post-merge row can land in it. Before measuring,
+   `expose` refuses `ReleaseRefused("EVIDENCE_EXPIRED")` when `now - (exposed_at -
+   timedelta(days=baseline_window_days)) > timedelta(days=EVIDENCE_TTL_DAYS)`: the baseline's
+   oldest rows have already expired, so a late call would freeze an undercount as the baseline. It
+   writes `exposure.merge_sha`, `exposed_at` (the merge time), `outcome.baseline`, **restamps
+   `observation_window_ends_at = exposed_at + window_days`** (the approve-time value is
+   provisional; the window is anchored to the merge) and appends two events to `outcome.history`:
+   `{"event": "exposed", "merged_at": <exposed_at>, "expose_called_at": <now>}` so a late call is
+   visible on the record, and `{"event": "window_restamped", "from": <approve-time value>, "to":
+   <new value>}`. Transitions to `observing`.
 7. **`lifecycle.close_window`**: refuses before `observation_window_ends_at` unless `--force` with a
    recorded reason; refuses with `verdict="undetermined", reason="EVIDENCE_EXPIRED"` when
    `now - exposed_at > EVIDENCE_TTL_DAYS` (the evidence rows the window needs have expired, so a
@@ -285,22 +301,33 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    `ZERO_DENOMINATOR` on `undetermined`), `outcome.claim_level_2_supported`, `outcome.falsifier`;
    transitions to `accepted` on `held`, stays `observing` otherwise with `outcome.rollback_recommended`.
 8. **`lifecycle.rollback`**: from `observing` or `accepted`, executes the rollback plan for real in a
-   temporary worktree of `main` (`git revert -m 1 <merge_sha>` or plain revert, commit message
-   carrying `Refs #<issue>` for the hotfix guard), pushes through the injected runner
-   (`git push origin HEAD:main`, or `HEAD:<name>` under `--branch <name>`), and **transitions to
-   `rolled_back` only when the push returned 0 and `git ls-remote origin main` resolves to
-   `revert_sha`**. A refused push (branch protection, `.githooks/pre-push`, a moved head) appends
-   `{"event": "rollback_push_refused", "stderr": ..., "revert_sha": ...}` to `outcome.history`,
-   leaves the state unchanged, and raises `ReleaseRefused("ROLLBACK_PUSH_REFUSED")`; the revert
-   commit is reported so the operator can push it by hand or re-run with `--branch`. On success it
-   records `outcome.rollback` with the revert SHA, the verification result, and `propagation:
-   "requires /update on fleet machines"`. Rollback is the one deliberately pipeline-exempt path in
+   temporary worktree built from **freshly fetched `origin/<target>`**, where `target = branch or
+   "main"`: `git fetch origin <target>` first, then `git worktree add --detach <path>
+   origin/<target>`, with `parent_sha = git rev-parse origin/<target>` recorded in `outcome.history`
+   beside `revert_sha`. A worktree of the local `main` would, on any machine whose checkout is
+   behind the remote (the common case during an incident), put the revert on a stale parent and
+   every push would be rejected non-fast-forward with the same stderr until the operator guessed
+   to fetch. Under `--branch <name>` for a branch the remote does not have, the fetch fails; the
+   worktree then comes from `origin/main` and the record carries `pushed_to: <name>`. The revert
+   (`git revert -m 1 <merge_sha>` or plain revert, commit message carrying `Refs #<issue>` for the
+   hotfix guard) is pushed through the injected runner (`git push origin HEAD:<target>`), and the
+   release **transitions to `rolled_back` only when the push returned 0 and `git ls-remote origin
+   refs/heads/<target>` resolves to `revert_sha`**, the same ref the push targeted. A refused push
+   (branch protection, `.githooks/pre-push`, a head that moved after the fetch) appends
+   `{"event": "rollback_push_refused", "stderr": ..., "revert_sha": ..., "parent_sha": ...}` to
+   `outcome.history`, leaves the state unchanged, and raises
+   `ReleaseRefused("ROLLBACK_PUSH_REFUSED")`; the revert commit is reported so the operator can push
+   it by hand or re-run with `--branch`. On success it records `outcome.rollback` with the revert
+   SHA, `parent_sha`, `pushed_to`, the verification result, and `propagation: "requires /update on
+   fleet machines"`. Rollback is the one deliberately pipeline-exempt path in
    this lane: it is an incident surface, and a revert that waits on critique and review is a
    rollback that arrives after the damage. `--branch` is the pipeline-shaped alternative for a
    rollback that is not urgent; the CLI prints the `gh pr create` command for it.
 9. **Output**: `get_release_lineage` joins release → evaluation → experiment → case for the
    dashboard partial and `show`; `report.claim_report` reads accepted releases with
-   `claim_level_2_supported` for level 2.
+   `claim_level_2_supported` for level 2. Every read of an evaluation's `effect` or
+   `confidence_interval` goes through `evaluation_read.effect_of` / `interval_of` (Technical
+   Approach, "Evaluation read"), because lane 4 stores both as JSON strings keyed by endpoint.
 
 **Comparison flow (claim level 3)**
 
@@ -329,8 +356,10 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    worthwhile effect, `reject` when the upper bound is below zero, `inconclusive` otherwise or on
    any budget refusal.
 6. **Output**: one `ImprovementEvaluation(evaluator_version="recursive-comparison/1")` with
-   `effect`, `confidence_interval`, `correction="holm"`, `notes` carrying the budget accounting per
-   arm and the refusal reason if any. On `accept`, one `ImprovementModelRevision` with
+   `effect` and `confidence_interval` in lane 4's string shape (`json.dumps({"validated_gain":
+   ...}, sort_keys=True)`, keyed by the single endpoint), `correction="holm"`, `notes` as a
+   newline-joined string carrying the budget accounting per arm as one `budget=<json>` line and the
+   refusal reason if any. On `accept`, one `ImprovementModelRevision` with
    `research_process_digest` of the winning arm, `prediction`, `supersedes_id` of the current
    revision, and the previous revision moved to `superseded`.
 
