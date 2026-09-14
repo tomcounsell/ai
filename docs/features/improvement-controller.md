@@ -387,7 +387,7 @@ rejected approaches with lane 5. Each section renders one of three distinguishab
 "nothing yet, written by lane N", or "unavailable" when the read failed. A bare
 zero would claim a measurement was taken.
 
-The other two panels are backed by `ImprovementEvidence`.
+Two panels are backed by `ImprovementEvidence`.
 
 **Coverage** comes first and is the denominator. A falling correction count with
 a falling scan count is not an improvement, and coverage is what makes the two
@@ -410,9 +410,10 @@ sentence on every load. See [Improvement Release](improvement-release.md).
 **Experiment count and merged-patch count are activity, not improvement**,
 and there is deliberately no function here that returns them.
 
-Cases, hypotheses, rejected experiments, spend, and the
+Hypotheses, rejected experiments, spend, and the
 paused/inconclusive/reconciliation-required renderings arrive with the lane that
-first writes each one. Six permanently empty tiles is not a dashboard.
+first writes each one (3 for intents and reservations, 5 for hypotheses and
+rejected approaches). Permanently empty tiles are not a dashboard.
 
 ## Break-glass
 

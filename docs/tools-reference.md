@@ -364,8 +364,8 @@ Research sessions reach research state only through this CLI, which enforces
 journal authorization and never exposes a raw transition. `pause`, `resume`, and
 `doctor` are the break-glass path; the manual procedure lives in
 [Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
-The comparison of a release against its incumbent, once listed here as
-`valor-improve release compare`, ships as `valor-improve-release compare` below.
+The recursive comparison of two research processes runs under the separate
+`valor-improve-release compare` binary, below.
 
 **What is available today** is the evidence side, which has no CLI, and the
 release side, which has `valor-improve-release`. The
