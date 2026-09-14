@@ -48,10 +48,18 @@ class FakeSessionRunner:
     this spy. ``on_run`` (optional classmethod seam) lets a test mutate the
     agent_session mid-"run" the way the real adapter's publish_exit_summary
     would (exit_reason / user_facing_routed).
+
+    The returned ``RunSummary`` mirrors whatever ``on_run`` wrote onto the
+    agent_session, because that is the real relationship: the adapter's
+    ``publish_exit_summary`` copies ``summary.exit_reason`` onto the row.
+    ``summary_exit_reason`` overrides that for the one case where the two
+    genuinely diverge -- the run-start lookup missed, so there is no row to
+    write onto and only the summary carries this run's exit.
     """
 
     instances: list[FakeSessionRunner] = []
     on_run = None  # optional: callable(fake_runner) -> None
+    summary_exit_reason = None  # optional: force the RunSummary's exit_reason
 
     def __init__(self, **kwargs):
         self.init_kwargs = kwargs
@@ -63,16 +71,24 @@ class FakeSessionRunner:
         hook = type(self).on_run
         if hook is not None:
             hook(self)
-        return RunSummary(exit_reason="pm_complete", turn_count=1)
+        forced = type(self).summary_exit_reason
+        if forced is not None:
+            return RunSummary(exit_reason=forced, turn_count=1)
+        row = self.init_kwargs.get("agent_session")
+        return RunSummary(
+            exit_reason=getattr(row, "exit_reason", None) or "pm_complete", turn_count=1
+        )
 
 
 @pytest.fixture(autouse=True)
 def _reset_fake_runner():
     FakeSessionRunner.instances = []
     FakeSessionRunner.on_run = None
+    FakeSessionRunner.summary_exit_reason = None
     yield
     FakeSessionRunner.instances = []
     FakeSessionRunner.on_run = None
+    FakeSessionRunner.summary_exit_reason = None
 
 
 def _patch_runner():
@@ -1100,10 +1116,9 @@ class TestSyntheticSlugWorktreePreservation:
         ``AgentSession.exit_reason`` is persisted and was only ever written at
         the END of a run, so a re-run of the same row arrived from Redis still
         carrying the prior run's value. Any consumer that reads it before this
-        run writes its own -- the synthetic-slug cleanup skip, and with it the
-        #3176 pre-finalize guard it gates -- would then act on the outcome of a
-        run that already finished. The executor clears the field at run start,
-        making it run-scoped.
+        run writes its own -- the synthetic-slug cleanup skip among them --
+        would then act on the outcome of a run that already finished. The
+        executor clears the field at run start, making it run-scoped.
 
         RED without the run-start reset: the row's stale ``"turn_timeout"``
         takes the preserve branch and the worktree survives a run that never
@@ -1155,4 +1170,158 @@ class TestSyntheticSlugWorktreePreservation:
         assert not os.path.isdir(wt_path), (
             "a stale persisted exit_reason from a previous run suppressed this "
             "run's cleanup -- exit_reason is not run-scoped"
+        )
+        # Non-vacuity: the assertion above also holds if the run-start lookup
+        # simply missed (no row found => nothing read, nothing cleared). The
+        # persisted field is None ONLY if the reset actually executed.
+        reloaded = AgentSession.get_by_id(session.agent_session_id)
+        assert reloaded.exit_reason is None, (
+            "the run-start exit_reason reset did not execute -- the row still "
+            f"carries {reloaded.exit_reason!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_preserve_branch_still_finalizes_the_authoritative_row(
+        self, redis_test_db
+    ):
+        """The pre-finalize guard must run on the PRESERVE branch too (#3176).
+
+        The guard exists because a row left ``status="running"`` makes the busy
+        scan (``_scan_worktree_sessions``, which reads ``exec_cwd``) refuse the
+        lane forever -- a synthetic ``session/dev-*`` branch never satisfies
+        ``sweep_worktrees``' ``merged_via_tree`` requirement, so nothing else
+        ever reclaims it. Nesting the guard inside the cleanup ``else:`` would
+        make a preserved lane a PERMANENTLY WEDGED lane: directory kept, row
+        stuck ``running``, and nobody can ever take the slot.
+
+        The exit driven here is the one the guard was written for: the runner
+        reports ``turn_timeout`` (as ``publish_exit_summary`` does), then the
+        turn is CANCELLED -- the health-check recovery shape. Cancellation
+        unwinds straight past the unconditional completion-exit guard (#2007),
+        so the terminal ``finally`` is the only thing left that can finalize
+        the row. Both properties are asserted together because the fix is only
+        correct when they hold at once.
+        """
+        import asyncio
+        import os
+        import re
+        import shutil
+
+        from models.session_lifecycle import get_authoritative_session
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        slug = f"dev-{session.agent_session_id[:8]}"
+        assert re.match(r"^dev-[0-9a-f]{8}$", slug)
+        repo_root = tempfile.mkdtemp()
+        wt_path = os.path.join(repo_root, ".worktrees", slug)
+        os.makedirs(wt_path, exist_ok=True)
+
+        def _fake_cleanup_after_merge(root, cleaned_slug):
+            shutil.rmtree(os.path.join(str(root), ".worktrees", cleaned_slug), ignore_errors=True)
+            return {"slug": cleaned_slug, "worktree_removed": True, "errors": []}
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        class _TimeoutThenCancelledRunner(FakeSessionRunner):
+            async def run(self, user_message: str) -> RunSummary:
+                self.run_messages.append(user_message)
+                row = self.init_kwargs.get("agent_session")
+                if row is not None:
+                    # What publish_exit_summary writes on a preempted turn.
+                    row.exit_reason = "turn_timeout"
+                    row.save(update_fields=["exit_reason"])
+                raise asyncio.CancelledError()
+
+        with (
+            patch("agent.session_runner.SessionRunner", _TimeoutThenCancelledRunner),
+            patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+            patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+            patch("agent.worktree_manager.resolve_main_repo_root", return_value=repo_root),
+            patch("agent.worktree_manager.cleanup_after_merge", _fake_cleanup_after_merge),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await _execute_agent_session(session)
+
+        assert os.path.isdir(wt_path), (
+            "the turn-timeout preserve branch deleted the lane it exists to save"
+        )
+        _auth = get_authoritative_session(session.session_id)
+        assert _auth is not None
+        assert _auth.status != "running", (
+            "the preserved lane's row is still `running` with no live process -- "
+            "the busy scan will refuse this worktree forever and no sweep can "
+            "reclaim a synthetic dev-* branch. The pre-finalize guard did not run "
+            "on the preserve branch."
+        )
+
+    @pytest.mark.asyncio
+    async def test_runner_timeout_preserves_lane_when_the_row_lookup_missed(self, redis_test_db):
+        """No AgentSession row => the runner's own exit_reason must decide.
+
+        The run-start lookup filters on ``status="running"`` and legitimately
+        misses (documented race). Reading the cleanup decision off the row
+        alone then yields None on a turn that genuinely timed out, the ``else:``
+        runs, and ``cleanup_after_merge`` DELETES the lane -- destroying exactly
+        the uncommitted work the user was just told is saved. Fail-open in the
+        data-losing direction.
+        """
+        import os
+        import re
+        import shutil
+
+        # Left `pending`, so the executor's run-start lookup (project_key +
+        # status="running") finds nothing and agent_session stays None.
+        session = _make_session(working_dir="/tmp")
+        assert session.status == "pending"
+
+        slug = f"dev-{session.agent_session_id[:8]}"
+        assert re.match(r"^dev-[0-9a-f]{8}$", slug)
+        repo_root = tempfile.mkdtemp()
+        wt_path = os.path.join(repo_root, ".worktrees", slug)
+        os.makedirs(wt_path, exist_ok=True)
+
+        def _fake_cleanup_after_merge(root, cleaned_slug):
+            shutil.rmtree(os.path.join(str(root), ".worktrees", cleaned_slug), ignore_errors=True)
+            return {"slug": cleaned_slug, "worktree_removed": True, "errors": []}
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        # Only the RunSummary carries the exit: there is no row to write onto.
+        FakeSessionRunner.summary_exit_reason = "turn_timeout"
+
+        with (
+            _patch_runner(),
+            patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+            patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+            patch("agent.worktree_manager.resolve_main_repo_root", return_value=repo_root),
+            patch("agent.worktree_manager.cleanup_after_merge", _fake_cleanup_after_merge),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert FakeSessionRunner.instances[0].init_kwargs.get("agent_session") is None, (
+            "the run-start lookup found a row -- this test no longer covers the "
+            "agent_session-is-None path"
+        )
+        assert os.path.isdir(wt_path), (
+            "a timed-out turn lost its lane because no AgentSession row carried "
+            "the exit reason -- the runner's own summary was ignored"
         )

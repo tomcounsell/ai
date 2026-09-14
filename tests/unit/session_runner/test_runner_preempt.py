@@ -30,6 +30,7 @@ from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessTurnOutcome
 from agent.session_runner.router import ExitReason, TurnFailure
 from agent.session_runner.runner import (
+    ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE,
     ENG_ABSOLUTE_TIMEOUT_S,
     ENG_IDLE_TIMEOUT_S,
     TIMEOUT_NEEDS_ATTENTION_MESSAGE,
@@ -304,11 +305,64 @@ async def test_timeout_expiry_is_graceful_preempt_not_error():
     assert deliveries == [TIMEOUT_NEEDS_ATTENTION_MESSAGE]
     # The delivered text must assert nothing false (#3289). Nothing is
     # paused or suspended: the process group was SIGTERM'd, given a flush
-    # grace, then SIGKILL'd, and any foreground subagent died with it.
+    # grace, then SIGKILL'd, and any foreground subagent died with it. The
+    # inactivity claim is true here because the IDLE deadline is what fired.
     assert deliveries == [
         "I stopped this run after a long stretch with no activity. The work "
         "so far is saved. Reply and I'll pick it up from there."
     ]
+    timeout_records = [
+        e
+        for e in session.session_events
+        if e["type"] == "runner_turn" and e["turn_end_source"] == "timeout"
+    ]
+    assert len(timeout_records) == 1
+
+
+async def test_absolute_ceiling_preempt_delivers_the_absolute_variant_notice():
+    """The absolute ceiling must not tell the human "no activity" (#3294).
+
+    The absolute deadline fires by construction on a turn that kept BOTH
+    activity signals fresh for the whole ceiling -- the idle deadline could
+    never catch it. Delivering the idle text there states something false.
+    Here the idle deadline is set out of reach so only the ceiling can fire.
+
+    The EXIT is unchanged: both deadlines are ``ExitReason.TURN_TIMEOUT`` and
+    both record ``turn_end_source="timeout"``; only the human-facing text
+    differs.
+    """
+    driver = KillableDriver()
+    kills = []
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        driver.kill_event.set()
+
+    runner, deliveries, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        idle_timeout_s=3600.0,  # unreachable: the ceiling is the only deadline
+        absolute_timeout_s=0.12,
+    )
+    session.session_id = f"dbg-abs-notice-{uuid.uuid4()}"
+    summary = await runner.run("endless streaming task")
+
+    assert kills and kills[0][1] == signal.SIGTERM
+    assert summary.exit_reason == "turn_timeout", (
+        "the absolute ceiling must keep mapping to TURN_TIMEOUT"
+    )
+    assert deliveries == [ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE], (
+        f"absolute-ceiling preempt delivered the wrong notice: {deliveries!r}"
+    )
+    assert "no activity" not in deliveries[0], (
+        "the absolute-ceiling notice claims inactivity on a turn that was continuously active"
+    )
+    # The clauses that stay true on both deadlines.
+    assert "saved" in deliveries[0]
+    assert "Reply" in deliveries[0]
     timeout_records = [
         e
         for e in session.session_events
@@ -1044,7 +1098,7 @@ async def test_fully_silent_turn_preempts_at_idle_deadline(tmp_path, monkeypatch
         stream_idle_s=ENG_IDLE_TIMEOUT_S + 1,
     )
     assert past.killed is True
-    assert past.kill_cause == "timeout"
+    assert past.kill_cause == "timeout_idle"
     assert kills and kills[0][1] == signal.SIGTERM
 
 
@@ -1061,5 +1115,5 @@ async def test_absolute_ceiling_preempts_endless_streamer(tmp_path, monkeypatch)
 
     past = await _drive_watcher(runner, elapsed_s=ENG_ABSOLUTE_TIMEOUT_S + 1, refresh_stream=True)
     assert past.killed is True
-    assert past.kill_cause == "timeout"
+    assert past.kill_cause == "timeout_absolute"
     assert kills and kills[0][1] == signal.SIGTERM

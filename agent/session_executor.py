@@ -1443,11 +1443,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 agent_session.append_history("user", (session.message_text or "")[:200])
         except Exception as e:
-            # A lane that stays invisible to the busy scan is exactly the
-            # condition this write exists to prevent, so it must be loud and
-            # greppable rather than swallowed at debug level.
+            # Two guarantees ride on this save and BOTH are lost when it
+            # raises: the exec_cwd stamp (a lane that stays invisible to the
+            # busy scan is exactly the condition it exists to prevent) and the
+            # run-start exit_reason reset (without it the field keeps the
+            # PREVIOUS run's outcome and every consumer reads a stale exit).
+            # Name both, so the log says what actually did not land.
             logger.warning(
-                f"[lane-writeback] AgentSession exec_cwd update failed for "
+                f"[lane-writeback] AgentSession run-start update failed "
+                f"(exec_cwd stamp AND exit_reason reset) for "
                 f"session={session.session_id} path={working_dir} (non-fatal): {e}"
             )
 
@@ -2280,8 +2284,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # double-emit.
         _runner_message = _harness_input
 
+        # The runner's OWN report of how this run ended, captured the moment
+        # ``run()`` returns. This is the authoritative signal for the terminal
+        # cleanup branch below: the persisted ``agent_session.exit_reason`` is
+        # only reachable when the run-start lookup found a row, and that lookup
+        # legitimately misses (documented race below), which would otherwise
+        # make a genuinely timed-out turn look like a clean exit and DELETE its
+        # lane. ``run()`` never raises, so a still-None value here means the
+        # unwind happened before/around the call, not that the run ended clean.
+        _runner_exit_reason = None
+
         async def do_work() -> str:
-            await _runner.run(_runner_message)
+            nonlocal _runner_exit_reason
+            _summary = await _runner.run(_runner_message)
+            _runner_exit_reason = getattr(_summary, "exit_reason", None)
             return ""
 
         # Pass working_dir so BackgroundTask._watchdog can detect a vanished
@@ -2748,23 +2764,47 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
 
                 _wd = locals().get("working_dir")
-                # Exit reason as the executor already knows it: the adapter's
-                # ``publish_exit_summary`` writes ``str(summary.exit_reason)``
-                # onto this very ``agent_session`` object before the runner
-                # returns, which is the same in-scope state the reaction branch
-                # and ``_runner_final_status`` read. No Redis re-read here --
-                # the terminal path must not depend on a fresh round-trip.
-                # This reads THIS run's outcome, not a previous one's: the
-                # field is cleared to None at run start (see the run-start
-                # reset above), so an exit that never reaches
-                # ``publish_exit_summary`` leaves it None and falls through to
-                # the cleanup branch rather than inheriting a stale
+                # Exit reason for this run, runner-first. ``_runner_exit_reason``
+                # is captured straight off the ``RunSummary`` the runner returned,
+                # so it holds even when the run-start lookup missed and
+                # ``agent_session`` is None -- on that path the adapter has no row
+                # to write ``publish_exit_summary`` onto, and reading the row alone
+                # would classify a timed-out turn as a clean exit and DELETE the
+                # lane whose uncommitted work the preserve branch exists to save.
+                # The row is the fallback: it is what the adapter's
+                # ``publish_exit_summary`` wrote onto this very in-scope object,
+                # the same state the reaction branch and ``_runner_final_status``
+                # read, and it covers unwinds that never reached the capture. No
+                # Redis re-read here -- the terminal path must not depend on a
+                # fresh round-trip. Either source reads THIS run's outcome: the
+                # persisted field is cleared to None at run start (see the
+                # run-start reset above), so it cannot inherit a stale
                 # ``"turn_timeout"`` from the run before it.
                 # ``ExitReason`` is a ``StrEnum``, so this compares equal
-                # whether the attribute holds the member or the wire string
+                # whether the value is the member or the wire string
                 # ``"turn_timeout"``.
-                _exit_reason_for_cleanup = getattr(
-                    locals().get("agent_session"), "exit_reason", None
+                # ``locals()`` because an early raise can unwind before either
+                # name is bound (the same reason ``working_dir`` is read this
+                # way above).
+                _runner_exit_reason_local = locals().get("_runner_exit_reason")
+                _agent_session_for_cleanup = locals().get("agent_session")
+                if _agent_session_for_cleanup is None:
+                    # The run-start lookup missed (see the race note above), so
+                    # nothing persisted this run's exit onto a row. Greppable by
+                    # name: the cleanup decision is running on the runner local
+                    # alone, and if that is unset too the lane WILL be deleted.
+                    logger.warning(
+                        "[synthetic-slug] cleanup decision without an AgentSession row "
+                        "for session=%s slug=%s — falling back to the runner's own "
+                        "exit_reason=%r",
+                        session.session_id,
+                        _slug_for_cleanup,
+                        _runner_exit_reason_local,
+                    )
+                _exit_reason_for_cleanup = (
+                    _runner_exit_reason_local
+                    if _runner_exit_reason_local is not None
+                    else getattr(_agent_session_for_cleanup, "exit_reason", None)
                 )
                 _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
                 if _wd is not None:
@@ -2787,11 +2827,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     #
                     # Hoisted above the skip branches (#3289) so it runs on
                     # EVERY terminal exit, not only the one that deletes the
-                    # worktree. Only the removal itself is conditional: the
-                    # skips fire on exactly the raising/cancelled exits this
-                    # guard exists for, and leaving a row `running` with no
-                    # live process wedges the lane whether or not the
-                    # directory survives.
+                    # worktree. Only the removal itself is conditional. The two
+                    # skips below do NOT share one exit shape: the turn-timeout
+                    # skip fires on a CLEAN return of `_runner.run()` (where the
+                    # completion-exit finalize already ran and the
+                    # `status == "running"` predicate makes this guard a no-op),
+                    # while the reap-failure skip fires on the raising/cancelled
+                    # exit this guard exists for. Leaving a row `running` with no
+                    # live process wedges the lane whether or not the directory
+                    # survives, so the guard cannot sit inside either branch.
                     try:
                         from models.session_lifecycle import (  # noqa: PLC0415
                             StatusConflictError,

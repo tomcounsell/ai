@@ -137,14 +137,30 @@ absolute_s)` (`agent/session_runner/runner.py`):
   active." This mirrors the precedent in `tools/session_progress.py`, which
   bans inferring a wedge from absence of a signal.
 - **Driver backstop.** The `HeadlessRoleDriver`'s own `asyncio.wait_for` is
-  re-derived from `self._absolute_timeout_s` (the larger of the two
-  deadlines the watcher can fire on) plus grace and margin, so the watcher's
+  derived from `max(idle_timeout_s, absolute_timeout_s)` — whichever deadline
+  the watcher could fire on last — plus grace and margin, so the watcher's
   preempt always fires before the driver's own backstop.
 
-`TIMEOUT_NEEDS_ATTENTION_MESSAGE` makes no claim that the work was "paused":
-the process group is SIGTERM'd then SIGKILL'd, so nothing is paused. It
-tells the human the run was stopped after a silent stretch, that the work so
-far is saved, and that a reply resumes the same session.
+### The timeout notice names the deadline that fired
+
+Neither notice claims the work was "paused": the process group is SIGTERM'd
+then SIGKILL'd, so nothing is paused. Both say the work so far is saved and
+that a reply resumes the same session. They differ on the one clause the two
+deadlines disagree about:
+
+| Kill cause | Constant | What it tells the human |
+|---|---|---|
+| `timeout_idle` | `TIMEOUT_NEEDS_ATTENTION_MESSAGE` | stopped "after a long stretch with no activity" — literally the idle deadline's predicate |
+| `timeout_absolute` | `ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE` | stopped because the run "had been going for a very long time" |
+
+The absolute ceiling fires on a turn that kept BOTH activity signals fresh for
+the whole ceiling — the idle deadline could never have caught it — so claiming
+inactivity there would be false. The EXIT is the same either way:
+`_TurnHandle.kill_cause` carries the variant, both members of
+`TIMEOUT_KILL_CAUSES` record `turn_end_source="timeout"` and map to
+`ExitReason.TURN_TIMEOUT`, and the per-run notice dedupe
+(`timeout-notice-sent:{session_id}:{run_id}`) covers both — one timeout notice
+per run, whichever deadline produced it.
 
 ## Subprocess Lifecycle & Teardown Reap (issue #1938)
 

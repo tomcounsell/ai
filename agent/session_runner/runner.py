@@ -130,7 +130,7 @@ TEAMMATE_TURN_TIMEOUT_S: float = float(
 )
 
 # TTL (seconds) on the `timeout-notice-sent:{session_id}:{run_id}` dedupe key
-# that stops TIMEOUT_NEEDS_ATTENTION_MESSAGE from being re-posted on every
+# that stops the timeout needs-attention notice from being re-posted on every
 # re-run of one stranded row (#3270 defect 7). The TTL is deliberately long
 # relative to the re-enqueue cadence: the incident re-ran the same row hourly
 # for hours, so a short TTL would expire between re-runs and re-spam. It is
@@ -273,15 +273,32 @@ OPERATOR_TERMINAL_MESSAGE = (
 # Delivered when an operator aborts a running session via an is_abort steer.
 STEER_ABORT_USER_MESSAGE = "Session stopped at your request."
 
-# Needs-attention message for a timeout-preempted turn. Nothing is paused:
+# Kill causes that mean "a turn deadline expired", as opposed to a steer
+# preempt. TWO deadlines can fire (``_preempt_watcher``) and they describe
+# opposite conditions, so each carries its own cause and its own notice.
+TIMEOUT_KILL_CAUSE_IDLE = "timeout_idle"
+TIMEOUT_KILL_CAUSE_ABSOLUTE = "timeout_absolute"
+TIMEOUT_KILL_CAUSES = frozenset({TIMEOUT_KILL_CAUSE_IDLE, TIMEOUT_KILL_CAUSE_ABSOLUTE})
+
+# Needs-attention messages for a timeout-preempted turn. Nothing is paused:
 # the turn's process group is SIGTERM'd, given a flush grace, then SIGKILL'd,
-# and any foreground subagent dies with it. Every clause below is therefore
-# verifiable — the run was stopped, the stretch had no observed activity
-# (that is literally the preempt predicate), the transcript and worktree are
-# preserved, and a reply resumes the same session via ``claude --resume``.
+# and any foreground subagent dies with it.
+#
+# The IDLE variant is the only one entitled to claim inactivity — "no observed
+# activity for the idle window" is literally that deadline's predicate. The
+# ABSOLUTE variant fires on the opposite shape: a turn that kept BOTH activity
+# signals fresh and simply ran past the wall-clock ceiling, so telling that
+# human "no activity" would be false. Both keep the two clauses that hold
+# either way: the transcript and worktree are preserved, and a reply resumes
+# the same session via ``claude --resume``.
 TIMEOUT_NEEDS_ATTENTION_MESSAGE = (
     "I stopped this run after a long stretch with no activity. The work so "
     "far is saved. Reply and I'll pick it up from there."
+)
+
+ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE = (
+    "I stopped this run because it had been going for a very long time. The "
+    "work so far is saved. Reply and I'll pick it up from there."
 )
 
 # Persona-safe apology for a turn whose subprocess failed outright.
@@ -293,8 +310,8 @@ RUNNER_ERROR_USER_MESSAGE = (
 def _claim_timeout_notice(session_id: str, run_id: str = "") -> bool:
     """Claim the right to deliver the timeout needs-attention notice ONCE.
 
-    ``TIMEOUT_NEEDS_ATTENTION_MESSAGE`` describes a *session-level* condition
-    ("I stopped this run after a long stretch with no activity"), so
+    The timeout needs-attention text (either deadline's variant) describes a
+    *session-level* condition ("I stopped this run ..."), so
     re-delivering it on every re-run of the same row is pure noise to the
     human -- the #3270 incident posted the byte-identical text into a chat
     once per re-enqueue.
@@ -425,7 +442,7 @@ class _TurnHandle:
     pid: int | None = None
     pgid: int | None = None
     killed: bool = False
-    kill_cause: str | None = None  # "steer" | "timeout"
+    kill_cause: str | None = None  # "steer" | "timeout_idle" | "timeout_absolute"
 
 
 @dataclass
@@ -1023,17 +1040,28 @@ class SessionRunner:
 
                 # -- Preempt outcomes (steer / timeout) ----------------------
                 if handle.killed:
-                    source = "timeout" if handle.kill_cause == "timeout" else "preempted"
+                    timed_out = handle.kill_cause in TIMEOUT_KILL_CAUSES
+                    source = "timeout" if timed_out else "preempted"
                     self._record_turn_event(handle, turn_end_source=source)
-                    if handle.kill_cause == "timeout":
+                    if timed_out:
                         # Graceful preempt, not an error: partial work stays
                         # in the transcript; surface needs-attention -- but at
                         # most ONCE per run, not once per chat thread (#3270).
+                        # The notice text names the deadline that actually
+                        # fired; only the idle one may claim inactivity.
+                        notice = (
+                            ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE
+                            if handle.kill_cause == TIMEOUT_KILL_CAUSE_ABSOLUTE
+                            else TIMEOUT_NEEDS_ATTENTION_MESSAGE
+                        )
                         if _claim_timeout_notice(
                             str(getattr(self._agent_session, "session_id", "") or ""),
                             str(getattr(self._agent_session, "id", "") or ""),
                         ):
-                            self._adapter.on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)
+                            self._adapter.on_user_payload(notice)
+                        # Both deadlines are the same EXIT: the turn was
+                        # preempted on a deadline. Only the human-facing text
+                        # differs.
                         summary.exit_reason = ExitReason.TURN_TIMEOUT
                         break
                     # Steer preempt: pending steers drain at the next
@@ -1500,7 +1528,7 @@ class SessionRunner:
                     elapsed,
                     self._absolute_timeout_s,
                 )
-                await self._kill_turn(handle, turn_task, cause="timeout")
+                await self._kill_turn(handle, turn_task, cause=TIMEOUT_KILL_CAUSE_ABSOLUTE)
                 return
             idle = self._turn_idle_seconds(now_mono)
             if self._idle_timeout_s and idle >= self._idle_timeout_s:
@@ -1511,7 +1539,7 @@ class SessionRunner:
                     self._idle_timeout_s,
                     elapsed,
                 )
-                await self._kill_turn(handle, turn_task, cause="timeout")
+                await self._kill_turn(handle, turn_task, cause=TIMEOUT_KILL_CAUSE_IDLE)
                 return
             try:
                 popped = self._pop_steering()
@@ -2129,6 +2157,7 @@ class SessionRunner:
 
 # Re-exported for the executor wiring (task 4) and tests.
 __all__ = [
+    "ABSOLUTE_TIMEOUT_NEEDS_ATTENTION_MESSAGE",
     "DEFAULT_MAX_TURNS",
     "ENG_ABSOLUTE_TIMEOUT_S",
     "ENG_IDLE_TIMEOUT_S",
@@ -2142,6 +2171,7 @@ __all__ = [
     "STEER_DEBOUNCE_S",
     "STEER_POLL_INTERVAL_S",
     "TEAMMATE_TURN_TIMEOUT_S",
+    "TIMEOUT_KILL_CAUSES",
     "TIMEOUT_NEEDS_ATTENTION_MESSAGE",
     "ResumeContext",
     "SessionRunner",

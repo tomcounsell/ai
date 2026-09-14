@@ -99,7 +99,17 @@ class TestCleanupGating:
     def test_finally_block_carries_pre_finalize_guard(self):
         """Source guard (#3176): a pre-finalize guard must sit ahead of the
         cleanup_after_merge call so a still-`running` row (every raising or
-        cancelled exit) does not permanently block its own removal."""
+        cancelled exit) does not permanently block its own removal.
+
+        Source text only — it cannot see WHERE the guard sits, so it stays
+        green if the guard is re-nested under one cleanup branch. The
+        behavioral coverage for its placement is
+        ``TestSyntheticSlugWorktreePreservation::
+        test_timeout_preserve_branch_still_finalizes_the_authoritative_row``
+        in ``tests/unit/test_session_executor_runner_dispatch.py``, which
+        drives a real turn-timeout exit and asserts the row goes terminal
+        while the worktree survives.
+        """
         import inspect
 
         src = inspect.getsource(session_executor)
