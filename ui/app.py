@@ -413,6 +413,22 @@ def create_app() -> FastAPI:
             {"goals": get_goals(project_key=project_key)},
         )
 
+    @app.get("/_partials/improvement/control/", response_class=HTMLResponse)
+    def partial_improvement_control(request: Request, project_key: str = "valor"):
+        """HTMX partial: the lane-3 control panel (#3215).
+
+        Intents by state, lane slots, unit-2 spend, paused heads, and
+        reconciliation_required wedges -- reads only, through
+        intents.list_intents over each open case's own set, never a scan.
+        """
+        from ui.data.improvement import get_control_status
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/control.html",
+            {"control": get_control_status(project_key=project_key)},
+        )
+
     @app.get("/_partials/improvement/burden/", response_class=HTMLResponse)
     def partial_improvement_burden(request: Request, project_key: str = "valor"):
         """HTMX partial: how often a human had to step in, and of what kind (#3177)."""

@@ -726,6 +726,7 @@ class TestImprovementPartials:
         # Stays an exact list on purpose: it is what stops a later lane from
         # quietly adding an activity counter beside the honest panels.
         assert exported == [
+            "get_control_status",
             "get_coverage",
             "get_goals",
             "get_intervention_burden",
@@ -738,6 +739,62 @@ class TestImprovementPartials:
         assert "/_partials/improvement/goals/" in resp.text
         assert "/_partials/improvement/coverage/" in resp.text
         assert "/_partials/improvement/burden/" in resp.text
+        assert "/_partials/improvement/control/" in resp.text
+
+    def test_control_partial_renders_on_an_empty_namespace(self, client):
+        resp = client.get("/_partials/improvement/control/?project_key=test-3215-ui-empty")
+
+        assert resp.status_code == 200
+        assert "Nothing yet, written by lane 3" in resp.text
+        assert "improvement-control" in resp.text
+
+    def test_control_partial_renders_a_seeded_paused_case(self, client):
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+        from tools.improvement_control.journal import transition
+
+        pk = "test-3215-ui-paused"
+        case = ImprovementCase.create(
+            project_key=pk, state="investigating", title="t", created_at=datetime.now(UTC)
+        )
+        transition(
+            pk,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d",
+            action_id="a1",
+        )
+        transition(
+            pk,
+            case.id,
+            expected_revision=1,
+            generation=1,
+            event="paused",
+            payload_digest="operator says so",
+        )
+
+        resp = client.get(f"/_partials/improvement/control/?project_key={pk}")
+        assert resp.status_code == 200
+        assert case.id in resp.text
+
+    def test_control_partial_renders_unavailable_when_the_read_raises(self, client, monkeypatch):
+        """Patches the real dependency, not get_control_status itself: the
+        classification only means something if the failure it classifies is
+        the one production can actually hit (same pattern as the goals and
+        assumption unavailable tests above)."""
+        from models.improvement_case import ImprovementCase
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("case store unreachable")
+
+        monkeypatch.setattr(ImprovementCase.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/control/?project_key=test-3215-ui-boom")
+        assert resp.status_code == 200
+        assert "could not be read" in resp.text
 
     def test_goals_partial_renders_on_an_empty_namespace(self, client):
         """An unseeded project says so, and names no zero."""
