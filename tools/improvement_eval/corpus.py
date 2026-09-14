@@ -15,6 +15,14 @@ record lines by each record's ``key``, and dumps each record body with
 manifest is compared byte-equal between arms separately, so a future
 volatile manifest key surfaces as a mismatch rather than being absorbed.
 
+Restore passes ``on_embedding_mismatch="carry"`` and relies on
+``import_records`` saving with ``skip_auto_now=True``. Both are
+load-bearing: ``Memory.relevance`` is a decaying sorted field with
+``auto_now``, so a plain re-save would stamp every record with import time,
+and a re-embed under the current provider recomputes the vectors. Dropping
+either makes two arms rank differently even from identical bytes, and the
+baseline parity gate is what catches it.
+
 Every Redis touch in this module goes through the Popoto ORM
 (``Memory.export_records`` / ``Memory.import_records``). No raw Redis
 command is issued here.

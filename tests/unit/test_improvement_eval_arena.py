@@ -322,10 +322,53 @@ class TestArmRetrieve:
 
     def test_two_arms_rank_identically_across_a_clock_gap(self):
         from tools.improvement_eval.arena import arm_redis_server, run_arm_job
+
+        """The shipped ranking path reads persisted state, so a clock gap moves nothing.
+
+        Sensitivity first: the fixture spaces an old, important record and a
+        fresh, unimportant one so that decay ranking (``base_score *
+        elapsed_days ** -rate``) puts the fresh one first today and the old
+        one first 30 days on. The test proves that flip through the decay
+        query in-process before asserting the arms agree across the same
+        gap; a ranking path that read the decay clock would reorder in
+        ``arm_b`` and go red here.
+        """
+        import time
+
+        from models.memory import Memory
         from tools.improvement_eval.corpus import export_corpus
 
-        _seed_memory(PK_RETRIEVE, "clock gap lighthouse beacon")
-        _seed_memory(PK_RETRIEVE, "clock gap grocery errands")
+        skew = 30 * 86400
+        with mock.patch("time.time", return_value=time.time() - 60 * 86400):
+            old = Memory(
+                agent_id="test-3216",
+                project_key=PK_RETRIEVE,
+                content="clock gap lighthouse beacon",
+                importance=9.0,
+                source="agent",
+            )
+            assert old.save() is not False
+        fresh = Memory(
+            agent_id="test-3216",
+            project_key=PK_RETRIEVE,
+            content="clock gap grocery errands",
+            importance=1.0,
+            source="agent",
+        )
+        assert fresh.save() is not False
+
+        def _decay_order():
+            rows = Memory.query.filter(project_key=PK_RETRIEVE).top_by_decay("relevance", n=10)
+            return [str(r.memory_id) for r in rows]
+
+        now_order = _decay_order()
+        real_time = time.time
+        with mock.patch("time.time", side_effect=lambda: real_time() + skew):
+            later_order = _decay_order()
+        assert now_order[0] == str(fresh.memory_id)
+        assert later_order[0] == str(old.memory_id)
+        assert now_order != later_order, "fixture is insensitive to the clock gap"
+
         export = export_corpus(PK_RETRIEVE)
         query = "zxqvkw qvxj retrieval-absent"
         job = {
@@ -337,5 +380,6 @@ class TestArmRetrieve:
         }
         with arm_redis_server() as arm_a, arm_redis_server() as arm_b:
             result_a = run_arm_job(arm_a, PK_RETRIEVE, job)
-            result_b = run_arm_job(arm_b, PK_RETRIEVE, job, clock_skew_s=30 * 86400)
+            result_b = run_arm_job(arm_b, PK_RETRIEVE, job, clock_skew_s=skew)
+        assert len(result_a["ids"]) == 2
         assert result_a["ids"] == result_b["ids"]

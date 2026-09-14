@@ -849,6 +849,42 @@ test is observed to fail, the mutation is reverted, and the test is observed to 
 | Calibration floor | Return a judge verdict below the floor | `test_reference_set_below_floor_yields_infra_failure` |
 | `metrics.py` untouched | Edit `tools/memory_eval/metrics.py` | `test_metrics_module_is_unmodified` |
 
+### Mutation proof record (build, 2026-09-14)
+
+Every row was run as apply → named test → revert → named test, from the lane worktree with
+`scripts/pytest-clean.sh`. The "Relevance carry-over" mutation lives in popoto's import path
+(`popoto/transfer/import_.py`, `skip_auto_now=True`), so it was applied to the worktree venv's copy
+(a single-link file) and reverted the same way. The "Corpus identity" row is proven twice: the arm
+worker's per-arm re-export (the named test) and the runner's comparison of those digests against the
+export (`test_unequal_corpus_digests`), because the named test alone reaches only the first.
+
+| Guard | Mutation applied | Test | Red line observed (mutant) | Reverted |
+|---|---|---|---|---|
+| Holm monotonicity | Drop the cumulative maximum (`correction.py`) | `test_holm_adjusted_values_are_non_decreasing` | `assert False` | green |
+| Holm suppression | Return raw p-values unchanged (`correction.py`) | `test_holm_suppresses_the_spurious_winner` | `AssertionError: assert ['endpoint-3'] == []` | green |
+| Artifact integrity | Catch ArtifactIntegrityError and continue (`runner.py`) | `test_corrupted_archive_invalidates_without_verdict` | `AssertionError: assert 'complete' == 'invalidated'` | green |
+| Parity gate ordering | Move the parity check after the candidate arm (`runner.py`) | `test_parity_miss_never_invokes_the_candidate_arm` | `AssertionError: assert 'baseline parity' in 'infra_failure: unexpected AssertionError: candidate arm was invoked'` | green |
+| Corpus identity (arm re-export) | Skip the per-arm re-export; echo the input digest (`arm_worker.py`) | `test_two_arms_read_a_byte_identical_corpus` | `assert '' == '{"consistent...on": "1.9.0"}'` | green |
+| Corpus identity (runner comparison) | Skip the per-arm digest comparison (`runner.py`) | `test_unequal_corpus_digests` | `AssertionError: assert 'accept' == 'infra_failure'` | green |
+| Retrieval reproducibility | Rank through Query.top_by_decay instead of retrieve_memories (`retrieval.py`) | `test_two_arms_rank_identically_across_a_clock_gap` | `AssertionError: assert ['c620feb8287...2e8eb2b618b2'] == ['1d5e5d61b02...77b8e258e1ea']` | green |
+| Relevance carry-over | Drop skip_auto_now from the restore (popoto import path) (`import_.py`) | `test_restore_without_skip_auto_now_fails_baseline_parity` | `AssertionError: assert False` | green |
+| Parent pool isolation | Call set_REDIS_DB_settings in the parent (`arena.py`) | `test_parent_pool_kwargs_survive_an_arena_context` | `AssertionError: assert {'socket_conn...vm1/arm.sock'} == {'db': 1, 'ho...eout': 5, ...}` | green |
+| Blinding | Return blinded=True unconditionally (`runner.py`) | `test_identity_leak_sets_blinded_false` | `assert True is False` | green |
+| Writer kill switch (wrapper) | Remove the client wrapper (leave the digest re-check) (`writer_guard.py`) | `test_arm_write_is_refused` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| Writer kill switch (digest re-check) | Remove the digest re-check (leave the wrapper) (`arm_worker.py`) | `test_escaped_write_surfaces_as_infra_failure` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| Verdict disjointness | Merge infra_failure into reject (`runner.py`) | `test_infra_failure_and_reject_have_disjoint_causes` | `AssertionError: assert 'reject' == 'infra_failure'` | green |
+| Gate 0 crash disposition | Let Gate 0 accept state=running (`runner.py`) | `test_crashed_run_leaves_a_documented_repair` | `AssertionError: assert 'accept' == 'infra_failure'` | green |
+| Corpus restore fidelity | Drop on_embedding_mismatch="carry" (popoto default: error) (`corpus.py`) | `test_restore_without_carry_fails_baseline_parity` | `popoto.exceptions.ModelException: embedding provenance mismatch on field 'embedding': source={'provider': 'FakeEmbeddingProvider', 'model': 'fake-test…` | green |
+| Section 7 routing | Ignore is_open_source and always use any provider (`serves_charter.py`) | `test_client_project_judge_stays_on_subscription_providers` | `AssertionError: assert 'openai' == 'claude-subscription'` | green |
+| Calibration floor | Return a judge verdict below the floor (`calibration.py`) | `test_reference_set_below_floor_yields_infra_failure` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
+| metrics.py untouched | Edit tools/memory_eval/metrics.py (`metrics.py`) | `test_metrics_module_is_unmodified` | `assert '"""Retrieval...rank(0.95)}\n' == '"""Retrieval...rank(0.95)}\n'` | green |
+
+The first sweep found one guard that reached no code: `test_two_arms_rank_identically_across_a_clock_gap`
+stayed green under a correct decay-clock mutant because its fixture seeded both records at one instant,
+so a 30-day skew moved nothing. The fixture now spaces an old, important record 60 days behind a fresh,
+unimportant one and asserts in-process that decay ranking flips across the gap before asserting the arms
+agree; the row above is the rerun against that fixture.
+
 ## Test Impact
 
 Most of this lane is new test surface. Four existing files need changes, and each is named with its

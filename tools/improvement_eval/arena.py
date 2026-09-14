@@ -2,7 +2,8 @@
 
 Each arm gets its own ``redis-server`` on a unix socket in a per-arm
 tmpdir, with ``--port 0`` (no TCP listener, so no port for a concurrent
-agent to collide on) and no persistence. The arm is then reached ONLY by a
+agent to collide on: issue #2799 is the failure this avoids) and no
+persistence. The arm is then reached ONLY by a
 child Python process (``arm_worker.py``) whose env dict carries
 ``REDIS_URL=unix://<arm.sock>``: inside that child, and only inside that
 child, popoto's canonical pool IS the arm's private server.

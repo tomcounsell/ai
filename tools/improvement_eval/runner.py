@@ -26,6 +26,11 @@ Data Flow), exactly:
 Three disjoint handlers with no shared fall-through:
 
 - :class:`~tools.improvement_eval.errors.InfraFailure` writes ``verdict="infra_failure"``.
+  It is raised for exactly six conditions, each with a test: a Gate 0
+  refusal (state or contract digest), an arm that would not spawn, unequal
+  corpus digests between the arms and the export, a baseline parity miss, a
+  judge provider that could not be reached (a ``skipped`` envelope), and an
+  uncalibrated judge (a reference set below the floor).
 - :class:`~models.verifying_artifact_store.ArtifactIntegrityError` writes
   ``state="invalidated"`` and no verdict at all.
 - Any other exception writes ``infra_failure`` with the exception type in ``notes``.
