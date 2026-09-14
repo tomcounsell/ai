@@ -447,7 +447,7 @@ and carried to a filed follow-up, not squeezed in.
 | Known-item builder importable | `python -c "from tools.memory_eval.query_set import build_known_item_set"` | spike-1: the labeled query set is reused, not rebuilt |
 | Verifying artifact store writable | `python -c "from models.verifying_artifact_store import verifying_artifact_store as s; import os; os.makedirs(s.base_path, exist_ok=True)"` | Ranking snapshots and protocols land here |
 | `gh` authenticated | `gh auth status` | The lesson adapter reads merged PR bodies |
-| Anthropic API key present in the vault `.env` | `python -c "from config.settings import settings; assert settings.api.anthropic_api_key"` | `build_known_item_set` routes through `run_typed` |
+| Anthropic API key resolvable (never printed) | `python -c "from utils.api_keys import get_anthropic_api_key as g; assert g()"` | `build_known_item_set` routes through `run_typed` (`agent/llm/wrapper.py:208`) |
 
 The three lane-3 rows are written against the names the parent plan and #3215's body use
 (`tools/improvement.py`, `tools/paid_inference_meter.py`, `.claude/skills/improve-research/SKILL.md`).
@@ -1178,6 +1178,7 @@ digest. Watermark writes happen only after a successful send.
 - [ ] Update `docs/features/sdlc-repo-addenda.md` (`:46-92`): the reflection-agent section is replaced by one paragraph stating that lessons in PR bodies are now `ImprovementEvidence` rows of kind `lesson` read by the planner, and the `com.valor.sdlc-reflection` rows leave the file table
 - [ ] Update `docs/features/launchctl-bootstrap-fail-soft.md:76`: remove the `install_sdlc_reflection.sh` row
 - [ ] Update `docs/features/log-rotation.md:40` and `docs/features/nightly-regression-tests.md:371`: remove the `sdlc_reflection.py` / `sdlc_reflection_last_run.json` references
+- [ ] Update the three prose mentions the "No live reference" Verification row also catches: `docs/features/bridge-self-healing.md:637` (drop `install_sdlc_reflection.sh` from the helper list), `scripts/lib/launchctl.sh:41` (drop `sdlc-reflection` from the StartInterval example), `tests/integration/test_install_reflection_worker.py:180` (rename the idiom comment; the idiom itself stays)
 - [ ] Update `docs/tools-reference.md` (`:345-361`): the `valor-improve` block gains `ranking [--at DIGEST]`, `investigation open|record|resolve`, `revise-model`, `experiment freeze|evaluate`, and `report`, and its "planned, lane 3" marker is corrected once lane 3 lands
 - [ ] Update `docs/plans/critiques/recursive-self-improvement-capability-matrix.md`: add a lane-5 section grading each component on the four axes, and correct the "Not built, by lane" row for lane 5 (`:134`)
 - [ ] Update `.claude/skills/update/SKILL.md:115` and `.claude/skills/setup/SKILL.md:105`: remove the `./scripts/install_sdlc_reflection.sh` line
