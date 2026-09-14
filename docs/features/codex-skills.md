@@ -111,7 +111,8 @@ unmanaged/edited/symlink conflict preservation, missing resources, source drift,
 broken/nonportable links, project/global scope, native-only installation, ordinary
 YAML scalar/block forms, `metadata.json` survival across a managed update, refusal to
 dereference a symlinked `metadata.json`, and rejection of invalid required metadata. A real input/output regression also checks that ebook page-number removal preserves
-paragraphs. The skill helpers' syntax and archive CLI help are checked without contacting its service. Live deployment, mail,
+paragraphs. Bundled helper scripts are compiled for syntax by `check`, never executed, so
+the archive helper's CLI is not exercised and no test contacts its service. Live deployment, mail,
 social publication, managed-agent launches, and other external effects are not run as
 part of conversion validation.
 
