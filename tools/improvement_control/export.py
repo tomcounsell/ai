@@ -96,7 +96,10 @@ def import_namespace(
     schema mismatch unconditionally. Returns ``None`` on success.
     """
     namespace_path = Path(archive) / "namespace.json"
-    data = json.loads(namespace_path.read_text())
+    try:
+        data = json.loads(namespace_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return ImportRefusal("ARCHIVE_NOT_FOUND")
     if data.get("schema") != SCHEMA_VERSION:
         return ImportRefusal("SCHEMA_MISMATCH")
     if not force and not _namespace_is_empty(project_key):
