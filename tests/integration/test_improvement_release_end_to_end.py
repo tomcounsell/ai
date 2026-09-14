@@ -93,14 +93,39 @@ def commit(repo: Path, message: str, **files: str) -> str:
 
 @pytest.fixture
 def repo(tmp_path):
+    """A clone with a bare ``origin``: base on ``main``, candidate on ``cand``."""
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    git(origin, "init", "-q", "--bare", "-b", "main")
     path = tmp_path / "repo"
     path.mkdir()
     git(path, "init", "-q", "-b", "main")
+    git(path, "remote", "add", "origin", str(origin))
     base = commit(path, "base", **{"README.md": "readme\n", "src/thing.py": "v0\n"})
     git(path, "switch", "-q", "-c", "cand")
     commit(path, "candidate", **{"src/thing.py": "v1\n"})
     git(path, "switch", "-q", "main")
-    return {"path": path, "base": base}
+    git(path, "push", "-q", "origin", "main", "cand")
+    return {"path": path, "origin": origin, "base": base}
+
+
+def merge_candidate(repo: dict) -> str:
+    """Merge ``cand`` into ``main`` with a merge commit and push; return its SHA."""
+    git(repo["path"], "merge", "-q", "--no-ff", "-m", "merge cand", "cand")
+    git(repo["path"], "push", "-q", "origin", "main")
+    return git(repo["path"], "rev-parse", "HEAD")
+
+
+def write_pr_view(view: Path, merge_sha: str) -> None:
+    view.write_text(
+        json.dumps(
+            {
+                "mergeCommit": {"oid": merge_sha},
+                "mergedAt": MERGED_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "state": "MERGED",
+            }
+        )
+    )
 
 
 @pytest.fixture
@@ -111,15 +136,7 @@ def fake_gh(tmp_path):
     script.write_text(FAKE_GH)
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     view = tmp_path / "pr_view.json"
-    view.write_text(
-        json.dumps(
-            {
-                "mergeCommit": {"oid": MERGE_SHA},
-                "mergedAt": MERGED_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "state": "MERGED",
-            }
-        )
-    )
+    write_pr_view(view, MERGE_SHA)
     return {"bin": bin_dir, "view": view}
 
 
@@ -280,7 +297,9 @@ def _propose(cli, evaluation, plans, repo, *, expect: int = 0) -> dict:
 
 
 class TestOperatorPath:
-    def test_propose_to_accepted_then_report(self, cli, evaluation, plans, repo, tmp_path):
+    def test_propose_to_accepted_report_then_rollback(
+        self, cli, fake_gh, evaluation, plans, repo, tmp_path
+    ):
         proposed = _propose(cli, evaluation, plans, repo)
         assert proposed["state"] == "proposed"
         release_id = proposed["id"]
@@ -327,6 +346,10 @@ class TestOperatorPath:
         pr_log = (tmp_path / "pr.jsonl").read_text()
         assert '"gh", "pr", "create"' in pr_log
 
+        # The pipeline merges the PR; the canned ``gh pr view`` answers with the
+        # real merge commit so the later rollback reverts something that exists.
+        merge_sha = merge_candidate(repo)
+        write_pr_view(fake_gh["view"], merge_sha)
         _seed_evidence(MERGED_AT - timedelta(days=3), architectural=2, ticks=20)
         _seed_evidence(MERGED_AT + timedelta(days=3), architectural=2, ticks=20)
 
@@ -340,8 +363,9 @@ class TestOperatorPath:
             NOW.isoformat(),
         )
         assert exposed["state"] == "observing"
-        assert exposed["exposure"]["merge_sha"] == MERGE_SHA
+        assert exposed["exposure"]["merge_sha"] == merge_sha
         assert isinstance(exposed["exposure"]["merge_sha"], str)
+        assert len(exposed["exposure"]["merge_sha"]) == 40
         assert exposed["exposed_at"] == MERGED_AT.isoformat()
         assert exposed["outcome"]["baseline"]["coverage_ticks"] == 20
 
@@ -377,6 +401,41 @@ class TestOperatorPath:
 
         stored = ImprovementRelease.query.filter(project_key=PK, id=release_id).first()
         assert stored.state == "accepted"
+
+        # The incident surface: revert the real merge on a freshly fetched
+        # origin/main and push the revert to main.
+        rolled = cli(
+            "rollback",
+            "--release",
+            release_id,
+            "--reason",
+            "regression seen after the window",
+            "--repo",
+            str(repo["path"]),
+            "--root",
+            str(tmp_path / "retention"),
+            "--runner-log",
+            str(tmp_path / "rollback.jsonl"),
+        )
+        assert rolled["state"] == "rolled_back"
+        record = rolled["outcome"]["rollback"]
+        assert record["merge_sha"] == merge_sha
+        assert record["merge_commit_parents"] == 2
+        assert record["pushed_to"] == "main"
+        assert "pr_command" not in rolled
+        remote_head = git(repo["origin"], "rev-parse", "refs/heads/main")
+        assert remote_head == record["revert_sha"]
+        reverted = subprocess.run(
+            ["git", "show", f"{remote_head}:src/thing.py"],
+            cwd=repo["origin"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, **GIT_ENV},
+        ).stdout
+        assert reverted == "v0\n"
+        rollback_log = (tmp_path / "rollback.jsonl").read_text()
+        assert rollback_log.index('"fetch"') < rollback_log.index('"revert"')
 
     def test_report_renders_as_text(self, cli):
         completed = subprocess.run(
