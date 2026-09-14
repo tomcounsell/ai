@@ -4,20 +4,23 @@ Read-only. All functions are synchronous (``def``, not ``async def``) because
 Popoto uses synchronous Redis calls and FastAPI runs sync handlers in a
 threadpool.
 
-**Renders only what this build writes.** Two views, both backed by
-``ImprovementEvidence``, plus the provisional-assumptions list:
+**Renders only what a lane writes.** Two views backed by
+``ImprovementEvidence``, the provisional-assumptions list, the goals record,
+and the release lineage:
 
 - **Coverage** — how much the system is actually observing, so a rate has a
   denominator. A falling correction count with a falling scan count is not an
   improvement, and this is the panel that makes the difference visible.
 - **Intervention burden** — how often a human had to step in, split by
   classification, with the raw counts published beside anything normalized.
+- **Release lineage** (#3218) — every release joined to its evaluation,
+  experiment, case, drill, window, and outcome, beside the promotion gate's
+  sentence. Lineage, never a tally.
 
-Cases, hypotheses, rejected experiments, spend, release lineage, and the
-paused/inconclusive/reconciliation-required renderings deliberately do not
-appear. Nothing writes those records yet, and six permanently empty tiles is
-not a dashboard — each one arrives with the lane that first writes it (3 for
-intents and reservations, 5 for cases and hypotheses, 6 for releases).
+Hypotheses, rejected experiments, spend, and the paused/inconclusive/
+reconciliation-required renderings deliberately do not appear. Nothing writes
+those records yet; each one arrives with the lane that first writes it (3 for
+intents and reservations, 5 for hypotheses and rejected approaches).
 
 **Two things this module will never show.** Experiment count and merged-patch
 count are activity, not improvement, and presenting either as improvement is
@@ -305,4 +308,83 @@ def get_goals(project_key: str = "valor") -> dict:
             {"heading": heading, "written_by": written_by}
             for heading, written_by in PENDING_SECTIONS
         ],
+    }
+
+
+#: Human text for an ``outcome.reason`` code; a code with no entry renders as itself.
+OUTCOME_REASON_TEXT = {
+    "ZERO_DENOMINATOR": "no denominator",
+    "EVIDENCE_TRUNCATED": "EVIDENCE_TRUNCATED (the read hit its limit inside the window)",
+    "EVIDENCE_EXPIRED": "EVIDENCE_EXPIRED (the window's early evidence rows expired)",
+    "EVIDENCE_UNAVAILABLE": "evidence unavailable; the read failed",
+    "DETECTION_DECLINED": "detection declined against the baseline",
+}
+
+
+def _outcome_sentence(state: str | None, outcome: dict) -> str | None:
+    """One sentence for a closed window; ``None`` while nothing has been scored."""
+    verdict = outcome.get("verdict")
+    if verdict is None:
+        return None
+    reason = outcome.get("reason")
+    reason_text = OUTCOME_REASON_TEXT.get(reason, reason) if reason else None
+    if state == "observing" and verdict == "regressed":
+        return "window closed: regressed, rollback recommended"
+    if state == "observing" and verdict == "undetermined":
+        suffix = f" ({reason_text})" if reason_text else ""
+        return f"window closed: undetermined{suffix}; rollback recommended"
+    if reason_text:
+        return f"window closed: {verdict} ({reason_text})"
+    return f"window closed: {verdict}"
+
+
+def _stamp_text(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M UTC")
+    return str(value) if value else None
+
+
+def get_release_lineage(project_key: str = "valor") -> dict:
+    """Every release with its lineage, and the promotion gate as a sentence (#3218).
+
+    Delegates to ``tools.improvement_release.lineage.release_lineage`` and
+    shapes each row for the partial: a drill line, a window line, and one
+    outcome sentence. ``unavailable`` means the release read raised (logged
+    there); the gate travels regardless, so the partial can always say that
+    automated promotion is disabled. There is no count here: a lineage is a
+    list of what happened to each release, never a number of releases.
+    """
+    from tools.improvement_release.lineage import release_lineage as _release_lineage
+
+    lineage = _release_lineage(project_key)
+    gate = lineage.get("promotion_gate") or {}
+    unmet = list(gate.get("unmet") or [])
+    releases = []
+    for row in lineage.get("releases") or []:
+        drill = row.get("drill") or {}
+        outcome = row.get("outcome") or {}
+        window = row.get("window") or {}
+        releases.append(
+            {
+                **row,
+                "drilled": drill.get("result") is not None,
+                "drilled_at_text": _stamp_text(drill.get("drilled_at")),
+                "exposed": window.get("exposed_at") is not None,
+                "exposed_at_text": _stamp_text(window.get("exposed_at")),
+                "ends_at_text": _stamp_text(window.get("ends_at")),
+                "outcome_sentence": _outcome_sentence(row.get("state"), outcome),
+            }
+        )
+    return {
+        "project_key": project_key,
+        "releases": releases,
+        "promotion_gate": {"automated": bool(gate.get("automated")), "unmet": unmet},
+        "gate_sentence": (
+            "Automated promotion: enabled"
+            if gate.get("automated")
+            else "Automated promotion: disabled; unmet: "
+            + (", ".join(unmet) if unmet else "none recorded")
+        ),
+        "unavailable": bool(lineage.get("unavailable")),
+        "no_releases_yet": bool(lineage.get("no_releases_yet")),
     }

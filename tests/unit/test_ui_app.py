@@ -730,6 +730,7 @@ class TestImprovementPartials:
             "get_goals",
             "get_intervention_burden",
             "get_provisional_assumptions",
+            "get_release_lineage",
         ]
 
     def test_index_page_links_all_improvement_partials(self, client):
@@ -738,6 +739,121 @@ class TestImprovementPartials:
         assert "/_partials/improvement/goals/" in resp.text
         assert "/_partials/improvement/coverage/" in resp.text
         assert "/_partials/improvement/burden/" in resp.text
+        assert "/_partials/improvement/releases/" in resp.text
+
+    def test_releases_partial_says_no_release_yet_and_draws_no_table(self, client):
+        resp = client.get("/_partials/improvement/releases/?project_key=test-3218-ui-empty")
+
+        assert resp.status_code == 200
+        assert "no release proposed yet; the first arrives from an accepted evaluation" in resp.text
+        assert "<table" not in resp.text
+        assert "Automated promotion: disabled; unmet:" in resp.text
+
+    def test_releases_partial_reports_unavailable_and_still_renders_the_gate(
+        self, client, monkeypatch
+    ):
+        """A broken release read never hides that promotion is disabled.
+
+        Patches the lineage read the getter delegates to, so the getter's own
+        shaping and the template are what render the gate sentence.
+        """
+        from tools.improvement_release import lineage
+
+        def _unavailable(project_key="valor", *, now=None):
+            return {
+                "project_key": project_key,
+                "releases": [],
+                "promotion_gate": {
+                    "automated": False,
+                    "unmet": ["credential_separation", "charter_names_reversible_surfaces"],
+                },
+                "unavailable": True,
+                "no_releases_yet": False,
+            }
+
+        monkeypatch.setattr(lineage, "release_lineage", _unavailable)
+
+        resp = client.get("/_partials/improvement/releases/?project_key=test-3218-ui-empty")
+
+        assert resp.status_code == 200
+        assert "release lineage unavailable" in resp.text
+        assert "no release proposed yet" not in resp.text
+        assert (
+            "Automated promotion: disabled; unmet: credential_separation, "
+            "charter_names_reversible_surfaces" in resp.text
+        )
+
+    def test_releases_partial_renders_a_regressed_window_as_rollback_recommended(
+        self, client, monkeypatch
+    ):
+        """An observing release whose window regressed never reads as accepted."""
+        from tools.improvement_release import lineage
+
+        def _regressed(project_key="valor", *, now=None):
+            return {
+                "project_key": project_key,
+                "releases": [
+                    {
+                        "id": "rel-1",
+                        "state": "observing",
+                        "kind": "core_workflow",
+                        "surfaces": ["tools/x.py"],
+                        "candidate_ref": "session/x",
+                        "evaluation": {
+                            "verdict": "accept",
+                            "effect": 0.12,
+                            "confidence_interval": {"lower": 0.02, "upper": 0.22},
+                        },
+                        "experiment": {"hypothesis": "h", "contract_digest": "sha256:c"},
+                        "case": {"title": None, "priority_area": None},
+                        "drill": {"result": "pass", "drilled_at": "2026-09-10T12:05:00+00:00"},
+                        "window": {"exposed_at": None, "ends_at": None, "days_remaining": None},
+                        "outcome": {
+                            "verdict": "regressed",
+                            "reason": None,
+                            "claim_level_2_supported": False,
+                            "rollback_recommended": True,
+                        },
+                    },
+                    {
+                        "id": "rel-0",
+                        "state": "observing",
+                        "kind": "infrastructure",
+                        "surfaces": ["docs/a.md"],
+                        "candidate_ref": "session/a",
+                        "evaluation": {
+                            "verdict": "accept",
+                            "effect": None,
+                            "confidence_interval": None,
+                        },
+                        "experiment": {"hypothesis": None, "contract_digest": None},
+                        "case": {"title": None, "priority_area": None},
+                        "drill": {"result": None, "drilled_at": None},
+                        "window": {"exposed_at": None, "ends_at": None, "days_remaining": None},
+                        "outcome": {
+                            "verdict": "undetermined",
+                            "reason": "ZERO_DENOMINATOR",
+                            "claim_level_2_supported": False,
+                            "rollback_recommended": True,
+                        },
+                    },
+                ],
+                "promotion_gate": {"automated": False, "unmet": ["credential_separation"]},
+                "unavailable": False,
+                "no_releases_yet": False,
+            }
+
+        monkeypatch.setattr(lineage, "release_lineage", _regressed)
+
+        resp = client.get("/_partials/improvement/releases/?project_key=test-3218-ui")
+
+        assert resp.status_code == 200
+        assert "window closed: regressed, rollback recommended" in resp.text
+        assert "accepted" not in resp.text
+        assert "drilled (worktree)" in resp.text
+        assert "not drilled" in resp.text
+        assert "no denominator" in resp.text
+        assert "0%" not in resp.text
 
     def test_goals_partial_renders_on_an_empty_namespace(self, client):
         """An unseeded project says so, and names no zero."""
