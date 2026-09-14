@@ -1113,10 +1113,13 @@ class TestG6NotCrossedByReorder:
             pr_merge_state="CLEAN",
             ci_all_passing=True,
             latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
         )
         # G7 defers at Gate 1 because pr_number is set.
         assert guard_g7_plan_revising(states, meta, {}) is None
-        result = decide_next_dispatch(states, meta, {})
+        # #3249/#3260: G6 is a terminal merge dispatch, so it needs positive
+        # evidence that the APPROVED verdict judged the live head.
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_MERGE
         assert result.row_id == "G6"
@@ -1393,8 +1396,11 @@ class TestRow10VerdictGate:
             pr_number=1897,
             last_dispatched_skill=SKILL_DO_DOCS,
             latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
         )
-        result = decide_next_dispatch(states, meta, {})
+        # #3249/#3260: row 10 is terminal, so the approval must be shown to have
+        # judged the live head before it may merge.
+        result = decide_next_dispatch(states, meta, {"pr_head_sha": _SHA_A})
         assert result == Dispatch(
             skill=SKILL_DO_MERGE,
             reason="Execute programmatic merge gate",
@@ -1419,8 +1425,13 @@ class TestRow10VerdictGate:
         from agent.sdlc_router import _rule_ready_to_merge
 
         states = dict(_ALL_COMPLETED)
-        meta = _base_meta(pr_number=1897, latest_review_verdict="APPROVED")
-        assert _rule_ready_to_merge(states, meta, {}) is True
+        meta = _base_meta(
+            pr_number=1897,
+            latest_review_verdict="APPROVED",
+            latest_review_head_sha=_SHA_A,
+        )
+        # #3249/#3260: the live-head evidence pair is part of row 10's contract.
+        assert _rule_ready_to_merge(states, meta, {"pr_head_sha": _SHA_A}) is True
 
 
 class TestRow8eNoVerdictRecovery:
