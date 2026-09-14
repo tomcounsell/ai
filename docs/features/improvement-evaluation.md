@@ -194,6 +194,14 @@ The subprocess boundary:
   `REDIS_URL` at import, so inside the child, and only inside the child, the
   ORM *is* the arm's private server: `Memory.query` and
   `agent.memory_retrieval.retrieve_memories` work unmodified.
+- The corpus identity is `corpus.canonical_corpus_digest`, never a hash of
+  the raw JSONL: record order and the manifest's `exported_at` vary per call,
+  and the exporter's embedding-provider fingerprint (`embedding_provenance`
+  in the manifest, `state.<field>.provenance` per record) varies per
+  *process*. An arm subprocess has no provider configured, and a parent's
+  provider depends on import order, so the fingerprint is popped by name;
+  the carried vector bytes stay in the digest. Any other manifest key that
+  turns volatile surfaces as an inter-arm mismatch rather than being absorbed.
 - The corpus moves as popoto `export_records`/`import_records` JSONL. Restore
   passes `on_conflict="overwrite"` and `on_embedding_mismatch="carry"`, and
   relies on `import_records` saving with `skip_auto_now=True`. Dropping

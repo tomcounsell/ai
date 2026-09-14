@@ -63,6 +63,63 @@ class TestCanonicalCorpusDigest:
         )
         assert canonical_corpus_digest(first) == canonical_corpus_digest(second)
 
+    def test_is_stable_across_exporter_provider_fingerprint(self):
+        """The provider fingerprint is exporter-process state, not corpus content.
+
+        A parent with ``OpenAIProvider`` configured and an arm subprocess with
+        none export the same records under different ``embedding_provenance``;
+        the digest must agree or every real run ends as ``infra_failure``.
+        """
+        from tools.improvement_eval.corpus import canonical_corpus_digest, canonical_manifest
+
+        records = [_record("Memory:a")]
+        configured = _make_jsonl(
+            _make_manifest(
+                embedding_provenance={
+                    "embedding": {
+                        "provider": "OpenAIProvider",
+                        "model": "text-embedding-3-small",
+                        "dimensions": 1536,
+                    }
+                }
+            ),
+            records,
+        )
+        bare = _make_jsonl(
+            _make_manifest(
+                embedding_provenance={
+                    "embedding": {"provider": "unknown", "model": None, "dimensions": None}
+                }
+            ),
+            records,
+        )
+        assert configured != bare
+        assert canonical_manifest(configured) == canonical_manifest(bare)
+        assert canonical_corpus_digest(configured) == canonical_corpus_digest(bare)
+        assert "embedding_provenance" not in canonical_manifest(configured)
+
+    def test_is_stable_across_per_record_provenance_but_not_vectors(self):
+        """``state.<field>.provenance`` is popped; the carried vector is not."""
+        from tools.improvement_eval.corpus import canonical_corpus_digest
+
+        def _with_state(provenance, vector):
+            body = _record("Memory:a")
+            body["state"] = {
+                "embedding": {"provenance": provenance, "vector": vector},
+                "confidence": {"score": 0.5},
+            }
+            return body
+
+        openai = {"provider": "OpenAIProvider", "model": "text-embedding-3-small", "dimensions": 2}
+        unknown = {"provider": "unknown", "model": None, "dimensions": None}
+        manifest = _make_manifest()
+        same_vector = [0.1, 0.2]
+        first = _make_jsonl(manifest, [_with_state(openai, same_vector)])
+        second = _make_jsonl(manifest, [_with_state(unknown, same_vector)])
+        moved = _make_jsonl(manifest, [_with_state(openai, [0.9, 0.2])])
+        assert canonical_corpus_digest(first) == canonical_corpus_digest(second)
+        assert canonical_corpus_digest(first) != canonical_corpus_digest(moved)
+
     def test_is_stable_across_record_order(self):
         from tools.improvement_eval.corpus import canonical_corpus_digest
 

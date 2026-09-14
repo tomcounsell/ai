@@ -656,9 +656,15 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
         ]
         for response in arm_digests:
             if response["digest"] != export.digest:
+                detail = ""
+                if response.get("manifest") != export.manifest_canon:
+                    detail = (
+                        f"; arm manifest {response.get('manifest')!r} differs from the "
+                        f"export's {export.manifest_canon!r}"
+                    )
                 raise InfraFailure(
                     f"arm corpus digest {response['digest']} differs from the export's "
-                    f"{export.digest}; the arms did not read the frozen corpus"
+                    f"{export.digest}; the arms did not read the frozen corpus{detail}"
                 )
         if arm_digests[0]["manifest"] != arm_digests[1]["manifest"]:
             raise InfraFailure("arm corpus manifests differ between arms")
