@@ -37,8 +37,10 @@ Order of operations in :func:`run`:
    catches one that is not.
 8. ``finally``: ``git worktree remove --force`` and ``git worktree prune``.
 
-A drill never changes ``state``; it writes ``rollback_drill`` and
-``drill_log`` and saves the release. Every argv is a list. Refs from the
+A drill never changes ``state``; it writes ``rollback_drill`` (the record,
+as a JSON string, since a plain popoto ``Field`` stores ``str()`` of a dict)
+and ``drill_log`` and saves the release. :func:`drill_record` and
+:func:`read_drill_log` read them back from a queried row. Every argv is a list. Refs from the
 release row are checked for an option shape before use and replaced by their
 resolved SHAs for every later command; surfaces go through
 :func:`denylist.normalize_surface` and are passed after ``--``.
@@ -46,6 +48,7 @@ resolved SHAs for every later command; surfaces go through
 
 from __future__ import annotations
 
+import json
 import logging
 import shlex
 import shutil
@@ -84,8 +87,8 @@ class DrillRefused(Exception):  # noqa: N818 -- plan-mandated name (#3218)
     Codes: ``NOT_PROPOSED`` (the release is past proposal), ``CHECKOUT_PATH``
     (the worktree path is inside a git checkout or outside the retention
     root), ``BAD_REF`` (a ref shaped like a command-line option), ``BAD_SURFACE``
-    (a surface the denylist cannot normalize), ``NO_REPO`` (no repository to
-    drill from).
+    (a surface the denylist cannot normalize), ``BAD_PLAN`` (a rollback plan
+    that is not a JSON object), ``NO_REPO`` (no repository to drill from).
     """
 
     def __init__(self, code: str, detail: str = ""):
@@ -160,7 +163,24 @@ def _check_ref(value: object, field: str) -> str:
     return value
 
 
+def _json_field(value: object, code: str, field: str) -> object:
+    """A row field as its parsed value.
+
+    Popoto's plain ``Field`` stores whatever ``str()`` makes of a non-string,
+    so list and dict fields on this model are written as JSON strings
+    (``json.dumps``) and read back here; an already-parsed value passes
+    through for callers holding the row before ``save()``.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError as exc:
+        raise DrillRefused(code, f"{field} is not JSON: {exc}") from exc
+
+
 def _check_surfaces(surfaces: object) -> list[str]:
+    surfaces = _json_field(surfaces, "BAD_SURFACE", "surfaces")
     if not isinstance(surfaces, list | tuple) or not surfaces:
         raise DrillRefused("BAD_SURFACE", "a release declares at least one surface")
     normalized = []
@@ -173,7 +193,11 @@ def _check_surfaces(surfaces: object) -> list[str]:
 
 
 def _verify_commands(rollback_plan: object) -> list[list[str]]:
-    plan = rollback_plan if isinstance(rollback_plan, dict) else {}
+    plan = _json_field(rollback_plan, "BAD_PLAN", "rollback_plan")
+    if plan is None:
+        plan = {}
+    if not isinstance(plan, dict):
+        raise DrillRefused("BAD_PLAN", "rollback_plan is not an object")
     commands = plan.get("verify") or []
     if isinstance(commands, str):
         commands = [commands]
@@ -338,8 +362,18 @@ def _undeclared(changed: list[str], surfaces: list[str]) -> list[str]:
 class _Drill:
     """One drill's mutable state; ``run`` builds it and returns its record."""
 
-    def __init__(self, release, *, runner: Runner, root: Path | None, repo: str, now: datetime):
+    def __init__(
+        self,
+        release,
+        *,
+        runner: Runner,
+        root: Path | None,
+        repo: str,
+        now: datetime,
+        verify_commands: list[list[str]],
+    ):
         self.release = release
+        self.verify_commands = verify_commands
         self.runner = runner
         self.root = root
         self.repo = repo
@@ -445,7 +479,7 @@ class _Drill:
             return self.fail("residue", paths=restoration["differing"])
 
         # 6. The plan's verify commands, in the restored worktree.
-        commands = _verify_commands(self.release.rollback_plan)
+        commands = self.verify_commands
         if commands:
             self.exercised("verify")
             timeout = _verify_timeout()
@@ -510,14 +544,16 @@ def run(
 
     Raises:
         DrillRefused: before anything is created, for a release that is not
-            ``proposed``, an option-shaped ref, an invalid surface, a missing
-            repo, or a worktree slot that is not under the retention root.
+            ``proposed``, an option-shaped ref, an invalid surface, a rollback
+            plan that is not a JSON object, a missing repo, or a worktree slot
+            that is not under the retention root.
     """
     if getattr(release, "state", None) != "proposed":
         raise DrillRefused("NOT_PROPOSED", f"release {release.id} is {release.state!r}")
     candidate_ref = _check_ref(release.candidate_ref, "candidate_ref")
     base_ref = _check_ref(release.base_revision, "base_revision")
     surfaces = _check_surfaces(release.surfaces)
+    verify_commands = _verify_commands(release.rollback_plan)
     runner = runner or SubprocessRunner()
     repo_path = _resolve_repo(runner, repo)
     stamp_at = now or datetime.now(UTC)
@@ -525,7 +561,14 @@ def run(
     worktree = refuse_checkout_path(slot, root=root)
 
     started = time.monotonic()
-    drill = _Drill(release, runner=runner, root=root, repo=repo_path, now=stamp_at)
+    drill = _Drill(
+        release,
+        runner=runner,
+        root=root,
+        repo=repo_path,
+        now=stamp_at,
+        verify_commands=verify_commands,
+    )
     drill.record["worktree"] = str(worktree)
     try:
         add = add_detached_worktree(
@@ -541,10 +584,36 @@ def run(
             runner, repo=repo_path, path=worktree, transcript=drill.transcript, root=root
         )
         drill.record["seconds"] = round(time.monotonic() - started, 3)
-        release.rollback_drill = drill.record
+        # A plain Field stores str() of a dict; the record is written as JSON
+        # so a reader gets it back with json.loads (the row convention).
+        release.rollback_drill = json.dumps(drill.record, sort_keys=True)
         release.drill_log = "\n".join(drill.transcript)
         release.save()
     return drill.record
+
+
+def drill_record(release) -> dict | None:
+    """The ``rollback_drill`` record of a row, or ``None`` when no drill ran."""
+    value = getattr(release, "rollback_drill", None)
+    if value is None or value == "":
+        return None
+    parsed = _json_field(value, "BAD_DRILL", "rollback_drill")
+    return parsed if isinstance(parsed, dict) else None
+
+
+def read_drill_log(release) -> str | None:
+    """The ``drill_log`` transcript of a row, verified on load.
+
+    popoto hydrates a queried row lazily, so the attribute reads back as its
+    ``$CF:`` store reference; resolving it through the field's own store is
+    what re-hashes the bytes, and a corrupted transcript raises
+    ``ArtifactIntegrityError`` here instead of loading as something else.
+    """
+    value = getattr(release, "drill_log", None)
+    if isinstance(value, str) and value.startswith("$CF:"):
+        store = release._meta.fields["drill_log"].store
+        return store.load(value).decode("utf-8")
+    return value
 
 
 def _slot_age(slot: Path, now: datetime) -> float:
@@ -608,8 +677,10 @@ __all__ = [
     "DrillRefused",
     "add_detached_worktree",
     "assert_restored",
+    "drill_record",
     "drill_root",
     "drills_dir",
+    "read_drill_log",
     "refuse_checkout_path",
     "remove_worktree",
     "run",

@@ -12,6 +12,7 @@ No Redis access: the stand-in's ``save()`` records the call.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -157,7 +158,8 @@ class TestDrillPass:
         verify_steps = [s for s in record["steps"] if s["name"].startswith("verify")]
         assert verify_steps[0]["returncode"] == 0
         assert verify_steps[0]["stdout_tail"] == "v0\n", "verify ran on the reverted tree"
-        assert release.rollback_drill is record
+        assert json.loads(release.rollback_drill) == record
+        assert drill.drill_record(release) == record
         assert release.saves == 1
         assert release.state == "proposed"
         assert "$ git revert --no-commit" in release.drill_log
@@ -426,13 +428,37 @@ class TestSafety:
         assert excinfo.value.code == "BAD_REF"
         assert_no_worktree_left(repo, root)
 
-    def test_drill_refuses_invalid_surface(self, repo, root):
-        release = release_for(repo, surfaces=["../escape"])
+    @pytest.mark.parametrize(
+        ("field", "value", "code"),
+        [
+            ("surfaces", ["../escape"], "BAD_SURFACE"),
+            ("surfaces", "not json", "BAD_SURFACE"),
+            ("surfaces", "[]", "BAD_SURFACE"),
+            ("rollback_plan", "[1, 2]", "BAD_PLAN"),
+            ("rollback_plan", "{not json", "BAD_PLAN"),
+        ],
+    )
+    def test_drill_refuses_malformed_row_fields(self, repo, root, field, value, code):
+        release = release_for(repo, **{field: value})
 
         with pytest.raises(DrillRefused) as excinfo:
             drill.run(release, root=root, repo=repo["path"])
-        assert excinfo.value.code == "BAD_SURFACE"
+        assert excinfo.value.code == code
+        assert release.rollback_drill is None
         assert_no_worktree_left(repo, root)
+
+    def test_drill_reads_json_string_row_fields(self, repo, root):
+        """Popoto stores list and dict fields as JSON strings; the drill reads that shape."""
+        release = release_for(
+            repo,
+            surfaces=json.dumps(["tools/thing.py"]),
+            rollback_plan=json.dumps({"verify": ["cat tools/thing.py"]}),
+        )
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["result"] == "pass", record
+        assert record["exercised"][-1] == "verify"
 
     def test_drill_root_is_timestamped_under_retention_root(self, root):
         now = datetime(2026, 9, 14, 1, 2, 3, tzinfo=UTC)
@@ -529,4 +555,4 @@ class TestRunnerSeam:
 
         verify_calls = [c for c in runner.calls if c["argv"][:1] == ["echo"]]
         assert verify_calls[0]["argv"] == shlex.split("echo 'a b' && rm -rf /")
-        assert verify_calls[0]["cwd"] == release.rollback_drill["worktree"]
+        assert verify_calls[0]["cwd"] == drill.drill_record(release)["worktree"]
