@@ -377,15 +377,19 @@ class TestArmRetrieve:
             with pytest.raises(InfraFailure):
                 run_arm_job(arm, PK_RETRIEVE, {"mode": "no-such-mode"})
 
-    def test_bm25_hit_below_the_pool_size_runs_ok(self):
-        """A real query (BM25 hits, ``limit`` below the corpus) completes through the shipped arm.
+    def test_bm25_hit_beyond_the_assembler_pool_runs_ok(self):
+        """A real query whose hits outnumber the assembler's pool completes through the shipped arm.
 
-        Under the ambient default ``RETRIEVAL_MODE=auto`` the hybrid path's
-        post-retrieve effects write confidence updates onto the non-selected
-        candidates inside the arm and the digest re-check fails the job. The
-        arm env pins ``RETRIEVAL_MODE=current`` so the four-signal RRF path
-        runs and the job reports ``ok``.
+        Under the ambient default ``RETRIEVAL_MODE=auto`` the hybrid path
+        requests ``2 * limit`` candidates; any BM25 hit past that pool is
+        never selected, and the post-retrieve effects write a competitive
+        suppression onto it inside the arm, so the digest re-check fails the
+        job. The arm env pins ``RETRIEVAL_MODE=current`` so the four-signal
+        RRF path runs and the job reports ``ok``. The test proves it is
+        sensitive first: with the pin patched back to ``auto`` the same job
+        must fail on the digest, or the guard would reach no code.
         """
+        from tools.improvement_eval import arena
         from tools.improvement_eval.arena import arm_redis_server, run_arm_job
         from tools.improvement_eval.corpus import export_corpus
 
@@ -394,21 +398,23 @@ class TestArmRetrieve:
             _seed_memory(PK_BM25, f"grocery errands and the weekly budget {i}")
         export = export_corpus(PK_BM25)
         assert export.record_count == 6
+        job = {
+            "mode": "retrieve",
+            "jsonl": export.jsonl_text,
+            "project_key": PK_BM25,
+            "query_text": "lighthouse harbor beacon",
+            "limit": 1,  # three hits, a pool of two: one hit is left unselected
+        }
+
+        with mock.patch.object(arena, "ARM_RETRIEVAL_MODE", "auto"):
+            with arm_redis_server() as arm:
+                with pytest.raises(InfraFailure, match="digest changed"):
+                    run_arm_job(arm, PK_BM25, dict(job))
 
         with arm_redis_server() as arm:
-            result = run_arm_job(
-                arm,
-                PK_BM25,
-                {
-                    "mode": "retrieve",
-                    "jsonl": export.jsonl_text,
-                    "project_key": PK_BM25,
-                    "query_text": "lighthouse harbor beacon",
-                    "limit": 2,
-                },
-            )
+            result = run_arm_job(arm, PK_BM25, dict(job))
         assert result["status"] == "ok"
-        assert len(result["ids"]) == 2
+        assert len(result["ids"]) == 1
         assert result["digest"] == export.digest
 
     def test_two_arms_rank_identically_across_a_clock_gap(self):

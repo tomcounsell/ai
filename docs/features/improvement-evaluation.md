@@ -202,8 +202,10 @@ The subprocess boundary:
   and only inside the child, the ORM *is* the arm's private server:
   `Memory.query` and `agent.memory_retrieval.retrieve_memories` work
   unmodified. The clock-gap test's skew travels inside the job spec
-  (`clock_skew_s`), never through the environment, so nothing ambient can
-  skew a real arm's clock.
+  (`clock_skew_s`), never through the environment, and the runner forwards
+  only `ARM_PARAM_KEYS` (`limit`) from a protocol's arm dicts, refusing any
+  other key as `infra_failure`, so neither the environment nor a frozen
+  contract can skew a real arm's clock.
 - The corpus identity is `corpus.canonical_corpus_digest`, never a hash of
   the raw JSONL: record order and the manifest's `exported_at` vary per call,
   and the exporter's embedding-provider fingerprint (`embedding_provenance`
@@ -232,10 +234,13 @@ pinned in every arm's env dict (`arena.ARM_RETRIEVAL_MODE`), so the four RRF
 signals, all reads of persisted state, are what both arms run. The ambient
 default `auto` routes through popoto's hybrid `ContextAssembler` first, whose
 post-retrieve effects write confidence and access-tracker updates through a
-raw pipeline; inside an arm that write trips the corpus digest re-check on
-every query that hits BM25 with `limit` below the candidate pool, which is
-the production shape. A test runs exactly that query through the shipped arm
-worker and asserts the job reports `ok`. The RRF path also breaks confidence
+raw pipeline; inside an arm that write trips the corpus digest re-check
+whenever the query's candidate pool is larger than the assembler's
+`max_items` (`2 * limit`), so some hit goes unselected and gets suppressed,
+which is the production shape. A test runs exactly that query through the
+shipped arm worker: first with the pin patched back to `auto`, asserting the
+digest re-check fails, then pinned, asserting the job reports `ok` with
+exactly `limit` ids. The RRF path also breaks confidence
 ties by key: Redis iterates a hashtable-encoded hash in per-server random
 order, and two fresh arms would otherwise rank tied records differently from
 identical bytes. It never ranks through popoto's decay-clock query, whose

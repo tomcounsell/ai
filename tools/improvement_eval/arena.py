@@ -180,8 +180,10 @@ def run_arm_job(
     The worker reads the JSON job spec on stdin and writes JSON on stdout.
     Any transport failure or worker-reported error arrives here as
     :class:`InfraFailure`. ``clock_skew_s`` travels inside the job spec as
-    ``clock_skew_s`` (the clock-gap test's lever; the runner never sets it),
-    so nothing in the ambient environment can skew a real arm's clock.
+    ``clock_skew_s``: it is the clock-gap test's lever, set only through this
+    keyword. The runner never passes it, and its ``ARM_PARAM_KEYS`` allowlist
+    refuses a protocol that names it, so neither the ambient environment nor a
+    frozen contract can skew a real arm's clock.
     """
     child_env = build_child_env(
         sock_path=arm.sock_path,

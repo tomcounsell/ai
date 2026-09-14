@@ -882,12 +882,18 @@ export (`test_unequal_corpus_digests`), because the named test alone reaches onl
 | Section 7 routing | Ignore is_open_source and always use any provider (`serves_charter.py`) | `test_client_project_judge_stays_on_subscription_providers` | `AssertionError: assert 'openai' == 'claude-subscription'` | green |
 | Calibration floor | Return a judge verdict below the floor (`calibration.py`) | `test_reference_set_below_floor_yields_infra_failure` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` | green |
 | metrics.py untouched | Edit tools/memory_eval/metrics.py (`metrics.py`) | `test_metrics_module_is_unmodified` | `assert '"""Retrieval...rank(0.95)}\n' == '"""Retrieval...rank(0.95)}\n'` | green |
+| RRF path pin (review round 2) | Drop `env["RETRIEVAL_MODE"]` from `build_child_env` (`arena.py`) | `test_bm25_hit_beyond_the_assembler_pool_runs_ok` | `InfraFailure: arm worker reported an error: InfraFailure: writer guard: corpus digest changed during arm retrieve job` | green |
+| Arm-param allowlist (review round 2) | Skip the `ARM_PARAM_KEYS` check in `_retrieve_job` (`runner.py`) | `test_clock_skew_in_a_protocol_arm_dict_is_refused`, `test_mode_override_is_refused` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` (both) | green |
 
 The first sweep found one guard that reached no code: `test_two_arms_rank_identically_across_a_clock_gap`
 stayed green under a correct decay-clock mutant because its fixture seeded both records at one instant,
 so a 30-day skew moved nothing. The fixture now spaces an old, important record 60 days behind a fresh,
 unimportant one and asserts in-process that decay ranking flips across the gap before asserting the arms
-agree; the row above is the rerun against that fixture.
+agree; the row above is the rerun against that fixture. Review round 2 found a second inert guard:
+the BM25 test seeded three hits at `limit=2`, inside the hybrid assembler's `2 * limit` pool, so no hit
+went unselected and nothing was written; it stayed green with the pin removed. The test now runs at
+`limit=1` and asserts the digest failure with the pin patched to `auto` before asserting the pinned
+job is `ok`; the two round-2 rows above are the reruns.
 
 ## Test Impact
 
@@ -1034,8 +1040,8 @@ external event ever gates five of the nine tasks again, and the claim and the gr
 often and a loop that never learns anything. If most runs end in `infra_failure`, the separation from
 `reject` has bought nothing.
 
-**Mitigation:** `infra_failure` is raised from exactly six named conditions and from nowhere else,
-each with its own test. The final catch-all handler in `runner.py` writes `infra_failure` with the
+**Mitigation:** `infra_failure` is written for six named categories of condition, each with its own
+test, and every raise site names its transport or protocol failure in `notes`. The final catch-all handler in `runner.py` writes `infra_failure` with the
 exception type in `notes`, so an unnamed cause is visible as an unnamed cause rather than blending
 into the six. The dashboard renders `infra_failure` counts beside the others, which makes a rising
 rate an observable fact rather than a suspicion.

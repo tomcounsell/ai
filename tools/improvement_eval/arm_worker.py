@@ -26,8 +26,11 @@ write slipped past the wrapper and the arm is invalid.
 An optional ``"clock_skew_s"`` in a retrieve job shifts this process's
 ``time.time`` during the retrieve step only. It exists so a test can query
 an arm under a clock 30 days forward and prove the retrieval path does
-not read the decay clock; the runner never sets it, and it travels in the
-job spec rather than the environment so nothing ambient can skew an arm.
+not read the decay clock. It travels in the job spec rather than the
+environment, and the runner's ``ARM_PARAM_KEYS`` allowlist keeps it out of
+every job it builds from a protocol, so neither the ambient environment nor
+a frozen contract can skew a real arm's clock; only
+``run_arm_job(clock_skew_s=...)`` sets it.
 """
 
 from __future__ import annotations

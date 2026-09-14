@@ -133,6 +133,30 @@ class TestWedgedExperiment:
 # ---------------------------------------------------------------------------
 
 
+class TestArmParamAllowlist:
+    """Only ``ARM_PARAM_KEYS`` reach the arm worker's job spec (in-process, no arms)."""
+
+    def test_limit_is_forwarded(self):
+        export = mock.Mock(jsonl_text="x")
+        job = runner._retrieve_job(export, PK, {"query_text": "q"}, {"limit": 2})
+        assert job["limit"] == 2
+        assert job["mode"] == "retrieve"
+
+    def test_clock_skew_in_a_protocol_arm_dict_is_refused(self):
+        # The clock-gap lever is run_arm_job's keyword, never a contract input:
+        # a frozen protocol naming it must fail the run, not skew one arm.
+        export = mock.Mock(jsonl_text="x")
+        with pytest.raises(InfraFailure, match="clock_skew_s"):
+            runner._retrieve_job(
+                export, PK, {"query_text": "q"}, {"limit": 2, "clock_skew_s": 2592000}
+            )
+
+    def test_mode_override_is_refused(self):
+        export = mock.Mock(jsonl_text="x")
+        with pytest.raises(InfraFailure, match="mode"):
+            runner._retrieve_job(export, PK, {"query_text": "q"}, {"mode": "restore"})
+
+
 class TestContract:
     def test_digest_is_crlf_normalized_and_field_sensitive(self):
         base = mock.Mock(

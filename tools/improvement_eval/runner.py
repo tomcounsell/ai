@@ -300,15 +300,27 @@ class TrialResult:
     metrics: dict[str, float]
 
 
+#: The only protocol arm-param keys that reach the arm worker's job spec. The
+#: worker also honors ``clock_skew_s``, which is the clock-gap test's lever and
+#: is set only by ``run_arm_job(clock_skew_s=...)``; a frozen protocol cannot
+#: name it, so no contract input can skew a real arm's clock.
+ARM_PARAM_KEYS = frozenset({"limit"})
+
+
 def _retrieve_job(export, project_key: str, query: dict, arm_params: dict) -> dict:
-    job = {
+    unknown = sorted(set(arm_params) - ARM_PARAM_KEYS)
+    if unknown:
+        raise InfraFailure(
+            f"protocol arm params carry keys the arm does not accept: {unknown} "
+            f"(allowed: {sorted(ARM_PARAM_KEYS)})"
+        )
+    return {
         "mode": "retrieve",
         "jsonl": export.jsonl_text,
         "project_key": project_key,
         "query_text": query["query_text"],
+        **{k: arm_params[k] for k in ARM_PARAM_KEYS if k in arm_params},
     }
-    job.update({k: v for k, v in arm_params.items() if k not in job and k != "mode"})
-    return job
 
 
 def _run_arm(arm, export, project_key: str, query: dict, arm_params: dict) -> list[str]:
