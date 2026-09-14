@@ -42,7 +42,7 @@ from tools.improvement_release.lifecycle import (
     withdraw,
 )
 from tools.improvement_release.observation import EVIDENCE_TTL_DAYS
-from tools.improvement_release.runner import RecordingRunner
+from tools.improvement_release.runner import CommandResult, RecordingRunner
 
 PK = "test-3218-lifecycle"
 NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
@@ -1024,6 +1024,8 @@ class TestRollback:
         assert "rollback_attempt" not in _outcome(release.id)
 
     def test_rollback_refuses_a_branch_git_rejects(self, approved, tmp_path):
+        from config.settings import settings
+
         release = self._exposed(approved)
         runner = RecordingRunner(
             [(["git", "check-ref-format"], (1, "", "fatal: 'a..b' is not a valid branch name"))]
@@ -1044,3 +1046,49 @@ class TestRollback:
         argvs = runner.argvs()
         assert ["git", "check-ref-format", "--branch", "a..b"] in argvs
         assert not any(a[:2] == ["git", "fetch"] for a in argvs)
+        check = next(c for c in runner.calls if c["argv"][:2] == ["git", "check-ref-format"])
+        assert check["timeout"] == settings.timeouts.git_subprocess_s
+
+    def test_rollback_failure_persist_keeps_a_concurrent_transition(self, approved, tmp_path):
+        """Race 1 on the failure path: a state change during the steps survives the persist.
+
+        A ``withdraw``-shaped transition lands between the rollback's read and
+        its failure write; the persisted row keeps that state and both history
+        events, in order.
+        """
+        release = self._exposed(approved)
+        real = _rollback_runner()
+
+        def runner(argv, *, cwd=None, timeout=None):
+            if argv[:2] == ["git", "revert"]:
+                row = get_release(release.id, PK)
+                lifecycle._transition(
+                    row,
+                    to="accepted",
+                    allowed_from=("observing",),
+                    event="window_closed",
+                    now=NOW,
+                    detail={"verdict": "kept", "reason": "concurrent"},
+                )
+                return CommandResult(argv, 1, "", "CONFLICT (content): tools/x.py", 0.0)
+            return real(argv, cwd=cwd, timeout=timeout)
+
+        with pytest.raises(ReleaseRefused) as exc:
+            rollback(
+                release.id,
+                project_key=PK,
+                reason="r",
+                runner=runner,
+                root=tmp_path,
+                repo=tmp_path,
+                now=NOW + timedelta(seconds=1),
+            )
+        assert exc.value.code == "ROLLBACK_STEP_FAILED"
+        row = get_release(release.id, PK)
+        assert row.state == "accepted", "the concurrent transition survives the failure persist"
+        outcome = json_field(row.outcome)
+        events = [e["event"] for e in outcome["history"]]
+        assert events.count("window_closed") == 1, events
+        assert events.count("rollback_step_failed") == 1, events
+        assert events.index("window_closed") < events.index("rollback_step_failed")
+        assert outcome["rollback_attempt"]["code"] == "ROLLBACK_STEP_FAILED"

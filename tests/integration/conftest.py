@@ -16,7 +16,7 @@ def _improvement_retention_root(request, tmp_path, monkeypatch):
     builds its own store from the environment; the in-process singleton was
     built at import, so its ``base_path`` is redirected directly.
     """
-    if not request.node.fspath.basename.startswith(_RETENTION_ROOT_MODULES):
+    if not request.node.path.name.startswith(_RETENTION_ROOT_MODULES):
         yield None
         return
     from models.verifying_artifact_store import verifying_artifact_store

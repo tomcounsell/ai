@@ -560,7 +560,9 @@ runner.
      range aborts on a merge commit ("no -m option"), and reverting each with `-m 1` rehearses a
      different operation from the one the plan declares; the operator re-proposes from a
      linear candidate branch.
-   - `changed = git diff --name-only <base_revision> <candidate_ref>`; `undeclared = [p for p in
+   - `changed = git diff --name-only --no-renames <base_revision> <candidate_ref>` (renames
+     off, so a `git mv` of a denied path to a declared destination is listed at its source
+     too, never at the destination alone); `undeclared = [p for p in
      changed if not any(p == s or p.startswith(s.rstrip("/") + "/") for s in surfaces)]`;
      non-empty → `reason: UNDECLARED_SURFACE_CHANGED`, `paths: undeclared`. This is the check
      that makes the declared surfaces a claim the drill can falsify: a candidate that touches a
@@ -940,6 +942,11 @@ Every guard below is mutated once during the build and the test that catches it 
 - denylist parent rule (`denylist`): drop the enclosing-directory match → `test_a_directory_enclosing_an_entry_is_denied` and `test_propose_refuses_charter_surface[docs]` red
 - denied changed path (`drill`): drop the `denied_surfaces` check over the changed paths → `test_drill_fails_when_a_changed_path_is_denied` red
 - rollback checkout refusal (`rollback`): build the slot without `refuse_checkout_path` → `test_rollback_refuses_checkout_path` red
+- rename-blind listing (`drill`): drop `--no-renames` from the `changed_paths` listing → `test_drill_sees_a_renamed_denied_path_at_its_source` (both parametrizations) red; drop it from the restoration's `differing_paths` listing → `test_assert_restored_lists_both_ends_of_a_rename` red
+- rollback failure persist (`rollback`): save without `update_fields=["outcome"]`, or skip the re-read and `_merge_history` → `test_rollback_failure_persist_keeps_a_concurrent_transition` red
+- `check-ref-format` timeout (`rollback`): drop `timeout=_git_timeout()` from the call → `test_rollback_refuses_a_branch_git_rejects` red
+- venv link on a tracked `.venv` (`drill`): check `target.exists()` alone and let `symlink_to` raise → `test_add_detached_worktree_leaves_a_tracked_dangling_venv_link` and `test_add_detached_worktree_records_a_refused_link` red
+- restoration step tail (`drill`): join `differing` into the synthetic step without `tail(...)` → `test_residue_paths_come_from_the_full_listing_and_the_step_keeps_a_tail` red
 
 ## Test Impact
 
@@ -1004,7 +1011,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 **Trigger:** `approve` and `withdraw` run within the same second from two shells.
 **Data prerequisite:** The release row at the state each caller read.
 **State prerequisite:** Exactly one terminal write per transition.
-**Mitigation:** `_transition` re-reads the row immediately before `save()` and refuses `WRONG_STATE` if `state` no longer equals `allowed_from`. Popoto has no CAS, so a sub-millisecond interleave can still double-write; the `history` list inside `outcome` records both events with timestamps, so the double-write is detectable and the second event names the conflict. Operator-invoked transitions on an immortal audit record are rare enough that detectability is the right cost; lane 3's journal is the place a fenced transition belongs, and this lane does not build a second one.
+**Mitigation:** `_transition` re-reads the row immediately before `save()` and refuses `WRONG_STATE` if `state` no longer equals `allowed_from`, and merges the re-read row's history events into its own (`_merge_history`), which recovers a second writer whose re-read lands after the first writer's save: the record shows both events. Popoto has no CAS, so the sub-millisecond interleave (both re-read, then both save) remains a lost write; the last save wins and the earlier event is gone. The rollback failure persist (`rollback_step_failed`, `rollback_push_refused`) takes the same re-read-and-merge path and saves `outcome` alone, so a transition landed during the git steps keeps its state. Operator-invoked transitions on an immortal audit record are rare enough that this window is the right cost; lane 3's journal is the place a fenced transition belongs, and this lane does not build a second one.
 
 ### Race 2: A crash between writing the new revision and superseding the old one
 **Location:** `tools/improvement_recursion/compare.py::_write_revision`

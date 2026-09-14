@@ -256,6 +256,44 @@ class TestPreRevertChecks:
         assert record["exercised"] == ["range_checks"]
         assert_no_worktree_left(repo, root)
 
+    @pytest.mark.parametrize(
+        ("surfaces", "reason"),
+        [
+            (["docs"], "DENIED_SURFACE_CHANGED"),
+            (["docs/archive/charter-old.md"], "UNDECLARED_SURFACE_CHANGED"),
+        ],
+    )
+    def test_drill_sees_a_renamed_denied_path_at_its_source(self, repo, root, surfaces, reason):
+        """``git mv`` of the charter to a declared destination is refused at the source.
+
+        Git's default rename detection lists only the destination of a rename,
+        so a listing without ``--no-renames`` shows ``docs/archive/charter-old.md``
+        alone and neither check sees ``docs/improvement-charter.md``. A surface
+        enclosing both ends reaches the denylist; one naming only the
+        destination stops at the undeclared check. Either way the source path
+        is in ``paths`` and no revert runs.
+        """
+        commit(repo["path"], "charter", **{"docs/improvement-charter.md": "the charter\n"})
+        charter_base = git(repo["path"], "rev-parse", "HEAD")
+        git(repo["path"], "switch", "-q", "-c", "renamer")
+        (repo["path"] / "docs" / "archive").mkdir()
+        git(repo["path"], "mv", "docs/improvement-charter.md", "docs/archive/charter-old.md")
+        git(repo["path"], "commit", "-q", "-m", "archive the charter")
+        git(repo["path"], "switch", "-q", "main")
+        listing = git(repo["path"], "diff", "--name-only", charter_base, "renamer")
+        assert listing == "docs/archive/charter-old.md", "the fixture must be a detected rename"
+        release = release_for(
+            repo, base_revision=charter_base, candidate_ref="renamer", surfaces=surfaces
+        )
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["result"] == "fail"
+        assert record["reason"] == reason
+        assert "docs/improvement-charter.md" in record["paths"]
+        assert "revert" not in step_names(record)
+        assert_no_worktree_left(repo, root)
+
     def test_drill_fails_when_base_not_ancestor(self, repo, root):
         advanced = commit(repo["path"], "main moved on", **{"README.md": "readme 2\n"})
         release = release_for(repo, base_revision=advanced)
@@ -347,6 +385,36 @@ class TestRevertAndRestoration:
         assert record["restored"] is False
         assert_no_worktree_left(repo, root)
 
+    def test_residue_paths_come_from_the_full_listing_and_the_step_keeps_a_tail(self, repo, root):
+        """``paths`` carries every differing file; the synthetic step record is bounded."""
+        files = {
+            f"tools/generated/module_{i:03d}_with_a_long_name.py": f"# {i}\n" for i in range(80)
+        }
+        wide_base = commit(repo["path"], "wide base", **files)
+        git(repo["path"], "switch", "-q", "-c", "wide-cand")
+        commit(repo["path"], "candidate", **{"tools/thing.py": "v2\n"})
+        git(repo["path"], "switch", "-q", "main")
+        listing = "\n".join(sorted(files))
+        assert len(listing.encode("utf-8")) > TAIL_BYTES, "the fixture must exceed the tail"
+        release = release_for(
+            repo,
+            base_revision=wide_base,
+            candidate_ref="wide-cand",
+            surfaces=["tools/thing.py"],
+            rollback_plan={
+                "verify": ["sh -c 'for f in tools/generated/*.py; do printf residue > $f; done'"]
+            },
+        )
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["reason"] == "residue"
+        assert record["paths"] == sorted(files)
+        restoration = [s for s in record["steps"] if s["name"] == "restoration"][-1]
+        assert restoration["returncode"] == 1
+        assert len(restoration["stdout_tail"].encode("utf-8")) <= TAIL_BYTES
+        assert_no_worktree_left(repo, root)
+
     def test_assert_restored_lists_differing_paths(self, repo, root):
         worktree = root / "wt"
         git(repo["path"], "worktree", "add", "-q", "--detach", str(worktree), "cand")
@@ -361,6 +429,23 @@ class TestRevertAndRestoration:
             )
             assert result == {"restored": False, "differing": ["tools/thing.py"]}
             assert any("git diff --quiet" in line for line in transcript)
+        finally:
+            git(repo["path"], "worktree", "remove", "--force", str(worktree))
+
+    def test_assert_restored_lists_both_ends_of_a_rename(self, repo, root):
+        """A rename in the restored tree differs from base at its source and destination."""
+        worktree = root / "wt"
+        git(repo["path"], "worktree", "add", "-q", "--detach", str(worktree), repo["base"])
+        try:
+            git(worktree, "mv", "README.md", "README-moved.md")
+            result = assert_restored(
+                SubprocessRunner(),
+                worktree=str(worktree),
+                base_revision=repo["base"],
+                surfaces=["tools/thing.py"],
+                transcript=[],
+            )
+            assert result == {"restored": False, "differing": ["README-moved.md", "README.md"]}
         finally:
             git(repo["path"], "worktree", "remove", "--force", str(worktree))
 
@@ -604,6 +689,62 @@ class TestWorktreeVenv:
             assert not (slot / ".venv").exists()
             assert not (slot / ".venv").is_symlink()
             assert not any("[linked" in line for line in transcript)
+        finally:
+            drill.remove_worktree(
+                SubprocessRunner(), repo=repo["path"], path=slot, transcript=transcript, root=root
+            )
+
+    def test_add_detached_worktree_leaves_a_tracked_dangling_venv_link(self, repo, root):
+        """A candidate tracking a broken ``.venv`` symlink is checked out as-is.
+
+        ``Path.exists()`` is false for a dangling link, so a check on it alone
+        reaches ``symlink_to`` and raises ``FileExistsError`` out of the drill.
+        """
+        git(repo["path"], "switch", "-q", "cand")
+        os.symlink("nowhere", repo["path"] / ".venv")
+        git(repo["path"], "add", "--", ".venv")
+        git(repo["path"], "commit", "-q", "-m", "track a dangling venv link")
+        git(repo["path"], "switch", "-q", "main")
+        assert not (repo["path"] / ".venv").is_symlink(), "main carries no .venv"
+        venv = repo["path"] / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        slot = drill_root("rel-dangling", root=root)
+        transcript: list[str] = []
+
+        add = drill.add_detached_worktree(
+            SubprocessRunner(), repo=repo["path"], ref="cand", path=slot, transcript=transcript
+        )
+        try:
+            assert add["returncode"] == 0
+            link = slot / ".venv"
+            assert link.is_symlink()
+            assert os.readlink(link) == "nowhere", "the tracked link is untouched"
+            assert any(line.startswith("[venv link skipped:") for line in transcript)
+            assert not any("[linked" in line for line in transcript)
+        finally:
+            drill.remove_worktree(
+                SubprocessRunner(), repo=repo["path"], path=slot, transcript=transcript, root=root
+            )
+
+    def test_add_detached_worktree_records_a_refused_link(self, repo, root, monkeypatch):
+        (repo["path"] / ".venv" / "bin").mkdir(parents=True)
+        slot = drill_root("rel-refused", root=root)
+        transcript: list[str] = []
+
+        def refuse(self, *args, **kwargs):
+            raise OSError(1, "Operation not permitted")
+
+        monkeypatch.setattr(Path, "symlink_to", refuse)
+        add = drill.add_detached_worktree(
+            SubprocessRunner(), repo=repo["path"], ref="cand", path=slot, transcript=transcript
+        )
+        try:
+            assert add["returncode"] == 0
+            assert not (slot / ".venv").is_symlink()
+            assert any(
+                line.startswith("[venv link skipped:") and "not permitted" in line
+                for line in transcript
+            )
         finally:
             drill.remove_worktree(
                 SubprocessRunner(), repo=repo["path"], path=slot, transcript=transcript, root=root

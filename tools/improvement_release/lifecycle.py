@@ -259,9 +259,11 @@ def _transition(
     ``outcome`` is the caller's already-updated dict (defaults to the row's);
     the transition event lands on it, then ``extra_events`` in order, and the
     row is saved once. History events the re-read row carries and the caller's
-    dict lacks are merged in first (:func:`_merge_history`), so when two
-    callers interleave between the re-read and the save, the second write
-    keeps the first writer's event and the record shows both.
+    dict lacks are merged in first (:func:`_merge_history`), which recovers a
+    second writer whose re-read lands after the first writer's save: the
+    second write keeps the first's event and the record shows both. The
+    sub-millisecond interleave (both re-read, then both save) is still a lost
+    write; Popoto has no compare-and-set, and the last save wins.
     """
     at = _now(now)
     current = get_release(release.id, release.project_key)
@@ -289,6 +291,23 @@ def _transition(
 def _save_outcome(release: ImprovementRelease, outcome: dict) -> ImprovementRelease:
     release.outcome = _dump(outcome)
     if release.save() is False:
+        raise RuntimeError("ImprovementRelease.save() returned False")
+    return release
+
+
+def _save_outcome_only(release: ImprovementRelease, outcome: dict) -> ImprovementRelease:
+    """Write ``outcome`` alone, after re-reading the row (Race 1, no transition).
+
+    For a caller that records an event without moving the state: history
+    events the re-read row carries and ``outcome`` lacks are merged in
+    (:func:`_merge_history`), and the save is partial (``update_fields``), so
+    a transition another caller landed since this one read the row keeps its
+    state and its event.
+    """
+    current = get_release(release.id, release.project_key)
+    _merge_history(outcome, _outcome(current))
+    release.outcome = _dump(outcome)
+    if release.save(update_fields=["outcome"]) is False:
         raise RuntimeError("ImprovementRelease.save() returned False")
     return release
 
@@ -1050,7 +1069,7 @@ def rollback(
             "steps": steps,
             "transcript": tail("\n".join(transcript), ROLLBACK_TRANSCRIPT_BYTES),
         }
-        _save_outcome(release, outcome)
+        _save_outcome_only(release, outcome)
 
     try:
         fetch = step(["git", "fetch", "origin", target], cwd=repo_path, name="fetch")

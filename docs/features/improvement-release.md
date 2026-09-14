@@ -53,8 +53,11 @@ string, so a writer that assigned a dict directly would store its Python repr;
 `ReleaseRefused(code, detail)` from a closed vocabulary. A refusal writes
 nothing, with one exception described under Rollback. `_transition` re-reads
 the row immediately before `save()` and refuses `WRONG_STATE` when the state
-moved under the caller; Popoto has no compare-and-set, so a sub-millisecond
-interleave is detectable through the history rather than prevented.
+moved under the caller, and merges the re-read row's history events into its
+own, which recovers a second writer whose re-read lands after the first's
+save. Popoto has no compare-and-set, so the sub-millisecond interleave (both
+re-read, then both save) remains a lost write: the last save wins and the
+earlier event is gone.
 
 | From | Event | To | Guard |
 |---|---|---|---|
@@ -147,7 +150,11 @@ add --detach`. Any other path is refused before anything is created
 and outside every git checkout. When the repository has a `.venv`, the whole
 directory is symlinked into the worktree (a linked worktree carries none of
 its own), so a `verify` command such as `scripts/pytest-clean.sh` finds an
-interpreter there; the link is removed with the worktree and never followed. A release past `proposed` is refused
+interpreter there; the link is removed with the worktree and never followed.
+A `.venv` the candidate already tracks (a dangling symlink included) is left
+as checked out, and a link the filesystem refuses is recorded in the
+transcript as `[venv link skipped: …]` rather than raised; a verify command
+that needed the link then fails at its own step. A release past `proposed` is refused
 `NOT_PROPOSED`; an option-shaped ref, an invalid surface, a rollback plan that
 is not a JSON object, and a missing repository are refused `BAD_REF`,
 `BAD_SURFACE`, `BAD_PLAN`, and `NO_REPO`.
@@ -164,15 +171,26 @@ is not a JSON object, and a missing repository are refused `BAD_REF`,
      non-empty, listed under `merges`. A range revert aborts on a merge commit,
      and reverting each with `-m 1` rehearses a different operation from the
      one the plan declares; the operator re-proposes from a linear branch.
-   - `UNDECLARED_SURFACE_CHANGED`: a path in `git diff --name-only <base>
-     <candidate>` is neither a declared surface nor under a declared directory,
-     listed under `paths`. This is the check that makes the declared surfaces
-     a claim the drill can falsify.
+   - `UNDECLARED_SURFACE_CHANGED`: a path in `git diff --name-only
+     --no-renames <base> <candidate>` is neither a declared surface nor under
+     a declared directory, listed under `paths`. This is the check that makes
+     the declared surfaces a claim the drill can falsify.
    - `DENIED_SURFACE_CHANGED`: a changed path is on the candidate denylist,
      listed under `paths`. The denylist already refuses a declared directory
      that encloses an entry at proposal; this check reads the paths the
      candidate actually changed, so a charter edit under any declared surface
      stops here before a revert is rehearsed.
+
+   Both listings run with `--no-renames`. Git's default rename detection
+   reports only the destination of a rename, and treats a file moved with up
+   to half its content rewritten as a rename, so `git mv
+   docs/improvement-charter.md <declared path>` would otherwise carry a
+   charter edit through both checks under the declared name alone. With
+   renames off, the source and the destination are both listed, and the
+   source stops at whichever check reaches it first: the undeclared check
+   when the surfaces name only the destination, the denylist when a declared
+   directory encloses both. The restoration listing runs the same way, so a
+   rename left behind by a verify command is reported at both ends.
 
    The path lists behind these checks (and the revert's unmerged paths, and
    the restoration's differing paths) are read from the command's full
@@ -420,7 +438,8 @@ With `target = branch or "main"`:
    checked against the same ref the push targeted. A refused push (branch
    protection, `.githooks/pre-push`, a head that moved after the fetch) or a
    remote head that differs appends `{"event": "rollback_push_refused",
-   stderr, revert_sha, parent_sha, target, detail}` to `outcome.history`,
+   stderr, revert_sha, parent_sha, target, rollback_ref, detail}` to
+   `outcome.history`,
    leaves the state unchanged, and raises `ROLLBACK_PUSH_REFUSED`. The revert
    commit is reported, and stays reachable as
    `refs/improvement-rollback/<release id>` in the local repository for as
@@ -435,7 +454,10 @@ Every step's transcript is persisted, bounded to the last
 and on `ROLLBACK_PUSH_REFUSED` under `outcome.rollback_attempt` as `{at,
 code, detail, target, steps, transcript}`, beside a `rollback_step_failed` or
 `rollback_push_refused` history event. Each new attempt overwrites
-`rollback_attempt`; the history keeps one event per attempt.
+`rollback_attempt`; the history keeps one event per attempt. That write
+re-reads the row, merges its history, and saves `outcome` alone
+(`update_fields`), so a transition another caller landed while the steps ran
+keeps its state and its event.
 
 On success `outcome.rollback` carries `reason`, `merge_sha`,
 `merge_commit_parents`, `revert_sha`, `parent_sha`, `pushed_to`,

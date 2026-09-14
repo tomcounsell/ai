@@ -66,7 +66,13 @@ from pathlib import Path
 from config.settings import settings
 from models.verifying_artifact_store import _default_base_path
 from tools.improvement_release.denylist import InvalidSurface, denied_surfaces, normalize_surface
-from tools.improvement_release.runner import Runner, SubprocessRunner, execute_step, run_step
+from tools.improvement_release.runner import (
+    Runner,
+    SubprocessRunner,
+    execute_step,
+    run_step,
+    tail,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,12 +244,25 @@ def _link_venv(repo: Path, worktree: Path, transcript: list[str]) -> None:
     back to the system ``python3`` without one, where ``config.settings`` does
     not import. The whole directory is linked, never ``bin/python`` alone: a
     partial link silently resolves site-packages from the base interpreter.
+
+    A ``.venv`` the candidate already tracks (a dangling symlink included,
+    which ``exists()`` alone reports as absent) is left in place, and an
+    ``OSError`` from the link is recorded in the transcript rather than
+    raised: the link is a convenience for the verify commands, and a missing
+    one fails the drill at the verify step with its own record.
     """
     source = repo / ".venv"
     target = worktree / ".venv"
-    if not source.exists() or not worktree.is_dir() or target.exists():
+    if not source.exists() or not worktree.is_dir():
         return
-    target.symlink_to(source, target_is_directory=True)
+    if target.is_symlink() or target.exists():
+        transcript.append(f"[venv link skipped: {target} already exists]")
+        return
+    try:
+        target.symlink_to(source, target_is_directory=True)
+    except OSError as exc:
+        transcript.append(f"[venv link skipped: {exc}]")
+        return
     transcript.append(f"[linked {target} -> {source}]")
 
 
@@ -344,7 +363,8 @@ def assert_restored(
     """Per-surface then whole-tree ``git diff --quiet <base>``.
 
     Returns ``{"restored": bool, "differing": [paths]}``; the paths come from
-    ``git diff --name-only <base>`` when any check is nonzero.
+    ``git diff --name-only --no-renames <base>`` when any check is nonzero, so
+    a renamed file is listed at both ends rather than at its destination alone.
     """
     worktree = str(worktree)
     restored = True
@@ -373,7 +393,7 @@ def assert_restored(
     if not restored:
         _record, listing = execute_step(
             runner,
-            ["git", "diff", "--name-only", base_revision],
+            ["git", "diff", "--name-only", "--no-renames", base_revision],
             cwd=worktree,
             timeout=_git_timeout(),
             transcript=transcript,
@@ -509,8 +529,13 @@ class _Drill:
         )
         if merge_shas:
             return self.fail("MERGE_COMMITS_IN_RANGE", merges=merge_shas)
+        # --no-renames: git's default rename detection lists only the destination
+        # of a rename, so `git mv docs/improvement-charter.md <declared path>`
+        # would hide the denied source from both checks below.
         _changed, changed = self.listing(
-            ["git", "diff", "--name-only", base_sha, cand_sha], cwd=wt, name="changed_paths"
+            ["git", "diff", "--name-only", "--no-renames", base_sha, cand_sha],
+            cwd=wt,
+            name="changed_paths",
         )
         undeclared = _undeclared(changed, surfaces)
         if undeclared:
@@ -573,7 +598,7 @@ class _Drill:
                 "returncode": 0 if result["restored"] else 1,
                 "seconds": 0.0,
                 "timed_out": False,
-                "stdout_tail": "\n".join(result["differing"]),
+                "stdout_tail": tail("\n".join(result["differing"])),
                 "stderr_tail": "",
                 "checks": len(self.transcript) - before,
             }

@@ -443,7 +443,7 @@ def _write_evaluation(
     return evaluation
 
 
-def _finish_experiment(experiment: Any, state: str) -> None:
+def _set_experiment_state(experiment: Any, state: str) -> None:
     experiment.state = state
     if experiment.save() is False:
         raise RuntimeError("ImprovementExperiment.save() returned False")
@@ -558,12 +558,12 @@ def run(
         f"arm_assignment_digest={assignment_digest}",
     ]
 
-    _finish_experiment(experiment, "running")
+    _set_experiment_state(experiment, "running")
 
     def _infra_failure(reason: str) -> Any:
         logger.warning("comparison %s infra_failure: %s", experiment.id, reason)
         notes.insert(0, f"infra_failure: {reason}")
-        _finish_experiment(experiment, "aborted")
+        _set_experiment_state(experiment, "aborted")
         return _write_evaluation(
             experiment=experiment,
             project_key=project_key,
@@ -628,7 +628,7 @@ def run(
     notes.append("budget=" + json.dumps(budget, sort_keys=True))
     notes.extend(reasons)
 
-    _finish_experiment(experiment, STATE_COMPLETE)
+    _set_experiment_state(experiment, STATE_COMPLETE)
     evaluation = _write_evaluation(
         experiment=experiment,
         project_key=project_key,
