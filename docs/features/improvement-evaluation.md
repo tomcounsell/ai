@@ -203,8 +203,10 @@ The subprocess boundary:
   `Memory.query` and `agent.memory_retrieval.retrieve_memories` work
   unmodified. The clock-gap test's skew travels inside the job spec
   (`clock_skew_s`), never through the environment, and the runner forwards
-  only `ARM_PARAM_KEYS` (`limit`) from a protocol's arm dicts, refusing any
-  other key as `infra_failure`, so neither the environment nor a frozen
+  only `ARM_PARAM_KEYS` (`limit`) from a protocol's arm dicts. Both arm
+  dicts are validated once at protocol load, before the corpus export and
+  the arms spawn, so any other key ends the run as `infra_failure` whatever
+  the protocol's `infra_failure_cap`; neither the environment nor a frozen
   contract can skew a real arm's clock.
 - The corpus identity is `corpus.canonical_corpus_digest`, never a hash of
   the raw JSONL: record order and the manifest's `exported_at` vary per call,

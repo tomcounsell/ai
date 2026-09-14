@@ -884,6 +884,7 @@ export (`test_unequal_corpus_digests`), because the named test alone reaches onl
 | metrics.py untouched | Edit tools/memory_eval/metrics.py (`metrics.py`) | `test_metrics_module_is_unmodified` | `assert '"""Retrieval...rank(0.95)}\n' == '"""Retrieval...rank(0.95)}\n'` | green |
 | RRF path pin (review round 2) | Drop `env["RETRIEVAL_MODE"]` from `build_child_env` (`arena.py`) | `test_bm25_hit_beyond_the_assembler_pool_runs_ok` | `InfraFailure: arm worker reported an error: InfraFailure: writer guard: corpus digest changed during arm retrieve job` | green |
 | Arm-param allowlist (review round 2) | Skip the `ARM_PARAM_KEYS` check in `_retrieve_job` (`runner.py`) | `test_clock_skew_in_a_protocol_arm_dict_is_refused`, `test_mode_override_is_refused` | `Failed: DID NOT RAISE <class 'tools.improvement_eval.errors.InfraFailure'>` (both) | green |
+| Arm-param validation at load (review round 3) | Drop the two `_validate_arm_params` calls at protocol load, leaving the per-trial check (`runner.py`) | `test_disallowed_candidate_param_is_infra_failure_even_under_a_high_cap` | `AssertionError: assert 'inconclusive' == 'infra_failure'` | green |
 
 The first sweep found one guard that reached no code: `test_two_arms_rank_identically_across_a_clock_gap`
 stayed green under a correct decay-clock mutant because its fixture seeded both records at one instant,
