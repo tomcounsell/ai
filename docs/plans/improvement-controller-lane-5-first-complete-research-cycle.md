@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-14
 tracking: https://github.com/tomcounsell/ai/issues/3217
 last_comment_id: 5662856978
+revision_applied: true
+revision_applied_at: 2026-09-14T11:21:29Z
 ---
 
 # Improvement controller lane 5: the first complete research cycle
@@ -1125,6 +1127,8 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` (`:62`, `:84`) — UPDATE: remove the `install_sdlc_reflection.sh` entries from both dicts; the installer is deleted with the script.
 - [ ] `tests/unit/test_reflection_register.py` (`:682-790`, the `improvement_collect` registration cases) — UPDATE: parametrize the six cases over the three improvement registrations (`improvement-evidence-collect`, `improvement-planner-tick`, `improvement-assumption-digest`) instead of one, so each new registration inherits owner-gating, idempotency, non-owner skip, missing-vault skip, and scheduler-registry loading.
 - [ ] `tests/unit/test_improvement_evidence.py::TestCollectCorrections` and siblings (`:260-344`) — no change to existing cases; the file gains `TestCollectLessons` and `TestCollectPromises` classes on the same fixture shape.
+- [ ] `tests/unit/test_improvement_evidence.py` (no existing case asserts the `len(findings) == 3` literal) — no change to existing cases; the file gains two `run_improvement_collect` status cases (all-skipped is `success`, all-failed is `error`) pinning the new `failed`/`skipped` rule.
+- [ ] `tests/unit/test_improvement_models.py::FORBIDDEN_INDEX_NAMES` (`:104`) — UPDATE: gains `stage`, `dedup_identity`, `evaluation_ids`, `blocked_by`, `research_process_spec`; the loop at `:186` keeps refusing an index on any of them.
 - [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the two entries this lane registers (`retire_sdlc_reflection` and `improvement_investigation_stage_field`).
 - [ ] (lane 4) `tests/unit/test_improvement_eval_arena.py::test_carries_the_four_arm_keys` (`:48`) — no change; the arm env is untouched. The arm worker's job-spec test file gains cases for the `rrf_k` and `min_rrf_score` pass-throughs, asserting an absent key leaves `retrieve_memories` at its defaults.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change: lane 7 already tests the `on_escalation` sink both present and absent (`tools/infrastructure_budget.py:568-574`); this lane supplies the callable and adds one integration case in its own digest test file.
@@ -1371,7 +1375,14 @@ records an override, plus this plan's own.
   exist whose diff names the case under `left` (reject) or `moved` (inconclusive) with the
   evaluation id as the reason, and a seeded `rejected` case is refused re-opening by the tick
 - [ ] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
-  to end in the real cycle, with claims carrying URLs and retrieval dates
+  to end in the real cycle, with claims carrying URLs and retrieval dates; the runbook seeds a
+  `Memory`, never an evidence row, and the tick's `counts["inspirations"] >= 1` is recorded
+- [ ] Seeded provenance is stated, not hidden: every seeded evidence row carries the `seed`
+  marker (`source_ref="seed:..."` or a `seed` key in `detail`), the report's "What this does not
+  establish" names every case opened from seeded evidence, and the report posted on #3217 states
+  whether any case in the real cycle opened from organically collected evidence (the expected
+  answer for the first cycle is "none besides the seeded inference case, unless the lesson or
+  correction adapters opened one", and the report says which)
 - [ ] The `resource_acquisition` investigation produces a prepared adapter and a written vault
   request rendered in the digest, and places no credential; the anti-criterion row passes
 - [ ] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
@@ -1392,9 +1403,16 @@ records an override, plus this plan's own.
 - [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
 - [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
   is exactly seven and carries no activity counter
-- [ ] Lane 6's three seams exist: every model revision carries a `research_process_digest` in
-  lane 6's canonical form, `PlannerArmRunner` registers from the CLI entry when lane 6's module is
-  importable, and every manifest carries `base_revision` and `candidate_ref`
+- [ ] Lane 6's three seams exist: every model revision carries `research_process_spec` in the
+  canonical bytes and a `research_process_digest` computed only by lane 6's function (`None`
+  until lane 6 merges; no second hashing routine in this lane), `PlannerArmRunner` registers
+  from the CLI entry when lane 6's module is importable, and every manifest carries
+  `base_revision` and `candidate_ref`
+- [ ] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
+  passes, and the two human-paced waits (vault request, amendment request) survive the
+  investigation TTL through `case.blocked_by`, `case.summary`, and the tick's keep-alive save
+- [ ] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
+  `batch_size` equals the number of queries actually generated
 - [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -1494,9 +1512,11 @@ task 0 passes.
 - **Agent Type**: builder
 - **Parallel**: true
 - `INVESTIGATION_KINDS` to eight, `INVESTIGATION_STATES` to five, `stage` and the four new plain
-  fields on `ImprovementInvestigation`, three new plain fields on `ImprovementCase`, `lesson` and
-  `promise` on `EVIDENCE_KINDS` with the docstring argument, `VOCABULARY_MAXIMUMS` entry,
-  `FORBIDDEN_INDEX_NAMES` gains `stage`, `dedup_identity`, `evaluation_ids`
+  fields on `ImprovementInvestigation`, four new plain fields on `ImprovementCase`
+  (`evaluation_ids`, `rejected_reason`, `dedup_identity`, `blocked_by`), `research_process_spec`
+  on `ImprovementModelRevision`, `lesson` and `promise` on `EVIDENCE_KINDS` with the docstring
+  argument, `VOCABULARY_MAXIMUMS` entry, `FORBIDDEN_INDEX_NAMES` gains `stage`, `dedup_identity`,
+  `evaluation_ids`, `blocked_by`, `research_process_spec`
 - `ImprovementSettings.promise_detector_enabled` and `cheap_inference_model`, `.env.example`
   declarations with `# @optional`
 - Migrations `improvement_investigation_stage_field` and `retire_sdlc_reflection`, registered
@@ -1517,7 +1537,9 @@ task 0 passes.
 - `collect_promises` with the sampled cheap-model judge, lane 3's meter under purpose
   `promise_detector`, the `enabled` and `promise_detector_enabled` gates, an injectable transport
 - Both adapters in the tick's tuple; the module docstring lists five and names each input's
-  production writer
+  production writer; the status rule becomes `failed`/`skipped` lists with
+  `status = "error" if len(failed) == n_adapters`, replacing the `len(findings) == 3` literal
+  at `:515`, with the two status tests
 - Delete `scripts/sdlc_reflection.py`, `scripts/install_sdlc_reflection.sh`,
   `com.valor.sdlc-reflection.plist`; add `"sdlc-reflection"` to `OBSOLETE_SERVICE_SUFFIXES` with
   a comment; delete `TestCheckExistingReflectionPR`; remove the installer from both dicts in
@@ -1566,12 +1588,16 @@ task 0 passes.
 - `tools/improvement_ranking.py`: `rank` with the five ordinal rules each pinned by a test,
   the lexicographic order with `blocked`, `write_snapshot`, `load_snapshot`, `latest_snapshot`,
   the diff
-- `reflections/improvement_plan.py`: `open_cases` with the identity rules and the novelty check,
-  the pure `plan_tick` core and its `run_improvement_planner` wrapper with the four fail-soft
-  steps, the `enabled` gate, the paused-head refusal, the idempotent single proposal, the
-  `apply_verdict` backstop
-- `process_digest` in `tools/improvement_ranking.py` on lane 6's canonical form, called by
-  `revise-model`; `tools/improvement_plan_arm.py::PlannerArmRunner` and its conditional
+- `reflections/improvement_plan.py`: `open_cases` clustering unconsumed rows (ids absent from
+  every case's `evidence_ids`, watermark as scan bound only) with the identity rules and the
+  novelty check, `test_cluster_opens_across_two_ticks`; the pure `plan_tick` core and its
+  `run_improvement_planner` wrapper with the fail-soft steps, the `enabled` gate, the paused-head
+  refusal, the keep-alive save for awaiting and vault-request rows, the `blocked_by` unblock on a
+  `verified` probe, the idempotent single proposal, the `apply_verdict` backstop
+- `rank()` reads `case.blocked_by` for `blocked`; `process_spec_json` in
+  `tools/improvement_ranking.py` (canonical bytes only; the digest comes from lane 6's import or
+  stays `None`), called by `revise-model`; `test_process_spec_canonical_bytes` with the fixture
+  spec lane 6 can copy; `tools/improvement_plan_arm.py::PlannerArmRunner` and its conditional
   registration from the CLI entry (tests for both, including "nothing registers at import")
 - `register_improvement_planner` and `register_improvement_assumption_digest` in
   `reflection_register.py` and `scripts/update/run.py`; parametrize the six registration tests
@@ -1587,12 +1613,17 @@ task 0 passes.
 - **Assigned To**: experiment-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `tools/improvement_experiment.py`: `ENVELOPES`, `validate_candidate`, `freeze_experiment`
-  (manifest carries `base_revision` and `candidate_ref`), `evaluate_experiment` (reservation then
-  `runner.evaluate`), `apply_verdict`, `repair`
+- `tools/improvement_experiment.py`: `ENVELOPES`, `validate_candidate` (refuses `None` values),
+  `known_item_records(export)` from `export.jsonl_text`, `freeze_experiment` in the seven
+  numbered steps (unconditional #2082 `prior_answers` entry, `MIN_QUERIES` /
+  `KNOWN_ITEM_SHORTFALL`, incumbent exactly `{"limit": 10}`, `batch_size = len(queries)` after
+  generation, manifest carries `base_revision` and `candidate_ref`), `evaluate_experiment`
+  (reservation then `runner.evaluate`), `apply_verdict`, `repair`; tests for the shortfall
+  refusal, the batch-size-after-generation rule, and `prior_answers` naming `#2082`
 - `arm_worker.py::handle_job` and `retrieval.py::retrieve_ranked_ids` pass-throughs, absent keys
   not forwarded
-- `tools/improvement_report.py::build_report` with the three mandatory derived sections
+- `tools/improvement_report.py::is_seeded` and `build_report` with the three mandatory derived
+  sections, including the seeded-inputs line and its two-case test
 - CLI `experiment freeze|evaluate|show|repair`, `report`
 
 ### 7. Digest and dashboard
@@ -1628,8 +1659,10 @@ task 0 passes.
 - **Assigned To**: lead (on the owning machine)
 - **Agent Type**: builder
 - **Parallel**: false
-- Follow "Running the first real cycle" in Technical Approach, steps 1 through 7
-- Record which dispatch path ran (adapter or `valor-session create`) and every reason code seen
+- Follow "Running the first real cycle" in Technical Approach, steps 1 through 7; step 2 seeds a
+  `Memory` with the seed JSON in `reference` and lets `collect_inspirations` write the row
+- Record which dispatch path ran (adapter or `valor-session create`), every reason code seen,
+  and whether any case opened from organically collected evidence
 - Post `valor-improve report --case ID` output on #3217 verbatim, with the claim "loop
   operational" and nothing higher
 
@@ -1687,8 +1720,16 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Charter unwritten by this lane | `git diff --stat origin/main -- docs/improvement-charter.md models/improvement_charter.py \| wc -l` | match count == 0 |
 | `docs/sdlc/` files untouched by the retirement (eleven on main) | `python -c "import glob,sys; sys.exit(0 if len(glob.glob('docs/sdlc/*.md'))==11 else 1)"` | exit code 0 |
 | Existing auto-generated reflection notes preserved | `git diff --stat origin/main -- docs/sdlc/ \| wc -l` | match count == 0 |
-| Process digest matches lane 6's canonical form | `scripts/pytest-clean.sh tests/unit/test_improvement_ranking.py -k process_digest_canonical -q` | exit code 0 |
+| Process spec bytes are canonical | `scripts/pytest-clean.sh tests/unit/test_improvement_ranking.py -k process_spec_canonical_bytes -q` | exit code 0 |
+| This lane hashes no process spec itself (lane 6's function or `None`) | `grep -rEn "def (process_digest\|research_process_digest)" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_experiment.py \| wc -l` | match count == 0 |
 | Manifest carries both refs | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "manifest_carries_base_revision_and_candidate_ref" -q` | exit code 0 |
+| Every retrieval freeze cites #2082 and sizes the batch from the queries produced | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "prior_answers_names_2082 or batch_size_equals_queries_produced or shortfall_refuses" -q` | exit code 0 |
+| The incumbent dict carries no `None`-valued key | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "incumbent_has_no_none_keys" -q` | exit code 0 |
+| A one-row-per-tick cluster still opens | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k cluster_opens_across_two_ticks -q` | exit code 0 |
+| A vault request survives the investigation TTL on the case | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_investigations.py -k "blocked_by_survives_expiry or awaiting_row_kept_alive" -q` | exit code 0 |
+| The report names seeded cases | `scripts/pytest-clean.sh tests/unit/test_improvement_report.py -k seeded_inputs_line -q` | exit code 0 |
+| Tick status counts failures per adapter, never skips | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -k "all_skipped_is_success or all_failed_is_error" -q` | exit code 0 |
+| The three-adapter status literal is gone | `grep -n "len(findings) == 3" reflections/improvement_collect.py \| wc -l` | match count == 0 |
 | Arm runner registers only from the CLI entry | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k "arm_runner" -q` | exit code 0 |
 | Retrieval envelope refuses `retrieval_mode` | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "refuses_retrieval_mode" -q` | exit code 0 |
 | Plan critique verdict recorded | `grep -c "READY TO BUILD" docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md` | output > 0 |
@@ -1699,15 +1740,15 @@ Critique mode: sequential lenses (Agent tool unavailable in the stage runner: no
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Freeze step does not fit lane 4's surfaces: `build_known_item_set(export.records, ...)` names an attribute `CorpusExport` lacks (`corpus.py:130-142` carries `jsonl_text`, not `records`), the builder returns fewer than `n_queries` on degenerate generations, and `"batch_size": n_queries` then makes `FixedBatchStoppingRule.is_complete` (`correction.py:95-97`, `runner.py:768-770`) return `inconclusive` unconditionally on any shortfall. | pending | Build `records` from `export.jsonl_text` via a small adapter type carrying `content`, `importance`, `memory_id`; `queries = [...]` from the generated items; refuse with `KNOWN_ITEM_SHORTFALL` below a stated `MIN_QUERIES`; set `protocol["batch_size"] = len(queries)` after generation. The incumbent dict passed to `capture_baseline` and written to `protocol["incumbent"]` must be exactly `{"limit": 10}` with no `None`-valued keys, because `_retrieve_job` (`runner.py:291-299`) copies every present key into the job and a present `None` is not "absent". |
-| CONCERN | Risk & Robustness | `ImprovementInvestigation` and `ImprovementEvidence` carry `Meta.ttl = 86400 * 30` (`models/improvement_investigation.py:96-99`, `models/improvement_evidence.py:141-146`) while the case is immortal; the `vault_request_written` disposition that keeps the inference case blocked, and the `charter_amendment` row in `awaiting_authorization`, both wait on Tom with no deadline and expire silently after thirty days (block lifts or reason vanishes, digest cannot render the request, no decline is ever recorded). | pending | Add plain unindexed `blocked_by = Field(null=True)` on `ImprovementCase` (add to `FORBIDDEN_INDEX_NAMES`), set by `resolve()` on a `vault_request_written` disposition (`"vault request: <item title>"`) and cleared by the tick when `tools.improvement_resources.probe` reports `verified`; `rank()` reads `case.blocked_by`, never an investigation. For amendments, the tick's amendment-resolution hook calls `investigation.save()` each tick while `state == "awaiting_authorization"` (refreshing the TTL) and writes the request text onto `case.summary` the way the assumption tail is written. |
-| CONCERN | Scope & Value | A second implementation of lane 6's canonical form (`tools/improvement_ranking.py::process_digest`, "so the two agree byte for byte once both exist") is the drift the verifying store exists to prevent; one field-order or float-formatting difference makes every revision digest written before lane 6 merges incomparable with every one after. | pending | Keep one implementation: store the canonical spec JSON on the revision (`research_process_spec = Field(null=True)`, `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`), set `research_process_digest` only via `from tools.improvement_recursion.process import research_process_digest` and leave it `None` when the import fails; a one-line backfill computes digests for rows with a spec and no digest once lane 6 lands. The fixture test pins the canonical spec bytes, shareable verbatim with lane 6's plan. |
-| CONCERN | Scope & Value | The first case is planted by the builder ("an `inspiration` row the builder writes citing charter §3"), and nothing in the records distinguishes a seeded row from an observed one, so the report's "What this does not establish" cannot say it and a reader of the records alone cannot tell. This is the root-cause pattern the plan itself names (output whose input had no validated connection to behavior). | pending | Seed with `source_ref="seed:charter-s3:inference"` and `detail=json.dumps({"seeded_by": "build task 9", "plan": "#3217"})`; `build_report` adds to "What this does not establish" every case whose evidence has any `source_ref.startswith("seed:")`; Success Criteria state whether any case in the real cycle opened from organically collected evidence. Integration tests keep using seeded rows (they test mechanism, not provenance). |
-| CONCERN | History & Consistency | The freeze's novelty check cites `docs/plans/hybrid-retrieval-eval.md`, which does not exist (migrated to `docs/archive/plans-completed/hybrid-retrieval-eval.md` in 449df07a0; live doc `docs/features/hybrid-retrieval-eval.md`), and its trigger ("varies only `retrieval_mode`-adjacent behavior") is too vague for a builder to apply, so the one prior answer the plan says must be surfaced may never be. | pending | In `freeze_experiment`: `if envelope == "retrieval_parameters": prior_answers.append({"ref": "#2082", "doc": "docs/features/hybrid-retrieval-eval.md", "plan": "docs/archive/plans-completed/hybrid-retrieval-eval.md", "why": "prior paired evaluation of retrieval over this corpus"})`, unconditionally for this envelope; `test_improvement_experiment.py` asserts a frozen retrieval experiment's `prior_answers` names `#2082`. |
-| CONCERN | History & Consistency | Case opening "reads evidence rows newer than the last tick's watermark" and opens a case only at `CASE_OPEN_MIN_EVIDENCE = 2` rows; a cluster that accrues one row per tick never has two rows inside one window, the watermark advances past the first, and the cluster never opens (only the single-`architectural` exception or rows landing between the same two ticks ever become cases). The `rejected_is_not_reproposed` test seeds both rows at once and cannot see this. | pending | Cluster over unconsumed rows, not a time window: `consumed = {eid for c in ImprovementCase.query.filter(project_key=pk) for eid in (c.evidence_ids or [])}`; `pending = [e for e in evidence_rows_since(watermark_minus_ttl) if e.id not in consumed]`; cluster `pending` by `dedup_identity`; open at `len(cluster) >= CASE_OPEN_MIN_EVIDENCE` and append every cluster row id to `case.evidence_ids` in the same save. Add a planner test: one row, tick, second row same identity, tick, exactly one case with both ids. |
-| CONCERN | History & Consistency | Success Criteria say the existing memory-inspiration adapter is "exercised end to end in the real cycle", but runbook step 2 seeds the `inspiration` evidence row directly; `collect_inspirations` reads `human_memories(project_key)` (`reflections/improvement_collect.py:205`, `:329`) and writes the row itself, so a directly written row bypasses the adapter and no Verification row would notice. | pending | Runbook step 2 becomes: save one `Memory` row into the partition `human_memories` enumerates, with the fields (including the URL) `collect_inspirations` keys on, then run `run_improvement_collect()` and assert `counts["inspirations"] >= 1`; the seeded memory carries the `seed:` marker in whatever field survives into `source_ref`. |
-| NIT | History & Consistency | `run_improvement_collect`'s status rule is hard-coded to three adapters (`"status": "error" if len(findings) == 3`, `reflections/improvement_collect.py:511`), and the promise adapter's meter-refusal skip is appended to `findings`, so a routine unit-2 refusal would count toward "error" once five adapters exist. | pending | Track failures and skips in separate lists; `status = "error" if len(failed) == n_adapters else "success"`. |
-| NIT | History & Consistency | Freshness Check says lane 6's plan is "on `session/sdlc-3218`, not yet on main"; it is on main as of `ee656d8af`. | pending | Drop the branch qualifier in the revision pass. |
+| CONCERN | Risk & Robustness | Freeze step does not fit lane 4's surfaces: `build_known_item_set(export.records, ...)` names an attribute `CorpusExport` lacks (`corpus.py:130-142` carries `jsonl_text`, not `records`), the builder returns fewer than `n_queries` on degenerate generations, and `"batch_size": n_queries` then makes `FixedBatchStoppingRule.is_complete` (`correction.py:95-97`, `runner.py:768-770`) return `inconclusive` unconditionally on any shortfall. | Technical Approach: "Consumed from lane 4" (`known_item_records` from `jsonl_text`, incumbent exactly `{"limit": 10}`); "Experiments" freeze steps 3-6 (`MIN_QUERIES`/`KNOWN_ITEM_SHORTFALL`, `batch_size = len(queries)` after generation); spike-1 correction; Data Flow step 4; task 6; Verification rows "Every retrieval freeze cites #2082 and sizes the batch" and "incumbent dict carries no `None`" | Build `records` from `export.jsonl_text` via a small adapter type carrying `content`, `importance`, `memory_id`; `queries = [...]` from the generated items; refuse with `KNOWN_ITEM_SHORTFALL` below a stated `MIN_QUERIES`; set `protocol["batch_size"] = len(queries)` after generation. The incumbent dict passed to `capture_baseline` and written to `protocol["incumbent"]` must be exactly `{"limit": 10}` with no `None`-valued keys, because `_retrieve_job` (`runner.py:291-299`) copies every present key into the job and a present `None` is not "absent". |
+| CONCERN | Risk & Robustness | `ImprovementInvestigation` and `ImprovementEvidence` carry `Meta.ttl = 86400 * 30` (`models/improvement_investigation.py:96-99`, `models/improvement_evidence.py:141-146`) while the case is immortal; the `vault_request_written` disposition that keeps the inference case blocked, and the `charter_amendment` row in `awaiting_authorization`, both wait on Tom with no deadline and expire silently after thirty days (block lifts or reason vanishes, digest cannot render the request, no decline is ever recorded). | Records (`blocked_by` on `ImprovementCase`, unindexed); Ranking (`blocked = bool(case.blocked_by)`); Planner tick keep-alive and unblock step; Investigations (`resolve()` sets `blocked_by` and copies request text onto `case.summary`; amendment text onto `case.summary`); Race 3; task 5; Verification row "A vault request survives the investigation TTL" | Add plain unindexed `blocked_by = Field(null=True)` on `ImprovementCase` (add to `FORBIDDEN_INDEX_NAMES`), set by `resolve()` on a `vault_request_written` disposition (`"vault request: <item title>"`) and cleared by the tick when `tools.improvement_resources.probe` reports `verified`; `rank()` reads `case.blocked_by`, never an investigation. For amendments, the tick's amendment-resolution hook calls `investigation.save()` each tick while `state == "awaiting_authorization"` (refreshing the TTL) and writes the request text onto `case.summary` the way the assumption tail is written. |
+| CONCERN | Scope & Value | A second implementation of lane 6's canonical form (`tools/improvement_ranking.py::process_digest`, "so the two agree byte for byte once both exist") is the drift the verifying store exists to prevent; one field-order or float-formatting difference makes every revision digest written before lane 6 merges incomparable with every one after. | "Provided to lane 6" item 1 (store `research_process_spec` bytes, digest only via lane 6's import else `None`, backfill once lane 6 lands); Records (`research_process_spec` on `ImprovementModelRevision`); task 5; Success Criteria; Verification rows "Process spec bytes are canonical" and "This lane hashes no process spec itself" | Keep one implementation: store the canonical spec JSON on the revision (`research_process_spec = Field(null=True)`, `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`), set `research_process_digest` only via `from tools.improvement_recursion.process import research_process_digest` and leave it `None` when the import fails; a one-line backfill computes digests for rows with a spec and no digest once lane 6 lands. The fixture test pins the canonical spec bytes, shareable verbatim with lane 6's plan. |
+| CONCERN | Scope & Value | The first case is planted by the builder ("an `inspiration` row the builder writes citing charter §3"), and nothing in the records distinguishes a seeded row from an observed one, so the report's "What this does not establish" cannot say it and a reader of the records alone cannot tell. This is the root-cause pattern the plan itself names (output whose input had no validated connection to behavior). | "The first resource-acquisition action" (seed marker: `source_ref="seed:..."` or `seed` key in `detail`; `is_seeded()` single definition); "The qualified-result report" seeded-inputs line and its test; Success Criteria "Seeded provenance is stated"; task 6; Verification row "The report names seeded cases" | Seed with `source_ref="seed:charter-s3:inference"` and `detail=json.dumps({"seeded_by": "build task 9", "plan": "#3217"})`; `build_report` adds to "What this does not establish" every case whose evidence has any `source_ref.startswith("seed:")`; Success Criteria state whether any case in the real cycle opened from organically collected evidence. Integration tests keep using seeded rows (they test mechanism, not provenance). |
+| CONCERN | History & Consistency | The freeze's novelty check cites `docs/plans/hybrid-retrieval-eval.md`, which does not exist (migrated to `docs/archive/plans-completed/hybrid-retrieval-eval.md` in 449df07a0; live doc `docs/features/hybrid-retrieval-eval.md`), and its trigger ("varies only `retrieval_mode`-adjacent behavior") is too vague for a builder to apply, so the one prior answer the plan says must be surfaced may never be. | Prior Art PR #2135 entry (archived plan and live doc paths); "Experiments" freeze step 2 (unconditional `prior_answers` entry for the envelope); task 6; Verification row "Every retrieval freeze cites #2082" | In `freeze_experiment`: `if envelope == "retrieval_parameters": prior_answers.append({"ref": "#2082", "doc": "docs/features/hybrid-retrieval-eval.md", "plan": "docs/archive/plans-completed/hybrid-retrieval-eval.md", "why": "prior paired evaluation of retrieval over this corpus"})`, unconditionally for this envelope; `test_improvement_experiment.py` asserts a frozen retrieval experiment's `prior_answers` names `#2082`. |
+| CONCERN | History & Consistency | Case opening "reads evidence rows newer than the last tick's watermark" and opens a case only at `CASE_OPEN_MIN_EVIDENCE = 2` rows; a cluster that accrues one row per tick never has two rows inside one window, the watermark advances past the first, and the cluster never opens (only the single-`architectural` exception or rows landing between the same two ticks ever become cases). The `rejected_is_not_reproposed` test seeds both rows at once and cannot see this. | "Case opening and the novelty check" (cluster unconsumed rows, watermark as scan bound, `evidence_ids` appended in the opening save, `test_cluster_opens_across_two_ticks`); Data Flow step 2(b); task 5; Success Criteria; Verification row "A one-row-per-tick cluster still opens" | Cluster over unconsumed rows, not a time window: `consumed = {eid for c in ImprovementCase.query.filter(project_key=pk) for eid in (c.evidence_ids or [])}`; `pending = [e for e in evidence_rows_since(watermark_minus_ttl) if e.id not in consumed]`; cluster `pending` by `dedup_identity`; open at `len(cluster) >= CASE_OPEN_MIN_EVIDENCE` and append every cluster row id to `case.evidence_ids` in the same save. Add a planner test: one row, tick, second row same identity, tick, exactly one case with both ids. |
+| CONCERN | History & Consistency | Success Criteria say the existing memory-inspiration adapter is "exercised end to end in the real cycle", but runbook step 2 seeds the `inspiration` evidence row directly; `collect_inspirations` reads `human_memories(project_key)` (`reflections/improvement_collect.py:205`, `:329`) and writes the row itself, so a directly written row bypasses the adapter and no Verification row would notice. | "Running the first real cycle" step 2 (seed a `Memory`, run `run_improvement_collect()`, assert `counts["inspirations"] >= 1`); "The first resource-acquisition action" (seed JSON in `reference` becomes `detail`); task 9; Success Criteria | Runbook step 2 becomes: save one `Memory` row into the partition `human_memories` enumerates, with the fields (including the URL) `collect_inspirations` keys on, then run `run_improvement_collect()` and assert `counts["inspirations"] >= 1`; the seeded memory carries the `seed:` marker in whatever field survives into `source_ref`. |
+| NIT | History & Consistency | `run_improvement_collect`'s status rule is hard-coded to three adapters (`"status": "error" if len(findings) == 3`, `reflections/improvement_collect.py:511`), and the promise adapter's meter-refusal skip is appended to `findings`, so a routine unit-2 refusal would count toward "error" once five adapters exist. | "Observer adapters" tick status rule (`failed`/`skipped` lists, `status = "error" if len(failed) == n_adapters`); Data Flow step 1; Risk 5; Test Impact; task 2; Verification rows "Tick status counts failures per adapter" and "The three-adapter status literal is gone" | Track failures and skips in separate lists; `status = "error" if len(failed) == n_adapters else "success"`. |
+| NIT | History & Consistency | Freshness Check says lane 6's plan is "on `session/sdlc-3218`, not yet on main"; it is on main as of `ee656d8af`. | Freshness Check (#3218 row and the active-plans list now say on main, first landed at `ee656d8af`) | Drop the branch qualifier in the revision pass. |
 
 ---
 
