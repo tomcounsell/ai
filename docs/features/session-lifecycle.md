@@ -551,20 +551,20 @@ BaseException` clause in `_execute_agent_session` sets the flag and re-raises;
 the `except asyncio.CancelledError` clause precedes it, so a cancel is never
 misread as a raise.
 
-On the raise path the guard does not change the row's eventual status — it
-changes *when* the status lands. The worker's outer `finally` in
-`agent_session_queue.py` gates on `not session_completed and not
-finalized_by_execute`, and `finalized_by_execute` is set only on a
-non-exceptional return, so a raise already took that crash path and wrote
-`failed` in the same turn. The guard writes the same `failed` earlier, ahead
-of the synthetic-slug worktree cleanup that refuses to reclaim a lane whose
-row still reads `running`; the worker's later write then hits
-`finalize_session`'s idempotent same-status early return. That agreement is
-the point: two writers landing on *different* terminal statuses raise
-`StatusConflictError`, which the worker's retry re-raises out of its outer
-`finally` and kills the worker loop, stranding every session on that
-`worker_key` (#3253). Forcing `failed` on the raise exit is what keeps the
-two writers in agreement.
+On the raise path the guard is the *sole* terminal writer, not an earlier
+duplicate. The worker's outer `finally` in `agent_session_queue.py` is still
+entered — it gates on `not session_completed and not finalized_by_execute`,
+and `finalized_by_execute` is set on the non-exceptional return and on the
+deadline-kill/terminal path, never on a raise — but it re-reads the
+authoritative row before writing, and the already-terminal skip branch
+documented above then logs at INFO and performs no completion write at all.
+The guard also lands ahead of the synthetic-slug worktree cleanup, which
+refuses to reclaim a lane whose row still reads `running`.
+
+That is precisely why `raised=True` must force `failed`: with no second
+writer to disagree with, this is the only chance to record the outcome
+honestly, and a `completed` written here for an executor that unwound on an
+exception would stand unchallenged.
 
 Cancellation is the one exit deliberately excluded. `_execute_agent_session`
 carries an `except asyncio.CancelledError` whose only job is to mark the exit

@@ -134,27 +134,34 @@ def _finalize_if_still_running(
     path the old in-``try`` guard reached (#3209).
 
     Why finalizing the raise path here is safe, stated precisely because an
-    earlier revision of this docstring got it wrong. It is NOT that a raise
-    lacks a downstream owner. It has one: the worker's outer ``finally``
-    (``agent_session_queue.py:2957``) gates on
-    ``not session_completed and not finalized_by_execute``, and
-    ``finalized_by_execute`` is set only on a non-exceptional return
-    (``:2767``), so a raise takes that crash path and calls
-    ``_complete_agent_session(session, failed=True)`` in the SAME turn. The
-    row is therefore already destined for ``failed`` microseconds later. This
-    guard does not change that outcome -- it moves the write EARLIER, ahead of
-    the synthetic-slug worktree cleanup below, which refuses to reclaim a lane
+    earlier revision of this docstring got it wrong twice. This guard is not a
+    duplicate write that merely lands earlier: on the raise path it is the
+    SOLE terminal writer. The worker's outer completion ``finally``
+    (``_worker_loop``, gated on
+    ``not session_completed and not finalized_by_execute``) is still entered,
+    because ``finalized_by_execute`` is set on the non-exceptional return and
+    on the deadline-kill/terminal path, never on a raise. But that block
+    re-reads the authoritative row before writing, and its
+    ``elif fresh.status in TERMINAL_STATUSES`` branch -- whose comment names
+    this finalize guard as one of the legitimate first writers -- logs at INFO
+    and performs no completion write at all. So the status this guard records
+    is the status the session ends on, and it also lands ahead of the
+    synthetic-slug worktree cleanup below, which refuses to reclaim a lane
     whose row still reads ``running``.
 
-    Because both writers land on the same terminal status, the second one hits
-    ``finalize_session``'s idempotent same-status early return and is a no-op.
-    That agreement is load-bearing, not incidental: two writers reaching
-    DIFFERENT terminal statuses raise ``StatusConflictError``, and the worker's
-    retry at ``agent_session_queue.py:3028`` re-raises it out of the outer
-    ``finally``, killing the worker loop and stranding every session on that
-    ``worker_key`` (#3253). That is exactly why ``raised=True`` must force
-    ``failed`` below rather than letting ``_runner_final_status`` report
-    ``completed`` -- see "Status honesty".
+    That makes ``raised=True`` forcing ``failed`` below MORE load-bearing, not
+    less. The point is not agreement with a second writer about to say the
+    same thing -- there is no second writer. This is the only chance to record
+    the outcome honestly, so a ``completed`` written here for an executor that
+    unwound on an exception would stand unchallenged. See "Status honesty".
+
+    Divergent-terminal writes are no longer a worker-loop hazard regardless.
+    The worker's ``_complete_agent_session`` call is wrapped in an
+    ``except StatusConflictError`` that logs at INFO and must not propagate
+    (#3253, the third member of the #1803/#2088 family, closed by #3280).
+    Every cross-module reference in this docstring is anchored by symbol
+    rather than line number on purpose: the line numbers it used to carry all
+    rotted.
 
     Cancellation is deliberately excluded by the caller, and there the owner
     argument DOES hold: ``_agent_session_health_check`` cancels the task and
@@ -207,8 +214,9 @@ def _finalize_if_still_running(
     subprocesses on the event loop, and this guard now reaches them on the raise
     path too. ``skip_checkpoint=True`` is deliberately NOT passed -- this guard
     is the only finalizer that REACHES the checkpoint step on that path (the
-    worker's later same-status write returns at ``finalize_session``'s
-    idempotency check, before checkpointing), so skipping the checkpoint would
+    worker's outer completion ``finally`` takes its already-terminal skip
+    branch and never calls ``finalize_session`` at all), so skipping the
+    checkpoint would
     drop the lane's branch state for exactly the sessions whose lane most needs
     reclaiming. Making the checkpoint non-blocking is a separate change.
     """
@@ -2851,10 +2859,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # === Finalize guarantee (#2007, #3209) ===
         # Runs on every exit this function owns -- normal return AND raise --
         # and before the worktree cleanup below, which refuses to remove a lane
-        # whose row is still `running`. On the raise path this does not change
-        # the row's eventual status (the worker's outer `finally` writes the
-        # same `failed` in the same turn); it just gets there before the
-        # cleanup reads it. Cancellation is excluded because its owner is still
+        # whose row is still `running`. On the raise path this is the sole
+        # terminal writer: the worker's outer `finally` re-reads the row and
+        # takes its already-terminal skip branch rather than writing. That is
+        # why `raised` forces `failed` -- see `_finalize_if_still_running`.
+        # Cancellation is excluded because its owner is still
         # deciding (see the `except asyncio.CancelledError` above).
         # Keyed on `status == "running"`, so the nudge path's `pending` write
         # survives untouched; see `_finalize_if_still_running` for why that
