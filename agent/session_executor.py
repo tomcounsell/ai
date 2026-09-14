@@ -206,8 +206,10 @@ def _finalize_if_still_running(
     NOTE: ``finalize_session``'s checkpoint step runs two 5s-bounded ``git``
     subprocesses on the event loop, and this guard now reaches them on the raise
     path too. ``skip_checkpoint=True`` is deliberately NOT passed -- this guard
-    is the only finalizer on that path, so skipping the checkpoint would drop
-    the lane's branch state for exactly the sessions whose lane most needs
+    is the only finalizer that REACHES the checkpoint step on that path (the
+    worker's later same-status write returns at ``finalize_session``'s
+    idempotency check, before checkpointing), so skipping the checkpoint would
+    drop the lane's branch state for exactly the sessions whose lane most needs
     reclaiming. Making the checkpoint non-blocking is a separate change.
     """
     try:
