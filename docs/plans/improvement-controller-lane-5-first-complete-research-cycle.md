@@ -893,7 +893,59 @@ Success Criteria below claim only what the records show.
 
 ## Failure Path Test Strategy
 
-(filled below)
+### Exception Handling Coverage
+- [ ] `reflections/improvement_collect.py`: every adapter is wrapped at `:500-505` with
+  `logger.warning` and a `findings` entry. The two new adapters follow the same shape, and each
+  gains a test that injects a raising `gh` runner (lessons) and a raising judge transport
+  (promises) and asserts the warning text, the `findings` entry, and that the other adapters'
+  counts are unaffected.
+- [ ] `reflections/improvement_plan.py`: each of the four steps is wrapped independently; a test
+  per step injects a failure (store unwritable, journal refusal reason code, `pinned()` returning
+  `None`) and asserts the tick's `status`, the `findings` text, and that no `ImprovementCase` was
+  written by a step after the failure. A `pinned() is None` ends the tick with `status="error"`
+  and zero writes, asserted by counting rows before and after.
+- [ ] `tools/improvement_experiment.py`: `freeze_experiment` wraps `build_known_item_set` and
+  `capture_baseline`; a failure in either leaves the experiment in `proposed`, writes no protocol,
+  and returns a reason; a test asserts the experiment record is unchanged and the store holds no
+  new `protocol-` key. `evaluate` does not catch: lane 4's runner owns its three disjoint handlers.
+- [ ] `reflections/improvement_assumption_digest.py`: a `send_host_eng_telegram` returning
+  `False` records `findings=["digest-not-delivered"]` and does **not** advance the watermark, so
+  the next digest re-sends; asserted by two runs with the transport failing then succeeding.
+- [ ] `tools/improvement_ranking.py::load_snapshot`: `ArtifactIntegrityError` propagates to the
+  CLI (exit 2, message printed) and is caught by `ui/data/improvement.py::get_ranking` into
+  `unavailable=True`; both asserted, the second by corrupting the archive copy the way lane 4's
+  mutation test does.
+
+### Empty/Invalid Input Handling
+- [ ] `rank([])` returns an empty order and `write_snapshot` still writes a snapshot with an empty
+  `order` and a diff naming every previously ranked case under `left` with reason
+  `"no open cases"`; asserted.
+- [ ] `record_claims` with an empty list, `None`, or whitespace-only `claim` text: empty list is a
+  no-op returning 0; `None` raises `ValueError` at the boundary (the CLI prints it); a
+  whitespace-only claim is stored as a note with `is_claim=False`; each asserted.
+- [ ] `build_brief` for a case with no evidence renders the charter and the case and the line
+  "No evidence rows are attached to this case" rather than an empty section; asserted.
+- [ ] `collect_promises` with an empty outbound log, an entry whose `content` is empty, and a judge
+  returning unparseable text: zero rows, zero rows, and zero rows plus a `findings` entry naming
+  the parse failure; each asserted.
+- [ ] `collect_lessons` with a PR body of `None` or a body with no prefixed lines: zero rows, no
+  exception; asserted.
+- [ ] `validate_candidate({})` and `validate_candidate(incumbent)` both refuse with distinct reason
+  codes; asserted.
+- [ ] The research session's empty output is not this lane's to loop on: it runs under lane 3's
+  dispatch and the executor's turn deadline, and the planner tick proposes at most one action per
+  tick, so an idle session cannot make the tick spin.
+
+### Error State Rendering
+- [ ] Each new partial renders three distinguishable states (content, "nothing yet", "unavailable")
+  on the goals partial's pattern (`ui/templates/improvement/goals.html`), and a test hits each route
+  in each state and asserts the distinguishing text; a corrupted snapshot renders "unavailable" and
+  the `ArtifactIntegrityError` message, never a stale order.
+- [ ] `valor-improve ranking --at <bad digest>` prints the integrity error to stderr and exits 2;
+  `valor-improve experiment show` on an `aborted` experiment prints the `notes` that name the
+  infra failure; both asserted through the CLI entry point.
+- [ ] The report's "What this does not establish" section is non-empty for every verdict,
+  including `accept`; asserted with a seeded accept.
 
 ## Test Impact
 
@@ -914,19 +966,163 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 
 ## Rabbit Holes
 
-(filled below)
+- **Building the agent-run arm "while we are in there."** It is the natural next thing and it is
+  a lane of its own (#3311). This lane's envelope is retrieval parameters, and the validator
+  refuses anything else so a builder cannot drift into it.
+- **A numeric ranking score.** Weights nobody calibrated produce an order nobody can defend.
+  Ordinal factors with stated rules, lexicographic order, and a diff that names why something
+  moved.
+- **Making the planner clever.** The tick is deterministic rules over records. Every place
+  judgment is needed is the research session's, and the session reaches state only through
+  `valor-improve`. An LLM call inside the tick would make the ranking unreproducible.
+- **Making the promise detector precise.** It is a sampled, cheap, yes/no judge whose rows are
+  evidence with `confidence`. Tuning its prompt to a benchmark that does not exist is the
+  autoexperiment failure with a new name.
+- **Rebuilding the known-item set.** `build_known_item_set` exists, is seeded, and skips
+  degenerate generations. Reuse it.
+- **A second lease, journal, or dead-letter sink.** Lane 3's. If it is not there, wait.
+- **Keeping `sdlc_reflection.py` around "just in case."** Development principle 1. The lessons
+  it scraped are now evidence rows with a reader; the script has no remaining job.
+- **Reading `retrieval_mode` into the envelope.** It is an environment setting, not a call
+  parameter, and lane 4's arena test pins the arm environment (spike-2).
+- **Treating the first real cycle as a demonstration of improvement.** It demonstrates that the
+  loop runs. The report's mandatory sections say what it does not establish, and the Success
+  Criteria claim level 1 only.
 
 ## Risks
 
-(filled below)
+### Risk 1: The build starts before lanes 3 and 4 merge and drifts against a moving head
+**Impact:** The consumed contract (journal, `propose`, the harness) shifts under the build; the
+lane ships against names that no longer exist.
+**Mitigation:** Prerequisites gate every lane-3 and lane-4 surface by import, and the build's
+first commit corrects any name to what merged. Nothing is stubbed. If lane 3 lands `propose`
+without a Python seam, the planner shells to the CLI (Technical Approach, "Consumed from lane 3").
+
+### Risk 2: The novelty check is a string heuristic and lets a rejected idea back in with new wording
+**Impact:** The loop rediscovers its own dead end; the acceptance criterion "a rejected hypothesis
+is not re-proposed" holds only for identical wording.
+**Mitigation:** The dedup identity is classification plus a normalized prefix, and the rule is
+stated so its limits are known. The brief shows rejected cases in the same `priority_area` with
+their reasons, so the research session sees the prior answer before proposing. The report's
+"What this does not establish" names the identity rule's limit. A semantic novelty check is a
+research target for the loop itself, not a builder's guess.
+
+### Risk 3: The evaluation's judge calls exhaust unit 2 or hit an `unknown` metering
+**Impact:** Lane 4's runner raises `InfraFailure` on an unreachable judge and the experiment lands
+`aborted`; the cycle stops without a verdict.
+**Mitigation:** `experiment evaluate` reserves `evaluation_judges` before starting and refuses
+with a reason if the reservation fails, so the abort is a refusal, not a mid-run failure. An
+`infra_failure` leaves the case where it was and records a `probe` investigation naming the cause;
+`experiment repair` returns the experiment to `frozen` for a retry once unit 2 reopens.
+
+### Risk 4: Thirty known-item queries are underpowered and every verdict is `inconclusive`
+**Impact:** The cycle completes with a verdict that moves the case back to `investigating`; the
+demonstration of "verdict changes selection" is a move within the open set, not an exit.
+**Mitigation:** That is a legitimate outcome and the snapshot diff still shows the move (the
+`uncertainty` factor resets to high, and the position changes). The report says the sample is a
+placeholder. `n_queries` is a parameter of `freeze`, and the second cycle can raise it under the
+same contract shape. The plan does not pretend 30 is powered.
+
+### Risk 5: The promise detector spends money on the fifteen-minute tick
+**Impact:** Ten judge calls per tick is 960 calls a day at a cheap model's price, and unit 2 is
+shared with the evaluator.
+**Mitigation:** Off by default (`promise_detector_enabled=False`); reserves through lane 3's meter
+under its own purpose so it cannot starve `evaluation_judges`; skips with a `findings` entry when
+the meter refuses; the sample cap is a named constant. The cheap model is the one in
+`ImprovementSettings.cheap_inference_model` when set, else `OPENROUTER_GEMMA4_FREE`.
+
+### Risk 6: The digest becomes a question by accident
+**Impact:** Charter §11 is violated the moment a rendered line reads as a request for direction.
+**Mitigation:** The fixed closing line, the no-`?` assertion outside quoted assumption bodies, and
+no import of any poll or `AskUserQuestion` symbol, all tested. Vault requests are phrased as
+statements of what the adapter expects, not as asks.
+
+### Risk 7: Retiring `sdlc_reflection.py` loses lessons already in flight
+**Impact:** A PR merged between the last cron run and the retirement never has its lessons read.
+**Mitigation:** `collect_lessons`'s first run uses a 14-day window (the script's own lookback was
+7), so the gap is covered twice over, and dedup makes the overlap free.
+
+### Risk 8: The first real cycle needs lane 3's dispatch on this machine and it is not enabled
+**Impact:** The run stalls at step 4 of the runbook.
+**Mitigation:** The runbook names the fallback: `valor-session create` for the research skill with
+the case id is the same top-level path the adapter uses, and the report records which path ran.
+The integration test does not depend on dispatch at all: it drives the research steps through the
+Python functions the CLI wraps.
 
 ## Race Conditions
 
-(filled below)
+### Race 1: Two planner ticks run concurrently and both propose for the same case
+**Location:** `reflections/improvement_plan.py::propose_one_action`
+**Trigger:** The reflection scheduler restarts while a tick is mid-flight, or an operator runs the
+tick by hand during a scheduled one.
+**Data prerequisite:** The snapshot reference on the controller head payload.
+**State prerequisite:** The case's intent state in lane 3's record.
+**Mitigation:** The action id is a digest of `(case_id, snapshot_ref, action_kind)`, so both ticks
+compute the same id and lane 3's intent record dedups on it; the journal's `transition` refuses
+the second `ranking_recorded` at the same expected revision with a reason code, and the loser
+reports `findings=["ranking_recorded refused: revision moved"]` and writes no proposal.
+
+### Race 2: The evaluation finishes while the planner tick is reading the case
+**Location:** `tools/improvement_experiment.py::apply_verdict` versus
+`reflections/improvement_plan.py::rank`
+**Trigger:** `experiment evaluate` returns during a tick.
+**Data prerequisite:** The `ImprovementEvaluation` row with a verdict.
+**State prerequisite:** The case at `evaluating`.
+**Mitigation:** `apply_verdict` journals `verdict_applied` before the ORM save; the tick reads the
+head, and a case whose head revision moved since the tick's snapshot read is re-read once before
+ranking. The backstop in the next tick applies any `complete` evaluation whose case still reads
+`evaluating`, so a verdict is never lost, only delayed one tick.
+
+### Race 3: The research session records claims on an investigation the tick just expired
+**Location:** `tools/improvement_investigations.py::record_claims`
+**Trigger:** A 30-day TTL or an `expires_at` passes mid-session.
+**Data prerequisite:** The investigation row.
+**State prerequisite:** `state="open"`.
+**Mitigation:** `record_claims` re-reads the row and refuses on a missing row or a non-`open`
+state with a reason code; the session opens a new investigation citing the old id in
+`prior_answers`. The TTL is thirty days and a session is hours, so this is a correctness rule more
+than an expected event.
+
+### Race 4: The digest and a resolving session touch the same watermark
+**Location:** `reflections/improvement_assumption_digest.py`
+**Trigger:** An investigation resolves with an assumption between the digest's read and its
+watermark write.
+**Data prerequisite:** `resolved_at` on the investigation (set by `resolve`).
+**State prerequisite:** None.
+**Mitigation:** The watermark is the newest `resolved_at` the digest actually rendered, not
+"now", so a row resolved after the read is newer than the watermark and appears in the next
+digest. Watermark writes happen only after a successful send.
 
 ## No-Gos (Out of Scope)
 
-(filled below)
+- [SEPARATE-SLUG #3311] The paired agent-run arm, charter §5 stages 4 and 5 of the
+  skill-acquisition cycle, and the cheap-inference integration experiment once a credential is
+  vaulted. This lane's envelope is retrieval parameters; the validator refuses anything else, and
+  the Verification row "the arm worker still reads only what `retrieve_memories` accepts" is the
+  anti-criterion.
+- [SEPARATE-SLUG #3218] Any writer for `ImprovementRelease`, exposure assignment, rollback, or
+  promotion on an `accept` verdict. `apply_verdict` leaves an accepted case at `evaluating`. The
+  Verification row "No `ImprovementRelease` writer in this lane" is the anti-criterion.
+- [SEPARATE-SLUG #3215] The control journal, the lease, dispatch intents, the scheduler adapter,
+  `propose`, `propose-amendment`, the paid-inference meter, `vault_write`, and the base CLI. This
+  lane consumes each and adds subcommands to the CLI; it opens no PR against
+  `agent/agent_session_queue.py` and defines no second journal.
+- [SEPARATE-SLUG #3216] Every gate inside `tools/improvement_eval/` except the two pass-through
+  keys in the arm worker. The Verification row on `handle_job` bounds the edit.
+- [EXTERNAL] Placing any credential. The resource-acquisition action writes a vault request;
+  Tom places the item in `m-valor` or declines. No controller module writes `.env` or invokes
+  `op`; `tools/improvement_resources.probe` (read-only) and lane 3's `tools/vault_write.py` are the
+  only improvement-path `op` callers. The Verification row asserts it.
+- [ORDERED] Amending `docs/improvement-charter.md` or `models/improvement_charter.py`. The
+  session may `propose-amendment`; only Tom authorizes. The Verification row "Charter unwritten by
+  this lane" is the anti-criterion.
+- [DESTRUCTIVE] Deleting the "Reflection Notes (auto-generated)" sections that
+  `sdlc_reflection.py` already appended to `docs/sdlc/*.md`. They are history; the retirement
+  removes the writer, not what it wrote. A Verification row asserts the `docs/sdlc/` stub count is
+  unchanged.
+- [ORDERED] Turning `IMPROVEMENT__ENABLED` or `promise_detector_enabled` on in any machine's
+  `.env`. The first real cycle runs with the switch set in the invoking shell; leaving the loop on
+  is an operating decision Tom makes after reading the report.
 
 ## Update System
 
