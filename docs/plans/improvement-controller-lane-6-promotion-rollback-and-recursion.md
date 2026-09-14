@@ -712,24 +712,45 @@ class ResearchProcessSpec:
 
 def research_process_digest(spec: ResearchProcessSpec) -> str: ...  # "sha256:<hex>" of canonical JSON
 ```
-Canonical JSON is `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))`, so key order
-never changes the digest. Validation: `unknown = set(split) - set(INVESTIGATION_KINDS)` raises
-`ValueError`; the sum check `0.99 <= sum(split.values()) <= 1.01` applies **only to a non-empty
-split**. Lane 5's plan (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:541-544`)
-writes every revision with `investigation_budget_split={}`, and an empty split is a legitimate
-"no split declared", so the canonical function must digest it rather than refuse it. Two tests pin
-this: `ResearchProcessSpec(..., investigation_budget_split={})` digests to a `sha256:` string, and
-lane 5's fixture values (`selection_rule="ordinal-lexicographic-v1"`, `extra={"ranking_module_digest":
-...}`) digest identically through `research_process_digest` and lane 5's
-`tools/improvement_ranking.py::process_digest` once both exist (the second test is written against
-lane 5's function by import and skipped with a named reason while that module is absent, so it
-bites the day lane 5 lands). This is the one function lane 5 is asked to call when it writes
-`ImprovementModelRevision.research_process_digest`; the comparison accepts any `sha256:` string
-from a revision row, so a lane 5 that computes its own digest is still comparable as long as the
-two arms differ.
+The digest hashes exactly `json.dumps(asdict(spec), sort_keys=True, separators=(",", ":")).encode("utf-8")`,
+so key order never changes it. That byte form is a contract with lane 5, not a private choice:
+lane 5's plan on `main` (`docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:559-578`)
+stores the same bytes on every revision as `research_process_spec`, built by
+`tools/improvement_ranking.py::process_spec_json(spec)` and pinned by its
+`test_process_spec_canonical_bytes`, and sets `research_process_digest` **only** by importing this
+function (`from tools.improvement_recursion.process import research_process_digest`), leaving the
+digest `None` when the import fails and backfilling once this lane merges. Lane 5 ships no hashing
+routine of its own and carries a Verification row asserting no `def process_digest` exists in its
+modules (`:1724`), so there is one implementation of the digest, this one. Validation: `unknown =
+set(split) - set(INVESTIGATION_KINDS)` raises `ValueError`; the sum check `0.99 <=
+sum(split.values()) <= 1.01` applies **only to a non-empty split**. Lane 5 writes every revision
+with `investigation_budget_split={}` (`:561`), and an empty split is a legitimate "no split
+declared", so the canonical function must digest it rather than refuse it. Two tests pin this.
+The first: `ResearchProcessSpec(..., investigation_budget_split={})` digests to a `sha256:`
+string. The second is the cross-lane byte check, written against the function lane 5 actually
+ships:
+```python
+def test_digest_matches_lane5_canonical_bytes():
+    ranking = pytest.importorskip("tools.improvement_ranking", reason="lane 5 (#3217) not landed")
+    spec = ResearchProcessSpec(
+        selection_rule="ordinal-lexicographic-v1", investigation_budget_split={},
+        revision_cadence_seconds=3600, planner_prompt_digest="sha256:" + "0" * 64,
+        skill_digest="sha256:" + "0" * 64, extra={"ranking_module_digest": "sha256:" + "0" * 64},
+    )
+    expected = "sha256:" + hashlib.sha256(ranking.process_spec_json(spec).encode("utf-8")).hexdigest()
+    assert research_process_digest(spec) == expected
+```
+It skips with a named reason while `tools/improvement_ranking.py` is absent and bites the day lane
+5 lands; the fixture values are lane 5's (`:561-565`), so a builder on either side can copy them
+verbatim. The comparison accepts any `sha256:` string from a revision row and needs only that the
+two arms differ, so a revision written before this lane merged (digest `None`) is simply not an
+incumbent the comparison can name, and `INCUMBENT_PROCESS_UNKNOWN` says so.
 
 **What this lane assumes from lane 5, and what it does without it.** Lane 5 (#3217) is open with
-no commits. The comparison needs three things a running loop provides, and each is a seam:
+no commits; its plan on `main` names what it provides to this lane in one section ("Provided to
+lane 6 (#3218)", `docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md:553-596`:
+the digest at `:559-578`, the arm runner at `:579-590`, the manifest keys at `:591-596`). The
+comparison needs three things a running loop provides, and each is a seam:
 - *A research process to run.* `ArmRunner` is a `Protocol` with one method,
   `run(process_digest, opportunity_ids, budget_cap, arm_run_id) -> ArmResult`. `ReplayArmRunner`
   (in `arms.py`, exercised by tests) returns gains and budget use from a fixture. `compare run`
@@ -739,8 +760,8 @@ no commits. The comparison needs three things a running loop provides, and each 
   `ArmRunnerAbsent("ARM_RUNNER_ABSENT", detail=str(exc))` and the CLI exits 2. When the flag is
   omitted, `get_arm_runner()` returns the runner registered in-process by `register_arm_runner(...)`
   and raises `ArmRunnerAbsent` otherwise. The flag exists because lane 5 registers
-  `PlannerArmRunner` from the research CLI's entry (`valor-improve`, lane 5 plan `:554-562`), a
-  process `valor-improve-release compare run` never runs in; without the flag the production
+  `PlannerArmRunner` from the research CLI's entry (`tools/improvement.py`, lane 5 plan
+  `:579-590`), a process `valor-improve-release compare run` never runs in; without the flag the production
   comparison would be `ARM_RUNNER_ABSENT` forever and the verification row would pass for the
   wrong reason. The import is lazy, at the moment `compare run` executes, so the incident binary
   imports nothing from the research CLI at module load and the coupling argument in Agent
@@ -790,9 +811,15 @@ deltas, clusters by the opportunity's `priority_area`, calls `clustered_bootstra
 `evaluate_family` from `tools/improvement_eval/statistics.py`, decides the verdict, and writes one
 `ImprovementEvaluation` with `experiment_id`, `contract_digest`, `charter_digest` (pinned),
 `evaluator_version="recursive-comparison/1"`, `blinded=False` (the arms are processes, not judged
-artifacts; the field is honest rather than decorative), `trials=len(opportunities)`, `effect`,
-`confidence_interval`, `correction="holm"`, `notes`. Any exception from an arm is
-`infra_failure`, never a result. On `accept`, `_write_revision` creates the new
+artifacts; the field is honest rather than decorative), `trials=len(opportunities)`,
+`effect=json.dumps({"validated_gain": mean_delta}, sort_keys=True)`,
+`confidence_interval=json.dumps({"validated_gain": {"lower": ..., "upper": ..., "n": ...,
+"raw_p_value": ..., "adjusted_p_value": ...}}, sort_keys=True)`, `correction="holm"`, and
+`notes="\n".join(lines)` where one line is `budget=<json>` carrying both arms' use in every unit
+and, on a refusal, one line names the reason (`BUDGET_UNKNOWN:unit1`, ...). These are lane 4's
+string shapes keyed by endpoint (Technical Approach, "Evaluation read"), so `report.py` and the
+lineage getter parse both evaluator versions through `effect_of` / `interval_of` / `notes_of` /
+`budget_of`. Any exception from an arm is `infra_failure`, never a result. On `accept`, `_write_revision` creates the new
 `ImprovementModelRevision` and supersedes the current one in that order, so a crash between the
 two leaves two `current` rows (detectable) rather than none.
 
@@ -800,18 +827,22 @@ two leaves two `current` rows (detectable) rather than none.
 `{name, supported: bool, evidence: [...], confidence_interval, correction, falsifier, why_not}`.
 Level 1 reads lane 5's cycle when it exists (an experiment with a complete evaluation whose case
 moved state) and otherwise says "no complete cycle recorded". Level 2 reads accepted releases with
-`outcome.claim_level_2_supported`. Level 3 reads `recursive-comparison/` evaluations with verdict
-`accept` and comparable budgets. Each level degrades independently on a read failure, the shape
-lane 7's `generate_report` established. `render(report) -> str` prints it; the dashboard partial
+`outcome.claim_level_2_supported` and takes the interval from
+`interval_of(evaluation, primary_endpoint)`. Level 3 reads `recursive-comparison/` evaluations
+with verdict `accept` and comparable budgets (`budget_of(evaluation)` parsed from the `budget=`
+line in `notes`). Each level degrades independently on a read failure, the shape lane 7's
+`generate_report` established. `render(report) -> str` prints it; the dashboard partial
 shows the same three rows. No count of experiments, patches, or releases appears anywhere in the
 report or the partial; a Verification row asserts the absence.
 
 **Dashboard.** `get_release_lineage(project_key="valor") -> dict` returns `releases` (each with
 `id`, `state`, `kind`, `surfaces`, `candidate_ref`, `evaluation: {verdict, effect,
-confidence_interval}`, `experiment: {hypothesis, contract_digest}`, `case: {title, priority_area}`,
-`drill: {result, drilled_at}`, `window: {exposed_at, ends_at, days_remaining}`, `outcome:
-{verdict, claim_level_2_supported}`), `promotion_gate: {automated, unmet}`, `unavailable`,
-`no_releases_yet`. The partial `ui/templates/improvement/releases.html` renders the lineage as one
+confidence_interval}` where `effect` is `effect_of(evaluation, primary_endpoint)` and
+`confidence_interval` is `interval_of(...)` for the protocol's primary endpoint, both `None` when
+the row has no parsable value, `experiment: {hypothesis, contract_digest}`, `case: {title,
+priority_area}`, `drill: {result, drilled_at}`, `window: {exposed_at, ends_at, days_remaining}`,
+`outcome: {verdict, claim_level_2_supported}`), `promotion_gate: {automated, unmet}`,
+`unavailable`, `no_releases_yet`. The partial `ui/templates/improvement/releases.html` renders the lineage as one
 row per release and the gate as a sentence ("Automated promotion: disabled; unmet: ..."). The
 index page links it beside the other three. The exact pinned list in
 `test_dashboard_never_offers_experiment_or_patch_counts` grows to five.
