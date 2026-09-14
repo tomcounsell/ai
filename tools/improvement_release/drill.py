@@ -668,10 +668,15 @@ def run(
         )
         drill.record["seconds"] = round(time.monotonic() - started, 3)
         # A plain Field stores str() of a dict; the record is written as JSON
-        # so a reader gets it back with json.loads (the row convention).
+        # so a reader gets it back with json.loads (the row convention). The
+        # save is partial (Race 1): the row was read before the git steps, and
+        # a transition landed since (a ``withdraw`` during ``git worktree
+        # add``) keeps its state and outcome; only the drill's two columns
+        # are written. popoto runs the ContentField's ``on_save`` for a listed
+        # field, so ``drill_log`` still lands in the verifying store.
         release.rollback_drill = json.dumps(drill.record, sort_keys=True)
         release.drill_log = "\n".join(drill.transcript)
-        if release.save() is False:
+        if release.save(update_fields=["rollback_drill", "drill_log"]) is False:
             raise RuntimeError("ImprovementRelease.save() returned False")
     return drill.record
 

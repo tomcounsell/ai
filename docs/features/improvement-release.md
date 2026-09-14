@@ -54,15 +54,19 @@ string, so a writer that assigned a dict directly would store its Python repr;
 nothing, with one exception described under Rollback. `_transition` re-reads
 the row immediately before `save()` and refuses `WRONG_STATE` when the state
 moved under the caller, then merges its outcome onto the re-read row's
-(`_merge_outcome`): the re-read row is the base, every key and history event
-another writer landed since the caller read the row survives, and the keys
-the caller itself added or changed take the caller's value. That recovers a
-second writer whose re-read lands after the first's save, in either order. A
-write that records an event without moving the state (`open_pr`, the
-non-held `close_window`, a rollback failure) goes through
-`_save_outcome_only`, which applies the same merge and saves only the columns
-it wrote (`update_fields`), so a transition another caller landed keeps its
-state as well. Popoto has no compare-and-set, so the sub-millisecond
+(`_merge_outcome`): the result starts from the re-read row, so every key and
+history event another writer landed since the caller read the row survives;
+`base` is the caller's pre-edit read, and keys the caller added or changed
+relative to it take the caller's value. That recovers a second writer whose
+re-read lands after the first's save, in either order. A write that records
+an event without moving the state (`open_pr`, the non-held `close_window`, a
+rollback failure) goes through `_save_outcome_only`, which applies the same
+merge, saves only the columns it wrote (`update_fields`), so a transition
+another caller landed keeps its state as well, and returns the row re-read
+after the save, so the caller reports the persisted state. The drill's
+persist (`drill.run`) is partial the same way: it writes `rollback_drill`
+and `drill_log` alone, so a `withdraw` landed during the git steps keeps
+its state and outcome. Popoto has no compare-and-set, so the sub-millisecond
 interleave (both re-read, then both save) remains a lost write: the last save
 wins and the earlier event is gone.
 

@@ -88,8 +88,9 @@ class FakeRelease:
         for key, value in fields.items():
             setattr(self, key, value)
 
-    def save(self):
+    def save(self, update_fields=None):
         self.saves += 1
+        self.saved_fields = update_fields
         return True
 
 
@@ -162,6 +163,7 @@ class TestDrillPass:
         assert json.loads(release.rollback_drill) == record
         assert drill.drill_record(release) == record
         assert release.saves == 1
+        assert release.saved_fields == ["rollback_drill", "drill_log"], "the save is partial"
         assert release.state == "proposed"
         assert "$ git revert --no-commit" in release.drill_log
         assert_no_worktree_left(repo, root)

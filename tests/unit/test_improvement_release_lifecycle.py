@@ -647,7 +647,7 @@ class TestExpose:
         ``open_pr`` records the PR without a transition; the row it read is
         stale by the time the subprocess returns. The persisted row keeps the
         withdrawn state, its reason, and both history events, and still
-        carries the PR it opened.
+        carries the PR it opened; the returned row reports that state too.
         """
 
         def create(argv):
@@ -655,7 +655,10 @@ class TestExpose:
             return (0, "https://github.com/tomcounsell/ai/pull/3299\n", "")
 
         runner = RecordingRunner([(["gh", "pr", "create"], create)])
-        open_pr(approved.id, project_key=PK, runner=runner, now=NOW + timedelta(seconds=1))
+        returned = open_pr(
+            approved.id, project_key=PK, runner=runner, now=NOW + timedelta(seconds=1)
+        )
+        assert returned.state == "withdrawn"
         row = get_release(approved.id, PK)
         assert row.state == "withdrawn"
         outcome = json_field(row.outcome)
@@ -782,7 +785,8 @@ class TestCloseWindow:
 
         The regressed close records its verdict without a transition; the row
         it read is stale by then. The persisted row keeps ``rolled_back``, the
-        rollback record, both events, and the close's own verdict keys.
+        rollback record, both events, and the close's own verdict keys; the
+        returned row reports ``rolled_back`` too.
         """
         release, merged_at = self._exposed(approved, window=(15, 20))
         rolled = {"rollback": {"revert_sha": REVERT_SHA, "pushed_to": "main"}}
@@ -799,7 +803,8 @@ class TestCloseWindow:
             )
 
         self._measure_after(monkeypatch, concurrent_rollback)
-        close_window(release.id, project_key=PK, now=merged_at + timedelta(days=7))
+        returned = close_window(release.id, project_key=PK, now=merged_at + timedelta(days=7))
+        assert returned.state == "rolled_back"
         row = get_release(release.id, PK)
         assert row.state == "rolled_back"
         outcome = json_field(row.outcome)

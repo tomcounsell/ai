@@ -24,6 +24,9 @@ import pytest
 from models.improvement_release import ImprovementRelease
 from models.verifying_artifact_store import verifying_artifact_store
 from tools.improvement_release import drill
+from tools.improvement_release.evaluation_read import json_field
+from tools.improvement_release.lifecycle import withdraw
+from tools.improvement_release.runner import SubprocessRunner
 
 PK = "test-3218-drill"
 
@@ -165,6 +168,35 @@ class TestDrillOnARealRelease:
         assert stored.state == "proposed"
         assert drill.drill_record(stored)["paths"] == ["docs/other.md"]
         assert "[drill fail: UNDECLARED_SURFACE_CHANGED]" in drill.read_drill_log(stored)
+
+    def test_drill_persist_keeps_a_withdraw_landing_during_worktree_add(
+        self, repo, release, tmp_path
+    ):
+        """Race 1 on the drill's persist: a ``withdraw`` during ``git worktree add`` survives.
+
+        ``run`` was handed the row before the git steps; by the time it
+        writes ``rollback_drill`` and ``drill_log`` the row has moved. The
+        persisted row keeps the withdrawn state, its reason, and the
+        ``withdrawn`` event, and carries the drill record and transcript.
+        """
+        real = SubprocessRunner()
+        at = datetime.now(UTC)
+
+        def runner(argv, *, cwd=None, timeout=None):
+            if [str(part) for part in argv[:3]] == ["git", "worktree", "add"]:
+                withdraw(release.id, project_key=PK, reason="pulled", now=at)
+            return real(argv, cwd=cwd, timeout=timeout)
+
+        record = drill.run(release, runner=runner, root=tmp_path / "retention", repo=repo["path"])
+
+        assert record["result"] == "pass", record
+        stored = reload(release.id)
+        assert stored.state == "withdrawn"
+        outcome = json_field(stored.outcome)
+        assert outcome["withdrawn"] == {"reason": "pulled", "at": at.isoformat()}
+        assert [e["event"] for e in outcome["history"]] == ["withdrawn"]
+        assert drill.drill_record(stored) == record
+        assert "$ git worktree add --detach" in drill.read_drill_log(stored)
 
     def test_drill_refuses_a_release_past_proposal(self, repo, release, tmp_path):
         release.state = "approved"

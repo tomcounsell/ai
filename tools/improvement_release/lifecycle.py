@@ -320,14 +320,16 @@ def _save_outcome_only(
     (``update_fields=fields``), so a transition another caller landed keeps
     its state. ``fields`` names every column written, ``outcome`` included; a
     caller that also set another column on ``release`` (``open_pr`` and
-    ``exposure``) lists it here.
+    ``exposure``) lists it here. Returns the row re-read after the save, so
+    ``state`` and every column this caller left alone report what is
+    persisted rather than what the caller read before its subprocess.
     """
     current = get_release(release.id, release.project_key)
     merged = _merge_outcome(outcome, _outcome(current), base=_outcome(release))
     release.outcome = _dump(merged)
     if release.save(update_fields=list(fields)) is False:
         raise RuntimeError("ImprovementRelease.save() returned False")
-    return release
+    return get_release(release.id, release.project_key)
 
 
 def _observation_plan(release: Any) -> tuple[dict, int, int]:
