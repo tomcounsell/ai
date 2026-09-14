@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -131,14 +132,40 @@ def _complete_via_openai(*, provider: str, model: str, prompt: str) -> str:
     return response.choices[0].message.content or "{}"
 
 
+#: The headless ``claude -p`` argv for a judge call, prompt appended last.
+#: ``--tools=`` disables every built-in tool and ``--strict-mcp-config``
+#: loads no MCP server (none is passed), so the judge cannot open the repo
+#: or ``data/improvement_content/`` and de-blind itself; with no tools the
+#: call is a single model turn. Each flag is one ``--flag=value`` argv
+#: element because the CLI's tool options are variadic and a bare value
+#: would swallow the prompt. Verified live on the installed CLI.
+SUBSCRIPTION_JUDGE_ARGV = [
+    "claude",
+    "-p",
+    "--output-format",
+    "json",
+    "--tools=",
+    "--strict-mcp-config",
+]
+
+
 def _complete_via_subscription(*, provider: str, model: str, prompt: str) -> str:
-    """Run the prompt under Claude subscription auth. Raises on failure."""
-    completed = subprocess.run(
-        ["claude", "-p", "--output-format", "json", prompt],
-        capture_output=True,
-        text=True,
-        timeout=SUBSCRIPTION_JUDGE_TIMEOUT_S,
-    )
+    """Run the prompt under Claude subscription auth. Raises on failure.
+
+    Runs from an empty temporary directory so the judge's working directory
+    holds nothing to read, and with every tool disabled (see
+    :data:`SUBSCRIPTION_JUDGE_ARGV`): the only thing the judge sees is the
+    prompt, which carries the blinded arm id and nothing else about the
+    candidate.
+    """
+    with tempfile.TemporaryDirectory(prefix="serves-charter-judge-") as empty_cwd:
+        completed = subprocess.run(
+            [*SUBSCRIPTION_JUDGE_ARGV, prompt],
+            capture_output=True,
+            text=True,
+            timeout=SUBSCRIPTION_JUDGE_TIMEOUT_S,
+            cwd=empty_cwd,
+        )
     if completed.returncode != 0 or not (completed.stdout or "").strip():
         raise RuntimeError(f"claude -p exited {completed.returncode}")
     try:

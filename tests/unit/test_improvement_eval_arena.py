@@ -20,6 +20,7 @@ from tools.improvement_eval.errors import InfraFailure
 
 PK_ARENA = "test3216arena"
 PK_RETRIEVE = "test3216retrieve"
+PK_BM25 = "test3216bm25"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -45,7 +46,7 @@ class TestSocketPathGuard:
 
 
 class TestChildEnv:
-    def test_carries_the_four_arm_keys(self):
+    def test_carries_the_five_arm_keys(self):
         from tools.improvement_eval.arena import build_child_env
 
         env = build_child_env(
@@ -57,6 +58,17 @@ class TestChildEnv:
         assert env["POPOTO_CONTENT_PATH"] == "/tmp/content"
         assert env["VALOR_PROJECT_KEY"] == PK_ARENA
         assert env["POPOTO_EMBEDDING_INVALIDATION"] == "none"
+        assert env["RETRIEVAL_MODE"] == "current"
+
+    def test_pins_the_rrf_path_over_an_ambient_hybrid_setting(self):
+        """An ambient RETRIEVAL_MODE=auto never reaches the arm; the harness measures RRF."""
+        from tools.improvement_eval.arena import build_child_env
+
+        with mock.patch.dict(os.environ, {"RETRIEVAL_MODE": "auto"}):
+            env = build_child_env(
+                sock_path="/tmp/arm.sock", content_dir="/tmp/c", project_key=PK_ARENA
+            )
+        assert env["RETRIEVAL_MODE"] == "current"
 
     def test_parent_environment_is_untouched(self):
         from tools.improvement_eval.arena import build_child_env
@@ -96,6 +108,11 @@ class TestSourceHygiene:
 
     def test_no_decay_clock_ranking(self):
         hits = [p for p in self._sources() if "top_by_decay" in p.read_text()]
+        assert hits == []
+
+    def test_no_clock_skew_env_read(self):
+        """The clock-gap lever travels in the job spec; no env var can skew a real arm."""
+        hits = [p for p in self._sources() if "CLOCK_SKEW" in p.read_text()]
         assert hits == []
 
     def test_no_raw_redis_commands(self):
@@ -193,6 +210,12 @@ class TestWriterGuard:
             writer_guard.verify_digest_unchanged("abc", "def", context="probe")
 
 
+def _assert_process_gone(pid: int) -> None:
+    """The redis-server child is terminated, not merely unreachable."""
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 class TestArenaLifecycle:
     def test_socket_served_while_open_and_cleaned_after(self):
         import popoto.redis_db as rdb
@@ -203,11 +226,12 @@ class TestArenaLifecycle:
         with arm_redis_server() as arm:
             assert os.path.exists(arm.sock_path)
             assert os.path.isdir(arm.content_dir)
+            os.kill(arm.pid, 0)  # alive while the context is open
         assert not os.path.exists(arm.tmpdir)
+        _assert_process_gone(arm.pid)
         assert dict(rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs) == parent_kwargs_before
 
     def test_teardown_survives_an_exception_inside(self):
-
         from tools.improvement_eval.arena import arm_redis_server
 
         with pytest.raises(RuntimeError):
@@ -216,6 +240,7 @@ class TestArenaLifecycle:
                 raise RuntimeError("boom")
         assert not os.path.exists(child.tmpdir)
         assert not os.path.exists(child.sock_path)
+        _assert_process_gone(child.pid)
 
     def test_overlong_tmpdir_fails_before_spawning(self, tmp_path):
         from tools.improvement_eval.arena import arm_redis_server
@@ -225,6 +250,28 @@ class TestArenaLifecycle:
         with pytest.raises(InfraFailure):
             with arm_redis_server(base_tmpdir=str(long_dir)):
                 pass
+        assert list(long_dir.iterdir()) == []  # the guard's tmpdir is cleaned too
+
+    def test_missing_redis_binary_is_a_named_spawn_failure(self):
+        """An unlaunchable redis-server is the "arm would not spawn" condition, tmpdir cleaned."""
+        import shutil
+        import tempfile
+
+        from tools.improvement_eval.arena import arm_redis_server
+
+        # a short base dir: pytest's tmp_path would trip the socket-length guard first
+        base = tempfile.mkdtemp(prefix="arm-spawn-", dir="/tmp")
+        try:
+            with mock.patch(
+                "tools.improvement_eval.arena.subprocess.Popen",
+                side_effect=FileNotFoundError("redis-server"),
+            ):
+                with pytest.raises(InfraFailure, match="would not spawn"):
+                    with arm_redis_server(base_tmpdir=base):
+                        pass
+            assert os.listdir(base) == []
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
 
 
 def _seed_memory(project_key, content):
@@ -330,9 +377,41 @@ class TestArmRetrieve:
             with pytest.raises(InfraFailure):
                 run_arm_job(arm, PK_RETRIEVE, {"mode": "no-such-mode"})
 
-    def test_two_arms_rank_identically_across_a_clock_gap(self):
-        from tools.improvement_eval.arena import arm_redis_server, run_arm_job
+    def test_bm25_hit_below_the_pool_size_runs_ok(self):
+        """A real query (BM25 hits, ``limit`` below the corpus) completes through the shipped arm.
 
+        Under the ambient default ``RETRIEVAL_MODE=auto`` the hybrid path's
+        post-retrieve effects write confidence updates onto the non-selected
+        candidates inside the arm and the digest re-check fails the job. The
+        arm env pins ``RETRIEVAL_MODE=current`` so the four-signal RRF path
+        runs and the job reports ``ok``.
+        """
+        from tools.improvement_eval.arena import arm_redis_server, run_arm_job
+        from tools.improvement_eval.corpus import export_corpus
+
+        for i in range(3):
+            _seed_memory(PK_BM25, f"lighthouse harbor beacon guides the pilot boat {i}")
+            _seed_memory(PK_BM25, f"grocery errands and the weekly budget {i}")
+        export = export_corpus(PK_BM25)
+        assert export.record_count == 6
+
+        with arm_redis_server() as arm:
+            result = run_arm_job(
+                arm,
+                PK_BM25,
+                {
+                    "mode": "retrieve",
+                    "jsonl": export.jsonl_text,
+                    "project_key": PK_BM25,
+                    "query_text": "lighthouse harbor beacon",
+                    "limit": 2,
+                },
+            )
+        assert result["status"] == "ok"
+        assert len(result["ids"]) == 2
+        assert result["digest"] == export.digest
+
+    def test_two_arms_rank_identically_across_a_clock_gap(self):
         """The shipped ranking path reads persisted state, so a clock gap moves nothing.
 
         Sensitivity first: the fixture spaces an old, important record and a
@@ -346,6 +425,7 @@ class TestArmRetrieve:
         import time
 
         from models.memory import Memory
+        from tools.improvement_eval.arena import arm_redis_server, run_arm_job
         from tools.improvement_eval.corpus import export_corpus
 
         skew = 30 * 86400

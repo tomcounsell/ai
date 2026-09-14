@@ -26,11 +26,16 @@ Data Flow), exactly:
 Three disjoint handlers with no shared fall-through:
 
 - :class:`~tools.improvement_eval.errors.InfraFailure` writes ``verdict="infra_failure"``.
-  It is raised for exactly six conditions, each with a test: a Gate 0
-  refusal (state or contract digest), an arm that would not spawn, unequal
-  corpus digests between the arms and the export, a baseline parity miss, a
-  judge provider that could not be reached (a ``skipped`` envelope), and an
-  uncalibrated judge (a reference set below the floor).
+  Its raise sites fall into six categories, each with a test: a Gate 0
+  refusal (state or contract digest), an arm that would not spawn or whose
+  worker broke (spawn failure, timeout, unparseable output, an escaped
+  write, on either arm), unequal corpus digests between the arms and the
+  export, a baseline parity miss, a judge provider that could not be
+  reached (a ``skipped`` envelope), and an uncalibrated judge (a reference
+  set below the floor). Both arms run the same worker code, so a
+  candidate-side worker failure is harness breakage too: it counts toward
+  ``infra_failure_cap`` exactly like an incumbent-side one and never
+  scores against the candidate.
 - :class:`~models.verifying_artifact_store.ArtifactIntegrityError` writes
   ``state="invalidated"`` and no verdict at all.
 - Any other exception writes ``infra_failure`` with the exception type in ``notes``.
@@ -67,8 +72,16 @@ reference's own digest, and a corrupted protocol surfaces as
 of the manifest is also what keeps blinding honest: ``blinding.identity_tokens``
 treats every string in the manifest as candidate identity, and the holdout
 queries and memory ids a judge legitimately sees must never read as a leak.
-The candidate arm receives only ``query_text`` per trial; the gold answers
-stay in this process.
+The scan reads the manifest's content, resolved through its store by
+:func:`identity_source`, never the ``$CF:`` reference a queried row
+hydrates. The candidate arm receives only ``query_text`` per trial; the
+gold answers stay in this process.
+
+**Calibration is recorded on the evaluation.** When the default roster
+runs, the frozen reference set's artifact reference, digest, size, Cohen's
+kappa, raw agreement, and position-swap consistency are written as one
+``calibration: {...}`` JSON line in ``notes``; :func:`calibration_record`
+reads it back.
 
 Protocol shape (JSON)::
 
@@ -102,6 +115,7 @@ from typing import Any
 from models.verifying_artifact_store import ArtifactIntegrityError
 from tools.improvement_eval.blinding import (
     CANDIDATE_ARM,
+    IDENTITY_FIELDS,
     INCUMBENT_ARM,
     ArmAssignment,
     assign_arms,
@@ -284,8 +298,6 @@ class TrialResult:
     arm: str
     ranked_ids: list[str]
     metrics: dict[str, float]
-    failed: bool = False
-    error: str | None = None
 
 
 def _retrieve_job(export, project_key: str, query: dict, arm_params: dict) -> dict:
@@ -336,11 +348,43 @@ def capture_baseline(
 # ---------------------------------------------------------------------------
 
 
-def default_judges(project_key: str, charter: Any, *, judge_complete=None) -> list[JudgeFn]:
+CALIBRATION_NOTE_PREFIX = "calibration: "
+
+
+def calibration_note(result: Any) -> str:
+    """The ``notes`` line that records a :class:`CalibrationResult` durably."""
+    payload = {
+        "artifact_ref": result.artifact_ref,
+        "digest": result.digest,
+        "size": result.size,
+        "kappa": result.kappa,
+        "raw_agreement": result.raw_agreement,
+        "position_swap_consistency": result.position_swap_consistency,
+    }
+    return CALIBRATION_NOTE_PREFIX + json.dumps(payload, sort_keys=True)
+
+
+def calibration_record(evaluation: Any) -> dict | None:
+    """Read the calibration record back from an evaluation's ``notes``.
+
+    ``None`` when the run never calibrated (an injected roster, or a run
+    that failed before the judges were resolved).
+    """
+    for line in (getattr(evaluation, "notes", None) or "").splitlines():
+        if line.startswith(CALIBRATION_NOTE_PREFIX):
+            return json.loads(line[len(CALIBRATION_NOTE_PREFIX) :])
+    return None
+
+
+def default_judges(
+    project_key: str, charter: Any, *, judge_complete=None
+) -> tuple[list[JudgeFn], Any]:
     """The default roster: a calibrated ``serves_charter`` judge.
 
     Calibration runs first and raises :class:`InfraFailure` below the
     reference-set floor, so an uncalibrated judge never scores a trial.
+    Returns the roster and the :class:`CalibrationResult` it was measured
+    with, so the runner can record the numbers on the evaluation.
     ``judge_complete`` injects the provider transport (tests); the default
     routes per charter section 7.
     """
@@ -367,8 +411,8 @@ def default_judges(project_key: str, charter: Any, *, judge_complete=None) -> li
             raise InfraFailure(f"calibration judge call skipped: {envelope.get('reason')}")
         return envelope["judge"]["verdict"]
 
-    calibrate(project_key, _calibration_probe)
-    return [_judge]
+    calibration = calibrate(project_key, _calibration_probe)
+    return [_judge], calibration
 
 
 @dataclass
@@ -376,6 +420,18 @@ class _JudgeOutcome:
     envelopes: list[dict] = field(default_factory=list)
     leaks: list[str] = field(default_factory=list)
     scans: int = 0
+
+
+def identity_source(experiment: Any) -> dict[str, Any]:
+    """The experiment's identity-bearing fields with content resolved.
+
+    ``manifest`` is a ``ContentField``: a queried row hydrates it as its
+    ``$CF:`` reference, and a scan over that reference would never see the
+    branch name or files inside. Every field ``blinding.identity_tokens``
+    reads is resolved through :func:`read_content` here, so the scan runs
+    over what the manifest says.
+    """
+    return {name: read_content(experiment, name) for name in IDENTITY_FIELDS}
 
 
 def _run_judges(
@@ -389,6 +445,7 @@ def _run_judges(
 ) -> _JudgeOutcome:
     outcome = _JudgeOutcome()
     experiment_id = str(experiment.id)
+    identity = identity_source(experiment)
     for incumbent_result, candidate_result in trials:
         for result in (incumbent_result, candidate_result):
             blinded_arm_id = assignment.blinded_ids[result.arm]
@@ -399,7 +456,7 @@ def _run_judges(
                 "metrics": result.metrics,
             }
             candidate_output = json.dumps(judge_input, sort_keys=True)
-            scan = scan_for_identity(candidate_output, experiment)
+            scan = scan_for_identity(candidate_output, identity)
             outcome.scans += 1
             if scan.leaked:
                 outcome.leaks.extend(scan.hits)
@@ -426,7 +483,7 @@ def _run_judges(
                     raw_response_ref=raw_ref,
                 )
                 serialized = serialize_envelope(wrapped)
-                envelope_scan = scan_for_identity(serialized, experiment)
+                envelope_scan = scan_for_identity(serialized, identity)
                 outcome.scans += 1
                 if envelope_scan.leaked:
                     outcome.leaks.extend(envelope_scan.hits)
@@ -638,12 +695,13 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
     ctx.arm_assignment_digest = assignment.digest
 
     # Judges are resolved before the arms spawn so an uncalibrated judge
-    # fails the run before any Redis is started.
-    roster = (
-        judges
-        if judges is not None
-        else default_judges(project_key, charter, judge_complete=judge_complete)
-    )
+    # fails the run before any Redis is started. The default roster's
+    # calibration numbers are recorded on the evaluation, not only logged.
+    if judges is not None:
+        roster = judges
+    else:
+        roster, calibration = default_judges(project_key, charter, judge_complete=judge_complete)
+        ctx.notes.append(calibration_note(calibration))
 
     with arm_redis_server() as incumbent_arm, arm_redis_server() as candidate_arm_server:
         # Arena digest comparison: each arm re-exports and hashes its own corpus.
@@ -670,22 +728,29 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
             raise InfraFailure("arm corpus manifests differ between arms")
 
         # Gate 1: the incumbent reproduces its recorded baseline before the
-        # candidate arm is invoked at all. An incumbent-side error is a
+        # candidate arm is invoked at all. A worker error on either arm is a
         # harness error: the trial is excluded and counted toward the cap.
+        # Both arms run the same worker code, so a candidate-side failure
+        # is harness breakage by construction and never scores as a zero.
         baseline_digest = str(baseline_spec.get("corpus_digest"))
         incumbent_results: dict[str, TrialResult] = {}
         harness_errors = 0
+
+        def _harness_error(arm_name: str, trial_id: str, exc: InfraFailure) -> None:
+            nonlocal harness_errors
+            harness_errors += 1
+            ctx.notes.append(f"harness error on {arm_name} arm, trial {trial_id!r}: {exc}")
+            if harness_errors > infra_cap:
+                raise InfraFailure(
+                    f"{harness_errors} harness-errored trial(s) exceed the cap of {infra_cap}"
+                ) from exc
+
         for query in queries:
             trial_id = str(query.get("trial_id"))
             try:
                 ids = _run_arm(incumbent_arm, export, project_key, query, incumbent_params)
             except InfraFailure as exc:
-                harness_errors += 1
-                ctx.notes.append(f"harness error on trial {trial_id!r}: {exc}")
-                if harness_errors > infra_cap:
-                    raise InfraFailure(
-                        f"{harness_errors} harness-errored trial(s) exceed the cap of {infra_cap}"
-                    ) from exc
+                _harness_error(INCUMBENT_ARM, trial_id, exc)
                 continue
             recorded = RankedBaseline(
                 ids=[str(x) for x in baseline_ids.get(trial_id, [])],
@@ -728,23 +793,16 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
                         candidate_arm_server, export, project_key, query, candidate_params
                     )
                 except InfraFailure as exc:
-                    # The candidate arm broke: that scores against the candidate.
-                    ctx.notes.append(f"candidate arm failed on trial {trial_id!r}: {exc}")
-                    candidate = TrialResult(
-                        trial_id=trial_id,
-                        arm=CANDIDATE_ARM,
-                        ranked_ids=[],
-                        metrics={e: 0.0 for e in endpoints},
-                        failed=True,
-                        error=str(exc),
-                    )
-                    continue
+                    _harness_error(CANDIDATE_ARM, trial_id, exc)
+                    break
                 candidate = TrialResult(
                     trial_id=trial_id,
                     arm=CANDIDATE_ARM,
                     ranked_ids=candidate_ids,
                     metrics={e: score_endpoint(e, candidate_ids, gold_id) for e in endpoints},
                 )
+            if candidate is None:
+                continue
             paired.append((incumbent, candidate))
 
         # Judges on blinded envelopes; a leak is recorded, never suppressed.
@@ -758,7 +816,9 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
         )
 
     ctx.judge_records = judged.envelopes
-    ctx.blinded = not judged.leaks
+    # blinded=True only when a scan ran and found nothing; a run with no
+    # judged trials has no blinding fact to state and leaves the field null.
+    ctx.blinded = (not judged.leaks) if judged.scans else None
     if judged.leaks:
         ctx.notes.append(
             f"blinding leak: identity tokens reached a judge: {sorted(set(judged.leaks))}"

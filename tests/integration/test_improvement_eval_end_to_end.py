@@ -107,7 +107,9 @@ def test_default_roster_end_to_end(charter, architectural_evidence):
         mechanism="a larger limit admits the second-ranked record",
         falsifier="recall_at_2 does not rise",
         candidate_surfaces=json.dumps(["tools/improvement_eval/"]),
-        manifest=json.dumps({"protocol_ref": protocol_ref, "base_revision": "e2e"}),
+        # the manifest is scanned as candidate identity, so the revision is a
+        # SHA-shaped string that no trial id or envelope field contains
+        manifest=json.dumps({"protocol_ref": protocol_ref, "base_revision": "9f1c2b7e0a4d"}),
     )
     assert experiment.save() is not False
     experiment = ImprovementExperiment.query.filter(project_key=PK, id=experiment.id).first()
@@ -133,6 +135,21 @@ def test_default_roster_end_to_end(charter, architectural_evidence):
         assert record["blinded_arm_id"] in {"arm-a", "arm-b"}
         assert verifying_artifact_store.exists(record["raw_response_ref"])
     assert _artifact_refs("ImprovementCalibration"), "calibration froze no reference set"
+
+    # The calibration numbers are recorded on the evaluation row, not only logged.
+    from models.improvement_evaluation import ImprovementEvaluation
+
+    stored = ImprovementEvaluation.query.filter(project_key=PK, id=evaluation.id).first()
+    calibration = runner.calibration_record(stored)
+    assert calibration is not None
+    assert calibration["size"] == MIN_REFERENCE_SET_SIZE
+    assert verifying_artifact_store.exists(calibration["artifact_ref"])
+    assert calibration["artifact_ref"].split(":")[1] == calibration["digest"]
+    # the transport refuses every reference item, so the judge agrees with the
+    # reference on all of them: kappa 1.0 is the one non-degenerate value
+    assert calibration["kappa"] == 1.0
+    assert calibration["raw_agreement"] == 1.0
+    assert calibration["position_swap_consistency"] == 1.0
 
 
 def _artifact_refs(model_class_name: str) -> list[str]:

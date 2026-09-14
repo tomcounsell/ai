@@ -2,9 +2,10 @@
 
 Covers ``tools.improvement_eval.calibration``: the frozen reference set of
 retained architectural corrections, the declared floor with its boundary
-behavior, content-addressed freezing cited by digest, and the two reported
-numbers (Cohen's kappa and paired position-swap consistency), computed in
-pure Python with no statistics dependency.
+behavior, content-addressed freezing cited by digest, and the three reported
+numbers (Cohen's kappa, raw agreement, and paired position-swap consistency),
+computed in pure Python with no statistics dependency, including kappa's
+degeneracy on the one-class reference shape.
 
 Uses the autouse ``redis_test_db`` fixture (tests/conftest.py); every row is
 written under a test-scoped ``project_key``.
@@ -181,7 +182,7 @@ class TestFrozenReferenceSet:
         assert store.load(first.artifact_ref)
         assert store.load(second.artifact_ref)
 
-    def test_calibration_record_cites_digest_and_both_numbers(self):
+    def test_calibration_record_cites_digest_and_all_three_numbers(self):
         from tools.improvement_eval import calibration
 
         _seed_architectural(calibration.MIN_REFERENCE_SET_SIZE, project_key=PK + "-record")
@@ -192,9 +193,34 @@ class TestFrozenReferenceSet:
         result = calibration.calibrate(PK + "-record", constant_judge)
         assert result.digest
         assert result.artifact_ref.startswith("$CF:")
-        assert -1.0 <= result.kappa <= 1.0
-        assert 0.0 <= result.position_swap_consistency <= 1.0
-        assert result.position_swap_consistency == 1.0
+        assert result.kappa == 0.0  # disagrees on every item
+        assert result.raw_agreement == 0.0
+        assert result.position_swap_consistency == 1.0  # consistently wrong is still consistent
+
+    def test_kappa_is_degenerate_on_the_one_class_reference_shape(self):
+        """Every reference label is EXPECTED_VERDICT, so kappa cannot rank imperfect judges.
+
+        A judge that agrees on n-1 of n items and one that agrees on 0 of n
+        both score kappa 0.0 (``po == pe`` against a one-class reference);
+        only the perfect judge scores 1.0. Raw agreement is the figure that
+        separates them, which is why it is recorded alongside.
+        """
+        from tools.improvement_eval import calibration
+
+        n = calibration.MIN_REFERENCE_SET_SIZE
+        _seed_architectural(n, project_key=PK + "-oneclass")
+
+        def all_but_one(text, *, swapped=False):
+            return "APPROVED" if "(0)" in text else calibration.EXPECTED_VERDICT
+
+        partial = calibration.calibrate(PK + "-oneclass", all_but_one)
+        perfect = calibration.calibrate(PK + "-oneclass", _stub_judge(calibration.EXPECTED_VERDICT))
+
+        assert partial.kappa == 0.0
+        assert partial.raw_agreement == pytest.approx((n - 1) / n)
+        assert perfect.kappa == 1.0
+        assert perfect.raw_agreement == 1.0
+        assert "uninformative" in calibration.__doc__
 
     def test_module_hygiene_no_forbidden_surfaces(self):
         import pathlib

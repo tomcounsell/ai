@@ -169,8 +169,12 @@ def get_confidence_ranked(
         # Filter to project scope (project_key is embedded in Redis keys)
         entries = _filter_by_project(entries, project_key)
 
-        # Sort by confidence descending
-        entries.sort(key=lambda x: x[1], reverse=True)
+        # Sort by confidence descending, ties by key ascending. HGETALL
+        # order on a hashtable-encoded hash follows Redis's per-server
+        # random hash seed, so without the key tie-break two servers holding
+        # identical data rank tied entries differently (#3216: every arm of
+        # the evaluation harness is a fresh redis-server).
+        entries.sort(key=lambda x: (-x[1], x[0]))
         return entries[:limit]
     except Exception as e:
         logger.warning(f"[memory_retrieval] confidence ranked fetch failed: {e}")

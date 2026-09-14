@@ -10,7 +10,12 @@ pieces that make that claim checkable:
 - :func:`identity_tokens` derives the leak-detection token list from the
   experiment record itself (candidate surfaces, manifest branch/files,
   hypothesis text, operator-supplied tokens), so a new identity-bearing
-  field is covered without an edit here.
+  field is covered without an edit here. The record may be a mapping of
+  already-resolved field values: ``manifest`` is a ``ContentField`` that a
+  queried row hydrates as its ``$CF:`` store reference, so the runner
+  resolves each field through its store (``runner.read_content``) and
+  hands the mapping in, rather than an attribute record whose manifest
+  would tokenize as one reference string.
 - :func:`scan_for_identity` runs over the serialized judge envelope
   immediately before it is handed to a judge. A hit records
   ``blinded=False`` downstream; it never suppresses the evaluation.
@@ -36,6 +41,10 @@ _CONTENT_FIELDS = (
     "falsifier",
 )
 _OPERATOR_TOKEN_FIELDS = ("identity_tokens", "extra_identity_tokens")
+
+#: Every experiment field :func:`identity_tokens` reads, in order. The
+#: runner resolves each of these through its store before scanning.
+IDENTITY_FIELDS = _CONTENT_FIELDS + _OPERATOR_TOKEN_FIELDS
 
 
 @dataclass
@@ -137,7 +146,7 @@ def identity_tokens(experiment: Any) -> list:
     if isinstance(experiment, (list, tuple)):
         return _as_tokens(list(experiment))
     tokens: list = []
-    for field_name in _CONTENT_FIELDS + _OPERATOR_TOKEN_FIELDS:
+    for field_name in IDENTITY_FIELDS:
         tokens.extend(_as_tokens(_read_field(experiment, field_name)))
     return tokens
 

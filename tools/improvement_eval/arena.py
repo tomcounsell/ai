@@ -51,7 +51,15 @@ spawning so the failure arrives as a named :class:`InfraFailure`.
 ARM_SOCKET_NAME = "arm.sock"
 REDIS_STARTUP_WAIT_S = 10.0
 ARM_WORKER_TIMEOUT_S = 600
-CLOCK_SKEW_ENV_VAR = "IMPROVEMENT_EVAL_CLOCK_SKEW_SECONDS"
+
+#: The ranking path every arm runs. ``current`` forces
+#: ``agent.memory_retrieval.retrieve_memories`` onto the four-signal RRF
+#: path, whose every input is persisted state. The default ``auto`` routes
+#: through popoto's hybrid ``ContextAssembler`` first, whose post-retrieve
+#: effects write confidence and access-tracker updates through a raw
+#: pipeline; inside an arm that write trips the digest re-check and every
+#: real query ends as ``infra_failure``. The harness measures the RRF path.
+ARM_RETRIEVAL_MODE = "current"
 
 
 @dataclass
@@ -61,6 +69,7 @@ class Arm:
     sock_path: str
     tmpdir: str
     content_dir: str
+    pid: int
 
 
 def assert_socket_path_fits(sock_path: str) -> None:
@@ -76,12 +85,19 @@ def assert_socket_path_fits(sock_path: str) -> None:
 
 
 def build_child_env(*, sock_path: str, content_dir: str, project_key: str) -> dict:
-    """Build the arm worker subprocess env dict (never assigned to the parent)."""
+    """Build the arm worker subprocess env dict (never assigned to the parent).
+
+    ``RETRIEVAL_MODE`` is pinned to :data:`ARM_RETRIEVAL_MODE` so the arm
+    ranks through the four-signal RRF path whatever the ambient environment
+    says; ``config.settings.HybridEvalSettings.retrieval_mode`` reads that
+    key inside the child.
+    """
     env = dict(os.environ)
     env["REDIS_URL"] = f"unix://{sock_path}"
     env["POPOTO_CONTENT_PATH"] = content_dir
     env["VALOR_PROJECT_KEY"] = project_key
     env["POPOTO_EMBEDDING_INVALIDATION"] = "none"
+    env["RETRIEVAL_MODE"] = ARM_RETRIEVAL_MODE
     return env
 
 
@@ -105,36 +121,43 @@ def arm_redis_server(*, base_tmpdir: str | None = None):
     """Spawn one private arm Redis; terminate it and remove the tmpdir on exit.
 
     The ``finally`` terminates the known child process and removes the
-    socket even when the arm body raised.
+    tmpdir (socket included) even when the arm body raised, and also when
+    the socket-path guard or the ``redis-server`` spawn itself failed. A
+    missing or unlaunchable ``redis-server`` binary arrives as the named
+    "arm that would not spawn" :class:`InfraFailure`.
     """
     tmpdir = tempfile.mkdtemp(prefix="improve-arm-", dir=base_tmpdir)
-    sock_path = os.path.join(tmpdir, ARM_SOCKET_NAME)
-    assert_socket_path_fits(sock_path)
-    content_dir = os.path.join(tmpdir, "content")
-    os.makedirs(content_dir, exist_ok=True)
-    proc = subprocess.Popen(
-        [
-            "redis-server",
-            "--port",
-            "0",
-            "--unixsocket",
-            sock_path,
-            "--save",
-            "",
-            "--appendonly",
-            "no",
-            "--dir",
-            tmpdir,
-        ],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    proc: subprocess.Popen | None = None
     try:
+        sock_path = os.path.join(tmpdir, ARM_SOCKET_NAME)
+        assert_socket_path_fits(sock_path)
+        content_dir = os.path.join(tmpdir, "content")
+        os.makedirs(content_dir, exist_ok=True)
+        try:
+            proc = subprocess.Popen(
+                [
+                    "redis-server",
+                    "--port",
+                    "0",
+                    "--unixsocket",
+                    sock_path,
+                    "--save",
+                    "",
+                    "--appendonly",
+                    "no",
+                    "--dir",
+                    tmpdir,
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            raise InfraFailure(f"arm redis-server would not spawn: {exc}") from exc
         _wait_for_socket(sock_path, proc)
-        yield Arm(sock_path=sock_path, tmpdir=tmpdir, content_dir=content_dir)
+        yield Arm(sock_path=sock_path, tmpdir=tmpdir, content_dir=content_dir, pid=proc.pid)
     finally:
-        if proc.poll() is None:
+        if proc is not None and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=10)
@@ -155,8 +178,10 @@ def run_arm_job(
     """Run one job in an arm worker subprocess and return its response dict.
 
     The worker reads the JSON job spec on stdin and writes JSON on stdout.
-    Any transport failure, worker-reported error, or clock-skew request the
-    worker cannot honor arrives here as :class:`InfraFailure`.
+    Any transport failure or worker-reported error arrives here as
+    :class:`InfraFailure`. ``clock_skew_s`` travels inside the job spec as
+    ``clock_skew_s`` (the clock-gap test's lever; the runner never sets it),
+    so nothing in the ambient environment can skew a real arm's clock.
     """
     child_env = build_child_env(
         sock_path=arm.sock_path,
@@ -164,7 +189,7 @@ def run_arm_job(
         project_key=project_key,
     )
     if clock_skew_s:
-        child_env[CLOCK_SKEW_ENV_VAR] = str(float(clock_skew_s))
+        job = {**job, "clock_skew_s": float(clock_skew_s)}
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "tools.improvement_eval.arm_worker"],

@@ -4,11 +4,15 @@ The runner composes every gate in the plan's order and is the single writer
 of ``ImprovementEvaluation``. These tests drive the real arms (two private
 ``redis-server`` processes reached only through ``arm_worker`` subprocesses)
 against a small seeded corpus, and pin the three disjoint exit handlers, the
-six named ``infra_failure`` conditions, the Gate 1 ordering, the blinding
-record, the stopping rule, and the documented Race 1b repair.
+six ``infra_failure`` categories (a candidate-side worker failure included),
+the Gate 1 ordering, the blinding record read from a queried row, the
+stopping rule, and the documented Race 1b repair.
 
-Uses the autouse ``redis_test_db`` fixture (tests/conftest.py): rows land in
-a claimed test DB under test-scoped ``project_key`` values.
+This module holds the four exits, artifact integrity, and the ``infra_failure``
+conditions; blinding, the wedge repair, the contract digest, and the
+single-writer invariant live in ``test_improvement_eval_runner_guards.py``.
+Fixtures and helpers come from ``improvement_eval_runner_support``, which
+records why the suite is split across two files.
 """
 
 from __future__ import annotations
@@ -16,140 +20,25 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-from datetime import UTC, datetime
 from unittest import mock
 
-import pytest
-
-from models.improvement_charter import _CHARTER_PATH, ImprovementCharter
-from models.improvement_evaluation import ImprovementEvaluation
-from models.improvement_experiment import ImprovementExperiment
 from models.verifying_artifact_store import verifying_artifact_store
+from tests.unit.improvement_eval_runner_support import (  # noqa: F401 -- fixtures
+    PK,
+    _accepting_protocol,
+    _approving_judge,
+    _evaluate,
+    _freeze,
+    _protocol,
+    _rejecting_protocol,
+    _reload,
+    _reload_evaluation,
+    _skipping_judge,
+    charter_fixture,
+    corpus_fixture,
+)
 from tools.improvement_eval import runner
 from tools.improvement_eval.errors import InfraFailure
-
-PK = "test3216runner"
-
-APPROVING_JUDGE_DICT = {
-    "judge_id": "fake-judge",
-    "verdict": "APPROVED",
-    "blockers": 0,
-    "confidence": 0.9,
-}
-
-
-def _approving_judge(candidate_output, *, blinded_arm_id, trial_id):
-    return {"status": "ok", "judge": dict(APPROVING_JUDGE_DICT)}
-
-
-def _skipping_judge(candidate_output, *, blinded_arm_id, trial_id):
-    return {"status": "skipped", "reason": "Judge provider call failed: ConnectionError"}
-
-
-def _seed_memory(project_key, content):
-    from models.memory import Memory
-
-    record = Memory(
-        agent_id="test-3216",
-        project_key=project_key,
-        content=content,
-        importance=5.0,
-        source="agent",
-    )
-    assert record.save() is not False
-    return record
-
-
-@pytest.fixture
-def charter(tmp_path):
-    path = tmp_path / "improvement-charter.md"
-    path.write_bytes(_CHARTER_PATH.read_bytes().replace(b"\r\n", b"\n"))
-    row = ImprovementCharter.load_from_file(path, project_key=PK)
-    assert row is not None
-    return row
-
-
-@pytest.fixture
-def corpus():
-    """Two memories, so a ranking has a second place to put the gold id."""
-    _seed_memory(PK, "runner lighthouse beacon on the headland")
-    _seed_memory(PK, "runner grocery errands for the week")
-    from tools.improvement_eval.corpus import export_corpus
-
-    return export_corpus(PK)
-
-
-QUERIES = [
-    {"trial_id": "trial-one", "query_text": "zxqvkw qvxj runner-absent"},
-    {"trial_id": "trial-two", "query_text": "zxqvkw qvxj runner-absent again"},
-]
-
-
-def _protocol(corpus, *, incumbent, candidate, batch_size=2, **extra):
-    baseline = runner.capture_baseline(PK, QUERIES, incumbent=incumbent, export=corpus)
-    full = runner.capture_baseline(PK, QUERIES, incumbent={"limit": 10}, export=corpus)
-    queries = []
-    for query in QUERIES:
-        ranked = full["ranked_ids"][query["trial_id"]]
-        assert len(ranked) == 2, "the full ranking must place both seeded records"
-        gold = ranked[-1]  # the second-ranked id: an arm limited to one misses it
-        queries.append({**query, "gold_id": gold})
-    protocol = {
-        "batch_size": batch_size,
-        "endpoints": ["recall_at_2", "mrr"],
-        "holdout_partition": "epoch-test",
-        "queries": queries,
-        "baseline": baseline,
-        "incumbent": incumbent,
-        "candidate": candidate,
-    }
-    protocol.update(extra)
-    return protocol
-
-
-def _freeze(protocol, **experiment_fields) -> ImprovementExperiment:
-    ref = runner.freeze_protocol(protocol)
-    fields = {
-        "project_key": PK,
-        "created_at": datetime.now(UTC),
-        "hypothesis": "a wider candidate finds the gold memory",
-        "mechanism": "a larger limit admits the second-ranked record",
-        "falsifier": "recall_at_2 does not rise",
-        "candidate_surfaces": json.dumps(["tools/improvement_eval/"]),
-        "manifest": json.dumps({"protocol_ref": ref, "base_revision": "abc123"}),
-    }
-    fields.update(experiment_fields)
-    experiment = ImprovementExperiment(**fields)
-    assert experiment.save() is not False
-    experiment = _reload(experiment.id)
-    experiment.contract_digest = runner.compute_contract_digest(experiment)
-    experiment.state = "frozen"
-    experiment.frozen_at = datetime.now(UTC)
-    assert experiment.save() is not False
-    return _reload(experiment.id)
-
-
-def _reload(experiment_id) -> ImprovementExperiment:
-    row = ImprovementExperiment.query.filter(project_key=PK, id=experiment_id).first()
-    assert row is not None
-    return row
-
-
-def _accepting_protocol(corpus):
-    # Incumbent sees one record and misses the gold; the candidate sees both,
-    # so recall_at_2 rises from 0 to 1 and mrr from 0 to 0.5 on every trial.
-    return _protocol(corpus, incumbent={"limit": 1}, candidate={"limit": 10})
-
-
-def _rejecting_protocol(corpus):
-    # The candidate narrows to one record and loses the gold id every trial.
-    return _protocol(corpus, incumbent={"limit": 10}, candidate={"limit": 1})
-
-
-def _evaluate(experiment, **kwargs):
-    kwargs.setdefault("judges", [_approving_judge])
-    return runner.evaluate(str(experiment.id), PK, **kwargs)
-
 
 # ---------------------------------------------------------------------------
 # The four exits
@@ -228,10 +117,34 @@ def _corrupt_live_artifact(reference: str) -> None:
         handle.write(b"\n# tampered after freezing\n")
 
 
+def _corrupt_archive_copy(reference: str) -> None:
+    """Tamper ``.versions/{prefix}/{hash}{ext}`` and leave the live path absent.
+
+    ``FilesystemStore.save`` archives a live file only when it is overwritten,
+    so the artifact is saved a second time under its own key with different
+    bytes (which archives the original), the archive copy is tampered, and
+    the live file is removed. ``load`` then has only the archive branch left.
+    """
+    content_hash, relative_path = reference[len("$CF:") :].split(":", 1)
+    model_class_name, filename = relative_path.split("/", 1)
+    store = verifying_artifact_store
+    key = filename[: -len(store.extension)]
+    live_path = os.path.join(store.base_path, relative_path)
+    store.save(b"{}", key=key, model_class_name=model_class_name)
+    archive_path = os.path.join(
+        store.base_path, ".versions", content_hash[:2], f"{content_hash}{store.extension}"
+    )
+    assert os.path.exists(archive_path), "the overwrite archived nothing"
+    with open(archive_path, "ab") as handle:
+        handle.write(b"\n# tampered archive copy\n")
+    os.remove(live_path)
+
+
 class TestArtifactIntegrity:
     def test_corrupted_archive_invalidates_without_verdict(self, charter, corpus):
+        """The archive copy specifically: live path absent, only the tampered version remains."""
         experiment = _freeze(_accepting_protocol(corpus))
-        _corrupt_live_artifact(experiment.manifest)  # a hydrated row reads back its $CF: ref
+        _corrupt_archive_copy(experiment.manifest)  # a hydrated row reads back its $CF: ref
 
         evaluation = _evaluate(experiment)
 
@@ -239,7 +152,20 @@ class TestArtifactIntegrity:
         assert not runner.has_verdict(evaluation)
         assert evaluation.verdict not in {"accept", "reject"}
         assert evaluation.verdict == "inconclusive"  # the schema default, never written
-        assert "invalidated" in evaluation.notes
+        assert "invalidated: Archived artifact" in evaluation.notes
+        assert evaluation.trials == 0
+
+    def test_corrupted_live_artifact_invalidates_without_verdict(self, charter, corpus):
+        """The live path, with no archive to fall back to, is corruption rather than absence."""
+        experiment = _freeze(_accepting_protocol(corpus))
+        _corrupt_live_artifact(experiment.manifest)
+
+        evaluation = _evaluate(experiment)
+
+        assert evaluation.state == "invalidated"
+        assert not runner.has_verdict(evaluation)
+        assert evaluation.verdict not in {"accept", "reject"}
+        assert "invalidated: Live artifact" in evaluation.notes
         assert evaluation.trials == 0
 
     def test_corrupted_protocol_invalidates_too(self, charter, corpus):
@@ -314,6 +240,34 @@ class TestInfraFailureConditions:
         assert "baseline parity" in evaluation.notes
         candidate_arm.assert_not_called()
 
+    def test_candidate_arm_worker_failure_is_infra_failure_not_reject(self, charter, corpus):
+        """Both arms run the same worker, so a candidate-side InfraFailure is harness breakage."""
+        experiment = _freeze(_rejecting_protocol(corpus))
+        candidate_arm = mock.Mock(side_effect=InfraFailure("arm worker timed out after 600s"))
+
+        evaluation = _evaluate(experiment, _candidate_arm=candidate_arm)
+
+        assert candidate_arm.called
+        assert evaluation.verdict == "infra_failure"
+        assert "harness error on candidate arm" in evaluation.notes
+        assert "exceed the cap of 0" in evaluation.notes
+        assert evaluation.effect is None  # nothing was scored against the candidate
+
+    def test_candidate_failures_within_the_cap_are_excluded_not_scored(self, charter, corpus):
+        """A tolerated worker failure drops the trial; it never becomes a zero for the candidate."""
+        protocol = _protocol(corpus, incumbent={"limit": 10}, candidate={"limit": 1})
+        protocol["infra_failure_cap"] = 2
+        candidate_arm = mock.Mock(side_effect=InfraFailure("arm worker exited with returncode 1"))
+
+        evaluation = _evaluate(_freeze(protocol), _candidate_arm=candidate_arm)
+
+        assert evaluation.verdict == "inconclusive"
+        assert evaluation.trials == 0
+        assert evaluation.effect is None
+        assert evaluation.notes.count("harness error on candidate arm") == 2
+        # no judge scan ran, so there is no blinding fact to state
+        assert _reload_evaluation(evaluation).blinded is None
+
     def test_judge_provider_unreachable(self, charter, corpus):
         experiment = _freeze(_accepting_protocol(corpus))
         evaluation = _evaluate(experiment, judges=[_skipping_judge])
@@ -362,135 +316,3 @@ class TestInfraFailureConditions:
             evaluation = _evaluate(experiment)
         assert evaluation.verdict == "infra_failure"
         assert "unexpected RuntimeError" in evaluation.notes
-
-
-# ---------------------------------------------------------------------------
-# Blinding
-# ---------------------------------------------------------------------------
-
-
-class TestBlinding:
-    def test_identity_leak_sets_blinded_false(self, charter, corpus):
-        # A judge legitimately sees the trial id; an operator who lists it as
-        # candidate identity has built a leak, and the run must say so.
-        experiment = _freeze(
-            _accepting_protocol(corpus),
-            candidate_surfaces=json.dumps(["trial-one"]),
-        )
-        evaluation = _evaluate(experiment)
-
-        assert evaluation.blinded is False
-        assert "blinding leak" in evaluation.notes
-        assert "trial-one" in evaluation.notes
-        # recorded, not suppressed: the measurement still completed
-        assert evaluation.verdict == "accept"
-
-    def test_clean_run_records_blinded_true_not_null(self, charter, corpus):
-        evaluation = _evaluate(_freeze(_accepting_protocol(corpus)))
-        assert evaluation.blinded is True
-
-    def test_judges_never_see_the_true_arm_identity(self, charter, corpus):
-        seen = []
-
-        def _spy(candidate_output, *, blinded_arm_id, trial_id):
-            seen.append((candidate_output, blinded_arm_id))
-            return _approving_judge(
-                candidate_output, blinded_arm_id=blinded_arm_id, trial_id=trial_id
-            )
-
-        _evaluate(_freeze(_accepting_protocol(corpus)), judges=[_spy])
-        assert seen
-        for output, arm_id in seen:
-            assert arm_id in {"arm-a", "arm-b"}
-            assert "candidate" not in output
-            assert "incumbent" not in output
-
-
-# ---------------------------------------------------------------------------
-# Race 1 / 1b: the running state and its repair
-# ---------------------------------------------------------------------------
-
-
-class TestWedgedExperiment:
-    def test_crashed_run_leaves_a_documented_repair(self, charter, corpus):
-        experiment = _freeze(_accepting_protocol(corpus))
-        experiment.state = "running"
-        experiment.save()
-
-        broken = _evaluate(experiment)
-        assert broken.verdict == "infra_failure"
-        assert "'running'" in broken.notes
-        assert broken.verdict not in {"accept", "reject"}
-        assert _reload(experiment.id).state == "running"  # the loser touches nothing
-
-        repaired = runner.repair_wedged_experiment(project_key=PK, experiment_id=str(experiment.id))
-        assert repaired.state == "frozen"
-        assert _reload(experiment.id).state == "frozen"
-
-        retried = _evaluate(_reload(experiment.id))
-        assert "Gate 0" not in (retried.notes or "")
-        assert retried.verdict == "accept"
-
-    def test_repair_of_a_missing_experiment_raises(self):
-        with pytest.raises(LookupError):
-            runner.repair_wedged_experiment(project_key=PK, experiment_id="no-such-id")
-
-    def test_docstring_shows_the_same_repair_call(self):
-        assert "repair_wedged_experiment(project_key=project_key, experiment_id=experiment_id)" in (
-            runner.__doc__ or ""
-        )
-
-
-# ---------------------------------------------------------------------------
-# Contract digest and endpoints
-# ---------------------------------------------------------------------------
-
-
-class TestContract:
-    def test_digest_is_crlf_normalized_and_field_sensitive(self):
-        base = mock.Mock(
-            hypothesis="h",
-            mechanism="m\nline",
-            falsifier="f",
-            candidate_surfaces="[]",
-            manifest="{}",
-        )
-        crlf = mock.Mock(
-            hypothesis="h",
-            mechanism="m\r\nline",
-            falsifier="f",
-            candidate_surfaces="[]",
-            manifest="{}",
-        )
-        changed = mock.Mock(
-            hypothesis="h2",
-            mechanism="m\nline",
-            falsifier="f",
-            candidate_surfaces="[]",
-            manifest="{}",
-        )
-        assert runner.compute_contract_digest(base) == runner.compute_contract_digest(crlf)
-        assert runner.compute_contract_digest(base) != runner.compute_contract_digest(changed)
-        assert runner.compute_contract_digest(base).startswith("sha256:")
-
-    def test_unknown_endpoint_is_a_harness_error(self):
-        with pytest.raises(InfraFailure):
-            runner.score_endpoint("ndcg_at_5", ["a"], "a")
-        with pytest.raises(InfraFailure):
-            runner.score_endpoint("recall_at_zero", ["a"], "a")
-        assert runner.score_endpoint("recall_at_1", ["a", "b"], "b") == 0.0
-        assert runner.score_endpoint("mrr", ["a", "b"], "b") == 0.5
-
-    def test_manifest_without_protocol_ref_is_infra_failure(self, charter, corpus):
-        experiment = _freeze(_accepting_protocol(corpus), manifest=json.dumps({"base": "x"}))
-        evaluation = _evaluate(experiment)
-        assert evaluation.verdict == "infra_failure"
-        assert "protocol_ref" in evaluation.notes
-
-
-class TestSingleWriter:
-    def test_one_evaluation_row_per_run(self, charter, corpus):
-        before = len(list(ImprovementEvaluation.query.filter(project_key=PK)))
-        _evaluate(_freeze(_accepting_protocol(corpus)))
-        after = len(list(ImprovementEvaluation.query.filter(project_key=PK)))
-        assert after == before + 1

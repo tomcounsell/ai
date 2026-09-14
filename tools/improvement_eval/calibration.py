@@ -11,12 +11,25 @@ calibration record cites that frozen artifact by digest. Recalibration
 writes a new artifact rather than mutating one, so a kappa reported in
 March remains checkable in September.
 
-Two numbers are reported, because kappa alone produces a false sense of
+Three numbers are reported, because kappa alone produces a false sense of
 having addressed judge reliability: Cohen's kappa (chance-corrected
-agreement of the judge against the reference expectation) and a paired
-position-swap consistency figure (the fraction of items whose verdict is
-unchanged when the presentation order is swapped). Both are pure Python;
-no statistics dependency is needed or used.
+agreement of the judge against the reference expectation), raw agreement
+(the plain fraction of items the judge labelled as the reference expects),
+and a paired position-swap consistency figure (the fraction of items whose
+verdict is unchanged when the presentation order is swapped). All are pure
+Python; no statistics dependency is needed or used.
+
+**Kappa is uninformative on this reference set, and raw agreement is the
+number to read.** The set holds retained architectural corrections only,
+so every reference label is ``EXPECTED_VERDICT``: one class. Against a
+one-class reference, observed agreement equals chance agreement for any
+judge short of perfect (``po == pe``), so kappa is exactly ``0.0`` from 0
+through n-1 agreements and ``1.0`` at n of n; it cannot rank two imperfect
+judges. Kappa is still recorded, because the reference-set definition is
+frozen with this lane and a later lane that adds a negative class (retained
+non-architectural corrections expected ``APPROVED``) turns the same figure
+informative without changing the record shape. A test pins the degeneracy
+on the real reference shape so nobody reads a ``0.0`` as a failing judge.
 
 ``MIN_REFERENCE_SET_SIZE`` is 20. Observed on this machine at build time:
 0 architectural rows in the 30-day window across every project partition
@@ -72,6 +85,7 @@ class CalibrationResult:
     digest: str
     size: int
     kappa: float
+    raw_agreement: float
     position_swap_consistency: float
 
 
@@ -98,6 +112,21 @@ def cohens_kappa(labels_a: list, labels_b: list) -> float:
     if pe == 1.0:
         return 1.0 if po == 1.0 else 0.0
     return (po - pe) / (1.0 - pe)
+
+
+def raw_agreement(labels_a: list, labels_b: list) -> float:
+    """Plain fraction of items on which two labelings agree.
+
+    The chance-corrected kappa collapses to ``0.0`` against a one-class
+    reference for any imperfect judge, so this is the figure that ranks
+    judges on the current reference set.
+    """
+    if not labels_a or len(labels_a) != len(labels_b):
+        raise ValueError(
+            "raw_agreement needs two non-empty labelings of equal length, "
+            f"got {len(labels_a)} and {len(labels_b)}"
+        )
+    return sum(1 for a, b in zip(labels_a, labels_b) if a == b) / len(labels_a)
 
 
 def position_swap_consistency(first_labels: list, second_labels: list) -> float:
@@ -182,13 +211,16 @@ def calibrate(project_key: str, judge_fn, *, store=None, limit: int = 500) -> Ca
     except Exception as exc:
         raise InfraFailure(f"Calibration judge run failed: {type(exc).__name__}: {exc}") from exc
     kappa = cohens_kappa(first, reference_labels)
+    agreement = raw_agreement(first, reference_labels)
     consistency = position_swap_consistency(first, second)
     logger.info(
-        "serves_charter calibration: project=%s size=%d digest=%s kappa=%.3f swap=%.3f",
+        "serves_charter calibration: project=%s size=%d digest=%s kappa=%.3f "
+        "agreement=%.3f swap=%.3f",
         project_key,
         len(items),
         frozen.digest,
         kappa,
+        agreement,
         consistency,
     )
     return CalibrationResult(
@@ -197,5 +229,6 @@ def calibrate(project_key: str, judge_fn, *, store=None, limit: int = 500) -> Ca
         digest=frozen.digest,
         size=len(items),
         kappa=kappa,
+        raw_agreement=agreement,
         position_swap_consistency=consistency,
     )

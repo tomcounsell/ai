@@ -3,9 +3,15 @@
 The adapter runs ``agent.memory_retrieval.retrieve_memories`` — the
 four-signal RRF path whose every input is persisted state (BM25, stored
 relevance scores, confidence, on-disk embeddings) — and returns the ranked
-memory ids. Ranking never goes through the decay-clock query path whose
-clock cannot be pinned and which would make the harness irreproducible by
-construction.
+memory ids. The harness measures that RRF path and only that path: every
+arm subprocess carries ``RETRIEVAL_MODE=current`` in its env dict
+(``arena.ARM_RETRIEVAL_MODE``), which is the switch ``retrieve_memories``
+reads to bypass popoto's hybrid ``ContextAssembler``. The hybrid path is
+excluded because its post-retrieve effects write confidence and
+access-tracker updates through a raw pipeline; inside an arm that write
+trips the corpus digest re-check on every query that hits BM25. Ranking
+also never goes through the decay-clock query path whose clock cannot be
+pinned and which would make the harness irreproducible by construction.
 
 Gate ordering is load-bearing: :func:`baseline_parity` runs on the
 incumbent arm before the candidate arm is ever invoked. A miss raises

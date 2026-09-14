@@ -2,10 +2,11 @@
 
 Run as ``python -m tools.improvement_eval.arm_worker`` in a child process
 whose env dict carries ``REDIS_URL=unix://<arm.sock>`` (plus the arm's own
-``POPOTO_CONTENT_PATH``, ``VALOR_PROJECT_KEY``, and
-``POPOTO_EMBEDDING_INVALIDATION=none``). Inside this process, and only
-inside this process, popoto's canonical pool is the arm's private server,
-so every Redis touch here goes through the ORM against the arm.
+``POPOTO_CONTENT_PATH``, ``VALOR_PROJECT_KEY``,
+``POPOTO_EMBEDDING_INVALIDATION=none``, and ``RETRIEVAL_MODE=current`` so
+retrieval ranks through the four-signal RRF path). Inside this process, and
+only inside this process, popoto's canonical pool is the arm's private
+server, so every Redis touch here goes through the ORM against the arm.
 
 Protocol: one JSON job spec on stdin, one JSON response on stdout.
 
@@ -22,16 +23,16 @@ Every mode ends with the teardown digest re-check: the digest taken right
 after restore must equal the digest taken after the job's reads, or a
 write slipped past the wrapper and the arm is invalid.
 
-``IMPROVEMENT_EVAL_CLOCK_SKEW_SECONDS`` shifts this process's
+An optional ``"clock_skew_s"`` in a retrieve job shifts this process's
 ``time.time`` during the retrieve step only. It exists so a test can query
 an arm under a clock 30 days forward and prove the retrieval path does
-not read the decay clock; the runner never sets it.
+not read the decay clock; the runner never sets it, and it travels in the
+job spec rather than the environment so nothing ambient can skew an arm.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from contextlib import contextmanager
@@ -42,13 +43,8 @@ JOB_MODES = ("restore", "retrieve", "digest")
 
 
 @contextmanager
-def _skewed_clock():
-    """Shift ``time.time`` for the retrieve step when the env requests it."""
-    raw = os.environ.get("IMPROVEMENT_EVAL_CLOCK_SKEW_SECONDS", "")
-    try:
-        skew = float(raw) if raw else 0.0
-    except ValueError:
-        skew = 0.0
+def _skewed_clock(skew: float):
+    """Shift ``time.time`` for the retrieve step by ``skew`` seconds."""
     if not skew:
         yield
         return
@@ -110,7 +106,11 @@ def handle_job(job: dict) -> dict:
 
         query_text = job.get("query_text", "")
         limit = int(job.get("limit", 10))
-        with _skewed_clock():
+        try:
+            skew = float(job.get("clock_skew_s") or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise InfraFailure(f"arm job 'clock_skew_s' is not a number: {exc}") from exc
+        with _skewed_clock(skew):
             response["ids"] = retrieve_ranked_ids(query_text, project_key, limit=limit)
 
     digest_final, manifest_final = _arm_digest(project_key)

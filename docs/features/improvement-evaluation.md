@@ -77,6 +77,10 @@ covers the protocol bytes transitively, and a tampered protocol raises
 outside the manifest is also what keeps blinding honest: `blinding.identity_tokens`
 treats every string in the manifest as candidate identity, and the holdout
 queries and memory ids a judge legitimately sees must never read as a leak. The
+manifest is a `ContentField`, so a queried row hydrates it as its `$CF:`
+reference; `runner.identity_source` resolves it (and every other scanned
+field) through its store before the scan, so the scan reads the branch name
+and files the manifest carries rather than one reference string. The
 candidate arm receives only `query_text` per trial; the gold answers stay in
 the runner's process.
 
@@ -121,9 +125,11 @@ order, and the order is load-bearing:
 8. **Paired trials.** Both arms run each input in the assigned order. The
    incumbent's slot re-runs it and demands the Gate 1 ranking again, so an
    incumbent that drifts within the run is an `infra_failure`, never an
-   average. A candidate arm that errors scores as a candidate failure (every
-   endpoint `0.0` for that trial); an incumbent arm that errors is a harness
-   error, excluded and counted against `infra_failure_cap`.
+   average. A worker failure on either arm (timeout, a dead `redis-server`,
+   unparseable output, an escaped write) is a harness error: the trial is
+   excluded and counted against `infra_failure_cap`. Both arms run the same
+   worker code, so a candidate-side failure says nothing about the candidate
+   and never scores as a zero.
 9. **Judges.** Each arm's per-trial output goes to the roster carrying the
    blinded arm id. `scan_for_identity` runs over what the judge sees and over
    the finished envelope; a hit sets `blinded=False` and annotates `notes`,
@@ -152,10 +158,11 @@ one:
 | `inconclusive` | The measurement ran and could not distinguish the arms, or the batch was short |
 | `infra_failure` | The harness broke. **This says nothing about the candidate** |
 
-`infra_failure` comes from `errors.InfraFailure`, raised for exactly these
-conditions, each with a test: a Gate 0 refusal (state or contract digest), an
-arm that would not spawn, unequal corpus digests, a baseline parity miss, a
-judge provider that could not be reached, and an uncalibrated judge. Any other
+`infra_failure` comes from `errors.InfraFailure`, whose raise sites fall into
+six categories, each with a test: a Gate 0 refusal (state or contract digest),
+an arm that would not spawn or whose worker broke (on either arm), unequal
+corpus digests, a baseline parity miss, a judge provider that could not be
+reached, and an uncalibrated judge. Any other
 exception is also written as `infra_failure` with the exception type in
 `notes`. Collapsing `infra_failure` into `reject` would let flaky
 infrastructure read as evidence against a change, and a test drives both
@@ -189,11 +196,14 @@ The subprocess boundary:
   the tmpdir, on the clean path and the raising path.
 - `arm_worker.py` is the only process that talks to an arm. It is launched
   with an env dict carrying `REDIS_URL=unix://<arm.sock>`,
-  `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`, and
-  `POPOTO_EMBEDDING_INVALIDATION=none`. Popoto binds its canonical pool from
-  `REDIS_URL` at import, so inside the child, and only inside the child, the
-  ORM *is* the arm's private server: `Memory.query` and
-  `agent.memory_retrieval.retrieve_memories` work unmodified.
+  `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`,
+  `POPOTO_EMBEDDING_INVALIDATION=none`, and `RETRIEVAL_MODE=current`. Popoto
+  binds its canonical pool from `REDIS_URL` at import, so inside the child,
+  and only inside the child, the ORM *is* the arm's private server:
+  `Memory.query` and `agent.memory_retrieval.retrieve_memories` work
+  unmodified. The clock-gap test's skew travels inside the job spec
+  (`clock_skew_s`), never through the environment, so nothing ambient can
+  skew a real arm's clock.
 - The corpus identity is `corpus.canonical_corpus_digest`, never a hash of
   the raw JSONL: record order and the manifest's `exported_at` vary per call,
   and the exporter's embedding-provider fingerprint (`embedding_provenance`
@@ -216,22 +226,36 @@ db-claim pool. A later reader will be tempted to simplify the child process
 away; three tests and a row of `grep` anti-criteria exist so that simplification
 fails loudly.
 
-Retrieval ranks through `agent.memory_retrieval.retrieve_memories`, whose
-four RRF signals are all reads of persisted state. It never ranks through
-popoto's decay-clock query, whose clock is `time.time()` inside the call with
-no parameter to pin it; a test queries a second arm under a clock 30 days
-forward and asserts the ranked ids do not move.
+**The harness measures the four-signal RRF path.** Retrieval ranks through
+`agent.memory_retrieval.retrieve_memories` with `RETRIEVAL_MODE=current`
+pinned in every arm's env dict (`arena.ARM_RETRIEVAL_MODE`), so the four RRF
+signals, all reads of persisted state, are what both arms run. The ambient
+default `auto` routes through popoto's hybrid `ContextAssembler` first, whose
+post-retrieve effects write confidence and access-tracker updates through a
+raw pipeline; inside an arm that write trips the corpus digest re-check on
+every query that hits BM25 with `limit` below the candidate pool, which is
+the production shape. A test runs exactly that query through the shipped arm
+worker and asserts the job reports `ok`. The RRF path also breaks confidence
+ties by key: Redis iterates a hashtable-encoded hash in per-server random
+order, and two fresh arms would otherwise rank tied records differently from
+identical bytes. It never ranks through popoto's decay-clock query, whose
+clock is `time.time()` inside the call with no parameter to pin it; a test
+queries a second arm under a clock 30 days forward and asserts the ranked ids
+do not move.
 
 ## Blinding
 
 Blinding is measured, and a leak is recorded rather than suppressed.
 `scan_for_identity` derives its token list from the experiment record (the
 surfaces, manifest, hypothesis, mechanism, falsifier, and any operator-supplied
-identity tokens) and scans the serialized judge input and envelope. A hit sets
-`ImprovementEvaluation.blinded=False` and names the tokens in `notes`.
-`blinded=True` is written only when every scan ran and found nothing; it is a
-typed boolean, never null on a completed evaluation, so `blinded=False` is a
-queryable fact.
+identity tokens), each resolved through its store by `runner.identity_source`
+so the manifest's content is what gets tokenized, and scans the serialized
+judge input and envelope. A hit sets `ImprovementEvaluation.blinded=False` and
+names the tokens in `notes`. `blinded=True` is written only when a scan ran
+and found nothing. It is a typed boolean on every run that reached the
+judges, so `blinded=False` is a queryable fact; a run that ended before any
+judge scan (an `infra_failure`, or every trial excluded within the cap)
+leaves it null because there is no blinding fact to state.
 
 ## The judge envelope
 
@@ -254,6 +278,12 @@ an open-source project may route the judge to any provider within the
 inference budget; client work stays on the Claude subscription. The guard is
 called, never reimplemented.
 
+The subscription transport is a headless `claude -p` confined to the prompt:
+`--tools=` disables every built-in tool, `--strict-mcp-config` loads no MCP
+server, and the process runs from an empty temporary directory, so the judge
+cannot open the repo or the artifact store and de-blind itself. With no tools
+the call is a single model turn.
+
 ## Calibration
 
 A judge whose agreement with a reference set is unmeasured is an opinion, not
@@ -264,10 +294,24 @@ and cites it by digest from every calibration record. The freeze exists because
 is small and rotating; a kappa reported in March has to remain checkable in
 September, so recalibration writes a new artifact rather than mutating one.
 
-Two numbers are reported: Cohen's kappa (chance-corrected agreement against
-the reference expectation) and paired position-swap consistency (the fraction
-of items whose verdict survives a swapped presentation). Kappa alone
-overstates discrimination.
+Three numbers are reported: Cohen's kappa (chance-corrected agreement against
+the reference expectation), raw agreement (the plain fraction the judge
+labelled as expected), and paired position-swap consistency (the fraction of
+items whose verdict survives a swapped presentation). They are recorded on
+the evaluation, not only logged: the default roster writes one
+`calibration: {...}` JSON line into `ImprovementEvaluation.notes` carrying
+the frozen artifact reference, its digest, the set size, and all three
+figures; `runner.calibration_record(evaluation)` reads it back.
+
+**Read raw agreement, not kappa, on the current reference set.** The set is
+one class (every retained architectural correction expects `CHANGES
+REQUESTED`), and against a one-class reference observed agreement equals
+chance agreement for any imperfect judge, so kappa is exactly `0.0` from 0
+through n-1 agreements and `1.0` only at n of n. It cannot rank two imperfect
+judges and a `0.0` is not a failing judge. Kappa stays recorded because a
+later reference set with a negative class (retained non-architectural
+corrections expected `APPROVED`) turns the same figure informative without
+changing the record shape; a test pins the degeneracy on the real shape.
 
 The reference-set floor is `MIN_REFERENCE_SET_SIZE = 20`. Below it the judge
 returns `infra_failure` rather than an uncalibrated opinion; the default

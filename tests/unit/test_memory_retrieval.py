@@ -260,6 +260,29 @@ class TestGetConfidenceRanked:
         assert result[2][0] == "Memory:agent1:proj:key2"
         assert result[2][1] == 0.3
 
+    def test_ties_break_by_key_regardless_of_hgetall_order(self):
+        """Tied confidences rank by key ascending whatever order Redis hands the hash back in."""
+        import msgpack
+
+        from agent.memory_retrieval import get_confidence_ranked
+
+        packed = msgpack.packb({"confidence": 0.5, "evidence_count": 0})
+        forward = {
+            b"Memory:agent1:proj:aaa": packed,
+            b"Memory:agent1:proj:bbb": packed,
+            b"Memory:agent1:proj:ccc": packed,
+        }
+        reversed_order = dict(reversed(list(forward.items())))
+        results = []
+        for hash_order in (forward, reversed_order):
+            with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+                mock_redis.hgetall.return_value = hash_order
+                with self._mock_confidence_field():
+                    results.append([k for k, _s in get_confidence_ranked("proj")])
+
+        expected = ["Memory:agent1:proj:aaa", "Memory:agent1:proj:bbb", "Memory:agent1:proj:ccc"]
+        assert results == [expected, expected]
+
     def test_filters_by_project_key(self):
         """Only entries whose Redis key contains the project_key are returned."""
         import msgpack

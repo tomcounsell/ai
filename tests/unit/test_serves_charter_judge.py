@@ -190,3 +190,37 @@ class TestProviderRouting:
     def test_envelope_records_the_selected_provider(self):
         envelope = _run(_aligned_response())
         assert envelope["judge"]["meta"]["provider"] != "claude-subscription"
+
+
+class TestSubscriptionTransportConfinement:
+    def test_headless_judge_runs_with_no_tools_from_an_empty_cwd(self):
+        """The subscription judge cannot open the repo or the artifact store and de-blind itself."""
+        import os
+        import subprocess
+
+        from tools.improvement_eval.judges import serves_charter as sc
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = list(argv)
+            seen["cwd"] = kwargs.get("cwd")
+            seen["cwd_entries"] = os.listdir(kwargs["cwd"])
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"result": _aligned_response()}), stderr=""
+            )
+
+        with patch.object(sc.subprocess, "run", fake_run):
+            result = sc._complete_via_subscription(
+                provider="claude-subscription", model="claude", prompt="PROMPT"
+            )
+
+        assert json.loads(result)["serves_charter"] is True
+        argv = seen["argv"]
+        assert argv[:2] == ["claude", "-p"]
+        assert "--tools=" in argv  # every built-in tool disabled, as one argv element
+        assert "--strict-mcp-config" in argv  # and no MCP server loaded
+        assert argv[-1] == "PROMPT"  # the prompt stays last, after the variadic flags
+        assert seen["cwd_entries"] == []  # nothing to read where the judge runs
+        assert os.path.realpath(seen["cwd"]) != os.path.realpath(os.getcwd())
+        assert not os.path.exists(seen["cwd"])  # the empty cwd is removed afterwards

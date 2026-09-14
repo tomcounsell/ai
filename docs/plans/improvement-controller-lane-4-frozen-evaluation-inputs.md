@@ -551,8 +551,10 @@ bigger arm.
   process, never imports `tests/db_claim.py`.
 - **`tools/improvement_eval/arm_worker.py`** — the arm-side entry point, run as
   `python -m tools.improvement_eval.arm_worker` in a child process whose env dict carries
-  `REDIS_URL=unix://<arm.sock>`, `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`, and
-  `POPOTO_EMBEDDING_INVALIDATION=none`. Reads a job spec on stdin, restores the corpus, runs the
+  `REDIS_URL=unix://<arm.sock>`, `POPOTO_CONTENT_PATH=<arm tmp>/content`, `VALOR_PROJECT_KEY`,
+  `POPOTO_EMBEDDING_INVALIDATION=none`, and `RETRIEVAL_MODE=current` (the four-signal RRF path is
+  the measured subject; the hybrid path's post-retrieve writes would trip the digest re-check).
+  Reads a job spec on stdin, restores the corpus, runs the
   retrieval, re-exports for the digest check, and writes JSON on stdout. Every Redis touch inside it
   goes through the ORM against the child's own canonical pool.
 - **`tools/improvement_eval/writer_guard.py`** — the writer kill switch. A client wrapper that
@@ -820,9 +822,11 @@ is where a later dashboard will read them from:
 - [ ] `infra_failure` is a distinct verdict value produced by six named conditions with a test each,
       never merged into `reject` (`test_infra_failure_and_reject_have_disjoint_causes`). A consumer
       cannot present it as evidence about the candidate without deliberately choosing to.
-- [ ] `blinded` is written only from `scan_for_identity`'s result and is never null on a completed
-      evaluation, so `blinded=False` is a queryable fact rather than an absence a renderer has to
-      infer. `test_identity_leak_sets_blinded_false` pins it.
+- [ ] `blinded` is written only from `scan_for_identity`'s result and is never null on an
+      evaluation that reached the judges (a run that ended before any scan, an `infra_failure` or
+      every trial excluded within the cap, leaves it null: there is no blinding fact to state), so
+      `blinded=False` is a queryable fact rather than an absence a renderer has to infer.
+      `test_identity_leak_sets_blinded_false` pins it on a queried row.
 
 ### Mutation proofs (each guard, measured)
 
@@ -1207,8 +1211,12 @@ Nothing else in the update path changes:
   existing settings and the existing `is_open_source` guard; no `.env` key is added, so
   `.env.example` and `config/settings.py` are untouched and `tests/unit/test_env_completeness.py`
   stays green without edits.
-- **No service restart.** `tools/improvement_eval/` is not imported by the bridge, the worker, or
-  any agent code path, so `./scripts/valor-service.sh restart` is not required by this change.
+- **No service restart for the package; a worker restart for the two `agent/` edits.**
+  `tools/improvement_eval/` is not imported by the bridge, the worker, or any agent code path, so
+  the harness itself needs no restart. The lane also changes `agent/session_executor.py`
+  (`VALOR_PROJECT_KEY` in `_harness_env`) and `agent/memory_retrieval.py` (the confidence-signal
+  key tie-break), both of which the worker imports, so deploying needs `worker-restart` on every
+  machine (`/update` handles it when its restart step is enabled).
 - **`POPOTO_IMPROVEMENT_CONTENT_PATH`** already exists and already defaults to
   `data/improvement_content` inside the repo (`models/verifying_artifact_store.py:52-56`). The new
   artifacts this lane writes (corpus exports, calibration sets, raw judge responses) land under that
@@ -1531,7 +1539,7 @@ theme, because two builders converging on one file is how a lane livelocks.
 ### 6. The runner
 - **Task ID**: build-runner
 - **Depends On**: validate-components, build-charter-judge
-- **Validates**: `tests/unit/test_improvement_eval_runner.py` (create), `tests/integration/test_improvement_eval_end_to_end.py` (create)
+- **Validates**: `tests/unit/test_improvement_eval_runner.py` and `tests/unit/test_improvement_eval_runner_guards.py` (create; split so neither file alone outlasts `pytest-clean.sh`'s idle-controller window under `--dist loadfile`), `tests/integration/test_improvement_eval_end_to_end.py` (create)
 - **Assigned To**: runner-builder
 - **Agent Type**: builder
 - **Parallel**: false
