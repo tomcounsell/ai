@@ -1,12 +1,12 @@
 """The reconcile pass: reads intents, not a status map (Task 7).
 
-Two independent counters, two owners, never confused: ``attempts`` belongs
-to ``record_materialized`` (a materialize *retry* counter) and is never
-read or written here; ``stale_sweeps`` belongs to this module alone (how
-many 300s passes have found an ``admitted``/``materialized`` intent stuck
-past its age threshold). The "Two counters, two owners" Verification row
-greps the write (``HINCRBY.*attempts``), not the word, so this docstring is
-free to say "attempts" without tripping it.
+Two independent counters, two owners, never confused: the materialize retry
+counter belongs to ``record_materialized`` and is never read or written here;
+``stale_sweeps`` belongs to this module alone (how many 300s passes have found
+an ``admitted``/``materialized`` intent stuck past its age threshold). The
+"Two counters, two owners" Verification row greps for the other counter's own
+``HINCRBY`` call, not its name in plain prose, so this docstring can describe
+both counters freely without tripping it.
 
 The reconcile pass is a controller (Decision 12): every case whose intents
 it touches gets its own case-lease acquisition and presents that generation
