@@ -678,6 +678,10 @@ class TestCrossVendorJudgeConsensus:
 
         assert CROSS_VENDOR_JUDGE_ID not in {"code-quality", "risk"}
 
+        from tools.improvement_eval.judges.serves_charter import SERVES_CHARTER_JUDGE_ID
+
+        assert SERVES_CHARTER_JUDGE_ID not in {"code-quality", "risk", CROSS_VENDOR_JUDGE_ID}
+
 
 # ---------------------------------------------------------------------------
 # Trivial-diff path never reaches compute_consensus (issue #3197, spike-1)
