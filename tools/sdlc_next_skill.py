@@ -178,6 +178,37 @@ def _fetch_pr_head_sha(pr_number: int, repo: str | None = None) -> str | None:
     return resolve_pr_head_sha(pr_number, repo=repo, repo_root=_target_repo_cwd())
 
 
+def _fetch_pr_head_branch(pr_number: int, repo: str | None = None) -> str | None:
+    """Read the PR's actual head branch name via ``gh pr view``.
+
+    A lane branch derived from the recorded slug (``lane_branch_name``) is a
+    GUESS: it assumes the branch was created as ``session/{slug}``. Lanes whose
+    branch predates that convention, or which were branched by hand, carry a
+    name no slug can reproduce -- #3171's ``redis-client-accessor-3003`` against
+    a recorded slug of ``sdlc-3003``. The PR itself knows the answer, so when a
+    PR number is recorded the derived name is never the better source.
+
+    This matters because the PATCH probe is fail-CLOSED: a guessed name that
+    resolves to nothing is indistinguishable from a branch that was never
+    pushed, so a wrong guess re-dispatches ``/do-patch`` against work that is
+    already pushed and green, until G4's oscillation cap hard-blocks the lane
+    (the #2718 shape, reached through a wrong slug rather than an absent one).
+
+    Returns ``None`` when the call fails, the response is unparseable, or
+    ``headRefName`` is absent / not a string -- callers must treat ``None`` as
+    "could not determine" and fall back, never as evidence of a false claim.
+    """
+    cmd = ["gh", "pr", "view", str(pr_number), "--json", "headRefName"]
+    if repo:
+        cmd = ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "headRefName"]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if proc.returncode != 0:
+        return None
+    data = json.loads(proc.stdout or "{}")
+    branch = data.get("headRefName")
+    return branch if isinstance(branch, str) and branch else None
+
+
 def _check_branch_pushed(branch_name: str) -> bool:
     """Live-check (``git ls-remote``) that ``branch_name`` exists on origin.
 
@@ -353,10 +384,15 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
             return {"stage_artifacts_verified": False, "unverified_stage": "BUILD"}
 
     if patch_claimed:
-        if pr_state != "MERGED" and not _check_branch_pushed(lane_branch):
+        # The PR's own head branch outranks the slug-derived name: the latter
+        # assumes a `session/{slug}` branch that a hand-branched lane never had.
+        # Fall back to the derived name only when the PR cannot answer, so a
+        # failed lookup keeps the prior behaviour rather than skipping the gate.
+        probe_branch = _fetch_pr_head_branch(pr_number, repo=repo) or lane_branch
+        if pr_state != "MERGED" and not _check_branch_pushed(probe_branch):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
-                f"but branch {lane_branch} is not pushed"
+                f"but branch {probe_branch} is not pushed"
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "PATCH"}
 
