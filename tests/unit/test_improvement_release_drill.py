@@ -30,6 +30,7 @@ from tools.improvement_release.drill import (
     sweep,
 )
 from tools.improvement_release.runner import (
+    TAIL_BYTES,
     TIMEOUT_RETURNCODE,
     CommandResult,
     RecordingRunner,
@@ -209,6 +210,51 @@ class TestPreRevertChecks:
         record = drill.run(release, root=root, repo=repo["path"])
 
         assert record["result"] == "pass", record
+
+    def test_undeclared_check_reads_the_whole_listing_past_tail_bytes(self, repo, root):
+        """Git sorts ``diff --name-only``; the one undeclared path sorts first.
+
+        The declared surface changes enough files that the listing exceeds
+        ``TAIL_BYTES``, so a check that reads the step's 2 KB tail never sees
+        ``.githooks/x`` and passes the drill.
+        """
+        git(repo["path"], "switch", "-q", "cand")
+        files = {
+            f"tools/generated/module_{i:03d}_with_a_long_name.py": f"# {i}\n" for i in range(80)
+        }
+        files[".githooks/x"] = "#!/bin/sh\n"
+        commit(repo["path"], "wide candidate", **files)
+        listing = git(repo["path"], "diff", "--name-only", repo["base"], "cand")
+        git(repo["path"], "switch", "-q", "main")
+        assert len(listing.encode("utf-8")) > TAIL_BYTES, "the fixture must exceed the tail"
+        assert listing.splitlines()[0] == ".githooks/x", "the undeclared path sorts first"
+        release = release_for(repo, surfaces=["tools/"])
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["result"] == "fail"
+        assert record["reason"] == "UNDECLARED_SURFACE_CHANGED"
+        assert record["paths"] == [".githooks/x"]
+        assert "revert" not in step_names(record)
+        changed = next(s for s in record["steps"] if s["name"] == "changed_paths")
+        assert len(changed["stdout_tail"].encode("utf-8")) <= TAIL_BYTES, "the record keeps a tail"
+        assert_no_worktree_left(repo, root)
+
+    def test_drill_fails_when_a_changed_path_is_denied(self, repo, root):
+        """A ``docs`` surface encloses the charter; the changed path itself is refused."""
+        git(repo["path"], "switch", "-q", "cand")
+        commit(repo["path"], "charter edit", **{"docs/improvement-charter.md": "mine now\n"})
+        git(repo["path"], "switch", "-q", "main")
+        release = release_for(repo, surfaces=["tools/thing.py", "docs"])
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["result"] == "fail"
+        assert record["reason"] == "DENIED_SURFACE_CHANGED"
+        assert record["paths"] == ["docs/improvement-charter.md"]
+        assert "revert" not in step_names(record)
+        assert record["exercised"] == ["range_checks"]
+        assert_no_worktree_left(repo, root)
 
     def test_drill_fails_when_base_not_ancestor(self, repo, root):
         advanced = commit(repo["path"], "main moved on", **{"README.md": "readme 2\n"})
@@ -494,6 +540,89 @@ class TestSweep:
 
     def test_sweep_on_missing_root_is_empty(self, root):
         assert sweep(root=root, repo=None) == []
+
+    def test_sweep_continues_past_a_refused_slot(self, repo, root, monkeypatch, caplog):
+        """A slot the checkout guard refuses is logged and left; later slots are still swept."""
+        now = datetime(2026, 9, 14, 12, 0, tzinfo=UTC)
+        first = root / "drills" / "rel-a" / "20200101T000000Z"
+        second = root / "drills" / "rel-b" / "20200101T000000Z"
+        for path in (first, second):
+            path.mkdir(parents=True)
+            (path / "leftover").write_text("x")
+        real = drill.refuse_checkout_path
+
+        def refusing(path, *, root=None):
+            if Path(path).resolve() == first.resolve():
+                raise DrillRefused("CHECKOUT_PATH", "seeded refusal")
+            return real(path, root=root)
+
+        monkeypatch.setattr(drill, "refuse_checkout_path", refusing)
+
+        with caplog.at_level("WARNING", logger="tools.improvement_release.drill"):
+            removed = sweep(root=root, repo=None, now=now)
+
+        assert removed == [str(second)]
+        assert first.exists() and not second.exists()
+        assert any("seeded refusal" in r.getMessage() for r in caplog.records)
+
+
+class TestWorktreeVenv:
+    def test_add_detached_worktree_links_the_repo_venv(self, repo, root):
+        venv = repo["path"] / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("#!/bin/sh\n")
+        slot = drill_root("rel-venv", root=root)
+        transcript: list[str] = []
+
+        add = drill.add_detached_worktree(
+            SubprocessRunner(), repo=repo["path"], ref="cand", path=slot, transcript=transcript
+        )
+        try:
+            assert add["returncode"] == 0
+            link = slot / ".venv"
+            assert link.is_symlink()
+            assert link.resolve() == venv.resolve()
+            assert (link / "bin" / "python").exists()
+            assert any("[linked" in line for line in transcript)
+        finally:
+            drill.remove_worktree(
+                SubprocessRunner(), repo=repo["path"], path=slot, transcript=transcript, root=root
+            )
+        assert not slot.exists()
+        assert venv.exists(), "removing the worktree never follows the link into the venv"
+        assert (venv / "bin" / "python").exists()
+
+    def test_add_detached_worktree_skips_the_link_without_a_venv(self, repo, root):
+        slot = drill_root("rel-novenv", root=root)
+        transcript: list[str] = []
+
+        add = drill.add_detached_worktree(
+            SubprocessRunner(), repo=repo["path"], ref="cand", path=slot, transcript=transcript
+        )
+        try:
+            assert add["returncode"] == 0
+            assert not (slot / ".venv").exists()
+            assert not (slot / ".venv").is_symlink()
+            assert not any("[linked" in line for line in transcript)
+        finally:
+            drill.remove_worktree(
+                SubprocessRunner(), repo=repo["path"], path=slot, transcript=transcript, root=root
+            )
+
+    def test_drill_passes_with_a_linked_venv(self, repo, root):
+        """The verify command runs the linked interpreter; the link leaves the tree restored."""
+        venv = repo["path"] / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text("#!/bin/sh\necho linked\n")
+        (venv / "bin" / "python").chmod(0o755)
+        release = release_for(repo, rollback_plan={"verify": [".venv/bin/python"]})
+
+        record = drill.run(release, root=root, repo=repo["path"])
+
+        assert record["result"] == "pass", record
+        verify = next(s for s in record["steps"] if s["name"] == "verify[0]")
+        assert verify["stdout_tail"].strip() == "linked"
+        assert_no_worktree_left(repo, root)
 
 
 class TestRunnerSeam:

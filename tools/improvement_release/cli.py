@@ -16,9 +16,10 @@ module:attr`` names lane 5's runner and resolves it lazily at execution
 through ``arms.resolve_arm_runner``.
 
 ``--runner-log <path>`` builds ``SubprocessRunner(log_path=path)`` so a test
-can inspect every subprocess call. ``--now <iso>`` on ``propose``,
-``approve``, ``expose``, and ``close-window`` overrides the clock; it exists
-for tests and is documented as such in ``--help``.
+can inspect every subprocess call. Every subcommand runs on the wall clock;
+the ``now=`` keyword the library functions accept is for their unit tests and
+has no command-line spelling, so nothing on this binary can close a window
+early without ``--force`` or sidestep ``EVIDENCE_EXPIRED`` and ``DRILL_STALE``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import argparse
 import json
 import sys
 import traceback
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -171,13 +172,6 @@ def _evaluation_payload(evaluation: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _parse_now(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
 def _load_json_file(path: str, *, what: str) -> Any:
     try:
         return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -200,7 +194,11 @@ def _arm_digest(value: str | None) -> str | None:
     spec = _load_json_file(value, what="process spec")
     if not isinstance(spec, dict):
         raise argparse.ArgumentTypeError(f"process spec {value!r} is not a JSON object")
-    return research_process_digest(ResearchProcessSpec(**spec))
+    try:
+        return research_process_digest(ResearchProcessSpec(**spec))
+    except TypeError as exc:
+        # An unknown or missing key: the spec file is the bad argument, exit 2.
+        raise argparse.ArgumentTypeError(f"process spec {value!r}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +221,6 @@ def cmd_propose(args: argparse.Namespace) -> dict:
         calibration_ref=args.calibration_ref,
         argument=args.argument,
         runner=_runner(args),
-        now=_parse_now(args.now),
         repo=args.repo,
     )
     return release_payload(release)
@@ -253,7 +250,6 @@ def cmd_approve(args: argparse.Namespace) -> dict:
         args.release,
         approved_by=args.approved_by,
         project_key=args.project_key,
-        now=_parse_now(args.now),
     )
     return release_payload(release)
 
@@ -279,7 +275,6 @@ def cmd_expose(args: argparse.Namespace) -> dict:
         args.release,
         project_key=args.project_key,
         runner=_runner(args),
-        now=_parse_now(args.now),
         repo=args.repo,
     )
     return release_payload(release)
@@ -288,9 +283,8 @@ def cmd_expose(args: argparse.Namespace) -> dict:
 def cmd_close_window(args: argparse.Namespace) -> dict:
     from tools.improvement_release.lifecycle import close_window, due_windows
 
-    now = _parse_now(args.now)
     if args.due:
-        rows = due_windows(args.project_key, now=now)
+        rows = due_windows(args.project_key)
         return {
             "project_key": args.project_key,
             "due": [
@@ -309,7 +303,6 @@ def cmd_close_window(args: argparse.Namespace) -> dict:
     release = close_window(
         args.release,
         project_key=args.project_key,
-        now=now,
         force=args.force,
         reason=args.reason,
     )
@@ -427,14 +420,6 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_now(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--now",
-        default=None,
-        help="TEST-ONLY clock override, ISO-8601 (default: the wall clock)",
-    )
-
-
 def _add_runner_log(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--runner-log",
@@ -477,7 +462,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--argument", default=None, help="evaluator releases only: the written case")
     _add_repo(p)
     _add_runner_log(p)
-    _add_now(p)
     _add_common(p)
     p.set_defaults(func=cmd_propose)
 
@@ -493,7 +477,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = subparsers.add_parser("approve", help="a human approves a drilled release")
     p.add_argument("--release", required=True)
     p.add_argument("--approved-by", required=True, help="the approving human's name")
-    _add_now(p)
     _add_common(p)
     p.set_defaults(func=cmd_approve)
 
@@ -510,7 +493,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--release", required=True)
     _add_repo(p)
     _add_runner_log(p)
-    _add_now(p)
     _add_common(p)
     p.set_defaults(func=cmd_expose)
 
@@ -521,7 +503,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="close before the window end")
     p.add_argument("--reason", default=None, help="required with --force")
     p.add_argument("--due", action="store_true", help="list observing releases past their end")
-    _add_now(p)
     _add_common(p)
     p.set_defaults(func=cmd_close_window)
 
@@ -631,8 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"refused": True, "code": exc.code, "detail": exc.detail})
         return EXIT_REFUSED
     except (ValueError, argparse.ArgumentTypeError) as exc:
-        # A hand supersede without a reason, an unparsable --now, an unreadable
-        # plan file, a process spec that fails validation: refused, never a crash.
+        # A hand supersede without a reason, an unreadable plan file, a process
+        # spec that fails validation: refused, never a crash.
         _emit({"refused": True, "code": "INVALID_ARGUMENT", "detail": str(exc)})
         return EXIT_REFUSED
     except Exception:  # noqa: BLE001 -- the CLI boundary: traceback to stderr, exit 1

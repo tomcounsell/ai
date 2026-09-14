@@ -82,6 +82,7 @@ from tools.improvement_recursion.budget import (
     budgets_comparable,
 )
 from tools.improvement_recursion.freshness import COMPARISON_SURFACES, fresh_opportunities
+from tools.improvement_release.rows import aware
 
 logger = logging.getLogger(__name__)
 
@@ -142,14 +143,8 @@ def current_revisions(project_key: str = "valor") -> list[Any]:
         for r in ImprovementModelRevision.query.filter(project_key=project_key)
         if r.state == "current"
     ]
-    rows.sort(key=lambda r: (_aware(r.created_at) or datetime.min.replace(tzinfo=UTC), str(r.id)))
+    rows.sort(key=lambda r: (aware(r.created_at) or datetime.min.replace(tzinfo=UTC), str(r.id)))
     return rows
-
-
-def _aware(stamp: Any) -> datetime | None:
-    if not isinstance(stamp, datetime):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
 
 
 def _refuse_revision_conflict(rows: list[Any]) -> None:
@@ -317,7 +312,7 @@ def freeze(
         "opportunity_set_digest": protocol["opportunity_set_digest"],
         "arms": protocol["arms"],
     }
-    at = _aware(now) or datetime.now(UTC)
+    at = aware(now) or datetime.now(UTC)
     experiment = ImprovementExperiment(
         project_key=project_key,
         created_at=at,
@@ -450,7 +445,8 @@ def _write_evaluation(
 
 def _finish_experiment(experiment: Any, state: str) -> None:
     experiment.state = state
-    experiment.save()
+    if experiment.save() is False:
+        raise RuntimeError("ImprovementExperiment.save() returned False")
 
 
 def _write_revision(
@@ -519,7 +515,8 @@ def run(
     before anything runs; ``ArmRunnerAbsent`` propagates from the runner
     lookup (``runner`` > ``arm_runner_spec`` > the registry). No pinned
     charter (``CHARTER_NOT_PINNED``, before either arm runs) and any exception
-    from an arm or the accounting read write ``infra_failure`` and move the
+    from an arm, the accounting read, the priority-area lookup, or the
+    statistics write ``infra_failure`` and move the
     experiment to ``aborted``, lane 4's shape. On ``accept`` the winning arm
     becomes the ``current`` model revision.
     """
@@ -551,7 +548,7 @@ def run(
     cap = BudgetCap(**protocol["budget_cap"])
     minimum = float(protocol.get("minimum_worthwhile_effect", 0.0))
     evaluator_version = str(protocol.get("evaluator_version") or EVALUATOR_VERSION)
-    at = _aware(now) or datetime.now(UTC)
+    at = aware(now) or datetime.now(UTC)
     charter = ImprovementCharter.pinned(project_key)
     charter_digest = getattr(charter, "digest", None)
     order, assignment_digest = _assign_arms(arms, rng_seed)
@@ -561,8 +558,7 @@ def run(
         f"arm_assignment_digest={assignment_digest}",
     ]
 
-    experiment.state = "running"
-    experiment.save()
+    _finish_experiment(experiment, "running")
 
     def _infra_failure(reason: str) -> Any:
         logger.warning("comparison %s infra_failure: %s", experiment.id, reason)
@@ -592,29 +588,34 @@ def run(
 
     results: dict[str, ArmResult] = {}
     use: dict[str, BudgetUse] = {}
+    # Everything from the first arm through the scoring is one guarded span:
+    # a failure anywhere in it (an arm, the accounting read, the priority-area
+    # lookup, the statistics) lands as infra_failure/aborted, never as an
+    # experiment left in ``running`` that a retry refuses WRONG_STATE.
     try:
         for arm in order:
             arm_run_id = f"{experiment.id}:{arm}"
             results[arm] = active.run(arms[arm], list(opportunity_ids), cap, arm_run_id)
             use[arm] = accounted_use(reader, arm_run_id, results[arm].budget_use)
-    except Exception as exc:  # noqa: BLE001 -- an arm failure is infra_failure, never a result
+
+        comparable, reasons = budgets_comparable(use["a"], use["b"], cap)
+        budget = {
+            "cap": _cap_payload(cap),
+            "a": _use_payload(use["a"]),
+            "b": _use_payload(use["b"]),
+            "comparable": comparable,
+            "reasons": reasons,
+        }
+
+        areas = _priority_areas(project_key, opportunity_ids)
+        deltas_by_area: dict[str, list[float]] = {}
+        for cid in opportunity_ids:
+            delta = results["b"].scored_gain(cid) - results["a"].scored_gain(cid)
+            deltas_by_area.setdefault(areas[cid], []).append(delta)
+        (outcome,) = evaluate_family({PRIMARY_ENDPOINT: deltas_by_area})
+    except Exception as exc:  # noqa: BLE001 -- an arm or scoring failure is infra_failure, never a result
         return _infra_failure(f"{type(exc).__name__}: {exc}")
 
-    comparable, reasons = budgets_comparable(use["a"], use["b"], cap)
-    budget = {
-        "cap": _cap_payload(cap),
-        "a": _use_payload(use["a"]),
-        "b": _use_payload(use["b"]),
-        "comparable": comparable,
-        "reasons": reasons,
-    }
-
-    areas = _priority_areas(project_key, opportunity_ids)
-    deltas_by_area: dict[str, list[float]] = {}
-    for cid in opportunity_ids:
-        delta = results["b"].scored_gain(cid) - results["a"].scored_gain(cid)
-        deltas_by_area.setdefault(areas[cid], []).append(delta)
-    (outcome,) = evaluate_family({PRIMARY_ENDPOINT: deltas_by_area})
     interval = {
         "lower": outcome.lower,
         "upper": outcome.upper,

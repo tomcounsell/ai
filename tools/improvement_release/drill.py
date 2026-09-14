@@ -25,7 +25,14 @@ Order of operations in :func:`run`:
 2. Identity: the two SHAs and ``git diff --stat base..candidate``.
 3. Pre-revert range checks, in this order, each a recorded ``fail`` that
    stops the drill before any revert: ``BASE_NOT_ANCESTOR``,
-   ``MERGE_COMMITS_IN_RANGE``, ``UNDECLARED_SURFACE_CHANGED``.
+   ``MERGE_COMMITS_IN_RANGE``, ``UNDECLARED_SURFACE_CHANGED``,
+   ``DENIED_SURFACE_CHANGED`` (a changed path on the candidate denylist; a
+   declared directory that encloses an entry is refused at proposal, and this
+   check refuses the path itself so the drill never rehearses a charter edit).
+   The path lists behind these checks are read from the full command output,
+   never from the 2 KB tail the step record keeps: git sorts paths, so a tail
+   of a long listing would drop exactly the ``.githooks/`` and ``config/``
+   entries that sort first.
 4. ``git revert --no-commit <base>..<candidate>``; a conflict is
    ``revert_conflict`` with the unmerged paths.
 5. Restoration: ``git diff --quiet <base> -- <surface>`` per surface, then
@@ -58,8 +65,8 @@ from pathlib import Path
 
 from config.settings import settings
 from models.verifying_artifact_store import _default_base_path
-from tools.improvement_release.denylist import InvalidSurface, normalize_surface
-from tools.improvement_release.runner import Runner, SubprocessRunner, run_step
+from tools.improvement_release.denylist import InvalidSurface, denied_surfaces, normalize_surface
+from tools.improvement_release.runner import Runner, SubprocessRunner, execute_step, run_step
 
 logger = logging.getLogger(__name__)
 
@@ -223,12 +230,32 @@ def _lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
+def _link_venv(repo: Path, worktree: Path, transcript: list[str]) -> None:
+    """Symlink ``<repo>/.venv`` into the worktree when the repo has one.
+
+    A linked worktree carries no venv of its own, and the shared
+    ``.githooks/pre-push`` (which the real rollback's push runs under) falls
+    back to the system ``python3`` without one, where ``config.settings`` does
+    not import. The whole directory is linked, never ``bin/python`` alone: a
+    partial link silently resolves site-packages from the base interpreter.
+    """
+    source = repo / ".venv"
+    target = worktree / ".venv"
+    if not source.exists() or not worktree.is_dir() or target.exists():
+        return
+    target.symlink_to(source, target_is_directory=True)
+    transcript.append(f"[linked {target} -> {source}]")
+
+
 def add_detached_worktree(
     runner: Runner, *, repo: str | Path, ref: str, path: str | Path, transcript: list[str]
 ) -> dict:
     """``git worktree prune`` then ``git worktree add --detach <path> <ref>`` from ``repo``.
 
     Returns the ``add`` step record. The caller checks its ``returncode``.
+    After a successful add the repo's ``.venv`` is symlinked into the worktree
+    (:func:`_link_venv`), for the drill's verify commands and the rollback's
+    push hook alike.
     """
     repo = str(repo)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -240,7 +267,7 @@ def add_detached_worktree(
         transcript=transcript,
         name="worktree_prune",
     )
-    return run_step(
+    add = run_step(
         runner,
         ["git", "worktree", "add", "--detach", str(path), ref],
         cwd=repo,
@@ -248,6 +275,9 @@ def add_detached_worktree(
         transcript=transcript,
         name="worktree_add",
     )
+    if add["returncode"] == 0:
+        _link_venv(Path(repo), Path(path), transcript)
+    return add
 
 
 def remove_worktree(
@@ -341,7 +371,7 @@ def assert_restored(
         restored = False
     differing: list[str] = []
     if not restored:
-        listing = run_step(
+        _record, listing = execute_step(
             runner,
             ["git", "diff", "--name-only", base_revision],
             cwd=worktree,
@@ -349,7 +379,7 @@ def assert_restored(
             transcript=transcript,
             name="differing_paths",
         )
-        differing = _lines(listing["stdout_tail"])
+        differing = _lines(listing.stdout)
     return {"restored": restored, "differing": differing}
 
 
@@ -357,6 +387,22 @@ def _undeclared(changed: list[str], surfaces: list[str]) -> list[str]:
     return [
         p for p in changed if not any(p == s or p.startswith(s.rstrip("/") + "/") for s in surfaces)
     ]
+
+
+def _denied(changed: list[str]) -> list[str]:
+    """Changed paths on the candidate denylist, in listing order.
+
+    A path the denylist cannot normalize (a glob character in a filename) is
+    refused as if it were denied, the denylist's own rule for an uncheckable
+    surface.
+    """
+    denied: list[str] = []
+    for path in changed:
+        try:
+            denied.extend(denied_surfaces([path]))
+        except InvalidSurface:
+            denied.append(path)
+    return denied
 
 
 class _Drill:
@@ -397,7 +443,18 @@ class _Drill:
         }
 
     def step(self, argv: list[str], *, cwd: str, name: str, timeout: float | None = None) -> dict:
-        record = run_step(
+        record, _result = self.listing(argv, cwd=cwd, name=name, timeout=timeout)
+        return record
+
+    def listing(
+        self, argv: list[str], *, cwd: str, name: str, timeout: float | None = None
+    ) -> tuple[dict, list[str]]:
+        """A step whose stdout is a list: the record plus every non-blank line.
+
+        The record keeps a tail; the lines come from the full output, so a
+        listing longer than ``TAIL_BYTES`` still yields its first entries.
+        """
+        record, result = execute_step(
             self.runner,
             argv,
             cwd=cwd,
@@ -406,7 +463,7 @@ class _Drill:
             name=name,
         )
         self.steps.append(record)
-        return record
+        return record, _lines(result.stdout)
 
     def fail(self, reason: str, **extra) -> dict:
         self.record["result"] = "fail"
@@ -445,21 +502,22 @@ class _Drill:
         )
         if ancestry["returncode"] != 0:
             return self.fail("BASE_NOT_ANCESTOR")
-        merges = self.step(
+        _merges, merge_shas = self.listing(
             ["git", "rev-list", "--merges", f"{base_sha}..{cand_sha}"],
             cwd=wt,
             name="merges_in_range",
         )
-        merge_shas = _lines(merges["stdout_tail"])
         if merge_shas:
             return self.fail("MERGE_COMMITS_IN_RANGE", merges=merge_shas)
-        changed_step = self.step(
+        _changed, changed = self.listing(
             ["git", "diff", "--name-only", base_sha, cand_sha], cwd=wt, name="changed_paths"
         )
-        changed = _lines(changed_step["stdout_tail"])
         undeclared = _undeclared(changed, surfaces)
         if undeclared:
             return self.fail("UNDECLARED_SURFACE_CHANGED", paths=undeclared)
+        denied = _denied(changed)
+        if denied:
+            return self.fail("DENIED_SURFACE_CHANGED", paths=denied)
 
         # 4. The revert the plan declares.
         self.exercised("revert")
@@ -467,10 +525,10 @@ class _Drill:
             ["git", "revert", "--no-commit", f"{base_sha}..{cand_sha}"], cwd=wt, name="revert"
         )
         if revert["returncode"] != 0:
-            unmerged = self.step(
+            _unmerged, unmerged = self.listing(
                 ["git", "diff", "--name-only", "--diff-filter=U"], cwd=wt, name="unmerged_paths"
             )
-            return self.fail("revert_conflict", paths=_lines(unmerged["stdout_tail"]))
+            return self.fail("revert_conflict", paths=unmerged)
 
         # 5. Restoration on every declared surface and the whole tree.
         self.exercised("tree_restoration")
@@ -588,7 +646,8 @@ def run(
         # so a reader gets it back with json.loads (the row convention).
         release.rollback_drill = json.dumps(drill.record, sort_keys=True)
         release.drill_log = "\n".join(drill.transcript)
-        release.save()
+        if release.save() is False:
+            raise RuntimeError("ImprovementRelease.save() returned False")
     return drill.record
 
 
@@ -661,7 +720,12 @@ def sweep(
             if repo_path is not None:
                 remove_worktree(runner, repo=repo_path, path=slot, transcript=transcript, root=root)
             if slot.exists():
-                refuse_checkout_path(slot, root=root)
+                try:
+                    refuse_checkout_path(slot, root=root)
+                except DrillRefused as exc:
+                    # One refused slot never aborts the sweep; the rest still converge.
+                    logger.warning("[drill] sweep left %s in place: %s", slot, exc)
+                    continue
                 shutil.rmtree(slot, ignore_errors=True)
             logger.info("[drill] swept stale worktree %s", slot)
             removed.append(str(slot))

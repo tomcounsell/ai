@@ -423,9 +423,8 @@ valor-improve-release report --render   # the same as text
 ```
 
 `propose`, `drill`, `open-pr`, `expose`, and `rollback` accept
-`--runner-log <path>` (one JSON line per `git`/`gh` call). `propose`,
-`approve`, `expose`, and `close-window` accept `--now <iso>`, a test-only
-clock override.
+`--runner-log <path>` (one JSON line per `git`/`gh` call). Every subcommand
+runs on the wall clock; there is no clock override on the binary.
 
 ### Agent Session Scheduler (`tools.agent_session_scheduler`)
 

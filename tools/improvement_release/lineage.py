@@ -16,18 +16,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from tools.improvement_release.evaluation_read import effect_of, interval_of, json_field
+from tools.improvement_release.rows import aware, lookup, recency
 
 logger = logging.getLogger(__name__)
-
-
-def _aware(stamp: Any) -> datetime | None:
-    if not isinstance(stamp, datetime):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
-def _recency(row: Any) -> datetime:
-    return _aware(getattr(row, "created_at", None)) or datetime.min.replace(tzinfo=UTC)
 
 
 def primary_endpoint_of(protocol: dict | None) -> str | None:
@@ -60,15 +51,9 @@ def load_primary_endpoint(experiment: Any) -> str | None:
         return None
 
 
-def _lookup(model: Any, project_key: str, row_id: Any) -> Any:
-    if not row_id:
-        return None
-    return model.query.filter(project_key=project_key, id=str(row_id)).first()
-
-
 def _window(release: Any, now: datetime) -> dict:
-    exposed_at = _aware(getattr(release, "exposed_at", None))
-    ends_at = _aware(getattr(release, "observation_window_ends_at", None))
+    exposed_at = aware(getattr(release, "exposed_at", None))
+    ends_at = aware(getattr(release, "observation_window_ends_at", None))
     days_remaining = None
     if ends_at is not None:
         days_remaining = round(max((ends_at - now).total_seconds(), 0.0) / 86400.0, 2)
@@ -80,14 +65,12 @@ def _release_row(release: Any, project_key: str, now: datetime) -> dict:
     from models.improvement_evaluation import ImprovementEvaluation
     from models.improvement_experiment import ImprovementExperiment
 
-    evaluation = _lookup(
-        ImprovementEvaluation, project_key, getattr(release, "evaluation_id", None)
-    )
-    experiment = _lookup(
+    evaluation = lookup(ImprovementEvaluation, project_key, getattr(release, "evaluation_id", None))
+    experiment = lookup(
         ImprovementExperiment, project_key, getattr(evaluation, "experiment_id", None)
     )
     case_id = getattr(release, "case_id", None) or getattr(experiment, "case_id", None)
-    case = _lookup(ImprovementCase, project_key, case_id)
+    case = lookup(ImprovementCase, project_key, case_id)
     endpoint = load_primary_endpoint(experiment)
     drill = json_field(getattr(release, "rollback_drill", None)) or {}
     outcome = json_field(getattr(release, "outcome", None)) or {}
@@ -97,7 +80,7 @@ def _release_row(release: Any, project_key: str, now: datetime) -> dict:
         "kind": getattr(release, "kind", None),
         "surfaces": json_field(getattr(release, "surfaces", None)) or [],
         "candidate_ref": getattr(release, "candidate_ref", None),
-        "created_at": _aware(getattr(release, "created_at", None)),
+        "created_at": aware(getattr(release, "created_at", None)),
         "evaluation": {
             "id": str(evaluation.id) if evaluation is not None else None,
             "verdict": getattr(evaluation, "verdict", None),
@@ -134,14 +117,14 @@ def release_lineage(project_key: str = "valor", *, now: datetime | None = None) 
     """
     from tools.improvement_release.promotion import promotion_gate
 
-    now = _aware(now) or datetime.now(UTC)
+    now = aware(now) or datetime.now(UTC)
     releases: list[dict] = []
     unavailable = False
     try:
         from models.improvement_release import ImprovementRelease
 
         rows = list(ImprovementRelease.query.filter(project_key=project_key))
-        rows.sort(key=_recency, reverse=True)
+        rows.sort(key=recency, reverse=True)
         releases = [_release_row(row, project_key, now) for row in rows]
     except Exception as exc:  # noqa: BLE001 -- the dashboard pattern: unavailable, never a crash
         logger.warning("release lineage: read failed for %s: %s", project_key, exc)

@@ -65,6 +65,17 @@ class TestEntries:
         assert denied_surfaces([surface]) == []
         refuse_denied([surface])
 
+    @pytest.mark.parametrize(
+        "surface", ["docs", "docs/", "models", "config", "tools", "./tools/", "docs/./"]
+    )
+    def test_a_directory_enclosing_an_entry_is_denied(self, surface):
+        """A declared directory covers everything beneath it in the drill, so a
+        parent of any denylist entry is itself denied; ``docs`` would otherwise
+        carry the charter through ``propose`` and the drill's undeclared check."""
+        assert denied_surfaces([surface]) == [surface]
+        with pytest.raises(SurfaceDenied):
+            refuse_denied([surface])
+
     def test_offenders_come_back_in_input_order(self):
         surfaces = [
             "tools/x.py",

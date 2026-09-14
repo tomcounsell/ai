@@ -135,7 +135,11 @@ class TestDrillOnARealRelease:
         stored = reload(release.id)
         reference = getattr(stored, "drill_log")
         assert isinstance(reference, str) and reference.startswith("$CF:"), reference
-        content_hash, _relative = verifying_artifact_store._parse_reference(reference)
+        content_hash, relative = verifying_artifact_store._parse_reference(reference)
+        # the conftest fixture keeps these bytes out of the production retention root
+        live = Path(os.environ["POPOTO_IMPROVEMENT_CONTENT_PATH"]) / relative
+        assert live.is_file(), live
+        assert str(tmp_path) in str(live)
 
         transcript = drill.read_drill_log(stored)
         assert hashlib.sha256(transcript.encode("utf-8")).hexdigest() == content_hash

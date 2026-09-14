@@ -12,15 +12,18 @@
 
 Every public function checks its preconditions first and raises
 :class:`ReleaseRefused` with a code from :data:`REFUSAL_CODES`. A refusal
-writes nothing; the one exception is ``ROLLBACK_PUSH_REFUSED``, which
-records the orphaned revert commit in ``outcome.history`` before raising,
-because a revert that exists and never reached the target branch is exactly
-the fact the record must carry.
+writes nothing; the exceptions are ``rollback``'s two refusals after a step
+has run, ``ROLLBACK_PUSH_REFUSED`` and ``ROLLBACK_STEP_FAILED``, which record
+the attempt (its transcript, and for a refused push the orphaned revert
+commit) on the row before raising, because a revert that exists and never
+reached the target branch is exactly the fact the record must carry.
 
-:func:`_transition` re-reads the row immediately before ``save()`` and
-refuses ``WRONG_STATE`` when the state moved under the caller (Race 1).
-``outcome.history`` is bounded at :data:`HISTORY_MAX` entries; past that the
-oldest entry is dropped and ``history_truncated`` is set once.
+:func:`_transition` re-reads the row immediately before ``save()``, refuses
+``WRONG_STATE`` when the state moved under the caller, and merges any history
+event the re-read row carries that the caller's copy lacks, so an interleaved
+double-write keeps both events (Race 1). ``outcome.history`` is bounded at
+:data:`HISTORY_MAX` entries; past that the oldest entry is dropped and
+``history_truncated`` is set once.
 
 Exposure is anchored on the merge (``exposed_at = mergedAt``), never on the
 call: the baseline is frozen over ``[mergedAt - baseline_days, mergedAt)``
@@ -49,6 +52,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from config.settings import settings
 from models.improvement_charter import ImprovementCharter
 from models.improvement_evaluation import ImprovementEvaluation
 from models.improvement_experiment import ImprovementExperiment
@@ -72,6 +76,7 @@ from tools.improvement_release.observation import (
     measure,
 )
 from tools.improvement_release.promotion import promotion_gate
+from tools.improvement_release.rows import aware
 from tools.improvement_release.runner import Runner, SubprocessRunner, run_step, tail
 
 logger = logging.getLogger(__name__)
@@ -124,6 +129,13 @@ EXPOSURE_PLAN = {"unit": "fleet", "mechanism": "merged PR via /update"}
 
 ROLLBACK_PROPAGATION_NOTE = "requires /update on fleet machines"
 
+#: Local ref prefix that keeps a rollback's revert commit reachable after its
+#: worktree is removed: ``refs/improvement-rollback/<release id>``.
+ROLLBACK_REF_PREFIX = "refs/improvement-rollback/"
+
+#: Bytes of the rollback transcript persisted on the row (the last ones).
+ROLLBACK_TRANSCRIPT_BYTES = 16384
+
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _PR_NUMBER = re.compile(r"/pull/(\d+)")
 
@@ -150,15 +162,9 @@ def _now(now: datetime | None) -> datetime:
     return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
 
 
-def _aware(stamp: Any) -> datetime | None:
-    if isinstance(stamp, str):
-        try:
-            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if not isinstance(stamp, datetime):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+def _git_timeout() -> float:
+    """One bound for every ``git`` and ``gh`` subprocess outside the drill's verify step."""
+    return settings.timeouts.git_subprocess_s
 
 
 def _json_default(value: Any) -> Any:
@@ -208,6 +214,25 @@ def _append_history(outcome: dict, event: str, at: datetime, **fields: Any) -> d
     return entry
 
 
+def _merge_history(outcome: dict, current: dict) -> None:
+    """Fold the stored row's history events into ``outcome`` (Race 1).
+
+    Events present on the re-read row and absent from the caller's dict were
+    written by another caller since this one read the row. They are kept,
+    ordered by ``at`` (a stable sort, so same-stamp events keep their
+    order), and the :data:`HISTORY_MAX` bound is re-applied.
+    """
+    history = outcome.setdefault("history", [])
+    missing = [entry for entry in current.get("history", []) if entry not in history]
+    if not missing:
+        return
+    history.extend(missing)
+    history.sort(key=lambda entry: str(entry.get("at") or ""))
+    while len(history) > HISTORY_MAX:
+        history.pop(0)
+        outcome["history_truncated"] = True
+
+
 def _require_state(release: Any, allowed: tuple[str, ...], event: str) -> None:
     state = getattr(release, "state", None)
     if state not in allowed:
@@ -233,7 +258,10 @@ def _transition(
 
     ``outcome`` is the caller's already-updated dict (defaults to the row's);
     the transition event lands on it, then ``extra_events`` in order, and the
-    row is saved once.
+    row is saved once. History events the re-read row carries and the caller's
+    dict lacks are merged in first (:func:`_merge_history`), so when two
+    callers interleave between the re-read and the save, the second write
+    keeps the first writer's event and the record shows both.
     """
     at = _now(now)
     current = get_release(release.id, release.project_key)
@@ -244,6 +272,7 @@ def _transition(
             f"{current.state!r} (re-read before save)",
         )
     outcome = outcome if outcome is not None else _outcome(release)
+    _merge_history(outcome, _outcome(current))
     entry_fields = {"from": current.state, "to": to, **fields}
     if detail is not None:
         entry_fields["detail"] = detail
@@ -449,7 +478,7 @@ def propose(
     if not resolved_ref or resolved_ref.startswith("-"):
         raise ReleaseRefused("CANDIDATE_REF_UNRESOLVED", "candidate_ref is empty")
     run = runner or SubprocessRunner()
-    verify = run(["git", "rev-parse", "--verify", resolved_ref], cwd=repo)
+    verify = run(["git", "rev-parse", "--verify", resolved_ref], cwd=repo, timeout=_git_timeout())
     if verify.returncode != 0:
         raise ReleaseRefused(
             "CANDIDATE_REF_UNRESOLVED",
@@ -514,8 +543,8 @@ def _check_drill(release: Any, outcome: dict) -> dict:
             f"release {release.id} has no passing rollback drill"
             + (f" (last result {drill.get('result')!r})" if drill else ""),
         )
-    drilled_at = _aware(drill.get("drilled_at"))
-    written_at = _aware(outcome.get("rollback_plan_written_at"))
+    drilled_at = aware(drill.get("drilled_at"))
+    written_at = aware(outcome.get("rollback_plan_written_at"))
     if drilled_at is None:
         raise ReleaseRefused("DRILL_STALE", "the drill record carries no drilled_at")
     if written_at is not None and drilled_at < written_at:
@@ -679,6 +708,7 @@ def open_pr(
                 body_path,
             ],
             cwd=repo,
+            timeout=_git_timeout(),
         )
     finally:
         Path(body_path).unlink(missing_ok=True)
@@ -705,7 +735,9 @@ def open_pr(
 
 def _pr_view(runner: Runner, pr_number: int, *, repo: str | None) -> dict:
     result = runner(
-        ["gh", "pr", "view", str(pr_number), "--json", "mergeCommit,mergedAt,state"], cwd=repo
+        ["gh", "pr", "view", str(pr_number), "--json", "mergeCommit,mergedAt,state"],
+        cwd=repo,
+        timeout=_git_timeout(),
     )
     if result.returncode != 0:
         raise ReleaseRefused(
@@ -747,7 +779,7 @@ def expose(
         raise ReleaseRefused(
             "MERGE_SHA_INVALID", f"mergeCommit.oid {merge_sha!r} is not a 40-hex SHA"
         )
-    merged_at = _aware(payload.get("mergedAt"))
+    merged_at = aware(payload.get("mergedAt"))
     if merged_at is None:
         raise ReleaseRefused("PR_NOT_MERGED", f"mergedAt {payload.get('mergedAt')!r} unparsable")
 
@@ -761,7 +793,7 @@ def expose(
         )
 
     baseline = measure(project_key, baseline_start, merged_at)
-    previous_end = _aware(release.observation_window_ends_at)
+    previous_end = aware(release.observation_window_ends_at)
     new_end = merged_at + timedelta(days=window_days)
 
     exposure["merge_sha"] = merge_sha
@@ -812,8 +844,8 @@ def close_window(
     at = _now(now)
     release = get_release(release_id, project_key)
     _require_state(release, ("observing",), "close_window")
-    exposed_at = _aware(release.exposed_at)
-    ends_at = _aware(release.observation_window_ends_at)
+    exposed_at = aware(release.exposed_at)
+    ends_at = aware(release.observation_window_ends_at)
     if exposed_at is None or ends_at is None:
         raise ReleaseRefused("WRONG_STATE", f"release {release.id} has no exposure timestamps")
     outcome = _outcome(release)
@@ -883,8 +915,8 @@ def due_windows(project_key: str, now: datetime | None = None) -> list[Improveme
     """Observing releases whose window has ended, oldest end first."""
     at = _now(now)
     rows = list(ImprovementRelease.query.filter(project_key=project_key, state="observing"))
-    due = [r for r in rows if (_aware(r.observation_window_ends_at) or at) <= at]
-    due.sort(key=lambda r: _aware(r.observation_window_ends_at) or at)
+    due = [r for r in rows if (aware(r.observation_window_ends_at) or at) <= at]
+    due.sort(key=lambda r: aware(r.observation_window_ends_at) or at)
     return due
 
 
@@ -896,13 +928,38 @@ def due_windows(project_key: str, now: datetime | None = None) -> list[Improveme
 def _resolve_repo(runner: Runner, repo: str | None) -> str:
     if repo is not None:
         return str(Path(repo).resolve())
-    result = runner(["git", "rev-parse", "--show-toplevel"], cwd=None)
+    result = runner(["git", "rev-parse", "--show-toplevel"], cwd=None, timeout=_git_timeout())
     top = (result.stdout or "").strip()
     if result.returncode != 0 or not top:
         raise ReleaseRefused(
             "ROLLBACK_STEP_FAILED", "cwd is not inside a git repository and no repo was given"
         )
     return top
+
+
+def _check_branch(runner: Runner, branch: str | None, *, repo: str) -> None:
+    """Refuse an option-shaped or malformed ``--branch`` before it reaches ``git fetch``.
+
+    ``--branch=--prune`` would otherwise run a pruning fetch before failing;
+    ``git check-ref-format --branch`` is the authority on the rest.
+    """
+    if branch is None:
+        return
+    if not branch.strip() or branch.startswith("-"):
+        raise ReleaseRefused("ROLLBACK_STEP_FAILED", f"branch {branch!r} is not a branch name")
+    check = runner(
+        ["git", "check-ref-format", "--branch", branch], cwd=repo, timeout=_git_timeout()
+    )
+    if check.returncode != 0:
+        raise ReleaseRefused(
+            "ROLLBACK_STEP_FAILED",
+            f"git check-ref-format --branch {branch!r} exited {check.returncode}",
+        )
+
+
+def rollback_ref(release_id: str) -> str:
+    """The local ref that keeps a rollback's revert commit reachable past its worktree."""
+    return f"{ROLLBACK_REF_PREFIX}{release_id}"
 
 
 def rollback(
@@ -919,19 +976,33 @@ def rollback(
 ) -> ImprovementRelease:
     """Revert the merge on a freshly fetched ``origin/<target>`` and push it.
 
-    ``target = branch or "main"``. The worktree comes from ``origin/<target>``
-    after ``git fetch origin <target>``; when the fetch of a named branch
-    fails (the remote has no such branch) the worktree comes from
-    ``origin/main`` and the record carries ``pushed_to: <branch>``. The
-    release transitions to ``rolled_back`` only after ``git push`` returned 0
-    and ``git ls-remote origin refs/heads/<target>`` resolves to the revert
-    commit; anything else appends ``rollback_push_refused`` to the history,
-    leaves the state, and raises ``ROLLBACK_PUSH_REFUSED``.
+    ``target = branch or "main"``. The worktree slot is
+    ``<retention root>/drills/<release id>/<timestamp>``, refused exactly as
+    the drill refuses it (``CHECKOUT_PATH`` in the detail) before any step
+    runs; a ``--branch`` is validated before the fetch. The worktree comes
+    from ``origin/<target>`` after ``git fetch origin <target>``; when the
+    fetch of a named branch fails (the remote has no such branch) the
+    worktree comes from ``origin/main`` and the record carries ``pushed_to:
+    <branch>``. Once the revert is committed, ``refs/improvement-rollback/<release
+    id>`` in the repository points at it, so the commit outlives the worktree
+    whatever the push does. The release transitions to ``rolled_back`` only
+    after ``git push`` returned 0 and ``git ls-remote origin refs/heads/<target>``
+    resolves to the revert commit; anything else appends
+    ``rollback_push_refused`` to the history, leaves the state, and raises
+    ``ROLLBACK_PUSH_REFUSED``.
+
+    The transcript of every step is persisted, bounded at
+    :data:`ROLLBACK_TRANSCRIPT_BYTES`: under ``outcome.rollback.transcript``
+    on success, and under ``outcome.rollback_attempt`` (with the refusal code
+    and detail) when a step failed or the push was refused, beside a
+    ``rollback_step_failed`` or ``rollback_push_refused`` history event.
     """
     from tools.improvement_release.drill import (
+        DrillRefused,
         add_detached_worktree,
         assert_restored,
         drill_root,
+        refuse_checkout_path,
         remove_worktree,
     )
 
@@ -944,6 +1015,10 @@ def rollback(
         raise ReleaseRefused("ROLLBACK_STEP_FAILED", "the release records no merge_sha to revert")
     if not (reason or "").strip():
         raise ReleaseRefused("ROLLBACK_STEP_FAILED", "a rollback needs a reason")
+    try:
+        worktree = refuse_checkout_path(drill_root(release.id, root=root, now=at), root=root)
+    except DrillRefused as exc:
+        raise ReleaseRefused("ROLLBACK_STEP_FAILED", f"{exc.code}: {exc.detail}") from exc
     surfaces = _list_field(release, "surfaces")
     target = branch or "main"
     parent = target
@@ -951,9 +1026,12 @@ def rollback(
     steps: list[dict] = []
     outcome = _outcome(release)
     repo_path = _resolve_repo(runner, repo)
+    _check_branch(runner, branch, repo=repo_path)
 
     def step(argv: list[str], *, cwd: str | None, name: str) -> dict:
-        record = run_step(runner, argv, cwd=cwd, transcript=transcript, name=name)
+        record = run_step(
+            runner, argv, cwd=cwd, timeout=_git_timeout(), transcript=transcript, name=name
+        )
         steps.append(record)
         return record
 
@@ -961,16 +1039,34 @@ def rollback(
         transcript.append(f"[rollback refused: {detail}]")
         return ReleaseRefused("ROLLBACK_STEP_FAILED", detail)
 
-    fetch = step(["git", "fetch", "origin", target], cwd=repo_path, name="fetch")
-    if fetch["returncode"] != 0:
-        if branch is None:
-            raise fail(f"git fetch origin {target} exited {fetch['returncode']}")
-        parent = "main"
-        fetch = step(["git", "fetch", "origin", parent], cwd=repo_path, name="fetch_main")
-        if fetch["returncode"] != 0:
-            raise fail(f"git fetch origin {parent} exited {fetch['returncode']}")
+    def persist_failure(exc: ReleaseRefused) -> None:
+        if exc.code == "ROLLBACK_STEP_FAILED":
+            _append_history(outcome, "rollback_step_failed", at, target=target, detail=exc.detail)
+        outcome["rollback_attempt"] = {
+            "at": at.isoformat(),
+            "code": exc.code,
+            "detail": exc.detail,
+            "target": target,
+            "steps": steps,
+            "transcript": tail("\n".join(transcript), ROLLBACK_TRANSCRIPT_BYTES),
+        }
+        _save_outcome(release, outcome)
 
-    worktree = drill_root(release.id, root=root, now=at)
+    try:
+        fetch = step(["git", "fetch", "origin", target], cwd=repo_path, name="fetch")
+        if fetch["returncode"] != 0:
+            if branch is None:
+                raise fail(f"git fetch origin {target} exited {fetch['returncode']}")
+            parent = "main"
+            fetch = step(["git", "fetch", "origin", parent], cwd=repo_path, name="fetch_main")
+            if fetch["returncode"] != 0:
+                raise fail(f"git fetch origin {parent} exited {fetch['returncode']}")
+    except ReleaseRefused as exc:
+        persist_failure(exc)
+        raise
+
+    record: dict | None = None
+    failure: ReleaseRefused | None = None
     try:
         add = add_detached_worktree(
             runner, repo=repo_path, ref=f"origin/{parent}", path=worktree, transcript=transcript
@@ -1001,6 +1097,15 @@ def rollback(
         revert_sha = head["stdout_tail"].strip()
         if not _HEX40.match(revert_sha):
             raise fail(f"git rev-parse HEAD answered {revert_sha!r}, not a SHA")
+        # The revert outlives the worktree: a lightweight ref in the repository
+        # keeps it reachable after `git worktree remove`, whatever the push does.
+        keep = step(
+            ["git", "update-ref", rollback_ref(release.id), revert_sha],
+            cwd=repo_path,
+            name="rollback_ref",
+        )
+        if keep["returncode"] != 0:
+            raise fail(f"git update-ref exited {keep['returncode']}: {keep['stderr_tail']}")
 
         verification = {"base_revision": release.base_revision, "surfaces": surfaces}
         if release.base_revision and surfaces:
@@ -1043,9 +1148,10 @@ def rollback(
                 revert_sha=revert_sha,
                 parent_sha=parent_sha,
                 target=target,
+                rollback_ref=rollback_ref(release.id),
                 detail=refused_detail,
             )
-            _save_outcome(release, outcome)
+            transcript.append(f"[rollback refused: {refused_detail}]")
             raise ReleaseRefused("ROLLBACK_PUSH_REFUSED", f"{refused_detail}; revert {revert_sha}")
 
         record = {
@@ -1056,6 +1162,7 @@ def rollback(
             "parent_sha": parent_sha,
             "pushed_to": target,
             "worktree_ref": f"origin/{parent}",
+            "rollback_ref": rollback_ref(release.id),
             "verification": verification,
             "propagation": ROLLBACK_PROPAGATION_NOTE,
             "steps": steps,
@@ -1068,20 +1175,26 @@ def rollback(
                 f"--body {json.dumps(message)}"
             )
             record["propagation"] = f"{ROLLBACK_PROPAGATION_NOTE}; open the PR from {branch}"
-        outcome["rollback"] = record
-        return _transition(
-            release,
-            allowed_from=("observing", "accepted"),
-            to="rolled_back",
-            event="rolled_back",
-            now=at,
-            outcome=outcome,
-            revert_sha=revert_sha,
-            parent_sha=parent_sha,
-            pushed_to=target,
-        )
+    except ReleaseRefused as exc:
+        failure = exc
     finally:
         remove_worktree(runner, repo=repo_path, path=worktree, transcript=transcript, root=root)
+    if failure is not None:
+        persist_failure(failure)
+        raise failure
+    record["transcript"] = tail("\n".join(transcript), ROLLBACK_TRANSCRIPT_BYTES)
+    outcome["rollback"] = record
+    return _transition(
+        release,
+        allowed_from=("observing", "accepted"),
+        to="rolled_back",
+        event="rolled_back",
+        now=at,
+        outcome=outcome,
+        revert_sha=revert_sha,
+        parent_sha=parent_sha,
+        pushed_to=target,
+    )
 
 
 __all__ = [
@@ -1089,6 +1202,8 @@ __all__ = [
     "EXPOSURE_PLAN",
     "HISTORY_MAX",
     "REFUSAL_CODES",
+    "ROLLBACK_REF_PREFIX",
+    "ROLLBACK_TRANSCRIPT_BYTES",
     "WINDOW_SUM_MAX_DAYS",
     "ReleaseRefused",
     "approve",
@@ -1099,5 +1214,6 @@ __all__ = [
     "open_pr",
     "propose",
     "rollback",
+    "rollback_ref",
     "withdraw",
 ]

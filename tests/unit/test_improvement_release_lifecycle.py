@@ -311,7 +311,8 @@ class TestPropose:
         assert release.kind == "evaluator"
 
     @pytest.mark.parametrize(
-        "surfaces", [["docs/improvement-charter.md"], [], ["../escape"], ["tools/*.py"]]
+        "surfaces",
+        [["docs/improvement-charter.md"], [], ["../escape"], ["tools/*.py"], ["docs"], ["tools"]],
     )
     def test_propose_refuses_charter_surface(self, evaluation, surfaces):
         with pytest.raises(ReleaseRefused) as exc:
@@ -485,6 +486,24 @@ class TestApprove:
         assert exc.value.code == "WRONG_STATE"
         assert get_release(proposed.id, PK).state == "withdrawn"
 
+    def test_transition_merges_a_concurrent_writers_history(self, proposed):
+        """Race 1: a second writer keeps the first writer's event, so the record shows both."""
+        _stamp_drill(proposed)
+        stale = get_release(proposed.id, PK)
+        stale_outcome = lifecycle._outcome(stale)
+        approve(proposed.id, approved_by="Tom Counsell", project_key=PK, now=NOW)
+        lifecycle._transition(
+            stale,
+            to="withdrawn",
+            allowed_from=("proposed", "approved"),
+            event="withdrawn",
+            now=NOW + timedelta(seconds=1),
+            outcome=stale_outcome,
+        )
+        history = _outcome(proposed.id)["history"]
+        assert [e["event"] for e in history] == ["proposed", "approved", "withdrawn"]
+        assert history[-1]["from"] == "approved"
+
     def test_withdraw_records_reason(self, proposed):
         release = withdraw(proposed.id, project_key=PK, reason="superseded", now=NOW)
         assert release.state == "withdrawn"
@@ -560,6 +579,27 @@ class TestExpose:
         assert events["exposed"]["expose_called_at"] == NOW.isoformat()
         assert events["window_restamped"]["from"] == provisional.isoformat()
         assert events["window_restamped"]["to"] == (merged_at + timedelta(days=7)).isoformat()
+
+    def test_gh_and_rev_parse_calls_carry_the_git_timeout(self, evaluation):
+        """No network subprocess runs unbounded: propose, open_pr, and expose all pin it."""
+        from config.settings import settings
+
+        expected = settings.timeouts.git_subprocess_s
+        propose_runner = RecordingRunner()
+        proposed = _propose(evaluation, runner=propose_runner)
+        assert propose_runner.calls[0]["argv"][:3] == ["git", "rev-parse", "--verify"]
+        assert propose_runner.calls[0]["timeout"] == expected
+        _stamp_drill(proposed)
+        approve(proposed.id, approved_by="Tom Counsell", project_key=PK, now=NOW)
+        runner = _pr_runner(NOW - timedelta(days=3))
+        open_pr(proposed.id, project_key=PK, runner=runner)
+        expose(proposed.id, project_key=PK, runner=runner, now=NOW)
+        gh_calls = [c for c in runner.calls if c["argv"][0] == "gh"]
+        assert [c["argv"][:3] for c in gh_calls] == [
+            ["gh", "pr", "create"],
+            ["gh", "pr", "view"],
+        ]
+        assert all(c["timeout"] == expected for c in gh_calls), gh_calls
 
     def test_expose_refuses_when_baseline_expired(self, approved):
         merged_at = NOW - timedelta(days=EVIDENCE_TTL_DAYS - 7 + 1)
@@ -765,6 +805,44 @@ class TestRollback:
         assert push == ["git", "push", "origin", "HEAD:refs/heads/main"]
         assert ["git", "ls-remote", "origin", "refs/heads/main"] in argvs
         assert any(a[:3] == ["git", "worktree", "remove"] for a in argvs)
+        # the transcript is persisted, through the worktree removal
+        assert record["transcript"].index("$ git push origin") < record["transcript"].index(
+            "$ git worktree remove"
+        )
+        assert "rollback_attempt" not in outcome
+
+    def test_rollback_keeps_a_ref_to_the_revert_before_pushing(self, approved, tmp_path):
+        """``refs/improvement-rollback/<id>`` points at the revert, written in the repo
+        after the commit and before the push, so the commit outlives the worktree."""
+        release = self._exposed(approved)
+        runner = _rollback_runner()
+        rollback(release.id, project_key=PK, reason="r", runner=runner, root=tmp_path, now=NOW)
+        calls = runner.calls
+        keep = next(i for i, c in enumerate(calls) if c["argv"][:2] == ["git", "update-ref"])
+        commit = next(i for i, c in enumerate(calls) if c["argv"][:2] == ["git", "commit"])
+        push = next(i for i, c in enumerate(calls) if c["argv"][:2] == ["git", "push"])
+        assert commit < keep < push
+        assert calls[keep]["argv"] == [
+            "git",
+            "update-ref",
+            f"refs/improvement-rollback/{release.id}",
+            REVERT_SHA,
+        ]
+        assert calls[keep]["cwd"] == "/repo", "the ref lives in the repository, not the worktree"
+        record = _outcome(release.id)["rollback"]
+        assert record["rollback_ref"] == lifecycle.rollback_ref(release.id)
+
+    def test_rollback_network_calls_carry_the_git_timeout(self, approved, tmp_path):
+        from config.settings import settings
+
+        release = self._exposed(approved)
+        runner = _rollback_runner()
+        rollback(release.id, project_key=PK, reason="r", runner=runner, root=tmp_path, now=NOW)
+        expected = settings.timeouts.git_subprocess_s
+        for name in ("fetch", "push", "ls-remote", "rev-parse", "revert", "worktree"):
+            calls = [c for c in runner.calls if c["argv"][:2] == ["git", name]]
+            assert calls, name
+            assert all(c["timeout"] == expected for c in calls), (name, calls)
 
     def test_rollback_fetches_before_worktree(self, approved, tmp_path):
         release = self._exposed(approved)
@@ -786,11 +864,17 @@ class TestRollback:
             rollback(release.id, project_key=PK, reason="r", runner=runner, root=tmp_path, now=NOW)
         assert exc.value.code == "ROLLBACK_PUSH_REFUSED"
         assert get_release(release.id, PK).state == "observing"
-        event = _outcome(release.id)["history"][-1]
+        outcome = _outcome(release.id)
+        event = outcome["history"][-1]
         assert event["event"] == "rollback_push_refused"
         assert event["revert_sha"] == REVERT_SHA
         assert event["parent_sha"] == PARENT_SHA
-        assert "rollback" not in _outcome(release.id)
+        assert event["rollback_ref"] == f"refs/improvement-rollback/{release.id}"
+        assert "rollback" not in outcome
+        attempt = outcome["rollback_attempt"]
+        assert attempt["code"] == "ROLLBACK_PUSH_REFUSED"
+        assert "$ git ls-remote origin refs/heads/main" in attempt["transcript"]
+        assert "$ git worktree remove" in attempt["transcript"]
 
     def test_rollback_refuses_nonzero_push(self, approved, tmp_path):
         release = self._exposed(approved)
@@ -838,6 +922,21 @@ class TestRollback:
         # squash merge: one parent, plain revert
         assert ["git", "revert", "--no-commit", MERGE_SHA] in argvs
 
+    def test_rollback_refuses_checkout_path(self, approved, tmp_path):
+        """The [DESTRUCTIVE] No-Go: a slot inside a git checkout is refused before any step."""
+        checkout = tmp_path / "checkout"
+        (checkout / ".git").mkdir(parents=True)
+        release = self._exposed(approved)
+        runner = _rollback_runner()
+        with pytest.raises(ReleaseRefused) as exc:
+            rollback(release.id, project_key=PK, reason="r", runner=runner, root=checkout, now=NOW)
+        assert exc.value.code == "ROLLBACK_STEP_FAILED"
+        assert "CHECKOUT_PATH" in exc.value.detail
+        assert get_release(release.id, PK).state == "observing"
+        assert not (checkout / "drills").exists()
+        assert not any(a[:2] == ["git", "fetch"] for a in runner.argvs())
+        assert not any(a[:2] == ["git", "worktree"] for a in runner.argvs())
+
     def test_rollback_refuses_wrong_state(self, approved, tmp_path):
         with pytest.raises(ReleaseRefused) as exc:
             rollback(
@@ -873,3 +972,75 @@ class TestRollback:
         assert get_release(release.id, PK).state == "observing"
         assert not any(a[:2] == ["git", "push"] for a in runner.argvs())
         assert any(a[:3] == ["git", "worktree", "remove"] for a in runner.argvs())
+        # the failed attempt and its transcript land on the row
+        outcome = _outcome(release.id)
+        assert outcome["history"][-1]["event"] == "rollback_step_failed"
+        assert "git revert exited 1" in outcome["history"][-1]["detail"]
+        attempt = outcome["rollback_attempt"]
+        assert attempt["code"] == "ROLLBACK_STEP_FAILED"
+        assert "CONFLICT (content): tools/x.py" in attempt["transcript"]
+        assert "$ git worktree remove" in attempt["transcript"]
+        assert [s["name"] for s in attempt["steps"]][-1] == "revert"
+        assert "rollback" not in outcome
+
+    def test_rollback_transcript_is_bounded(self, approved, tmp_path):
+        from tools.improvement_release.lifecycle import ROLLBACK_TRANSCRIPT_BYTES
+
+        release = self._exposed(approved)
+        runner = RecordingRunner(
+            [
+                (["git", "rev-parse", "HEAD"], (0, REVERT_SHA + "\n", "")),
+                (["git", "revert"], (1, "x" * (ROLLBACK_TRANSCRIPT_BYTES * 2), "conflict")),
+            ]
+        )
+        with pytest.raises(ReleaseRefused):
+            rollback(
+                release.id, project_key=PK, reason="r", runner=runner, root=tmp_path, repo=tmp_path
+            )
+        transcript = _outcome(release.id)["rollback_attempt"]["transcript"]
+        assert len(transcript.encode("utf-8")) <= ROLLBACK_TRANSCRIPT_BYTES
+        assert "[rollback refused: git revert exited 1: conflict]" in transcript
+        assert transcript.endswith("$ git worktree prune\n[exit 0 in 0.00 s]"), (
+            "the tail keeps the end: the refusal and the worktree removal"
+        )
+
+    @pytest.mark.parametrize("branch", ["-x", "--prune", " ", ""])
+    def test_rollback_refuses_option_shaped_branch_before_fetch(self, approved, tmp_path, branch):
+        release = self._exposed(approved)
+        runner = _rollback_runner()
+        with pytest.raises(ReleaseRefused) as exc:
+            rollback(
+                release.id,
+                project_key=PK,
+                reason="r",
+                runner=runner,
+                branch=branch,
+                root=tmp_path,
+                now=NOW,
+            )
+        assert exc.value.code == "ROLLBACK_STEP_FAILED"
+        assert not any(a[:2] == ["git", "fetch"] for a in runner.argvs())
+        assert get_release(release.id, PK).state == "observing"
+        assert "rollback_attempt" not in _outcome(release.id)
+
+    def test_rollback_refuses_a_branch_git_rejects(self, approved, tmp_path):
+        release = self._exposed(approved)
+        runner = RecordingRunner(
+            [(["git", "check-ref-format"], (1, "", "fatal: 'a..b' is not a valid branch name"))]
+        )
+        with pytest.raises(ReleaseRefused) as exc:
+            rollback(
+                release.id,
+                project_key=PK,
+                reason="r",
+                runner=runner,
+                branch="a..b",
+                root=tmp_path,
+                repo=tmp_path,
+                now=NOW,
+            )
+        assert exc.value.code == "ROLLBACK_STEP_FAILED"
+        assert "check-ref-format" in exc.value.detail
+        argvs = runner.argvs()
+        assert ["git", "check-ref-format", "--branch", "a..b"] in argvs
+        assert not any(a[:2] == ["git", "fetch"] for a in argvs)

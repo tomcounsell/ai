@@ -890,7 +890,7 @@ ended, for a future tick to call.
 - [ ] `lifecycle.rollback` with a runner whose `git push` returns nonzero: state unchanged, `outcome.history` carries `rollback_push_refused` with the revert SHA and `parent_sha`, `ReleaseRefused("ROLLBACK_PUSH_REFUSED")` raised, CLI exit 2. With a runner whose push returns 0 but whose `ls-remote origin refs/heads/main` answers a different SHA (a head that moved under the push): same refusal, so the transition never rests on the push's exit code alone. The recording runner returns 0 for `git fetch origin main` and `git worktree add --detach <path> origin/main`, and the test asserts those two calls precede the revert in the runner log (`test_rollback_fetches_before_worktree`), so a builder who builds the worktree from the local checkout goes red.
 - [ ] `lifecycle.expose` with canned `gh pr view` JSON whose `mergedAt` is older than `EVIDENCE_TTL_DAYS - baseline_window_days` days: refused `ReleaseRefused("EVIDENCE_EXPIRED")`, state stays `approved`, no baseline written (`test_expose_refuses_when_baseline_expired`). With `state != "MERGED"`: `PR_NOT_MERGED`.
 - [ ] `evaluation_read.effect_of` / `interval_of` on a row whose `effect` is `None`, an empty string, or a JSON string lacking the requested endpoint: `None`, never an exception; on a `dict` (a row written by a future writer that stores the parsed value): the same answer as the string form. `budget_of` on `notes` without a `budget=` line: `None`.
-- [ ] `compare.py` catches any exception from an `ArmRunner` and writes `infra_failure`, mirroring lane 4's runner; test asserts the evaluation row exists with that verdict and `notes` naming the exception type.
+- [ ] `compare.py` catches any exception from an `ArmRunner`, the accounting read, the priority-area lookup, or the statistics and writes `infra_failure` with the experiment `aborted`, mirroring lane 4's runner; tests assert the evaluation row exists with that verdict and `notes` naming the exception type, for a raise inside an arm and for one after both arms ran (`test_post_arm_scoring_failure_is_infra_failure_not_a_wedged_running_state`).
 - [ ] `observation.py` and `lineage.py` catch read failures and mark the result `unavailable` (the dashboard pattern from `get_goals`); tests monkeypatch `ImprovementEvidence.recent` to raise and assert `unavailable=True` with a `logger.warning` captured, and that `get_release_lineage` still returns the promotion gate.
 - [ ] `report.py`: each level degrades independently; test raises inside the level-2 read and asserts levels 1 and 3 are still populated and level 2 says "could not be determined".
 
@@ -936,6 +936,10 @@ Every guard below is mutated once during the build and the test that catches it 
 - freshness (`freeze`): skip the experiment lookup → `test_freeze_refuses_worked_opportunity` red
 - arms-identical (`run`): drop the check → `test_run_refuses_identical_arms` red
 - detection-declined (`close_window`): drop the coverage comparison → `test_close_window_undetermined_when_detection_declines` red
+- undeclared-surface listing past the tail (`drill`): parse the step's 2 KB `stdout_tail` instead of the full output → `test_undeclared_check_reads_the_whole_listing_past_tail_bytes` red
+- denylist parent rule (`denylist`): drop the enclosing-directory match → `test_a_directory_enclosing_an_entry_is_denied` and `test_propose_refuses_charter_surface[docs]` red
+- denied changed path (`drill`): drop the `denied_surfaces` check over the changed paths → `test_drill_fails_when_a_changed_path_is_denied` red
+- rollback checkout refusal (`rollback`): build the slot without `refuse_checkout_path` → `test_rollback_refuses_checkout_path` red
 
 ## Test Impact
 
@@ -1040,7 +1044,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 - [SEPARATE-SLUG #3215] Unit-2 paid-inference metering, the `valor-improve` CLI, the control journal, and scheduling `close-window --due` on the controller tick. `BudgetReader.unit2_usd` returns `None` until lane 3 meters it; `valor-improve-release` is a separate binary by design.
 - [SEPARATE-SLUG #3216] Any change to `tools/improvement_eval/`. Imported, never modified. Anti-criterion: the "Lane 4 harness untouched" Verification row.
 - [DESTRUCTIVE] Auto-rollback on a regressed observation window. `close_window` writes `rollback_recommended`; a human runs `rollback`. Anti-criterion: `grep -c 'rollback(' tools/improvement_release/lifecycle.py` inside `close_window`'s body is asserted zero by `test_close_window_never_calls_rollback`.
-- [DESTRUCTIVE] Running the drill or the rollback inside the repo checkout. Both refuse any path that is not a worktree they created under the retention root. Anti-criterion: `test_drill_refuses_checkout_path`.
+- [DESTRUCTIVE] Running the drill or the rollback inside the repo checkout. Both refuse any path that is not a worktree they created under the retention root. Anti-criteria: `test_drill_refuses_checkout_path` and `test_rollback_refuses_checkout_path`.
 
 ## Update System
 
@@ -1256,7 +1260,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Unit tests for the lane pass | `scripts/pytest-clean.sh tests/unit/test_improvement_release_lifecycle.py tests/unit/test_improvement_release_drill.py tests/unit/test_improvement_release_denylist.py tests/unit/test_improvement_release_promotion_gate.py tests/unit/test_improvement_release_observation.py tests/unit/test_improvement_release_evaluation_read.py tests/unit/test_improvement_recursion_process.py tests/unit/test_improvement_recursion_freshness.py tests/unit/test_improvement_recursion_compare.py tests/unit/test_improvement_recursion_report.py tests/unit/test_improvement_models.py tests/unit/test_ui_app.py tests/unit/test_migrations.py -q` | exit code 0 |
+| Unit tests for the lane pass | `scripts/pytest-clean.sh tests/unit/test_improvement_release_lifecycle.py tests/unit/test_improvement_release_drill.py tests/unit/test_improvement_release_denylist.py tests/unit/test_improvement_release_promotion_gate.py tests/unit/test_improvement_release_observation.py tests/unit/test_improvement_release_evaluation_read.py tests/unit/test_improvement_release_cli.py tests/unit/test_improvement_recursion_process.py tests/unit/test_improvement_recursion_freshness.py tests/unit/test_improvement_recursion_compare.py tests/unit/test_improvement_recursion_report.py tests/unit/test_improvement_models.py tests/unit/test_ui_app.py tests/unit/test_migrations.py -q` | exit code 0 |
 | End-to-end release lifecycle | `scripts/pytest-clean.sh tests/integration/test_improvement_release_end_to_end.py tests/integration/test_improvement_release_drill.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/improvement_release tools/improvement_recursion models/improvement_release.py ui/data/improvement.py ui/app.py scripts/update/migrations.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/improvement_release tools/improvement_recursion models/improvement_release.py ui/data/improvement.py ui/app.py scripts/update/migrations.py` | exit code 0 |

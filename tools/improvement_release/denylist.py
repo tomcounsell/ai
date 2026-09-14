@@ -11,7 +11,10 @@ repo-relative surface cannot name.
 Every surface is normalized with :func:`posixpath.normpath` before it is
 compared, and a surface that is absolute, escapes the repo, or carries a glob
 character is refused outright: a denylist that
-``./docs/../docs/improvement-charter.md`` walks around is not a denylist.
+``./docs/../docs/improvement-charter.md`` walks around is not a denylist. A
+surface that encloses an entry (``docs``, ``models``, ``config``, ``tools``)
+is denied for the same reason: a declared directory covers everything beneath
+it, so ``--surfaces docs`` would carry the charter through the drill.
 
 Pure functions, no Redis, no filesystem.
 """
@@ -83,11 +86,20 @@ def normalize_surface(surface: str) -> str:
 
 
 def _is_denied(normalized: str) -> bool:
+    """True for an entry, a path under a directory entry, or a parent of any entry.
+
+    A declared directory surface covers everything beneath it (the drill's
+    undeclared-surface check treats ``docs`` as covering
+    ``docs/improvement-charter.md``), so a surface that encloses an entry is
+    denied too; ``docs``, ``models``, ``config``, and ``tools`` all are.
+    """
     for entry in CANDIDATE_SURFACE_DENYLIST:
         if entry.endswith("/"):
             if normalized == entry.rstrip("/") or normalized.startswith(entry):
                 return True
         elif normalized == entry:
+            return True
+        if entry.startswith(normalized + "/"):
             return True
     return False
 

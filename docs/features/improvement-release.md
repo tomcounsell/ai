@@ -82,7 +82,7 @@ plain field on an immortal row.
 | `CHARTER_DRIFT` | `propose`, `approve` | The evaluation's (or release's) `charter_digest` differs from `ImprovementCharter.pinned(project_key).digest`. Charter §12: reassess pending actions under the new authority before further effects. The operator withdraws and re-proposes; the withdrawn row keeps the old digest |
 | `INVALID_KIND` | `propose` | `kind` is outside `RELEASE_KINDS` (`core_workflow`, `evaluator`, `infrastructure`) |
 | `EVALUATOR_RELEASE_NEEDS_CALIBRATION` | `propose` | An `evaluator` release without `--calibration-ref` and a non-empty `--argument` |
-| `SURFACE_DENIED` | `propose` | No surfaces, a surface the denylist cannot normalize, or a surface on the denylist |
+| `SURFACE_DENIED` | `propose` | No surfaces, a surface the denylist cannot normalize, a surface on the denylist, or a directory surface that encloses an entry (`docs`, `models`, `config`, `tools`) |
 | `MANIFEST_LACKS_BASE_REVISION` | `propose` | The manifest carries no `base_revision` and `--base-revision` was not given |
 | `BASE_REVISION_CONFLICT` | `propose` | The manifest's `base_revision` and `--base-revision` both exist and differ |
 | `CANDIDATE_REF_CONFLICT` | `propose` | The manifest's `candidate_ref` (lane 5's manifests carry one) and `--candidate-ref` both exist and differ |
@@ -98,8 +98,8 @@ plain field on an immortal row.
 | `MERGE_SHA_INVALID` | `expose` | `mergeCommit.oid` is not a 40-hex SHA (`mergeCommit` is an object, never a string) |
 | `EVIDENCE_EXPIRED` | `expose` | `now - (mergedAt - baseline_window_days) > EVIDENCE_TTL_DAYS`: the baseline's oldest rows have expired. Also an `outcome.reason` at `close_window`; one name, one meaning, two surfaces |
 | `WINDOW_OPEN` | `close_window` | Called before `observation_window_ends_at` without `--force` and a reason |
-| `ROLLBACK_STEP_FAILED` | `rollback` | No `merge_sha` on the release, no reason, or a fetch, worktree add, revert, or commit step exited nonzero |
-| `ROLLBACK_PUSH_REFUSED` | `rollback` | The push exited nonzero, or `ls-remote` resolved the target to something other than the revert commit. The only refusal that writes: a history event naming the orphaned revert |
+| `ROLLBACK_STEP_FAILED` | `rollback` | No `merge_sha` on the release, no reason, a worktree slot outside the retention root or inside a git checkout (`CHECKOUT_PATH` in the detail, the drill's rule), an option-shaped or malformed `--branch`, or a fetch, worktree add, revert, commit, or update-ref step exited nonzero. Once a step has run, the attempt and its transcript are written to `outcome.rollback_attempt` beside a `rollback_step_failed` history event |
+| `ROLLBACK_PUSH_REFUSED` | `rollback` | The push exited nonzero, or `ls-remote` resolved the target to something other than the revert commit. Writes a history event naming the orphaned revert and its local ref, plus `outcome.rollback_attempt` with the transcript |
 | `WRONG_STATE` | every transition | The release is not in a state the event accepts, on the first read or on the re-read before save |
 | `NOT_FOUND` | every command | No release with that id under that project key |
 
@@ -144,7 +144,10 @@ the same declared surfaces. The dashboard renders a drilled release as
 `<retention root>/drills/<release id>/<timestamp>/` created with `git worktree
 add --detach`. Any other path is refused before anything is created
 (`DrillRefused("CHECKOUT_PATH")`): the slot must sit under the retention root
-and outside every git checkout. A release past `proposed` is refused
+and outside every git checkout. When the repository has a `.venv`, the whole
+directory is symlinked into the worktree (a linked worktree carries none of
+its own), so a `verify` command such as `scripts/pytest-clean.sh` finds an
+interpreter there; the link is removed with the worktree and never followed. A release past `proposed` is refused
 `NOT_PROPOSED`; an option-shaped ref, an invalid surface, a rollback plan that
 is not a JSON object, and a missing repository are refused `BAD_REF`,
 `BAD_SURFACE`, `BAD_PLAN`, and `NO_REPO`.
@@ -165,6 +168,17 @@ is not a JSON object, and a missing repository are refused `BAD_REF`,
      <candidate>` is neither a declared surface nor under a declared directory,
      listed under `paths`. This is the check that makes the declared surfaces
      a claim the drill can falsify.
+   - `DENIED_SURFACE_CHANGED`: a changed path is on the candidate denylist,
+     listed under `paths`. The denylist already refuses a declared directory
+     that encloses an entry at proposal; this check reads the paths the
+     candidate actually changed, so a charter edit under any declared surface
+     stops here before a revert is rehearsed.
+
+   The path lists behind these checks (and the revert's unmerged paths, and
+   the restoration's differing paths) are read from the command's full
+   output. The step record keeps a 2 KB tail of each stream, and git sorts
+   paths, so a check that read the tail of a long listing would miss exactly
+   the `.githooks/` and `config/` entries that sort first.
 3. `git revert --no-commit <base>..<candidate>`; a conflict is `fail` with
    `reason: revert_conflict` and the unmerged paths.
 4. Restoration: `git diff --quiet <base> -- <surface>` per surface, then `git
@@ -191,8 +205,10 @@ on every load; a corrupted transcript raises `ArtifactIntegrityError` through
 
 `drill --sweep` removes drill slots older than a day (`SWEEP_AGE_SECONDS`),
 aged by the timestamp in their name so a slot from a hard-killed drill is
-swept even when the filesystem later touched it. The drill's own `finally`
-handles every exception path; only a SIGKILL leaves residue.
+swept even when the filesystem later touched it. A slot the checkout guard
+refuses is logged and left in place; the sweep continues to the next one. The
+drill's own `finally` handles every exception path; only a SIGKILL leaves
+residue.
 
 ## Approval
 
@@ -344,9 +360,14 @@ surface that is absolute, escapes the repo, carries a glob character, or names
 the repo root is refused outright (`InvalidSurface`, a subclass of
 `SurfaceDenied`), since a denylist that
 `./docs/../docs/improvement-charter.md` walks around is not a denylist. An
-entry ending in `/` denies the directory and everything under it. Identity
-and persona files beyond `config/identity.json` live in the private vault
-outside the repo, which a repo-relative surface cannot name.
+entry ending in `/` denies the directory and everything under it, and a
+surface that encloses any entry (`docs`, `models`, `config`, `tools`) is
+denied for the same reason: the drill treats a declared directory as covering
+everything beneath it, so `--surfaces docs` would carry the charter through.
+The drill also checks the paths a candidate actually changed against the
+list (`DENIED_SURFACE_CHANGED`). Identity and persona files beyond
+`config/identity.json` live in the private vault outside the repo, which a
+repo-relative surface cannot name.
 
 The denylist is one of three checks, and it catches only what it names. It
 does not refuse a candidate that edits `models/__init__.py` to import a
@@ -361,7 +382,13 @@ because the loader is the second guard.
 
 `rollback` is the one deliberately pipeline-exempt path in this lane. It is an
 incident surface, and a revert that waits on critique and review is a
-rollback that arrives after the damage. With `target = branch or "main"`:
+rollback that arrives after the damage. Before any step runs, the worktree
+slot `<retention root>/drills/<release id>/<timestamp>` goes through the
+drill's `refuse_checkout_path` (a slot outside the retention root or inside a
+git checkout is `ROLLBACK_STEP_FAILED` with `CHECKOUT_PATH` in the detail),
+and a `--branch` is refused when it starts with `-` or fails `git
+check-ref-format --branch`, so `--branch=--prune` never reaches the fetch.
+With `target = branch or "main"`:
 
 1. `git fetch origin <target>` first. A local `main` behind `origin/main` is
    the ordinary state of a machine during an incident; a revert committed on
@@ -370,12 +397,17 @@ rollback that arrives after the damage. With `target = branch or "main"`:
    cause. Under `--branch <name>` for a branch the remote does not have, the
    fetch fails and the worktree comes from `origin/main` instead.
 2. `git worktree add --detach <slot> origin/<parent>` under the retention
-   root, the same slot shape the drill uses. `parent_sha = git rev-parse
-   origin/<parent>` is recorded.
+   root, the same slot shape the drill uses, with the repository's `.venv`
+   symlinked in so the shared `.githooks/pre-push` runs under the repo's
+   interpreter at push time. `parent_sha = git rev-parse origin/<parent>` is
+   recorded.
 3. `git revert --no-commit -m 1 <merge_sha>` when the merge commit has two
    parents, plain `git revert --no-commit <merge_sha>` when the PR was
    squash-merged; then `git commit -m "Roll back improvement release <id>:
-   <reason> (Refs #3218)"`, so `.githooks/commit-msg` accepts it.
+   <reason> (Refs #3218)"`, so `.githooks/commit-msg` accepts it. `git
+   update-ref refs/improvement-rollback/<release id> <revert sha>` in the
+   repository then keeps the revert reachable after the worktree is removed;
+   without it the commit would be unreferenced and gone at the next prune.
 4. `assert_restored` against `base_revision` on the declared surfaces, recorded
    under `outcome.rollback.verification` with a note that it is informational:
    `main` has moved since `base_revision`, so a difference is expected.
@@ -390,15 +422,26 @@ rollback that arrives after the damage. With `target = branch or "main"`:
    remote head that differs appends `{"event": "rollback_push_refused",
    stderr, revert_sha, parent_sha, target, detail}` to `outcome.history`,
    leaves the state unchanged, and raises `ROLLBACK_PUSH_REFUSED`. The revert
-   commit is reported so the operator can push it by hand or re-run with
+   commit is reported, and stays reachable as
+   `refs/improvement-rollback/<release id>` in the local repository for as
+   long as that ref exists, so the operator can push it by hand (`git push
+   origin refs/improvement-rollback/<id>:refs/heads/<target>`) or re-run with
    `--branch`.
 7. `finally`: the worktree is removed.
 
+Every step's transcript is persisted, bounded to the last
+`ROLLBACK_TRANSCRIPT_BYTES` (16 KB): on success under
+`outcome.rollback.transcript`; on `ROLLBACK_STEP_FAILED` after a step has run
+and on `ROLLBACK_PUSH_REFUSED` under `outcome.rollback_attempt` as `{at,
+code, detail, target, steps, transcript}`, beside a `rollback_step_failed` or
+`rollback_push_refused` history event. Each new attempt overwrites
+`rollback_attempt`; the history keeps one event per attempt.
+
 On success `outcome.rollback` carries `reason`, `merge_sha`,
 `merge_commit_parents`, `revert_sha`, `parent_sha`, `pushed_to`,
-`worktree_ref`, `verification`, `steps`, `rolled_back_at`, and
-`propagation: "requires /update on fleet machines"`, naming the step the
-rollback did not perform. A revert pushed to `main` reaches other machines
+`worktree_ref`, `rollback_ref`, `verification`, `steps`, `transcript`,
+`rolled_back_at`, and `propagation: "requires /update on fleet machines"`,
+naming the step the rollback did not perform. A revert pushed to `main` reaches other machines
 through the ordinary `/update`. Under `--branch`, `propagation` also names the
 PR the operator must open, the record carries `pr_command`, and the CLI prints
 it; that is the pipeline-shaped alternative for a rollback that is not urgent.
@@ -625,15 +668,25 @@ stderr. `--help` on the binary and on every subcommand is authoritative.
 
 `propose`, `drill`, `open-pr`, `expose`, and `rollback` accept `--runner-log
 <path>`, which appends one JSON line per subprocess call so a test or an
-operator can inspect every `git` and `gh` invocation. `propose`, `approve`,
-`expose`, and `close-window` accept `--now <iso>`, a test-only clock override
-labelled as such in `--help`; production runs use the wall clock.
+operator can inspect every `git` and `gh` invocation. Every subcommand runs on
+the wall clock; the `now=` keyword the library functions take exists for their
+unit tests and has no command-line spelling, so nothing on the binary can
+close a window early without `--force` or sidestep `EVIDENCE_EXPIRED` and
+`DRILL_STALE`. Every `git` and `gh` call outside the drill's verify step is
+bounded by `TIMEOUTS.git_subprocess_s`, so a hung remote becomes a recorded
+nonzero step instead of a CLI that never returns.
 
 Rollback and observation plan files:
 
 ```json
 {"kind": "git_revert", "verify": ["scripts/pytest-clean.sh tests/unit/test_x.py -q"], "propagation": "/update"}
 ```
+
+A verify command runs inside the drill worktree, which carries a `.venv`
+symlink to the repository's venv when the repository has one; that is what
+lets `scripts/pytest-clean.sh` (which refuses a linked worktree without a
+usable venv) run there. On a checkout without a `.venv`, declare a command
+that needs none.
 
 ```json
 {"window_days": 14, "baseline_window_days": 14, "metrics": ["corrections_total", "corrections_architectural", "coverage_ticks", "architectural_correction_rate"]}

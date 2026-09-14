@@ -545,6 +545,32 @@ def test_arm_exception_is_infra_failure_never_a_result(charter):
     assert current_revisions(PK) == []
 
 
+def test_post_arm_scoring_failure_is_infra_failure_not_a_wedged_running_state(charter, monkeypatch):
+    """A raise after both arms ran (the priority-area lookup here) still aborts the
+    experiment; the only alternative is a row stuck in ``running`` that a retry
+    refuses ``WRONG_STATE`` and no subcommand recovers."""
+    from tools.improvement_recursion import compare
+
+    case_ids = _cases()
+    experiment = _freeze(case_ids)
+
+    def _boom(project_key, opportunity_ids):
+        raise LookupError("priority areas unavailable")
+
+    monkeypatch.setattr(compare, "_priority_areas", _boom)
+    evaluation = run(
+        experiment.id,
+        runner=_replay(ACCEPT_GAINS, case_ids),
+        budget_reader=_MeteredReader(),
+        project_key=PK,
+    )
+    row = _reload_evaluation(evaluation)
+    assert row.verdict == "infra_failure"
+    assert "LookupError: priority areas unavailable" in notes_of(row)[0]
+    assert _reload_experiment(experiment).state == "aborted"
+    assert current_revisions(PK) == []
+
+
 def test_no_pinned_charter_is_infra_failure_before_any_arm_runs():
     """Lane 4's shape: a missing charter pin is a harness failure, never a silent ``None``."""
     assert ImprovementCharter.pinned(PK) is None

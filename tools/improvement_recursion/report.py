@@ -38,6 +38,7 @@ from tools.improvement_release.evaluation_read import (
     notes_of,
 )
 from tools.improvement_release.lineage import load_primary_endpoint
+from tools.improvement_release.rows import aware, lookup, recency
 
 logger = logging.getLogger(__name__)
 
@@ -68,22 +69,6 @@ def _level(level: int, **fields: Any) -> dict:
     return entry
 
 
-def _aware(stamp: Any) -> datetime | None:
-    if not isinstance(stamp, datetime):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
-def _recency(row: Any) -> datetime:
-    return _aware(getattr(row, "created_at", None)) or datetime.min.replace(tzinfo=UTC)
-
-
-def _lookup(model: Any, project_key: str, row_id: Any) -> Any:
-    if not row_id:
-        return None
-    return model.query.filter(project_key=project_key, id=str(row_id)).first()
-
-
 # ---------------------------------------------------------------------------
 # Level 1: a complete research cycle
 # ---------------------------------------------------------------------------
@@ -97,7 +82,7 @@ def _complete_evaluations(project_key: str) -> list[Any]:
         for r in ImprovementEvaluation.query.filter(project_key=project_key)
         if r.state == "complete"
     ]
-    rows.sort(key=_recency, reverse=True)
+    rows.sort(key=recency, reverse=True)
     return rows
 
 
@@ -106,8 +91,8 @@ def _level_1(project_key: str) -> dict:
     from models.improvement_experiment import ImprovementExperiment
 
     for evaluation in _complete_evaluations(project_key):
-        experiment = _lookup(ImprovementExperiment, project_key, evaluation.experiment_id)
-        case = _lookup(ImprovementCase, project_key, getattr(experiment, "case_id", None))
+        experiment = lookup(ImprovementExperiment, project_key, evaluation.experiment_id)
+        case = lookup(ImprovementCase, project_key, getattr(experiment, "case_id", None))
         if case is None or case.state in OPEN_CASE_STATES:
             continue
         endpoint = load_primary_endpoint(experiment)
@@ -140,7 +125,7 @@ def _accepted_releases(project_key: str) -> list[Any]:
     rows = [
         r for r in ImprovementRelease.query.filter(project_key=project_key) if r.state == "accepted"
     ]
-    rows.sort(key=_recency, reverse=True)
+    rows.sort(key=recency, reverse=True)
     return rows
 
 
@@ -154,8 +139,8 @@ def _level_2(project_key: str) -> dict:
     unsupported: list[str] = []
     for release in releases:
         outcome = json_field(getattr(release, "outcome", None)) or {}
-        evaluation = _lookup(ImprovementEvaluation, project_key, release.evaluation_id)
-        experiment = _lookup(
+        evaluation = lookup(ImprovementEvaluation, project_key, release.evaluation_id)
+        experiment = lookup(
             ImprovementExperiment, project_key, getattr(evaluation, "experiment_id", None)
         )
         endpoint = load_primary_endpoint(experiment)
@@ -217,7 +202,7 @@ def _level_3(project_key: str) -> dict:
         comparable = budget.get("comparable") is True
         if evaluation.verdict != "accept" or not comparable:
             continue
-        experiment = _lookup(ImprovementExperiment, project_key, evaluation.experiment_id)
+        experiment = lookup(ImprovementExperiment, project_key, evaluation.experiment_id)
         endpoint = load_primary_endpoint(experiment) or PRIMARY_ENDPOINT
         return _level(
             3,
@@ -235,7 +220,7 @@ def _level_3(project_key: str) -> dict:
             why_not=None,
         )
     newest = comparisons[0]
-    experiment = _lookup(ImprovementExperiment, project_key, newest.experiment_id)
+    experiment = lookup(ImprovementExperiment, project_key, newest.experiment_id)
     endpoint = load_primary_endpoint(experiment) or PRIMARY_ENDPOINT
     budget = budget_of(newest) or {}
     reasons = [str(r) for r in (budget.get("reasons") or [])]
@@ -265,7 +250,7 @@ _LEVELS = {1: _level_1, 2: _level_2, 3: _level_3}
 
 def claim_report(project_key: str = "valor", *, now: datetime | None = None) -> dict:
     """The three ladder levels for ``project_key``; each degrades on its own."""
-    at = _aware(now) or datetime.now(UTC)
+    at = aware(now) or datetime.now(UTC)
     levels: dict[int, dict] = {}
     for level, compute in _LEVELS.items():
         try:

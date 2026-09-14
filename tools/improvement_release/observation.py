@@ -41,10 +41,10 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, datetime
-from typing import Any
+from datetime import datetime
 
 from models.improvement_evidence import ImprovementEvidence
+from tools.improvement_release.rows import aware
 
 logger = logging.getLogger(__name__)
 
@@ -91,12 +91,6 @@ REASON_ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
 REASON_DETECTION_DECLINED = "DETECTION_DECLINED"
 
 
-def _aware(stamp: Any) -> datetime | None:
-    if not isinstance(stamp, datetime):
-        return None
-    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
-
-
 def _span_days(start: datetime, end: datetime) -> float:
     return max((end - start).total_seconds(), 0.0) / 86400.0
 
@@ -129,7 +123,7 @@ def measure(project_key: str, start: datetime, end: datetime, *, limit: int = RE
     ``truncated`` (the read hit ``limit`` before reaching ``start``), and
     ``unavailable`` (the read raised; logged, never propagated).
     """
-    start, end = _aware(start), _aware(end)
+    start, end = aware(start), aware(end)
     try:
         rows = ImprovementEvidence.recent(project_key, limit=limit)
     except Exception as exc:  # noqa: BLE001 -- the dashboard pattern: unavailable, never a crash
@@ -144,7 +138,7 @@ def measure(project_key: str, start: datetime, end: datetime, *, limit: int = RE
     result = _empty(start, end, unavailable=False, truncated=False)
     result["rows_read"] = len(rows)
     for row in rows:
-        stamp = _aware(getattr(row, "created_at", None))
+        stamp = aware(getattr(row, "created_at", None))
         if stamp is None or not (start <= stamp < end):
             continue
         if getattr(row, "kind", None) == CORRECTION_KIND:
@@ -157,7 +151,7 @@ def measure(project_key: str, start: datetime, end: datetime, *, limit: int = RE
         result["corrections_architectural"], result["coverage_ticks"]
     )
     if rows and len(rows) >= limit:
-        oldest = _aware(getattr(rows[-1], "created_at", None))
+        oldest = aware(getattr(rows[-1], "created_at", None))
         result["truncated"] = oldest is not None and oldest > start
     return result
 

@@ -9,6 +9,11 @@ level 3 not. ``gh`` is a fake executable on ``PATH`` that answers
 ``gh pr create`` with a URL and ``gh pr view`` with the real object shape.
 Refusals are asserted on the exit code and the JSON the CLI prints.
 
+The CLI has no clock override, so the path runs on the wall clock: the canned
+``mergedAt`` sits seven days and a few minutes in the past, which puts the
+baseline inside the evidence TTL and the window end just behind ``now`` at
+``close-window`` time.
+
 Uses the autouse ``redis_test_db`` fixture (tests/conftest.py); the child
 inherits the claimed db through ``REDIS_URL``.
 """
@@ -34,8 +39,10 @@ from tests.db_claim import subprocess_env
 from tools.improvement_eval.runner import freeze_protocol
 
 PK = "test-3218-e2e"
-NOW = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
-MERGED_AT = NOW - timedelta(days=7)
+NOW = datetime.now(UTC).replace(microsecond=0)
+#: Seven days plus slack before the wall clock, at second resolution (the
+#: canned ``gh pr view`` prints ``mergedAt`` to the second).
+MERGED_AT = NOW - timedelta(days=7, minutes=5)
 MERGE_SHA = "37dc10b33f6c33d18559d4c338d23653a21dbb49"
 INTERVAL = {"lower": 0.02, "upper": 0.22, "n": 12, "raw_p_value": 0.01, "adjusted_p_value": 0.02}
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
@@ -290,8 +297,6 @@ def _propose(cli, evaluation, plans, repo, *, expect: int = 0) -> dict:
         str(plans["observation"]),
         "--repo",
         str(repo["path"]),
-        "--now",
-        NOW.isoformat(),
         expect=expect,
     )
 
@@ -326,8 +331,6 @@ class TestOperatorPath:
             release_id,
             "--approved-by",
             "Tom Counsell",
-            "--now",
-            (NOW + timedelta(hours=1)).isoformat(),
         )
         assert approved["state"] == "approved"
         assert approved["observation_window_ends_at"] is not None
@@ -359,8 +362,6 @@ class TestOperatorPath:
             release_id,
             "--repo",
             str(repo["path"]),
-            "--now",
-            NOW.isoformat(),
         )
         assert exposed["state"] == "observing"
         assert exposed["exposure"]["merge_sha"] == merge_sha
@@ -369,16 +370,10 @@ class TestOperatorPath:
         assert exposed["exposed_at"] == MERGED_AT.isoformat()
         assert exposed["outcome"]["baseline"]["coverage_ticks"] == 20
 
-        due = cli("close-window", "--due", "--now", (MERGED_AT + timedelta(days=7)).isoformat())
+        due = cli("close-window", "--due")
         assert [row["id"] for row in due["due"]] == [release_id]
 
-        closed = cli(
-            "close-window",
-            "--release",
-            release_id,
-            "--now",
-            (MERGED_AT + timedelta(days=7)).isoformat(),
-        )
+        closed = cli("close-window", "--release", release_id)
         assert closed["state"] == "accepted"
         assert closed["outcome"]["verdict"] == "held"
         assert closed["outcome"]["claim_level_2_supported"] is True
@@ -425,6 +420,12 @@ class TestOperatorPath:
         assert "pr_command" not in rolled
         remote_head = git(repo["origin"], "rev-parse", "refs/heads/main")
         assert remote_head == record["revert_sha"]
+        # the revert stays reachable in the local repo after its worktree is gone
+        kept = git(repo["path"], "rev-parse", f"refs/improvement-rollback/{release_id}")
+        assert kept == record["revert_sha"]
+        assert record["rollback_ref"] == f"refs/improvement-rollback/{release_id}"
+        assert "drills" not in git(repo["path"], "worktree", "list", "--porcelain")
+        assert "$ git push origin HEAD:refs/heads/main" in record["transcript"]
         reverted = subprocess.run(
             ["git", "show", f"{remote_head}:src/thing.py"],
             cwd=repo["origin"],

@@ -226,7 +226,7 @@ def tail(text: str, limit: int = TAIL_BYTES) -> str:
     return encoded[-limit:].decode("utf-8", errors="ignore")
 
 
-def run_step(
+def execute_step(
     runner: Runner,
     argv: list[str],
     *,
@@ -234,13 +234,17 @@ def run_step(
     timeout: float | None = None,
     transcript: list[str],
     name: str | None = None,
-) -> dict:
-    """Run one command, log it to ``transcript``, and return its step record.
+) -> tuple[dict, CommandResult]:
+    """Run one command; return its step record and the full :class:`CommandResult`.
 
     The record is ``{name, argv, returncode, seconds, timed_out, stdout_tail,
     stderr_tail}``; ``name`` defaults to the first two argv words. The
     transcript block is human-readable: the command, its output, and
-    ``[exit N in S s]``.
+    ``[exit N in S s]``. The record keeps only a :data:`TAIL_BYTES` tail of
+    each stream; a caller that reads a list out of stdout (``git diff
+    --name-only``, ``git rev-list``) reads ``result.stdout`` instead, because
+    git sorts paths and a tail drops the earliest ones once the listing is
+    longer than the tail.
     """
     argv = [str(part) for part in argv]
     result = runner(argv, cwd=cwd, timeout=timeout)
@@ -253,7 +257,7 @@ def run_step(
     suffix = " (timed out)" if result.timed_out else ""
     block.append(f"[exit {result.returncode} in {result.seconds:.2f} s]{suffix}")
     transcript.append("\n".join(block))
-    return {
+    record = {
         "name": step_name,
         "argv": argv,
         "returncode": result.returncode,
@@ -262,6 +266,23 @@ def run_step(
         "stdout_tail": tail(result.stdout),
         "stderr_tail": tail(result.stderr),
     }
+    return record, result
+
+
+def run_step(
+    runner: Runner,
+    argv: list[str],
+    *,
+    cwd: str | None,
+    timeout: float | None = None,
+    transcript: list[str],
+    name: str | None = None,
+) -> dict:
+    """:func:`execute_step` for a caller that needs only the step record."""
+    record, _result = execute_step(
+        runner, argv, cwd=cwd, timeout=timeout, transcript=transcript, name=name
+    )
+    return record
 
 
 def result_to_dict(result: CommandResult) -> dict:
@@ -277,6 +298,7 @@ __all__ = [
     "RecordingRunner",
     "Runner",
     "SubprocessRunner",
+    "execute_step",
     "result_to_dict",
     "run_step",
     "tail",
