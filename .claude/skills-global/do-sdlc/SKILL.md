@@ -274,6 +274,15 @@ these sites decline rather than merge on it, and a merge-ready state with no hea
 to `Blocked(guard_id='NO_RULE')` by design. See
 [`docs/features/gh-stale-state-verdict-gate.md`](../../../docs/features/gh-stale-state-verdict-gate.md).
 
+**`Blocked(NO_RULE)` at `BUILD == completed` with no PR and no branch.** This is the one subcase
+where the plan-stage stand-down (above) leaves nothing to answer: `pr_number` is unset, `BUILD ==
+completed`, and `context['branch_exists']` is `False`. Row 5 (`_rule_branch_exists_no_pr`) needs a
+live branch and has none; rows 4a/4b/4c have already stood down on `BUILD == completed`. No rule
+owns the state, so it escalates. This is correct, not a bug: the plan was already accepted when
+the build was dispatched, so a missing branch means the build's output was lost or deleted, not
+that planning must restart — go find the branch rather than re-dispatching `/do-plan`. It is the
+minority subcase; the ordinary shape, a live branch, resumes through row 5.
+
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` when
 the verdict requires a revision pass, cleared by `/do-plan` after pushing the revision, and
 self-heals from the plan frontmatter. `/do-plan` also records an event-scoped timestamp alongside
