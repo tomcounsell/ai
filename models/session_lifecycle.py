@@ -270,22 +270,20 @@ def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
             "extra_context": getattr(session, "extra_context", None),
         }
         project_key = getattr(session, "project_key", None)
-        if stage == "session_init_hang":
-            dead_letters.record(
-                "session_init_hang",
-                payload,
-                reason,
-                replayable=False,
-                project_key=project_key,
-            )
-        else:
-            dead_letters.record(
-                "session_recovery_cap",
-                payload,
-                reason,
-                replayable=True,
-                project_key=project_key,
-            )
+        # `session_init_hang` alone is non-replayable (#2181: re-spawning the
+        # identical input reproduces the identical hang). Every other stage
+        # -- `session_recovery_cap`'s two production callers above, and any
+        # caller outside this module that passes its own reserved stage
+        # (e.g. `improve_intent`, #3215) -- is replayable and passes its own
+        # `stage` through unchanged rather than being coerced to
+        # `session_recovery_cap`.
+        dead_letters.record(
+            stage,
+            payload,
+            reason,
+            replayable=stage != "session_init_hang",
+            project_key=project_key,
+        )
     except Exception as e:  # noqa: BLE001 -- never block a terminal transition
         logger.debug("[lifecycle] terminal dead-letter write failed (non-fatal): %s", e)
 
