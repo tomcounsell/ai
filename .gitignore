@@ -497,3 +497,6 @@ PROGRESS.md
 # Per-worktree SDLC run-identity signal written by `sdlc-tool session-ensure`
 # (ephemeral run_id state; must never be committed — issue #2144).
 .sdlc-run
+
+# Codex skill conversion inventory (source hashes and resource coverage)
+!.agents/skills-manifest.json
