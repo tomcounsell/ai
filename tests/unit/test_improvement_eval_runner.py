@@ -268,6 +268,27 @@ class TestInfraFailureConditions:
         # no judge scan ran, so there is no blinding fact to state
         assert _reload_evaluation(evaluation).blinded is None
 
+    def test_disallowed_candidate_param_is_infra_failure_even_under_a_high_cap(
+        self, charter, corpus
+    ):
+        """An unknown arm-param key is a contract-shape defect, never a tolerated harness error.
+
+        A cap at or above the trial count would let the per-trial
+        ``_retrieve_job`` refusal exhaust into ``inconclusive`` instead of
+        ``infra_failure``. The load-time check in ``_run_gates`` runs before
+        any trial is attempted, so the cap is never consulted.
+        """
+        protocol = _protocol(
+            corpus, incumbent={"limit": 10}, candidate={"limit": 1, "mode": "restore"}
+        )
+        protocol["infra_failure_cap"] = len(protocol["queries"])
+
+        evaluation = _evaluate(_freeze(protocol))
+
+        assert evaluation.verdict == "infra_failure"
+        assert "candidate params carry keys the arm does not accept" in evaluation.notes
+        assert evaluation.trials == 0
+
     def test_judge_provider_unreachable(self, charter, corpus):
         experiment = _freeze(_accepting_protocol(corpus))
         evaluation = _evaluate(experiment, judges=[_skipping_judge])

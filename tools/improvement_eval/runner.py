@@ -307,13 +307,25 @@ class TrialResult:
 ARM_PARAM_KEYS = frozenset({"limit"})
 
 
-def _retrieve_job(export, project_key: str, query: dict, arm_params: dict) -> dict:
+def _validate_arm_params(arm_name: str, arm_params: dict) -> None:
+    """Reject protocol arm params outside ``ARM_PARAM_KEYS`` at load time.
+
+    Run at protocol load (beside the ``endpoints`` check, before
+    ``export_corpus`` and the arm spawn) so a contract-shape defect is a
+    run-level ``InfraFailure`` unconditionally -- never a per-trial harness
+    error whose outcome depends on ``infra_failure_cap``. ``_retrieve_job``
+    still re-checks per trial as the second line of defense.
+    """
     unknown = sorted(set(arm_params) - ARM_PARAM_KEYS)
     if unknown:
         raise InfraFailure(
-            f"protocol arm params carry keys the arm does not accept: {unknown} "
+            f"protocol {arm_name} params carry keys the arm does not accept: {unknown} "
             f"(allowed: {sorted(ARM_PARAM_KEYS)})"
         )
+
+
+def _retrieve_job(export, project_key: str, query: dict, arm_params: dict) -> dict:
+    _validate_arm_params("arm", arm_params)
     return {
         "mode": "retrieve",
         "jsonl": export.jsonl_text,
@@ -697,6 +709,8 @@ def _run_gates(ctx: _RunContext, *, judges, judge_complete, store, candidate_arm
     baseline_ids = baseline_spec.get("ranked_ids") or {}
     incumbent_params = dict(protocol.get("incumbent") or {})
     candidate_params = dict(protocol.get("candidate") or {})
+    _validate_arm_params("incumbent", incumbent_params)
+    _validate_arm_params("candidate", candidate_params)
     infra_cap = int(protocol.get("infra_failure_cap", DEFAULT_INFRA_FAILURE_CAP))
 
     # Corpus export, hashed once; both arms restore from these bytes.

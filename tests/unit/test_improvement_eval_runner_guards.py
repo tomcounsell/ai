@@ -2,11 +2,13 @@
 
 The second half of the runner suite: blinding on a queried row, the Race 1b
 wedge repair, the contract digest, and the single-writer invariant. It lives
-apart from ``test_improvement_eval_runner.py`` because every runner test
+apart from ``test_improvement_eval_runner.py`` because nearly every test here
 drives two private ``redis-server`` arms and the whole set takes over ten
 minutes on one worker; under ``--dist loadfile`` one file lands on one xdist
 worker, and a lone worker that long trips ``scripts/pytest-clean.sh``'s
 idle-controller wedge guard. Two files keep each below the guard's window.
+``TestArmParamAllowlist`` is the one exception: it calls ``_retrieve_job``
+in-process against a mocked export and spawns no arms at all.
 
 Fixtures and helpers come from ``improvement_eval_runner_support``.
 """
