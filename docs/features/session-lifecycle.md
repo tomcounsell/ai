@@ -578,8 +578,11 @@ same way by `_recover_interrupted_agent_sessions_startup`.
 The exclusion holds for every session except a synthetic `dev-{aid8}` lane.
 There, the separate #3176 pre-finalize guard further down the same `finally`
 has no cancel carve-out and finalizes the row anyway, so the requeue loses the
-race and its `StatusConflictError` is swallowed at INFO — the lane is
-reclaimed rather than retried. That is long-standing behavior on both guards'
+race and its `StatusConflictError` is swallowed at INFO, so the session is not
+retried. Whether its lane is reclaimed in exchange depends on the exit: an
+ordinary cancellation reaches `cleanup_after_merge`, but the turn-timeout and
+reap-failure preserve branches skip it, leaving the directory for a manual
+`git worktree prune`. That is long-standing behavior on both guards'
 part, and the carve-out still earns its keep by holding for every
 non-synthetic session; collapsing the two guards into one authority is tracked
 in #3305.

@@ -2959,9 +2959,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     # top of this same `finally` already covers normal return
                     # and raise, but the caller skips it under cancellation
                     # (see its docstring), so on that exit alone the
-                    # authoritative row can still be "running" here. On every
-                    # other exit this re-read finds a terminal row and no-ops.
-                    # The busy scan
+                    # authoritative row can still be "running" here. Every
+                    # other exit reaches this re-read already terminal, or
+                    # `pending` on the nudge re-enqueue below -- do NOT widen
+                    # the predicate off `status == "running"` on the strength
+                    # of the first half of that sentence. (One more way a
+                    # `running` row can reach here: a non-CAS failure inside
+                    # `_finalize_if_still_running`, which logs and returns.
+                    # This guard then writes without knowing the exit raised.
+                    # That divergence is #3305.) The busy scan
                     # (agent/worktree_manager.py::_scan_worktree_sessions)
                     # reads exec_cwd, so a still-running row would make
                     # cleanup_after_merge's own busy check refuse the removal

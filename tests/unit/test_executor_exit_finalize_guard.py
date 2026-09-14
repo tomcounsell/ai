@@ -3,13 +3,14 @@
 The finalize guard used to sit in the ``try`` body behind
 ``if not chat_state.defer_reaction:``, so only a NORMAL RETURN reached it. A
 raise walked straight past it into the ``finally`` with the row still
-``running``. The worker's outer completion block did finalize it moments
-later, so the row was not stranded -- but that write lands AFTER the executor's
-own ``finally`` has already run. In a synthetic ``dev-*`` lane the cleanup
-therefore saw a still-``running`` row, its busy check refused the removal, and
-the lane leaked permanently: a ``session/dev-*`` branch never satisfies
-``sweep_worktrees``' ``merged_via_tree`` requirement, so nothing reclaims it
-later. Ordering, not absence, is what was broken.
+``running``. The row was not stranded -- something always finalized it -- but
+never the executor, and whoever got there first decided the status. In a
+synthetic ``dev-*`` lane that was the #3176 pre-finalize guard, running inside
+this same ``finally`` and ahead of the worker: it has no ``raised`` carve-out,
+so it called ``_runner_final_status``, which reports ``completed`` for a clean
+runner exit with a falsy ``task.error``. A session whose executor unwound on
+an exception could therefore be recorded a success. Authorship, not absence,
+is what was broken.
 
 The guard now lives in the ``finally`` and is keyed on
 ``status == "running"``, not on ``defer_reaction``. These tests pin the four
