@@ -376,25 +376,27 @@ async def reconcile_once(
                     )
                     continue
 
-                # Durable Room-inbox shadow append (durability plan Task 11
-                # phase 1, issue #2494): written alongside the untouched
-                # re-enqueue below, mirroring live intake's append-precedes-
-                # dispatch order. NOT authoritative — dispatch still routes
-                # from the re-enqueue; shadow_append_inbox never raises into
-                # the recovery path. Text is already stripped at intake; see
-                # "Private-tag stripping happens at intake" in
-                # docs/features/durability-model.md.
-                shadow_append_inbox(
-                    project,
-                    chat_id=chat_id,
-                    message_id=message.id,
-                    sender_id=sender_id,
-                    sender_name=sender_name,
-                    text=text,
-                    date=message.date,
-                )
-
                 try:
+                    # Durable Room-inbox shadow append (durability plan Task 11
+                    # phase 1, issue #2494): written alongside the untouched
+                    # re-enqueue below, mirroring live intake's append-precedes-
+                    # dispatch order. NOT authoritative — dispatch still routes
+                    # from the re-enqueue; shadow_append_inbox never raises into
+                    # the recovery path. Text is already stripped at intake; see
+                    # "Private-tag stripping happens at intake" in
+                    # docs/features/durability-model.md. Inside the claim-release
+                    # guard so a BaseException escaping the append (which catches
+                    # only Exception) cannot strand the claim for its full TTL.
+                    shadow_append_inbox(
+                        project,
+                        chat_id=chat_id,
+                        message_id=message.id,
+                        sender_id=sender_id,
+                        sender_name=sender_name,
+                        text=text,
+                        date=message.date,
+                    )
+
                     await enqueue_agent_session_fn(
                         project_key=project_key,
                         session_id=session_id,

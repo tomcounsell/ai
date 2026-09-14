@@ -6,12 +6,16 @@ scanners (``bridge/catchup.py``, ``bridge/reconciler.py``,
 ``bridge/agent_catchup.py``) now call ``shadow_append_inbox`` alongside their
 untouched enqueue, mirroring live intake's append-precedes-dispatch order.
 
-Three invariants per scanner:
+Four invariants per scanner:
 1. A re-enqueued message produces a matching Room-inbox entry (same
    ``chat_id``/``message_id`` shape as live intake).
-2. An inbox failure (``Room.resolve`` raising) NEVER prevents the re-enqueue —
+2. The append precedes the enqueue. Inert under shadow semantics (nothing
+   drains the inbox yet), but load-bearing at the phase-2 flip: an entry
+   written after dispatch reopens the loss window the append exists to close.
+   Asserted by observing the inbox from inside the enqueue callback.
+3. An inbox failure (``Room.resolve`` raising) NEVER prevents the re-enqueue —
    shadow mode has no durability responsibility; dispatch is untouched.
-3. ``<private>``-wrapped content never reaches the persisted entry. Text is
+4. ``<private>``-wrapped content never reaches the persisted entry. Text is
    stripped once, at intake (see "Private-tag stripping happens at intake" in
    docs/features/durability-model.md), so these tests guard the inbox surface
    specifically — they do not exercise the strip itself, which is covered by
@@ -78,7 +82,7 @@ def broken_room_resolve(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("redis down")
 
-    monkeypatch.setattr(Room, "resolve", classmethod(lambda cls, *a, **k: _boom()))
+    monkeypatch.setattr(Room, "resolve", classmethod(_boom))
 
 
 def _inbox_entries(project, chat_id):
@@ -190,6 +194,21 @@ class TestCatchupShadowAppend:
         assert entry["ts"] is not None
 
     @pytest.mark.asyncio
+    async def test_append_precedes_enqueue(self, scratch_project):
+        dialog = _make_dialog("Test Group", entity_id=503)
+        msg = _make_message(804, text="ordering probe")
+        seen_at_enqueue: list[int] = []
+
+        async def enqueue_fn(**kwargs):
+            seen_at_enqueue.append(len(_inbox_entries(scratch_project, dialog.id)))
+
+        with _dedup_patches():
+            queued = await _run_catchup(_client_for(dialog, msg), scratch_project, enqueue_fn)
+
+        assert queued == 1
+        assert seen_at_enqueue == [1], "inbox entry must exist before dispatch is enqueued"
+
+    @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_re_enqueue(
         self, scratch_project, broken_room_resolve, caplog
     ):
@@ -241,6 +260,21 @@ class TestReconcilerShadowAppend:
         assert entry["sender_name"] == "TestUser"
         assert entry["text"] == "recovered message"
         assert entry["ts"] is not None
+
+    @pytest.mark.asyncio
+    async def test_append_precedes_enqueue(self, scratch_project):
+        dialog = _make_dialog("Test Group", entity_id=603)
+        msg = _make_message(904, text="ordering probe")
+        seen_at_enqueue: list[int] = []
+
+        async def enqueue_fn(**kwargs):
+            seen_at_enqueue.append(len(_inbox_entries(scratch_project, dialog.id)))
+
+        with _dedup_patches():
+            recovered = await _run_reconciler(_client_for(dialog, msg), scratch_project, enqueue_fn)
+
+        assert recovered == 1
+        assert seen_at_enqueue == [1], "inbox entry must exist before dispatch is enqueued"
 
     @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_re_enqueue(
@@ -347,6 +381,28 @@ class TestAgentCatchupShadowAppend:
         assert entry["sender_name"] == "TestUser"
         assert entry["text"] == "unanswered question?"
         assert entry["ts"] is not None
+
+    @pytest.mark.asyncio
+    async def test_append_precedes_enqueue(self, scratch_project):
+        chat = _owned_chat(scratch_project, chat_id=558)
+        messages = [_make_thread_msg(45, "ordering probe")]
+        client = _FakeClient({chat.entity: messages})
+        seen_at_enqueue: list[int] = []
+
+        async def enqueue_fn(**kwargs):
+            seen_at_enqueue.append(len(_inbox_entries(scratch_project, chat.chat_id)))
+
+        result = await sweep_chat(
+            client,
+            chat,
+            enqueue_fn=enqueue_fn,
+            judge_fn=_unanswered_judge,
+            record_processed_fn=_noop_record,
+            record_last_fn=_noop_record,
+        )
+
+        assert result.enqueued == 1
+        assert seen_at_enqueue == [1], "inbox entry must exist before dispatch is enqueued"
 
     @pytest.mark.asyncio
     async def test_inbox_failure_does_not_prevent_recovery_enqueue(
