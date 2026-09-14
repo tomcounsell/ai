@@ -148,6 +148,41 @@ class _FakeQuery:
         return _Rows()
 
 
+# The lane every default-fixture test stalls: ``stalled_pr`` serves
+# ``_pr(branch="session/sdlc-1395")``, so this is the slug the lane filter
+# (#3270) actually matches against on those tests. ``_Row`` defaults to it so
+# the filter is EXERCISED rather than bypassed -- a row seeded with a
+# match-anything slug would let every ladder test pass even if the filter were
+# deleted. Tests that stall a differently-named lane pass that lane's real
+# slug; tests about the filter itself pass a rival slug or ``None``.
+_DEFAULT_LANE_SLUG = "sdlc-1395"
+
+
+class _AnyLane(str):
+    """A slug that belongs to whichever lane the test is exercising.
+
+    Deliberately narrow: the ONLY remaining use is the pair of target-dedupe
+    tests that need one row to be selected for TWO different lanes in a single
+    tick. Post-#3270 a real row cannot do that (it carries one slug), so the
+    scenario the dedupe defends against is reachable only through this
+    sentinel. Never reach for it to avoid naming a lane -- pass the lane's
+    real slug, or ``None`` for the slugless conversation thread the filter
+    must exclude.
+    """
+
+    def __eq__(self, other):
+        return isinstance(other, str)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(str(self))
+
+
+_ANY_LANE = _AnyLane("<any-lane>")
+
+
 class _Row:
     """Minimal AgentSession row shape the reflection actually reads."""
 
@@ -160,7 +195,7 @@ class _Row:
         claude_session_uuid=None,
         updated_at=None,
         project_key="valor",
-        slug=None,
+        slug=_DEFAULT_LANE_SLUG,
     ):
         self.session_id = session_id
         self.status = status
@@ -436,7 +471,7 @@ def test_human_named_lane_is_discovered_and_steered(lab, stub_workdir, gh_payloa
         }
     ]
     monkeypatch.setattr(sdlc_progress, "_last_commit", lambda cwd, b: ("sha-dev-1", now - 9 * 3600))
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="dev-41a59eee")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -481,7 +516,9 @@ def test_ledger_rung_resolves_a_lane_the_branch_name_cannot(lab, stub_workdir, s
     """Rung 1: a recorded ``pr_number`` binds a human-named lane to its issue."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/dashboard-jinja-filter-registrar")]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [
+        _Row("eng-live", status="running", slug="dashboard-jinja-filter-registrar")
+    ]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -493,7 +530,7 @@ def test_ledger_rung_wins_over_a_disagreeing_closing_reference(lab, stub_workdir
     """The entire justification for the rung ordering, asserted directly."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[555])]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -538,7 +575,7 @@ def test_two_ledger_records_on_one_pr_are_ambiguous_not_an_overwrite(
         _LedgerRecord(pr_number=2798, issue_number=2719),
         _LedgerRecord(pr_number=2798, issue_number=2720),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -551,7 +588,9 @@ def test_two_closing_references_are_ambiguous_and_produce_no_action(lab, stub_wo
     stale_lanes["prs"] = [
         _lane_pr(2746, "session/hook-validator-target-resolution", closing=[2689, 2738])
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [
+        _Row("eng-live", status="running", slug="hook-validator-target-resolution")
+    ]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -574,7 +613,7 @@ def test_cross_repo_closing_reference_does_not_resolve(lab, stub_workdir, stale_
             "closingIssuesReferences": [_closing_ref(77, owner="tomcounsell", repo="popoto")],
         }
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -603,7 +642,7 @@ def test_no_target_repo_issues_no_ledger_query_and_trusts_no_reference(
     """Both read-based rungs need a repo to scope by; without one they are skipped."""
     stale_lanes["prs"] = [_lane_pr(2798, "session/some-lane", closing=[999])]
     lab.ledger.records = [_LedgerRecord(pr_number=2798, issue_number=2719)]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="some-lane")]
 
     result = sdlc_progress._check_project_stalls(_PROJECT)  # no github block
 
@@ -618,7 +657,7 @@ def test_the_ledger_is_enumerated_once_per_tick_not_once_per_pr(lab, stub_workdi
         _lane_pr(2, "session/lane-two", closing=[102]),
         _lane_pr(3, "session/lane-three", closing=[103]),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="lane-one")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -634,7 +673,7 @@ def test_errored_ledger_still_lets_a_steer_through(lab, stub_workdir, stale_lane
     """Reading is fail-soft: a Redis outage must not blind the detector."""
     lab.ledger.raises = True
     stale_lanes["prs"] = [_lane_pr(2695, "session/dev-41a59eee", closing=[2694])]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="dev-41a59eee")]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -730,7 +769,7 @@ def test_two_lanes_never_dispatch_to_the_same_session_in_one_tick(lab, stub_work
         _lane_pr(1, "session/lane-one", closing=[101]),
         _lane_pr(2, "session/lane-two", closing=[102]),
     ]
-    lab.query.by_project = [_Row("only-eng-session", status="running")]
+    lab.query.by_project = [_Row("only-eng-session", status="running", slug=_ANY_LANE)]
 
     result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -743,7 +782,7 @@ def test_a_lane_deferred_by_the_target_dedupe_owes_no_cooldown(lab, stub_workdir
         _lane_pr(1, "session/lane-one", closing=[101]),
         _lane_pr(2, "session/lane-two", closing=[102]),
     ]
-    lab.query.by_project = [_Row("only-eng-session", status="running")]
+    lab.query.by_project = [_Row("only-eng-session", status="running", slug=_ANY_LANE)]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -814,7 +853,7 @@ def test_escalation_volume_with_resume_disabled_is_one_page_per_visible_lane(
         _lane_pr(2, "session/lane-two", closing=[102]),
         _lane_pr(3, "session/lane-three", closing=[103]),
     ]
-    lab.query.by_project = [_Row("eng-live", status="running")]
+    lab.query.by_project = [_Row("eng-live", status="running", slug="lane-one")]
 
     sdlc_progress._check_project_stalls(_AI_PROJECT)
 
@@ -907,45 +946,60 @@ def test_lane_is_live_malformed_payload_is_unknown(fake_redis, fake_query):
 
 def test_target_prefers_live_over_resumable(fake_query):
     fake_query.by_project = [
-        _Row("resumable", status="completed", claude_session_uuid="u1"),
-        _Row("live", status="running"),
+        _Row("resumable", status="completed", claude_session_uuid="u1", slug="sdlc-1395"),
+        _Row("live", status="running", slug="sdlc-1395"),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("steer", "live")
 
 
-def test_target_live_picks_most_recently_updated(fake_query):
+def test_target_live_picks_most_recently_updated_within_the_lane(fake_query):
+    """Recency still decides -- but only among rows the lane filter admitted."""
     now = time.time()
     fake_query.by_project = [
-        _Row("old", status="running", updated_at=now - 900),
-        _Row("newest", status="running", updated_at=now),
+        _Row("old", status="running", slug="sdlc-1395", updated_at=now - 900),
+        _Row("newest", status="running", slug="sdlc-1395", updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("steer", "newest")
 
 
-def test_target_falls_back_to_most_recent_resumable(fake_query):
+def test_target_falls_back_to_the_most_recent_resumable_in_the_lane(fake_query):
     now = time.time()
     fake_query.by_project = [
-        _Row("older", status="completed", claude_session_uuid="u1", updated_at=now - 900),
-        _Row("newer", status="killed", claude_session_uuid="u2", updated_at=now),
+        _Row(
+            "older",
+            status="completed",
+            claude_session_uuid="u1",
+            slug="sdlc-1395",
+            updated_at=now - 900,
+        ),
+        _Row("newer", status="killed", claude_session_uuid="u2", slug="sdlc-1395", updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor")
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
     assert (kind, session.session_id) == ("resume", "newer")
 
 
 def test_target_resumable_without_uuid_is_not_resumable(fake_query):
     """resume_session requires a claude_session_uuid; without one we create."""
-    fake_query.by_project = [_Row("no-uuid", status="completed", claude_session_uuid=None)]
-    assert sdlc_progress._pick_steer_target("valor") == ("create", None)
+    fake_query.by_project = [
+        _Row("no-uuid", status="completed", claude_session_uuid=None, slug="sdlc-1395")
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
 
 
 def test_target_ledger_anchors_are_never_selected(fake_query):
     fake_query.by_project = [
-        _Row("sdlc-local-1395", status="running", is_ledger=True),
-        _Row("ledger-terminal", status="completed", is_ledger=True, claude_session_uuid="u1"),
+        _Row("sdlc-local-1395", status="running", is_ledger=True, slug="sdlc-1395"),
+        _Row(
+            "ledger-terminal",
+            status="completed",
+            is_ledger=True,
+            claude_session_uuid="u1",
+            slug="sdlc-1395",
+        ),
     ]
-    assert sdlc_progress._pick_steer_target("valor") == ("create", None)
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
 
 
 def test_target_query_is_scoped_to_project_and_eng(fake_query):
@@ -997,14 +1051,73 @@ def test_resume_target_also_prefers_the_stalled_lanes_own_session(fake_query):
     assert (kind, session.session_id) == ("resume", "this-lane")
 
 
-def test_target_falls_back_to_recency_when_no_session_matches_the_lane(fake_query):
+def test_target_is_the_create_rung_when_no_session_matches_the_lane(fake_query):
+    """No same-lane row means a FRESH session, never the most recent stranger.
+
+    This case used to assert the recency fallback. That fallback is the #3270
+    defect: a stalled lane with no session of its own reached for whichever eng
+    row was touched last, up to and including a human conversation thread.
+    """
     now = time.time()
     fake_query.by_project = [
-        _Row("old", status="running", slug="sdlc-1", updated_at=now - 900),
-        _Row("newest", status="running", slug=None, updated_at=now),
+        _Row("other-lane", status="running", slug="sdlc-1", updated_at=now - 900),
+        _Row("slugless", status="running", slug=None, updated_at=now),
     ]
-    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395")
-    assert (kind, session.session_id) == ("steer", "newest")
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="sdlc-1395") == ("create", None)
+
+
+# ---------------------------------------------------------------------------
+# The lane match is a FILTER, not a ranking preference (#3270)
+#
+# Both rungs rank with the same closure, in which the slug used to be only a
+# tiebreaker. With no same-lane candidate the ladder therefore reached for the
+# most-recently-updated eng row -- routinely a slugless human conversation
+# thread, which the stall check then steered or resumed on behalf of unrelated
+# engineering work. A row with no slug, or a slug belonging to another lane, is
+# now structurally ineligible for either rung.
+# ---------------------------------------------------------------------------
+
+
+def test_resume_rung_never_reaches_a_slugless_conversation_thread(fake_query):
+    """The #3270 loop: a finished chat thread resumed for an unrelated lane."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("chat-thread", status="completed", claude_session_uuid="u1", slug=None, updated_at=now)
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
+
+
+def test_steer_rung_never_reaches_a_slugless_conversation_thread(fake_query):
+    """Rung 1's twin of the same defect: an unprompted steer into a stranger's thread."""
+    now = time.time()
+    fake_query.by_project = [_Row("chat-thread", status="running", slug=None, updated_at=now)]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
+
+
+def test_steer_rung_falls_through_to_the_resume_rung_not_to_create(fake_query):
+    """No same-lane LIVE row must not skip a perfectly good same-lane resumable one."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("chat-thread", status="running", slug=None, updated_at=now),
+        _Row(
+            "this-lane",
+            status="completed",
+            claude_session_uuid="u1",
+            slug="X",
+            updated_at=now - 3600,
+        ),
+    ]
+    kind, session = sdlc_progress._pick_steer_target("valor", lane_slug="X")
+    assert (kind, session.session_id) == ("resume", "this-lane")
+
+
+def test_resume_rung_never_selects_a_failed_row(fake_query):
+    """A row that failed once fails the same way again -- re-resuming it is a loop."""
+    now = time.time()
+    fake_query.by_project = [
+        _Row("this-lane", status="failed", claude_session_uuid="u1", slug="X", updated_at=now)
+    ]
+    assert sdlc_progress._pick_steer_target("valor", lane_slug="X") == ("create", None)
 
 
 def test_ladder_threads_the_stalled_lanes_slug_into_target_selection(lab, stub_workdir, stalled_pr):

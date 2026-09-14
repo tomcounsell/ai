@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.agent_session_queue import _push_agent_session, _session_notify_listener
+from tests.db_claim import claim_test_db
 
 
 class _EmptyQueryResult(list):
@@ -53,10 +54,25 @@ class TestSessionNotifyPublish:
     """Verify _push_agent_session publishes to valor:sessions:new."""
 
     def test_publishes_to_notify_channel(self, mock_agent_session_cls):
-        """Calling _push_agent_session() should publish a notification within 1 second."""
+        """Calling _push_agent_session() should publish a notification within 1 second.
+
+        The channel name is db-scoped (#2147/#2163), so the mocked client must
+        expose a REAL db number: ``MagicMock().__int__()`` returns 1, which made
+        ``notify_channel_for`` derive ``...:db1`` from a mock's default integer
+        rather than from any database this process owns (#3250). Pinning
+        ``connection_kwargs`` to the claimed test db makes the expected channel
+        the one a real client on this process's db would produce.
+        """
         received: list[dict] = []
+        test_db = claim_test_db()
+        expected_channel = f"valor:sessions:new:db{test_db}"
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.connection_pool.connection_kwargs = {
+                "host": "localhost",
+                "port": 6379,
+                "db": test_db,
+            }
 
             def capture_publish(channel, payload):
                 received.append({"channel": channel, "payload": payload})
@@ -80,7 +96,7 @@ class TestSessionNotifyPublish:
 
             assert elapsed < 2.0, f"publish took too long: {elapsed:.2f}s"
             assert len(received) == 1, f"expected 1 publish call, got {len(received)}"
-            assert received[0]["channel"] == "valor:sessions:new"
+            assert received[0]["channel"] == expected_channel
             payload = json.loads(received[0]["payload"])
             assert payload["chat_id"] == "notify-chat-1"
             assert payload["session_id"] == "notify-test-sess"

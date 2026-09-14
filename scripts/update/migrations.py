@@ -339,6 +339,35 @@ def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | No
         return str(e)
 
 
+def _migrate_confirm_codex_dev_lane_fields_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession Codex dev-lane fields (issue #2001) read on legacy rows.
+
+    One idempotent migration registering the five new nullable fields
+    (dev_harness, codex_thread_id, codex_version, codex_turn_count,
+    dev_lane_fence). Purely additive, no backfill. Mirrors
+    ``_migrate_confirm_run_identity_fields_readable``: a read-only probe
+    over a small sample of existing records proving Popoto's lazy-load
+    descriptor healing resolves cleanly for rows written before the fields
+    existed. Writes nothing. Returns None on success, error string on
+    failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.dev_harness  # noqa: B018 -- read-only healing probe
+            _ = session.codex_thread_id  # noqa: B018 -- read-only healing probe
+            _ = session.codex_version  # noqa: B018 -- read-only healing probe
+            _ = session.codex_turn_count  # noqa: B018 -- read-only healing probe
+            _ = session.dev_lane_fence  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_confirm_is_ledger_field_readable(project_dir: Path) -> str | None:
     """Confirm AgentSession.is_ledger (issue #2042) is readable on legacy rows.
 
@@ -1381,50 +1410,101 @@ def _migrate_retire_task_type_profile(project_dir: Path) -> str | None:
     )
 
 
+def _confirm_models_readable(project_dir: Path, model_names: tuple[str, ...]) -> str | None:
+    """Import each named model from ``models`` and prove its keyspace resolves.
+
+    Shared by every additive-schema marker migration below, so a new marker is
+    just a new model-name tuple rather than a second copy of this body.
+    Read-only: for each name it imports the class and pulls at most one row
+    from a project-scoped query, without hydrating the rest of the partition.
+    Writes nothing. Returns None on success, error string on unexpected
+    failure.
+    """
+    try:
+        import importlib
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        models_module = importlib.import_module("models")
+        for name in model_names:
+            model = getattr(models_module, name)
+            next(iter(model.query.filter(project_key="valor")), None)
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_confirm_improvement_models_readable(project_dir: Path) -> str | None:
     """Confirm the eight new Improvement* models (issue #3177) import and read.
 
     Purely additive: eight brand-new model classes, no field added to and no
     field removed from an existing model, so there is nothing to backfill and
     no index set to strip. This entry exists so ``run_pending_migrations()``
-    carries a durable marker for the schema version that introduced them —
+    carries a durable marker for the schema version that introduced them:
     without it there is no record on a machine that the improvement keyspace
     was ever registered, and a later subtractive migration has no predecessor
     to reason from.
-
-    Read-only: it imports each class and runs one bounded, project-scoped
-    query per model to prove the keyspace resolves. Writes nothing. Returns
-    None on success, error string on unexpected failure.
     """
-    try:
-        import sys
+    return _confirm_models_readable(
+        project_dir,
+        (
+            "ImprovementCharter",
+            "ImprovementEvidence",
+            "ImprovementModelRevision",
+            "ImprovementCase",
+            "ImprovementInvestigation",
+            "ImprovementExperiment",
+            "ImprovementEvaluation",
+            "ImprovementRelease",
+        ),
+    )
 
-        sys.path.insert(0, str(project_dir))
-        from models import (
-            ImprovementCase,
-            ImprovementCharter,
-            ImprovementEvaluation,
-            ImprovementEvidence,
-            ImprovementExperiment,
-            ImprovementInvestigation,
-            ImprovementModelRevision,
-            ImprovementRelease,
-        )
 
-        for model in (
-            ImprovementCharter,
-            ImprovementEvidence,
-            ImprovementModelRevision,
-            ImprovementCase,
-            ImprovementInvestigation,
-            ImprovementExperiment,
-            ImprovementEvaluation,
-            ImprovementRelease,
-        ):
-            list(model.query.filter(project_key="valor"))[:1]
-        return None
-    except Exception as e:
-        return str(e)
+def _migrate_confirm_improvement_v2_fields(project_dir: Path) -> str | None:
+    """Confirm the charter-v2 fields on the Improvement* models (issue #3255).
+
+    Purely additive to four existing models: ``ImprovementCharter`` gains
+    ``digest``, ``effective``, and ``text``; ``ImprovementCase`` gains
+    ``priority_area``, ``ranking_rationale``, and ``charter_digest``;
+    ``ImprovementInvestigation`` and ``ImprovementRelease`` gain
+    ``charter_digest``. The one removal, ``ImprovementCase.objective``, was a
+    plain unindexed field with no writer, so there is nothing to backfill and
+    no index set to strip.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the v2 vocabulary: without it there
+    is no record on a machine that the charter-digest fields were ever
+    registered, and a later subtractive migration has no predecessor to reason
+    from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        (
+            "ImprovementCharter",
+            "ImprovementCase",
+            "ImprovementInvestigation",
+            "ImprovementRelease",
+        ),
+    )
+
+
+def _migrate_confirm_improvement_infrastructure_ledger_readable(
+    project_dir: Path,
+) -> str | None:
+    """Confirm the InfrastructureReservation ledger model (issue #3274) reads cleanly.
+
+    Purely additive: one brand-new Popoto model, no field added to and no
+    field removed from an existing model, so there is nothing to backfill and
+    no index set to strip. This entry exists so ``run_pending_migrations()``
+    carries a durable marker for the schema version that introduced the unit-3
+    ledger: without it there is no record on a machine that the infrastructure
+    keyspace was ever registered, and a later subtractive migration has no
+    predecessor to reason from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        ("InfrastructureReservation",),
+    )
 
 
 MIGRATIONS: dict[str, tuple[callable, str]] = {
@@ -1560,10 +1640,25 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         "Register the eight additive Improvement* models (issue #3177) and "
         "confirm their keyspace resolves",
     ),
+    "confirm_improvement_v2_fields": (
+        _migrate_confirm_improvement_v2_fields,
+        "Register the charter-v2 fields on ImprovementCharter, ImprovementCase, "
+        "ImprovementInvestigation, and ImprovementRelease (issue #3255) and "
+        "confirm their keyspace resolves",
+    ),
+    "confirm_improvement_infrastructure_ledger_readable": (
+        _migrate_confirm_improvement_infrastructure_ledger_readable,
+        "Register the additive InfrastructureReservation ledger model (issue #3274) "
+        "and confirm its keyspace resolves",
+    ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,
         "Repair tz-skewed Job.last_active_at sorted-set scores via field-scoped "
         "ORM re-saves (issue #2636)",
+    ),
+    "confirm_codex_dev_lane_fields_readable": (
+        _migrate_confirm_codex_dev_lane_fields_readable,
+        "Confirm AgentSession Codex dev-lane fields (issue #2001) read cleanly on legacy rows",
     ),
     "clear_orphaned_warn_state_key": (
         _migrate_clear_orphaned_warn_state_key,

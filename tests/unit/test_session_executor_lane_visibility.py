@@ -223,8 +223,16 @@ class TestLaneWritebackFailure:
 
         assert FakeSessionRunner.instances, "session must still run despite the save failure"
         warnings = [m for m in _log_messages(caplog) if "[lane-writeback]" in m]
-        assert warnings, "expected a [lane-writeback] WARNING on the failed exec_cwd save"
+        assert warnings, "expected a [lane-writeback] WARNING on the failed run-start save"
         assert session.session_id in warnings[0]
+        # One save carries TWO guarantees and both are lost when it raises: the
+        # exec_cwd stamp and the run-start exit_reason reset. A message naming
+        # only exec_cwd sends the reader looking for the wrong regression.
+        assert "exec_cwd" in warnings[0]
+        assert "exit_reason" in warnings[0], (
+            "the lane-writeback WARNING does not say the run-start exit_reason "
+            f"reset was lost too: {warnings[0]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +266,11 @@ class TestTerminalRowCleanup:
 
 
 # ---------------------------------------------------------------------------
-# 4. Pre-finalize guard: raising exit with `task` never bound
+# 4. Exit finalize guard: raising exit with `task` never bound
 # ---------------------------------------------------------------------------
 
 
-class TestPreFinalizeGuardUnboundTask:
+class TestExitFinalizeGuardUnboundTask:
     @pytest.mark.asyncio
     async def test_early_raise_before_task_bound_finalizes_failed_and_removes_worktree(
         self, redis_test_db, tmp_path, caplog
@@ -293,10 +301,10 @@ class TestPreFinalizeGuardUnboundTask:
         )
 
         wt_path = repo / ".worktrees" / slug
-        assert not wt_path.exists(), "the pre-finalize guard must unblock cleanup's removal"
+        assert not wt_path.exists(), "the exit finalize guard must unblock cleanup's removal"
 
         msgs = _log_messages(caplog)
-        assert any("synthetic-cleanup pre-finalize" in m or "Pre-finalize guard" in m for m in msgs)
+        assert any("Finalize guard finalized session" in m for m in msgs)
         assert any("Cleaned up worktree+branch" in m for m in msgs)
         assert not any("cleanup blocked" in m for m in msgs)
 
@@ -315,7 +323,7 @@ class TestDeferredNudgeMainPathPreservesLane:
         error handler calls ``messenger.send(...)`` -> ``route_session_output``
         (forced here to "nudge_continue"), and ``_enqueue_nudge``'s MAIN path
         re-reads the row and calls ``transition_status(session, "pending",
-        ...)`` on the SAME row. The pre-finalize guard must see a `pending`
+        ...)`` on the SAME row. The exit finalize guard must see a `pending`
         row and no-op; the synthetic cleanup must then find the row still
         non-terminal (carrying the exec_cwd stamped earlier in this same
         run) and refuse removal, preserving the lane for the continuation
@@ -347,7 +355,7 @@ class TestDeferredNudgeMainPathPreservesLane:
         assert reloaded is not None
         assert reloaded.status == "pending", (
             "the main nudge path must leave the row pending, untouched by the "
-            "pre-finalize guard (status == 'running' predicate must no-op here)"
+            "exit finalize guard (status == 'running' predicate must no-op here)"
         )
 
         wt_path = repo / ".worktrees" / slug

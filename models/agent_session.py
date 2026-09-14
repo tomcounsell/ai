@@ -435,6 +435,36 @@ class AgentSession(Model):
     # existing sessions unaffected.
     requires_real_chrome = Field(default=False)
 
+    # === Codex dev-lane selection and continuity (plan #2001, Phase 3) ===
+    # `dev_harness` is the immutable creation-time-only in-turn dev-lane
+    # selector: None (the default) means the existing Claude `Agent(dev)`
+    # lane; "codex" means developer work runs through a worktree-scoped,
+    # resumable `codex exec` thread driven by a session-scoped MCP tool.
+    # Ownership split with `exec_harness` above: `exec_harness` stays the
+    # top-level spawn selector and remains fixed to "claude" on every
+    # flagged eng row; `dev_harness` owns only the in-turn dev lane. No
+    # reuse of `exec_harness == "codex"` — the two selectors coexist with
+    # this stated boundary. Nullable non-indexed adds: Popoto's
+    # `_create_lazy_model` default-fills absent fields generically (since
+    # 1.6.1), so no backfill is needed; a registered read-compatibility
+    # migration probes them (scripts/update/migrations.py).
+    dev_harness = Field(null=True)
+    # Codex thread id (UUID from `thread.started`), persisted synchronously
+    # on first sight (write-or-kill) and preserved for forensics across the
+    # one-way codex-to-claude downgrade. Never inferred from rollout files.
+    codex_thread_id = Field(null=True)
+    # Codex CLI version that opened the thread (informational / forensics).
+    codex_version = Field(null=True)
+    # Count of executed Codex turns against the persisted thread. Guarded by
+    # `codex_max_resumed_turns`; incremented only after a live child spawn,
+    # refunded on spawn failure, so the guard counts real turns only.
+    codex_turn_count = IntField(null=True)
+    # Monotonic dev-lane fence token (uuid hex, stamped at creation).
+    # Every resume re-checks the token under the dev-lane lease so a TTL
+    # lease expiry that races a still-live child cannot resume a superseded
+    # thread.
+    dev_lane_fence = Field(null=True)
+
     # === Runner user-facing delivery tracking (issue #1647) ===
     # Set to True by SessionRunnerAdapter.publish_exit_summary when at least
     # one [/user] or non-empty [/complete] payload was confirmed delivered to

@@ -333,12 +333,17 @@ class TestSidecarParity:
 
         # Stub KnowledgeDocument.safe_upsert to record the call and return a
         # minimal stand-in object exposing the attributes the indexer touches.
+        # index_file reads project_key/scope back off the returned doc (the
+        # value safe_upsert actually persisted) rather than its own locals, so
+        # the stand-in must expose them.
         class _FakeDoc:
-            def __init__(self, file_path: str):
+            def __init__(self, file_path: str, project_key: str, scope: str):
                 self.file_path = file_path
                 self.doc_id = f"doc-{file_path}"
                 self.content = ""
                 self.content_hash = ""
+                self.project_key = project_key
+                self.scope = scope
 
         # The existing-doc lookup must report "no existing doc" so the
         # content-changed branch fires for both inputs.
@@ -349,7 +354,7 @@ class TestSidecarParity:
 
         def _fake_upsert(file_path, project_key, scope):
             upsert_calls.append((file_path, project_key, scope))
-            return _FakeDoc(file_path)
+            return _FakeDoc(file_path, project_key, scope)
 
         monkeypatch.setattr(
             "models.knowledge_document.KnowledgeDocument.safe_upsert",

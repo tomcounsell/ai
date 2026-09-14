@@ -909,3 +909,45 @@ class TestClusterARemoveCandidateEmpiricalRegression:
                     session.delete()
                 except Exception:
                     pass
+
+
+class TestDevHarnessFields:
+    """Phase 3 dev-lane fields coexist with the top-level selector (#2001).
+
+    ``dev_harness`` is a creation-time capability distinct from
+    ``exec_harness`` (which stays top-level-Claude): setting one never
+    implies the other, and both default to None (unflagged).
+    """
+
+    def _unsaved(self, **overrides):
+        from datetime import UTC, datetime
+
+        base = {
+            "project_key": "test-2001",
+            "status": "pending",
+            "priority": "normal",
+            "created_at": datetime.now(tz=UTC),
+            "session_id": "unit-test-2001",
+            "working_dir": "/tmp/test",
+            "chat_id": "123",
+            "message_text": "hello",
+            "sender_name": "Tester",
+            "telegram_message_id": 1,
+        }
+        base.update(overrides)
+        return AgentSession(**base)
+
+    def test_dev_harness_distinct_from_exec_harness(self):
+        session = self._unsaved(dev_harness="codex", exec_harness="claude")
+
+        assert session.dev_harness == "codex"
+        assert session.exec_harness == "claude"
+
+    def test_dev_lane_fields_default_to_none(self):
+        session = self._unsaved()
+
+        assert session.dev_harness is None
+        assert session.codex_thread_id is None
+        assert session.codex_version is None
+        assert session.codex_turn_count is None
+        assert session.dev_lane_fence is None

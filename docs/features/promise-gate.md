@@ -76,14 +76,42 @@ session ends before self-draft steering was consumed. At that moment there is
 no live agent to self-draft a rewrite, so `needs_self_draft=True` is not an
 option. `agent/session_health._gate_terminal_promise` therefore evaluates the
 exact text about to ship and, on a block, **substitutes** the fallback
-`TERMINAL_PROMISE_FALLBACK_MESSAGE` ("An outbound safety filter held back this
-session's final message. The work may have finished normally; if something you
-expected is missing, ask again in a new message."). The wording asserts only
-what the gate can actually know: a filter withheld the message. It claims
-nothing about whether the session's work finished, because a block verdict
-carries no such information (#3135; the substitution design itself is still
-open there). Suppression is not used, because it reintroduces the swallowed-reply
-class. The gate is fail-open for delivery: an evaluation error delivers the
+`TERMINAL_PROMISE_FALLBACK_MESSAGE` ("I didn't send my last message here. It
+wasn't good enough. If you were waiting on something from me, just ask again.").
+The constant is defined in `agent/notification_copy.py`, alongside
+`INTERRUPT_NO_RESUME` and `FAILURE_NOTICE`, under the #1877 contract that every
+user-facing lifecycle string has exactly one definition that send sites import
+by name.
+
+Three constraints bind this text, and a change that breaks any of them is a
+regression:
+
+1. **It must pass the promise heuristic itself** — the substitution may never be
+   a new empty promise (#3135).
+2. **Every clause must be true given only "the gate withheld the message"** — a
+   block verdict carries no information about whether any work completed, so the
+   text may not claim failure or invent a pending request (#3135). Note that it
+   may not characterize the *withheld* text either: the behavioral-change block
+   class fires on bare acknowledgments ("you're right", "good point") that
+   contain no promise, so wording like "it made a commitment I couldn't back up"
+   is false in that case. "It wasn't good enough" is verdict-shaped rather than
+   content-shaped, and holds under both block classes.
+3. **It is Valor speaking, in the first person, naming no internal mechanism**
+   (#3290). This route delivers straight to the human in Telegram, where the
+   standing rule is that no raw error or internal narration ever reaches them.
+   The pre-#3290 wording ("An outbound safety filter held back this session's
+   final message") satisfied constraints 1 and 2 and was still flagged by the
+   principal as off-persona, which is why constraint 3 is enforced by its own
+   test rather than left to review.
+
+`tests/unit/test_deferred_self_draft_completed.py` locks constraints 1 and 3
+(`test_substitute_message_passes_the_heuristic` and
+`test_substitute_message_names_no_internal_mechanism`, the latter matching
+`filter` / `session` / `gate` on word boundaries so `possession` does not
+false-positive).
+
+Suppression is not used, because it reintroduces the swallowed-reply class.
+The gate is fail-open for delivery: an evaluation error delivers the
 original text rather than swallowing the reply. This route always evaluates
 via the regex heuristic — it never reaches the LLM layer the drafter's main
 path now uses, because there is no agent left to consume an LLM-derived

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from config.models import OLLAMA_CLASSIFIER_MODEL
 from scripts.update.service import is_bridge_running
+from tools.process_lookup import find_command_pids
 
 logger = logging.getLogger(__name__)
 
@@ -451,12 +452,12 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
         "use_api_billing": False,
     }
 
-    # Check Claude Desktop
-    try:
-        ps_result = run_cmd(["pgrep", "-f", "Claude.app"], timeout=5)
-        result["claude_desktop_running"] = ps_result.returncode == 0
-    except Exception:
-        pass
+    # Check Claude Desktop. Ancestor-safe (#3265): the desktop app spawns the
+    # agent sessions that run /update, so `pgrep -f` reported "not running" for
+    # a live Claude.app in exactly the case this check is consulted from.
+    # `find_command_pids` rather than `find_python_service_pids` because
+    # Claude.app is not a CPython invocation and has no argv grammar to parse.
+    result["claude_desktop_running"] = bool(find_command_pids("Claude.app"))
 
     # Check .env for API key and billing preference. The .env symlinks to
     # ~/Desktop/Valor/.env (iCloud + TCC-protected); read can raise PermissionError

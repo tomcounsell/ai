@@ -264,8 +264,12 @@ def push_steering_message(
     front: bool = False,
     room_id: str | None = None,
     timestamp: float | None = None,
-) -> None:
+) -> str:
     """Push a message to a steering queue — the Room leg, or the legacy leg.
+
+    Returns the serialized payload exactly as it was written, so a caller
+    whose own follow-up work fails can hand it back to
+    :func:`remove_steering_message` and undo the push. Most callers ignore it.
 
     Args:
         session_id: The active session to steer
@@ -334,6 +338,46 @@ def push_steering_message(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
         f"{text[:80]!r} (from {sender}){target_suffix}{front_suffix}"
     )
+    return payload
+
+
+def remove_steering_message(
+    session_id: str,
+    payload: str,
+    room_id: str | None = None,
+) -> bool:
+    """Undo a single :func:`push_steering_message`, by exact payload.
+
+    Exists for the push-then-do-something-that-can-fail shape: a caller that
+    must push BEFORE a second write (to close a two-write race) has no other
+    way to clean up when that second write raises. Without it the orphaned
+    steer sits on the legacy key forever — the legacy leg carries no TTL and
+    is never age-bounded at drain time (only the Room leg is, via
+    ``steering_room_max_age_s``) — and is injected verbatim whenever that
+    session next runs, however much later that is.
+
+    Removes the LAST occurrence (``LREM count=-1``), which is the entry a
+    just-completed ``RPUSH`` wrote. Concurrent pushes of *different* text are
+    unaffected; a byte-identical duplicate would lose its newest copy, which
+    is the correct one to drop here.
+
+    The leg is re-derived from the payload's own ``is_abort`` so it always
+    matches the key ``push_steering_message`` chose, including for a keyword
+    auto-detected abort. Never raises.
+    """
+    try:
+        is_abort = bool(json.loads(payload).get("is_abort"))
+    except Exception:
+        is_abort = False
+    key = _room_queue_key(room_id) if (room_id and not is_abort) else _queue_key(session_id)
+    try:
+        removed = _get_redis().lrem(key, -1, payload)
+    except Exception as e:
+        logger.warning("[steering] Failed to remove steering message from %s: %s", key, e)
+        return False
+    if removed:
+        logger.info("[steering] Removed %s orphaned steering message(s) from %s", removed, key)
+    return bool(removed)
 
 
 def pop_all_steering_messages(session_id: str, room_id: str | None = None) -> list[dict]:

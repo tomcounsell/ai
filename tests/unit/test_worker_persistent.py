@@ -383,7 +383,7 @@ class TestPersistentMode:
             patch("agent.agent_session_queue.CORRUPTED_POP_BACKOFF_SECONDS", 0.001),
             patch("agent.agent_session_queue.asyncio.sleep", side_effect=fake_sleep),
             patch("agent.agent_session_queue.logger", mock_logger),
-            patch.object(asq.AgentSession, "get", return_value=mock_fresh, create=True),
+            patch.object(asq.AgentSession.query, "get", return_value=mock_fresh),
         ):
             await _worker_loop(chat_id, event)
 
@@ -475,10 +475,9 @@ class TestPersistentMode:
             ),
             patch("agent.agent_session_queue.save_session_snapshot"),
             patch.object(
-                asq.AgentSession,
+                asq.AgentSession.query,
                 "get",
                 return_value=mock_fresh,
-                create=True,
             ),
         ):
             # Register event so request_shutdown can wake us
@@ -565,10 +564,9 @@ class TestGracefulShutdown:
             ),
             patch("agent.agent_session_queue.save_session_snapshot"),
             patch.object(
-                asq.AgentSession,
+                asq.AgentSession.query,
                 "get",
                 return_value=mock_fresh,
-                create=True,
             ),
         ):
             await _worker_loop(chat_id, event)

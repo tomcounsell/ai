@@ -1716,3 +1716,73 @@ class TestPublishSessionNotify:
         payload = _json.loads(redis_mock.publish.call_args[0][1])
         assert payload["worker_key"] == "valor"
         assert payload["chat_id"] is None
+
+
+def _push_kwargs(**overrides):
+    base = {
+        "project_key": "test-2001",
+        "session_id": "unit-test-2001",
+        "working_dir": "/tmp/test",
+        "message_text": "hello",
+        "sender_name": "Tester",
+        "chat_id": "123",
+        "telegram_message_id": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestPushDevHarnessValidation:
+    """The creation chokepoint validates dev_harness before any Redis write."""
+
+    async def test_unknown_dev_harness_raises_before_redis(self):
+        with pytest.raises(ValueError, match="Unknown dev_harness"):
+            await _push_agent_session(**_push_kwargs(dev_harness="bogus"))
+
+    async def test_non_eng_dev_harness_raises(self):
+        with pytest.raises(ValueError, match="requires an eng session"):
+            await _push_agent_session(**_push_kwargs(session_type="teammate", dev_harness="codex"))
+
+
+class TestDevLaneFieldRecreation:
+    """Clone/continuation recreation carries the dev-lane fields (plan #2001).
+
+    The copy set is model-derived, so the Phase 3 fields ride along
+    automatically; CONTINUATION resets only _EXECUTION_FENCE_RESET_FIELDS.
+    """
+
+    def _flagged(self, **overrides):
+        base = {
+            "dev_harness": "codex",
+            "codex_thread_id": "thread-abc",
+            "codex_version": "0.154.0",
+            "codex_turn_count": 3,
+            "dev_lane_fence": "fence-1",
+        }
+        base.update(overrides)
+        return _make_session(**base)
+
+    def test_clone_carries_dev_lane_fields(self):
+        from agent.agent_session_queue import clone_agent_session_fields
+
+        fields = clone_agent_session_fields(self._flagged())
+
+        assert fields["dev_harness"] == "codex"
+        assert fields["codex_thread_id"] == "thread-abc"
+        assert fields["codex_version"] == "0.154.0"
+        assert fields["codex_turn_count"] == 3
+        assert fields["dev_lane_fence"] == "fence-1"
+
+    def test_continuation_preserves_dev_lane_but_resets_execution_fence(self):
+        from agent.agent_session_queue import continuation_agent_session_fields
+
+        session = self._flagged(exec_harness="claude", exec_pid=12345)
+        fields = continuation_agent_session_fields(session)
+
+        assert fields["dev_harness"] == "codex"
+        assert fields["codex_thread_id"] == "thread-abc"
+        assert fields["codex_turn_count"] == 3
+        assert fields["dev_lane_fence"] == "fence-1"
+        # The execution fence belongs to the run that just ended.
+        assert fields["exec_harness"] is None
+        assert fields["exec_pid"] is None
