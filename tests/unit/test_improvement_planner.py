@@ -741,3 +741,74 @@ def test_arm_runner_nothing_registers_at_import(monkeypatch):
     assert hasattr(module, "main")
     with pytest.raises(ArmRunnerUnavailable, match="ARM_RUNNER_UNAVAILABLE: lane 6 not merged"):
         PlannerArmRunner().run("sha256:" + "0" * 64, ["case-1"], None, "arm-test-2")
+
+
+# ---------------------------------------------------------------------------
+# valor-improve ranking [--at REF], through the CLI entry point
+# ---------------------------------------------------------------------------
+
+
+class TestRankingCli:
+    def _run(self, argv, capsys):
+        from tools import improvement as cli
+
+        code = cli.main(argv)
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def test_no_snapshot_yet_exits_zero(self, capsys):
+        code, out, _ = self._run(["ranking"], capsys)
+        assert code == 0
+        assert out.strip() == "no snapshot yet"
+        code, out, _ = self._run(["--json", "ranking"], capsys)
+        assert code == 0 and json.loads(out) == {"snapshot": None}
+
+    def test_latest_prints_order_factors_block_pool_and_diff(self, charter_path, store, capsys):
+        evidence(text="you lost the journey again and shipped half", classification="architectural")
+        evidence(
+            kind="inspiration",
+            text="watch this",
+            source_ref="memory:m1",
+            detail=json.dumps({"url": "https://youtube.com/watch?v=abc"}),
+        )
+        result = tick(charter_path, store)
+        (case,) = cases()
+        (intake,) = investigations(kind="inspiration_intake")
+        code, out, _ = self._run(["ranking"], capsys)
+        assert code == 0
+        assert f"1. {case.id}" in out
+        assert "opportunity_cost=" in out and "unlocked_capacity=" in out
+        assert f"intake pool: {intake.id}" in out
+        assert f"entered: {case.id}" in out
+        code, out, _ = self._run(["--json", "ranking", "--at", result.snapshot_ref], capsys)
+        assert code == 0
+        assert json.loads(out)["snapshot"]["order"][0]["case_id"] == case.id
+
+    def test_blocked_text_is_printed(self, charter_path, store, capsys):
+        ImprovementCase.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            state="observed",
+            title="blocked",
+            priority_area="inference",
+            ranking_rationale="r",
+            blocked_by="vault:meta_model_api",
+        )
+        tick(charter_path, store, probe=lambda: {})
+        code, out, _ = self._run(["ranking"], capsys)
+        assert code == 0
+        assert "[blocked: vault:meta_model_api]" in out
+
+    def test_at_with_a_corrupted_snapshot_exits_two(self, charter_path, store, capsys):
+        import os
+
+        evidence(text="you lost the journey again and shipped half", classification="architectural")
+        ref = tick(charter_path, store).snapshot_ref
+        content_hash, relative_path = ref[len("$CF:") :].split(":", 1)
+        live_path = os.path.join(store.base_path, relative_path)
+        with open(live_path, "ab") as handle:
+            handle.write(b"\n# tampered\n")
+        code, out, err = self._run(["ranking", "--at", ref], capsys)
+        assert code == 2
+        assert out == ""
+        assert "does not match its digest" in err
