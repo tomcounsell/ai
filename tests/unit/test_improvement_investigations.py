@@ -624,6 +624,29 @@ class TestCli:
         import sys
 
         monkeypatch.setitem(sys.modules, "reflections.improvement_plan", None)
-        code, payload = run_cli(["case", "open", "--priority-area", "inference"], capsys)
+        code, payload = run_cli(["case", "open"], capsys)
         assert code == 1
         assert payload["reason"] == "PLANNER_UNAVAILABLE"
+
+    def test_case_open_runs_the_planner_seam_on_named_evidence(self, capsys):
+        from models.improvement_evidence import ImprovementEvidence
+
+        pinned_digest()
+        row = ImprovementEvidence.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            kind="inspiration",
+            classification="unknown",
+            source_ref="seed:test-case-open",
+            text="charter §3: cheap inference first",
+            detail=json.dumps({"seed": "charter-s3:test", "priority_area": "inference"}),
+        )
+        code, payload = run_cli(["case", "open", "--evidence-ids", row.id], capsys)
+        assert code == 0, payload
+        assert len(payload["opened"]) == 1
+        (case_id,) = payload["opened"]
+        case = ImprovementCase.query.get(project_key=PK, id=case_id)
+        assert json.loads(case.evidence_ids) == [row.id]
+        assert [e["event"] for e in journal_tail(PK, case_id, 5)] == ["case_opened"]
+        code, payload = run_cli(["case", "open", "--evidence-ids", "no-such-row"], capsys)
+        assert (code, payload["reason"]) == (1, "EVIDENCE_NOT_FOUND")

@@ -732,22 +732,16 @@ def _research_process_spec_values() -> dict:
     }
 
 
-def _research_process_spec_bytes(values: dict) -> tuple[str, object]:
+def _research_process_spec_text(values: dict) -> str:
     """Canonical spec JSON through ``tools.improvement_ranking.process_spec_json``
-    when it is importable, else the same canonical form built here:
-    ``json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))``.
-    Returns ``(text, spec_object_or_None)``."""
+    (bytes, decoded) when it is importable, else the same canonical form
+    built here: ``json.dumps(values, sort_keys=True, separators=(",", ":"))``."""
     try:
         from tools.improvement_ranking import process_spec_json
-
-        try:
-            from tools.improvement_recursion.process import ResearchProcessSpec
-        except ImportError:
-            from tools.improvement_ranking import ResearchProcessSpec
-        spec = ResearchProcessSpec(**values)
-        return process_spec_json(spec), spec
-    except (ImportError, AttributeError, TypeError):
-        return json.dumps(values, sort_keys=True, separators=(",", ":")), None
+    except ImportError:
+        return json.dumps(values, sort_keys=True, separators=(",", ":"))
+    encoded = process_spec_json(values)
+    return encoded.decode("utf-8") if isinstance(encoded, bytes) else str(encoded)
 
 
 def cmd_revise_model(args) -> int:
@@ -768,12 +762,12 @@ def cmd_revise_model(args) -> int:
         return _refused(args, "CASE_NOT_FOUND", f"no case {args.case}")
 
     values = _research_process_spec_values()
-    spec_text, spec = _research_process_spec_bytes(values)
+    spec_text = _research_process_spec_text(values)
     digest = None
     try:
         from tools.improvement_recursion.process import research_process_digest
 
-        digest = research_process_digest(spec if spec is not None else values)
+        digest = research_process_digest(values)
     except ImportError:
         digest = None
 
@@ -815,13 +809,13 @@ def cmd_revise_model(args) -> int:
 
 
 def cmd_case_open(args) -> int:
-    """Open a case through the planner's ``open_cases`` (same novelty check
-    the tick runs), then journal ``case_opened`` for any new case whose tail
-    lacks one. Refuses ``PLANNER_UNAVAILABLE`` until the planner module exists."""
-    import hashlib
-
+    """Open cases through the planner's ``open_cases``: the same clustering,
+    novelty check, and ``case_opened`` journal write the tick runs. With
+    ``--evidence-ids`` only those rows are considered; without it the
+    planner's bounded recent scan runs. Refuses ``PLANNER_UNAVAILABLE`` when
+    ``reflections.improvement_plan`` is absent and ``CHARTER_NOT_PINNED`` when
+    no charter row exists."""
     from models.improvement_charter import ImprovementCharter
-    from tools.improvement_control.journal import journal_tail, read_head, transition
 
     try:
         from reflections.improvement_plan import open_cases
@@ -832,50 +826,38 @@ def cmd_case_open(args) -> int:
     charter = ImprovementCharter.pinned(PROJECT_KEY)
     if charter is None:
         return _refused(args, "CHARTER_NOT_PINNED", "no charter row; run the planner tick first")
-    extras = {}
+
     if args.evidence_ids:
-        extras["evidence_ids"] = [e for e in args.evidence_ids.split(",") if e]
-    if args.priority_area:
-        extras["priority_area"] = args.priority_area
-    if args.dedup_identity:
-        extras["dedup_identity"] = args.dedup_identity
-    try:
-        result = open_cases(PROJECT_KEY, charter, **extras)
-    except TypeError as e:
-        return _refused(args, "PLANNER_SIGNATURE", str(e))
+        from models.improvement_evidence import ImprovementEvidence
 
-    opened = getattr(result, "opened", result)
-    case_ids = []
-    for item in opened if isinstance(opened, (list, tuple)) else []:
-        case_ids.append(item if isinstance(item, str) else getattr(item, "id", None))
-    case_ids = [c for c in case_ids if c]
+        wanted = [e.strip() for e in args.evidence_ids.split(",") if e.strip()]
+        rows = []
+        for eid in wanted:
+            try:
+                row = ImprovementEvidence.query.get(project_key=PROJECT_KEY, id=eid)
+            except Exception:
+                row = None
+            if row is None:
+                return _refused(args, "EVIDENCE_NOT_FOUND", f"no evidence row {eid}")
+            rows.append(row)
+        result = open_cases(PROJECT_KEY, charter, evidence=rows)
+    else:
+        result = open_cases(PROJECT_KEY, charter)
 
-    journaled = []
-    for case_id in case_ids:
-        if any(e.get("event") == "case_opened" for e in journal_tail(PROJECT_KEY, case_id, 50)):
-            continue
-        lease, lease_key, generation = _acquire_lease(case_id)
-        if generation is None:
-            continue
-        try:
-            head = read_head(PROJECT_KEY, case_id)
-            outcome = transition(
-                PROJECT_KEY,
-                case_id,
-                expected_revision=head.revision if head is not None else 0,
-                generation=generation,
-                event="case_opened",
-                payload_digest="sha256:" + hashlib.sha256(case_id.encode()).hexdigest(),
-            )
-        finally:
-            lease.release(lease_key, generation)
-        if outcome.accepted:
-            _project(case_id)
-            journaled.append(case_id)
+    payload = {
+        "accepted": True,
+        "opened": list(result.opened),
+        "attached": list(result.attached),
+        "intake": list(result.intake),
+        "refused": list(result.refused),
+        "findings": list(result.findings),
+    }
     _emit(
         args,
-        f"opened {len(case_ids)} case(s): {', '.join(case_ids) or 'none'}",
-        {"accepted": True, "case_ids": case_ids, "journaled": journaled},
+        f"opened {len(result.opened)} case(s): {', '.join(result.opened) or 'none'}; "
+        f"attached {len(result.attached)}, intake {len(result.intake)}, "
+        f"refused {len(result.refused)}",
+        payload,
     )
     return 0
 
@@ -921,8 +903,6 @@ def main(argv: list[str] | None = None) -> int:
     p_explain.set_defaults(func=cmd_case_explain)
     p_open = case_sub.add_parser("open")
     p_open.add_argument("--evidence-ids", default=None, help="comma-separated evidence ids")
-    p_open.add_argument("--priority-area", default=None)
-    p_open.add_argument("--dedup-identity", default=None)
     p_open.set_defaults(func=cmd_case_open)
 
     p = sub.add_parser("budget")

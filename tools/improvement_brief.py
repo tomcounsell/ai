@@ -73,7 +73,7 @@ SUBCOMMANDS = (
     "valor-improve investigation resolve --id ID --interpretation ... "
     "[--assumption ... --assumption-detail JSON] [--disposition ... --resource-name ...]",
     "valor-improve investigation list [--case ID]",
-    "valor-improve case open [--evidence-ids A,B] [--priority-area X]",
+    "valor-improve case open [--evidence-ids A,B]",
     "valor-improve revise-model --case ID --summary ... --rationale ... --prediction ...",
     "valor-improve propose --case ID --action-type investigate --payload FILE",
     "valor-improve propose-amendment --case ID --request ...",
