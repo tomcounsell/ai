@@ -443,7 +443,7 @@ hypothesis with a falsifier, frozen, and measured by the harness, and the record
   code. `INVESTIGATION_KINDS` grows from five to eight; `INVESTIGATION_STATES` from four to five;
   `EVIDENCE_KINDS` from seven (eight with lane 3) to ten. `ImprovementCase` gains `blocked_by`;
   `ImprovementModelRevision` gains `research_process_spec`. `ui/data/improvement.py` exports
-  eight getters (lane 3 shipped `get_control_status`). `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
+  nine getters (lane 3 shipped `get_control_status`, lane 6 shipped `get_release_lineage`). `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
   adapter tuple grows from three to five and its status rule counts failures per adapter instead
   of against the literal three. `tools.improvement_resources.RESOURCES` grows from six names to
   seven (`meta_model_api`) with its `_VAULT_TITLE_KEYWORDS` entry; `probe()` is unchanged.
@@ -1144,8 +1144,8 @@ demonstrates the cycle's shape, not an acquired ability.**
   interval, and the snapshot in which it left). Three templates under `ui/templates/improvement/`,
   three inline routes in `ui/app.py`, three links from `/`. `get_goals`'s "Open cases" section reads
   positions from `get_ranking` when a snapshot exists and its placeholder text names lane 5, not
-  lane 3. The exact-list test moves to eight names (lane 3's `get_control_status` is already
-  exported) and gains the no-activity-counter assertion.
+  lane 3. The exact-list test moves to nine names (lane 3's `get_control_status` and lane 6's
+  `get_release_lineage` are already exported) and gains the no-activity-counter assertion.
 
 #### The qualified-result report
 
@@ -1256,7 +1256,7 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_improvement_models.py::INDEXED_VOCABULARIES` (`:60-63`) — UPDATE: `ImprovementInvestigation.kind` grows to eight values and `state` to five (`awaiting_authorization`); the tuple import picks the new values up, and the test keeps failing if a ninth kind or a sixth state appears without an argument here.
 - [ ] `tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS` (`:93-97`) — UPDATE: add `(ImprovementEvidence, "kind"): 10` with the cardinality argument (two adapter-owned kinds, `lesson` and `promise`, each an index set with its own reader; `other` would make both unqueryable). This is the "named entry carrying its reason" the test's own message demands.
 - [ ] `tests/unit/test_improvement_models.py::TestLane7EvidenceKinds` (`:259`) — UPDATE: gains the sibling class `TestLane5EvidenceKinds` asserting `lesson` and `promise` are declared and round-trip without coercion to `other`, on the same shape as `:267-292`.
-- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` (`:719-733`) — UPDATE: the exact getter list becomes `["get_control_status", "get_coverage", "get_goals", "get_hypotheses", "get_intervention_burden", "get_provisional_assumptions", "get_ranking", "get_rejected_approaches"]` (lane 3 already exports `get_control_status`). The rule the test protects (no activity counter) stands: none of the three new getters returns a count of experiments or patches, and a new assertion checks that no getter's result dict carries a key named `experiment_count` or `merged_patch_count`.
+- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` (`:719-733`) — UPDATE: the exact getter list becomes `["get_control_status", "get_coverage", "get_goals", "get_hypotheses", "get_intervention_burden", "get_provisional_assumptions", "get_ranking", "get_rejected_approaches", "get_release_lineage"]` (lane 3 already exports `get_control_status`; lane 6 already exports `get_release_lineage`). The rule the test protects (no activity counter) stands: none of the three new getters returns a count of experiments or patches, and a new assertion checks that no getter's result dict carries a key named `experiment_count` or `merged_patch_count`.
 - [ ] `tests/unit/test_ui_app.py::test_index_page_links_all_improvement_partials` (`:735`) — UPDATE: asserts the three new partial routes (`/_partials/improvement/ranking/`, `/hypotheses/`, `/rejected/`) are linked from `/`.
 - [ ] `tests/unit/test_sdlc_stubs.py::TestCheckExistingReflectionPR` (`:156-194`) — DELETE: it tests `scripts.sdlc_reflection._check_existing_reflection_pr`, and the script is deleted whole. The stub-creation tests above it (`:34-141`) test `scripts/update/migrations.py`'s `create_sdlc_stubs` and stay.
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` (`:62`, `:84`) — UPDATE: remove the `install_sdlc_reflection.sh` entries from both dicts; the installer is deleted with the script.
@@ -1499,7 +1499,7 @@ and reports the finding.
 
 ### Feature Documentation
 - [ ] Create `docs/features/improvement-research-cycle.md`: the planner tick, the ranking snapshot and its diff, the investigation lifecycle (eight kinds, five indexed states, the unindexed `stage`), the claim rule, provisional assumptions and the three-day digest, the brief contract, the experiment envelope for this lane (retrieval arm parameters), the verdict-to-selection rule, the two new observer adapters, and the qualified-result report format
-- [ ] Update `docs/features/improvement-controller.md`: "What exists today" (`:12-21`) names lane 5; the Three layers "Research reasoning" paragraph (`:29-32`) drops "Not built yet (lane 5)"; the Dashboard section (`:364-395`) documents the three new partials and the eight-getter list; the Evidence collection table (`:92-96`) gains the `lesson` and `promise` adapter rows; a "Research cycle" section links the new feature doc
+- [ ] Update `docs/features/improvement-controller.md`: "What exists today" (`:12-21`) names lane 5; the Three layers "Research reasoning" paragraph (`:29-32`) drops "Not built yet (lane 5)"; the Dashboard section (`:364-395`) documents the three new partials and the nine-getter list; the Evidence collection table (`:92-96`) gains the `lesson` and `promise` adapter rows; a "Research cycle" section links the new feature doc
 - [ ] Update `docs/features/sdlc-repo-addenda.md` (`:46-92`): the reflection-agent section is replaced by one paragraph stating that lessons in PR bodies are now `ImprovementEvidence` rows of kind `lesson` read by the planner, and the `com.valor.sdlc-reflection` rows leave the file table
 - [ ] Update `docs/features/launchctl-bootstrap-fail-soft.md:76`: remove the `install_sdlc_reflection.sh` row
 - [ ] Update `docs/features/log-rotation.md:40` and `docs/features/nightly-regression-tests.md:371`: remove the `sdlc_reflection.py` / `sdlc_reflection_last_run.json` references
@@ -1556,8 +1556,8 @@ records an override, plus this plan's own.
   as a provisional assumption citing #3311
 - [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
 - [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
-  is exactly eight (the four existing including lane 3's `get_control_status`, plus
-  `get_ranking`, `get_hypotheses`, `get_rejected_approaches`) and carries no activity counter
+  is exactly nine (the six existing including lane 3's `get_control_status` and lane 6's
+  `get_release_lineage`, plus `get_ranking`, `get_hypotheses`, `get_rejected_approaches`) and carries no activity counter
 - [ ] Lane 6's three seams exist: every model revision carries `research_process_spec` in the
   canonical bytes and a `research_process_digest` computed only by lane 6's function (`None`
   until lane 6 merges; no second hashing routine in this lane), `PlannerArmRunner` registers
@@ -1828,7 +1828,7 @@ task 0 passes.
   fixed closing line, the sections, `send_host_eng_telegram`
 - `get_ranking`, `get_hypotheses`, `get_rejected_approaches`; three templates; three inline
   routes; three index links; the goals partial's placeholder text and position column
-- The exact-list test to eight names plus the no-activity-counter assertion
+- The exact-list test to nine names plus the no-activity-counter assertion
 
 ### 8. Validate wave 2 and the integration test
 - **Task ID**: validate-loop
@@ -1904,7 +1904,7 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Promise adapter is wired into the tick and gated | `grep -c "collect_promises\|promise_detector" reflections/improvement_collect.py` | output > 1 |
 | No planner or verdict path writes `state` by ORM | `grep -nE "\.state *= *['\"]" reflections/improvement_plan.py tools/improvement_experiment.py \| wc -l` | `0` |
 | Every lane-5 journal write is lease-fenced | `python -c "import inspect, reflections.improvement_plan as p, tools.improvement_experiment as e; src=inspect.getsource(p)+inspect.getsource(e); assert 'default_lease().acquire(' in src and 'projection' in src"` | exit code 0 |
-| The dashboard exports exactly the eight honest getters | `python -c "import ui.data.improvement as m; assert [n for n in dir(m) if n.startswith('get_')]==['get_control_status','get_coverage','get_goals','get_hypotheses','get_intervention_burden','get_provisional_assumptions','get_ranking','get_rejected_approaches']"` | exit code 0 |
+| The dashboard exports exactly the nine honest getters | `python -c "import ui.data.improvement as m; assert [n for n in dir(m) if n.startswith('get_')]==['get_control_status','get_coverage','get_goals','get_hypotheses','get_intervention_burden','get_provisional_assumptions','get_ranking','get_rejected_approaches','get_release_lineage']"` | exit code 0 |
 | No dashboard getter returns an activity counter | `grep -rEn "experiment_count|merged_patch_count|patches_merged" ui/data/improvement.py ui/templates/improvement/ \| wc -l` | match count == 0 |
 | No `ImprovementRelease` writer in this lane | `grep -rEn "ImprovementRelease\(|ImprovementRelease\.create|release\.save\(" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_experiment.py tools/improvement_report.py \| wc -l` | match count == 0 |
 | The arm worker still reads only what `retrieve_memories` accepts (lane 4 surface) | `python -c "import inspect; from agent.memory_retrieval import retrieve_memories as r; from tools.improvement_eval import arm_worker; src=inspect.getsource(arm_worker.handle_job); assert 'rrf_k' in src and 'min_rrf_score' in src and 'retrieval_mode' not in src"` | exit code 0 |

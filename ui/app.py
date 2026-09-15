@@ -469,6 +469,62 @@ def create_app() -> FastAPI:
             {"lineage": get_release_lineage(project_key=project_key)},
         )
 
+    @app.get("/_partials/improvement/ranking/", response_class=HTMLResponse)
+    def partial_improvement_ranking(request: Request, project_key: str = "valor"):
+        """HTMX partial: the opportunity ranking and its movement (lane 5, #3217).
+
+        The latest snapshot's order with each case's movement against the
+        previous one, the cases that left, and the intake pool. A snapshot
+        that does not verify renders as unavailable with the integrity
+        error, never as a stale order.
+        """
+        from ui.data.improvement import get_ranking
+
+        ranking = get_ranking(project_key=project_key)
+        if ranking["unavailable"]:
+            logger.warning("improvement ranking partial: %s", ranking["error"])
+        return templates.TemplateResponse(
+            request,
+            "improvement/ranking.html",
+            {"ranking": ranking},
+        )
+
+    @app.get("/_partials/improvement/hypotheses/", response_class=HTMLResponse)
+    def partial_improvement_hypotheses(request: Request, project_key: str = "valor"):
+        """HTMX partial: hypotheses in flight (lane 5, #3217).
+
+        Experiments in proposed, frozen, or running with hypothesis,
+        mechanism, falsifier, and contract digest. A list, never a count.
+        """
+        from ui.data.improvement import get_hypotheses
+
+        hypotheses = get_hypotheses(project_key=project_key)
+        if hypotheses["unavailable"]:
+            logger.warning("improvement hypotheses partial: %s", hypotheses["error"])
+        return templates.TemplateResponse(
+            request,
+            "improvement/hypotheses.html",
+            {"hypotheses": hypotheses},
+        )
+
+    @app.get("/_partials/improvement/rejected/", response_class=HTMLResponse)
+    def partial_improvement_rejected(request: Request, project_key: str = "valor"):
+        """HTMX partial: rejected approaches (lane 5, #3217).
+
+        Cases in rejected with why, the evaluation that decided it, and the
+        snapshot in which each left the order.
+        """
+        from ui.data.improvement import get_rejected_approaches
+
+        rejected = get_rejected_approaches(project_key=project_key)
+        if rejected["unavailable"]:
+            logger.warning("improvement rejected partial: %s", rejected["error"])
+        return templates.TemplateResponse(
+            request,
+            "improvement/rejected.html",
+            {"rejected": rejected},
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""

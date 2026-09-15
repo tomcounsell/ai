@@ -1,0 +1,58 @@
+{# Improvement: hypotheses in flight (lane 5, #3217).
+
+   Every experiment in proposed, frozen, or running, with the hypothesis it
+   tests, the mechanism, the falsifier, and the frozen contract digest.
+   Three distinguishable states on the goals partial's pattern: the list,
+   "nothing yet", or "unavailable" with the read error. A list, never a
+   count: how many experiments exist is activity, not improvement.
+#}
+<div class="improvement-panel" id="improvement-hypotheses">
+    <h4>Hypotheses in flight</h4>
+    {% if hypotheses.unavailable %}
+    <p class="improvement-warning">Hypotheses unavailable; the experiment read failed.</p>
+    <p class="improvement-meta"><code>{{ hypotheses.error }}</code></p>
+    {% elif hypotheses.no_hypotheses_yet %}
+    <p class="improvement-meta">
+        No hypothesis in flight. The first arrives when a research session
+        proposes an experiment for a ranked case.
+    </p>
+    {% else %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>Case</th>
+                <th>Hypothesis</th>
+                <th>Mechanism</th>
+                <th>Falsifier</th>
+                <th>Contract</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for experiment in hypotheses.experiments %}
+            <tr>
+                <td>
+                    {{ experiment.case_title or experiment.case_id or 'no case' }}
+                    {% if experiment.priority_area %}
+                    <br><span class="improvement-meta">{{ experiment.priority_area | replace('_', ' ') }}</span>
+                    {% endif %}
+                    <br><span class="improvement-meta">{{ experiment.state }}</span>
+                </td>
+                <td>{{ experiment.hypothesis or 'no hypothesis recorded' }}</td>
+                <td>{{ experiment.mechanism or 'no mechanism recorded' }}</td>
+                <td>{{ experiment.falsifier or 'no falsifier recorded' }}</td>
+                <td>
+                    {% if experiment.contract_digest %}
+                    <code>{{ experiment.contract_digest }}</code>
+                    {% else %}
+                    not frozen
+                    {% endif %}
+                    {% if experiment.frozen_at_text %}
+                    <br><span class="improvement-meta">frozen {{ experiment.frozen_at_text }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
