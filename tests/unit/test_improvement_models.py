@@ -403,6 +403,40 @@ class TestLane5InvestigationVocabularies:
         assert len(INVESTIGATION_STATES) == 5
 
 
+class TestLane5ControllerState:
+    """``ImprovementControllerState`` (lane 5, #3217) is the planner tick's
+    cursor, not a record: one row per project, keyed by ``project_key`` alone,
+    with no index, no recency sort, and no TTL. It stays outside
+    ``INDEXED_VOCABULARIES`` because the shape tests there demand an
+    ``AutoKeyField`` id and a partitioned recency sort a singleton cursor does
+    not have; the cardinality rule still applies and is asserted here."""
+
+    def test_keyed_by_project_key_alone_with_no_index_and_no_ttl(self):
+        from popoto import Field
+
+        from models.improvement_controller_state import ImprovementControllerState
+
+        fields = _fields(ImprovementControllerState)
+        assert isinstance(fields["project_key"], KeyField)
+        assert not any(isinstance(f, AutoKeyField) for f in fields.values())
+        assert _indexed_names(ImprovementControllerState) == set()
+        assert not any(isinstance(f, SortedField) for f in fields.values())
+        for name in ("last_snapshot_ref", "evidence_watermark", "last_tick_at", "charter_digest"):
+            assert type(fields[name]) is Field
+        assert getattr(ImprovementControllerState._meta, "ttl", None) in (None, 0)
+
+    def test_one_row_per_project_and_record_refuses_unknown_fields(self):
+        from models.improvement_controller_state import ImprovementControllerState
+
+        first = ImprovementControllerState.get_or_create(PK)
+        first.record(last_snapshot_ref="$CF:abc:x/y.txt")
+        second = ImprovementControllerState.get_or_create(PK)
+        assert second.last_snapshot_ref == "$CF:abc:x/y.txt"
+        assert len(list(ImprovementControllerState.query.filter(project_key=PK))) == 1
+        with pytest.raises(ValueError):
+            first.record(nope=1)
+
+
 class TestExportedFromModelsPackage:
     def test_all_eight_are_exported(self):
         import models as m
