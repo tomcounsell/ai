@@ -132,11 +132,84 @@ was run without it.
 
 ## Prior Art
 
-[skeleton — Phase 2 fill]
+Searched closed issues and merged PRs for voice, TTS, transcription, interview,
+and open-question keywords. One direct hit on the audio primitives, several on the
+surrounding question-channel work.
+
+| Work | State | Relevance |
+|---|---|---|
+| PR #1183 / #1136 — TTS module + `/do-debrief` | Merged | The only prior audio-synthesis work. Supplies `tools/tts.synthesize()`, Kokoro ONNX primary with OpenAI `tts-1` fallback, OGG/Opus only. This plan consumes it unchanged. |
+| #2701 / PR #3080 — `/ask-me` questions as native Telegram polls | Shipped | The existing asynchronous decision channel and this work's closest sibling. Feature doc: `docs/features/telegram-poll-questions.md`. The voice channel is a second transport over the same need, not a replacement. |
+| #3095 — poll-feature deferrals | Open | Live backlog on the poll channel, including owner decisions. Load-bearing: this plan must not leave a second half-finished question channel standing next to it. |
+| #2650 — plan-doc writes in the shared `main` checkout have no single-writer protocol | Closed, protocol never built | **The governing hazard for writeback.** Catalogues seven collision shapes with SHAs, including an unrecoverable 2026-08-13 incident where a plan-doc agent's `git add -A` swallowed another lane's staged code onto `main` under an unrelated issue reference. |
+| #1688 / PR #1847 — hook-driven turn returns | Shipped | The `AskUserQuestion` PreToolUse `needs_human` edge and the `pause_open_question` router verdict. A voice session must wait on this existing edge rather than invent a mechanism. |
+| #2902 — meeting participant, joins invited Google Meets | Open, explicitly text-out-only | Nearest in-flight audio work. No overlap: it never speaks, and this never joins a call. |
+
+### Why Previous Fixes Failed
+
+Not applicable in the usual sense — no prior attempt at a voice question channel
+exists. But one prior fix is *relevant by its absence*: #2650 correctly diagnosed
+the plan-doc concurrency hazard and was closed without the mitigation being built,
+and the plan that would have built it
+(`docs/archive/plans-completed/plan-doc-single-writer-lease.md`) was swept into
+the completed-plans archive by a content-free rename while still reading
+`status: Ready`. The lesson this plan takes from that: do not stake the writeback
+step on a protocol that does not exist. Writeback is sequential by construction so
+that it needs no lock.
 
 ## Research
 
-[skeleton — Phase 2 fill]
+Two searches, both aimed at assumptions the codebase cannot answer on its own.
+
+**Query 1: "Telegram Bot API voice note reply_to_message_id binding inbound audio
+reply to specific message"**
+
+Finding: a reply target is a first-class field on every voice send and survives
+onto the inbound reply. Legacy Bot API exposed `reply_to_message_id`; current
+versions moved it into a `ReplyParameters` object with `message_id`. The inbound
+update carries the replied-to message id, so pairing an answer to the question it
+answers needs no audio timestamp alignment. Telegram also allows re-sending an
+already-uploaded file by `file_id`, avoiding re-upload — with the caveat that a
+`file_id` obtained via `sendAudio` is not interchangeable with `sendVoice`.
+Source: <https://core.telegram.org/bots/api>,
+<https://core.telegram.org/bots/api-changelog>.
+
+How it informs the approach: this repo speaks MTProto through Telethon, not the
+Bot API, so the field names differ (`reply_to` on send, `reply_to.reply_to_msg_id`
+inbound), but the capability is the same and the conclusion carries. The plan
+therefore treats reply-to as **corroborating** evidence rather than the primary
+binding: the session tracks exactly one outstanding clip at a time, so the next
+inbound voice note is the answer positionally, and a present `reply_to_msg_id`
+that disagrees with the outstanding clip is a hard mismatch signal rather than the
+only way to bind. The `file_id` reuse path is noted as a future optimization and
+explicitly out of scope — the clip library is a local-file cache, not a Telegram
+file-id cache.
+
+**Query 2: "kokoro-onnx deterministic output same text same voice reproducible
+audio"**
+
+Finding: Kokoro ONNX inference has no sampling or temperature randomness and is
+bit-exact across runs for a fixed execution provider, dtype, and model file —
+incidentally established by
+<https://github.com/Microsoft/onnxruntime/issues/29807>, which reports
+byte-identical corrupt output across independent sessions on a WebGPU EP.
+Determinism does **not** hold across execution providers, quantization dtypes,
+model/voice file versions, or espeak-ng / G2P versions; the phonemizer runs
+*before* the ONNX graph and is the single largest drift source. No official
+determinism guarantee exists from the project.
+Sources: <https://github.com/Microsoft/onnxruntime/issues/29807>,
+<https://github.com/thewh1teagle/kokoro-onnx>,
+<https://pypi.org/project/kokoro-onnx/>.
+
+How it informs the approach: the clip cache does not actually require
+determinism — it is a reuse cache, not a verification cache. What it requires is
+that the **key covers every input that affects output**, so a config change
+invalidates rather than silently serving a stale clip in the wrong voice. The
+cache key is therefore `sha256(spoken_text) + voice + speed + backend identity +
+model/voice file fingerprint`, not the text hash alone, and the backend identity
+must be recorded *after* dispatch because `tools/tts` falls back from Kokoro to
+OpenAI `tts-1` without the caller choosing. Both findings are saved to the agent
+memory store for reuse.
 
 ## Spike Results
 
