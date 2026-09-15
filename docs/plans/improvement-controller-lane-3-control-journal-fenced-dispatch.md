@@ -487,7 +487,7 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 - [ ] The happy path settles: a session that proposes finalizes with its intent `settled` and `result_digest == payload_digest`; a session that completes without proposing settles `no_proposal`; only `failed`/`killed`/`abandoned` leave the intent `running` for the sweep (three tests, Task 4)
 - [ ] `attempts` is written only by `record_materialized` and `stale_sweeps` only by the reconcile pass; a `running` intent whose row is terminal or missing is released on the first sweep past the age threshold
 - [ ] A reconcile-forced `finalize_session` emits no WARNING (`slot == "absent"` is DEBUG; only `foreign_holder` warns)
-- [ ] `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation
+- [x] `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation
 - [ ] A session on the research path attempting `valor-session create --parent` receives the existing `ChildSessionsDisabledError` message
 - [ ] The seam and the lease are consumed with no change to `agent/agent_session_queue.py`; `LeaseProtocol` matches #3220's three declared calls and the conformance suite passes against `CaseLease`
 - [ ] `tools/paid_inference_meter.py` settles a call from `usage.cost` (`metering="exact"`), marks a token-only response `metering="estimated"`, receipts an unsettled reservation `metering="unknown"` on reconcile, never counts `purpose="sdlc_review"` against the pool, and imports no HTTP client

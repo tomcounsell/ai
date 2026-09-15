@@ -206,24 +206,47 @@ class TestProposeEndToEnd:
 
 class TestDoctorEndToEnd:
     def test_doctor_on_a_seeded_paused_case_prints_it(self):
+        """Plan Success Criterion: `doctor` on a seeded paused case prints
+        the paused head and its outstanding reservation (the slot its
+        admitted intent holds)."""
         from tools.improvement_control.journal import pause
 
+        aid = f"e2e-doc-{uuid.uuid4().hex[:8]}"
         case = new_case()
-        transition(
+        r = transition(
             PK,
             case.id,
             expected_revision=0,
             generation=1,
             event="action_proposed",
             payload_digest="d",
-            action_id="a1",
+            action_id=aid,
         )
-        pause(PK, case.id, generation=1, reason="test pause", by="operator")
+        r2 = admit(
+            PK,
+            case.id,
+            aid,
+            expected_revision=r.revision,
+            generation=1,
+            action_type="investigate",
+            max_concurrent=50,
+        )
+        assert r2.accepted
+        paused = pause(PK, case.id, generation=1, reason="test pause", by="operator")
+        assert paused.accepted
 
         completed = run(["--json", "doctor"])
         assert completed.returncode == 0
         out = json.loads(completed.stdout.strip())
         assert case.id in out["paused"]
+        mine = [s for s in out["reservations"]["slots"] if s["action_id"] == aid]
+        assert mine == [{"action_id": aid, "case_id": case.id, "since": mine[0]["since"]}]
+        assert mine[0]["since"]
+
+        completed = run(["doctor"])
+        assert completed.returncode == 0
+        assert "Paused heads: " in completed.stdout
+        assert f"slot {aid} (case {case.id})" in completed.stdout
 
 
 class TestChildSessionGateUnaffected:

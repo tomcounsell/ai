@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 
 PROJECT_KEY = "valor"
 
@@ -114,6 +115,10 @@ def cmd_propose(args) -> int:
             return 1
         action_id = ec["action_id"]
         agent_session_id = session.session_id
+    elif not action_id:
+        # Break-glass: mint one so the proposal is admittable. The scheduler
+        # adapter skips a journaled proposal with an empty action_id forever.
+        action_id = uuid.uuid4().hex
 
     validation_reason = _validate_case_for_proposal(case_id)
     if validation_reason:
@@ -128,7 +133,7 @@ def cmd_propose(args) -> int:
     from models.verifying_artifact_store import VerifyingArtifactStore
 
     store = VerifyingArtifactStore()
-    artifact_key = f"{case_id}-{action_id or 'noaction'}-{payload_digest.split(':', 1)[-1][:16]}"
+    artifact_key = f"{case_id}-{action_id}-{payload_digest.split(':', 1)[-1][:16]}"
     try:
         artifact_ref = store.save(
             payload_bytes, key=artifact_key, model_class_name="ImprovementProposal"
@@ -155,7 +160,7 @@ def cmd_propose(args) -> int:
             generation=generation,
             event="action_proposed",
             payload_digest=payload_digest,
-            action_id=action_id or "",
+            action_id=action_id,
             agent_session_id=agent_session_id,
             action_type=action_type,
             artifact_ref=artifact_ref,
@@ -271,6 +276,13 @@ def cmd_pause(args) -> int:
     from tools.improvement_control.journal import pause
 
     lease, lease_key, generation = _acquire_lease(args.case or "_ns")
+    if generation is None and args.case:
+        # A per-case pause is fenced by the case's generation; presenting 0
+        # to the transition would be refused STALE_GENERATION with the real
+        # cause (a live holder) hidden. The namespace pause is a direct hash
+        # write with no fence, so it proceeds regardless of the lease.
+        _emit(args, "paused: False (CASE_BUSY)", {"accepted": False, "reason": "CASE_BUSY"})
+        return 1
     generation = generation or 0
     try:
         result = pause(
@@ -285,7 +297,8 @@ def cmd_pause(args) -> int:
             lease.release(lease_key, generation)
     if result.accepted and args.case:
         _project(args.case)
-    _emit(args, f"paused: {result.accepted}", {"accepted": result.accepted})
+    human = "paused: True" if result.accepted else f"paused: False ({result.reason})"
+    _emit(args, human, {"accepted": result.accepted, "reason": result.reason})
     return 0 if result.accepted else 1
 
 
@@ -339,18 +352,25 @@ def cmd_resume(args) -> int:
 
 
 def cmd_doctor(args) -> int:
+    """Paused heads, wedged intents, and outstanding reservations: the unit-1
+    slot hash (each slot named with the case whose live intent holds it, or
+    ``None`` for a slot no intent can release) and the open unit-2 window's
+    reserved amount. The clean line is printed only when all three are empty."""
     try:
         from models.improvement_case import OPEN_CASE_STATES, ImprovementCase
+        from tools.improvement_control import keys
         from tools.improvement_control.intents import list_intents
         from tools.improvement_control.journal import read_head
+        from tools.paid_inference_meter import status_dict as unit2_status_dict
+        from utils.redis_client import text_redis
     except Exception as e:
         print(f"namespace unreachable: {e}")
         return 2
 
-    # One guard covers the ORM query and every per-case read: a namespace
-    # that becomes unreachable mid-loop reports `namespace unreachable` with
-    # exit 2 (the break-glass drill, Success Criterion 2) and never prints a
-    # partial "clean" or a partial wedged/paused list.
+    # One guard covers the ORM query and every per-case and namespace read: a
+    # namespace that becomes unreachable mid-loop reports `namespace
+    # unreachable` with exit 2 (the break-glass drill, Success Criterion 2)
+    # and never prints a partial "clean" or a partial wedged/paused list.
     try:
         cases = []
         for state in OPEN_CASE_STATES:
@@ -358,6 +378,7 @@ def cmd_doctor(args) -> int:
 
         paused = []
         wedged = []
+        holders: dict[str, str] = {}
         for case in cases:
             head = read_head(PROJECT_KEY, case.id)
             if head is not None and head.paused:
@@ -365,16 +386,29 @@ def cmd_doctor(args) -> int:
             for intent in list_intents(PROJECT_KEY, case.id):
                 if intent.state == "reconciliation_required":
                     wedged.append((case.id, intent.action_id))
+                if intent.state in ("admitted", "materialized", "running"):
+                    holders[intent.action_id] = case.id
+        slots = text_redis().hgetall(keys.slots_key(PROJECT_KEY))
+        unit2 = unit2_status_dict(PROJECT_KEY)
     except Exception as e:
         print(f"namespace unreachable: {e}")
         return 2
 
-    if not paused and not wedged:
-        _emit(
-            args,
-            "no paused heads, no stale intents, no outstanding reservations",
-            {"paused": [], "wedged": []},
-        )
+    reservations = {
+        "slots": [
+            {"action_id": aid, "case_id": holders.get(aid), "since": ts}
+            for aid, ts in sorted(slots.items())
+        ],
+        "unit2": {"day_key": unit2["day_key"], "reserved_usd": unit2["reserved_usd"]},
+    }
+    outstanding = bool(slots) or unit2["reserved_usd"] > 0
+    payload = {
+        "paused": paused,
+        "wedged": [list(w) for w in wedged],
+        "reservations": reservations,
+    }
+    if not paused and not wedged and not outstanding:
+        _emit(args, "no paused heads, no stale intents, no outstanding reservations", payload)
         return 0
 
     lines = []
@@ -382,7 +416,17 @@ def cmd_doctor(args) -> int:
         lines.append("Paused heads: " + ", ".join(paused))
     if wedged:
         lines.append("Wedged intents: " + ", ".join(f"{c}/{a}" for c, a in wedged))
-    _emit(args, "\n".join(lines), {"paused": paused, "wedged": [list(w) for w in wedged]})
+    if outstanding:
+        parts = [
+            f"slot {row['action_id']} (case {row['case_id'] or 'none, no live intent holds it'})"
+            for row in reservations["slots"]
+        ]
+        if unit2["reserved_usd"] > 0:
+            parts.append(
+                f"unit2 ${unit2['reserved_usd']:.2f} reserved in window {unit2['day_key']}"
+            )
+        lines.append("Outstanding reservations: " + "; ".join(parts))
+    _emit(args, "\n".join(lines), payload)
     return 0
 
 

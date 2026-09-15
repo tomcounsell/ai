@@ -71,12 +71,22 @@ end
 return 0
 """
 
-_LUA_RELEASE_RESERVED = """
+#: KEYS: [window, reservation]. ARGV: [reserved_cents].
+#: One call moves the reservation's cents out of `reserved_cents` and marks
+#: the reservation `released`, guarded by the same CAS as `_LUA_SETTLE`: a
+#: second release of the same reservation is a no-op (returns 0), so a crash
+#: between the decrement and the state flip cannot subtract the cents again
+#: and admit past the cap.
+_LUA_RELEASE = """
+if redis.call('HGET', KEYS[2], 'state') ~= 'reserved' then
+  return 0
+end
 local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved_cents') or '0')
 local rest = reserved - tonumber(ARGV[1])
 if rest < 0 then rest = 0 end
 redis.call('HSET', KEYS[1], 'reserved_cents', rest)
-return rest
+redis.call('HSET', KEYS[2], 'state', 'released')
+return 1
 """
 
 #: KEYS: [window, reservation]. ARGV: [reserved_cents, settled_cents].
@@ -209,15 +219,16 @@ def _reservation_row(project_key: str, reservation_id: str) -> dict | None:
 
 
 def release(project_key: str, reservation_id: str) -> None:
-    """Idempotent: releasing an already-settled or already-released
-    reservation is a no-op (the window counter is floored at 0)."""
+    """Idempotent: the window decrement and the state flip land in one Lua
+    call under a CAS on the reservation's ``state``, so releasing an
+    already-settled or already-released reservation is a no-op (the window
+    counter is also floored at 0)."""
     row = _reservation_row(project_key, reservation_id)
-    if row is None or row.get("state") != "reserved":
+    if row is None:
         return
     window_key = WINDOW_KEY_PREFIX.format(project=project_key) + row["day_key"]
-    _redis().eval(_LUA_RELEASE_RESERVED, 1, window_key, int(row["cents"]))
     res_key = RESERVATION_KEY_PREFIX.format(project=project_key) + reservation_id
-    _redis().hset(res_key, "state", "released")
+    _redis().eval(_LUA_RELEASE, 2, window_key, res_key, int(row["cents"]))
 
 
 def settle(project_key: str, reservation_id: str, usd: float, *, metering: str) -> None:

@@ -117,10 +117,12 @@ def import_namespace(
     key outside ``improve:{project_key}:budget:unit2:``, before writing
     anything. Every restored key goes through the package's own builders or
     :func:`keys.assert_control_key`; unit-2 hashes get their retention TTL
-    re-applied. With ``force``, each archived case's journal, intents set,
-    and intent hashes are deleted before they are restored, so a restore
-    onto live state replaces history rather than appending to it. Returns
-    ``None`` on success.
+    re-applied. With ``force``, the namespace slot hash and pause hash are
+    deleted before they are restored, and so are each archived case's
+    journal, intents set, and intent hashes, so a restore onto live state
+    replaces the archive's whole truth rather than merging into it: a slot
+    admitted after the export is dropped along with the intent that held it.
+    Returns ``None`` on success.
     """
     from tools.paid_inference_meter import KEY_EXPIRY_SECONDS
 
@@ -142,6 +144,12 @@ def import_namespace(
 
     r = _control_redis()
     r.set(keys.schema_key(project_key), str(SCHEMA_VERSION))
+    if force:
+        # The archive's slot and pause hashes are the whole truth. A merge
+        # would keep a slot admitted after the export while the per-case
+        # delete below drops the intent that held it, leaving a slot no
+        # release path can reach.
+        r.delete(keys.slots_key(project_key), keys.pause_key(project_key))
     if data.get("slots"):
         r.hset(keys.slots_key(project_key), mapping=data["slots"])
     if data.get("ns_pause"):

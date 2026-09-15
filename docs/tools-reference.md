@@ -354,13 +354,13 @@ on system PATH (Decision 14) — invoke it as
 ```bash
 valor-improve case show --case ID           # the journal head, its revision, and the journal tail
 valor-improve case explain --case ID        # why this case exists: state, pause reason, blocking intents, charter pin
-valor-improve propose --case ID --payload FILE           # the only way a research session writes a proposed action
+valor-improve propose --case ID --payload FILE [--action-id ID]  # the only way a research session writes a proposed action; break-glass mints an action id when none is given
 valor-improve propose-amendment --case ID --request TEXT # a deferred charter decision; pages Tom once
 valor-improve budget                        # all three units, with window boundaries disclosed
 valor-improve release compare               # a release against the incumbent it would replace
 valor-improve pause [--case ID] [--reason TEXT]   # break-glass. Never self-clearing
 valor-improve resume --case ID [--force]    # clears a reconciliation_required wedge before consulting `paused`
-valor-improve doctor                        # paused heads, reconciliation_required intents, outstanding reservations
+valor-improve doctor                        # paused heads, reconciliation_required intents, outstanding reservations (held unit-1 slots with their holder case, open unit-2 window reserved amount)
 valor-improve export [--root PATH]          # dump the namespace against lane 7's export-root contract
 valor-improve import --archive PATH [--force]  # restore a dumped namespace
 valor-improve replay-projection --case ID   # reconcile the ImprovementCase projection to the journal head

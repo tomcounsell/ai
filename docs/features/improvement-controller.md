@@ -191,7 +191,9 @@ audited against what was actually spent.
 against `weekly_infrastructure_usd` (see Unit-3 metering and teardown below). `tools/paid_inference_meter.py`
 (lane 3) mirrors its shape for `daily_paid_inference_usd`: reserve-then-check in one Lua `EVAL` on a
 plain `improve:{project}:budget:unit2:{day_key}` key, settling from `response.usage.cost` when a call
-carries it (`metering="exact"`) or a dated price table otherwise (`metering="estimated"`). Only
+carries it (`metering="exact"`) or a dated price table otherwise (`metering="estimated"`). Settle
+and release are each one Lua call under a CAS on the reservation's `state`, so a repeated call
+after a mid-write crash moves the cents exactly once in either direction. Only
 `purpose="rsi"` reservations count against the pool; `tools/cross_vendor_judge.py`'s ordinary review
 spend is receipted `purpose="sdlc_review"` and never gated. Uncertain metering is not zero cost: a
 reservation whose day window closes unsettled is receipted `metering="unknown"` by the reconcile pass,
@@ -369,8 +371,10 @@ intents, lane-slot reservations, the case lease, and the unit-2 window.
   differs from the target or its unit-2 section names a key outside
   `improve:{project_key}:budget:unit2:`; every restored key goes through the package's
   own key builders, unit-2 hashes get their 30-day retention TTL re-applied, and
-  `--force` deletes each archived case's journal, intents set, and intent hashes before
-  restoring them, so a forced restore replaces history rather than appending to it.
+  `--force` deletes the namespace slot and pause hashes and each archived case's
+  journal, intents set, and intent hashes before restoring them, so a forced restore
+  replaces history rather than appending to it (a slot admitted after the export is
+  dropped with the intent that held it, never stranded with no release path).
 - `budget` prints `metering="unknown"` receipts in their own block (`unit2_receipted_unknown`
   in `--json`, each with the `day_key` window it was charged to), read from
   `ImprovementEvidence(kind="spend_receipt")` rows, so an unknown never reads as zero.
@@ -491,10 +495,15 @@ touches the control namespace.
 
 **Is it a namespace outage or a wedged case?** Run `valor-improve doctor`. It
 prints every paused head, every `reconciliation_required` intent, and every
-outstanding reservation, so you see the blast radius before touching anything.
-`namespace unreachable: <error>` with exit code 2 means the substrate itself is
-down; a clean namespace prints "no paused heads, no stale intents, no outstanding
-reservations" rather than a bare success with nothing after it.
+outstanding reservation: each held unit-1 slot from `_ns:slots` named with the case
+whose live intent holds it (a slot with no live intent is printed as such, since no
+release path can reach it), plus the open unit-2 window's reserved amount when it
+is above zero. `--json` carries these under `reservations` (`slots`, `unit2`). So
+you see the blast radius before touching anything. `namespace unreachable: <error>`
+with exit code 2 means the substrate itself is down (the slot and unit-2 reads sit
+under the same guard); a clean namespace prints "no paused heads, no stale intents,
+no outstanding reservations" only when all three views are empty, rather than a
+bare success with nothing after it.
 
 - **`doctor` cannot read the namespace**. That is a Redis or connectivity
   problem, not a wedged case. Fix the substrate; `doctor` again once it is up —

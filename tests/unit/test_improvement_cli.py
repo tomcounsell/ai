@@ -186,6 +186,45 @@ class TestResumeForceClearsAWedgeOnAnUnpausedHead:
         assert r2.accepted
 
 
+class TestPause:
+    def test_pause_surfaces_its_reason_and_refuses_a_busy_case_lease(self, capsys):
+        """`pause --case` during a controller tick (the case lease held by
+        another holder) refuses `CASE_BUSY` rather than presenting generation
+        0 to the transition and surfacing a bare `paused: False`; once the
+        lease is free the accepted pause carries its reason too."""
+        from config.settings import settings
+        from tools.improvement_control.lease import default_lease
+
+        case = new_case(digest=pinned_digest())
+        transition(
+            PK,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d",
+            action_id="a1",
+        )
+        lease = default_lease()
+        lease_key = f"improve:{PK}:{case.id}:lease"
+        held = lease.acquire(lease_key, ttl=settings.improvement.lease_ttl_seconds)
+        assert held is not None
+        try:
+            code, payload = run_cli(["pause", "--case", case.id], capsys)
+            assert code == 1
+            assert payload == {"accepted": False, "reason": "CASE_BUSY"}
+            code = cli.main(["pause", "--case", case.id])
+            assert code == 1
+            assert capsys.readouterr().out.strip() == "paused: False (CASE_BUSY)"
+        finally:
+            lease.release(lease_key, held)
+
+        code, payload = run_cli(["pause", "--case", case.id], capsys)
+        assert code == 0
+        assert payload == {"accepted": True, "reason": "OK"}
+        assert read_head(PK, case.id).paused is True
+
+
 class TestDoctor:
     def test_doctor_reports_clean_when_nothing_seeded(self, capsys):
         pk_isolated = "valor"  # doctor is hardcoded to "valor"; assert shape only
@@ -193,7 +232,49 @@ class TestDoctor:
         assert code == 0
         assert "paused" in payload
         assert "wedged" in payload
+        assert set(payload["reservations"]) == {"slots", "unit2"}
         del pk_isolated
+
+    def test_doctor_prints_an_outstanding_slot_with_its_holder(self, capsys):
+        """Plan Success Criterion: doctor reads the unit-1 slot hash and the
+        open unit-2 window for real, naming each held slot with the case whose
+        live intent holds it, and prints the clean line only when every
+        reservation view is empty."""
+        aid = f"doc-{uuid.uuid4().hex[:8]}"
+        case = new_case(digest=pinned_digest())
+        r = transition(
+            PK,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d",
+            action_id=aid,
+        )
+        r2 = admit(
+            PK,
+            case.id,
+            aid,
+            expected_revision=r.revision,
+            generation=1,
+            action_type="investigate",
+            max_concurrent=50,
+        )
+        assert r2.accepted
+
+        code, payload = run_cli(["doctor"], capsys)
+        assert code == 0
+        mine = [s for s in payload["reservations"]["slots"] if s["action_id"] == aid]
+        assert len(mine) == 1
+        assert mine[0]["case_id"] == case.id
+        assert "reserved_usd" in payload["reservations"]["unit2"]
+
+        code = cli.main(["doctor"])
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "no outstanding reservations" not in out
+        assert "Outstanding reservations: " in out
+        assert f"slot {aid} (case {case.id})" in out
 
     def test_doctor_outage_break_glass_drill(self, capsys, monkeypatch):
         """Success Criterion 2's break-glass drill, end to end. `doctor`
@@ -341,6 +422,22 @@ class TestProposeUnderAgentSessionId:
         reloaded = ImprovementCase.query.get(project_key=PK, id=case.id)
         assert reloaded.revision == payload["revision"]
         assert reloaded.state == "investigating"
+
+    def test_propose_break_glass_without_action_id_mints_one(self, capsys, monkeypatch, tmp_path):
+        """An operator's propose with no `--action-id` journals a minted,
+        non-empty action_id; an empty one is a proposal the scheduler adapter
+        skips forever."""
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        case = new_case(digest=pinned_digest())
+        payload_file = tmp_path / "payload.json"
+        payload_file.write_text('{"hypothesis": "no action id given"}')
+
+        code, payload = run_cli(
+            ["propose", "--case", case.id, "--payload", str(payload_file)], capsys
+        )
+        assert code == 0
+        assert payload["action_id"]
+        assert journal_tail(PK, case.id, 1)[-1]["action_id"] == payload["action_id"]
 
     def test_propose_refused_by_intent_state_keeps_the_payload_as_evidence(
         self, capsys, monkeypatch, tmp_path

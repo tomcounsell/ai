@@ -216,6 +216,59 @@ class TestRoundTrip:
         assert journal_after == journal_before
         assert text_redis().hgetall(keys.intent_key(pk, case.id, "a1"))["state"] == "admitted"
 
+    def test_import_force_drops_a_post_export_slot(self, tmp_root):
+        """`--force` replaces the namespace slot hash with the archive's. A
+        slot admitted after the export is dropped together with the intent
+        that held it; merged in, it would survive with no intent to release
+        it and stall every later admit at `SLOT_EXHAUSTED`."""
+        import json
+
+        pk = fresh_pk()
+        case = ImprovementCase.create(
+            project_key=pk, state="investigating", title="t", created_at=datetime.now(UTC)
+        )
+        r1 = transition(
+            pk,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="d1",
+            action_id="a1",
+        )
+        assert r1.accepted
+        out = export_namespace(pk, tmp_root)
+        archive_slots = json.loads((out / "namespace.json").read_text())["slots"]
+
+        # Live state moves on after the export: a1 is admitted and takes the
+        # project's only slot.
+        r2 = admit(
+            pk,
+            case.id,
+            "a1",
+            expected_revision=r1.revision,
+            generation=1,
+            action_type="investigate",
+            max_concurrent=1,
+        )
+        assert r2.accepted
+        assert text_redis().hlen(keys.slots_key(pk)) == 1
+
+        assert import_namespace(out, project_key=pk, force=True) is None
+        assert text_redis().hlen(keys.slots_key(pk)) == len(archive_slots)
+
+        head = text_redis().hgetall(keys.head_key(pk, case.id))
+        fresh = admit(
+            pk,
+            case.id,
+            "a2",
+            expected_revision=int(head["revision"]),
+            generation=1,
+            action_type="investigate",
+            max_concurrent=1,
+        )
+        assert fresh.accepted, fresh.reason
+
     def test_import_refuses_a_non_empty_namespace_without_force(self, tmp_root):
         pk = fresh_pk()
         case = ImprovementCase.create(

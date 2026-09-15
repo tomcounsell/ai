@@ -51,12 +51,25 @@ class TestReserveAndSettle:
         assert status["reserved_usd"] == pytest.approx(0.0)
 
     def test_release_is_idempotent(self):
+        """The window decrement and the state flip land in one Lua call under
+        a CAS on the reservation's state, so a second release subtracts
+        nothing (a double decrement would under-count `reserved_cents` and
+        admit past the cap), and a settled row releases nothing at all."""
         pk = fresh_pk()
-        r = reserve(pk, 1.0, purpose="rsi", daily_paid_inference_usd=10.0)
-        release(pk, r.reservation_id)
-        release(pk, r.reservation_id)  # second release: no-op, no exception
+        r1 = reserve(pk, 1.0, purpose="rsi", daily_paid_inference_usd=10.0)
+        r2 = reserve(pk, 2.0, purpose="rsi", daily_paid_inference_usd=10.0)
+        release(pk, r1.reservation_id)
+        release(pk, r1.reservation_id)
+        # r2's $2.00 is still reserved: r1 came off the window exactly once.
+        assert status_dict(pk)["reserved_usd"] == pytest.approx(2.0)
+
+        settle(pk, r2.reservation_id, 2.0, metering="exact")
+        r3 = reserve(pk, 3.0, purpose="rsi", daily_paid_inference_usd=10.0)
+        assert isinstance(r3, Reservation)
+        release(pk, r2.reservation_id)  # settled, not reserved: no-op
         status = status_dict(pk)
-        assert status["reserved_usd"] == pytest.approx(0.0)
+        assert status["reserved_usd"] == pytest.approx(3.0)
+        assert status["settled_usd"] == pytest.approx(2.0)
 
     def test_settle_is_one_script_and_a_second_settle_counts_nothing(self):
         """The release, the settled increment, and the state flip land in one
