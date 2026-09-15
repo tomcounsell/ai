@@ -2,7 +2,7 @@
 (#3217, task 5): case opening with the novelty check, the seeded cold start,
 the two-tick cluster, keep-alive, the vault unblock, the idempotent single
 proposal, the paused refusal, per-step failure injection, the lease race,
-and the arm-runner seam that holds before and after lane 6 merges.
+and the arm-runner seam bound to lane 6's registry.
 
 Rows land in the claimed per-worker test DB (autouse ``redis_test_db``,
 tests/conftest.py). ``PK`` is ``"valor"`` because the tick proposes through
@@ -12,7 +12,6 @@ tests/conftest.py). ``PK`` is ``"valor"`` because the tick proposes through
 from __future__ import annotations
 
 import ast
-import dataclasses
 import importlib
 import io
 import json
@@ -630,7 +629,6 @@ FORBIDDEN_MODULE_LEVEL = (
     "agent.llm",
     "tools.improvement_control.scheduler_adapter",
     "tools.improvement_eval.runner",
-    "tools.improvement_recursion",
     "tools.improvement_experiment",
 )
 
@@ -661,7 +659,7 @@ def test_no_llm_or_dispatch_imports(module_path):
 
 
 # ---------------------------------------------------------------------------
-# The arm-runner seam (holds before and after lane 6 merges)
+# The arm-runner seam, bound directly to lane 6 (merged)
 # ---------------------------------------------------------------------------
 
 
@@ -677,70 +675,64 @@ class _Blocker:
         return None
 
 
-@dataclasses.dataclass(frozen=True)
-class _BudgetUse:
-    unit2_usd: float | None
-    unit3_usd: float | None
-    subscription_turns: int
-    wall_seconds: float | None
-
-
-@dataclasses.dataclass(frozen=True)
-class _ArmResult:
-    gains: dict
-    budget_use: _BudgetUse
-
-
-def _fake_arms_module():
-    registry: list = []
-    return types.SimpleNamespace(
-        register_arm_runner=registry.append,
-        get_arm_runner=lambda: registry[-1] if registry else None,
-        ArmResult=_ArmResult,
-        BudgetUse=_BudgetUse,
-        _registry=registry,
-    )
-
-
 def test_arm_runner_registers_from_cli_entry(monkeypatch, charter_path, store):
     from tools import improvement as cli
     from tools.improvement_plan_arm import PlannerArmRunner
+    from tools.improvement_recursion import arms
+    from tools.improvement_recursion.arms import ArmResult, get_arm_runner, register_arm_runner
+    from tools.improvement_recursion.budget import BudgetUse
 
-    fake = _fake_arms_module()
-    monkeypatch.setitem(
-        sys.modules, "tools.improvement_recursion", types.SimpleNamespace(__path__=[])
-    )
-    monkeypatch.setitem(sys.modules, "tools.improvement_recursion.arms", fake)
+    register_arm_runner(None)
+    with pytest.raises(arms.ArmRunnerAbsent):
+        get_arm_runner()
 
     out = io.StringIO()
     with redirect_stdout(out):
         code = cli.main(["--json", "release", "compare"])
     assert code == 0
-    assert len(fake._registry) == 1
-    runner = fake.get_arm_runner()
+    runner = get_arm_runner()
     assert isinstance(runner, PlannerArmRunner)
 
-    # and the runner produces lane 6's shapes with exactly the declared keywords
     result = runner.run("sha256:" + "0" * 64, [], None, "arm-test-1")
-    assert isinstance(result, _ArmResult)
+    assert isinstance(result, ArmResult)
+    assert isinstance(result.budget_use, BudgetUse)
     assert result.gains == {}
-    assert result.budget_use.unit2_usd is None
+    assert result.budget_use.unit2_usd is None and result.budget_use.unit3_usd is None
     assert result.budget_use.subscription_turns == 0
     assert result.budget_use.wall_seconds >= 0
+    register_arm_runner(None)
 
 
-def test_arm_runner_nothing_registers_at_import(monkeypatch):
-    from tools.improvement_plan_arm import ArmRunnerUnavailable, PlannerArmRunner
+def test_arm_runner_constructs_with_no_arguments_and_resolves_by_spec():
+    """`compare run --arm-runner tools.improvement_plan_arm:PlannerArmRunner`
+    resolves the class by lazy import and calls it with no arguments."""
+    from tools.improvement_plan_arm import PlannerArmRunner
+    from tools.improvement_recursion.arms import resolve_arm_runner
 
-    monkeypatch.delitem(sys.modules, "tools.improvement_recursion.arms", raising=False)
-    monkeypatch.delitem(sys.modules, "tools.improvement_recursion", raising=False)
-    monkeypatch.setattr(sys, "meta_path", [_Blocker("tools.improvement_recursion"), *sys.meta_path])
-    monkeypatch.delitem(sys.modules, "tools.improvement", raising=False)
+    direct = importlib.import_module("tools.improvement_plan_arm").PlannerArmRunner()
+    assert direct.project_key == "valor"
+    resolved = resolve_arm_runner("tools.improvement_plan_arm:PlannerArmRunner")
+    assert isinstance(resolved, PlannerArmRunner)
 
-    module = importlib.import_module("tools.improvement")
-    assert hasattr(module, "main")
-    with pytest.raises(ArmRunnerUnavailable, match="ARM_RUNNER_UNAVAILABLE: lane 6 not merged"):
-        PlannerArmRunner().run("sha256:" + "0" * 64, ["case-1"], None, "arm-test-2")
+
+def test_arm_runner_gains_come_from_accept_evaluations_on_record(charter_path, store):
+    from models.improvement_evaluation import ImprovementEvaluation
+    from tools.improvement_plan_arm import PlannerArmRunner
+
+    evidence(text="you lost the journey again and shipped half", classification="architectural")
+    tick(charter_path, store)
+    (case,) = cases()
+    accepted = ImprovementEvaluation.create(
+        project_key=PK,
+        created_at=datetime.now(UTC),
+        state="complete",
+        verdict="accept",
+        effect=json.dumps({"recall_at_2": 0.25}),
+    )
+    case.evaluation_ids = json.dumps([accepted.id])
+    case.save()
+    result = PlannerArmRunner().run("sha256:" + "0" * 64, [case.id, "missing"], None, "arm-3")
+    assert result.gains == {case.id: 0.25, "missing": None}
 
 
 # ---------------------------------------------------------------------------

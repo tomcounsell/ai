@@ -705,48 +705,87 @@ def cmd_investigation_list(args) -> int:
     return 0
 
 
-def _research_process_spec_values() -> dict:
-    """The six ``ResearchProcessSpec`` values this lane pins (Provided to
-    lane 6, item 1). ``ranking_module_digest`` is empty while the ranking
-    module is absent."""
+def _research_process_spec():
+    """The ``ResearchProcessSpec`` this lane pins (Provided to lane 6, item 1):
+    ``selection_rule="ordinal-lexicographic-v1"``, an empty budget split, the
+    controller tick cadence, the brief template digest, the research skill
+    digest, and the ranking module digest under ``extra``."""
     import hashlib
     from pathlib import Path
 
     from config.settings import settings
     from tools.improvement_brief import brief_template_digest
+    from tools.improvement_recursion.process import ResearchProcessSpec
 
     root = Path(__file__).resolve().parents[1]
     skill = root / ".claude" / "skills" / "improve-research" / "SKILL.md"
     ranking = root / "tools" / "improvement_ranking.py"
-    return {
-        "selection_rule": "ordinal-lexicographic-v1",
-        "investigation_budget_split": {},
-        "revision_cadence_seconds": settings.improvement.controller_tick_seconds,
-        "planner_prompt_digest": brief_template_digest(),
-        "skill_digest": hashlib.sha256(skill.read_bytes()).hexdigest() if skill.exists() else "",
-        "extra": {
-            "ranking_module_digest": (
-                hashlib.sha256(ranking.read_bytes()).hexdigest() if ranking.exists() else ""
-            )
-        },
-    }
+
+    def _file_digest(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
+
+    return ResearchProcessSpec(
+        selection_rule="ordinal-lexicographic-v1",
+        investigation_budget_split={},
+        revision_cadence_seconds=settings.improvement.controller_tick_seconds,
+        planner_prompt_digest="sha256:" + brief_template_digest(),
+        skill_digest=_file_digest(skill),
+        extra={"ranking_module_digest": _file_digest(ranking)},
+    )
 
 
-def _research_process_spec_text(values: dict) -> str:
-    """Canonical spec JSON text through ``tools.improvement_ranking.process_spec_json``."""
-    from tools.improvement_ranking import process_spec_json
+def _spec_from_text(text: str):
+    """Rebuild a ``ResearchProcessSpec`` from the canonical text a revision stores."""
+    from tools.improvement_recursion.process import ResearchProcessSpec
 
-    return process_spec_json(values)
+    return ResearchProcessSpec(**json.loads(text))
+
+
+def backfill_research_process_digests(project_key: str) -> list[str]:
+    """Set ``research_process_digest`` on every revision that stores a spec
+    and no digest. Returns the revision ids written. The digest is lane 6's
+    ``research_process_digest`` over the stored canonical text, so a
+    pre-merge revision digests identically to a post-merge one."""
+    from models.improvement_model_revision import ImprovementModelRevision
+    from tools.improvement_recursion.process import research_process_digest
+
+    written: list[str] = []
+    rows = []
+    for state in ("current", "superseded"):
+        rows.extend(ImprovementModelRevision.query.filter(project_key=project_key, state=state))
+    for row in rows:
+        spec_text = getattr(row, "research_process_spec", None)
+        if not spec_text or getattr(row, "research_process_digest", None):
+            continue
+        row.research_process_digest = research_process_digest(_spec_from_text(spec_text))
+        row.save()
+        written.append(row.id)
+    return written
 
 
 def cmd_revise_model(args) -> int:
-    """Write one ``ImprovementModelRevision`` for the case. A revision with no
-    prediction is a note, and is refused ``EMPTY_PREDICTION``."""
+    """Write one ``ImprovementModelRevision`` for the case, carrying the
+    canonical process spec text and lane 6's digest of it. A revision with
+    no prediction is a note, and is refused ``EMPTY_PREDICTION``.
+    ``--backfill-digests`` instead digests every stored spec that has none."""
     from datetime import UTC, datetime
 
     from models.improvement_case import ImprovementCase
     from models.improvement_model_revision import ImprovementModelRevision
+    from tools.improvement_ranking import process_spec_json
+    from tools.improvement_recursion.process import research_process_digest
 
+    if getattr(args, "backfill_digests", False):
+        written = backfill_research_process_digests(PROJECT_KEY)
+        _emit(
+            args,
+            f"backfilled research_process_digest on {len(written)} revision(s)",
+            {"accepted": True, "backfilled": written},
+        )
+        return 0
+    for name in ("case", "summary", "rationale", "prediction"):
+        if getattr(args, name, None) is None:
+            return _refused(args, "MISSING_ARGUMENT", f"--{name} is required")
     if not (args.prediction or "").strip():
         return _refused(args, "EMPTY_PREDICTION", "a revision with no prediction is a note")
     try:
@@ -756,15 +795,9 @@ def cmd_revise_model(args) -> int:
     if case is None:
         return _refused(args, "CASE_NOT_FOUND", f"no case {args.case}")
 
-    values = _research_process_spec_values()
-    spec_text = _research_process_spec_text(values)
-    digest = None
-    try:
-        from tools.improvement_recursion.process import research_process_digest
-
-        digest = research_process_digest(values)
-    except ImportError:
-        digest = None
+    spec = _research_process_spec()
+    spec_text = process_spec_json(spec)
+    digest = research_process_digest(spec)
 
     current = [
         r for r in ImprovementModelRevision.query.filter(project_key=PROJECT_KEY, state="current")
@@ -790,8 +823,7 @@ def cmd_revise_model(args) -> int:
         previous.save()
     _emit(
         args,
-        f"model revision {row.revision} written: {row.id}"
-        + ("" if digest else " (process digest pending lane 6)"),
+        f"model revision {row.revision} written: {row.id} ({digest})",
         {
             "accepted": True,
             "revision_id": row.id,
@@ -960,23 +992,23 @@ def main(argv: list[str] | None = None) -> int:
     p_ilist.set_defaults(func=cmd_investigation_list)
 
     p = sub.add_parser("revise-model")
-    p.add_argument("--case", required=True)
-    p.add_argument("--summary", required=True)
-    p.add_argument("--rationale", required=True)
-    p.add_argument("--prediction", required=True)
+    p.add_argument("--case", default=None)
+    p.add_argument("--summary", default=None)
+    p.add_argument("--rationale", default=None)
+    p.add_argument("--prediction", default=None)
+    p.add_argument(
+        "--backfill-digests",
+        action="store_true",
+        help="digest every stored research_process_spec that has no digest; writes no revision",
+    )
     p.set_defaults(func=cmd_revise_model)
 
     # lane 5 (#3217): register the planner tick as one of lane 6's comparison
-    # arms, only when lane 6's module is importable. Method-body import in
-    # tools/improvement_plan_arm.py; nothing here imports lane 6 at module level.
-    try:
-        from tools.improvement_recursion.arms import register_arm_runner
-    except ImportError:
-        register_arm_runner = None
-    if register_arm_runner is not None:
-        from tools.improvement_plan_arm import PlannerArmRunner
+    # arms, so `compare run` under this CLI finds it without --arm-runner.
+    from tools.improvement_plan_arm import PlannerArmRunner
+    from tools.improvement_recursion.arms import register_arm_runner
 
-        register_arm_runner(PlannerArmRunner())
+    register_arm_runner(PlannerArmRunner())
 
     args = parser.parse_args(argv)
     return args.func(args)

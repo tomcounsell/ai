@@ -619,6 +619,78 @@ class TestCli:
         }
         assert row.research_process_spec == json.dumps(spec, sort_keys=True, separators=(",", ":"))
         assert row.prediction == "p"
+        from tools.improvement_recursion.process import ResearchProcessSpec, research_process_digest
+
+        assert row.research_process_digest == research_process_digest(ResearchProcessSpec(**spec))
+        assert payload["research_process_digest"] == row.research_process_digest
+
+    def test_revise_model_backfill_digests_fills_only_the_missing_ones(self, capsys):
+        from models.improvement_model_revision import ImprovementModelRevision
+        from tools.improvement_recursion.process import ResearchProcessSpec, research_process_digest
+
+        spec = ResearchProcessSpec(
+            selection_rule="ordinal-lexicographic-v1",
+            investigation_budget_split={},
+            revision_cadence_seconds=900,
+            planner_prompt_digest="sha256:" + "a" * 64,
+            skill_digest="sha256:" + "b" * 64,
+            extra={"ranking_module_digest": "sha256:" + "c" * 64},
+        )
+        from tools.improvement_ranking import process_spec_json
+
+        pre_merge = ImprovementModelRevision.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            state="superseded",
+            revision=1,
+            summary="s",
+            rationale="r",
+            prediction="p",
+            research_process_spec=process_spec_json(spec),
+            research_process_digest=None,
+        )
+        already = ImprovementModelRevision.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            state="current",
+            revision=2,
+            summary="s",
+            rationale="r",
+            prediction="p",
+            research_process_spec=process_spec_json(spec),
+            research_process_digest="sha256:" + "9" * 64,
+        )
+        no_spec = ImprovementModelRevision.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            state="superseded",
+            revision=0,
+            summary="s",
+            rationale="r",
+            prediction="p",
+        )
+        code, payload = run_cli(["revise-model", "--backfill-digests"], capsys)
+        assert code == 0
+        assert payload["backfilled"] == [pre_merge.id]
+        assert ImprovementModelRevision.query.get(
+            project_key=PK, id=pre_merge.id
+        ).research_process_digest == research_process_digest(spec)
+        assert (
+            ImprovementModelRevision.query.get(
+                project_key=PK, id=already.id
+            ).research_process_digest
+            == "sha256:" + "9" * 64
+        )
+        assert (
+            ImprovementModelRevision.query.get(
+                project_key=PK, id=no_spec.id
+            ).research_process_digest
+            is None
+        )
+        code, payload = run_cli(["revise-model", "--backfill-digests"], capsys)
+        assert payload["backfilled"] == []
+        code, payload = run_cli(["revise-model", "--summary", "s"], capsys)
+        assert (code, payload["reason"]) == (1, "MISSING_ARGUMENT")
 
     def test_case_open_wiring_without_the_planner_module(self, capsys, monkeypatch):
         import sys
