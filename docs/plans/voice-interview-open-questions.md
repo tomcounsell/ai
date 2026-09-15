@@ -1084,11 +1084,67 @@ way, after the audio.
 
 ## Update System
 
-[skeleton — Phase 2 fill]
+**Minimal, but not zero.** The feature is per-project and per-machine by design, and
+"each machine harvests its own repo, with its own calling link tied to that project"
+is a deployment property, not just a code property — so the update path matters more
+here than the small diff suggests.
+
+- **`scripts/remote-update.sh`: no change.** No new dependency, no new service, no new
+  launchd plist, no new secret. `OPENAI_API_KEY` is already declared and is only the
+  fallback path for both TTS and STT.
+- **Hardlink sync: nothing new to register.** Spike-4 removed the new skill from this
+  plan, so `scripts/update/hardlinks.py` needs no entry and no `RENAMED_REMOVALS`
+  row. The only skill file that changes is the project-only
+  `.claude/skill-context/ask-me.md`, which is never synced.
+- **M4 does ride the sync.** `.claude/skills-global/do-plan/SKILL.md` and
+  `PLAN_TEMPLATE.md` are hardlinked to `~/.claude/skills/`, so the convention
+  amendment propagates fleet-wide on the next `/update`. That is the intent — the
+  convention is only worth having if every machine's `/do-plan` follows it — but it
+  means M4 changes planning behavior on machines that will never run this harvester.
+  Land it as its own commit so it is independently revertible.
+- **No Popoto migration.** No model changes, so `scripts/update/migrations.py` is
+  untouched. Interview state is a JSON file under `data/`, deliberately: the answers
+  themselves are durable in Telegram history, so state loss costs a re-read rather
+  than the answers, and that is not worth a schema migration.
+- **`data/clips/` is created on demand** by the preparation pass and needs no
+  provisioning step. It is gitignored twice over and grows slowly (one small OGG per
+  distinct question wording); no reaper is built, and if the directory ever needs
+  pruning that is a follow-up with evidence behind it.
+- **Existing installations need nothing.** First run of the harvester on a machine
+  creates what it needs.
 
 ## Agent Integration
 
-[skeleton — Phase 2 fill]
+**Who invokes what.**
+
+- **The harvester and preparation pass are operator-invoked CLIs**, not autonomous.
+  An Eng session (or the owner directly) runs `list` to see the queue and `prepare`
+  before a call. Nothing schedules them; nothing runs them on a hook.
+- **The interview runs inside an existing session** and uses the existing wait
+  machinery: render via `Bash`, then `AskUserQuestion` as the turn's final act to fire
+  the `needs_human` edge. It invents no session type, no new persona, and no new
+  permission surface.
+- **Writeback drafting is the one place subagents fan out.** One read-only drafting
+  agent per plan doc, spawned with the plan doc's path and the bound answer as
+  explicit context — context gets passed explicitly, never assumed inherited. Each
+  returns the exact `Edit` it proposes. They write nothing.
+- **Writeback applying is not delegated.** One writer, in the invoking session, one
+  doc at a time. Handing the apply phase to a subagent is how #2650 happened.
+
+**Persona and voice.** Clips are spoken output to the owner, so they are subject to
+the same rule as every other outbound channel: no raw errors, no internal narration,
+no issue numbers read aloud. A synthesis failure or a binding stop is reported to the
+operator in the session, not narrated into the owner's ear mid-call.
+
+**Session type.** `eng` (full permissions; writeback commits to `main`). A `teammate`
+session cannot run writeback — its writes are restricted to docs/meta paths and,
+regardless, it should not be committing plan docs. The harvester's `list` is safe
+from any session since it is read-only.
+
+**Task-list and lane identity.** This plan's build work is ordinary lane work:
+durable slug-scoped task list, branch `session/{slug}`, worktree
+`.worktrees/{slug}/`. The plan doc itself commits directly on `main`, as all plans and
+markdown docs do.
 
 ## Documentation
 
@@ -1102,11 +1158,117 @@ way, after the audio.
 
 ## Success Criteria
 
-[skeleton — Phase 2 fill]
+Carried from #3330's acceptance criteria, with the audited figures pinned as
+assertions and the spike findings folded in.
+
+**M1 — Harvester**
+
+- [ ] `python -m tools.open_questions list` prints every genuinely open question
+      across `docs/plans/*.md` and this repo's open issues, each with a stable
+      content-hash `qid`, source path and line, and the owning plan's `tracking:`
+      issue.
+- [ ] Classification matches the audited corpus: **15 genuinely unresolved** (13
+      under the documented strict reading), **11 defaulted**, **46 resolved**. All
+      nine shapes handled, including the H3 heading at
+      `durability-room-job-agentrun.md:512` and the six distinct heading strings.
+- [ ] Zero false positives on defaulted and resolved items. Specifically, the
+      `lane-3` and `lane-5` defaulted items are excluded, which the naive extractor
+      would have emitted as nine false positives.
+- [ ] `NON_LANE_PLANS` excluded; no crash on `tracking: null`,
+      `last_comment_id: none`, a bare `last_comment_id:`, or the two plan docs with
+      no frontmatter.
+- [ ] Issues are treated as a best-effort secondary source, not a peer of plan docs
+      (16 of ~126 carry a question section across 14 distinct heading strings).
+- [ ] Every question carries an unblock-leverage score, and the weights are named
+      env-overridable constants.
+- [ ] **Isolation:** no code path reads another project's checkout, another repo's
+      issues, or a remote repo's contents API. Provable by inspection — there is no
+      such call to find.
+- [ ] `tests/unit/test_open_question_gate.py` passes unchanged.
+
+**M2 — Preparation and clip library**
+
+- [ ] A preparation pass emits a tree with ordered nodes, pruning edges, and a
+      leverage score per node, bounded by a target session length.
+- [ ] Every node has an OGG/Opus clip at `data/clips/<hash>.ogg` with a sidecar
+      recording the **actual** backend and voice from the result dict.
+- [ ] Re-preparation with unchanged questions synthesizes nothing; changing one
+      question re-cuts only that clip; bumping the `v1` salt re-cuts everything.
+- [ ] A sidecar whose recorded backend disagrees with the requested backend is
+      treated as a miss.
+- [ ] No spoken text contains a multi-digit run; no clip text exceeds 4096
+      characters. Both rejected before synthesis, not after.
+- [ ] Every `synthesize()` call site handles the `{"error": ...}`-only return shape.
+
+**M3 — Delivery and writeback**
+
+- [ ] Clips are delivered as Telegram voice notes one at a time, sent with
+      `--ack-sent-id` and **without** `--cleanup-after-send`; the clip file still
+      exists after delivery.
+- [ ] An inbound voice-note reply binds to the clip it answers via the
+      `{msg_id → qid}` registry, with positional fallback on a missed ack, and **no
+      timestamp alignment anywhere**.
+- [ ] A disagreement between the two binding sources stops the traversal and names
+      both candidates.
+- [ ] Answering follows the pre-computed pruning edges; a session whose remaining
+      nodes are all pruned ends without asking them.
+- [ ] An off-script answer stops traversal, is recorded verbatim, and produces no
+      fabricated resolution. A partial answer leaves the question open with the
+      partial steer recorded.
+- [ ] The voice branch lives inside `tools/ask_poll.py`'s single degradation point;
+      no second CLI exists and `.claude/skills-global/ask-me/SKILL.md` is unchanged.
+- [ ] `session_has_open_question` gates the pause branch; `test_output_router.py`
+      and `test_poll_prose_answer_closeout.py` pass unchanged.
+- [ ] Writeback drafts in parallel and applies sequentially: one writer, `Edit` only
+      on plan docs, one atomic stage-and-commit per doc with explicit paths, never
+      `git add -A`.
+- [ ] Plan-only writeback commits carry no closing keyword and pass
+      `scripts/check_issue_disposition.py`.
+- [ ] Every pre-drafted writeback is re-verified against current `main`; a drifted
+      question is reported, not overwritten.
+- [ ] `--dry-run` prints every `Edit` and the exact `git` invocation before anything
+      is written.
+- [ ] Re-running the harvester after a session shows the answered questions resolved
+      and does not re-ask them. **This is the end-to-end proof.**
+
+**M4 — Convention forward**
+
+- [ ] `/do-plan` Phase 4 marks the Open Questions section instead of removing it
+      (`SKILL.md:399`), and `PLAN_TEMPLATE.md` names one resolution convention
+      including how a defaulted item is marked.
+- [ ] Landed as its own revertible commit, since it changes planning behavior on
+      every machine.
+- [ ] No existing plan doc is retro-edited.
 
 ## Team Orchestration
 
-[skeleton — Phase 2 fill]
+Three of the four milestones are single-builder work. Only writeback drafting fans
+out, and only in the read-only direction.
+
+### Team Members
+
+| Role | Agent type | Scope | Concurrency |
+|---|---|---|---|
+| Builder | `builder` | One milestone at a time, one task at a time. M1 → M2 → M3, with M4 landable at any point after M1. | 1 |
+| Test engineer | `test-engineer` | The new suites in Test Impact. Real fixtures from the actual corpus, no mocks on the extraction path. | 1, after each milestone |
+| Plan critic | `plan-reviewer` | This document, before build starts. | 1 |
+| Reviewer | `code-reviewer` | Each milestone's diff. Incision 2 gets particular attention — it is the only change that can break shipped behavior. | 1 per milestone |
+| Writeback drafters | `general-purpose`, read-only | One per plan doc at writeback time, **runtime** fan-out inside the feature itself, not build-time orchestration. Each gets the plan doc path and the bound answer as explicit context. | N, parallel, read-only |
+
+### Sequencing and why
+
+- **M1 before everything.** M2's tree is meaningless without reliable dispositions,
+  and M1 is the only milestone with standalone value if the appetite runs out.
+- **M2 before M3.** The delivery loop plays clips; there is nothing to play until the
+  library exists.
+- **M4 is independent after M1.** It needs the classification table (to know what
+  shapes exist) but nothing else, and it ships fleet-wide, so it lands alone.
+- **Do not parallelize M1 and M2 across two builders.** The `OpenQuestion` record
+  shape is the interface between them and it will move while M1 is being written.
+  Two builders would spend more on reconciling the record than either saves.
+- **The writeback fan-out is a feature behavior, not a build strategy.** It is listed
+  here because it spawns agents at runtime and that has to be designed, not because
+  the build is orchestrated that way.
 
 ## Step by Step Tasks
 
