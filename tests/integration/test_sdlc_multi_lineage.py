@@ -37,6 +37,7 @@ def _make_session(session_id: str) -> MagicMock:
 def _readback_as(session: MagicMock) -> MagicMock:
     mock_as = MagicMock()
     mock_as.query.filter.return_value = [session]
+    mock_as.newest_for_session_id.return_value = session
     return mock_as
 
 
@@ -102,7 +103,7 @@ class TestConcurrentMultiLineageContention:
         issue_number = 92027
 
         supervisor = _bare_ensure(issue_number, f"sdlc-local-{issue_number}-supervisor")
-        assert not supervisor.get("blocked")
+        assert not supervisor.get("blocked") and not supervisor.get("error"), supervisor
         owner_run_id = supervisor["run_id"]
 
         fork = _bare_ensure(issue_number, f"sdlc-local-{issue_number}-fork")
@@ -121,7 +122,7 @@ class TestConcurrentMultiLineageContention:
         issue_number = 92028
 
         first = _bare_ensure(issue_number, f"sdlc-local-{issue_number}-a")
-        assert not first.get("blocked")
+        assert not first.get("blocked") and not first.get("error"), first
         released = release_issue_lock(issue_number, first["run_id"])
         assert released is True
 
@@ -137,7 +138,7 @@ class TestConcurrentMultiLineageContention:
         issue_number = 92029
 
         supervisor = _bare_ensure(issue_number, f"sdlc-local-{issue_number}-sup")
-        assert not supervisor.get("blocked")
+        assert not supervisor.get("blocked") and not supervisor.get("error"), supervisor
 
         failed: list[str] = []
         notes: list[str] = []
