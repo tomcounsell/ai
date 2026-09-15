@@ -25,5 +25,9 @@ NON_LANE_PLANS: frozenset[str] = frozenset(
         # filed; the placeholder `tracking: none yet` is deliberately not a
         # resolvable reference.
         "resilience-simplification-three-tier.md",
+        # A review-findings revision list whose acceptance contract is the review
+        # itself; the plan states outright that no synthetic tracking issue or
+        # managed SDLC lane is needed, so `tracking: null` is deliberate.
+        "codex-skills-review-revisions.md",
     }
 )
