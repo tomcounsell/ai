@@ -889,6 +889,102 @@ def cmd_case_open(args) -> int:
     return 0
 
 
+# --- lane 5 (#3217), task 6: experiments and the qualified-result report ---
+
+
+def _experiment_exit(args, outcome, human_ok: str) -> int:
+    if not outcome.accepted:
+        return _refused(args, outcome.reason, outcome.message, experiment_id=outcome.experiment_id)
+    payload = {"accepted": True, "experiment_id": outcome.experiment_id, **outcome.extra}
+    _emit(args, f"{human_ok}: {outcome.experiment_id}", payload)
+    return 0
+
+
+def cmd_experiment_freeze(args) -> int:
+    """``experiment freeze --case ID``: freeze the case's latest ``proposed``
+    experiment, or create one from ``--hypothesis/--mechanism/--falsifier/
+    --candidate`` when none exists, then run the seven freeze steps."""
+    from tools import improvement_experiment as experiments
+
+    experiment = experiments.latest_proposed_experiment(PROJECT_KEY, args.case)
+    if experiment is None:
+        if not (args.hypothesis and args.mechanism and args.falsifier and args.candidate):
+            return _refused(
+                args,
+                "NO_PROPOSED_EXPERIMENT",
+                f"case {args.case} has no proposed experiment; pass --hypothesis, "
+                "--mechanism, --falsifier, and --candidate to create one",
+            )
+        try:
+            candidate = _load_json_arg(args.candidate)
+        except (OSError, ValueError) as e:
+            return _refused(args, "INVALID_CANDIDATE_JSON", str(e))
+        proposed = experiments.propose_experiment(
+            PROJECT_KEY,
+            args.case,
+            hypothesis=args.hypothesis,
+            mechanism=args.mechanism,
+            falsifier=args.falsifier,
+            candidate=candidate,
+            envelope=args.envelope,
+        )
+        if not proposed.accepted:
+            return _experiment_exit(args, proposed, "proposed")
+        experiment_id = proposed.experiment_id
+    else:
+        experiment_id = experiment.id
+    kwargs = {}
+    if args.n_queries is not None:
+        kwargs["n_queries"] = args.n_queries
+    if args.seed is not None:
+        kwargs["seed"] = args.seed
+    outcome = experiments.freeze_experiment(PROJECT_KEY, experiment_id, **kwargs)
+    return _experiment_exit(args, outcome, "frozen")
+
+
+def cmd_experiment_evaluate(args) -> int:
+    """``experiment evaluate --id ID``: reserve the judge spend and run lane 4's
+    evaluation; refuses ``SLOT_NOT_HELD`` for a session without the lane slot."""
+    from tools import improvement_experiment as experiments
+
+    outcome = experiments.evaluate_experiment(PROJECT_KEY, args.id)
+    return _experiment_exit(args, outcome, "evaluated")
+
+
+def cmd_experiment_show(args) -> int:
+    """``experiment show --id ID``: state, the latest verdict, and the notes."""
+    from tools import improvement_experiment as experiments
+
+    try:
+        shown = experiments.show_experiment(PROJECT_KEY, args.id)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, experiments.render_show(shown), shown)
+    return 0
+
+
+def cmd_experiment_repair(args) -> int:
+    """``experiment repair --id ID``: lane 4's Race 1b repair, back to ``frozen``."""
+    from tools import improvement_experiment as experiments
+
+    outcome = experiments.repair(PROJECT_KEY, args.id)
+    return _experiment_exit(args, outcome, "repaired")
+
+
+def cmd_report(args) -> int:
+    """``report --case ID``: the qualified-result report, from records alone."""
+    from tools.improvement_report import build_report
+
+    try:
+        text = build_report(args.case, PROJECT_KEY)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, text.rstrip("\n"), {"case_id": args.case, "report": text})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-improve")
     parser.add_argument("--json", action="store_true")
@@ -1002,6 +1098,33 @@ def main(argv: list[str] | None = None) -> int:
         help="digest every stored research_process_spec that has no digest; writes no revision",
     )
     p.set_defaults(func=cmd_revise_model)
+
+    # lane 5 (#3217), task 6: experiments and the qualified-result report
+    p = sub.add_parser("experiment")
+    exp_sub = p.add_subparsers(dest="experiment_command", required=True)
+    p_efreeze = exp_sub.add_parser("freeze")
+    p_efreeze.add_argument("--case", required=True)
+    p_efreeze.add_argument("--n-queries", type=int, default=None)
+    p_efreeze.add_argument("--seed", type=int, default=None)
+    p_efreeze.add_argument("--hypothesis", default=None)
+    p_efreeze.add_argument("--mechanism", default=None)
+    p_efreeze.add_argument("--falsifier", default=None)
+    p_efreeze.add_argument("--candidate", default=None, help="JSON object, or @path to one")
+    p_efreeze.add_argument("--envelope", default="retrieval_parameters")
+    p_efreeze.set_defaults(func=cmd_experiment_freeze)
+    p_eevaluate = exp_sub.add_parser("evaluate")
+    p_eevaluate.add_argument("--id", required=True)
+    p_eevaluate.set_defaults(func=cmd_experiment_evaluate)
+    p_eshow = exp_sub.add_parser("show")
+    p_eshow.add_argument("--id", required=True)
+    p_eshow.set_defaults(func=cmd_experiment_show)
+    p_erepair = exp_sub.add_parser("repair")
+    p_erepair.add_argument("--id", required=True)
+    p_erepair.set_defaults(func=cmd_experiment_repair)
+
+    p = sub.add_parser("report")
+    p.add_argument("--case", required=True)
+    p.set_defaults(func=cmd_report)
 
     # lane 5 (#3217): register the planner tick as one of lane 6's comparison
     # arms, so `compare run` under this CLI finds it without --arm-runner.
