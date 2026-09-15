@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import types
@@ -222,7 +223,7 @@ def collect_with(monkeypatch, *, prs: list[dict]) -> tuple[dict, list[str]]:
         improvement_collect, "_default_gh_runner", lambda project_key: gh_runner(prs)
     )
     monkeypatch.setattr(improvement_collect, "_openrouter_judge", lambda model: transport)
-    with patch("config.memory_defaults.DEFAULT_PROJECT_KEY", PK):
+    with patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}):
         result = improvement_collect.run_improvement_collect()
     return result, judge_calls
 

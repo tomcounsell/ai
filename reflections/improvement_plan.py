@@ -1188,13 +1188,15 @@ def plan_tick(
 
 def run_improvement_planner() -> dict:
     """Reflection entrypoint: one :func:`plan_tick` for the owning project.
+    The owning project is ``reflections.redis_access.get_project_key()``, the
+    key ``valor-improve`` is bound to; ``cmd_propose`` refuses any other.
 
     Gated on ``ImprovementSettings.enabled`` in the collect tick's shape:
     ``False`` returns ``status="skipped"`` and writes nothing.
     """
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
     from config.settings import settings
+    from reflections.redis_access import get_project_key
 
     if not settings.improvement.enabled:
         return {
@@ -1209,7 +1211,7 @@ def run_improvement_planner() -> dict:
             "duration": time.time() - t0,
         }
 
-    tick = plan_tick(DEFAULT_PROJECT_KEY)
+    tick = plan_tick(get_project_key())
     proposal = tick.proposal or {}
     summary = (
         f"improvement-planner-tick: {tick.status} opened={tick.counts.get('cases_opened', 0)} "

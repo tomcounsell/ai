@@ -19,6 +19,7 @@ is never touched, and every row is written under a test-scoped ``project_key``.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -626,7 +627,7 @@ class TestKillSwitch:
         session = _session("sess-killswitch", turns=["that's wrong"])
         with (
             _improvement_enabled(False),
-            patch("config.memory_defaults.DEFAULT_PROJECT_KEY", PK),
+            patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
             patch.object(improvement_collect, "human_memories", return_value=[]),
             patch("models.job.Job.with_open_expectations", return_value=[]),
@@ -644,7 +645,7 @@ class TestKillSwitch:
         session = _session("sess-killswitch-on", turns=["that's wrong"])
         with (
             _improvement_enabled(True),
-            patch("config.memory_defaults.DEFAULT_PROJECT_KEY", PK),
+            patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
             patch.object(improvement_collect, "human_memories", return_value=[]),
             patch("models.job.Job.with_open_expectations", return_value=[]),

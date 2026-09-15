@@ -1084,6 +1084,10 @@ def collect_promises(
 def run_improvement_collect() -> dict:
     """Reflection entrypoint: run every observer adapter for the owning project.
 
+    The owning project is ``reflections.redis_access.get_project_key()``
+    (``VALOR_PROJECT_KEY``, falling back to ``"valor"``), the same key
+    ``valor-improve`` is bound to, so the rows land where the CLI reads.
+
     Standard reflection result dict. Each adapter is wrapped independently so a
     single broken source degrades the tick rather than ending it — the loop
     reasons from partial evidence all the time, and a tick that recorded two of
@@ -1100,10 +1104,10 @@ def run_improvement_collect() -> dict:
     re-registration and history starts accumulating from that moment.
     """
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
     from config.settings import settings
+    from reflections.redis_access import get_project_key
 
-    project_key = DEFAULT_PROJECT_KEY
+    project_key = get_project_key()
 
     if not settings.improvement.enabled:
         return {

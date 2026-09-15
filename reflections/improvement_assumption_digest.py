@@ -375,8 +375,8 @@ def run_improvement_assumption_digest(
     overruns untouched. An empty digest sends nothing and is a success.
     """
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
     from config.settings import settings
+    from reflections.redis_access import get_project_key
 
     if not settings.improvement.enabled:
         return {
@@ -391,7 +391,7 @@ def run_improvement_assumption_digest(
             "duration": time.time() - t0,
         }
 
-    project_key = project_key or DEFAULT_PROJECT_KEY
+    project_key = project_key or get_project_key()
     now = now or datetime.now(UTC)
     if sender is None:
         from reflections.utilities import send_host_eng_telegram
