@@ -1,8 +1,8 @@
 """Shell-level tests for the install_*.sh launchd bootstrap call sites (#2013).
 
-Parametrized over the five ``install_*.sh`` helpers hardened by #2013
+Parametrized over the four ``install_*.sh`` helpers hardened by #2013
 (``install_worker.sh``, ``install_reflection_worker.sh``, ``install_nightly_tests.sh``,
-``install_email_bridge.sh``, ``install_sdlc_reflection.sh``). Runs each REAL script
+``install_email_bridge.sh``). Runs each REAL script
 inside a sandboxed fake project: the real script + ``scripts/lib/launchctl.sh``, the
 real ``com.valor.*.plist`` template it renders, a minimal ``.env``, a stub
 ``.venv/bin/python`` that special-cases each script's own precondition dry-run check
@@ -59,7 +59,6 @@ PROBE_LABELS: dict[str, set[str]] = {
     "install_reflection_worker.sh": {"com.valor.reflection-worker"},
     "install_email_bridge.sh": {"com.valor.email-bridge"},
     "install_nightly_tests.sh": set(),
-    "install_sdlc_reflection.sh": set(),
 }
 
 # script_name -> (plist template filenames to stage in PROJECT_DIR, ordered labels
@@ -80,10 +79,6 @@ INSTALL_SCRIPTS: dict[str, dict[str, list[str]]] = {
     "install_email_bridge.sh": {
         "plists": ["com.valor.email-bridge.plist"],
         "labels": ["com.valor.email-bridge"],
-    },
-    "install_sdlc_reflection.sh": {
-        "plists": ["com.valor.sdlc-reflection.plist"],
-        "labels": ["com.valor.sdlc-reflection"],
     },
 }
 
@@ -229,7 +224,7 @@ class InstallHarness:
         # the sandbox. Scoping it to the env var keeps this fixture's blast
         # radius to the one script that needs it.
         # Fail loudly rather than yielding host="": an empty machine name
-        # matches nothing, so all five installers would silently take their
+        # matches nothing, so all four installers would silently take their
         # skip paths and every parametrized case would fail as a confusing
         # "bootstrap was never called" instead of naming the real cause.
         _scutil = subprocess.run(

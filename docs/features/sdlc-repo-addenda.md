@@ -41,36 +41,13 @@ The `/update` skill runs `scripts/update/migrations.py` on every update. The `cr
 
 Running `/update` on a machine that already has all 8 files is a no-op (migration is skipped).
 
-## Reflection Agent
+## Lessons from merged PRs
 
-`scripts/sdlc_reflection.py` runs every 3 days via `com.valor.sdlc-reflection.plist`. It:
-
-1. Fetches merged PRs since the last run
-2. Classifies each PR by SDLC stage using keyword matching
-3. Extracts explicitly flagged learnings (lines starting with `- lesson:`, `- pattern:`, etc.)
-4. Proposes edits to the relevant `docs/sdlc/do-X.md` files
-5. Opens a PR for human review (does not auto-merge to main)
-6. Enforces the 300-line cap per file
-
-### Install the cron
-
-```bash
-./scripts/install_sdlc_reflection.sh
-```
-
-### Manual run
-
-```bash
-python scripts/sdlc_reflection.py --dry-run    # Preview without writing
-python scripts/sdlc_reflection.py              # Run and open PR
-python scripts/sdlc_reflection.py --days 14    # Larger lookback window
-```
-
-State is stored in `data/sdlc_reflection_last_run.json`.
+Explicitly flagged learnings in a merged PR body (lines starting with `- lesson:`, `- pattern:`, `- note:`, `- convention:`, `- learning:`, `- reminder:`, or `- caveat:`) are `ImprovementEvidence` rows of kind `lesson`, written by the `collect_lessons` adapter in `reflections/improvement_collect.py` on the improvement evidence tick and read by the improvement planner, which routes each one to a priority area by its stage guess. See [`improvement-controller.md`](improvement-controller.md).
 
 ## Authoring Guidelines
 
-- **Max 300 lines per file** — enforced by the reflection agent
+- **Max 300 lines per file**
 - **No duplication** — never copy content from the global skill; only add what is unique to this repo
 - **Comment header required** — each file starts with: `<!-- Do not duplicate content from the global skill. Only include what is unique to this repo. Max 300 lines. -->`
 - **Hand-authored changes welcome** — edit `docs/sdlc/do-X.md` directly and commit on the feature branch
@@ -87,9 +64,6 @@ State is stored in `data/sdlc_reflection_last_run.json`.
 | `docs/sdlc/do-pr-review.md` | Docs gate, section compliance, UI screenshots |
 | `docs/sdlc/do-docs.md` | Index, command reference, commit rules |
 | `docs/sdlc/do-merge.md` | Docs gate, plan migration, post-merge cleanup |
-| `scripts/sdlc_reflection.py` | Reflection agent (3-day cron) |
-| `com.valor.sdlc-reflection.plist` | launchd schedule definition |
-| `scripts/install_sdlc_reflection.sh` | Install script for launchd service |
 | `scripts/update/migrations.py` | Added `create_sdlc_stubs` migration |
 | `tests/unit/test_sdlc_stubs.py` | Unit tests for migration and stubs |
 

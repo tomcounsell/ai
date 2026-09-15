@@ -106,13 +106,12 @@ cd ~/src/ai
 
 ### Reinstall Launchd Services
 
-After update, reinstall launchd plists to pick up any template changes. The reflection scheduler runs in its own launchd subprocess (`python -m reflections`, label `com.valor.reflection-worker`) — out-of-process from the worker since issue #1828 — so three installers cover the set:
+After update, reinstall launchd plists to pick up any template changes. The reflection scheduler runs in its own launchd subprocess (`python -m reflections`, label `com.valor.reflection-worker`) — out-of-process from the worker since issue #1828 — so two installers cover the set:
 
 ```bash
 cd ~/src/ai
 ./scripts/install_worker.sh
 ./scripts/install_reflection_worker.sh
-./scripts/install_sdlc_reflection.sh
 ```
 
 `install_reflection_worker.sh` self-gates on worker role (any project's `machine` matches this host; fail-open) and removes its stale plist on non-worker machines. Verify with `python -m reflections --dry-run` (loads the registry, exits 0) and `tail -f logs/reflection_worker.log`. Install scripts substitute `__PROJECT_DIR__` and `__HOME_DIR__` placeholders, so plists work on any machine without hardcoded usernames.

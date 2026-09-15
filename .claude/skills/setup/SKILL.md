@@ -96,13 +96,12 @@ If no session file appeared, something went wrong. Ask the user what happened an
 
 ### Step 8: Install Worker + Reflection Schedules
 
-Three launchd services: the standalone worker, the reflection-scheduler subprocess (`python -m reflections` — its own supervised process since issue #1828, no longer inside the worker), and the SDLC reflection schedule:
+Two launchd services: the standalone worker and the reflection-scheduler subprocess (`python -m reflections` — its own supervised process since issue #1828, no longer inside the worker):
 
 ```bash
 cd ~/src/ai
 ./scripts/install_worker.sh
 ./scripts/install_reflection_worker.sh
-./scripts/install_sdlc_reflection.sh
 ```
 
 `install_reflection_worker.sh` self-gates on worker role (any project's `machine` matches this host; fail-open), so it installs wherever the worker does. Verify all loaded:
@@ -111,7 +110,7 @@ cd ~/src/ai
 launchctl list | grep com.valor
 ```
 
-Expect `com.valor.worker`, `com.valor.reflection-worker`, and `com.valor.sdlc-reflection` labels. The reflection scheduler logs to `logs/reflection_worker.log`; `python -m reflections --dry-run` validates the registry loads.
+Expect `com.valor.worker` and `com.valor.reflection-worker` labels. The reflection scheduler logs to `logs/reflection_worker.log`; `python -m reflections --dry-run` validates the registry loads.
 
 ### Steps 8.5-8.6: Optional Surfaces (macOS only, operator-opt-in)
 

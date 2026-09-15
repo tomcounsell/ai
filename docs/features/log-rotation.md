@@ -37,9 +37,8 @@ it holds the FD open for the lifetime of the service. Even for services
 that do install a Python rotating handler (like the bridge), renaming
 `bridge.log` to `bridge.log.1` does not affect launchd's FD — launchd
 keeps writing to the old inode. And for services that deliberately use a
-plain `FileHandler` (worker) or raw file append (`sdlc_reflection.py`),
-there is no in-process rotation at all; those files rely entirely on the
-LaunchAgent.
+plain `FileHandler` (worker), there is no in-process rotation at all; those
+files rely entirely on the LaunchAgent.
 
 The LaunchAgent sidesteps the FD problem the same way the old newsyslog
 config did: it renames the file, creates a fresh empty one, and accepts

@@ -177,7 +177,7 @@ def test_plist_is_long_lived_not_cron(plist_src):
 def test_plist_sets_launchd_and_sources_env(plist_src):
     assert "VALOR_LAUNCHD" in plist_src
     assert "-m reflections" in plist_src
-    # .env sourced in ProgramArguments via the /bin/bash -c sdlc-reflection idiom.
+    # .env sourced in ProgramArguments via the /bin/bash -c source-then-exec idiom.
     assert "/bin/bash" in plist_src
     assert "source" in plist_src and ".env" in plist_src
 

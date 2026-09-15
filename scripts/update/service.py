@@ -48,6 +48,13 @@ OBSOLETE_SERVICE_SUFFIXES: list[str] = [
     # in #466, so a machine that ever ran the installer has a nightly LaunchAgent
     # raising KeyError forever. Boot it out and remove the plist fleet-wide.
     "autoexperiment",
+    # scripts/sdlc_reflection.py, its installer, and com.valor.sdlc-reflection.plist
+    # were retired by lane 5 of the improvement controller (#3217,
+    # docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md):
+    # its lesson scraping now lives in reflections/improvement_collect.py::
+    # collect_lessons. Every machine that ever ran install_sdlc_reflection.sh has
+    # a three-day LaunchAgent pointing at a deleted script.
+    "sdlc-reflection",
 ]
 
 
