@@ -429,10 +429,11 @@ def record_claims(investigation_id: str, claims, sources=None) -> int:
     """Store every entry of ``claims`` on the investigation and return how
     many were stored (claims plus notes; nothing is dropped).
 
-    ``None`` or a non-list raises ``ValueError`` at the boundary; an empty
-    list is a no-op returning 0. The row is re-read and the call refuses
-    with :class:`InvestigationRefusedError` ``INVESTIGATION_NOT_FOUND`` or
-    ``INVESTIGATION_NOT_OPEN`` (Race 3) before anything is written. Valid
+    ``None`` or a non-list raises ``ValueError`` at the boundary. The row is
+    re-read and the call refuses with :class:`InvestigationRefusedError`
+    ``INVESTIGATION_NOT_FOUND`` or ``INVESTIGATION_NOT_OPEN`` (Race 3) before
+    anything is written; on a live open row an empty list is a no-op
+    returning 0. Valid
     claims also land in ``sources``, as do the explicit ``sources`` entries.
     ``stage`` moves to ``recorded`` when the row is earlier in the order.
     """
@@ -442,8 +443,6 @@ def record_claims(investigation_id: str, claims, sources=None) -> int:
         raise ValueError(f"claims must be a list, not {type(claims).__name__}")
     if sources is not None and not isinstance(sources, list):
         raise ValueError("sources must be a list when given")
-    if not claims and not sources:
-        return 0
 
     row = _find(investigation_id)
     if row is None:
@@ -455,6 +454,8 @@ def record_claims(investigation_id: str, claims, sources=None) -> int:
             "INVESTIGATION_NOT_OPEN",
             f"investigation {investigation_id} is {row.state}; open a new one citing it",
         )
+    if not claims and not sources:
+        return 0
 
     env = _claims_envelope(row)
     stored_sources = _load_json(row.sources, [])

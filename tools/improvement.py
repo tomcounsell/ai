@@ -581,6 +581,296 @@ def cmd_release_compare(args) -> int:
     return 0
 
 
+# --- lane 5 (#3217): the brief, investigations, model revisions, case open ---
+
+
+def _refused(args, reason: str, message: str = "", **extra) -> int:
+    payload = {"accepted": False, "reason": reason, "message": message or reason}
+    payload.update(extra)
+    _emit(args, f"refused: {reason}" + (f" ({message})" if message else ""), payload)
+    return 1
+
+
+def cmd_brief(args) -> int:
+    """Print the research brief for one case (charter first, then the case)."""
+    from tools.improvement_brief import build_brief
+
+    try:
+        text = build_brief(args.case, PROJECT_KEY)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, text.rstrip("\n"), {"case_id": args.case, "brief": text})
+    return 0
+
+
+def _outcome_exit(args, outcome, human_ok: str) -> int:
+    if not outcome.accepted:
+        return _refused(
+            args, outcome.reason, outcome.message, investigation_id=outcome.investigation_id
+        )
+    payload = {"accepted": True, "investigation_id": outcome.investigation_id, **outcome.extra}
+    _emit(args, f"{human_ok}: {outcome.investigation_id}", payload)
+    return 0
+
+
+def cmd_investigation_open(args) -> int:
+    from tools.improvement_investigations import open_investigation
+
+    outcome = open_investigation(
+        PROJECT_KEY,
+        kind=args.kind,
+        case_id=args.case,
+        uncertainty=args.uncertainty,
+        query=args.query,
+        decision_affected=args.decision_affected,
+        expected_information_value=args.expected_information_value,
+        state=args.state,
+    )
+    return _outcome_exit(args, outcome, "opened")
+
+
+def _load_json_arg(raw: str):
+    """A JSON literal, or ``@path`` naming a file holding one."""
+    if raw.startswith("@"):
+        raw = open(raw[1:], encoding="utf-8").read()
+    return json.loads(raw)
+
+
+def cmd_investigation_record(args) -> int:
+    from tools.improvement_investigations import InvestigationRefusedError, record_claims
+
+    try:
+        claims = _load_json_arg(args.claims)
+        sources = _load_json_arg(args.sources) if args.sources else None
+    except (OSError, ValueError) as e:
+        return _refused(args, "INVALID_CLAIMS_JSON", str(e))
+    try:
+        recorded = record_claims(args.id, claims, sources)
+    except InvestigationRefusedError as e:
+        return _refused(args, e.reason, e.message, investigation_id=args.id)
+    except ValueError as e:
+        return _refused(args, "INVALID_CLAIMS", str(e), investigation_id=args.id)
+    _emit(
+        args,
+        f"recorded {recorded} entr{'y' if recorded == 1 else 'ies'} on {args.id}",
+        {"accepted": True, "investigation_id": args.id, "recorded": recorded},
+    )
+    return 0
+
+
+def cmd_investigation_resolve(args) -> int:
+    from tools.improvement_investigations import resolve
+
+    detail = None
+    if args.assumption_detail:
+        try:
+            detail = _load_json_arg(args.assumption_detail)
+        except (OSError, ValueError) as e:
+            return _refused(args, "INVALID_ASSUMPTION_DETAIL_JSON", str(e))
+    outcome = resolve(
+        args.id,
+        interpretation=args.interpretation,
+        provisional_assumption=args.assumption,
+        assumption_detail=detail,
+        disposition=args.disposition,
+        resource_name=args.resource_name,
+    )
+    return _outcome_exit(args, outcome, "resolved")
+
+
+def cmd_investigation_list(args) -> int:
+    from tools.improvement_investigations import list_investigations, row_as_dict
+
+    rows = list_investigations(PROJECT_KEY, case_id=args.case)
+    lines = [
+        f"{r.id} {r.kind} {r.state} stage={r.stage or 'draft'} case={r.case_id or '-'}: "
+        f"{(r.query or '')[:80]}"
+        for r in rows
+    ]
+    _emit(
+        args,
+        "\n".join(lines) or "no investigations",
+        {"investigations": [row_as_dict(r) for r in rows]},
+    )
+    return 0
+
+
+def _research_process_spec_values() -> dict:
+    """The six ``ResearchProcessSpec`` values this lane pins (Provided to
+    lane 6, item 1). ``ranking_module_digest`` is empty while the ranking
+    module is absent."""
+    import hashlib
+    from pathlib import Path
+
+    from config.settings import settings
+    from tools.improvement_brief import brief_template_digest
+
+    root = Path(__file__).resolve().parents[1]
+    skill = root / ".claude" / "skills" / "improve-research" / "SKILL.md"
+    ranking = root / "tools" / "improvement_ranking.py"
+    return {
+        "selection_rule": "ordinal-lexicographic-v1",
+        "investigation_budget_split": {},
+        "revision_cadence_seconds": settings.improvement.controller_tick_seconds,
+        "planner_prompt_digest": brief_template_digest(),
+        "skill_digest": hashlib.sha256(skill.read_bytes()).hexdigest() if skill.exists() else "",
+        "extra": {
+            "ranking_module_digest": (
+                hashlib.sha256(ranking.read_bytes()).hexdigest() if ranking.exists() else ""
+            )
+        },
+    }
+
+
+def _research_process_spec_bytes(values: dict) -> tuple[str, object]:
+    """Canonical spec JSON through ``tools.improvement_ranking.process_spec_json``
+    when it is importable, else the same canonical form built here:
+    ``json.dumps(asdict(spec), sort_keys=True, separators=(",", ":"))``.
+    Returns ``(text, spec_object_or_None)``."""
+    try:
+        from tools.improvement_ranking import process_spec_json
+
+        try:
+            from tools.improvement_recursion.process import ResearchProcessSpec
+        except ImportError:
+            from tools.improvement_ranking import ResearchProcessSpec
+        spec = ResearchProcessSpec(**values)
+        return process_spec_json(spec), spec
+    except (ImportError, AttributeError, TypeError):
+        return json.dumps(values, sort_keys=True, separators=(",", ":")), None
+
+
+def cmd_revise_model(args) -> int:
+    """Write one ``ImprovementModelRevision`` for the case. A revision with no
+    prediction is a note, and is refused ``EMPTY_PREDICTION``."""
+    from datetime import UTC, datetime
+
+    from models.improvement_case import ImprovementCase
+    from models.improvement_model_revision import ImprovementModelRevision
+
+    if not (args.prediction or "").strip():
+        return _refused(args, "EMPTY_PREDICTION", "a revision with no prediction is a note")
+    try:
+        case = ImprovementCase.query.get(project_key=PROJECT_KEY, id=args.case)
+    except Exception:
+        case = None
+    if case is None:
+        return _refused(args, "CASE_NOT_FOUND", f"no case {args.case}")
+
+    values = _research_process_spec_values()
+    spec_text, spec = _research_process_spec_bytes(values)
+    digest = None
+    try:
+        from tools.improvement_recursion.process import research_process_digest
+
+        digest = research_process_digest(spec if spec is not None else values)
+    except ImportError:
+        digest = None
+
+    current = [
+        r for r in ImprovementModelRevision.query.filter(project_key=PROJECT_KEY, state="current")
+    ]
+    current.sort(key=lambda r: (int(getattr(r, "revision", 0) or 0), r.id))
+    previous = current[-1] if current else None
+    revision_number = max((int(getattr(r, "revision", 0) or 0) for r in current), default=0) + 1
+    row = ImprovementModelRevision.create(
+        project_key=PROJECT_KEY,
+        created_at=datetime.now(UTC),
+        state="current",
+        revision=revision_number,
+        summary=args.summary,
+        rationale=args.rationale,
+        prediction=args.prediction.strip(),
+        evidence_ids=case.evidence_ids or "[]",
+        supersedes_id=previous.id if previous is not None else None,
+        research_process_digest=digest,
+        research_process_spec=spec_text,
+    )
+    if previous is not None:
+        previous.state = "superseded"
+        previous.save()
+    _emit(
+        args,
+        f"model revision {row.revision} written: {row.id}"
+        + ("" if digest else " (process digest pending lane 6)"),
+        {
+            "accepted": True,
+            "revision_id": row.id,
+            "revision": row.revision,
+            "research_process_digest": digest,
+            "supersedes_id": row.supersedes_id,
+        },
+    )
+    return 0
+
+
+def cmd_case_open(args) -> int:
+    """Open a case through the planner's ``open_cases`` (same novelty check
+    the tick runs), then journal ``case_opened`` for any new case whose tail
+    lacks one. Refuses ``PLANNER_UNAVAILABLE`` until the planner module exists."""
+    import hashlib
+
+    from models.improvement_charter import ImprovementCharter
+    from tools.improvement_control.journal import journal_tail, read_head, transition
+
+    try:
+        from reflections.improvement_plan import open_cases
+    except ImportError:
+        return _refused(
+            args, "PLANNER_UNAVAILABLE", "reflections.improvement_plan.open_cases is not built"
+        )
+    charter = ImprovementCharter.pinned(PROJECT_KEY)
+    if charter is None:
+        return _refused(args, "CHARTER_NOT_PINNED", "no charter row; run the planner tick first")
+    extras = {}
+    if args.evidence_ids:
+        extras["evidence_ids"] = [e for e in args.evidence_ids.split(",") if e]
+    if args.priority_area:
+        extras["priority_area"] = args.priority_area
+    if args.dedup_identity:
+        extras["dedup_identity"] = args.dedup_identity
+    try:
+        result = open_cases(PROJECT_KEY, charter, **extras)
+    except TypeError as e:
+        return _refused(args, "PLANNER_SIGNATURE", str(e))
+
+    opened = getattr(result, "opened", result)
+    case_ids = []
+    for item in opened if isinstance(opened, (list, tuple)) else []:
+        case_ids.append(item if isinstance(item, str) else getattr(item, "id", None))
+    case_ids = [c for c in case_ids if c]
+
+    journaled = []
+    for case_id in case_ids:
+        if any(e.get("event") == "case_opened" for e in journal_tail(PROJECT_KEY, case_id, 50)):
+            continue
+        lease, lease_key, generation = _acquire_lease(case_id)
+        if generation is None:
+            continue
+        try:
+            head = read_head(PROJECT_KEY, case_id)
+            outcome = transition(
+                PROJECT_KEY,
+                case_id,
+                expected_revision=head.revision if head is not None else 0,
+                generation=generation,
+                event="case_opened",
+                payload_digest="sha256:" + hashlib.sha256(case_id.encode()).hexdigest(),
+            )
+        finally:
+            lease.release(lease_key, generation)
+        if outcome.accepted:
+            _project(case_id)
+            journaled.append(case_id)
+    _emit(
+        args,
+        f"opened {len(case_ids)} case(s): {', '.join(case_ids) or 'none'}",
+        {"accepted": True, "case_ids": case_ids, "journaled": journaled},
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-improve")
     parser.add_argument("--json", action="store_true")
@@ -620,6 +910,11 @@ def main(argv: list[str] | None = None) -> int:
     p_explain = case_sub.add_parser("explain")
     p_explain.add_argument("--case", required=True)
     p_explain.set_defaults(func=cmd_case_explain)
+    p_open = case_sub.add_parser("open")
+    p_open.add_argument("--evidence-ids", default=None, help="comma-separated evidence ids")
+    p_open.add_argument("--priority-area", default=None)
+    p_open.add_argument("--dedup-identity", default=None)
+    p_open.set_defaults(func=cmd_case_open)
 
     p = sub.add_parser("budget")
     p.set_defaults(func=cmd_budget)
@@ -641,6 +936,46 @@ def main(argv: list[str] | None = None) -> int:
     release_sub = p.add_subparsers(dest="release_command", required=True)
     p_compare = release_sub.add_parser("compare")
     p_compare.set_defaults(func=cmd_release_compare)
+
+    # lane 5 (#3217): the research session's own subcommands
+    p = sub.add_parser("brief")
+    p.add_argument("--case", required=True)
+    p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("investigation")
+    inv_sub = p.add_subparsers(dest="investigation_command", required=True)
+    p_iopen = inv_sub.add_parser("open")
+    p_iopen.add_argument("--kind", required=True)
+    p_iopen.add_argument("--case", default=None)
+    p_iopen.add_argument("--uncertainty", required=True)
+    p_iopen.add_argument("--query", required=True)
+    p_iopen.add_argument("--decision-affected", required=True)
+    p_iopen.add_argument("--expected-information-value", required=True)
+    p_iopen.add_argument("--state", default="open")
+    p_iopen.set_defaults(func=cmd_investigation_open)
+    p_irecord = inv_sub.add_parser("record")
+    p_irecord.add_argument("--id", required=True)
+    p_irecord.add_argument("--claims", required=True, help="JSON list, or @path to one")
+    p_irecord.add_argument("--sources", default=None, help="JSON list, or @path to one")
+    p_irecord.set_defaults(func=cmd_investigation_record)
+    p_iresolve = inv_sub.add_parser("resolve")
+    p_iresolve.add_argument("--id", required=True)
+    p_iresolve.add_argument("--interpretation", required=True)
+    p_iresolve.add_argument("--assumption", default=None)
+    p_iresolve.add_argument("--assumption-detail", default=None, help="JSON object, or @path")
+    p_iresolve.add_argument("--disposition", default=None)
+    p_iresolve.add_argument("--resource-name", default=None)
+    p_iresolve.set_defaults(func=cmd_investigation_resolve)
+    p_ilist = inv_sub.add_parser("list")
+    p_ilist.add_argument("--case", default=None)
+    p_ilist.set_defaults(func=cmd_investigation_list)
+
+    p = sub.add_parser("revise-model")
+    p.add_argument("--case", required=True)
+    p.add_argument("--summary", required=True)
+    p.add_argument("--rationale", required=True)
+    p.add_argument("--prediction", required=True)
+    p.set_defaults(func=cmd_revise_model)
 
     args = parser.parse_args(argv)
     return args.func(args)
