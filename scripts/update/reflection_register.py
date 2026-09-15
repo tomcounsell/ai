@@ -736,9 +736,7 @@ def register_improvement_assumption_digest(project_dir: Path) -> RegisterResult:
     A three-day status report of new provisional assumptions, acquired
     resources, and budget overruns, sent as a plain message that asks nothing.
     ``cadence="259200s"`` (spike-5: the register seam takes a free-form
-    cadence) and no custom timeout. The callable's module is built by a later
-    task; registration names the path and never imports it, so this function
-    is safe to run before that module exists. Machine pinning is inherited.
+    cadence) and no custom timeout. Machine pinning is inherited.
     """
     return register_reflection(
         project_dir,

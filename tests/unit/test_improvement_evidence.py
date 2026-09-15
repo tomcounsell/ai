@@ -1078,12 +1078,21 @@ class TestCollectPromises:
         assert "Working on it now." in prompt
 
     def test_a_no_writes_nothing_and_is_not_rejudged_next_tick(self, promise_env):
+        """The judged set is a control-namespace key declared in
+        ``tools.improvement_control.keys`` and carries the 30-day TTL."""
+        from tools.improvement_control.keys import promise_judged_key
+        from utils.redis_client import text_redis
+
         session = _session("sess-p3", outbound=["Working on it now."])
         transport = _transport([_no(), _no()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
             assert improvement_collect.collect_promises(PK, transport=transport) == 0
             assert improvement_collect.collect_promises(PK, transport=transport) == 0
         assert len(transport.prompts) == 1
+        judged_key = promise_judged_key(PK)
+        assert judged_key == f"improve:{PK}:_ns:promise_judged"
+        assert text_redis().scard(judged_key) == 1
+        assert 0 < text_redis().ttl(judged_key) <= improvement_collect.PROMISE_JUDGED_EXPIRY_SECONDS
 
     def test_inbound_entries_are_never_judged(self, promise_env):
         session = _session("sess-p4", turns=["can you promise me it ships?"])

@@ -896,11 +896,8 @@ built here so the recursive comparison can run on real arms later.
   pinned digest changed); `open_cases`; `rank` + `write_snapshot` + `ranking_recorded`;
   `propose_one_action`; the `apply_verdict` backstop. The backstop imports
   `tools.improvement_experiment.apply_verdict` **inside the step function**, never at module
-  level: task 6 creates that module after task 5 lands, and a module-level import would make
-  task 5's tests fail until task 6 exists. An `ImportError` there is reported as
-  `findings=["verdict backstop unavailable: tools.improvement_experiment not built"]` and the
-  tick continues; once task 6 lands the step runs for real, and the integration test exercises
-  it.
+  level, so the planner module carries no experiment machinery at import time
+  (`test_no_llm_or_dispatch_imports` pins that); the integration test exercises the step.
 - **Unblock step, exactly**: `report = tools.improvement_resources.probe()` once per tick (the
   function takes no item argument, `tools/improvement_resources.py:204`, and returns one entry
   per name in `RESOURCES`); for every open case with `blocked_by`:
@@ -1902,7 +1899,7 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | The digest text says silence validates nothing and asks nothing | `scripts/pytest-clean.sh tests/unit/test_improvement_assumption_digest.py -k "silence_validates_nothing and asks_nothing" -q` | exit code 0 |
 | `scripts/sdlc_reflection.py`, its installer, and its plist are gone | `ls scripts/sdlc_reflection.py scripts/install_sdlc_reflection.sh com.valor.sdlc-reflection.plist 2>/dev/null \| wc -l` | match count == 0 |
 | `sdlc-reflection` is in the obsolete-service sweep | `grep -c '"sdlc-reflection"' scripts/update/service.py` | output > 0 |
-| No live reference to the deleted script remains (task 8 note: the exclusion list also names the `retire_sdlc_reflection` migration, its tests, and the obsolete-sweep test, which the rows above require to name the script; task 11 note: the two feature docs the Documentation section requires to name that migration and state the retirement are excluded on the same ground, and the gitignored `PROGRESS.md` scratchpad is excluded because a fresh checkout never carries it) | `grep -rnE "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" --exclude=PROGRESS.md . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| grep -v "scripts/update/migrations.py" \| grep -v "tests/unit/test_migrations.py" \| grep -v "tests/unit/test_update_remove_obsolete_services.py" \| grep -v "docs/features/improvement-research-cycle.md" \| grep -v "docs/features/improvement-controller.md" \| wc -l` | match count == 0 |
+| No live reference to the deleted script remains (task 8 note: the exclusion list also names the `retire_sdlc_reflection` migration, its tests, and the obsolete-sweep test, which the rows above require to name the script; task 11 note: the two feature docs the Documentation section requires to name that migration and state the retirement are excluded on the same ground, and the gitignored `PROGRESS.md` scratchpad is excluded because a fresh checkout never carries it) | `grep -rnE "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" --include="*.plist" --exclude=PROGRESS.md . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| grep -v "scripts/update/migrations.py" \| grep -v "tests/unit/test_migrations.py" \| grep -v "tests/unit/test_update_remove_obsolete_services.py" \| grep -v "docs/features/improvement-research-cycle.md" \| grep -v "docs/features/improvement-controller.md" \| wc -l` | match count == 0 |
 | Lesson adapter is wired into the tick | `grep -c "collect_lessons" reflections/improvement_collect.py` | output > 1 |
 | Promise adapter is wired into the tick and gated | `grep -cE "collect_promises\|promise_detector" reflections/improvement_collect.py` | output > 1 |
 | No planner or verdict path writes `state` by ORM | `grep -nE "\.state *= *['\"]" reflections/improvement_plan.py tools/improvement_experiment.py \| wc -l` | match count == 0 |

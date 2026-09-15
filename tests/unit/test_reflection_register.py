@@ -837,10 +837,8 @@ def test_improvement_entry_loads_via_scheduler_registry(
     """A registered entry the scheduler cannot load is the failure this guards.
 
     register_reflection emits execution_type: function entries; the scheduler's
-    own loader has to accept it. The callable path has to resolve to the real
-    entrypoint for the two modules that exist at this task; the digest module
-    is built by a later task, so its path is only checked for shape here and
-    resolved once that module lands.
+    own loader has to accept it, and the callable path has to resolve to the
+    real entrypoint.
     """
     vault_path, project_dir = _setup(tmp_path)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -857,12 +855,7 @@ def test_improvement_entry_loads_via_scheduler_registry(
 
     module_path, _, attr = callable_path.rpartition(".")
     assert module_path.startswith("reflections.") and attr.startswith("run_")
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError:
-        assert name == IMPROVEMENT_ASSUMPTION_DIGEST_NAME, f"{module_path} must be importable"
-        return
-    assert callable(getattr(module, attr))
+    assert callable(getattr(importlib.import_module(module_path), attr))
 
 
 # ===================================================================

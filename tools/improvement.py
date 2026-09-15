@@ -841,17 +841,11 @@ def cmd_case_open(args) -> int:
     """Open cases through the planner's ``open_cases``: the same clustering,
     novelty check, and ``case_opened`` journal write the tick runs. With
     ``--evidence-ids`` only those rows are considered; without it the
-    planner's bounded recent scan runs. Refuses ``PLANNER_UNAVAILABLE`` when
-    ``reflections.improvement_plan`` is absent and ``CHARTER_NOT_PINNED`` when
+    planner's bounded recent scan runs. Refuses ``CHARTER_NOT_PINNED`` when
     no charter row exists."""
     from models.improvement_charter import ImprovementCharter
+    from reflections.improvement_plan import open_cases
 
-    try:
-        from reflections.improvement_plan import open_cases
-    except ImportError:
-        return _refused(
-            args, "PLANNER_UNAVAILABLE", "reflections.improvement_plan.open_cases is not built"
-        )
     charter = ImprovementCharter.pinned(PROJECT_KEY)
     if charter is None:
         return _refused(args, "CHARTER_NOT_PINNED", "no charter row; run the planner tick first")

@@ -159,12 +159,10 @@ def _one_line(text, limit: int = 400) -> str:
 
 
 def _ranking_lines(case_id: str, project_key: str) -> list[str]:
-    """Position and factors from the latest snapshot, through the ranking
-    module when it is importable and has one; the sentinel otherwise."""
-    try:
-        from tools.improvement_ranking import latest_snapshot
-    except ImportError:
-        return [f"Ranking: {NO_SNAPSHOT_LINE}"]
+    """Position and factors from the latest snapshot when the ranking module
+    has one; the sentinel otherwise."""
+    from tools.improvement_ranking import latest_snapshot
+
     try:
         snapshot = latest_snapshot(project_key)
     except Exception:

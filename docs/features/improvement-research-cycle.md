@@ -608,7 +608,11 @@ snapshot exists.
   `revise-model --backfill-digests` digests every stored spec that has none
   and writes no revision.
 - **Arm runner.** `PlannerArmRunner.run(process_digest, opportunity_ids, budget_cap, arm_run_id)`
-  runs exactly one `plan_tick` restricted to the named opportunities and
+  runs exactly one `plan_tick` restricted to the named opportunities. The
+  restricted tick ranks that subset in memory and leaves the ranking chain
+  alone (no snapshot, no cursor write, no `ranking_recorded`; the chain
+  records full ticks only), proposes for the named case under the cursor's
+  existing snapshot, and before any full tick proposes nothing. It
   returns lane 6's `ArmResult` with per-opportunity gains taken from `accept`
   evaluations already on record and
   `BudgetUse(unit2_usd=None, unit3_usd=None, subscription_turns=0, wall_seconds=elapsed)`;
@@ -673,11 +677,22 @@ investigations (`web_research`, `resource_acquisition`, `probe`,
 assumption with all four detail keys), wrote three model revisions with
 predictions and process digests, proposed under its running intent, froze an
 experiment (`{"rrf_k": 10}` against `{"limit": 10}`, 30 known-item queries,
-#2082 cited, both manifest refs), and evaluated it; `apply_verdict` ran; the
-post-verdict tick wrote snapshot 2 with `previous_ref` = snapshot 1; the
-report carried its three mandatory sections; the digest sent one assumption
-and no vault request. Lineage from case to charter digest is readable from
-the records alone.
+#2082 cited, both manifest refs), and evaluated it; `apply_verdict` ran and
+opened a seventh investigation, the `probe` (`34fc3fae…`) that names the
+calibration failure; the post-verdict tick wrote snapshot 2 with
+`previous_ref` = snapshot 1; the report carried its three mandatory sections;
+the digest sent one assumption and no vault request. The eighth
+investigation on the case, `3dbf7e2f7c67457bb768a03050772558`
+(`skill_acquisition`), was run from the shell through the same CLI after the
+session (commit `c1716fb76`): stages 1 to 3 ran (the gap: no skill guided a
+session through a paired evaluation's prerequisites before `experiment
+freeze`; the skill library and a web search found no covering skill, and two
+open-source candidates were declined), the `improve-preflight` skill was
+integrated at `.claude/skills/improve-preflight/SKILL.md`, stage 4 resolved
+as a provisional assumption citing #3311 (the agent-run arm is not yet
+available), and stage 5 recorded "not yet observable"; eight investigations
+on the case in all. Lineage from case to charter digest is readable from the
+records alone.
 
 **What it does not establish.**
 
@@ -714,6 +729,16 @@ the records alone.
   so the promise judge's fallback model is dead while
   `cheap_inference_model` is empty. Recorded as a resolved `probe`
   investigation and a model revision; the constant itself is unchanged.
+
+**How the parked case moves.** The planner proposes nothing for a case at
+`evaluating` (`_action_kind` returns `None`), so case
+`1ec40086ca1d422e90ef747775ff7f64` progresses only when the calibration
+reference set reaches `MIN_REFERENCE_SET_SIZE = 20` architectural
+corrections. At that point an operator runs
+`valor-improve experiment repair --id 3e5627da17ba4938bf6fff3c36c8952f`
+(the `aborted` experiment returns to `frozen`) and then
+`valor-improve experiment evaluate --id 3e5627da17ba4938bf6fff3c36c8952f`
+from a terminal; `apply_verdict` then moves the case.
 
 The cycle exposed four defects, each fixed under test on the lane branch: the
 improvement reflection entry points resolved the project as the literal

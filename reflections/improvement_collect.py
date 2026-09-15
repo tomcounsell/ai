@@ -117,6 +117,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from tools.improvement_control.keys import promise_judged_key
+
 logger = logging.getLogger("reflections.improvement_collect")
 
 #: How many recent sessions the correction detector reads per tick. Bounded so
@@ -173,11 +175,10 @@ PROMISE_SAMPLE_PER_TICK = 10
 #: zero, so this is the smallest amount it accepts.
 PROMISE_RESERVE_USD = 0.01
 
-#: Plain Redis set of judged entry refs per project (lane 3's non-Popoto
-#: ``improve:`` namespace, same rationale as the meter's keys). A ``no``
-#: verdict writes no evidence row, so without this a tick would buy the same
-#: ten verdicts again every fifteen minutes.
-PROMISE_JUDGED_KEY = "improve:{project}:promise_detector:judged"
+#: TTL of the judged-ref set, ``keys.promise_judged_key`` (lane 3's
+#: non-Popoto ``improve:`` namespace, same rationale as the meter's keys). A
+#: ``no`` verdict writes no evidence row, so without the set a tick would buy
+#: the same ten verdicts again every fifteen minutes.
 PROMISE_JUDGED_EXPIRY_SECONDS = 30 * 86400
 
 #: The charter §10 paragraph the judge is shown, verbatim.
@@ -888,15 +889,11 @@ def _parse_verdict(raw: str) -> tuple[bool, str, float | None] | None:
     return answer == "yes", str(data.get("span") or "")[:500], confidence
 
 
-def _judged_key(project_key: str) -> str:
-    return PROMISE_JUDGED_KEY.format(project=project_key)
-
-
 def _judged_refs(project_key: str) -> set[str]:
     from utils.redis_client import text_redis
 
     try:
-        return set(text_redis().smembers(_judged_key(project_key)))
+        return set(text_redis().smembers(promise_judged_key(project_key)))
     except Exception as exc:  # noqa: BLE001
         logger.warning("improvement_collect: judged-set read failed: %s", exc)
         return set()
@@ -907,8 +904,8 @@ def _mark_judged(project_key: str, ref: str) -> None:
 
     try:
         client = text_redis()
-        client.sadd(_judged_key(project_key), ref)
-        client.expire(_judged_key(project_key), PROMISE_JUDGED_EXPIRY_SECONDS)
+        client.sadd(promise_judged_key(project_key), ref)
+        client.expire(promise_judged_key(project_key), PROMISE_JUDGED_EXPIRY_SECONDS)
     except Exception as exc:  # noqa: BLE001
         logger.warning("improvement_collect: judged-set write failed: %s", exc)
 
@@ -917,7 +914,7 @@ def _clear_judged(project_key: str) -> None:
     """Forget every judged ref for a project. Test seam; never called by the tick."""
     from utils.redis_client import text_redis
 
-    text_redis().delete(_judged_key(project_key))
+    text_redis().delete(promise_judged_key(project_key))
 
 
 def _outbound_candidates(project_key: str) -> list[tuple[str, str, str, float]]:

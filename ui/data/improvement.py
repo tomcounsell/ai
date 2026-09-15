@@ -519,10 +519,10 @@ def get_ranking(project_key: str = "valor") -> dict:
     ``order`` is the snapshot's order, each entry carrying the case title
     and its ``movement`` against the previous snapshot (``entered``,
     ``moved from N``, or ``None``); ``left`` names the cases that dropped
-    out and why; ``intake_pool`` is the inspiration evidence waiting for a
-    case. ``no_snapshot_yet`` when the controller state names none;
-    ``unavailable`` with ``error`` when the store read raised or the
-    snapshot did not verify. A corrupted snapshot never renders as an
+    out and why; ``intake_pool`` is the ``inspiration_intake`` investigation
+    ids waiting for a case. ``no_snapshot_yet`` when the controller state
+    names none; ``unavailable`` with ``error`` when the store read raised or
+    the snapshot did not verify. A corrupted snapshot never renders as an
     order: the integrity error is the whole answer.
     """
     empty = {

@@ -15,7 +15,6 @@ import ast
 import importlib
 import io
 import json
-import sys
 import types
 from contextlib import redirect_stdout
 from datetime import UTC, datetime
@@ -514,6 +513,63 @@ class TestProposal:
         assert len(doc["diff"]["entered"]) == 1
         assert ImprovementControllerState.get(PK).last_snapshot_ref == second.snapshot_ref
 
+    def test_restricted_tick_leaves_the_cursor_and_chain_untouched(self, charter_path, store):
+        """Lane 6's arm seam ranks a named subset in memory. The ranking chain
+        is the loop's own record of full ticks: a restricted tick writes no
+        snapshot, moves no cursor, and journals no ``ranking_recorded``, and
+        it proposes for the named case under the previous snapshot."""
+        from models.improvement_controller_state import ImprovementControllerState
+        from tools.improvement_ranking import latest_snapshot
+
+        evidence(text="you lost the journey again and shipped half", classification="architectural")
+        evidence(
+            text="a second architectural miss on a different journey",
+            classification="architectural",
+        )
+        full = tick(charter_path, store)
+        assert full.counts["ranked"] == 2
+        first, second = sorted(cases(), key=lambda c: c.created_at)
+        snapshots = Path(store.base_path) / "ImprovementRankingSnapshot"
+        stored_before = sorted(snapshots.iterdir())
+        assert len(stored_before) == 1
+        recorded_before = {c.id: events(c.id).count("ranking_recorded") for c in (first, second)}
+        assert recorded_before == {first.id: 1, second.id: 1}
+
+        restricted = tick(charter_path, store, case_ids=[second.id])
+
+        assert restricted.counts["ranked"] == 1
+        assert restricted.snapshot_ref == full.snapshot_ref
+        assert ImprovementControllerState.get(PK).last_snapshot_ref == full.snapshot_ref
+        assert (
+            latest_snapshot(PK, store=store)["order"]
+            == load_snapshot(full.snapshot_ref, store=store)["order"]
+        )
+        assert sorted(snapshots.iterdir()) == stored_before
+        assert {
+            c.id: events(c.id).count("ranking_recorded") for c in (first, second)
+        } == recorded_before
+        assert restricted.proposal["case_id"] == second.id
+        assert restricted.proposal["status"] == "proposed"
+
+    def test_restricted_tick_before_any_snapshot_proposes_nothing(self, charter_path, store):
+        from models.improvement_controller_state import ImprovementControllerState
+
+        case = ImprovementCase.create(
+            project_key=PK,
+            created_at=datetime.now(UTC),
+            state="observed",
+            title="no snapshot yet",
+            priority_area="skills",
+            ranking_rationale="r",
+        )
+        result = tick(charter_path, store, case_ids=[case.id])
+        assert result.counts["ranked"] == 1
+        assert result.snapshot_ref is None
+        assert result.proposal is None
+        assert "proposal skipped: restricted tick with no snapshot on record" in result.findings
+        assert ImprovementControllerState.get(PK) is None
+        assert not Path(store.base_path).exists()
+
 
 # ---------------------------------------------------------------------------
 # Refusals and failure injection
@@ -638,40 +694,6 @@ class TestRefusals:
         assert journal_tail(PK, held.id, 50) == []
         assert result.proposal is None
 
-    def test_verdict_backstop_import_error_is_a_finding(self, charter_path, store, monkeypatch):
-        from models.improvement_evaluation import ImprovementEvaluation
-        from models.improvement_experiment import ImprovementExperiment
-
-        case = ImprovementCase.create(
-            project_key=PK,
-            created_at=datetime.now(UTC),
-            state="observed",
-            title="evaluated",
-            priority_area="skills",
-            ranking_rationale="r",
-        )
-        move_state(case.id, "evaluating")
-        experiment = ImprovementExperiment.create(
-            project_key=PK, created_at=datetime.now(UTC), state="complete", case_id=case.id
-        )
-        ImprovementEvaluation.create(
-            project_key=PK,
-            created_at=datetime.now(UTC),
-            state="complete",
-            verdict="reject",
-            experiment_id=experiment.id,
-        )
-        monkeypatch.setattr(
-            sys, "meta_path", [_Blocker("tools.improvement_experiment"), *sys.meta_path]
-        )
-        monkeypatch.delitem(sys.modules, "tools.improvement_experiment", raising=False)
-        result = tick(charter_path, store)
-        assert (
-            "verdict backstop unavailable: tools.improvement_experiment not built"
-            in result.findings
-        )
-        assert result.counts["verdicts_applied"] == 0
-
     def test_run_improvement_planner_is_gated_on_enabled(self, monkeypatch):
         from config.settings import settings
 
@@ -723,18 +745,6 @@ def test_no_llm_or_dispatch_imports(module_path):
 # ---------------------------------------------------------------------------
 # The arm-runner seam, bound directly to lane 6 (merged)
 # ---------------------------------------------------------------------------
-
-
-class _Blocker:
-    """A meta_path finder that refuses one module name (and its children)."""
-
-    def __init__(self, name: str):
-        self.name = name
-
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname == self.name or fullname.startswith(self.name + "."):
-            raise ImportError(f"{fullname} blocked by test")
-        return None
 
 
 def test_arm_runner_registers_from_cli_entry(monkeypatch, charter_path, store):

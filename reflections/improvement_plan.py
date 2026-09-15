@@ -30,7 +30,7 @@ depends on it is skipped:
     entry in state ``verified`` clears the block after a ``case_unblocked``
     journal event. When the pinned digest differs from the digest the last
     tick recorded, ``tools.improvement_investigations.resolve_awaiting_on_new_digest``
-    resolves the awaiting rows (imported lazily; absent means a finding).
+    resolves the awaiting rows.
 (d) :func:`open_cases`.
 (e) ``rank`` + ``write_snapshot``. ``ranking_recorded`` is journaled once per
     case whose rank moved (entered, left, or changed position) on that case's
@@ -38,11 +38,13 @@ depends on it is skipped:
     snapshot digest as ``payload_digest``; a tick where nothing moved journals
     nothing and reuses the previous snapshot reference. The tick's own
     cursor (``ImprovementControllerState``) is written by ORM ``save()``.
+    A tick restricted to ``case_ids`` (lane 6's arm seam) ranks the named
+    subset in memory and writes none of this: the chain records full ticks.
 (f) :func:`propose_one_action` for the first unblocked, non-busy case, through
     ``tools.improvement.cmd_propose`` so lane 3's adapter admits it.
 (g) The ``apply_verdict`` backstop for every ``complete`` evaluation whose
     case still reads ``evaluating``; ``tools.improvement_experiment`` is
-    imported inside the step (task 6 builds it after this module).
+    imported inside the step to keep the module free of it at import time.
 
 **Identity rules** (``dedup_identity``): a ``correction`` row is its
 ``classification`` plus the normalized first eight words of ``text``; a
@@ -713,13 +715,8 @@ def _unblock(project_key: str, *, probe, findings: list[str]) -> int:
 def _resolve_amendments(project_key: str, charter, recorded_digest: str | None, findings) -> int:
     if not recorded_digest or recorded_digest == charter.digest:
         return 0
-    try:
-        from tools.improvement_investigations import resolve_awaiting_on_new_digest
-    except ImportError:
-        findings.append(
-            "amendment resolution unavailable: tools.improvement_investigations not built"
-        )
-        return 0
+    from tools.improvement_investigations import resolve_awaiting_on_new_digest
+
     resolved = resolve_awaiting_on_new_digest(project_key, charter.digest)
     return int(resolved or 0) if not isinstance(resolved, list) else len(resolved)
 
@@ -766,7 +763,11 @@ def _rank_and_record(
 ) -> tuple[list, str, set[str]]:
     """Rank the open set, write (or reuse) the snapshot, journal the moves.
 
-    Returns ``(ranked, snapshot_ref, refused_case_ids)``.
+    Returns ``(ranked, snapshot_ref, refused_case_ids)``. A ``case_ids``
+    restriction (lane 6's arm seam) ranks the named subset in memory only:
+    the snapshot chain records full ticks, so nothing is written, and the
+    returned reference is the cursor's existing one (``None`` before any
+    full tick).
     """
     from models.improvement_evaluation import ImprovementEvaluation
     from models.improvement_model_revision import ImprovementModelRevision
@@ -799,6 +800,8 @@ def _rank_and_record(
     order = [r.as_dict() for r in ranked]
 
     previous_ref = getattr(state, "last_snapshot_ref", None) or None
+    if case_ids is not None:
+        return ranked, previous_ref, set()
     previous = None
     if previous_ref:
         try:
@@ -1029,11 +1032,8 @@ def _verdict_backstop(project_key: str, findings: list[str]) -> int:
         pending.append(evaluation)
     if not pending:
         return 0
-    try:
-        from tools.improvement_experiment import apply_verdict
-    except ImportError:
-        findings.append("verdict backstop unavailable: tools.improvement_experiment not built")
-        return 0
+    from tools.improvement_experiment import apply_verdict
+
     applied = 0
     for evaluation in pending:
         try:
@@ -1067,7 +1067,10 @@ def plan_tick(
     ``process_spec``, ``budget_cap``, and ``arm_run_id`` are lane 6's arm
     seam: the spec is recorded on the proposal when given, the run id tags
     the tick's findings, and ``case_ids`` restricts ranking and the proposal
-    to the named opportunities. ``probe`` replaces
+    to the named opportunities. A restricted tick ranks in memory and leaves
+    the ranking chain alone: no snapshot, no cursor write, no
+    ``ranking_recorded``; its proposal cites the cursor's existing snapshot,
+    and before any full tick it proposes nothing. ``probe`` replaces
     ``tools.improvement_resources.probe`` (tests inject a runner-bound one).
     ``charter_path`` and ``store`` are test seams; production leaves both
     default.
@@ -1164,34 +1167,38 @@ def plan_tick(
         case_ids=case_ids,
         findings=findings,
     )
-    if ranked_out is not None:
+    if ranked_out is None:
+        findings.append("proposal skipped: ranking step did not complete")
+        counts["proposed"] = 0
+    else:
         ranked, snapshot_ref, refused = ranked_out
         result.snapshot_ref = snapshot_ref
         counts["ranked"] = len(ranked)
         counts["ranking_refused"] = len(refused)
-        state = state or ImprovementControllerState.get_or_create(project_key)
-        step(
-            "cursor",
-            state.record,
-            last_snapshot_ref=snapshot_ref,
-            last_tick_at=now.isoformat(),
-            charter_digest=charter.digest,
-            evidence_watermark=watermark,
-        )
-        # (f) one proposal
-        result.proposal = step(
-            "propose",
-            propose_one_action,
-            project_key,
-            ranked,
-            snapshot_ref=snapshot_ref,
-            refused_case_ids=refused,
-            findings=findings,
-        )
+        if case_ids is None:
+            state = state or ImprovementControllerState.get_or_create(project_key)
+            step(
+                "cursor",
+                state.record,
+                last_snapshot_ref=snapshot_ref,
+                last_tick_at=now.isoformat(),
+                charter_digest=charter.digest,
+                evidence_watermark=watermark,
+            )
+        # (f) one proposal, always under a snapshot on record
+        if snapshot_ref is None:
+            findings.append("proposal skipped: restricted tick with no snapshot on record")
+        else:
+            result.proposal = step(
+                "propose",
+                propose_one_action,
+                project_key,
+                ranked,
+                snapshot_ref=snapshot_ref,
+                refused_case_ids=refused,
+                findings=findings,
+            )
         counts["proposed"] = 1 if result.proposal and result.proposal["status"] == "proposed" else 0
-    else:
-        findings.append("proposal skipped: ranking step did not complete")
-        counts["proposed"] = 0
 
     # (g) verdict backstop
     counts["verdicts_applied"] = (

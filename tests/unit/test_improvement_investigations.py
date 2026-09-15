@@ -692,14 +692,6 @@ class TestCli:
         code, payload = run_cli(["revise-model", "--summary", "s"], capsys)
         assert (code, payload["reason"]) == (1, "MISSING_ARGUMENT")
 
-    def test_case_open_wiring_without_the_planner_module(self, capsys, monkeypatch):
-        import sys
-
-        monkeypatch.setitem(sys.modules, "reflections.improvement_plan", None)
-        code, payload = run_cli(["case", "open"], capsys)
-        assert code == 1
-        assert payload["reason"] == "PLANNER_UNAVAILABLE"
-
     def test_case_open_runs_the_planner_seam_on_named_evidence(self, capsys):
         from models.improvement_evidence import ImprovementEvidence
 

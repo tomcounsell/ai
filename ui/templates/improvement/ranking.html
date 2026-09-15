@@ -73,8 +73,8 @@
     <p class="improvement-meta">No inspiration waiting for a case.</p>
     {% else %}
     <ul class="improvement-list">
-        {% for evidence_id in ranking.intake_pool %}
-        <li><code>{{ evidence_id }}</code></li>
+        {% for investigation_id in ranking.intake_pool %}
+        <li><code>{{ investigation_id }}</code></li>
         {% endfor %}
     </ul>
     {% endif %}

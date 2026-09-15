@@ -4,8 +4,8 @@
 <dict>
     <key>Label</key>
     <string>__SERVICE_LABEL__</string>
-    <!-- Source .env in ProgramArguments (the com.valor.sdlc-reflection.plist /bin/bash -c
-         idiom) so Redis/GitHub creds are present without a runtime iCloud read. /bin/bash -c
+    <!-- Source .env in ProgramArguments (the /bin/bash -c source-then-exec idiom) so
+         Redis/GitHub creds are present without a runtime iCloud read. /bin/bash -c
          (not zsh -l) avoids login-profile sourcing under launchd where there is no TTY.
          TCC-safe: VALOR_LAUNCHD=1 (below) makes the scheduler skip the ~/Desktop vault path
          and read the local config/reflections.yaml the installer copies. -->
