@@ -377,7 +377,8 @@ as `sha256:<hex>`. The probe never raises and never emits a credential.
 
 `improve:{project_key}:*`, with an explicit schema version (`tools/improvement_control/keys.py`),
 holding only what is research-specific: the case head and its journal, dispatch
-intents, lane-slot reservations, the case lease, and the unit-2 window.
+intents, lane-slot reservations, the case lease, the unit-2 window, and the
+promise detector's judged-ref set (`_ns:promise_judged`, lane 5).
 
 - `{case_id}:head` holds `{revision, state, epoch, highest_accepted, owner, updated_at,
   paused, pause_reason}`; `{case_id}:journal` is a bounded list of

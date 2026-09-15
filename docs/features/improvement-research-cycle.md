@@ -482,7 +482,9 @@ yes/no question per entry with the charter paragraph quoted. A `yes` writes a
 `confidence` = the judge's number) deduped on
 `source_ref="promise:{session_id}:{sha256(session_id + content)[:16]}"`;
 judged-but-clean entries are remembered in a plain Redis set under the
-improvement control namespace so a `no` is not bought again. The judge call is
+improvement control namespace (`keys.promise_judged_key`,
+`improve:{project}:_ns:promise_judged`, 30-day TTL) so a `no` is not bought
+again. The judge call is
 metered through `tools.paid_inference_meter` under `purpose="promise_detector"`
 (the meter is the reason the adapter exists as a spend: a refusal is a skip,
 never a failure) and the default transport is refused on a project
