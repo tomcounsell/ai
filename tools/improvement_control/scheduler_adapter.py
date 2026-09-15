@@ -66,6 +66,25 @@ def _project_root() -> str:
     return str(Path(__file__).resolve().parent.parent.parent)
 
 
+def _lane_slug(root: str) -> str | None:
+    """The lane slug when ``root`` is itself a ``.worktrees/<slug>`` checkout.
+
+    The executor gives a slugless eng session a synthetic slug and a fresh
+    worktree of its own, and refuses a pre-provisioned worktree on any other
+    branch (#1377). Dispatching from a lane worktree therefore names the lane,
+    so the research session runs in the checkout the case was proposed from;
+    a primary checkout names nothing and the executor's isolation stands.
+    """
+    from pathlib import Path
+
+    from agent.worktree_manager import WORKTREES_DIR
+
+    path = Path(root)
+    if path.parent.name == WORKTREES_DIR and path.name:
+        return path.name
+    return None
+
+
 def _open_case_rows(project_key: str):
     """One filter call per state (Popoto's IndexedField filter is exact-match,
     not IN) -- the same pattern ``ui/data/improvement.py``'s goals partial uses."""
@@ -230,12 +249,15 @@ def _admit_and_dispatch(project_key, case, generation, push, settings, result: T
     message_text = f"/improve-research case={case_id} action={action_id} type={action_type}"
     if proposal.artifact_ref:
         message_text += f" brief_ref={proposal.artifact_ref}"
+    root = _project_root()
+    lane = {"slug": _lane_slug(root)} if _lane_slug(root) else {}
     depth, agent_session_id = asyncio.run(
         push(
             project_key=project_key,
             session_id=str(uuid.uuid4()),
-            working_dir=_project_root(),
+            working_dir=root,
             message_text=message_text,
+            **lane,
             sender_name="improvement-controller",
             chat_id="0",
             telegram_message_id=0,

@@ -121,6 +121,35 @@ class RaiseOnceThenCountingPush(CountingPush):
         return await super().__call__(idempotency_key=idempotency_key, status=status, **kwargs)
 
 
+class TestLaneWorktreeSlug:
+    """The executor gives a slugless eng session a synthetic slug and demands
+    a fresh worktree on ``session/dev-<id>``; a pre-provisioned worktree on
+    another branch is refused (#1377). When the adapter itself runs from a
+    ``.worktrees/<slug>`` checkout, the dispatched session must carry that
+    slug so the executor trusts the lane worktree it was proposed from. From
+    a primary checkout the adapter passes no slug and the executor's own
+    isolation stands."""
+
+    def _dispatch(self, monkeypatch, root: str) -> dict:
+        monkeypatch.setattr("agent.session_health.any_worker_alive", lambda: False)
+        monkeypatch.setattr(adapter, "_project_root", lambda: root)
+        case = new_case()
+        propose(case.id, "a1")
+        push = CountingPush()
+        adapter.tick(PK, lease=fake_lease(), push=push)
+        return push.push_kwargs[0]
+
+    def test_a_lane_worktree_checkout_dispatches_under_its_slug(self, monkeypatch):
+        kwargs = self._dispatch(monkeypatch, "/repo/.worktrees/sdlc-3217")
+        assert kwargs["working_dir"] == "/repo/.worktrees/sdlc-3217"
+        assert kwargs["slug"] == "sdlc-3217"
+
+    def test_a_primary_checkout_dispatches_without_a_slug(self, monkeypatch):
+        kwargs = self._dispatch(monkeypatch, "/repo")
+        assert kwargs["working_dir"] == "/repo"
+        assert "slug" not in kwargs
+
+
 class TestReconciliationRequiredSkip:
     def test_case_with_a_wedged_intent_is_skipped_every_tick(self):
         from tools.improvement_control.intents import admit, mark_reconciliation_required
