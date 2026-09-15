@@ -640,7 +640,7 @@ class TestApplyVerdict:
         else:
             assert not row.rejected_reason
 
-    def test_reject_state_survives_projection(self, charter, store):
+    def test_apply_verdict_state_survives_projection(self, charter, store):
         case, experiment = frozen_pair(charter, store)
         evaluation = evaluation_for(experiment, verdict="reject", notes="mrr below margin")
         assert ex.apply_verdict(PK, evaluation.id).accepted
