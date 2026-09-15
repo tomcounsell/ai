@@ -261,6 +261,7 @@ _POPOTO_CONTEXT = [
     "ImprovementInvestigation",
     "ImprovementModelRevision",
     "ImprovementRelease",
+    "InfrastructureReservation",
     "Job",
     "KnowledgeDocument",
     "LastProcessedRecord",
