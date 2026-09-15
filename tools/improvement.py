@@ -581,6 +581,15 @@ def cmd_release_compare(args) -> int:
     return 0
 
 
+def cmd_ranking(args) -> int:
+    """``ranking [--at REF]``: the latest ranking snapshot, or the one named.
+    Thin: the reader and the renderer live in ``tools/improvement_ranking.py``
+    (lane 5, #3217)."""
+    from tools.improvement_ranking import cmd_ranking as run_ranking
+
+    return run_ranking(args, project_key=PROJECT_KEY)
+
+
 # --- lane 5 (#3217): the brief, investigations, model revisions, case open ---
 
 
@@ -937,6 +946,11 @@ def main(argv: list[str] | None = None) -> int:
     p_compare = release_sub.add_parser("compare")
     p_compare.set_defaults(func=cmd_release_compare)
 
+    # lane 5 (#3217): the planner's ranking snapshot
+    p = sub.add_parser("ranking")
+    p.add_argument("--at", default=None, help="a $CF: snapshot reference; default: the latest")
+    p.set_defaults(func=cmd_ranking)
+
     # lane 5 (#3217): the research session's own subcommands
     p = sub.add_parser("brief")
     p.add_argument("--case", required=True)
@@ -976,6 +990,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--rationale", required=True)
     p.add_argument("--prediction", required=True)
     p.set_defaults(func=cmd_revise_model)
+
+    # lane 5 (#3217): register the planner tick as one of lane 6's comparison
+    # arms, only when lane 6's module is importable. Method-body import in
+    # tools/improvement_plan_arm.py; nothing here imports lane 6 at module level.
+    try:
+        from tools.improvement_recursion.arms import register_arm_runner
+    except ImportError:
+        register_arm_runner = None
+    if register_arm_runner is not None:
+        from tools.improvement_plan_arm import PlannerArmRunner
+
+        register_arm_runner(PlannerArmRunner())
 
     args = parser.parse_args(argv)
     return args.func(args)
