@@ -1935,6 +1935,10 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 
 ## Critique Results
 
+Critique round 5 (verification of revision 4 at `a1eae369b`). Mode: independent roster (3 critics, `sonnet`, foreground, result-file barrier complete 3/3, all grounded). Verdict: READY TO BUILD (no concerns). No findings from the war room: all three critics confirmed the round-4 residue is gone, "controller head" and the seven-getter count appear nowhere outside these tables, and the rounds 2 and 3 embeddings are intact.
+
+### Round 4 (addressed; retained as the record)
+
 Critique round 4 (verification of revision 3 at `33500d185`). Mode: independent roster (3 critics, `sonnet`, foreground, result-file barrier complete 3/3, all grounded). Verdict: NEEDS REVISION (1 blocker reached independently by all three critics, 2 concerns, 0 nits). Every finding is residue of revision 3's own edit; items 2 (set_state then projection.apply), 3 (`BudgetUse.unit2_usd`), and the round-2 embeddings were verified intact by all three.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
