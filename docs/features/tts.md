@@ -30,11 +30,11 @@ Either stage failing marks Kokoro unavailable for the next 60 seconds and stores
 
 ### Voice handling
 
-The full Kokoro voice catalog (~40 voices) is in the upstream `voices.bin` file; `tools/tts/__init__.py:KOKORO_VOICES` ships a 10-voice subset known to work. OpenAI tts-1 has six fixed voices (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`).
+The full Kokoro voice catalog (54 voices) is in the upstream `voices.bin` file; `tools/tts/__init__.py:KOKORO_VOICES` ships a 12-voice subset known to work. OpenAI tts-1 has six fixed voices (`alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`).
 
 `_resolve_voice(voice, backend)` runs a five-step algorithm:
 
-1. `"default"` → backend canonical (`af_bella` for Kokoro, `nova` for cloud).
+1. `"default"` → backend canonical (`am_michael` for Kokoro, `nova` for cloud).
 2. Voice valid on the selected backend → use as-is.
 3. Voice valid on the *other* backend only → remap via `_VOICE_FALLBACK_MAP` and emit `tts.voice_remapped` at INFO.
 4. Unknown to both → return `{"error": ...}` *without* calling either backend.

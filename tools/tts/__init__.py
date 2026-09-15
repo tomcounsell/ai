@@ -31,8 +31,10 @@ KOKORO_VOICES: set[str] = {
     "af_sky",
     "am_adam",
     "am_michael",
+    "bf_alice",
     "bf_emma",
     "bf_isabella",
+    "bf_lily",
     "bm_george",
     "bm_lewis",
 }
@@ -52,8 +54,10 @@ _VOICE_FALLBACK_MAP: dict[str, str] = {
     "af_sky": "shimmer",
     "am_adam": "onyx",
     "am_michael": "echo",
+    "bf_alice": "fable",
     "bf_emma": "fable",
     "bf_isabella": "shimmer",
+    "bf_lily": "shimmer",
     "bm_george": "onyx",
     "bm_lewis": "echo",
     # OpenAI -> Kokoro (rough equivalents)
