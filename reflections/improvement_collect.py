@@ -966,8 +966,9 @@ def collect_promises(
     project (charter §7); an injected transport is the caller's responsibility.
 
     Order of gates, each a ``skipped`` entry and never a failure: the module
-    kill switch, ``promise_detector_enabled``, nothing new to judge, project
-    eligibility, a missing OpenRouter key, and the meter's refusal. One
+    kill switch, ``promise_detector_enabled``, project eligibility, a missing
+    OpenRouter key, and the meter's refusal. Nothing new to judge is plain
+    zero, not a skip, and reserves nothing. One
     reservation covers the tick's sample; it is settled from the transport's
     ``cost_usd``/``metering`` when it reports them and otherwise as the full
     reserved amount under ``metering="unknown"``, or released when no call was
