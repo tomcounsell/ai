@@ -74,20 +74,21 @@ class CountingPush:
         self.push_kwargs.append({"idempotency_key": idempotency_key, "status": status, **kwargs})
         if idempotency_key in self._bound:
             return (1, self._bound[idempotency_key])
-        session_id = f"improve-test-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
             message_text=kwargs.get("message_text", "x"),
             sender_name="improvement-controller",
-            session_id=session_id,
+            session_id=f"improve-test-{uuid.uuid4().hex[:8]}",
             working_dir=".",
             status=status,
             extra_context=kwargs.get("extra_context_overrides") or {},
         )
-        self._bound[idempotency_key] = session_id
-        return (1, session_id)
+        # The real seam returns the row's ``agent_session_id`` (the
+        # AutoKeyField hex id), never its ``session_id``.
+        self._bound[idempotency_key] = row.agent_session_id
+        return (1, row.agent_session_id)
 
 
 class RaiseOnceThenCountingPush(CountingPush):
@@ -104,18 +105,17 @@ class RaiseOnceThenCountingPush(CountingPush):
             # Simulate the crash landing AFTER the seam bound the idempotency
             # key (so a retry gets the same id), but before this function
             # returned it to the adapter.
-            session_id = f"improve-test-{uuid.uuid4().hex[:8]}"
-            AgentSession.create(
+            row = AgentSession.create(
                 project_key=PK,
                 chat_id="0",
                 session_type=SessionType.ENG,
                 message_text="x",
                 sender_name="improvement-controller",
-                session_id=session_id,
+                session_id=f"improve-test-{uuid.uuid4().hex[:8]}",
                 working_dir=".",
                 status=status,
             )
-            self._bound[idempotency_key] = session_id
+            self._bound[idempotency_key] = row.agent_session_id
             self.calls += 1
             raise RuntimeError("simulated crash after bind")
         return await super().__call__(idempotency_key=idempotency_key, status=status, **kwargs)
@@ -154,7 +154,7 @@ class TestAdmitMaterializeActivate:
         published = []
         monkeypatch.setattr(
             "agent.agent_session_queue.publish_session_notify",
-            lambda s: published.append((s.session_id, s.status)),
+            lambda s: published.append((s.agent_session_id, s.status)),
         )
         charter_digest = f"sha256:{uuid.uuid4().hex}"
         case = new_case(charter_digest=charter_digest)
@@ -229,7 +229,7 @@ class TestAdmitMaterializeActivate:
         published = []
         monkeypatch.setattr(
             "agent.agent_session_queue.publish_session_notify",
-            lambda s: published.append(s.session_id),
+            lambda s: published.append(s.agent_session_id),
         )
         case = new_case()
         propose(case.id, "a1")
@@ -303,7 +303,7 @@ class TestActivateRace7:
         result = adapter.tick(PK, lease=fake_lease(), push=push)
         assert result.skipped.get(case.id) == "no_live_worker"
         session_id = list(push._bound.values())[0]
-        session = AgentSession.query.get(session_id=session_id)
+        session = AgentSession.get_by_id(session_id)
         if row_status is None:
             session.delete()
         elif row_status == "completed":
@@ -322,7 +322,7 @@ class TestActivateRace7:
         published = []
         monkeypatch.setattr(
             "agent.agent_session_queue.publish_session_notify",
-            lambda s: published.append(s.session_id),
+            lambda s: published.append(s.agent_session_id),
         )
         case, session_id, push = self._materialized_case(monkeypatch, "pending")
         result = adapter.tick(PK, lease=fake_lease(), push=push)
@@ -335,13 +335,13 @@ class TestActivateRace7:
         published = []
         monkeypatch.setattr(
             "agent.agent_session_queue.publish_session_notify",
-            lambda s: published.append(s.session_id),
+            lambda s: published.append(s.agent_session_id),
         )
         case, session_id, push = self._materialized_case(monkeypatch, "running")
         result = adapter.tick(PK, lease=fake_lease(), push=push)
         assert published == []
         assert case.id not in result.activated
-        session = AgentSession.query.get(session_id=session_id)
+        session = AgentSession.get_by_id(session_id)
         assert session.status == "running"
         intents = list_intents(PK, case.id)
         assert intents[0].state == "running"

@@ -376,7 +376,7 @@ class TestProposeUnderAgentSessionId:
         digest = pinned_digest()
         case = new_case(digest=digest)
         session_id = f"test-cli-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -386,7 +386,7 @@ class TestProposeUnderAgentSessionId:
             working_dir=".",
             extra_context={},
         )
-        monkeypatch.setenv("AGENT_SESSION_ID", session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", row.agent_session_id)
         payload_file = tmp_path / "payload.json"
         payload_file.write_text('{"hypothesis": "x"}')
 
@@ -451,7 +451,7 @@ class TestProposeUnderAgentSessionId:
         digest = pinned_digest()
         case = new_case(digest=digest)
         session_id = f"test-cli-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -461,7 +461,7 @@ class TestProposeUnderAgentSessionId:
             working_dir=".",
             extra_context={"action_id": "a1", "research_case_id": case.id},
         )
-        monkeypatch.setenv("AGENT_SESSION_ID", session_id)
+        monkeypatch.setenv("AGENT_SESSION_ID", row.agent_session_id)
         payload_file = tmp_path / "payload.json"
         payload_bytes = b'{"hypothesis": "refused but kept"}'
         payload_file.write_bytes(payload_bytes)
@@ -480,6 +480,72 @@ class TestProposeUnderAgentSessionId:
         assert len(rows) == 1
         assert rows[0].detail.startswith("$CF:")
         assert VerifyingArtifactStore().load(rows[0].detail) == payload_bytes
+
+    def test_propose_from_the_dispatched_research_session_is_accepted(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """The production path: the worker exports ``AGENT_SESSION_ID`` as the
+        row's ``agent_session_id`` (the AutoKeyField hex id, what the scheduler
+        adapter bound on the intent), never its ``session_id``. The CLI must
+        resolve its own row from that id, present the running intent's
+        ``action_id``, and pass the Race 4b fence with the same id."""
+        from models.agent_session import AgentSession, SessionType
+        from tools.improvement_control.intents import record_materialized, record_running
+
+        digest = pinned_digest()
+        case = new_case(digest=digest)
+        r = transition(
+            PK,
+            case.id,
+            expected_revision=0,
+            generation=1,
+            event="action_proposed",
+            payload_digest="sha256:d",
+            action_id="a1",
+        )
+        assert r.accepted, r
+        r = admit(
+            PK,
+            case.id,
+            "a1",
+            expected_revision=r.revision,
+            generation=1,
+            action_type="investigate",
+            max_concurrent=5,
+        )
+        assert r.accepted, r
+        row = AgentSession.create(
+            project_key=PK,
+            chat_id="0",
+            session_type=SessionType.ENG,
+            message_text="x",
+            sender_name="improvement-controller",
+            session_id=str(uuid.uuid4()),
+            working_dir=".",
+            status="running",
+            extra_context={"action_id": "a1", "research_case_id": case.id},
+        )
+        r = record_materialized(
+            PK,
+            case.id,
+            "a1",
+            expected_revision=r.revision,
+            generation=1,
+            agent_session_id=row.agent_session_id,
+        )
+        assert r.accepted, r
+        r = record_running(PK, case.id, "a1", expected_revision=r.revision, generation=1)
+        assert r.accepted, r
+        monkeypatch.setenv("AGENT_SESSION_ID", row.agent_session_id)
+        payload_file = tmp_path / "payload.json"
+        payload_file.write_text('{"hypothesis": "from the session"}')
+
+        code, payload = run_cli(
+            ["propose", "--case", case.id, "--payload", str(payload_file)], capsys
+        )
+        assert (code, payload.get("reason")) == (0, None), payload
+        assert payload["action_id"] == "a1"
+        assert journal_tail(PK, case.id, 1)[-1]["action_id"] == "a1"
 
     def test_propose_refuses_when_the_store_write_fails(self, capsys, monkeypatch, tmp_path):
         """The one filesystem write in `propose` is a reason-coded boundary

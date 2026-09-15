@@ -295,11 +295,8 @@ def _activate(
     """Data Flow step 8 / Race 7: re-read the row fresh and branch on what a
     retry actually finds, never on what this tick assumed at its start."""
     from agent.session_health import any_worker_alive
-    from models.session_lifecycle import (
-        TERMINAL_STATUSES,
-        get_authoritative_session,
-        transition_status,
-    )
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import TERMINAL_STATUSES, transition_status
 
     action_id = intent.action_id
     agent_session_id = intent.agent_session_id
@@ -311,7 +308,11 @@ def _activate(
         result.skipped[case_id] = "no_live_worker"
         return
 
-    fresh = get_authoritative_session(agent_session_id) if agent_session_id else None
+    # The intent carries the row's ``agent_session_id`` (the AutoKeyField hex
+    # id the push seam returned), so the lookup is by id, never by
+    # ``session_id``: ``get_authoritative_session`` filters on the latter and
+    # reports every dispatched row as missing.
+    fresh = AgentSession.get_by_id(agent_session_id)
     if fresh is None:
         result.skipped[case_id] = "session_row_missing"
         return

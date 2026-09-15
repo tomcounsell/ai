@@ -27,16 +27,18 @@ def _emit(args, human: str, payload: dict) -> None:
 
 def _own_session():
     """The calling process's own AgentSession row, resolved through
-    AGENT_SESSION_ID (the worker exports it to every harness subprocess).
-    Returns None when unset (an operator at a terminal -- break-glass)."""
+    AGENT_SESSION_ID (the worker exports the row's ``agent_session_id``, the
+    AutoKeyField hex id, to every harness subprocess; the lookup is by that
+    id, never by ``session_id``). Returns None when unset (an operator at a
+    terminal -- break-glass)."""
     import os
 
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
+    agent_session_id = os.environ.get("AGENT_SESSION_ID")
+    if not agent_session_id:
         return None
-    from models.session_lifecycle import get_authoritative_session
+    from models.agent_session import AgentSession
 
-    return get_authoritative_session(session_id)
+    return AgentSession.get_by_id(agent_session_id)
 
 
 def _acquire_lease(case_id: str):
@@ -114,7 +116,7 @@ def cmd_propose(args) -> int:
             )
             return 1
         action_id = ec["action_id"]
-        agent_session_id = session.session_id
+        agent_session_id = session.agent_session_id
     elif not action_id:
         # Break-glass: mint one so the proposal is admittable. The scheduler
         # adapter skips a journaled proposal with an empty action_id forever.
