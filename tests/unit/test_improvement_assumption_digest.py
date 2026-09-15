@@ -131,24 +131,10 @@ def outside_quoted_bodies(text: str) -> str:
 
 
 class TestStatusReportNotQuestion:
-    def test_silence_validates_nothing(self):
-        pk = fresh_pk()
-        assumption_row(pk, case(pk).id)
-        sender = Sender()
-
-        result = run(pk, sender)
-
-        assert result["status"] == "success"
-        assert len(sender.messages) == 1
-        assert sender.messages[0].rstrip().endswith(digest.CLOSING_LINE)
-        assert digest.CLOSING_LINE == (
-            "This is a status report. It asks nothing. Silence validates none of the "
-            "above; each assumption stands until evidence overturns it."
-        )
-
-    def test_asks_nothing(self):
-        """No ``?`` outside a quoted assumption body, even when the bodies
-        themselves carry one, and no poll or question symbol imported."""
+    def test_silence_validates_nothing_and_asks_nothing(self):
+        """The rendered digest ends on the fixed closing line and carries no
+        ``?`` outside a quoted assumption body, even when every body has one
+        and every section is present."""
         pk = fresh_pk()
         c = case(pk, blocked_by="vault:meta_model_api")
         assumption_row(
@@ -168,12 +154,21 @@ class TestStatusReportNotQuestion:
         )
         sender = Sender()
 
-        run(pk, sender)
+        result = run(pk, sender)
 
+        assert result["status"] == "success"
+        assert len(sender.messages) == 1
         rendered = sender.messages[0]
+        assert rendered.rstrip().endswith(digest.CLOSING_LINE)
+        assert digest.CLOSING_LINE == (
+            "This is a status report. It asks nothing. Silence validates none of the "
+            "above; each assumption stands until evidence overturns it."
+        )
         assert "?" in rendered  # the quoted bodies keep their own text
         assert "?" not in outside_quoted_bodies(rendered)
 
+    def test_no_question_symbol_imported(self):
+        """No poll or ``AskUserQuestion`` symbol anywhere in the module."""
         source = inspect.getsource(digest)
         assert "AskUserQuestion" not in source
         assert "poll" not in source.lower()
