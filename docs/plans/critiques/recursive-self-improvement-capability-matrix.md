@@ -19,7 +19,7 @@ Column meanings, stated once so nothing is graded on a sliding scale:
 | **Measured** | Someone has read a number off it that came from real traffic, not a fixture |
 | **Effect** | What we can honestly say about whether it helps. `unknown` is the correct answer for everything shipped this week |
 
-State as of lane 4 (#3177). Later lanes update this file rather than starting a
+State as of lane 6 (#3177). Later lanes update this file rather than starting a
 new one.
 
 ## Lane 1 — autoexperiment retirement
@@ -181,12 +181,48 @@ in tests, and the control loop that would freeze a real experiment is lane
 there are none yet, so the first real run will report `infra_failure` from the
 calibration floor, on purpose.
 
+## Lane 6: promotion, rollback drills, and the recursive comparison
+
+| Component | Implemented | Deployed | Measured | Effect |
+|---|---|---|---|---|
+| Release lifecycle (`tools/improvement_release/lifecycle.py`): six states, every transition a guarded function, `ReleaseRefused` closed vocabulary, bounded history | yes | no: every transition is operator-invoked through `valor-improve-release`; nothing calls it on a schedule or in a request path | no: no production `ImprovementRelease` row exists; the only rows ever written live in claimed test dbs | n/a |
+| `ImprovementRelease` lane-6 fields, `accepted` state, `confirm_improvement_release_lane6_fields` migration | yes | on the next `/update` per machine | no | n/a: storage, not behavior |
+| Rollback drill (`drill.py`): throwaway worktree under the retention root, three pre-revert range checks, range revert, per-surface and whole-tree restoration, timed `verify`, `exercised`/`not_exercised` record, `drill_log` on the verifying store, `--sweep` | yes | no | **measurable in a worktree**: `tests/integration/test_improvement_release_drill.py` runs the whole path against a real temporary git repository, a real `ImprovementRelease` row in a claimed test db, and the real `SubprocessRunner`, and reads `pass` with the transcript re-hashed on load. A `pass` proves a range revert on a candidate branch restores the tree; `not_exercised` names the fleet update, production traffic, and the `-m 1` merge-commit revert the real rollback runs. No drill has run against a production release row, because none exists | unknown |
+| Real rollback (`lifecycle.rollback`): fetch-first parent, revert of the merge on `origin/<target>`, push gate confirmed by `ls-remote`, `ROLLBACK_PUSH_REFUSED` with the orphaned revert recorded | yes | no | no: never run against a real release; the push gate and the fetch-before-worktree order are proven by recording-runner tests and mutation | unknown |
+| Exposure anchored on `mergedAt`, frozen baseline over `[merged_at - baseline_days, merged_at)`, window restamp, `EVIDENCE_EXPIRED` at expose | yes | no | no: `gh pr view` is canned in every test | n/a |
+| Observation window (`observation.py`): raw counts beside every rate, `EVIDENCE_TRUNCATED`, Wilson band, 0.8 detection-decline ratio, `claim_level_2_supported`, falsifier | yes | no | no: no window has been observed on real traffic; `ImprovementEvidence` is empty while `IMPROVEMENT__ENABLED` is off | unknown |
+| Promotion gate (`promotion.py`): `automated=False`, both preconditions named, `promote_automatically` raises on every call; no setting, env key, or file flag reads into it | yes | yes: the gate answer is read by the releases partial on every dashboard load and recorded on every approval | **yes**: against the real pinned charter v2 the gate reports both preconditions unmet, checked by a Verification row | n/a: it refuses; automated promotion is **not implemented, by design** |
+| Candidate-surface denylist (`denylist.py`): charter, charter model, identity, this package, secrets files, git hooks; normalized paths, globs and escapes refused | yes | yes: consulted by every `propose` | **yes**: a Verification row runs it against the charter paths | n/a. It catches only what it names; a candidate editing `models/__init__.py` or the loader's owner check from another file passes it, and the loader's owner refusal and the pinned-digest gate are the other two guards |
+| Research process digest (`tools/improvement_recursion/process.py`): canonical bytes, one hashing routine shared with lane 5 | yes | no writer yet: lane 5 sets `research_process_digest` on revisions by importing this function; the cross-lane byte test skips until `tools/improvement_ranking.py` lands | no | n/a |
+| Freshness by record lookup (`freshness.py`) | yes | no | no | n/a |
+| Budget accounting (`budget.py`): four units, `LedgerBudgetReader` unit 3 by `arm:<run>:` prefix, `None` on zero rows, `budgets_comparable` | yes | no | **partly measurable**: unit 3 reads real ledger rows through the same `admit()`/`settle()` path a production arm takes. **Unit 2 (paid inference) has no arm-scoped read**; lane 3's meter windows the daily pool with no `arm_run_id`, so `unit2_usd` answers `None`, so every comparison today refuses a claim with `BUDGET_UNKNOWN:unit2`; unit 1 is the subscription lane slot, accounted as `subscription_turns` | n/a |
+| Comparison (`compare.py`): frozen contract through lane 4's `freeze_protocol`, two arm seams (`--arm-runner` lazy import, in-process registry), seeded arm order, paired deltas clustered by `priority_area`, Holm, one evaluation in lane 4's string shapes, new-then-supersede revision write, `REVISION_CONFLICT` | yes | no | no: every run uses `ReplayArmRunner` fixtures. **The production `ArmRunner` is lane 5's** planner tick and does not exist; without it `compare run` is `ARM_RUNNER_ABSENT` or replays fixtures | unknown |
+| Claim report (`report.py`): three ladder levels, each degrading independently, interval, correction, falsifier, `why_not`; no counts | yes | yes: `valor-improve-release report` and the releases partial | **yes, trivially**: on the real project it reports all three levels unsupported (no complete cycle, no accepted release, no comparison) | n/a: the report says what is true, and today that is "unsupported" three times |
+| Dashboard releases partial and `get_release_lineage` (sixth getter beside lane 3's `get_control_status`, pinned list) | yes | yes | no | n/a |
+| `valor-improve-release` entry point | yes | with the next `/update` (editable reinstall) | no | n/a |
+
+**The honest reading of this lane.** Every capability the parent plan asked
+for in a release is implemented and guarded, and every guard has a red-state
+proof. None of it has been exercised on a real release, because no evaluation
+has produced a real `accept` verdict: the control loop that would freeze one
+shipped with lane 3, and the research process that would drive it is lane 5's. Three
+things are not implemented and the code says so: automated promotion (the
+gate refuses and names the two events that would change that, neither of
+which is this codebase's to produce), an arm-scoped unit-2 read (lane 3's
+meter ships, but windows the daily pool with no `arm_run_id` to sum over),
+and the production arm runner (lane 5). Every drill that has run was
+against a temporary repository in a test db, and its record names what it did
+not rehearse. No level-2 or level-3 claim is supported, and the report says
+so.
+
 ## Not built, by lane
 
 | Component | Owning lane | Blocked on |
 |---|---|---|
-| Observer→planner loop, investigations, first journey-preservation experiment | 5 | nothing (lanes 3 and 4 both shipped; see their sections above) |
-| Release records, exposure, rollback, recursive comparison | 6 | lane 5 |
+| Observer→planner loop, investigations, first journey-preservation experiment | 5 | nothing (lanes 3, 4, and 6 all shipped; see their sections above) |
+| Production `ArmRunner` (the planner tick under a pinned process spec) and the writer of planner-tick `ImprovementModelRevision` rows | 5 | lane 5 |
+| Arm-scoped unit-2 read (`BudgetReader.unit2_usd` answers `None`; lane 3's meter windows the daily pool and carries no `arm_run_id`) | 5 | an arm's inference reservations carrying the arm |
+| Automated promotion | none | two events outside the codebase: credential separation from candidate execution, and a Tom-amended charter naming the reversible surfaces. The gate refuses until both |
 
 ## Five questions the plan asked, and where they stand
 

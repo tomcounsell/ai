@@ -47,8 +47,9 @@ snapshot raises ``ArtifactIntegrityError`` on load rather than rendering.
 The newest reference lives on ``ImprovementControllerState.last_snapshot_ref``.
 
 **This module hashes no process spec.** :func:`process_spec_json` produces
-the canonical bytes lane 6's ``research_process_digest`` hashes; the digest
-function is lane 6's and only lane 6's.
+the canonical JSON text whose UTF-8 bytes lane 6's
+``tools.improvement_recursion.process.research_process_digest`` hashes; the
+digest function is lane 6's and only lane 6's.
 """
 
 from __future__ import annotations
@@ -461,15 +462,18 @@ PROCESS_SPEC_FIELDS: tuple[str, ...] = (
 )
 
 
-def process_spec_json(spec) -> bytes:
-    """Canonical bytes of a research process spec: ``json.dumps(asdict(spec),
-    sort_keys=True, separators=(",", ":"))``, UTF-8. Accepts any dataclass or
-    plain dict carrying :data:`PROCESS_SPEC_FIELDS`."""
+def process_spec_json(spec) -> str:
+    """Canonical JSON text of a research process spec: ``json.dumps(asdict(spec),
+    sort_keys=True, separators=(",", ":"))``. Its UTF-8 encoding is exactly
+    what ``tools.improvement_recursion.process.research_process_digest``
+    hashes (that module's ``canonical_bytes``), and the text is what
+    ``ImprovementModelRevision.research_process_spec`` stores. Accepts any
+    dataclass or plain dict carrying :data:`PROCESS_SPEC_FIELDS`."""
     payload = dataclasses.asdict(spec) if dataclasses.is_dataclass(spec) else dict(spec)
     missing = [name for name in PROCESS_SPEC_FIELDS if name not in payload]
     if missing:
         raise ValueError(f"process spec is missing {missing}")
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 # ---------------------------------------------------------------------------

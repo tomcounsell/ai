@@ -733,15 +733,10 @@ def _research_process_spec_values() -> dict:
 
 
 def _research_process_spec_text(values: dict) -> str:
-    """Canonical spec JSON through ``tools.improvement_ranking.process_spec_json``
-    (bytes, decoded) when it is importable, else the same canonical form
-    built here: ``json.dumps(values, sort_keys=True, separators=(",", ":"))``."""
-    try:
-        from tools.improvement_ranking import process_spec_json
-    except ImportError:
-        return json.dumps(values, sort_keys=True, separators=(",", ":"))
-    encoded = process_spec_json(values)
-    return encoded.decode("utf-8") if isinstance(encoded, bytes) else str(encoded)
+    """Canonical spec JSON text through ``tools.improvement_ranking.process_spec_json``."""
+    from tools.improvement_ranking import process_spec_json
+
+    return process_spec_json(values)
 
 
 def cmd_revise_model(args) -> int:

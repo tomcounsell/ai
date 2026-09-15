@@ -750,6 +750,14 @@ class TestImprovementMigrationRegistration:
         assert fn is _migrate_improvement_evaluation_charter_digest
         assert description
 
+    def test_confirm_improvement_release_lane6_fields_registered(self):
+        from scripts.update.migrations import _migrate_confirm_improvement_release_lane6_fields
+
+        assert "confirm_improvement_release_lane6_fields" in MIGRATIONS
+        fn, description = MIGRATIONS["confirm_improvement_release_lane6_fields"]
+        assert fn is _migrate_confirm_improvement_release_lane6_fields
+        assert description
+
     def test_improvement_investigation_stage_field_marker_exists(self):
         from scripts.update.migrations import _migrate_improvement_investigation_stage_field
 

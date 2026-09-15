@@ -17,7 +17,6 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | `update.txt` | Update status file | Overwritten each update |
 | `checkpoints/` | Session checkpoint data for resume | Pruned automatically by checkpoint manager |
 | `experiments/` | Legacy autoexperiment corpora, retained as evidence (#3177 removed the script). See `experiments/README.md` | Retain indefinitely; do not prune |
-| `improvement_content/` | Retention root for improvement-controller artifacts (experiment manifests, judge envelopes) written through `models/verifying_artifact_store.py`. Content-addressed; every load is re-hashed. Override with `POPOTO_IMPROVEMENT_CONTENT_PATH` | Retain while the evaluation citing an artifact is retained; deleting one invalidates that verdict's evidence |
 | `media/` | Downloaded media files from Telegram | Pruned after processing |
 | `pipeline/` | SDLC pipeline state files (one subdir per slug) | Cleaned up when PRs merge |
 | `process_state/` | Process-level state tracking | Ephemeral; auto-recreated |
@@ -38,3 +37,4 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 - Never delete `valor_bridge.session` while the bridge is running -- it will disconnect from Telegram
 - The `pipeline/` directory grows with each SDLC build; clean up after PR merges
 - All paths are relative to the project root and referenced via `config/paths.py` constants
+- Improvement-controller artifacts live outside this directory and outside every checkout, under the retention root `~/.popoto/improvement_content` (`POPOTO_IMPROVEMENT_CONTENT_PATH`): experiment manifests, judge envelopes, and drill transcripts written through `models/verifying_artifact_store.py` (content-addressed, re-hashed on every load; deleting one invalidates the verdict that cites it), plus rollback-drill worktrees under `drills/<release id>/<timestamp>/`, swept by `valor-improve-release drill --sweep`. See [Improvement Controller](../docs/features/improvement-controller.md) and [Improvement Release](../docs/features/improvement-release.md)

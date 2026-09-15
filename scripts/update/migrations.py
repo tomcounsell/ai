@@ -1527,6 +1527,27 @@ def _migrate_improvement_evaluation_charter_digest(project_dir: Path) -> str | N
     )
 
 
+def _migrate_confirm_improvement_release_lane6_fields(project_dir: Path) -> str | None:
+    """Confirm the lane-6 release fields on ImprovementRelease (issue #3218).
+
+    Purely additive to one existing model: ``ImprovementRelease`` gains
+    ``kind``, ``candidate_ref``, ``base_revision``, ``exposed_at``,
+    ``observation``, ``rollback_drill``, ``promotion_gate``, and the
+    ``drill_log`` ContentField, all plain and unindexed, and ``RELEASE_STATES``
+    gains ``accepted`` on the existing ``state`` index. No field is removed,
+    no index set is stripped, nothing is backfilled.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the release lifecycle: without it
+    there is no record on a machine that the fields were ever registered, and
+    a later subtractive migration has no predecessor to reason from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        ("ImprovementRelease",),
+    )
+
+
 def _migrate_improvement_investigation_stage_field(project_dir: Path) -> str | None:
     """Confirm the lane 5 research-cycle fields (issue #3217) read cleanly.
 
@@ -1738,6 +1759,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_improvement_evaluation_charter_digest,
         "Register the charter_digest field on ImprovementEvaluation (issue "
         "#3216) and confirm its keyspace resolves",
+    ),
+    "confirm_improvement_release_lane6_fields": (
+        _migrate_confirm_improvement_release_lane6_fields,
+        "Register the lane-6 release lifecycle fields and the accepted state on "
+        "ImprovementRelease (issue #3218) and confirm its keyspace resolves",
     ),
     "improvement_investigation_stage_field": (
         _migrate_improvement_investigation_stage_field,

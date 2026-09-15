@@ -448,6 +448,22 @@ FIXTURE_SPEC_BYTES = (
 
 
 def test_process_spec_canonical_bytes():
-    assert process_spec_json(FIXTURE_SPEC) == FIXTURE_SPEC_BYTES
-    assert process_spec_json(dataclasses.asdict(FIXTURE_SPEC)) == FIXTURE_SPEC_BYTES
+    """The text's UTF-8 bytes are the exact bytes lane 6 hashes
+    (``tools.improvement_recursion.process.canonical_bytes``)."""
+    from tools.improvement_recursion.process import (
+        ResearchProcessSpec,
+        canonical_bytes,
+        research_process_digest,
+    )
+
+    text = process_spec_json(FIXTURE_SPEC)
+    assert isinstance(text, str)
+    assert text.encode("utf-8") == FIXTURE_SPEC_BYTES
+    assert process_spec_json(dataclasses.asdict(FIXTURE_SPEC)).encode("utf-8") == FIXTURE_SPEC_BYTES
     assert json.loads(FIXTURE_SPEC_BYTES) == dataclasses.asdict(FIXTURE_SPEC)
+    real = ResearchProcessSpec(**dataclasses.asdict(FIXTURE_SPEC))
+    assert canonical_bytes(real) == FIXTURE_SPEC_BYTES
+    assert (
+        research_process_digest(real)
+        == "sha256:" + __import__("hashlib").sha256(FIXTURE_SPEC_BYTES).hexdigest()
+    )

@@ -453,6 +453,22 @@ def create_app() -> FastAPI:
             },
         )
 
+    @app.get("/_partials/improvement/releases/", response_class=HTMLResponse)
+    def partial_improvement_releases(request: Request, project_key: str = "valor"):
+        """HTMX partial: release lineage and the promotion gate (#3218).
+
+        One row per release, each joined to what qualified it and what
+        happened after exposure, and the gate rendered as a sentence whether
+        or not the release table could be read. Lineage, never a count.
+        """
+        from ui.data.improvement import get_release_lineage
+
+        return templates.TemplateResponse(
+            request,
+            "improvement/releases.html",
+            {"lineage": get_release_lineage(project_key=project_key)},
+        )
+
     @app.get("/session/{agent_session_id}/modal-content", response_class=HTMLResponse)
     def session_modal_content(request: Request, agent_session_id: str):
         """HTMX partial: session detail content for modal."""
