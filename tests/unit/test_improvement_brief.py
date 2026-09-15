@@ -118,6 +118,30 @@ class TestOrder:
         assert "No evidence rows are attached to this case" in text
         assert "no ranking snapshot yet" in text
 
+    def test_ranking_position_and_factors_come_from_the_real_snapshot(self, tmp_path):
+        """The snapshot's ``order`` is the list of ``RankedCase.as_dict()``
+        entries ``write_snapshot`` writes, never bare ids."""
+        from models.improvement_controller_state import ImprovementControllerState
+        from models.verifying_artifact_store import VerifyingArtifactStore
+        from tools.improvement_ranking import rank, write_snapshot
+
+        charter = seed_charter()
+        other = seed_case(charter, priority_area="skills")
+        case = seed_case(charter, evidence=2)
+        store = VerifyingArtifactStore(base_path=str(tmp_path / "content"))
+        ranked = rank(
+            [other, case], evidence=[], investigations=[], experiments=[], charter=charter
+        )
+        ref = write_snapshot(ranked, previous_ref=None, charter_digest=charter.digest, store=store)
+        ImprovementControllerState.get_or_create(PK).record(last_snapshot_ref=ref)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", str(tmp_path / "content"))
+            text = brief.build_brief(case.id, PK)
+        mine = next(r for r in ranked if r.case_id == case.id)
+        assert f"Ranking: position {mine.position} of 2" in text
+        assert "Factors: " + ", ".join(f"{k}={v}" for k, v in sorted(mine.factors.items())) in text
+        assert "not in the latest snapshot" not in text
+
     def test_evidence_is_capped_newest_first_with_the_truncation_stated(self):
         charter = seed_charter()
         case = seed_case(charter, evidence=brief.BRIEF_MAX_EVIDENCE + 3)

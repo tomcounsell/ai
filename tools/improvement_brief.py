@@ -177,15 +177,17 @@ def _ranking_lines(case_id: str, project_key: str) -> list[str]:
             return snapshot.get(name)
         return getattr(snapshot, name, None)
 
-    order = list(pick("order") or [])
-    factors = pick("factors") or {}
-    if case_id not in order:
+    # ``order`` is the list of ``RankedCase.as_dict()`` entries the snapshot
+    # writer stores: ``{"case_id", "position", "factors", "reason", "blocked_by"}``.
+    order = [entry for entry in (pick("order") or []) if isinstance(entry, dict)]
+    mine = next((entry for entry in order if entry.get("case_id") == case_id), None)
+    if mine is None:
         return [f"Ranking: not in the latest snapshot ({len(order)} case(s) ranked)"]
-    position = order.index(case_id) + 1
+    position = mine.get("position") or order.index(mine) + 1
     lines = [f"Ranking: position {position} of {len(order)}"]
-    mine = factors.get(case_id) if isinstance(factors, dict) else None
-    if isinstance(mine, dict):
-        lines.append("Factors: " + ", ".join(f"{k}={mine[k]}" for k in sorted(mine)))
+    factors = mine.get("factors")
+    if isinstance(factors, dict):
+        lines.append("Factors: " + ", ".join(f"{k}={factors[k]}" for k in sorted(factors)))
     return lines
 
 
