@@ -87,6 +87,14 @@ IMPROVEMENT_INTENT_RECONCILE_CALLABLE = (
     "reflections.improvement_intent_reconcile.run_improvement_intent_reconcile"
 )
 
+IMPROVEMENT_PLANNER_NAME = "improvement-planner-tick"
+IMPROVEMENT_PLANNER_CALLABLE = "reflections.improvement_plan.run_improvement_planner"
+
+IMPROVEMENT_ASSUMPTION_DIGEST_NAME = "improvement-assumption-digest"
+IMPROVEMENT_ASSUMPTION_DIGEST_CALLABLE = (
+    "reflections.improvement_assumption_digest.run_improvement_assumption_digest"
+)
+
 # Reflections whose callables have been deleted from the repo. Each name is
 # removed from the vault registry on /update (the reflection counterpart of
 # hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
@@ -695,6 +703,52 @@ def register_improvement_intent_reconcile(project_dir: Path) -> RegisterResult:
         callable_path=IMPROVEMENT_INTENT_RECONCILE_CALLABLE,
         description="Sweep stale dispatch intents, release lane slots, force terminal rows (#3215)",
         cadence="300s",
+        priority="normal",
+    )
+
+
+def register_improvement_planner(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-planner-tick`` reflection is registered (#3217).
+
+    The planner tick opens cases from evidence, ranks them, and proposes one
+    action per tick for lane 3's adapter to dispatch. Cadence is
+    ``ImprovementSettings.controller_tick_seconds`` (default 900), the same
+    source the controller tick reads, so the two run on one clock. Registered
+    regardless of ``ImprovementSettings.enabled``; the tick itself returns
+    ``skipped`` while the switch is off. Machine pinning is inherited from
+    ``register_reflection``.
+    """
+    from config.settings import settings
+
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_PLANNER_NAME,
+        callable_path=IMPROVEMENT_PLANNER_CALLABLE,
+        description="Open improvement cases from evidence, rank them, propose one action (#3217)",
+        cadence=f"{settings.improvement.controller_tick_seconds}s",
+        priority="normal",
+    )
+
+
+def register_improvement_assumption_digest(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-assumption-digest`` reflection is registered (#3217).
+
+    A three-day status report of new provisional assumptions, acquired
+    resources, and budget overruns, sent as a plain message that asks nothing.
+    ``cadence="259200s"`` (spike-5: the register seam takes a free-form
+    cadence) and no custom timeout. The callable's module is built by a later
+    task; registration names the path and never imports it, so this function
+    is safe to run before that module exists. Machine pinning is inherited.
+    """
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_ASSUMPTION_DIGEST_NAME,
+        callable_path=IMPROVEMENT_ASSUMPTION_DIGEST_CALLABLE,
+        description=(
+            "Three-day digest of new improvement assumptions, acquired resources, "
+            "and overruns (#3217)"
+        ),
+        cadence="259200s",
         priority="normal",
     )
 

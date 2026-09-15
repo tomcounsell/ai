@@ -20,9 +20,10 @@ depends on it is skipped:
 (c) Keep-alive and unblock. Every ``awaiting_authorization`` investigation
     and every ``resource_acquisition`` investigation with disposition
     ``vault_request_written`` gets a ``save()`` so its 30-day TTL restarts
-    from this tick (the disposition is read from the row's
-    ``assumption_detail`` JSON ``disposition`` key, then ``claims``/``sources``
-    when either is a JSON object carrying one). Every open case whose
+    from this tick (the disposition is the ``disposition`` key of the
+    ``claims`` JSON envelope ``tools.improvement_investigations`` writes,
+    with ``assumption_detail`` and ``sources`` read the same way as
+    fallbacks). Every open case whose
     ``blocked_by`` names a vault item is checked against one
     ``tools.improvement_resources.probe()`` per tick (run only when some case
     is blocked): ``name = blocked_by.removeprefix("vault:")``, and a report
@@ -655,7 +656,7 @@ def open_cases(project_key: str, charter, *, evidence=None, watermark: str | Non
 
 
 def _disposition(row) -> str | None:
-    for name in ("assumption_detail", "claims", "sources"):
+    for name in ("claims", "assumption_detail", "sources"):
         obj = _json_object(getattr(row, name, None))
         if obj and obj.get("disposition"):
             return str(obj["disposition"])

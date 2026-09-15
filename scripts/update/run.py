@@ -172,6 +172,8 @@ class UpdateResult:
     improvement_collect_register_result: reflection_register.RegisterResult | None = None
     improvement_controller_tick_register_result: reflection_register.RegisterResult | None = None
     improvement_intent_reconcile_register_result: reflection_register.RegisterResult | None = None
+    improvement_planner_register_result: reflection_register.RegisterResult | None = None
+    improvement_assumption_digest_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
@@ -1329,6 +1331,40 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not icr.success:
             log(f"WARN: improvement-evidence-collect registration: {icr.detail}", v, always=True)
             _append_warning(result, f"improvement-evidence-collect registration: {icr.detail}")
+
+        # Step 1.65855: Ensure the lane-5 planner tick and the three-day
+        # assumption digest are registered (#3217). Same generalized register
+        # path, same ordering rationale as Step 1.6585; the planner shares the
+        # controller tick's cadence source and the digest runs every three days.
+        log("Ensuring improvement-planner-tick reflection is registered...", v)
+        result.improvement_planner_register_result = (
+            reflection_register.register_improvement_planner(project_dir)
+        )
+        ipr = result.improvement_planner_register_result
+        if ipr.action == "registered":
+            log("improvement-planner-tick reflection registered in vault reflections.yaml", v)
+        elif ipr.action == "noop":
+            log("improvement-planner-tick reflection already registered", v)
+        elif ipr.action == "skipped":
+            log(f"improvement-planner-tick registration skipped: {ipr.detail}", v)
+        if not ipr.success:
+            log(f"WARN: improvement-planner-tick registration: {ipr.detail}", v, always=True)
+            _append_warning(result, f"improvement-planner-tick registration: {ipr.detail}")
+
+        log("Ensuring improvement-assumption-digest reflection is registered...", v)
+        result.improvement_assumption_digest_register_result = (
+            reflection_register.register_improvement_assumption_digest(project_dir)
+        )
+        iadr = result.improvement_assumption_digest_register_result
+        if iadr.action == "registered":
+            log("improvement-assumption-digest reflection registered in vault reflections.yaml", v)
+        elif iadr.action == "noop":
+            log("improvement-assumption-digest reflection already registered", v)
+        elif iadr.action == "skipped":
+            log(f"improvement-assumption-digest registration skipped: {iadr.detail}", v)
+        if not iadr.success:
+            log(f"WARN: improvement-assumption-digest registration: {iadr.detail}", v, always=True)
+            _append_warning(result, f"improvement-assumption-digest registration: {iadr.detail}")
 
         # Step 1.6586: Ensure the lane-3 control-plane reflections are
         # registered (#3215): the controller tick (admit/materialize/activate)
