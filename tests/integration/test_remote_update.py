@@ -583,8 +583,8 @@ class TestPinHelpersRefuseLoudly:
 
     def test_real_pyproject_declarations_resolve(self):
         """The live file is the shape that produced every spike-2 defect."""
-        assert get_pinned_version(PROJECT_DIR, "anthropic") == "0.125.0"
-        assert get_pinned_version(PROJECT_DIR, "pydantic-ai-slim") == "2.9.0"
+        assert get_pinned_version(PROJECT_DIR, "anthropic") == "1.5.0"
+        assert get_pinned_version(PROJECT_DIR, "pydantic-ai-slim") == "2.43.0"
         # A floor is not a pin, and `openai` sits inside the slim line's comment.
         assert get_pinned_version(PROJECT_DIR, "openai") is None
 
@@ -705,17 +705,18 @@ def _drifting_sync(lock: Path, result):
 class TestCoupledSetDeclaration:
     """The declaration itself is a safety surface (#3001)."""
 
-    def test_llm_set_is_declared_and_held(self):
-        """`anthropic` is back in the auto-bump *structure*, but parked.
+    def test_llm_set_is_declared_and_unheld(self):
+        """`anthropic` auto-bumps freely, gated rather than parked.
 
-        Without the hold, the first post-merge cron tick would execute the
-        Step 2 upgrade fleet-wide, unattended.
+        #3001 Step 2 landed the upgrade and released the hold, so routine
+        bumps now resume through the `llm` gate. The gate is what keeps a
+        partial bump from shipping, which is why it stays asserted here.
         """
         llm_set = next(s for s in AUTO_BUMP_SETS if "anthropic" in s.members)
         assert set(llm_set.members) == {"anthropic", "pydantic-ai-slim"}
         assert llm_set.import_names == ("anthropic", "pydantic_ai")
         assert llm_set.gates == ("llm", "import", "pytest")
-        assert llm_set.hold == "#3001 Step 2"
+        assert llm_set.hold is None
 
     def test_openai_is_not_in_any_coupled_set(self):
         """spike-5: no packaging coupling, and its declaration is a floor."""
