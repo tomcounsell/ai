@@ -151,9 +151,10 @@ Not applicable in the usual sense — no prior attempt at a voice question chann
 exists. But one prior fix is *relevant by its absence*: #2650 correctly diagnosed
 the plan-doc concurrency hazard and was closed without the mitigation being built,
 and the plan that would have built it
-(`docs/archive/plans-completed/plan-doc-single-writer-lease.md`) was swept into
-the completed-plans archive by a content-free rename while still reading
-`status: Ready`. The lesson this plan takes from that: do not stake the writeback
+(`docs/archive/plans-completed/plan-doc-single-writer-lease.md`) sits in the
+completed-plans archive despite never being built, because
+`scripts/migrate_completed_plan.py:384-412` reads GitHub's `state` and never
+`stateReason` (filed as #3332). The lesson this plan takes from that: do not stake the writeback
 step on a protocol that does not exist. Writeback is sequential by construction so
 that it needs no lock.
 
@@ -617,7 +618,7 @@ are side findings that belong in their own issues rather than in this plan's sco
 |---|---|---|---|
 | P1 | **A resolution-marking convention for the future.** The nine existing shapes are teachable (spike-3), so this is not a blocker for the harvester — but M4 has to name one convention, and which marker it names is Open Question 2. | M4 only | Decide during M4. M1 ships against the existing shapes regardless. |
 | P2 | **`validate_poll_question` has two enforcement points for one invariant** — logged-and-discarded at `agent/output_handler.py:1560`, hard-exit at `tools/ask_poll.py:134`. It is an open owner decision on #3095. A voice renderer added to the same seam inherits it unresolved, which means an invalid question either hard-exits the interview or ships degraded, and nobody has ruled which. | M3 | Raised as an Open Question below. Not this plan's to settle unilaterally. |
-| P3 | **The single-writer-lease plan was archived as completed without being built.** `docs/archive/plans-completed/plan-doc-single-writer-lease.md` still reads `status: Ready` and was moved by a content-free rename (`433c166a9`), apparently swept up by PR #2942's bulk move. | Nothing | **This plan does not depend on it.** Sequential single-writer writeback sidesteps the hazard entirely. File separately — the discrepancy is a ledger problem, not a blocker. |
+| P3 | **The single-writer lease does not exist.** Confirmed: `models/plan_doc_lease.py` and `.claude/hooks/validators/validate_plan_doc_lease.py` are absent, and #2650 closed `NOT_PLANNED` into the still-open #3065. Its plan reads as completed only because plan migration never checks `stateReason` (filed as **#3332**, with 17 sibling mislabels). | Nothing | **This plan does not depend on it, but it is now the sole protection.** Sequential single-writer writeback sidesteps the hazard with no lock. Task 15's four rules are load-bearing rather than redundant. |
 | P4 | **`bf_alice` is named in `.claude/skill-context/do-debrief.md:21` but absent from `KOKORO_VOICES`** (`tools/tts/__init__.py:27-38`), so that documented invocation hits the unknown-voice path. Re-verified at the baseline commit. | Nothing | File separately. Relevant only as a warning: this plan pins its clip voice to a name verified present in the catalog, and records the *actual* voice from the result dict rather than trusting the request. |
 
 **Not prerequisites, explicitly.** No new external dependency, no vendor key beyond
@@ -1478,9 +1479,9 @@ out, and only in the read-only direction.
 - [ ] `python -m ruff check` and `python -m ruff format --check` clean.
 - [ ] The three regression-guard suites green **unchanged**.
 - [ ] Documentation tasks above complete and committed.
-- [ ] File the two side findings as their own issues: P3 (single-writer-lease plan
-      archived as completed without being built) and P4 (`bf_alice` documented but
-      absent from `KOKORO_VOICES`).
+- [x] Side findings filed: **#3332** (plan migration ignores `stateReason`; 18 abandoned
+      plans filed as completed, including the single-writer lease) and **#3331**
+      (`bf_alice` documented but absent from `KOKORO_VOICES`).
 
 ## Verification
 
@@ -1544,11 +1545,19 @@ it or codifies it by accident.
 
 ### Filed separately, not carried here
 
-- **P3.** `docs/archive/plans-completed/plan-doc-single-writer-lease.md` reads
-  `status: Ready` while sitting in the completed archive; it was moved by a content-free
-  rename (`433c166a9`), apparently swept up by PR #2942. The lease it describes is the
-  mitigation this plan's writeback contract works around, so whether it was ever built
-  matters — but it is not this plan's question.
-- **P4.** `.claude/skill-context/do-debrief.md:21` documents `bf_alice`, which is absent
-  from `tools/tts.KOKORO_VOICES:27-38`. A voice request for it silently falls through
-  `_VOICE_FALLBACK_MAP`. Affects M2's clip library only cosmetically.
+- **P3 — filed as #3332, and it changes a premise of this plan.** The single-writer
+  lease from #2650 was **never built**: `models/plan_doc_lease.py` and
+  `.claude/hooks/validators/validate_plan_doc_lease.py` do not exist, and #2650 closed
+  `NOT_PLANNED` (consolidated into #3065, still open). Its plan nonetheless sits in
+  `docs/archive/plans-completed/`, because `scripts/migrate_completed_plan.py:384-412`
+  reads GitHub's `state` and never `stateReason`; 18 archived plans are mislabeled the
+  same way. So this plan's writeback contract (sequential applier, `Edit` only, explicit
+  paths, one atomic stage-and-commit) is **the only** protection against the #2650
+  hazard, not a belt-and-braces layer on top of a lease. Treat those four rules in
+  task 15 as load-bearing.
+- **P4.** `.claude/skill-context/do-debrief.md:21` documents `bf_alice` as "the female
+  alternative", and `tools/tts/__init__.py:68` repeats it in a comment, but it is
+  absent from `KOKORO_VOICES` (`:27-38`) and from `tools/tts/README.md:77`. It is
+  unknown to both backends, so `_resolve_voice` (`:191-197`) returns an
+  `{"error": ...}` dict — a hard synthesis failure, not a fallback. Affects M2 only if
+  a clip recipe names that voice.
