@@ -27,7 +27,9 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   ``decision_affected`` (free text), and ``assumption_detail`` (JSON
   ``{charter_passage, evidence_ids, confidence, consequence,
   overturning_observation}``, the structured form behind
-  ``provisional_assumption``).
+  ``provisional_assumption``). ``resolved_at`` (a plain ``DatetimeField``)
+  is the moment ``resolve()`` closed the row; the assumption digest's
+  watermark is the newest ``resolved_at`` it rendered, read off the row.
 - **The controller asks no human anything.** There is no question kind, no
   attention queue, no daily question ceiling, and no poll-registry binding on
   this record. Uncertainty is resolved from Tom-sourced memories and online
@@ -116,6 +118,7 @@ class ImprovementInvestigation(Model):
         assumption_detail: JSON ``{charter_passage, evidence_ids, confidence,
             consequence, overturning_observation}`` behind
             ``provisional_assumption``.
+        resolved_at: When ``resolve()`` closed the row. Plain, unindexed.
     """
 
     id = AutoKeyField()
@@ -138,6 +141,7 @@ class ImprovementInvestigation(Model):
     expected_information_value = Field(null=True)
     decision_affected = Field(null=True)
     assumption_detail = Field(null=True)
+    resolved_at = DatetimeField(null=True)
 
     class Meta:
         # 30 days, matching ReflectionRun. Retrieval-dated external claims
