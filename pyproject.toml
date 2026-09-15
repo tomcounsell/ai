@@ -103,6 +103,7 @@ valor-session-archive = "tools.session_archive_cli:main"
 valor-venv-health = "tools.venv_health:main"
 belt-baseline = "tools.belt_baseline:main"
 belt-skew-report = "tools.belt_skew_report:main"
+valor-improve = "tools.improvement:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

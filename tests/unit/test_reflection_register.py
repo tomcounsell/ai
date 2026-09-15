@@ -18,9 +18,15 @@ import yaml
 from scripts.update.reflection_register import (
     IMPROVEMENT_COLLECT_CALLABLE,
     IMPROVEMENT_COLLECT_NAME,
+    IMPROVEMENT_CONTROLLER_TICK_CALLABLE,
+    IMPROVEMENT_CONTROLLER_TICK_NAME,
+    IMPROVEMENT_INTENT_RECONCILE_CALLABLE,
+    IMPROVEMENT_INTENT_RECONCILE_NAME,
     REMOVED_REFLECTIONS,
     register_crash_recovery,
     register_improvement_collect,
+    register_improvement_controller_tick,
+    register_improvement_intent_reconcile,
     register_memory_distill_backfill,
     register_reflection,
     register_sdlc_upvote_pickup,
@@ -799,3 +805,88 @@ def test_improvement_collect_entry_loads_via_scheduler_registry(
 
     module_path, _, attr = IMPROVEMENT_COLLECT_CALLABLE.rpartition(".")
     assert callable(getattr(importlib.import_module(module_path), attr))
+
+
+# ===================================================================
+# register_improvement_controller_tick / register_improvement_intent_reconcile
+# (#3215, Task 6/7). The lane-3 control-plane reflections: dispatch and
+# recovery. Same generalized register path as improvement_collect above.
+# ===================================================================
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_controller_tick_registers_with_configured_cadence(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_improvement_controller_tick(project_dir)
+
+    assert result.success is True
+    assert result.action == "registered"
+    entry = next(
+        r
+        for r in yaml.safe_load(vault_path.read_text())["reflections"]
+        if r["name"] == IMPROVEMENT_CONTROLLER_TICK_NAME
+    )
+    assert entry["callable"] == IMPROVEMENT_CONTROLLER_TICK_CALLABLE
+    assert entry["every"] == "900s"  # ImprovementSettings.controller_tick_seconds default
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_controller_tick_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_improvement_controller_tick(project_dir)
+    second = register_improvement_controller_tick(project_dir)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count(IMPROVEMENT_CONTROLLER_TICK_NAME) == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_intent_reconcile_registers_with_fixed_300s_cadence(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_improvement_intent_reconcile(project_dir)
+
+    assert result.success is True
+    assert result.action == "registered"
+    entry = next(
+        r
+        for r in yaml.safe_load(vault_path.read_text())["reflections"]
+        if r["name"] == IMPROVEMENT_INTENT_RECONCILE_NAME
+    )
+    assert entry["callable"] == IMPROVEMENT_INTENT_RECONCILE_CALLABLE
+    assert entry["every"] == "300s"
+
+
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
+def test_intent_reconcile_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_improvement_intent_reconcile(project_dir)
+    second = register_improvement_intent_reconcile(project_dir)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count(IMPROVEMENT_INTENT_RECONCILE_NAME) == 1
+
+
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
+def test_intent_reconcile_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(
+        tmp_path, projects=PROJECTS_OWNED, repo_registry=REGISTRY_WITHOUT_CRASH
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    before = vault_path.read_text()
+
+    result = register_improvement_intent_reconcile(project_dir)
+
+    assert result.success is True
+    assert result.action == "skipped"
+    assert IMPROVEMENT_INTENT_RECONCILE_NAME not in _names(vault_path)
+    assert vault_path.read_text() == before

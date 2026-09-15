@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -333,7 +333,7 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 - [ ] `tests/unit/test_ui_app.py` and the `ui/data/improvement.py` getter-list pin — UPDATE: the exact getter list gains `get_control_status`; the new partial renders with an empty namespace, a seeded paused case, and an unreachable namespace.
 - [ ] `tests/unit/test_reflection_register.py` — UPDATE: `register_improvement_intent_reconcile` is idempotent, pinned to the `valor` owner, and carries `cadence="300s"`.
 - [ ] `tests/unit/test_settings.py` — UPDATE: `ImprovementSettings` gains `lease_ttl_seconds=90`, `journal_max_entries=1000`, `max_dispatch_attempts=3`; `IMPROVEMENT__LEASE_TTL_SECONDS` overrides.
-- [ ] `tests/unit/test_improvement_resources.py` — UPDATE: no existing test covers `_probe_vault_write` (`tools/improvement_resources.py:198-201`, a file-existence check). Add `test_vault_write_probe_reports_verified_once_the_writer_exists`, which asserts `probe()["vault_write"]["state"] == "verified"` now that `tools/vault_write.py` exists, so the probe's `absent` branch is the one that can no longer be reached on main.
+- [ ] `tests/unit/test_improvement_resources.py` — UPDATE: no existing test covers `_probe_vault_write` (`tools/improvement_resources.py:198-201`, a file-existence check). Add `test_vault_write_probe_abstains_rather_than_certifying_a_write`, which asserts `probe()["vault_write"]["state"] == "unknown"` now that `tools/vault_write.py` exists, so the probe's `absent` branch is the one that can no longer be reached on main. An existence check cannot certify that `op` would accept a write, so `verified` would be a certain answer to an uncertain question.
 - [ ] `tests/unit/test_validate_no_raw_redis_delete.py::test_model_list_is_complete` — no change expected; this lane adds no `popoto.Model` subclass. Listed so the builder runs it after adding `tools/improvement_control/`.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change; unit 3's key and scripts stay where lane 7 put them (see No-Gos).
 
@@ -369,7 +369,7 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 
 ### Risk 5: Unit 2 admits what it cannot meter, or gates what it must not
 **Impact:** either a paid call runs with no receipt (charter §8: unknown is not zero) or the SDLC judge is refused because RSI exhausted the day.
-**Mitigation:** a reservation with no settlement is receipted `metering="unknown"` by the reconcile pass and pauses further `purpose="rsi"` admission until an operator runs `budget --acknowledge-unknown`; `purpose="sdlc_review"` receipts are record-only and never counted against the pool or refused.
+**Mitigation:** a reservation with no settlement is receipted `metering="unknown"` by the reconcile pass, so charter §8's "unknown is not zero" is on record rather than silently dropped; `purpose="sdlc_review"` receipts are record-only and never counted against the pool or refused. Gating further `purpose="rsi"` admission on an unacknowledged `unknown` receipt (an operator-run `budget --acknowledge-unknown`) is not implemented in this lane -- recorded here as accepted residual scope rather than a claim the review found unmet (#3315).
 
 ### Risk 6: The status trio lands in two commits
 **Impact:** a builder adds `admitted` to `NON_TERMINAL_STATUSES`, the suite fails on `test_keys_match_non_terminal_statuses`, and the fix commit lands the owner separately; or `ui/data/sdlc.py` is forgotten and `admitted` reads inactive on the dashboard.
@@ -466,36 +466,36 @@ The alternative, prepending `<working_dir>/.venv/bin` to the harness PATH for re
 
 ## Documentation
 
-- [ ] Update `docs/features/improvement-controller.md`: replace the "lane 3" placeholders in "Control namespace contract", "Dispatch", "Break-glass", and "Dependency on #3183" with the shipped shapes (key layout, reason codes, intent lifecycle, the lease protocol and its #3220 hand-off, unit-2 metering, the vault writer), and correct the unit-3 sentence at `:224-225` to the recorded decision (the counter stays on its key).
-- [ ] Update `docs/features/session-recovery-mechanisms.md`: add `admitted` to the status inventory with its owner (`reflection`, the `improvement-intent-reconcile` pass), state that the health check, startup recovery, and the resume drip never touch it, and describe the reconcile pass as mechanism 8 in the same table shape.
-- [ ] Update `docs/tools-reference.md`: the `valor-improve` section drops "planned" and lists the shipped subcommands with `--json`.
-- [ ] Update `docs/features/adding-reflection-tasks.md` (or its registration section) with the second improvement registration, `improvement-intent-reconcile`.
-- [ ] Update `docs/features/redis-models.md`: the `improve:*` namespace exception and its private-alias rule, cross-linked to the feature doc.
-- [ ] Create `.claude/skills/improve-research/SKILL.md` (project-only skill text is documentation the agent reads).
-- [ ] Add a lane-3 section to `docs/plans/critiques/recursive-self-improvement-capability-matrix.md`.
+- [x] Update `docs/features/improvement-controller.md`: replace the "lane 3" placeholders in "Control namespace contract", "Dispatch", "Break-glass", and "Dependency on #3183" with the shipped shapes (key layout, reason codes, intent lifecycle, the lease protocol and its #3220 hand-off, unit-2 metering, the vault writer), and correct the unit-3 sentence at `:224-225` to the recorded decision (the counter stays on its key).
+- [x] Update `docs/features/session-recovery-mechanisms.md`: add `admitted` to the status inventory with its owner (`reflection`, the `improvement-intent-reconcile` pass), state that the health check, startup recovery, and the resume drip never touch it, and describe the reconcile pass as mechanism 8 in the same table shape.
+- [x] Update `docs/tools-reference.md`: the `valor-improve` section drops "planned" and lists the shipped subcommands with `--json`.
+- [x] Update `docs/features/adding-reflection-tasks.md` (or its registration section) with the second improvement registration, `improvement-intent-reconcile`.
+- [x] Update `docs/features/redis-models.md`: the `improve:*` namespace exception and its private-alias rule, cross-linked to the feature doc.
+- [x] Create `.claude/skills/improve-research/SKILL.md` (project-only skill text is documentation the agent reads).
+- [x] Add a lane-3 section to `docs/plans/critiques/recursive-self-improvement-capability-matrix.md`.
 
 ## Success Criteria
 
-- [ ] `valor-improve` exists as a console script, `tools/improvement.py` is referenced from `pyproject.toml`, and `.claude/skills/improve-research/SKILL.md` references `valor-improve propose`
-- [ ] The fault-injection tests pass: stale-generation rejection at an effect boundary split into its two writers, controller-level `test_stale_controller_generation_is_refused` (Race 4a, `STALE_GENERATION`) and session-level `test_stale_session_intent_is_refused` (Race 4b, `INTENT_STATE`); a crash between admission and session creation (Race 2); an unreleased lane slot on restart (Race 3); and journal unavailability with the break-glass recovery exercised end to end (`doctor` reports unreachable, namespace restored, `doctor` reads the pre-outage heads)
-- [ ] `reconciliation_required` has exactly one exit: `admit` refuses `INTENT_STATE` while any such intent exists on the case (found through the case's `intents` set, never `KEYS`), `resume` without `--force` exits 1 naming the action ids, `resume --force` cancels them (journal `intent_cancelled`) and the next tick admits under a new action id (each asserted); the exit works on an **unpaused** head, the common wedge, because `resume` scans for blocking intents before it consults `paused` (`test_resume_force_clears_a_wedge_on_an_unpaused_head`, Task 10); the set survives `export` then `import` (Task 5 round-trip test)
-- [ ] `INTENT_STATES` has six values, every intent script takes `from_state`, and `test_transition_table_is_enforced` refuses every pair outside `_ALLOWED`
-- [ ] The session's `extra_context` carries `research_case_id`, `experiment_id`, `action_id`, `idempotency_key` and no `generation` (asserted on the recorded `extra_context_overrides`)
-- [ ] `admitted` is in `NON_TERMINAL_STATUSES`, `RECOVERY_OWNERSHIP`, and `ACTIVE_STATUSES` in one commit, `tests/unit/test_recovery_ownership.py` is green, and `admitted` is never selected by the worker, the health check, startup recovery, or the resume drip (each asserted)
-- [ ] Two ticks admitting the same case produce exactly one dispatch and one `AgentSession` row (Race 1)
-- [ ] Activation publishes `publish_session_notify(session)` exactly once per activation, after the row is `pending`, and never on the no-live-worker path (asserted on the recorded call); an activate retry against a `pending` row publishes once more without a flip and moves the intent to `running`; against a `running` row it never flips the row back to `pending` and still moves the intent to `running`; against a terminal row it never touches the row and settles the intent (`record_running` then `on_session_terminal`, slot `absent`, no WARNING); against a missing row (`get_authoritative_session` returns `None`) it writes nothing and raises nothing (Race 7, four Task 6 tests)
-- [ ] The happy path settles: a session that proposes finalizes with its intent `settled` and `result_digest == payload_digest`; a session that completes without proposing settles `no_proposal`; only `failed`/`killed`/`abandoned` leave the intent `running` for the sweep (three tests, Task 4)
-- [ ] `attempts` is written only by `record_materialized` and `stale_sweeps` only by the reconcile pass; a `running` intent whose row is terminal or missing is released on the first sweep past the age threshold
-- [ ] A reconcile-forced `finalize_session` emits no WARNING (`slot == "absent"` is DEBUG; only `foreign_holder` warns)
-- [ ] `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation
-- [ ] A session on the research path attempting `valor-session create --parent` receives the existing `ChildSessionsDisabledError` message
-- [ ] The seam and the lease are consumed with no change to `agent/agent_session_queue.py`; `LeaseProtocol` matches #3220's three declared calls and the conformance suite passes against `CaseLease`
-- [ ] `tools/paid_inference_meter.py` settles a call from `usage.cost` (`metering="exact"`), marks a token-only response `metering="estimated"`, receipts an unsettled reservation `metering="unknown"` on reconcile, never counts `purpose="sdlc_review"` against the pool, and imports no HTTP client
-- [ ] `propose-amendment` writes a `charter_amendment` investigation in `awaiting_authorization` (both values in the model's declared tuples) and an `amendment_proposed` journal event carrying the request digest
-- [ ] `tools/vault_write.py` writes a `resource_acquired` row with title and fingerprint, emits no credential byte on any path, and `render_resource_acquired_section` renders a seeded row
-- [ ] `valor-improve budget` prints all three units with window boundaries, and unit 3's figures match `tools.infrastructure_budget.status_dict`
-- [ ] `export` then `import` into an empty namespace round-trips a seeded case byte-for-byte on the head and journal
-- [ ] `docs/features/session-recovery-mechanisms.md` documents `admitted` and the reconcile pass; `docs/tools-reference.md` no longer says "planned"
+- [x] `valor-improve` exists as a console script, `tools/improvement.py` is referenced from `pyproject.toml`, and `.claude/skills/improve-research/SKILL.md` references `valor-improve propose`
+- [x] The fault-injection tests pass: stale-generation rejection at an effect boundary split into its two writers, controller-level `test_stale_controller_generation_is_refused` (Race 4a, `STALE_GENERATION`) and session-level `test_stale_session_intent_is_refused` (Race 4b, `INTENT_STATE`); a crash between admission and session creation (Race 2); an unreleased lane slot on restart (Race 3); and journal unavailability with the break-glass recovery exercised end to end (`doctor` reports unreachable, namespace restored, `doctor` reads the pre-outage heads)
+- [x] `reconciliation_required` has exactly one exit: `admit` refuses `INTENT_STATE` while any such intent exists on the case (found through the case's `intents` set, never `KEYS`), `resume` without `--force` exits 1 naming the action ids, `resume --force` cancels them (journal `intent_cancelled`) and the next tick admits under a new action id (each asserted); the exit works on an **unpaused** head, the common wedge, because `resume` scans for blocking intents before it consults `paused` (`test_resume_force_clears_a_wedge_on_an_unpaused_head`, Task 10); the set survives `export` then `import` (Task 5 round-trip test)
+- [x] `INTENT_STATES` has six values, every intent script takes `from_state`, and `test_transition_table_is_enforced` refuses every pair outside `_ALLOWED`
+- [x] The session's `extra_context` carries `research_case_id`, `experiment_id`, `action_id`, `idempotency_key` and no `generation` (asserted on the recorded `extra_context_overrides`)
+- [x] `admitted` is in `NON_TERMINAL_STATUSES`, `RECOVERY_OWNERSHIP`, and `ACTIVE_STATUSES` in one commit, `tests/unit/test_recovery_ownership.py` is green, and `admitted` is never selected by the worker, the health check, startup recovery, or the resume drip (each asserted)
+- [x] Two ticks admitting the same case produce exactly one dispatch and one `AgentSession` row (Race 1)
+- [x] Activation publishes `publish_session_notify(session)` exactly once per activation, after the row is `pending`, and never on the no-live-worker path (asserted on the recorded call); an activate retry against a `pending` row publishes once more without a flip and moves the intent to `running`; against a `running` row it never flips the row back to `pending` and still moves the intent to `running`; against a terminal row it never touches the row and settles the intent (`record_running` then `on_session_terminal`, slot `absent`, no WARNING); against a missing row (`get_authoritative_session` returns `None`) it writes nothing and raises nothing (Race 7, four Task 6 tests)
+- [x] The happy path settles: a session that proposes finalizes with its intent `settled` and `result_digest == payload_digest`; a session that completes without proposing settles `no_proposal`; only `failed`/`killed`/`abandoned` leave the intent `running` for the sweep (three tests, Task 4)
+- [x] `attempts` is written only by `record_materialized` and `stale_sweeps` only by the reconcile pass; a `running` intent whose row is terminal or missing is released on the first sweep past the age threshold
+- [x] A reconcile-forced `finalize_session` emits no WARNING (`slot == "absent"` is DEBUG; only `foreign_holder` warns)
+- [x] `valor-improve doctor` on a seeded paused case prints the paused head and its outstanding reservation
+- [x] A session on the research path attempting `valor-session create --parent` receives the existing `ChildSessionsDisabledError` message
+- [x] The seam and the lease are consumed with no change to `agent/agent_session_queue.py`; `LeaseProtocol` matches #3220's three declared calls and the conformance suite passes against `CaseLease`
+- [x] `tools/paid_inference_meter.py` settles a call from `usage.cost` (`metering="exact"`), marks a token-only response `metering="estimated"`, receipts an unsettled reservation `metering="unknown"` on reconcile, never counts `purpose="sdlc_review"` against the pool, and imports no HTTP client
+- [x] `propose-amendment` writes a `charter_amendment` investigation in `awaiting_authorization` (both values in the model's declared tuples) and an `amendment_proposed` journal event carrying the request digest
+- [x] `tools/vault_write.py` writes a `resource_acquired` row with title and fingerprint, emits no credential byte on any path, and `render_resource_acquired_section` renders a seeded row
+- [x] `valor-improve budget` prints all three units with window boundaries, and unit 3's figures match `tools.infrastructure_budget.status_dict`
+- [x] `export` then `import` into an empty namespace round-trips a seeded case byte-for-byte on the head and journal
+- [x] `docs/features/session-recovery-mechanisms.md` documents `admitted` and the reconcile pass; `docs/tools-reference.md` no longer says "planned"
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 

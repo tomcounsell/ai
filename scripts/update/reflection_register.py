@@ -77,6 +77,16 @@ CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
 IMPROVEMENT_COLLECT_NAME = "improvement-evidence-collect"
 IMPROVEMENT_COLLECT_CALLABLE = "reflections.improvement_collect.run_improvement_collect"
 
+IMPROVEMENT_CONTROLLER_TICK_NAME = "improvement-controller-tick"
+IMPROVEMENT_CONTROLLER_TICK_CALLABLE = (
+    "reflections.improvement_controller_tick.run_improvement_controller_tick"
+)
+
+IMPROVEMENT_INTENT_RECONCILE_NAME = "improvement-intent-reconcile"
+IMPROVEMENT_INTENT_RECONCILE_CALLABLE = (
+    "reflections.improvement_intent_reconcile.run_improvement_intent_reconcile"
+)
+
 # Reflections whose callables have been deleted from the repo. Each name is
 # removed from the vault registry on /update (the reflection counterpart of
 # hardlinks.py's RENAMED_REMOVALS) so no machine keeps scheduling an entry
@@ -646,6 +656,45 @@ def register_improvement_collect(project_dir: Path) -> RegisterResult:
             "Collect improvement evidence from completed sessions and Tom-sourced memories (#3177)"
         ),
         cadence="900s",
+        priority="normal",
+    )
+
+
+def register_improvement_controller_tick(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-controller-tick`` reflection is registered (#3215).
+
+    Cadence is ``ImprovementSettings.controller_tick_seconds`` (default 900),
+    not a literal, so an env override takes effect on the next registration
+    pass without a code change. Registered regardless of
+    ``ImprovementSettings.enabled`` -- same rationale as the collect tick
+    above: registration and activation are separate decisions.
+    """
+    from config.settings import settings
+
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_CONTROLLER_TICK_NAME,
+        callable_path=IMPROVEMENT_CONTROLLER_TICK_CALLABLE,
+        description="Admit, materialize, and activate proposed improvement actions (#3215)",
+        cadence=f"{settings.improvement.controller_tick_seconds}s",
+        priority="normal",
+    )
+
+
+def register_improvement_intent_reconcile(project_dir: Path) -> RegisterResult:
+    """Ensure the ``improvement-intent-reconcile`` reflection is registered (#3215).
+
+    Fixed 300s cadence per the plan (Task 7), independent of the controller
+    tick's own configurable cadence: recovery must run more often than
+    dispatch so a stale intent's staleness threshold (``4 * lease_ttl_seconds``)
+    is actually checked against a fresh clock.
+    """
+    return register_reflection(
+        project_dir,
+        name=IMPROVEMENT_INTENT_RECONCILE_NAME,
+        callable_path=IMPROVEMENT_INTENT_RECONCILE_CALLABLE,
+        description="Sweep stale dispatch intents, release lane slots, force terminal rows (#3215)",
+        cadence="300s",
         priority="normal",
     )
 

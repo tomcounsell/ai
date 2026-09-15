@@ -170,6 +170,8 @@ class UpdateResult:
     side_effect_drain_register_result: reflection_register.RegisterResult | None = None
     dead_letter_replay_register_result: reflection_register.RegisterResult | None = None
     improvement_collect_register_result: reflection_register.RegisterResult | None = None
+    improvement_controller_tick_register_result: reflection_register.RegisterResult | None = None
+    improvement_intent_reconcile_register_result: reflection_register.RegisterResult | None = None
     reflections_callables_result: reflections_callables.ReflectionsCallablesResult | None = None
     registry_probe_result: reflections_callables.RegistryProbeResult | None = None
     officecli_result: officecli.InstallResult | None = None
@@ -1327,6 +1329,40 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         if not icr.success:
             log(f"WARN: improvement-evidence-collect registration: {icr.detail}", v, always=True)
             _append_warning(result, f"improvement-evidence-collect registration: {icr.detail}")
+
+        # Step 1.6586: Ensure the lane-3 control-plane reflections are
+        # registered (#3215): the controller tick (admit/materialize/activate)
+        # and the intent reconcile pass (stale-sweep, slot release, forced
+        # terminal). Same generalized register path, same ordering rationale.
+        log("Ensuring improvement-controller-tick reflection is registered...", v)
+        result.improvement_controller_tick_register_result = (
+            reflection_register.register_improvement_controller_tick(project_dir)
+        )
+        ictr = result.improvement_controller_tick_register_result
+        if ictr.action == "registered":
+            log("improvement-controller-tick reflection registered in vault reflections.yaml", v)
+        elif ictr.action == "noop":
+            log("improvement-controller-tick reflection already registered", v)
+        elif ictr.action == "skipped":
+            log(f"improvement-controller-tick registration skipped: {ictr.detail}", v)
+        if not ictr.success:
+            log(f"WARN: improvement-controller-tick registration: {ictr.detail}", v, always=True)
+            _append_warning(result, f"improvement-controller-tick registration: {ictr.detail}")
+
+        log("Ensuring improvement-intent-reconcile reflection is registered...", v)
+        result.improvement_intent_reconcile_register_result = (
+            reflection_register.register_improvement_intent_reconcile(project_dir)
+        )
+        iirr = result.improvement_intent_reconcile_register_result
+        if iirr.action == "registered":
+            log("improvement-intent-reconcile reflection registered in vault reflections.yaml", v)
+        elif iirr.action == "noop":
+            log("improvement-intent-reconcile reflection already registered", v)
+        elif iirr.action == "skipped":
+            log(f"improvement-intent-reconcile registration skipped: {iirr.detail}", v)
+        if not iirr.success:
+            log(f"WARN: improvement-intent-reconcile registration: {iirr.detail}", v, always=True)
+            _append_warning(result, f"improvement-intent-reconcile registration: {iirr.detail}")
 
         # Step 1.659: Repoint reflection callables onto the modules that own them.
         # Two migration families share one table: the `agent.sustainability.*` shim

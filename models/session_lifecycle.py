@@ -82,6 +82,8 @@ NON_TERMINAL_STATUSES = frozenset(
         "paused_circuit",  # paused by api-health-gate when Anthropic circuit is OPEN
         "paused",  # paused mid-execution due to auth/API failure; resumed by session-resume-drip
         "paused_budget",  # paused by the per-tool budget backstop (#1821); human-only recovery
+        "admitted",  # created by the improvement scheduler adapter; inert until the
+        # adapter flips it to pending after a liveness check (#3215)
     }
 )
 
@@ -105,6 +107,11 @@ RECOVERY_OWNERSHIP: dict[str, str] = {
     # pending→denied→paused→pending runaway can form — tool_call_count /
     # total_cost_usd are cumulative and never reset, so an auto-drip would loop.
     "paused_budget": "human",
+    # A session created "admitted" by the improvement scheduler adapter is
+    # inert until that adapter's own liveness check flips it to "pending".
+    # Recovery is the improvement-intent-reconcile reflection, not the
+    # worker or the bridge watchdog -- neither knows this status exists.
+    "admitted": "reflection",
 }
 
 # All known statuses
@@ -263,22 +270,17 @@ def _record_terminal_dead_letter(session, stage: str, reason: str) -> None:
             "extra_context": getattr(session, "extra_context", None),
         }
         project_key = getattr(session, "project_key", None)
-        if stage == "session_init_hang":
-            dead_letters.record(
-                "session_init_hang",
-                payload,
-                reason,
-                replayable=False,
-                project_key=project_key,
-            )
-        else:
-            dead_letters.record(
-                "session_recovery_cap",
-                payload,
-                reason,
-                replayable=True,
-                project_key=project_key,
-            )
+        # `session_init_hang` alone is non-replayable (#2181: re-spawning the
+        # identical input reproduces the identical hang). Every other stage
+        # this function is passed is replayable and goes through unchanged
+        # rather than being coerced to `session_recovery_cap`.
+        dead_letters.record(
+            stage,
+            payload,
+            reason,
+            replayable=stage != "session_init_hang",
+            project_key=project_key,
+        )
     except Exception as e:  # noqa: BLE001 -- never block a terminal transition
         logger.debug("[lifecycle] terminal dead-letter write failed (non-fatal): %s", e)
 
@@ -744,6 +746,17 @@ def finalize_session(
                 logger.debug("[lifecycle] supervised-run signal clear failed (non-fatal): %s", e)
     except Exception as e:
         logger.debug("[lifecycle] issue-lease release on finalize failed (non-fatal): %s", e)
+
+    # 7. Improvement lane-slot release (#3215). Gated on action-id provenance so
+    # every other session pays one dict lookup. Best-effort and exception-isolated.
+    try:
+        _ec = getattr(session, "extra_context", None) or {}
+        if _ec.get("action_id"):
+            from tools.improvement_control.intents import on_session_terminal
+
+            on_session_terminal(session, status)
+    except Exception as e:
+        logger.debug("[lifecycle] improvement slot release failed (non-fatal): %s", e)
 
 
 def transition_status(

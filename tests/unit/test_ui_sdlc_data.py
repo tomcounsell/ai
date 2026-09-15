@@ -1603,8 +1603,9 @@ class TestActiveStatusesSingleDefinition:
             is True
         )
 
-    def test_active_statuses_gains_no_new_status_in_this_build(self):
-        """`admitted` arrives with lane 3, not here."""
+    def test_active_statuses_gains_admitted_with_lane_3(self):
+        """`admitted` (#3215): the improvement scheduler adapter's session
+        status reads as active on the dashboard even while it is inert."""
         from ui.data.sdlc import ACTIVE_STATUSES
 
         assert set(ACTIVE_STATUSES) == {
@@ -1613,6 +1614,7 @@ class TestActiveStatusesSingleDefinition:
             "in_progress",
             "active",
             "waiting_for_children",
+            "admitted",
         }
 
     def test_stage_state_is_active_does_not_read_active_statuses(self):

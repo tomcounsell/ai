@@ -77,8 +77,11 @@ handles the guards: it writes the vault path, refuses when
 machine), raises when `cadence` and `cron` are both or neither supplied, and is
 idempotent — a no-op once the entry exists. Existing wrappers to copy:
 `register_crash_recovery`, `register_sdlc_upvote_pickup`,
-`register_improvement_collect`. This is the path that survives `/update` and
-lands fleet-wide without anybody editing a file by hand.
+`register_improvement_collect`, `register_improvement_controller_tick` (cadence
+from `ImprovementSettings.controller_tick_seconds`, not a literal, so an env
+override takes effect on the next registration pass), and
+`register_improvement_intent_reconcile` (fixed 300s). This is the path that
+survives `/update` and lands fleet-wide without anybody editing a file by hand.
 
 **Hand edit of the vault file.** Only Tom does this, and only for
 `execution_type: agent` entries — `register_reflection` emits

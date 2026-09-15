@@ -342,31 +342,38 @@ bug_sessions = sessions_by_tag("bug")
 auto_tag_session("session-123")  # called automatically at session completion
 ```
 
-### Improvement Controller (`valor-improve`) — planned, lane 3
+### Improvement Controller (`valor-improve`)
 
-Not yet implemented. The entry point arrives with the improvement controller's
-lane-3 child issue; it is listed here so the surface is agreed before it is
-built rather than discovered afterwards. See
+Shipped in lane 3 ([#3215](https://github.com/tomcounsell/ai/issues/3215)). Like
+every other `valor-*` tool, the console script lives in `.venv/bin` only, never
+on system PATH (Decision 14) — invoke it as
+`"$CLAUDE_PROJECT_DIR/.venv/bin/valor-improve"` or `~/src/ai/.venv/bin/valor-improve`.
+`--json` on every subcommand; the human format is the default. See
 [Improvement Controller](features/improvement-controller.md).
 
 ```bash
-valor-improve case show --case ID     # the journal head, its revision, and the journal tail
-valor-improve case explain --case ID  # why this case exists, and on what evidence
-valor-improve propose                 # the only way a research session writes a proposed action
-valor-improve release compare         # a release against the incumbent it would replace
-valor-improve pause --case ID --reason TEXT   # break-glass. Never self-clearing
-valor-improve resume --case ID        # re-reads the head first; refuses a case with unreconciled intents
-valor-improve doctor                  # paused heads, stale intents, outstanding reservations
-valor-improve export / import         # move improvement records between machines
-valor-improve replay-projection       # rebuild a Popoto projection from the journal
+valor-improve case show --case ID           # the journal head, its revision, and the journal tail
+valor-improve case explain --case ID        # why this case exists: state, pause reason, blocking intents, charter pin
+valor-improve propose --case ID --payload FILE [--action-id ID]  # the only way a research session writes a proposed action; break-glass mints an action id when none is given
+valor-improve propose-amendment --case ID --request TEXT # a deferred charter decision; pages Tom once
+valor-improve budget                        # all three units, with window boundaries disclosed
+valor-improve release compare               # a release against the incumbent it would replace
+valor-improve pause [--case ID] [--reason TEXT]   # break-glass. Never self-clearing
+valor-improve resume --case ID [--force]    # clears a reconciliation_required wedge before consulting `paused`
+valor-improve doctor                        # paused heads, reconciliation_required intents, outstanding reservations (held unit-1 slots with their holder case, open unit-2 window reserved amount)
+valor-improve export [--root PATH]          # dump the namespace against lane 7's export-root contract
+valor-improve import --archive PATH [--force]  # restore a dumped namespace
+valor-improve replay-projection --case ID   # reconcile the ImprovementCase projection to the journal head
 ```
 
-Research sessions reach research state only through this CLI, which enforces
-journal authorization and never exposes a raw transition. `pause`, `resume`, and
-`doctor` are the break-glass path; the manual procedure lives in
+Research sessions reach research state only through this CLI (see
+`.claude/skills/improve-research/SKILL.md`), which resolves the session through
+`AGENT_SESSION_ID`, enforces journal authorization, and never exposes a raw
+transition. `pause`, `resume`, and `doctor` are the break-glass path; the manual
+procedure lives in
 [Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
 
-**What is available today** is the evidence side, and it has no CLI: the
+**The evidence side** predates the CLI and still has none of its own: the
 `improvement-evidence-collect` reflection runs on a 900s tick and writes
 `ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
 Read it directly if you need to:

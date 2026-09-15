@@ -43,6 +43,13 @@ def _make_session(session_id="test-session-lc", status="running", project_key="t
     session.project_key = project_key
     session.parent_agent_session_id = None
     session._saved_field_values = {}
+    # A bare MagicMock attribute is truthy, so without this every existing
+    # test here would silently exercise finalize_session step 7's
+    # (real-Redis) improvement-control path via extra_context.get("action_id")
+    # returning an auto-mocked truthy value. Real AgentSession rows default
+    # extra_context to {}; match that so the gate behaves as designed unless
+    # a test opts in explicitly (#3215).
+    session.extra_context = {}
     return session
 
 
@@ -163,6 +170,76 @@ class TestFinalizeSessionAutoTagHook:
 
         assert session.status == "completed"
         assert session.completed_at is not None
+
+
+# ===================================================================
+# finalize_session — step 7, improvement lane-slot release (#3215)
+# ===================================================================
+
+
+class TestFinalizeSessionImprovementSlotRelease:
+    """Step 7 is gated on `extra_context.action_id`, best-effort, exception-isolated."""
+
+    def test_finalize_survives_slot_release_failure(self, caplog):
+        """A raising on_session_terminal must never break the terminal transition."""
+        import logging
+
+        session = _make_session()
+        session.extra_context = {"action_id": "a1", "research_case_id": "c1"}
+
+        def boom(_session, _status):
+            raise RuntimeError("simulated redis outage")
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(sys.modules, {"tools.session_tags": _mock_session_tags()}),
+            patch("tools.improvement_control.intents.on_session_terminal", side_effect=boom),
+            caplog.at_level(logging.DEBUG, logger="models.session_lifecycle"),
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            finalize_session(session, "completed")
+
+        assert session.status == "completed"
+        assert any("improvement slot release failed" in rec.message for rec in caplog.records)
+
+    def test_finalize_without_provenance_never_calls_the_control_package(self):
+        """No `action_id` in extra_context means step 7 is one dict lookup, nothing more."""
+        session = _make_session()
+        session.extra_context = {}
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(sys.modules, {"tools.session_tags": _mock_session_tags()}),
+            patch("tools.improvement_control.intents.on_session_terminal") as mock_hook,
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            finalize_session(session, "completed")
+
+        mock_hook.assert_not_called()
+
+    def test_finalize_calls_the_hook_when_action_id_present(self):
+        """The positive case: a research session's slot release actually fires."""
+        session = _make_session()
+        session.extra_context = {"action_id": "a1", "research_case_id": "c1"}
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(sys.modules, {"tools.session_tags": _mock_session_tags()}),
+            patch("tools.improvement_control.intents.on_session_terminal") as mock_hook,
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            finalize_session(session, "completed")
+
+        mock_hook.assert_called_once_with(session, "completed")
 
 
 # ===================================================================

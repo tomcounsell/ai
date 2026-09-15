@@ -27,7 +27,7 @@ class TestRecoveryOwnershipCoverage:
         # "human" is the owner for paused_budget (#1821): the per-tool budget
         # backstop is a NON-drip status recovered only by a human, never by an
         # automated drip.
-        known_owners = {"worker", "bridge-watchdog", "none", "human"}
+        known_owners = {"worker", "bridge-watchdog", "none", "human", "reflection"}
         for status, owner in RECOVERY_OWNERSHIP.items():
             assert owner in known_owners, (
                 f"RECOVERY_OWNERSHIP[{status!r}] = {owner!r} is not a known owner. "
