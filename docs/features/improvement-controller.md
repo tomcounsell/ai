@@ -11,9 +11,15 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 
 ## What exists today
 
-Lanes 1, 2, 3, 4, and lane 7's unit-3 budget work. The records, the settings, the evidence collection tick, the
-verifying artifact store, four dashboard panels, and the evaluation harness
-(`tools/improvement_eval/`, see [Improvement Evaluation](improvement-evaluation.md)).
+Lanes 1, 2, 3, 4, 6, and lane 7's unit-3 budget work. The records, the settings, the evidence
+collection tick, the verifying artifact store, five dashboard panels, the evaluation harness
+(`tools/improvement_eval/`, see [Improvement Evaluation](improvement-evaluation.md)), and the
+release lane (`tools/improvement_release/` and `tools/improvement_recursion/`, see
+[Improvement Release](improvement-release.md)): the six-state release lifecycle, the rollback
+drill, exposure with a frozen baseline and a scored observation window, the promotion gate that
+refuses and names both preconditions, the candidate-surface denylist, the recursive comparison of
+two research processes behind an `ArmRunner` seam, the three-level claim report, and the
+`valor-improve-release` binary.
 Unit 3 (USD 50 per week for infrastructure) has a
 meter with an admission gate, a teardown policy, a generated charter section 2 progress report, two new
 evidence kinds (`spend_receipt` and `resource_probe`), and an artifact retention root outside the
@@ -22,8 +28,11 @@ checkout. The cloud sandbox itself is decided and unbuilt; see
 shipped the control journal, dispatch intents, the `admitted` session status,
 the reconcile reflection, the unit-2 paid-inference meter, the vault writer,
 and the `valor-improve` CLI, the only door through which a research session
-proposes anything. The research sessions themselves and releases arrive with
-lanes 5 and 6, each as its own child issue.
+proposes anything. The research sessions arrive with lane 5 as its own child
+issue; lane 5's planner tick is the production `ArmRunner`, and lane 3's
+paid-inference meter is what lets a comparison account unit 2 (the parent
+plan's Gap D numbering: unit 1 is the subscription lane slot, unit 2 daily paid
+inference, unit 3 weekly infrastructure).
 
 Read the capability matrix before believing anything is working. It grades each
 component on four separate axes (implemented, deployed, measured, effect) and
@@ -56,11 +65,13 @@ named seams, never forked.
 |---|---|---|
 | Research | Read scoped evidence, author hypotheses, request investigations, propose experiments within the charter | Enqueue sessions, contact anyone, amend the charter |
 | Candidate | Modify declared candidate surfaces in isolation | Read holdout answers, alter release policy, touch production state, contact stakeholders |
-| Evaluation and release | Run frozen contracts, write access-controlled verdicts under a separate process identity | Promote anything automatically |
+| Evaluation and release | Run frozen contracts, write access-controlled verdicts under a separate process identity, propose a release from an `accept` verdict with its rollback and observation plans written first | Promote anything automatically. `tools/improvement_release/promotion.py::promotion_gate` refuses and names both unmet preconditions; `promote_automatically` raises on every call |
 
 **A worktree is not a security boundary.** Until evaluator secrets and
-production credentials are separated from candidate execution, automated
-promotion stays disabled. That separation is an event outside this plan.
+production credentials are separated from candidate execution, and until a
+human-amended charter names the reversible surfaces, automated promotion stays
+disabled. Both are events outside this plan; the gate reads the pinned charter
+row and its own constants, and no setting, env key, or file flag reads into it.
 
 ## Records
 
@@ -78,7 +89,7 @@ carrying a schema-gate docstring, a `project_key` partition, a recency
 | `ImprovementInvestigation` | One bounded act of finding something out | 30 days |
 | `ImprovementExperiment` | A candidate under a frozen, preregistered contract | Immortal |
 | `ImprovementEvaluation` | A paired, blinded measurement | Immortal |
-| `ImprovementRelease` | A qualified candidate awaiting human review | Immortal |
+| `ImprovementRelease` | A qualified candidate put in front of a human. Six states (`proposed`, `approved`, `observing`, `accepted`, `rolled_back`, `withdrawn`), written only by `tools/improvement_release/lifecycle.py`. Beside the surfaces, exposure, rollback plan, and outcome it carries `kind`, `candidate_ref`, `base_revision`, `exposed_at`, `observation` (the plan), `rollback_drill` (the drill record), `drill_log` (the transcript, on the verifying store), and `promotion_gate` (the gate's answer at approval) | Immortal |
 
 Evidence and investigations expire on `ReflectionRun`'s 30-day horizon: they are
 high-volume observation rows and retrieval-dated external claims respectively,
@@ -267,8 +278,8 @@ while any of those inputs is non-empty. Sandbox count, uptime, and token volume 
 
 `docs/improvement-charter.md` is the north star. Tom owns it and only Tom edits
 it; nothing in `models/`, `tools/`, `reflections/`, or `ui/` writes that file.
-Lane 6 (#3218) adds the candidate-surface denylist that refuses it as a
-candidate.
+`tools/improvement_release/denylist.py` refuses it, and `models/improvement_charter.py`,
+as a candidate surface before a release row exists.
 
 `ImprovementCharter.load_from_file` projects the file into a record. It digests
 the bytes with the same CRLF-to-LF normalization `tools/sdlc_verdict.py::compute_plan_hash`
@@ -464,7 +475,7 @@ approaches are lane 5's. Each section renders one of three distinguishable
 states: content, "nothing yet, written by lane N", or "unavailable" when the
 read failed. A bare zero would claim a measurement was taken.
 
-The other two panels are backed by `ImprovementEvidence`.
+Two panels are backed by `ImprovementEvidence`.
 
 **Coverage** comes first and is the denominator. A falling correction count with
 a falling scan count is not an improvement, and coverage is what makes the two
@@ -480,13 +491,21 @@ usage, paused heads, `reconciliation_required` wedges (each naming its clearing
 `valor-improve resume --force` invocation), and unit-2 spend for the window open now —
 read through `intents.list_intents` over each open case's own set, never a keyspace scan.
 
-`ui/data/improvement.py` exports exactly five getters, and a test pins that
-list as an exact list. **Experiment count and merged-patch count are activity, not improvement**,
-and there is deliberately no function here that returns them.
+**Releases** (`/_partials/improvement/releases/`) renders release lineage: one
+row per release joined to the evaluation that qualified it, the drill that
+exercised its rollback plan ("drilled (worktree)"), the observation window, and
+the outcome scored when the window closed, plus the promotion gate as a
+sentence on every load. See [Improvement Release](improvement-release.md).
 
-Cases, hypotheses, rejected experiments, release lineage arrive with the lane that
-first writes each one (5 for cases and hypotheses, 6 for releases). Permanently empty
-tiles for content nothing writes yet is not a dashboard.
+`ui/data/improvement.py` exports exactly six getters (`get_control_status`,
+`get_coverage`, `get_goals`, `get_intervention_burden`,
+`get_provisional_assumptions`, `get_release_lineage`), and a test pins that
+list as an exact list. **Experiment count and merged-patch count are activity,
+not improvement**, and there is deliberately no function here that returns them.
+
+Cases, hypotheses, and rejected experiments arrive with the lane that first
+writes each one (5 for cases, hypotheses, and rejected approaches). Permanently
+empty tiles for content nothing writes yet is not a dashboard.
 
 ## Break-glass
 
@@ -602,6 +621,7 @@ unbounded acceleration are out of scope.
 ## See also
 
 - [Improvement Evaluation](improvement-evaluation.md): contract fields, manifest, judge envelope, statistics, holdout policy
+- [Improvement Release](improvement-release.md): release lifecycle, rollback drill, observation window, promotion gate, denylist, recursive comparison, claim report, `valor-improve-release`
 - [Improvement Cloud Execution](improvement-cloud-execution.md): provider decision, auth verdict, sandbox topology, host updates, evidence path
 - [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md): the full design
 - [Capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md): what is implemented, deployed, measured, and unknown

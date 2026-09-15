@@ -750,6 +750,14 @@ class TestImprovementMigrationRegistration:
         assert fn is _migrate_improvement_evaluation_charter_digest
         assert description
 
+    def test_confirm_improvement_release_lane6_fields_registered(self):
+        from scripts.update.migrations import _migrate_confirm_improvement_release_lane6_fields
+
+        assert "confirm_improvement_release_lane6_fields" in MIGRATIONS
+        fn, description = MIGRATIONS["confirm_improvement_release_lane6_fields"]
+        assert fn is _migrate_confirm_improvement_release_lane6_fields
+        assert description
+
     def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
         """The subprocess-shaped migrations name a script by filename.
 

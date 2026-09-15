@@ -1,0 +1,94 @@
+{# Improvement: release lineage and the promotion gate (#3218).
+
+   One row per release, joined to the evaluation that qualified it, the
+   drill that exercised its rollback plan, the observation window, and the
+   outcome written back when the window closed. The promotion gate renders
+   as a sentence on every load, whether or not the release table could be
+   read, so the page can always say that automated promotion is disabled
+   and why. This partial renders lineage, never a tally: there is no number
+   of releases, experiments, or merged patches anywhere on it.
+#}
+<div class="improvement-panel" id="improvement-releases">
+    <h4>Releases</h4>
+    <p class="improvement-meta">{{ lineage.gate_sentence }}</p>
+
+    {% if lineage.unavailable %}
+    <p class="improvement-warning">release lineage unavailable; the release read failed.</p>
+    {% elif lineage.no_releases_yet %}
+    <p class="improvement-meta">
+        no release proposed yet; the first arrives from an accepted evaluation.
+    </p>
+    {% else %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>Release</th>
+                <th>Evaluation</th>
+                <th>Drill</th>
+                <th>Window</th>
+                <th>Outcome</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for release in lineage.releases %}
+            <tr>
+                <td>
+                    <strong>{{ release.state }}</strong>
+                    &middot; {{ (release.kind or 'unknown kind') | replace('_', ' ') }}<br>
+                    <code>{{ release.candidate_ref or 'no candidate ref' }}</code><br>
+                    <span class="improvement-meta">
+                        {% for surface in release.surfaces %}<code>{{ surface }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                    </span>
+                    {% if release.case.title %}
+                    <br><span class="improvement-meta">{{ release.case.title }}
+                    {% if release.case.priority_area %}({{ release.case.priority_area | replace('_', ' ') }}){% endif %}</span>
+                    {% endif %}
+                </td>
+                <td>
+                    verdict {{ release.evaluation.verdict or 'none recorded' }}<br>
+                    {% if release.evaluation.effect is not none %}
+                    effect {{ '%.3f' | format(release.evaluation.effect) }}
+                    {% else %}
+                    effect not recorded
+                    {% endif %}
+                    {% if release.evaluation.confidence_interval %}
+                    <br>interval [{{ '%.3f' | format(release.evaluation.confidence_interval.lower) }},
+                    {{ '%.3f' | format(release.evaluation.confidence_interval.upper) }}]
+                    {% else %}
+                    <br>interval not recorded
+                    {% endif %}
+                </td>
+                <td>
+                    {% if release.drilled %}
+                    drilled (worktree): {{ release.drill.result }}
+                    {% if release.drilled_at_text %}<br><span class="improvement-meta">{{ release.drilled_at_text }}</span>{% endif %}
+                    {% else %}
+                    not drilled
+                    {% endif %}
+                </td>
+                <td>
+                    {% if release.exposed %}
+                    exposed {{ release.exposed_at_text }}<br>
+                    ends {{ release.ends_at_text or 'unset' }}
+                    {% if release.window.days_remaining is not none %}
+                    <br>{{ release.window.days_remaining }} days remaining
+                    {% endif %}
+                    {% else %}
+                    not exposed
+                    {% endif %}
+                </td>
+                <td>
+                    {% if release.outcome_sentence %}
+                    {{ release.outcome_sentence }}
+                    {% elif release.state == 'observing' %}
+                    window open
+                    {% else %}
+                    no window scored
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>

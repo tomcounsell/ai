@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -70,12 +70,12 @@ be provably unworked, and the two arms' budgets have to be accounted in the same
   setting, env key, or file flag that changes its answer.
 - The research process is a digestable specification. A recursive comparison freezes a contract
   naming two process digests, a fresh opportunity set, and one budget cap per arm; runs both arms;
-  refuses a claim when the budgets are not comparable or unit-1 spend is unknown; and writes an
+  refuses a claim when the budgets are not comparable or unit-2 spend is unknown; and writes an
   `ImprovementEvaluation` with effect, confidence interval, correction, and verdict.
 - A claim report states, for each ladder level, whether the evidence supports it, with the
   confidence interval, the correction, and the observation that would falsify it, and says plainly
   when it does not.
-- The dashboard renders release lineage as a fifth getter and never presents experiment count or
+- The dashboard renders release lineage as a getter on the pinned list and never presents experiment count or
   merged-patch count as improvement.
 
 ## Freshness Check
@@ -112,8 +112,8 @@ the `accept` verdict live.
 - #3216 (lane 4): open, PR #3309 open at `fe6f55072`, critique round 4 READY TO BUILD, build
   checkpoints landed. This lane's proposal reads its `accept` verdict, so #3216 is a build
   prerequisite.
-- #3215 (lane 3): open, no commits. Its `valor-improve` CLI and unit-1 meter do not exist; this
-  lane ships its own entry point and reads unit 1 through a seam that reports unknown.
+- #3215 (lane 3): open, no commits. Its `valor-improve` CLI and unit-2 meter do not exist; this
+  lane ships its own entry point and reads unit 2 through a seam that reports unknown.
 - #3255 (lane 2b): closed 2026-09-09 via PR #3275. Its comment on #3218 (id 5603830035) assigns
   merge authority through the pipeline and the evaluator-replacement release type to this lane;
   both are in scope below.
@@ -348,7 +348,7 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    `OPEN_CASE_STATES`, no `ImprovementExperiment.case_id` or `ImprovementInvestigation.case_id`
    references it, and no prior comparison's manifest lists it. Returns `(fresh, excluded_with_reasons)`.
 3. **`compare.freeze`**: builds the protocol (`arms: {a, b}` digests, `opportunity_ids`,
-   `opportunity_set_digest`, `budget_cap` per arm in unit-1 USD, unit-3 USD, subscription turns,
+   `opportunity_set_digest`, `budget_cap` per arm in unit-2 USD, unit-3 USD, subscription turns,
    and wall seconds, `primary_endpoint: validated_gain`, `minimum_worthwhile_effect`, `stopping_rule:
    finite batch`, `evaluator_version`), freezes it through lane 4's `freeze_protocol`, writes an
    `ImprovementExperiment(state="frozen", candidate_surfaces=["research_process"])` with the manifest
@@ -358,7 +358,7 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    (`arm_assignment_digest`), calls `ArmRunner.run` once per arm with the same opportunity ids and
    the same cap, receives per-opportunity validated gains and a `BudgetUse`, reads accounted spend
    through `BudgetReader` (unit 3 from `InfrastructureReservation` rows whose `resource` name
-   carries the `arm:<arm_run_id>:` prefix; unit 1 from the seam, `None` until lane 3), and checks
+   carries the `arm:<arm_run_id>:` prefix; unit 2 from the seam, `None` until an arm-scoped read exists), and checks
    `budgets_comparable`.
 5. **Statistics**: paired deltas per opportunity (`gain_b - gain_a`, with a rejected or inconclusive
    arm result scored 0), `clustered_bootstrap_ci` clustered by `priority_area`, `evaluate_family` for
@@ -381,12 +381,12 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
   are invoked through an injectable runner, the shape `tools/improvement_resources.py` already
   uses.
 - **Interface changes**: `ImprovementRelease` gains eight fields and one state, all additive.
-  `ui/data/improvement.py` gains one getter; the pinned list grows to five. `pyproject.toml` gains
+  `ui/data/improvement.py` gains one getter; the pinned list grows to six with lane 3's `get_control_status` merged in. `pyproject.toml` gains
   one script. Nothing in `tools/improvement_eval/` changes.
 - **Coupling**: the release lifecycle depends on lane 4's evaluation shape (`verdict`, `effect`,
   `charter_digest`) and on the experiment manifest carrying `base_revision`. The comparison depends
   on lane 4's `freeze_protocol` and statistics. Both dependencies are on merged or nearly merged
-  code. The two seams left open for lanes 3 and 5 (`BudgetReader.unit1`, `ArmRunner`) are
+  code. The two seams left open for lanes 3 and 5 (`BudgetReader.unit2`, `ArmRunner`) are
   protocols with a refusing default, so absence is a named condition rather than an import error.
 - **Data ownership**: this lane is the sole writer of `ImprovementRelease` and of
   `ImprovementModelRevision` rows produced by a comparison. Lane 5 remains the writer of planner
@@ -560,7 +560,9 @@ runner.
      range aborts on a merge commit ("no -m option"), and reverting each with `-m 1` rehearses a
      different operation from the one the plan declares; the operator re-proposes from a
      linear candidate branch.
-   - `changed = git diff --name-only <base_revision> <candidate_ref>`; `undeclared = [p for p in
+   - `changed = git diff --name-only --no-renames <base_revision> <candidate_ref>` (renames
+     off, so a `git mv` of a denied path to a declared destination is listed at its source
+     too, never at the destination alone); `undeclared = [p for p in
      changed if not any(p == s or p.startswith(s.rstrip("/") + "/") for s in surfaces)]`;
      non-empty → `reason: UNDECLARED_SURFACE_CHANGED`, `paths: undeclared`. This is the check
      that makes the declared surfaces a claim the drill can falsify: a candidate that touches a
@@ -802,12 +804,12 @@ comparison needs three things a running loop provides, and each is a seam:
   when no current revision carries a digest.
 - *Opportunities.* Fresh cases are lane 2's `ImprovementCase` rows and need nothing from lane 5;
   the freshness check reads experiments and investigations that lane 4 and lane 5 write.
-And from lane 3 (#3215): unit-1 paid-inference metering. `BudgetReader.unit1_usd(arm_run_id)`
+And from lane 3 (#3215): unit-2 paid-inference metering. `BudgetReader.unit2_usd(arm_run_id)`
 returns `None` until a meter exists; `budgets_comparable` treats `None` as unknown, and unknown
-refuses a level-3 claim with `BUDGET_UNKNOWN:unit1` in the evaluation's notes. This is charter §8
+refuses a level-3 claim with `BUDGET_UNKNOWN:unit2` in the evaluation's notes. This is charter §8
 applied: uncertain or missing metering is not zero cost.
 
-**Budget (`budget.py`).** `BudgetCap` and `BudgetUse` carry `unit1_usd`, `unit3_usd`,
+**Budget (`budget.py`).** `BudgetCap` and `BudgetUse` carry `unit2_usd`, `unit3_usd`,
 `subscription_turns`, `wall_seconds`, each `float | int | None`. Unit 3 is tagged through the
 resource name, the one field an admitting caller controls: lane 7's `admit()`
 (`tools/infrastructure_budget.py:260`) takes `resource`, `project_key`, `settings`, `now` and writes
@@ -819,7 +821,7 @@ filters `InfrastructureReservation.query.filter(project_key=...)` by
 `row.resource.startswith(f"arm:{arm_run_id}:")`, sums `settled_usd if settled_usd is not None else
 amount_usd` over rows with `state in ("reserved", "settled")`, and **returns `None` when zero rows
 match**, so an arm that admitted nothing through the ledger is `BUDGET_UNKNOWN:unit3` rather than a
-free arm. `unit1_usd` returns `None`; `subscription_turns` and `wall_seconds` come from the
+free arm. `unit2_usd` returns `None`; `subscription_turns` and `wall_seconds` come from the
 `ArmResult`. `budgets_comparable(a, b, cap, tolerance=0.10)` returns `(ok, reasons)`: `False` with
 `BUDGET_UNKNOWN:<unit>` for any `None` on either side, `False` with `BUDGET_EXCEEDED:<arm>:<unit>`
 when use exceeds the cap, `False` with `BUDGET_MISMATCH:<unit>` when the two arms' use differs by
@@ -844,7 +846,7 @@ artifacts; the field is honest rather than decorative), `trials=len(opportunitie
 `confidence_interval=json.dumps({"validated_gain": {"lower": ..., "upper": ..., "n": ...,
 "raw_p_value": ..., "adjusted_p_value": ...}}, sort_keys=True)`, `correction="holm"`, and
 `notes="\n".join(lines)` where one line is `budget=<json>` carrying both arms' use in every unit
-and, on a refusal, one line names the reason (`BUDGET_UNKNOWN:unit1`, ...). These are lane 4's
+and, on a refusal, one line names the reason (`BUDGET_UNKNOWN:unit2`, ...). These are lane 4's
 string shapes keyed by endpoint (Technical Approach, "Evaluation read"), so `report.py` and the
 lineage getter parse both evaluator versions through `effect_of` / `interval_of` / `notes_of` /
 `budget_of`. Any exception from an arm is `infra_failure`, never a result. On `accept`, `_write_revision` creates the new
@@ -872,8 +874,8 @@ priority_area}`, `drill: {result, drilled_at}`, `window: {exposed_at, ends_at, d
 `outcome: {verdict, claim_level_2_supported}`), `promotion_gate: {automated, unmet}`,
 `unavailable`, `no_releases_yet`. The partial `ui/templates/improvement/releases.html` renders the lineage as one
 row per release and the gate as a sentence ("Automated promotion: disabled; unmet: ..."). The
-index page links it beside the other three. The exact pinned list in
-`test_dashboard_never_offers_experiment_or_patch_counts` grows to five.
+index page links it beside the others. The exact pinned list in
+`test_dashboard_never_offers_experiment_or_patch_counts` grows to six with lane 3's `get_control_status` merged in.
 
 **CLI (`cli.py`).** `argparse` with subparsers; every subcommand takes `--project-key` (default
 `valor`), prints one JSON object on stdout, exits 0 on success, 2 on a `ReleaseRefused` or
@@ -890,7 +892,7 @@ ended, for a future tick to call.
 - [ ] `lifecycle.rollback` with a runner whose `git push` returns nonzero: state unchanged, `outcome.history` carries `rollback_push_refused` with the revert SHA and `parent_sha`, `ReleaseRefused("ROLLBACK_PUSH_REFUSED")` raised, CLI exit 2. With a runner whose push returns 0 but whose `ls-remote origin refs/heads/main` answers a different SHA (a head that moved under the push): same refusal, so the transition never rests on the push's exit code alone. The recording runner returns 0 for `git fetch origin main` and `git worktree add --detach <path> origin/main`, and the test asserts those two calls precede the revert in the runner log (`test_rollback_fetches_before_worktree`), so a builder who builds the worktree from the local checkout goes red.
 - [ ] `lifecycle.expose` with canned `gh pr view` JSON whose `mergedAt` is older than `EVIDENCE_TTL_DAYS - baseline_window_days` days: refused `ReleaseRefused("EVIDENCE_EXPIRED")`, state stays `approved`, no baseline written (`test_expose_refuses_when_baseline_expired`). With `state != "MERGED"`: `PR_NOT_MERGED`.
 - [ ] `evaluation_read.effect_of` / `interval_of` on a row whose `effect` is `None`, an empty string, or a JSON string lacking the requested endpoint: `None`, never an exception; on a `dict` (a row written by a future writer that stores the parsed value): the same answer as the string form. `budget_of` on `notes` without a `budget=` line: `None`.
-- [ ] `compare.py` catches any exception from an `ArmRunner` and writes `infra_failure`, mirroring lane 4's runner; test asserts the evaluation row exists with that verdict and `notes` naming the exception type.
+- [ ] `compare.py` catches any exception from an `ArmRunner`, the accounting read, the priority-area lookup, or the statistics and writes `infra_failure` with the experiment `aborted`, mirroring lane 4's runner; tests assert the evaluation row exists with that verdict and `notes` naming the exception type, for a raise inside an arm and for one after both arms ran (`test_post_arm_scoring_failure_is_infra_failure_not_a_wedged_running_state`).
 - [ ] `observation.py` and `lineage.py` catch read failures and mark the result `unavailable` (the dashboard pattern from `get_goals`); tests monkeypatch `ImprovementEvidence.recent` to raise and assert `unavailable=True` with a `logger.warning` captured, and that `get_release_lineage` still returns the promotion gate.
 - [ ] `report.py`: each level degrades independently; test raises inside the level-2 read and asserts levels 1 and 3 are still populated and level 2 says "could not be determined".
 
@@ -931,15 +933,30 @@ Every guard below is mutated once during the build and the test that catches it 
 - exposure anchor (`expose`): stamp `exposed_at = now` instead of `mergedAt` → `test_expose_restamps_window_end_from_exposed_at` red (the canned `gh pr view` JSON carries a `mergedAt` three days before the call; the test asserts `observation_window_ends_at == mergedAt + window_days`, `exposed_at == mergedAt`, the baseline span ends at `mergedAt`, and the `exposed` history event carries both `merged_at` and `expose_called_at`)
 - window-restamp (`expose`): keep the approve-time `observation_window_ends_at` → the same test red
 - evaluation shape (`evaluation_read`): read `evaluation.effect` as a number (skip `json.loads`) → `test_lineage_reads_lane4_string_shape` red (the fixture row is written with `runner.py:499-505`'s exact expressions)
-- budget-unknown (`compare`): treat `None` as 0 → `test_compare_refuses_claim_on_unknown_unit1` red
+- budget-unknown (`compare`): treat `None` as 0 → `test_compare_refuses_claim_on_unknown_unit2` red
 - unit-3 zero-rows (`budget`): return `0.0` from `unit3_usd` on no matched rows → `test_unit3_unknown_when_no_arm_rows` red
 - freshness (`freeze`): skip the experiment lookup → `test_freeze_refuses_worked_opportunity` red
 - arms-identical (`run`): drop the check → `test_run_refuses_identical_arms` red
 - detection-declined (`close_window`): drop the coverage comparison → `test_close_window_undetermined_when_detection_declines` red
+- undeclared-surface listing past the tail (`drill`): parse the step's 2 KB `stdout_tail` instead of the full output → `test_undeclared_check_reads_the_whole_listing_past_tail_bytes` red
+- denylist parent rule (`denylist`): drop the enclosing-directory match → `test_a_directory_enclosing_an_entry_is_denied` and `test_propose_refuses_charter_surface[docs]` red
+- denied changed path (`drill`): drop the `denied_surfaces` check over the changed paths → `test_drill_fails_when_a_changed_path_is_denied` red
+- rollback checkout refusal (`rollback`): build the slot without `refuse_checkout_path` → `test_rollback_refuses_checkout_path` red
+- rename-blind listing (`drill`): drop `--no-renames` from the `changed_paths` listing → `test_drill_sees_a_renamed_denied_path_at_its_source` (both parametrizations) red; drop it from the restoration's `differing_paths` listing → `test_assert_restored_lists_both_ends_of_a_rename` red
+- rollback failure persist (`rollback`): save without `update_fields=["outcome"]`, or skip the re-read and the merge → `test_rollback_failure_persist_keeps_a_concurrent_transition` red
+- merge starts from the re-read row (`_save_outcome_only`, row 34): merge history only onto the caller's stale dict (`merged = dict(outcome); _merge_history(merged, _outcome(current))`) → `test_rollback_failure_persist_keeps_a_concurrent_transition` red on the transition's `verdict`, `closed_at`, `claim_level_2_supported`, `rollback_recommended`; the naive fresh-row start that copies only keys the row lacks (`key not in merged` in `_merge_outcome`, ignoring `base`, the caller's pre-edit read) → `test_rollback_failure_persist_overwrites_its_own_previous_attempt` red
+- `open_pr` partial save (row 35): full `save()` from the stale row instead of `_save_outcome_only(..., fields=("exposure", "outcome"))` → `test_open_pr_keeps_a_withdraw_landing_during_pr_create` red
+- non-held `close_window` partial save (row 36): full `save()` from the stale row instead of `_save_outcome_only` → `test_regressed_close_keeps_a_concurrent_rollback` red
+- `_transition` merge base (row 37): history-only merge onto the caller's dict instead of `_merge_outcome` → `test_held_close_keeps_a_concurrent_rollback_failure_persist` red
+- drill persist partial save (`drill.run`, row 38): full `save()` from the row read before the git steps instead of `save(update_fields=["rollback_drill", "drill_log"])` → `test_drill_persist_keeps_a_withdraw_landing_during_worktree_add` (integration, real row, real `withdraw` inside the runner during `git worktree add`) red on `state == "withdrawn"`, and `test_drill_passes_on_linear_candidate` red on the stand-in's recorded `saved_fields`
+- `_save_outcome_only` returned row (row 39): return the caller's in-memory object instead of the row re-read after the save → `test_open_pr_keeps_a_withdraw_landing_during_pr_create` red on `returned.state == "withdrawn"` and `test_regressed_close_keeps_a_concurrent_rollback` red on `returned.state == "rolled_back"`
+- `check-ref-format` timeout (`rollback`): drop `timeout=_git_timeout()` from the call → `test_rollback_refuses_a_branch_git_rejects` red
+- venv link on a tracked `.venv` (`drill`): check `target.exists()` alone and let `symlink_to` raise → `test_add_detached_worktree_leaves_a_tracked_dangling_venv_link` and `test_add_detached_worktree_records_a_refused_link` red
+- restoration step tail (`drill`): join `differing` into the synthetic step without `tail(...)` → `test_residue_paths_come_from_the_full_listing_and_the_step_keeps_a_tail` red
 
 ## Test Impact
 
-- [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact pinned list becomes five names with `get_release_lineage` inserted in sorted position (`get_coverage`, `get_goals`, `get_intervention_burden`, `get_provisional_assumptions`, `get_release_lineage`); the assertion stays an exact list.
+- [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact pinned list becomes six names with `get_release_lineage` inserted in sorted position beside lane 3's `get_control_status` (`get_control_status`, `get_coverage`, `get_goals`, `get_intervention_burden`, `get_provisional_assumptions`, `get_release_lineage`); the assertion stays an exact list.
 - [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_index_page_links_all_improvement_partials` — UPDATE: add the `/_partials/improvement/releases/` link assertion.
 - [ ] `tests/unit/test_improvement_models.py` (`INDEXED_VOCABULARIES[ImprovementRelease]`) — UPDATE: `RELEASE_STATES` gains `accepted` (six values, under the cap of 8); the vocabulary map reads the constant, so the update is to the docstring-recorded TTL/state expectations only if any test enumerates the five names literally (none does today; the row is a no-op guard).
 - [ ] `tests/unit/test_migrations.py` — UPDATE: add a per-migration registration test `test_confirm_improvement_release_lane6_fields_registered` in the shape of `test_improvement_models_registration_marker_exists` (`tests/unit/test_migrations.py:738-742`): `assert "confirm_improvement_release_lane6_fields" in MIGRATIONS`, unpack `fn, description = MIGRATIONS[...]`, `assert fn is _migrate_confirm_improvement_release_lane6_fields`, `assert description`. No test enumerates `MIGRATIONS` keys as a list; each migration pins its own registration.
@@ -953,7 +970,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 - **Building the bundle.** "Immutable bundle digest activated for newly assigned Jobs; active Jobs stay pinned" is a per-Job routing layer that needs a promotion authority to route for. Nothing can promote, so there is nothing to pin. Exposure is the mechanism that exists (a merged PR reaching the fleet through `/update`), recorded honestly as `unit: fleet`.
 - **Scheduling the window close.** A launchd job or reflection to close windows on time is lane 3's controller tick. `close-window --due` is the callable; wiring a scheduler here would create a second cadence owner.
 - **Running a real research process for the comparison.** Lane 5's planner is the production `ArmRunner`. Writing one here, or a "simplified" planner to have something to compare, would produce a comparison of two things nobody runs. The replay runner exercises every statistical and budget path; the production runner registers itself.
-- **Metering unit 1 here.** The paid-inference meter is lane 3's and touches the harness. `unit1_usd` returns `None` and the comparison says so.
+- **Metering unit 2 here.** The paid-inference meter is lane 3's and touches the harness. `unit2_usd` returns `None` and the comparison says so.
 - **A generic feature-flag system for `setting_restore` rollbacks.** No Redis-backed settings override exists; inventing one so a rollback could flip a flag is a new subsystem. Rollback plan kind is `git_revert` only, which matches the only exposure mechanism.
 - **Auto-rollback on a regressed window.** Tempting because the drill proves the revert works. It is an automated production action taken on a metric with a 14-day denominator, and charter §6 says fewer detected bugs with less detection is not a signal. `close_window` recommends; a human runs `rollback`.
 - **Blinding the comparison.** The arms are processes, and the judge of each opportunity's gain is lane 4's blinded evaluation inside each arm. Adding a second blinding layer over process identity has nothing to blind: the process digest is the arm.
@@ -970,8 +987,8 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 **Mitigation:** Raw counts and denominators beside every rate; coverage ticks per day compared across windows with the 0.8 decline threshold; `undetermined` on a zero denominator; a noise band on the baseline rate derived from its own count (Wilson interval at 95%); and `claim_level_2_supported` requiring both the held-out effect and a `held` window. Level 2 is stated with the interval, the correction, and the falsifier, never as a bare "improved".
 
 ### Risk 3: Budget accounting is incomplete and reads as matched
-**Impact:** Unit 1 is unmetered. If `None` were ever read as zero, two arms with wildly different paid-inference spend would look budget-matched and a level-3 claim would measure the budget.
-**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit1` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until lane 3 meters unit 1, no level-3 claim can be made here, and the report says so in the `why_not` field.
+**Impact:** Unit 2 is unmetered. If `None` were ever read as zero, two arms with wildly different paid-inference spend would look budget-matched and a level-3 claim would measure the budget.
+**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit2` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until unit 2 has an arm-scoped read (lane 3's meter carries no `arm_run_id`; lane 5 tags the reservations), no level-3 claim can be made here, and the report says so in the `why_not` field.
 
 ### Risk 4: The canonical bytes drift between lane 5's spec JSON and this lane's digest
 **Impact:** Lane 5 stores the canonical spec bytes (`process_spec_json`) and computes the digest only through this lane's function (lane 5 plan, "Provided to lane 6 (#3218)" item 1, `1c3d17185`), so there is one hashing routine. The remaining hazard is the byte form itself: a `separators`, `sort_keys`, or float-formatting difference between `process_spec_json` and `research_process_digest`'s `json.dumps` call makes every stored spec un-rehashable to its own digest, and a revision written before this lane merged carries `research_process_digest=None` until backfilled.
@@ -1000,7 +1017,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 **Trigger:** `approve` and `withdraw` run within the same second from two shells.
 **Data prerequisite:** The release row at the state each caller read.
 **State prerequisite:** Exactly one terminal write per transition.
-**Mitigation:** `_transition` re-reads the row immediately before `save()` and refuses `WRONG_STATE` if `state` no longer equals `allowed_from`. Popoto has no CAS, so a sub-millisecond interleave can still double-write; the `history` list inside `outcome` records both events with timestamps, so the double-write is detectable and the second event names the conflict. Operator-invoked transitions on an immortal audit record are rare enough that detectability is the right cost; lane 3's journal is the place a fenced transition belongs, and this lane does not build a second one.
+**Mitigation:** `_transition` re-reads the row immediately before `save()` and refuses `WRONG_STATE` if `state` no longer equals `allowed_from`, then merges its outcome onto the re-read row's (`_merge_outcome`: the result starts from the re-read row, so its keys and history events survive; `base` is the caller's pre-edit read, and keys the caller added or changed relative to it take the caller's value), which recovers a second writer whose re-read lands after the first writer's save in either order: the record shows both events and both writers' keys. Popoto has no CAS, so the sub-millisecond interleave (both re-read, then both save) remains a lost write; the last save wins and the earlier event is gone. Every write that records an event without moving the state (`open_pr`, the non-held `close_window`, the rollback failure persist for `rollback_step_failed` and `rollback_push_refused`) goes through `_save_outcome_only`, which takes the same re-read-and-merge path, saves only the columns it wrote (`update_fields`), so a transition landed during a subprocess or the git steps keeps its state, and returns the row re-read after the save so the caller (and the CLI's `release_payload`) reports the persisted state. The drill's persist (`drill.run`) writes `rollback_drill` and `drill_log` alone (`update_fields`), so a `withdraw` landed during `git worktree add` keeps its state and outcome. Operator-invoked transitions on an immortal audit record are rare enough that this window is the right cost; lane 3's journal is the place a fenced transition belongs, and this lane does not build a second one.
 
 ### Race 2: A crash between writing the new revision and superseding the old one
 **Location:** `tools/improvement_recursion/compare.py::_write_revision`
@@ -1037,10 +1054,10 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 - [EXTERNAL] Separating evaluator secrets and production credentials from candidate execution. A separate process identity and credential scope is an operations change on Tom's machines; this lane names it as precondition 1 and cannot satisfy it.
 - [EXTERNAL] Amending `docs/improvement-charter.md` to name reversible surfaces. Only Tom authorizes charter changes (§12). The gate checks the pinned text for the section; writing it is not this lane's, and `docs/improvement-charter.md` is on the denylist.
 - [SEPARATE-SLUG #3217] The production `ArmRunner` (lane 5's planner tick run under a pinned process spec), the writer of planner-tick `ImprovementModelRevision` rows, and `candidate_ref` on the candidate manifest. This lane ships the protocol, the replay runner, the digest function, and the `ARM_RUNNER_ABSENT` refusal. Anti-criterion: the "Comparison refuses without an arm runner" Verification row.
-- [SEPARATE-SLUG #3215] Unit-1 paid-inference metering, the `valor-improve` CLI, the control journal, and scheduling `close-window --due` on the controller tick. `BudgetReader.unit1_usd` returns `None` until lane 3 meters it; `valor-improve-release` is a separate binary by design.
+- [SEPARATE-SLUG #3215] Unit-2 paid-inference metering, the `valor-improve` CLI, the control journal, and scheduling `close-window --due` on the controller tick. `BudgetReader.unit2_usd` returns `None` until an arm-scoped read exists over lane 3's meter; `valor-improve-release` is a separate binary by design.
 - [SEPARATE-SLUG #3216] Any change to `tools/improvement_eval/`. Imported, never modified. Anti-criterion: the "Lane 4 harness untouched" Verification row.
 - [DESTRUCTIVE] Auto-rollback on a regressed observation window. `close_window` writes `rollback_recommended`; a human runs `rollback`. Anti-criterion: `grep -c 'rollback(' tools/improvement_release/lifecycle.py` inside `close_window`'s body is asserted zero by `test_close_window_never_calls_rollback`.
-- [DESTRUCTIVE] Running the drill or the rollback inside the repo checkout. Both refuse any path that is not a worktree they created under the retention root. Anti-criterion: `test_drill_refuses_checkout_path`.
+- [DESTRUCTIVE] Running the drill or the rollback inside the repo checkout. Both refuse any path that is not a worktree they created under the retention root. Anti-criteria: `test_drill_refuses_checkout_path` and `test_rollback_refuses_checkout_path`.
 
 ## Update System
 
@@ -1061,7 +1078,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 
 ### Feature Documentation
 - [ ] Create `docs/features/improvement-release.md`: the release lifecycle and its state machine, the drill record shape and what it does and does not exercise, the exposure and observation-window semantics with the frozen baseline, the promotion gate and both preconditions, the denylist, the recursive comparison's contract and budget accounting, the claim ladder report, and the `valor-improve-release` reference.
-- [ ] Update `docs/features/improvement-controller.md`: "What exists today" gains lane 6; the authority table's "Evaluation and release" row cites the gate module; the records table's `ImprovementRelease` row names the new fields; the dashboard section lists the fifth getter.
+- [ ] Update `docs/features/improvement-controller.md`: "What exists today" gains lane 6; the authority table's "Evaluation and release" row cites the gate module; the records table's `ImprovementRelease` row names the new fields; the dashboard section lists the release-lineage getter.
 - [ ] Update `docs/features/improvement-evaluation.md` (lane 4's doc) with one paragraph on what consumes an `accept` verdict, linking to the release doc; no change to the harness description.
 - [ ] Add `docs/features/improvement-release.md` to the `docs/features/README.md` index table.
 - [ ] Update `docs/tools-reference.md`: add `valor-improve-release` with every subcommand in the Agent Integration list, including `revision supersede`, `drill --sweep`, `close-window --due`, `rollback --branch`, and `compare run --arm-runner`; re-point the planned `valor-improve release compare` line.
@@ -1070,7 +1087,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 ### Inline Documentation
 - [ ] `models/improvement_release.py` docstring: the six states and their transitions, the new fields, and the unchanged sentence that promotion is disabled and this record does not enable it.
 - [ ] `tools/improvement_release/promotion.py` docstring: both preconditions, the event that satisfies each, and the statement that no setting, env key, or file flag reads into the gate.
-- [ ] `tools/improvement_recursion/compare.py` docstring: why budgets are matched by cap and verified by accounting, why unknown unit-1 spend refuses a claim, and what "fresh" means by record lookup.
+- [ ] `tools/improvement_recursion/compare.py` docstring: why budgets are matched by cap and verified by accounting, why unknown unit-2 spend refuses a claim, and what "fresh" means by record lookup.
 
 ## Success Criteria
 
@@ -1082,8 +1099,8 @@ Mapped to the issue's acceptance criteria in order.
 - [ ] **The recursive comparison runs on budget-matched fresh opportunities with the budget accounting shown.** `tests/unit/test_improvement_recursion_compare.py` freezes a contract over fresh seeded cases, runs both arms through `ReplayArmRunner` with equal caps, and asserts the evaluation's `effect`, `confidence_interval`, `correction="holm"`, and that `notes` carries both arms' use in all four units. A worked opportunity is refused at freeze; a mismatched budget yields `inconclusive` with `BUDGET_MISMATCH`.
 - [ ] **`research_process_digest` distinguishes the arms.** `run` refuses `ARMS_IDENTICAL` on equal digests; the accept path writes an `ImprovementModelRevision` whose `research_process_digest` equals arm B's and whose `supersedes_id` names the prior current revision.
 - [ ] **Automated promotion remains disabled, and the code path names both preconditions.** `promotion_gate("valor")` returns `automated=False` with both names in `unmet` against the real pinned charter; `promote_automatically` raises `PromotionDisabled` listing them; a synthetic charter with a "Reversible surfaces" section clears only precondition 2 and the gate still refuses; no `PROMOTION` key exists in `config/settings.py` or `.env.example`.
-- [ ] **A level-2 or level-3 claim states its interval, correction, and falsifier, or the report says plainly that the evidence does not support it.** `claim_report` on an empty project returns all three levels `supported=False` with a `why_not` sentence each; on the end-to-end fixture, level 2 is `supported=True` with the interval, correction, and falsifier populated; level 3 is `supported=False` with `why_not` naming `BUDGET_UNKNOWN:unit1` when unit 1 is unmetered.
-- [ ] **The dashboard never presents experiment count or merged-patch count as improvement.** The pinned getter list is exactly five; the anti-criterion grep over `ui/data/improvement.py` and the releases template is zero; the partial renders lineage, not counts.
+- [ ] **A level-2 or level-3 claim states its interval, correction, and falsifier, or the report says plainly that the evidence does not support it.** `claim_report` on an empty project returns all three levels `supported=False` with a `why_not` sentence each; on the end-to-end fixture, level 2 is `supported=True` with the interval, correction, and falsifier populated; level 3 is `supported=False` with `why_not` naming `BUDGET_UNKNOWN:unit2` when unit 2 is unmetered.
+- [ ] **The dashboard never presents experiment count or merged-patch count as improvement.** The pinned getter list is exactly six; the anti-criterion grep over `ui/data/improvement.py` and the releases template is zero; the partial renders lineage, not counts.
 - [ ] Tests pass (`/do-test`), including the full `tests/unit/test_ui_app.py` and `tests/unit/test_improvement_models.py`.
 - [ ] Documentation updated (`/do-docs`): `docs/features/improvement-release.md` exists and is indexed; `improvement-controller.md`, `improvement-evaluation.md`, `tools-reference.md`, and the capability matrix are updated.
 - [ ] `pyproject.toml` references `tools.improvement_release.cli:main` and `valor-improve-release --help` exits 0 from the venv.
@@ -1196,7 +1213,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Write `process.py`, `freshness.py`, `budget.py` (`BudgetCap`, `BudgetUse`, `BudgetReader`, `LedgerBudgetReader`, `budgets_comparable`; imports nothing from `arms.py`), `arms.py` (`ArmRunner`, `ArmResult`, `ReplayArmRunner`, `register_arm_runner`, `get_arm_runner`, `resolve_arm_runner`, `ArmRunnerAbsent`, plus a runtime re-export of `BudgetCap` and `BudgetUse` via a module-level `from tools.improvement_recursion.budget import BudgetCap, BudgetUse`, never under `TYPE_CHECKING`, and `__all__ = ["ArmRunner", "ArmResult", "ArmRunnerAbsent", "BudgetCap", "BudgetUse", "ReplayArmRunner", "get_arm_runner", "register_arm_runner", "resolve_arm_runner"]`). Lane 5's `PlannerArmRunner.run` and `tools/improvement.py` import `ArmResult`, `BudgetUse`, `register_arm_runner`, and `get_arm_runner` from `arms` and nothing from `budget`.
 - `test_arms_exports_lane5_seam`: `from tools.improvement_recursion.arms import ArmResult, BudgetUse, get_arm_runner, register_arm_runner  # noqa: F401` (lane 5's exact import) then `import tools.improvement_recursion.budget as budget; assert BudgetUse is budget.BudgetUse`. Mutation check: moving the import under `if TYPE_CHECKING:` must fail this test.
-- Tests: canonical digest independent of key order; invalid split refused; empty split digests; `test_digest_matches_lane5_canonical_bytes` under `pytest.importorskip("tools.improvement_ranking", reason="lane 5 (#3217) not landed")` asserts `research_process_digest(spec) == "sha256:" + hashlib.sha256(process_spec_json(spec).encode("utf-8")).hexdigest()` on lane 5's fixture values (never a `process_digest` function; lane 5 ships none); freshness excludes cases with an experiment, an investigation, or a prior comparison, with reasons; `LedgerBudgetReader` sums seeded `InfrastructureReservation` rows whose `resource` carries the `arm:<arm_run_id>:` prefix (admitted through lane 7's `admit()` with a `ResourceDecl` named that way, never by writing `reason`), returns `None` on zero matched rows and `None` for unit 1; `budgets_comparable` on unknown, exceeded, mismatched, ok, and an explicit zero cap.
+- Tests: canonical digest independent of key order; invalid split refused; empty split digests; `test_digest_matches_lane5_canonical_bytes` under `pytest.importorskip("tools.improvement_ranking", reason="lane 5 (#3217) not landed")` asserts `research_process_digest(spec) == "sha256:" + hashlib.sha256(process_spec_json(spec).encode("utf-8")).hexdigest()` on lane 5's fixture values (never a `process_digest` function; lane 5 ships none); freshness excludes cases with an experiment, an investigation, or a prior comparison, with reasons; `LedgerBudgetReader` sums seeded `InfrastructureReservation` rows whose `resource` carries the `arm:<arm_run_id>:` prefix (admitted through lane 7's `admit()` with a `ResourceDecl` named that way, never by writing `reason`), returns `None` on zero matched rows and `None` for unit 2; `budgets_comparable` on unknown, exceeded, mismatched, ok, and an explicit zero cap.
 - `ReplayArmRunner` admits its fixture spend through `admit()` under the arm-prefixed resource name so the ledger reader is exercised on the same path a production runner uses; `arms.py` also exposes `resolve_arm_runner(spec: str)` for the `--arm-runner module:attr` form.
 
 ### 6. Comparison and claim report
@@ -1207,7 +1224,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: false
 - Write `compare.py` (`freeze`, `run`, `_write_revision`, `revision supersede` helper) importing `freeze_protocol`, `compute_contract_digest`, `clustered_bootstrap_ci`, `evaluate_family` from lane 4, writing `effect` / `confidence_interval` as `json.dumps({"validated_gain": ...}, sort_keys=True)` and `notes` as newline-joined lines with one `budget=<json>` line; and `report.py` (`claim_report`, `render`) reading every evaluation through `tools/improvement_release/evaluation_read.py`.
-- Tests: freeze refuses worked opportunities and zero opportunities; run refuses identical arms and an absent runner, resolves `--arm-runner` by lazy import and refuses an unimportable or missing attribute with the error in `detail`; equal-cap replay yields accept/reject/inconclusive on three fixtures with the interval and Holm recorded, and the written row's `effect` round-trips through `effect_of(row, "validated_gain")` and `budget_of(row)` carries both arms' use; unknown unit 1 yields inconclusive with `BUDGET_UNKNOWN:unit1`; an arm that admitted nothing yields `BUDGET_UNKNOWN:unit3`; an arm exception yields `infra_failure`; accept writes the revision new-then-supersede; two current revisions are reported as `REVISION_CONFLICT`; the report reads a lane-4-shaped row (seeded with `runner.py:499-508`'s expressions) and a comparison row through the same reader, degrades per level, and never contains a count.
+- Tests: freeze refuses worked opportunities and zero opportunities; run refuses identical arms and an absent runner, resolves `--arm-runner` by lazy import and refuses an unimportable or missing attribute with the error in `detail`; equal-cap replay yields accept/reject/inconclusive on three fixtures with the interval and Holm recorded, and the written row's `effect` round-trips through `effect_of(row, "validated_gain")` and `budget_of(row)` carries both arms' use; unknown unit 2 yields inconclusive with `BUDGET_UNKNOWN:unit2`; an arm that admitted nothing yields `BUDGET_UNKNOWN:unit3`; an arm exception yields `infra_failure`; accept writes the revision new-then-supersede; two current revisions are reported as `REVISION_CONFLICT`; the report reads a lane-4-shaped row (seeded with `runner.py:499-508`'s expressions) and a comparison row through the same reader, degrades per level, and never contains a count.
 
 ### 7. CLI, dashboard, end-to-end
 - **Task ID**: build-surface
@@ -1256,23 +1273,23 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Unit tests for the lane pass | `scripts/pytest-clean.sh tests/unit/test_improvement_release_lifecycle.py tests/unit/test_improvement_release_drill.py tests/unit/test_improvement_release_denylist.py tests/unit/test_improvement_release_promotion_gate.py tests/unit/test_improvement_release_observation.py tests/unit/test_improvement_release_evaluation_read.py tests/unit/test_improvement_recursion_process.py tests/unit/test_improvement_recursion_freshness.py tests/unit/test_improvement_recursion_compare.py tests/unit/test_improvement_recursion_report.py tests/unit/test_improvement_models.py tests/unit/test_ui_app.py tests/unit/test_migrations.py -q` | exit code 0 |
+| Unit tests for the lane pass | `scripts/pytest-clean.sh tests/unit/test_improvement_release_lifecycle.py tests/unit/test_improvement_release_drill.py tests/unit/test_improvement_release_denylist.py tests/unit/test_improvement_release_promotion_gate.py tests/unit/test_improvement_release_observation.py tests/unit/test_improvement_release_evaluation_read.py tests/unit/test_improvement_release_cli.py tests/unit/test_improvement_recursion_process.py tests/unit/test_improvement_recursion_freshness.py tests/unit/test_improvement_recursion_compare.py tests/unit/test_improvement_recursion_report.py tests/unit/test_improvement_models.py tests/unit/test_ui_app.py tests/unit/test_migrations.py -q -n 4` | exit code 0 |
 | End-to-end release lifecycle | `scripts/pytest-clean.sh tests/integration/test_improvement_release_end_to_end.py tests/integration/test_improvement_release_drill.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/improvement_release tools/improvement_recursion models/improvement_release.py ui/data/improvement.py ui/app.py scripts/update/migrations.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/improvement_release tools/improvement_recursion models/improvement_release.py ui/data/improvement.py ui/app.py scripts/update/migrations.py` | exit code 0 |
 | Entry point registered | `grep -c 'valor-improve-release = "tools.improvement_release.cli:main"' pyproject.toml` | output contains 1 |
 | Promotion gate refuses on current charter | `.venv/bin/python -c "from tools.improvement_release.promotion import promotion_gate; g = promotion_gate('valor'); assert g.automated is False and set(g.unmet) == {'credential_separation', 'charter_names_reversible_surfaces'}, g; print('refused')"` | output contains refused |
-| No promotion flag exists (anti-criterion) | `grep -rci 'promotion' config/settings.py .env.example` | match count == 0 |
+| No promotion flag exists (anti-criterion) | `grep -rciE 'promot[a-z_]*\s*[:=]' config/settings.py .env.example` | match count == 0 |
 | No file-flag enable for promotion (anti-criterion) | `grep -rc 'promotion-enabled\|promote-enabled' tools/improvement_release tools/improvement_recursion` | match count == 0 |
 | Charter is a denied surface | `.venv/bin/python -c "from tools.improvement_release.denylist import denied_surfaces; d = denied_surfaces(['docs/improvement-charter.md', 'models/improvement_charter.py', 'tools/x.py']); assert d == ['docs/improvement-charter.md', 'models/improvement_charter.py'], d; print('denied')"` | output contains denied |
-| Dashboard exports exactly five getters | `.venv/bin/python -c "import ui.data.improvement as m; names = [n for n in dir(m) if n.startswith('get_')]; assert names == ['get_coverage', 'get_goals', 'get_intervention_burden', 'get_provisional_assumptions', 'get_release_lineage'], names; print('pinned')"` | output contains pinned |
+| Dashboard exports exactly six getters | `.venv/bin/python -c "import ui.data.improvement as m; names = [n for n in dir(m) if n.startswith('get_')]; assert names == ['get_control_status', 'get_coverage', 'get_goals', 'get_intervention_burden', 'get_provisional_assumptions', 'get_release_lineage'], names; print('pinned')"` | output contains pinned |
 | Dashboard never returns an experiment or patch count (anti-criterion) | `grep -c 'experiment_count\|merged_patch\|patch_count\|len(experiments)' ui/data/improvement.py ui/templates/improvement/releases.html` | match count == 0 |
-| Lane 4 harness untouched (diffed against lane 4's head while #3309 is open, `origin/main` after it merges) | `BASE=$(git merge-base HEAD origin/session/sdlc-3216 2>/dev/null \|\| git merge-base HEAD origin/main); git diff --stat "$BASE" -- tools/improvement_eval/ \| tail -1 \| grep -c 'changed'` | match count == 0 |
+| Lane 4 harness untouched (diffed against `origin/main`, correct now that #3309 has merged; the prior `origin/session/sdlc-3216` fallback read a deleted branch's stale local remote-tracking ref instead of falling through) | `BASE=$(git merge-base HEAD origin/main); git diff --stat "$BASE" -- tools/improvement_eval/ \| tail -1 \| grep -c 'changed'` | match count == 0 |
 | Process digest is deterministic and canonical | `.venv/bin/python -c "from tools.improvement_recursion.process import ResearchProcessSpec, research_process_digest as d; a = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'probe': 0.5, 'web_research': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); b = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'web_research': 0.5, 'probe': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); assert d(a) == d(b) and d(a).startswith('sha256:'); print('canonical')"` | output contains canonical |
-| Comparison refuses without an arm runner | `.venv/bin/python -c "from tools.improvement_recursion.arms import get_arm_runner, ArmRunnerAbsent\ntry:\n    get_arm_runner()\nexcept ArmRunnerAbsent as e:\n    print('ARM_RUNNER_ABSENT', e)"` | output contains ARM_RUNNER_ABSENT |
+| Comparison refuses without an arm runner | `.venv/bin/python -c "from tools.improvement_recursion.arms import get_arm_runner; get_arm_runner()" 2>&1 \| grep ARM_RUNNER_ABSENT` | output contains ARM_RUNNER_ABSENT |
 | Comparison resolves a named arm runner by lazy import | `.venv/bin/python -c "from tools.improvement_recursion.arms import resolve_arm_runner, ReplayArmRunner; r = resolve_arm_runner('tools.improvement_recursion.arms:ReplayArmRunner'); assert isinstance(r, ReplayArmRunner); print('resolved')"` | output contains resolved |
 | Incident binary imports nothing from the research CLI at load | `.venv/bin/python -c "import sys; import tools.improvement_release.cli; assert not [m for m in sys.modules if m in ('tools.improvement', 'tools.improvement_ranking', 'tools.improvement_plan_arm')], 'research CLI imported at load'; print('decoupled')"` | output contains decoupled |
-| Evidence TTL constant matches the model | `.venv/bin/python -c "from tools.improvement_release.observation import EVIDENCE_TTL_DAYS; from models.improvement_evidence import ImprovementEvidence; assert EVIDENCE_TTL_DAYS * 86400 == ImprovementEvidence.Meta.ttl, (EVIDENCE_TTL_DAYS, ImprovementEvidence.Meta.ttl); print('ttl pinned')"` (`Meta.ttl = 86400 * 30`, `models/improvement_evidence.py:146`) | output contains ttl pinned |
+| Evidence TTL constant matches the model (`_meta.ttl = 86400 * 30`, `models/improvement_evidence.py:146`) | `.venv/bin/python -c "from tools.improvement_release.observation import EVIDENCE_TTL_DAYS; from models.improvement_evidence import ImprovementEvidence; assert EVIDENCE_TTL_DAYS * 86400 == ImprovementEvidence._meta.ttl, (EVIDENCE_TTL_DAYS, ImprovementEvidence._meta.ttl); print('ttl pinned')"` | output contains ttl pinned |
 | Release states are six and include accepted | `.venv/bin/python -c "from models.improvement_release import RELEASE_STATES as S; assert len(S) == 6 and 'accepted' in S and S[0] == 'proposed', S; print('states ok')"` | output contains states ok |
 | Migration registered | `grep -c '"confirm_improvement_release_lane6_fields"' scripts/update/migrations.py` | output contains 1 |
 | Feature doc exists and is indexed | `test -f docs/features/improvement-release.md && grep -c 'improvement-release.md' docs/features/README.md` | output contains 1 |
@@ -1341,6 +1358,29 @@ and item with the commit in parentheses so the next lane 5 revision cannot drift
 | NIT | Risk & Robustness | `expose` reads `gh pr view --json mergeCommit,mergedAt,state` and writes `exposure.merge_sha`, but the plan never states that `mergeCommit` is an object (`{"oid": "<sha>"}`), not a string. Every `expose` test runs against canned JSON the builder authors for the recording runner, so a fixture written as `{"mergeCommit": "abc"}` passes every test and the first production `expose` stores a dict as `merge_sha`, which then feeds `rollback`'s `git revert -m 1 <merge_sha>`. | Data Flow step 6 (`payload["mergeCommit"]["oid"]`, real capture from PR #3299, 40-hex check); `build-lifecycle` tests; `build-surface` end-to-end bullet | Real capture on this repo: `gh pr view 3299 --json mergeCommit,mergedAt,state` returns `{"mergeCommit":{"oid":"37dc10b33f6c33d18559d4c338d23653a21dbb49"},"mergedAt":"2026-09-14T02:25:45Z","state":"MERGED"}`; read `merge_sha = payload["mergeCommit"]["oid"]` and use that literal object shape in the recording runner's canned JSON. |
 | NIT | Scope & Value | Verification row "Lane 4 harness untouched" diffs against `main`, where `tools/improvement_eval/` does not exist (PR #3309 open at `fe6f55072`, not an ancestor of `origin/main`); on a branch built from lane 4's head (Risk 5) the row reads "N files changed" and fails for a reason unrelated to this lane until #3309 merges. | Verification row "Lane 4 harness untouched" (`merge-base` against `origin/session/sdlc-3216`, `origin/main` fallback) | `BASE=$(git merge-base HEAD origin/session/sdlc-3216 2>/dev/null \|\| git merge-base HEAD origin/main); git diff --stat "$BASE" -- tools/improvement_eval/ \| tail -1 \| grep -c 'changed'`, expected 0, correct before and after lane 4 merges. |
 | NIT | History & Consistency | Every lane 5 line citation was re-derived at `1c7ed2137`; lane 5's plan has since grown above the cited section (`1c3d17185`): "Provided to lane 6 (#3218)" is `:563-622` (cited `:553-596`), the digest item `:569-588` (cited `:559-578`), the fixture values `:571-575` (cited `:561-565`), the arm-runner item `:589-616` (cited `:579-590`), the manifest item `:617-622` (cited `:591-596`), the no-`process_digest` Verification row `:1846` (cited `:1724`). | Freshness Check #3217 entry; spike-2 impact; proposal gate (6); Technical Approach, "Research process digest" and "What this lane assumes from lane 5"; Risk 4 (every lane 5 reference now cites "Provided to lane 6 (#3218)" by item with `1c3d17185` in parentheses) | Cite the section by heading ("Provided to lane 6 (#3218)", items 1-3) with the commit in parentheses rather than by line while lane 5 is still revising; if lines stay, re-derive them at `1c3d17185`. |
+
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound
+(`concern_round_count = 3`, `MAX_CONCERN_RECRITIQUE_ROUNDS = 3`), so this note is
+written per the router's row-4c contract even though the round-3 revision pass
+above records every round-3 row as embedded in the body. The concerns below were
+carried into BUILD without a further critique round and are accepted on the record.
+
+- **`arms.py` must export `BudgetUse` at runtime for lane 5's seam** — the round-3 CONCERN: lane 5's `PlannerArmRunner.run` and `tools/improvement.py` import `ArmResult`, `BudgetUse`, `register_arm_runner`, `get_arm_runner` from `tools.improvement_recursion.arms`; a `BudgetUse` defined only in `budget.py` or re-exported under `TYPE_CHECKING` breaks the production arm runner after both lanes merge while every test stays green. Accepted because: the revision embedded the runtime re-export, `__all__`, the arms → budget dependency direction, and `test_arms_exports_lane5_seam` (Technical Approach, "What this lane assumes from lane 5"; task `build-recursion-core`); the builder implements exactly that and the mutation check (moving the import under `TYPE_CHECKING` must fail the test) is run by `validate-guards`. Non-blocking by definition of CONCERN.
+- **The self-drill's Redis target was unstated** — the round-3 CONCERN: `valor-improve-release` run from an ambient shell resolves the production `REDIS_URL`, so the self-drill's fabricated `accept` evaluation and withdrawn release would land immortal in the production `valor` partition. Accepted because: the revision embedded the claimed-test-db procedure (`redis_test_url()`, nonzero-db assert, `project_key="dbg-lane6-self-drill"`, ORM cleanup by key) in Success Criterion 2 and task `build-surface` steps 1-5; the PR reviewer checks `ImprovementRelease.query.filter(project_key="dbg-lane6-self-drill")` is empty in production. Non-blocking by definition of CONCERN.
+
+### Build-time correction: budget unit numbering
+
+This plan labeled paid inference "unit 1" and the first build followed it. The parent plan
+(`docs/plans/recursive-self-improvement.md`, Gap D) defines the three budget units as: unit 1 the
+subscription lane slot (concurrency, not money), unit 2 daily paid inference USD (lane 3's meter),
+unit 3 weekly infrastructure USD (lane 7's ledger). The parent plan is the authority. The build
+ships `unit2_usd` on `BudgetCap` / `BudgetUse` / `BudgetReader`, reason strings
+`BUDGET_UNKNOWN:unit2` / `BUDGET_EXCEEDED:<arm>:unit2` / `BUDGET_MISMATCH:unit2` /
+`CAP_UNKNOWN:unit2`, and `test_compare_refuses_claim_on_unknown_unit2`; unit 1 is accounted as
+`subscription_turns`, the arm's reported turn count as a proxy for slot time. The plan text above
+was corrected to match.
 
 ## Resolved Questions
 

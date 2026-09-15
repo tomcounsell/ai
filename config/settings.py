@@ -491,6 +491,23 @@ class TimeoutSettings(BaseModel):
             "Env: TIMEOUTS__CATCHUP_DISABLED_WARN_HOURS."
         ),
     )
+    improvement_drill_verify_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        description=(
+            "Per-command timeout (seconds) for each `rollback_plan.verify` "
+            "command a release declares, applied by "
+            "tools/improvement_release/drill.py::run inside the drill "
+            "worktree (#3218, lane 6); lifecycle.rollback() runs no verify "
+            "commands. A command that exceeds it is recorded as a `fail` with "
+            "`reason: verify_timeout` on the drill record rather than raising "
+            "past the worktree cleanup. Default 300s: the same ceiling as "
+            "subprocess_default_s's `pytest tests/unit/` quality gate, since "
+            "a verify step is typically a test run. Env: "
+            "TIMEOUTS__IMPROVEMENT_DRILL_VERIFY_SECONDS."
+        ),
+    )
 
 
 class HybridEvalSettings(BaseModel):
