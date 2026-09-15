@@ -775,32 +775,115 @@ reported, not overwritten). Applying is one writer, one doc at a time:
 
 ## Failure Path Test Strategy
 
-[skeleton — Phase 2 fill]
+The failure modes that matter here are not crashes. They are a channel that asks a
+question already answered, a clip that says nothing useful, an answer bound to the
+wrong plan doc, and a writeback that clobbers a lane's work. Each gets an explicit
+test.
+
+### Exception Handling Coverage
+
+- `tools/tts.synthesize()` returning **`{"error": ...}` alone** — no `path`, no
+  `backend`, no `duration` (`tools/tts/__init__.py:389-411`). Every call site is
+  tested against this shape; a preparation pass that hits it records the node as
+  unsynthesized and continues rather than dying with a `KeyError` on `path`.
+- `tools/transcribe.transcribe()` returning `{"error": ...}` instead of raising. An
+  untranscribable answer leaves the question **open** and records that the audio
+  arrived but could not be read. It must never be silently dropped and never
+  guessed at.
+- `await_sent_message_id` timing out or returning nothing (single-consumer,
+  delete-on-read, 120s TTL). Degrades to positional binding; tested.
+- A plan doc that has moved or been deleted between preparation and writeback.
+  Reported as drift, not created.
+- Malformed frontmatter: `tracking: null`, `last_comment_id: none`, a bare
+  `last_comment_id:`, and the two plan docs with no frontmatter at all. The
+  harvester parses all of them without raising.
+
+### Empty/Invalid Input Handling
+
+- Empty corpus: no plan docs, or every question resolved. `list` prints nothing and
+  exits 0; `prepare` refuses to build a tree rather than emitting an empty one; the
+  interview reports "nothing to ask" instead of opening a session.
+- A question whose spoken text exceeds 4096 chars, or contains a multi-digit run.
+  Rejected **before** synthesis with the offending text named.
+- A section with a heading but no list items, and a section containing only
+  template placeholder text (`[Question about scope/approach]` from
+  `PLAN_TEMPLATE.md:495`). Both yield zero questions.
+- Zero options / a single option on the shared question model: whatever
+  `normalize_options` (`tools/ask_poll.py:52-88`) enforces today, the voice branch
+  enforces identically by construction, since it consumes the same model.
+- An answer transcript that is empty, or is pure filler. Question stays open.
+
+### Error State Rendering
+
+- **Off-script answer**: traversal stops, the transcript is recorded verbatim, and
+  no disposition is fabricated. Tested as a first-class path, not an edge case —
+  this is the one the owner will actually hit.
+- **Partial answer**: the question stays open and the partial steer is recorded
+  alongside it. An answer that does not resolve must not read as resolved.
+- **Binding disagreement** between `reply_to_msg_id` and the outstanding clip:
+  stop and report, naming both candidates. Never pick one.
+- **Drifted question at writeback time**: reported with the old and current text
+  side by side, and skipped. The answer is preserved for a human to place.
+- **A disposition the tree did not anticipate**: treated as off-script, not coerced
+  into the nearest pre-computed edge.
 
 ## Test Impact
 
-New test files are added under `tests/unit/` for each new module; no existing
-test is expected to change behavior, but `tests/unit/test_open_question_gate.py`
-is a direct consumer of the extraction logic being lifted out of
-`bridge/message_drafter.py` and must stay green unchanged as the regression
-guard for that refactor.
+Mostly new files. Two existing suites are regression guards that must pass
+**unchanged**, and two existing suites cover behavior this plan deliberately does
+not re-test because it is already pinned.
 
-- [ ] `tests/unit/test_open_question_gate.py` — must pass unchanged after the
-      extractor is moved; this is the contract that the lift did not change
-      behavior for its existing caller.
-- [ ] `tests/unit/test_open_questions_extract.py` — new. Corpus-fixture tests for
-      all resolution-marking shapes, including defaulted items.
-- [ ] `tests/unit/test_open_questions_score.py` — new. Leverage scoring and
-      pruning-edge selection on synthetic question sets.
-- [ ] `tests/unit/test_question_clip_cache.py` — new. Cache-key coverage and
-      reuse/invalidations.
-- [ ] `tests/unit/test_voice_interview_session.py` — new. Answer-to-clip binding,
-      pruning traversal, off-script stop.
-- [ ] `tests/unit/test_open_questions_writeback.py` — new. Sequential apply,
-      `Edit`-only on plan docs, drift detection, commit-message shape.
+**Must pass unchanged (regression guards):**
 
-Run scope: `scripts/pytest-clean.sh tests/unit/test_open_questions_extract.py`
-and siblings by name. Never a full `tests/unit/` sweep for this work.
+- [ ] `tests/unit/test_open_question_gate.py` — the contract on
+      `_extract_open_questions`. This plan leaves `bridge/message_drafter.py`
+      alone precisely so this suite does not have to move; if it needs an edit,
+      the non-refactor decision was violated.
+- [ ] `tests/unit/test_output_router.py` — pins `pause_open_question` at
+      `:232` and `:333`. Widening `session_has_open_poll` →
+      `session_has_open_question` must not touch `output_router`'s pure-function
+      contract, and this suite is how that is proven.
+- [ ] `tests/unit/test_poll_prose_answer_closeout.py` — the failure shape the
+      pause branch exists to prevent. Green after incision 2 or the incision is
+      wrong.
+
+**Already pinned, no new test needed:**
+
+- `tests/unit/test_telegram_relay_voice_note.py:117-132` already asserts a clip
+  survives when `cleanup_file` is not set. Cite it; do not duplicate it.
+
+**New:**
+
+- [ ] `tests/unit/test_open_questions_extract.py` — corpus-fixture tests for every
+      resolution shape in the classification table, including the defaulted items
+      from `lane-3` and `lane-5`, the H3 heading, and all four frontmatter
+      irregularities. Also asserts agreement with `_extract_open_questions` on the
+      narrow single-well-formed-section case, so the deliberate duplication cannot
+      drift silently.
+- [ ] `tests/unit/test_open_questions_score.py` — leverage scoring and
+      root-selection-by-expected-pruning on synthetic question sets.
+- [ ] `tests/unit/test_question_clip_cache.py` — key coverage, reuse on unchanged
+      input, miss on sidecar-backend disagreement, `v1` salt invalidation, and the
+      `{"error": ...}`-only return shape.
+- [ ] `tests/unit/test_question_clip_text_guard.py` — rejection of multi-digit runs
+      and over-4096-char spoken text before synthesis is attempted.
+- [ ] `tests/unit/test_voice_interview_binding.py` — registry lookup via
+      `reply_to_msg_id`, positional fallback on a missed ack, and the stop-on-
+      disagreement path.
+- [ ] `tests/unit/test_voice_interview_traversal.py` — pruning-edge traversal,
+      early session end when remaining nodes are pruned, off-script stop, partial
+      answer leaves the question open.
+- [ ] `tests/unit/test_ask_poll_voice_branch.py` — the third arm of the degradation
+      point, and that the shared question model enforces the same option rules and
+      caps the poll branch enforces.
+- [ ] `tests/unit/test_open_questions_writeback.py` — sequential apply, `Edit`-only
+      on plan docs, drift detection, and the exact commit-message shape including
+      the no-closing-keyword rule for plan-only commits.
+
+Run scope: name each file explicitly, e.g.
+`scripts/pytest-clean.sh tests/unit/test_open_questions_extract.py`. Never a full
+`tests/unit/` sweep for this work — it takes about 20 minutes and leaks xdist
+orphans that other agents on this machine pay for.
 
 ## Rabbit Holes
 
