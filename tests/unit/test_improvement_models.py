@@ -97,6 +97,13 @@ VOCABULARY_MAXIMUMS: dict[tuple[type, str], int] = {
     # charter §3 vocabulary; eleven index sets per project partition,
     # membership reads only.
     (ImprovementCase, "priority_area"): 11,
+    # lane 5 (#3217) adds `lesson` and `promise` to lane 7's eight. Each new
+    # kind is written by its own observer adapter and read by its own
+    # consumer (the planner's case-opening rules for lessons, the dashboard's
+    # burden panel for promises), so each needs its own index set: a `lesson`
+    # coerced to `other` is unqueryable as a lesson. Ten index sets per
+    # project partition, membership reads only.
+    (ImprovementEvidence, "kind"): 10,
 }
 
 #: Cardinality tripwire: field names that must never carry an index, whatever
@@ -118,6 +125,14 @@ FORBIDDEN_INDEX_NAMES = (
     "charter_digest",
     "model_revision_id",
     "supersedes_id",
+    # lane 5 (#3217): the investigation lifecycle stage is a ten-value
+    # vocabulary the gate would refuse as an index, and the other four are
+    # unbounded (a cluster identity, a JSON list, a vault pointer, spec bytes).
+    "stage",
+    "dedup_identity",
+    "evaluation_ids",
+    "blocked_by",
+    "research_process_spec",
 )
 
 
@@ -290,6 +305,102 @@ class TestLane7EvidenceKinds:
         )
         assert row is not None
         assert row.kind == "resource_probe"
+
+
+class TestLane5EvidenceKinds:
+    """Lane 5 (#3217) owns ``lesson`` and ``promise``.
+
+    Both must round-trip through ``record_once`` without being coerced to
+    ``other``: the planner reads lessons and the dashboard's burden panel
+    reads promises, and neither can find its rows in the ``other`` set.
+    """
+
+    @pytest.mark.parametrize("kind", ["lesson", "promise"])
+    def test_kind_is_declared(self, kind):
+        assert kind in EVIDENCE_KINDS
+
+    @pytest.mark.parametrize("kind", ["lesson", "promise"])
+    def test_kind_round_trips_without_coercion(self, kind):
+        row = ImprovementEvidence.record_once(
+            PK,
+            kind,
+            text=f"lane 5 {kind} probe",
+            source_ref=f"lane5-{kind}-probe",
+        )
+        assert row is not None
+        assert row.kind == kind
+
+
+class TestLane5PlainFields:
+    """Lane 5 (#3217) adds plain, unindexed, nullable fields to three records.
+
+    Each round-trips through the ORM as a plain ``Field(null=True)``; the
+    index tripwire above (``FORBIDDEN_INDEX_NAMES``) is what keeps them plain.
+    """
+
+    @pytest.mark.parametrize(
+        "model,field_names",
+        [
+            (
+                ImprovementInvestigation,
+                (
+                    "stage",
+                    "sources",
+                    "prior_answers",
+                    "expected_information_value",
+                    "decision_affected",
+                    "assumption_detail",
+                ),
+            ),
+            (
+                ImprovementCase,
+                ("evaluation_ids", "rejected_reason", "dedup_identity", "blocked_by"),
+            ),
+            (ImprovementModelRevision, ("research_process_spec",)),
+        ],
+        ids=lambda x: x.__name__ if isinstance(x, type) else "fields",
+    )
+    def test_fields_are_plain_and_nullable(self, model, field_names):
+        fields = _fields(model)
+        for name in field_names:
+            assert name in fields, f"{model.__name__}.{name} is not declared"
+            assert not isinstance(fields[name], IndexedField)
+            assert getattr(fields[name], "null", False) is True
+
+    def test_investigation_stage_round_trips(self):
+        row = ImprovementInvestigation.create(
+            project_key=PK, created_at=datetime.now(UTC), stage="deduplicated"
+        )
+        found = ImprovementInvestigation.query.get(id=row.id, project_key=PK)
+        assert found.stage == "deduplicated"
+
+    def test_case_blocked_by_round_trips(self):
+        row = ImprovementCase.create(
+            project_key=PK, created_at=datetime.now(UTC), blocked_by="vault:meta_model_api"
+        )
+        found = ImprovementCase.query.get(id=row.id, project_key=PK)
+        assert found.blocked_by == "vault:meta_model_api"
+
+    def test_revision_process_spec_round_trips(self):
+        spec = '{"selection_rule":"ordinal-lexicographic-v1"}'
+        row = ImprovementModelRevision.create(
+            project_key=PK, created_at=datetime.now(UTC), research_process_spec=spec
+        )
+        found = ImprovementModelRevision.query.get(id=row.id, project_key=PK)
+        assert found.research_process_spec == spec
+        assert found.research_process_digest is None
+
+
+class TestLane5InvestigationVocabularies:
+    """Lane 5 (#3217) brings ``INVESTIGATION_KINDS`` to the gate's maximum."""
+
+    def test_eight_kinds_including_the_two_lane_5_adds(self):
+        assert len(INVESTIGATION_KINDS) == DEFAULT_VOCABULARY_MAXIMUM
+        assert "inspiration_intake" in INVESTIGATION_KINDS
+        assert "skill_acquisition" in INVESTIGATION_KINDS
+
+    def test_five_states(self):
+        assert len(INVESTIGATION_STATES) == 5
 
 
 class TestExportedFromModelsPackage:
