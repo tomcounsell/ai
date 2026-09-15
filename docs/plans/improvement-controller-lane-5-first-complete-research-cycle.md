@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-09-14
 tracking: https://github.com/tomcounsell/ai/issues/3217
-last_comment_id: 5662856978
+last_comment_id: 5668628952
 revision_applied: true
 revision_applied_at: 2026-09-14T11:54:11Z
 ---
@@ -142,6 +142,20 @@ reconciliation on the issue itself.
 contract (Technical Approach, "Consumed from lane 3") and gated by import checks in Prerequisites.
 If lane 3's build names things differently, the build adapts to lane 3's names; the contract is
 what this lane needs, not what it is called.
+
+**Build-time addendum (comment 5668628952):** PR #3318 (`session/sdlc-3218`, open, not merged)
+has built lane 6's seam with these shapes: `from tools.improvement_recursion.arms import
+ArmResult, BudgetUse, get_arm_runner, register_arm_runner`; `ArmRunner.run(self, process_digest:
+str, opportunity_ids: list[str], budget_cap, arm_run_id: str) -> ArmResult`; `ArmResult(gains:
+dict[str, float | None], budget_use: BudgetUse)`; `BudgetUse(unit1_usd, unit3_usd,
+subscription_turns, wall_seconds)` all optional; `from tools.improvement_recursion.process import
+ResearchProcessSpec, research_process_digest` hashing `json.dumps(asdict(spec), sort_keys=True,
+separators=(",", ":"))` to `sha256:<hex>`; `compare run --arm-runner
+tools.improvement_plan_arm:PlannerArmRunner` constructs the class with NO arguments; unit 3 is
+accounted only through `InfrastructureReservation` rows whose resource name starts with
+`arm:<arm_run_id>:`. Two build-time confirmations follow: `PlannerArmRunner()` accepts no
+constructor arguments, and any infrastructure the arm admits carries that prefix. The method-body
+import and `ImportError` fallback stand.
 
 ## Prior Art
 
