@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
 import subprocess
 import uuid
 
@@ -113,3 +115,42 @@ class TestRenderResourceAcquiredSection:
 
     def test_empty_list_renders_a_named_empty_state(self):
         assert "No resources acquired" in render_resource_acquired_section([])
+
+
+class TestTemplateCategoryIsTheEnumSpelling:
+    """`op item create --template` takes 1Password's ENUM category spelling.
+
+    `op item template list` prints the DISPLAY name ("API Credential"), and
+    handing that back to `op item create` fails with `"API Credential" is an
+    unknown item type`. The integration test that would have caught this skips
+    wherever `op` is unauthenticated, so this unit-level pin -- which needs no
+    `op` at all -- is what keeps a display-name regression unconditionally red.
+    """
+
+    def _template_written_by(self, **kwargs) -> dict:
+        """Capture the JSON template `write_credential` hands to `op`.
+
+        The file is unlinked in `write_credential`'s `finally`, so the read has
+        to happen inside the runner, while the call is in flight.
+        """
+        captured: dict = {}
+
+        def runner(argv: list[str]) -> subprocess.CompletedProcess:
+            template_path = argv[argv.index("--template") + 1]
+            captured.update(json.loads(pathlib.Path(template_path).read_text()))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        write_credential("title", "value", runner=runner, **kwargs)
+        return captured
+
+    def test_default_category_is_the_enum_form_not_the_display_name(self):
+        template = self._template_written_by()
+
+        assert template["category"] == "API_CREDENTIAL"
+        assert template["category"] != "API Credential"
+        assert " " not in template["category"]
+
+    def test_an_explicit_category_is_passed_through_unchanged(self):
+        template = self._template_written_by(category="PASSWORD")
+
+        assert template["category"] == "PASSWORD"

@@ -91,15 +91,16 @@ class TestShape:
 
 
 class TestVaultWriteProbe:
-    """`_probe_vault_write` (`:198-201`) reports the vault writer's presence
-    by file existence alone. Once tools/vault_write.py exists (#3215), the
-    `absent` branch this probe used to always take can no longer be reached
-    on main -- this is the one test that proves it."""
+    """`_probe_vault_write` classifies by file existence alone, so it can say
+    the writer is on disk but never that a write would be accepted. Once
+    tools/vault_write.py exists (#3215) the `absent` branch is unreachable on
+    main, and the remaining answer must be `unknown` rather than `verified`."""
 
-    def test_vault_write_probe_reports_verified_once_the_writer_exists(self):
+    def test_vault_write_probe_abstains_rather_than_certifying_a_write(self):
         report = probe(runner=make_runner())
 
-        assert report["vault_write"]["state"] == "verified"
+        assert report["vault_write"]["state"] == "unknown"
+        assert "not checked" in report["vault_write"]["detail"]
 
 
 class TestNeverLeaks:

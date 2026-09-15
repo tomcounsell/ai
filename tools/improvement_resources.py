@@ -196,8 +196,19 @@ def _probe_cloudflare_cli(runner: Runner) -> dict:
 
 
 def _probe_vault_write() -> dict:
+    # An existence check cannot certify that a write would succeed: the writer
+    # can be present while every `op item create` it makes is refused. `verified`
+    # was therefore a certain answer to an uncertain question, the exact harm the
+    # three-state vocabulary exists to prevent. `unknown` is the honest claim, and
+    # the detail carries what was actually established. The probe stays cheap and
+    # non-blocking on purpose -- it spawns no extra `op` call to settle the
+    # question, because a probe that can hang is worse than one that abstains.
     if _VAULT_WRITER.exists():
-        return _entry("verified", "the sanctioned vault writer is present")
+        return _entry(
+            "unknown",
+            "the sanctioned vault writer module is on disk; whether `op` accepts a "
+            "write here is not checked by this probe",
+        )
     return _entry("absent", "no sanctioned vault writer exists yet; acquisition is not wired")
 
 

@@ -149,7 +149,7 @@ def import_namespace(
     for key, mapping in unit2.items():
         if mapping:
             r.hset(keys.assert_control_key(key), mapping=mapping)
-            r.expire(key, KEY_EXPIRY_SECONDS)
+            r.expire(keys.assert_control_key(key), KEY_EXPIRY_SECONDS)
     for case_id, case_data in data.get("cases", {}).items():
         journal_key = keys.journal_key(project_key, case_id)
         intents_key = keys.intents_set_key(project_key, case_id)

@@ -17,10 +17,6 @@ import sys
 PROJECT_KEY = "valor"
 
 
-def _project_key(args) -> str:
-    return getattr(args, "project_key", None) or PROJECT_KEY
-
-
 def _emit(args, human: str, payload: dict) -> None:
     if getattr(args, "json", False):
         print(json.dumps(payload))

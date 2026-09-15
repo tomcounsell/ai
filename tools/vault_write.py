@@ -48,7 +48,11 @@ def write_credential(
     title: str,
     value: str,
     *,
-    category: str = "API Credential",
+    # 1Password's ENUM spelling, not the display name `op item template list`
+    # prints ("API Credential"). `op item create --template` rejects the display
+    # name with `"API Credential" is an unknown item type`; the enum form is what
+    # `op item template get "API Credential"` itself emits.
+    category: str = "API_CREDENTIAL",
     vault: str = "m-valor",
     project_key: str = "valor",
     runner: Runner | None = None,
