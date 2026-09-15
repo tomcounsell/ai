@@ -1,11 +1,8 @@
-# Worker Liveness Recovery: Dead-Man's-Switch + Bounded PTY Waits
+# Worker Liveness Recovery: Dead-Man's-Switch Heartbeat
 
-This document describes the first landing of the liveness-vs-progress wedge recovery work
-(issue #1815). Two independent fixes shipped together: a dead-man's-switch heartbeat that
-aborts a frozen event loop, and bounded timeouts on every PTY-pool await that previously
-had no deadline. Deferred follow-ups: fix #2 (lease semaphore) + fix #3 (progress-deadline
-cancel scope) are tracked in issue #1820; fix #5 (out-of-domain recovery) + fix #6
-(per-tool budget backstop) are tracked in issue #1821.
+This document describes fix #1 of the liveness-vs-progress wedge recovery work
+(issue #1815): a dead-man's-switch heartbeat that recycles a worker whose asyncio event
+loop has frozen.
 
 Fixes #2 and #3 have since shipped — see [Slot-Lease Ownership](slot-lease-ownership.md)
 (issue #1820): the ownerless concurrency semaphore is now an owner-keyed
@@ -19,11 +16,6 @@ established that a worker process can be alive at the OS level while its asyncio
 is wedged. The prior heartbeat write in `data/last_worker_connected` was unconditional on
 process liveness, so a frozen loop still produced a fresh green heartbeat from the off-loop
 watchdog thread. The watchdog never declared the process sick.
-
-Separately, the PTY pool's three internal awaits had no timeout. If a PTY slot's respawn
-task died on the error path without setting its completion event, the next caller would
-block on that event forever, holding a global semaphore slot. With enough concurrent
-sessions all wedged this way, the whole granite path deadlocked.
 
 ## Fix 1: Dead-Man's-Switch Heartbeat (Heartbeat Inversion)
 
@@ -98,7 +90,7 @@ should be raised before it produces false aborts.
 ### Composition With Off-Loop Redis Access (issue #1826)
 
 The beacon only stays fresh if the on-loop tick task actually gets to run. Before
-[Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4), the
+[Off-Loop Redis Access](redis-durability.md#off-loop-redis-access), the
 worker drain loop's hot-path idle-check ran its Redis query synchronously, directly
 on the event loop. A slow or restarting Redis could block the loop long enough to
 starve the tick task's `asyncio.sleep` resumption, letting the beacon go stale and
@@ -111,7 +103,7 @@ occupying the loop. The tick task keeps bumping the beacon throughout, so the
 dead-man's-switch no longer false-triggers on Redis slowness. It still fires
 correctly on a genuine synchronous freeze elsewhere in the loop, since that
 composition path was never touched. See
-[Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4)
+[Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access)
 for the bulkhead, the cut-over ordering, and the latency metric.
 
 ### Environment Constants (Provisional)
@@ -153,85 +145,10 @@ plist (`com.valor.worker.plist`, `StandardErrorPath`) captures that stream into
 `logs/worker_error.log`, so the exact wedged frame across every thread is available for
 post-mortem without a macOS crash dialog or `.ips` file ever being produced.
 
-## Fix 4: Bounded PTY-Pool Waits
-
-### The POOL-1 Hazard
-
-The PTY pool (`agent/granite_container/pty_pool.py`) maintains a fixed set of slots, each
-cycling through spawning, ready, and respawning states. The pre-fix code had three
-unbounded `await` calls:
-
-1. `await self._sem.acquire()` (semaphore for pool-size limit)
-2. `await self._slot_available.wait()` (condition signaling a ready slot exists)
-3. `await slot.event.wait()` (per-slot event signaling respawn complete)
-
-The POOL-1 hazard targeted await #3. A slot whose `_spawn_slot` task dies on the failure
-path (the task re-raises before calling `slot.event.set()`) is left stuck in `respawning`
-forever with `slot.event` never set. The next caller that wins the semaphore and the
-condition wait then parks on `slot.event.wait()` indefinitely. It holds a semaphore permit.
-With enough callers blocked this way, all permits exhaust and the entire granite path
-deadlocks: new sessions can never acquire, existing waiting calls never finish.
-
-### Bounded Awaits
-
-All three awaits are now wrapped in `asyncio.wait_for` with the following timeouts and
-recovery behaviors:
-
-**Semaphore acquire (`await self._sem.acquire()`):**
-- Timeout: `PTY_POOL_ACQUIRE_TIMEOUT` (120s by default).
-- On `asyncio.TimeoutError`: raise `PTYPoolError`. The session fails and is re-queued for
-  retry instead of wedging the worker permanently.
-- A `sem_acquired` flag guards the `finally` release: if the acquire timed out, the permit
-  was never held, so it must not be released.
-
-**Condition wait (`await self._slot_available.wait()`):**
-- Timeout: `PTY_POOL_WAIT_TIMEOUT` (60s by default).
-- On `asyncio.TimeoutError`: re-scan by breaking out of the inner wait loop. This defeats
-  a missed `notify_all` where all waiters were asleep when the notification fired.
-
-**Slot event wait (`await slot.event.wait()`):**
-- Timeout: `PTY_POOL_WAIT_TIMEOUT` (60s by default).
-- On `asyncio.TimeoutError`: the slot is still stuck in `respawning` past the deadline.
-  `_force_recycle_slot(slot)` is called.
-
-### Force Recycle (`_force_recycle_slot`)
-
-`_force_recycle_slot(slot)` is called when a slot's event wait times out. Under
-`slot.lock`, it checks that the slot is still in `respawning` with `event` unset (the
-stuck condition). If so, it schedules a fresh `_respawn_slot` task. The rescheduled task's
-success path sets both `slot.event` and notifies `_slot_available`. `_force_recycle_slot`
-does not set these directly: it hands the work to the new spawn task, which performs the
-proper state transitions under the slot lock.
-
-The re-check under `slot.lock` is important: between the timeout and the lock acquisition,
-another caller might have already recycled the slot. The guard prevents a double-recycle.
-
-### Environment Constants (Provisional)
-
-Both constants are env-overridable and live in `agent/granite_container/pty_pool.py`.
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `PTY_POOL_ACQUIRE_TIMEOUT` | `120` s | Max wait for the pool semaphore before raising `PTYPoolError` |
-| `PTY_POOL_WAIT_TIMEOUT` | `60` s | Max wait for both the ready-slot condition and the per-slot respawn event before re-scan or force-recycle |
-
-## How the Two Fixes Interact
-
-Fix 1 (dead-man's-switch) catches event-loop freezes, including cases where the granite
-executor itself is stuck somewhere that never reaches the PTY pool. Fix 4 (bounded PTY
-waits) catches PTY-pool-level deadlocks: callers return an error or trigger a force-recycle
-instead of parking forever. Together they close the two most common wedge shapes observed
-in production.
-
 ## Disabling and Rollback
 
-**Dead-man's-switch:** Set `WORKER_DEADMAN_ENABLED=false` in the environment before
-starting the worker. This restores #1767's unconditional-green heartbeat write with no
-code change.
-
-**PTY-pool timeouts:** Set `PTY_POOL_ACQUIRE_TIMEOUT` and `PTY_POOL_WAIT_TIMEOUT` to very
-large values (e.g., `86400`) to effectively disable the timeouts without removing the
-`asyncio.wait_for` wrappers.
+Set `WORKER_DEADMAN_ENABLED=false` in the environment before starting the worker. This
+restores #1767's unconditional-green heartbeat write with no code change.
 
 ## Observability
 
@@ -240,17 +157,13 @@ large values (e.g., `86400`) to effectively disable the timeouts without removin
 - Recycle events: CRITICAL log line from `_heartbeat_thread_main` immediately before
   `_self_kill()` fires, followed by the `faulthandler` all-thread stack dump in
   `logs/worker_error.log`.
-- PTY pool timeouts: `PTYPoolError` is logged at ERROR level with the session ID; the
-  session transitions to failed/re-queued.
-- Force-recycle events: logged at WARNING level from `_force_recycle_slot`.
 
 ## Status Quo
 
-This landing covered fix #1 (dead-man's-switch) and fix #4 (bounded PTY waits).
-Both deferred follow-ups have since shipped:
+The dead-man's-switch is live, and both deferred follow-ups have since shipped:
 
-- Issue #1820 — fix #2 (lease semaphore to decouple global slot holds from PTY
-  wait duration) + fix #3 (progress-deadline cancel scope inside the
+- Issue #1820 — fix #2 (owner-keyed lease registry replacing the ownerless
+  concurrency semaphore) + fix #3 (progress-deadline cancel scope inside the
   executor). See [Slot-Lease Ownership](slot-lease-ownership.md).
 - Issue #1821 — fix #5 (out-of-domain session recovery) + fix #6 (per-tool
   budget backstop). The beacon this doc publishes is now also read
@@ -261,11 +174,11 @@ Both deferred follow-ups have since shipped:
 ## See Also
 
 - [Worker Wedge Investigation](worker-wedge-investigation.md) — root-cause analysis that
-  motivated these fixes (issue #1808)
+  motivated this fix (issue #1808)
 - [Worker Service](worker-service.md) — worker architecture, launchd setup, env vars
 - [Bridge Self-Healing](bridge-self-healing.md) — worker watchdog and escalation ladder
-- [Headless Session Runner](headless-session-runner.md) — the current session-execution
-  substrate (no PTY pool; each turn is a short-lived `claude -p` subprocess)
+- [Headless Session Runner](headless-session-runner.md) — the session-execution
+  substrate: each turn is a short-lived `claude -p` subprocess
 - [Slot-Lease Ownership](slot-lease-ownership.md) — the lease registry and reap
   pass built on top of this dead-man's-switch (#1820)
 - [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —
@@ -275,9 +188,8 @@ Both deferred follow-ups have since shipped:
   the ingestion-time companion to this recovery machinery: the bridge reads the
   same loop beacon via `worker_loop_beacon_fresh` and applies a ⚠ reaction when
   the worker is not alive, so a paused pipeline is visible to the user (#1312)
-- [Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4):
+- [Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access):
   moves the drain loop's hot-path Redis query off the event loop so a slow Redis
   cannot starve this beacon's tick task (#1826)
 - `agent/session_state.py` — beacon globals and accessors
 - `worker/__main__.py` — tick task, watchdog thread, and dead-man's-switch constants
-- `agent/granite_container/pty_pool.py` — bounded awaits and force-recycle
