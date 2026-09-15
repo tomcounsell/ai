@@ -127,8 +127,15 @@ voice interview, a question harvester, or a clip cache. The three
 richest source of *input* questions for this harvester, but they do not overlap
 its implementation.
 
-**Notes:** `timeout` is not available on this macOS shell; the blast-radius tool
-was run without it.
+**Notes:** `tools.code_impact_finder` never produced output. The first invocation
+failed because `timeout` is not available on this macOS shell, and the re-run without
+it was killed by the harness for low memory. The blast radius in this plan therefore
+comes from a manual `git grep` sweep over the symbols the issue names, not from the
+tool. That sweep produced the more valuable finding anyway — `_extract_open_questions`
+(`bridge/message_drafter.py:100`) has exactly one production caller (`:1373`) plus
+tests, which is what justifies the deliberate non-refactor in Architectural Impact.
+Anyone re-verifying this plan's blast-radius claims should redo the grep rather than
+trust a tool run that did not happen.
 
 ## Prior Art
 
