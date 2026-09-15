@@ -628,26 +628,23 @@ built here so the recursive comparison can run on real arms later.
    named opportunities and returns lane 6's `ArmResult`: per-opportunity gains taken from
    `accept` evaluations **already on record** for those cases and budget use from lane 3's meter
    keyed by `arm_run_id`. Its docstring states the limit: a multi-tick arm that dispatches and
-   evaluates inside `run` is #3311's. **Lane 6 has no PR and the two lanes build concurrently
-   with no stated order**, so nothing in this lane imports `tools.improvement_recursion.arms`
-   at module level and nothing re-declares its types: `PlannerArmRunner.run` does
-   `from tools.improvement_recursion.arms import ArmResult, BudgetUse` inside the method body
-   and raises `ArmRunnerUnavailable("ARM_RUNNER_UNAVAILABLE: lane 6 not merged")` on
-   `ImportError`; `tools/improvement.py`'s CLI entry does
-   `try: from tools.improvement_recursion.arms import register_arm_runner`
-   `except ImportError: register_arm_runner = None` and calls
-   `register_arm_runner(PlannerArmRunner())` only when it is not `None`, so `compare run` under
-   the same CLI finds it once lane 6 lands. Tests, written so they hold before and after lane 6
-   merges: `tests/unit/test_improvement_planner.py::test_arm_runner_registers_from_cli_entry`
-   installs a fake module via `monkeypatch.setitem(sys.modules,
-   "tools.improvement_recursion.arms", types.SimpleNamespace(register_arm_runner=<records into a
-   list>, get_arm_runner=<reads it>, ArmResult=<dataclass>, BudgetUse=<dataclass>))` before
-   invoking `tools.improvement.main([...])`, and asserts the fake registry holds a
-   `PlannerArmRunner`; `test_arm_runner_nothing_registers_at_import` removes the module from
-   `sys.modules` (and blocks its import via a `meta_path` finder that raises `ImportError` for
-   that name), asserts `import tools.improvement` succeeds, and that `PlannerArmRunner().run(...)`
-   raises `ArmRunnerUnavailable`. When lane 6 merges, the fake is swapped for the real import
-   and both assertions stand; the build never stubs lane 6's types in production code.
+   evaluates inside `run` is #3311's. **Lane 6 (PR #3318) is merged**, so the binding is
+   direct: `tools/improvement_plan_arm.py` imports `ArmResult` and `BudgetUse` at module level
+   and `PlannerArmRunner.run` returns the real types
+   (`BudgetUse(unit2_usd=None, unit3_usd=None, subscription_turns=0, wall_seconds=elapsed)`);
+   `tools/improvement.py`'s CLI entry calls `register_arm_runner(PlannerArmRunner())` on every
+   invocation through the real registry, so `compare run` under the same CLI finds it, and
+   `compare run --arm-runner tools.improvement_plan_arm:PlannerArmRunner` resolves the class by
+   lazy import and constructs it with no arguments. `revise-model` builds the real
+   `ResearchProcessSpec`, stores `process_spec_json(spec)` (canonical text) on the revision, and
+   sets `research_process_digest` through lane 6's `research_process_digest`;
+   `revise-model --backfill-digests` digests every stored spec that has none. Tests:
+   `tests/unit/test_improvement_planner.py::test_arm_runner_registers_from_cli_entry` clears the
+   registry, invokes `tools.improvement.main([...])`, and asserts `get_arm_runner()` returns a
+   `PlannerArmRunner` whose `run` yields lane 6's `ArmResult`/`BudgetUse`;
+   `test_arm_runner_constructs_with_no_arguments_and_resolves_by_spec` covers the `--arm-runner`
+   resolution shape; `test_arm_runner_gains_come_from_accept_evaluations_on_record` pins the gain
+   source. No fake module, no `ImportError` fallback, no stub of lane 6's types anywhere.
 3. **`candidate_ref` and `base_revision` on the manifest.** This lane's manifest is
    `{"protocol_ref", "base_revision", "candidate_ref", "candidate", "incumbent", "envelope",
    "corpus_digest"}`. `base_revision` is the checkout SHA at freeze (lane 4's key); `candidate_ref`
@@ -1925,11 +1922,11 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | A vault request survives the investigation TTL on the case and unblocks on a verified probe | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_investigations.py -k "blocked_by_survives_expiry or awaiting_row_kept_alive or unblocks_on_verified_probe or blocked_by_names_a_known_resource" -q` | exit code 0 |
 | `meta_model_api` is a probeable resource | `python -c "from tools.improvement_resources import RESOURCES, _VAULT_TITLE_KEYWORDS as K; assert 'meta_model_api' in RESOURCES and 'meta_model_api' in K, (RESOURCES, K)"` | exit code 0 |
 | A seeded inspiration row opens a case on the first tick | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k seeded_inspiration_opens_a_case -q` | exit code 0 |
-| Lane 6's module is never imported at module level in this lane | `grep -rEn "^(from\|import) tools\.improvement_recursion" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py tools/improvement_plan_arm.py tools/improvement.py \| wc -l` | match count == 0 |
+| Lane 6's types are bound directly, with no fallback or stub (lane 6 merged) | `grep -rEn "ImportError|SimpleNamespace|ArmRunnerUnavailable" tools/improvement_plan_arm.py \| wc -l` | match count == 0 |
 | The report names seeded cases | `scripts/pytest-clean.sh tests/unit/test_improvement_report.py -k seeded_inputs_line -q` | exit code 0 |
 | Tick status counts failures per adapter, never skips | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -k "all_skipped_is_success or all_failed_is_error" -q` | exit code 0 |
 | The three-adapter status literal is gone | `grep -n "len(findings) == 3" reflections/improvement_collect.py \| wc -l` | match count == 0 |
-| Arm runner registers only from the CLI entry | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k "arm_runner" -q` | exit code 0 |
+| Arm runner registers from the CLI entry through lane 6's real registry, and lane 6's canonical-bytes test activates | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_recursion_process.py -k "arm_runner or lane5_canonical_bytes" -q` | exit code 0 |
 | Retrieval envelope refuses `retrieval_mode` | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "refuses_retrieval_mode" -q` | exit code 0 |
 | Plan critique verdict recorded | `grep -c "READY TO BUILD" docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md` | output > 0 |
 
