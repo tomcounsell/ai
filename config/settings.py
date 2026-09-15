@@ -728,9 +728,10 @@ class ImprovementSettings(BaseModel):
         description=(
             "The OpenRouter model id the promise detector's yes/no judge "
             "runs on, metered under the purpose ``promise_detector``. Empty "
-            "means the adapter declines and records a skip rather than "
-            "guessing a model, because a guessed model is an unaudited "
-            "spend. PROVISIONAL/TUNABLE. Env: IMPROVEMENT__CHEAP_INFERENCE_MODEL."
+            "means the judge runs on ``config.models.OPENROUTER_GEMMA4_FREE``, "
+            "the free-tier model the repo's OpenRouter key already reaches; "
+            "the spend gate is ``promise_detector_enabled``, not this field. "
+            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__CHEAP_INFERENCE_MODEL."
         ),
     )
 
