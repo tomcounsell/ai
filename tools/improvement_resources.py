@@ -56,6 +56,7 @@ RESOURCES: tuple[str, ...] = (
     "cloudflare_account",
     "cloudflare_cli",
     "vault_write",
+    "meta_model_api",
 )
 
 #: Vault-backed resources, and the title keyword sets that identify each. A
@@ -68,6 +69,7 @@ _VAULT_TITLE_KEYWORDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "workspace_work": (("google", "work"), ("workspace", "work")),
     "virtual_debit_card": (("virtual", "card"), ("debit", "card")),
     "cloudflare_account": (("cloudflare",),),
+    "meta_model_api": (("meta", "model", "api"), ("muse", "api")),
 }
 
 #: The sanctioned vault writer. It belongs to the lane that builds the

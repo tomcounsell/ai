@@ -90,6 +90,28 @@ class TestShape:
         assert report["virtual_debit_card"]["state"] == "absent"
 
 
+class TestMetaModelApi:
+    """Lane 5 (#3217) adds ``meta_model_api`` so a case ``blocked_by``
+    ``vault:meta_model_api`` has a probe entry to read when it unblocks."""
+
+    def test_a_meta_model_api_title_is_verified(self):
+        listing = '[{"id": "m1", "title": "Meta Model API key", "vault": {"name": "m-valor"}}]'
+        report = probe(runner=make_runner(listing=listing))
+
+        assert report["meta_model_api"]["state"] == "verified"
+
+    def test_a_muse_api_title_is_verified(self):
+        listing = '[{"id": "m2", "title": "Muse API token", "vault": {"name": "m-valor"}}]'
+        report = probe(runner=make_runner(listing=listing))
+
+        assert report["meta_model_api"]["state"] == "verified"
+
+    def test_a_listing_with_neither_keyword_set_is_absent(self):
+        report = probe(runner=make_runner())
+
+        assert report["meta_model_api"]["state"] == "absent"
+
+
 class TestVaultWriteProbe:
     """`_probe_vault_write` classifies by file existence alone, so it can say
     the writer is on disk but never that a write would be accepted. Once
