@@ -1272,7 +1272,215 @@ out, and only in the read-only direction.
 
 ## Step by Step Tasks
 
-[skeleton — Phase 2 fill]
+### M1 — Harvester
+
+#### 1. Records and plan-doc discovery
+
+- [ ] `tools/open_questions/models.py`: frozen `OpenQuestion` dataclass with `qid`,
+      `text`, `source_path`, `source_line`, `source_kind`, `tracking_issue`,
+      `disposition`, and leverage inputs. Style after
+      `bridge/poll_gating.py:36-37`.
+- [ ] `qid` = first 12 hex of `sha256` over the **normalized** question text
+      (whitespace collapsed, markdown emphasis stripped, trailing punctuation
+      dropped). Not position-keyed — plan docs churn constantly.
+- [ ] Discovery walks `docs/plans/*.md` excluding `tools/plan_doc_scope.NON_LANE_PLANS`
+      (import it; do not re-list the names).
+- [ ] Frontmatter parsing tolerates `tracking: null`, `last_comment_id: none`, a bare
+      `last_comment_id:`, and absent frontmatter.
+
+#### 2. Heading discovery and item parsing
+
+- [ ] Scan `^#{2,4}\s` — not `^## ` — so the H3 at
+      `durability-room-job-agentrun.md:512` is found.
+- [ ] Heading synonym table as a named env-overridable constant: `Open Questions`,
+      `Resolved Questions`, `Resolved Decisions`, `Decisions Recorded`,
+      `Decisions (Owner, …)`, `Schema Gate — Open Decisions from Spikes`. Overridable
+      because other repos have their own dialect.
+- [ ] Item parsing handles numbered, bulleted, and bold-lead-in items, and drops
+      template placeholder text.
+
+#### 3. Disposition classification
+
+- [ ] Implement the classification table from Technical Approach as ordered,
+      individually named rules, most-specific-first, so a resolution marker beats the
+      mere presence of a question heading.
+- [ ] Defaulted detection: section preamble "Silence keeps the default"; item-level
+      `Default:`; item-level `**Disposition:**` paired with `Overturned by:`.
+- [ ] Section-level short-circuits: `None.` / `**None.**` / `None blocking.` /
+      `None outstanding.` and the prose all-clear phrasings.
+- [ ] Blockquote `> **RESOLVED …**` banner and strikethrough-plus-`**Resolved**`.
+
+#### 4. Validate classification against the real corpus
+
+- [ ] `tests/unit/test_open_questions_extract.py` with fixtures lifted from the actual
+      docs. Assert the audited counts: 15 open, 11 defaulted, 46 resolved.
+- [ ] Assert agreement with `bridge/message_drafter._extract_open_questions` on the
+      narrow single-well-formed-section case. **This is the guard on the deliberate
+      duplication.**
+- [ ] `scripts/pytest-clean.sh tests/unit/test_open_questions_extract.py` green, and
+      `tests/unit/test_open_question_gate.py` green **unchanged**.
+
+#### 5. Issues as a secondary source
+
+- [ ] Harvest question-shaped sections from this repo's open issues via `gh`, tolerant
+      of the 14 heading variants, and mark them `source_kind="issue"`.
+- [ ] Never reach another repo. No `--repo`, no `GH_REPO` override, no contents API.
+
+#### 6. Leverage scoring and CLI
+
+- [ ] `tools/open_questions/score.py`: `w_plans · blocked_plans + w_issues ·
+      blocked_issues + w_prune · prunes`, weights as named env-overridable constants
+      with a grain-of-salt comment.
+- [ ] `python -m tools.open_questions list [--json] [--include-issues]` with
+      informative `--help`.
+- [ ] `tests/unit/test_open_questions_score.py` green.
+- [ ] **Milestone gate:** run `list --json` against the live corpus and read the
+      output by eye against the docs. Cheap, once, and it is the only real check on
+      Risk 1.
+
+### M2 — Preparation and clip library
+
+#### 7. Clip cache
+
+- [ ] `tools/question_tree/clips.py`: key
+      `sha256("v1|{text}|{requested_voice}|{force_cloud}|opus")` →
+      `data/clips/<hash>.ogg` plus `<hash>.json` sidecar recording actual `backend`,
+      actual `voice`, and `duration` from the result dict.
+- [ ] Read-time validation: sidecar backend disagreeing with the requested backend is
+      a miss. Backend is **not** in the key — `_is_kokoro_available()` cannot be
+      predicted.
+- [ ] Atomic writes: synthesize to a temp path in the same directory, then
+      `os.replace()`. Sidecar after audio.
+- [ ] Handle the `{"error": ...}`-only return shape at every call site.
+- [ ] `tests/unit/test_question_clip_cache.py` green.
+
+#### 8. Spoken-text guard
+
+- [ ] Reject multi-digit runs and text over `MAX_TEXT_LENGTH` (4096) **before**
+      synthesis, naming the offending text.
+- [ ] `tests/unit/test_question_clip_text_guard.py` green.
+
+#### 9. Authoring pass
+
+- [ ] `run_typed()` (PydanticAI, not `claude -p` — non-harness call), Literal-typed
+      Pydantic output following `tools/classifier.py:305-440`.
+- [ ] Per question: spoken text, deeper-context clip text, readback line, plausible
+      dispositions, the qids each disposition moots, and a draft writeback per
+      disposition.
+- [ ] Prompts carry no specific numbers or identifiers; clips reference work by name,
+      per the `/do-voice-recording` prosody rule against reciting multi-digit
+      identifiers aloud.
+
+#### 10. Tree construction
+
+- [ ] Rank by leverage; pick the root maximizing expected pruning; emit ordered nodes
+      plus pruning edges; bound by a target session length (named constant).
+- [ ] `python -m tools.question_tree prepare [--dry-run]`. `--dry-run` reports the
+      tree and which clips would be cut without synthesizing.
+- [ ] Refuse to build a tree from an empty question set rather than emitting an empty
+      one.
+
+### M3 — Delivery and writeback
+
+#### 11. Shared question model
+
+- [ ] Extract a frozen question model from `tools/ask_poll.py:52-88`
+      (`normalize_options`), the escape-hatch literal at `:39`, the imported
+      `POLL_QUESTION_MAX_CHARS` at `:132-135`, and
+      `agent/output_handler.py:375-386` (text rendering).
+- [ ] The poll branch consumes it with no behavior change. Existing poll tests green
+      unchanged.
+
+#### 12. Voice branch in the single degradation point
+
+- [ ] Add the voice arm inside `tools/ask_poll.py:141-164`. **No second CLI** — the
+      skill must not detect the surface.
+- [ ] If P2 is unresolved, fail closed (hard-exit, matching `:134`) and say so in the
+      output.
+- [ ] `tests/unit/test_ask_poll_voice_branch.py` green.
+
+#### 13. Widen the pause predicate
+
+- [ ] `session_has_open_poll` → `session_has_open_question` at
+      `agent/session_executor.py:1739`, consulting the voice registry alongside the
+      poll registry.
+- [ ] `agent/output_router.py:180` untouched: pure function, plain bool,
+      `False` default.
+- [ ] `test_output_router.py` and `test_poll_prose_answer_closeout.py` green
+      **unchanged**.
+
+#### 14. Interview driver and clip registry
+
+- [ ] `tools/voice_interview/`: state file at `data/voice_interviews/{id}.json`
+      holding at most one outstanding clip as an invariant.
+- [ ] Send with `--voice-note --ack-sent-id`, **never** `--cleanup-after-send`. Read
+      the ack immediately, in the same function, and record `{msg_id → qid}`.
+- [ ] Bind via `reply_to_msg_id` → registry; positional fallback on a missed ack;
+      **stop and name both candidates** on disagreement.
+- [ ] Advance only after the current answer is bound and recorded. A second inbound
+      note while nothing is outstanding is recorded as unsolicited.
+- [ ] Off-script stops traversal and records verbatim. Partial leaves the question
+      open with the steer recorded. An unanticipated disposition is off-script, never
+      coerced to the nearest edge.
+- [ ] `tests/unit/test_voice_interview_binding.py` and
+      `tests/unit/test_voice_interview_traversal.py` green.
+
+#### 15. Writeback
+
+- [ ] Drafting: one read-only subagent per plan doc, in parallel, each given the doc
+      path and bound answer explicitly. Each returns the exact `Edit` plus the text it
+      was authored against.
+- [ ] Applying: one writer, one doc at a time. `Edit` never `Write` (four PostToolUse
+      validators match `Write` on `docs/plans` with `exit_policy = "propagate"`).
+- [ ] One atomic shell invocation per doc: `git add <explicit paths> && git commit`.
+      **Never** `git add -A`.
+- [ ] Plan-only commits carry no closing keyword; anything outside `docs/plans/` needs
+      `Closes #N` / `Refs #N` / `No-issue: <reason>`.
+- [ ] Re-verify against current `main` before each apply; report drift and skip.
+- [ ] `--dry-run` prints every `Edit` and the exact `git` invocation.
+- [ ] `tests/unit/test_open_questions_writeback.py` green.
+
+#### 16. End-to-end validation
+
+- [ ] Run one real interview against the live corpus: prepare, deliver, answer,
+      write back, then re-run `list` and confirm the answered questions are resolved
+      and not re-asked.
+
+### M4 — Convention forward
+
+#### 17. Amend the planning convention
+
+- [ ] `.claude/skills-global/do-plan/SKILL.md:399`: Phase 4 marks the Open Questions
+      section instead of removing it.
+- [ ] `.claude/skills-global/do-plan/PLAN_TEMPLATE.md:495`: name one resolution
+      convention, including how a defaulted item is marked (Open Question 2).
+- [ ] Teach the harvester the new convention as the preferred shape.
+- [ ] Land as its own commit — it changes planning behavior fleet-wide on the next
+      `/update`.
+- [ ] Retro-edit nothing.
+
+### N-1. Documentation
+
+- [ ] `docs/features/voice-interview-open-questions.md`: harvester, question tree,
+      clip library and its cache-key reasoning, the binding contract and why no
+      timestamp alignment is needed, and the sequential writeback contract with the
+      #2650 rationale.
+- [ ] Row in `docs/features/README.md`.
+- [ ] `docs/tools-reference.md` entries for all three CLIs.
+- [ ] Voice row in `.claude/skill-context/ask-me.md` branch table (`:9-19`) and
+      degradation matrix (`:57-79`).
+- [ ] Note in the feature doc that the capability is per-project and per-machine, and
+      that cross-project harvesting is a non-goal.
+
+### N. Final Validation
+
+- [ ] Every Verification table row passes.
+- [ ] `python -m ruff check` and `python -m ruff format --check` clean.
+- [ ] The three regression-guard suites green **unchanged**.
+- [ ] Documentation tasks above complete and committed.
+- [ ] File the two side findings as their own issues: P3 (single-writer-lease plan
+      archived as completed without being built) and P4 (`bf_alice` documented but
+      absent from `KOKORO_VOICES`).
 
 ## Verification
 
@@ -1292,4 +1500,55 @@ out, and only in the read-only direction.
 
 ## Open Questions
 
-[skeleton — Phase 2 fill]
+Four of the tracking issue's five original questions were resolved by the spikes in
+`## Spike Results` and are recorded here as closed, not carried:
+
+| # | Original question | Resolution |
+|---|---|---|
+| Q1 | Normalize the 24 plan docs' heading conventions, or teach the harvester all of them? | **Teach.** Normalizing costs ~50 item edits across 15 of 24 docs for zero mechanical consumer, and the real root cause is `/do-plan` Phase 4 deleting the section (M4). |
+| Q3 | Share the `ask-me` transport or build a parallel one? | **Reuse.** Turn-ending and resume are already transport-independent; `tools/ask_poll.py:141-164` is the single degradation point and gets one new arm. |
+| Q4 | Where do recorded answers go once `/do-plan` removes the section? | **Dissolved by M4.** The section is marked rather than removed, so the answer lands in place. |
+| Q5 | Does this need a new global skill? | **No.** No new skill; a voice row in `.claude/skill-context/ask-me.md` and three CLIs. |
+
+Two questions remain.
+
+### P1. How is a defaulted question marked going forward? (blocks M4 only)
+
+The corpus already contains three incompatible shapes for "asked, nobody answered, the
+default stands": a section preamble ("Silence keeps the default"), an item-level
+`Default:` line, and an item-level `**Disposition:**` paired with `Overturned by:`. M1
+must read all three regardless. The question is which single shape `/do-plan`'s
+template mandates from M4 onward.
+
+- **Why it needs a human:** it is a convention choice that changes planning output
+  fleet-wide on the next `/update`, and the three shapes encode genuinely different
+  intents (a whole section defaulting vs. one item defaulting vs. one item defaulting
+  with a named escalation path).
+- **Default if silence:** item-level `**Disposition:** default — <what stands>`, because
+  it is the only one of the three that survives a section being partially answered.
+- **Does not block M1–M3.** Only task 17 waits on it.
+
+### P2. Must #3095's two-enforcement-points decision be settled before M3? (blocks task 12)
+
+`validate_poll_question` is enforced in two places with different failure modes:
+`agent/output_handler.py:1560` logs and discards, `tools/ask_poll.py:134` hard-exits.
+#3095 filed the divergence and it is unresolved. A voice renderer added at
+`tools/ask_poll.py:141-164` inherits whichever behavior is there, so M3 either settles
+it or codifies it by accident.
+
+- **Why it needs a human:** picking one is a behavior change to a shipped poll path, not
+  a new-code decision, and it belongs to #3095's scope rather than this plan's.
+- **Default if silence:** task 12 fails closed (hard-exit, matching `:134`) and says so
+  in its output, which is the conservative arm and leaves #3095 free to change it later.
+- **Blocks task 12 only.** M1, M2, and M4 are unaffected.
+
+### Filed separately, not carried here
+
+- **P3.** `docs/archive/plans-completed/plan-doc-single-writer-lease.md` reads
+  `status: Ready` while sitting in the completed archive; it was moved by a content-free
+  rename (`433c166a9`), apparently swept up by PR #2942. The lease it describes is the
+  mitigation this plan's writeback contract works around, so whether it was ever built
+  matters — but it is not this plan's question.
+- **P4.** `.claude/skill-context/do-debrief.md:21` documents `bf_alice`, which is absent
+  from `tools/tts.KOKORO_VOICES:27-38`. A voice request for it silently falls through
+  `_VOICE_FALLBACK_MAP`. Affects M2's clip library only cosmetically.
