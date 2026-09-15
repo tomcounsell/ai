@@ -1558,12 +1558,15 @@ records an override, plus this plan's own.
 - [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
   is exactly nine (the six existing including lane 3's `get_control_status` and lane 6's
   `get_release_lineage`, plus `get_ranking`, `get_hypotheses`, `get_rejected_approaches`) and carries no activity counter
-- [ ] Lane 6's three seams exist: every model revision carries `research_process_spec` in the
-  canonical bytes and a `research_process_digest` computed only by lane 6's function (`None`
-  until lane 6 merges; no second hashing routine in this lane), `PlannerArmRunner` registers
-  from the CLI entry when lane 6's module is importable and this lane imports cleanly when it is
-  not (method-body import, `ArmRunnerUnavailable`, tests via a fake `sys.modules` entry), and
-  every manifest carries `base_revision` and `candidate_ref`
+- [ ] Lane 6's three seams are bound directly (lane 6, PR #3318, is merged): every model
+  revision carries `research_process_spec` in the canonical bytes and a
+  `research_process_digest` set through `tools.improvement_recursion.process.research_process_digest`
+  (no second hashing routine in this lane; `revise-model --backfill-digests` fills older rows
+  through the same function), `PlannerArmRunner` (`tools/improvement_plan_arm.py`) is registered
+  from the CLI entry through lane 6's real `register_arm_runner` and returns lane 6's own
+  `ArmResult` and `BudgetUse` (money read from records: `unit2_usd=None`, `unit3_usd=None`; only
+  `subscription_turns` and `wall_seconds` come from the arm), and every manifest carries
+  `base_revision` and `candidate_ref`
 - [ ] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
   passes; a seeded row carrying `priority_area` opens a case on the first tick
   (`test_seeded_inspiration_opens_a_case`); and the two human-paced waits (vault request,
