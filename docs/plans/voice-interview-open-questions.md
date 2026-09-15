@@ -221,11 +221,82 @@ memory store for reuse.
 
 ## Architectural Impact
 
-[skeleton — Phase 2 fill]
+**Net-new, mostly additive.** Three new packages under `tools/`, one new skill,
+one new gitignored artifact directory. No change to the bridge, the worker, the
+relay, the session model, or any Popoto schema — which also means **no migration**
+(the repo's Popoto migration requirement does not apply to this plan).
+
+| Surface | Impact |
+|---|---|
+| `tools/open_questions/` | New package. Harvester, disposition classifier, leverage scoring, writeback. |
+| `tools/question_tree/` | New package. Tree construction, spoken-text authoring, clip cache. |
+| `tools/voice_interview/` | New package. The delivery session loop and its state file. |
+| `tools/tts/` | **Unchanged.** `synthesize(text, output_path, ...)` already lets the caller choose the destination, so the clip library is a pure caller-side concern. |
+| `tools/transcribe/` | **Unchanged.** Inbound voice notes are already transcribed into the agent's message text at `bridge/media.py:461`. |
+| `bridge/telegram_relay.py` | **Unchanged.** The unlink is opt-in on `cleanup_file`; the clip sender simply never sets it. |
+| `bridge/message_drafter.py` | **Unchanged** — see the deliberate non-refactor below. |
+| `data/question_clips/` | New, gitignored (`data/` is ignored at `.gitignore:181`). The clip library and its index. |
+| A new skill | The delivery half. Location (`.claude/skills-global/` vs `.claude/skills/`) is Open Question 5. |
+| `docs/features/`, `docs/tools-reference.md` | New feature doc and CLI entry. |
+
+**The deliberate non-refactor.** `bridge/message_drafter.py:100`
+`_extract_open_questions` looks like the natural thing to lift and share. It has
+exactly one production caller (`:1373`) and its output feeds the `needs_human` /
+`pause_open_question` SDLC gate — a false negative there silently disables the
+nudge pause for a session with a real outstanding question, which is the failure
+shape `tests/unit/test_poll_prose_answer_closeout.py` exists to guard. Its input is
+also a different thing: one well-formed section in agent stdout, not 24
+heterogeneous files under seven resolution conventions.
+
+Coupling an SDLC-gate-critical path to the much more speculative multi-convention
+classifier trades a real risk for a cosmetic win, so this plan **leaves
+`message_drafter` alone** and gives the harvester its own classifier. The
+duplication is bounded to the heading-detection regex and is made honest by a test
+asserting the two agree on the narrow single-section case. If the harvester's
+classifier proves stable over a few months, unifying then is a cheap follow-up
+with evidence behind it; doing it now is a guess.
+
+**Direction of dependency.** `tools/question_tree` imports `tools/open_questions`;
+`tools/voice_interview` imports both. Nothing in `bridge/`, `worker/`, or `agent/`
+imports any of the three, so the blast radius of a bug is confined to a manually
+invoked CLI and one skill.
+
+**Replication.** Other machines run this against their own project. Anything
+encoding *this* repo's plan-doc dialect (heading synonyms, disposition markers,
+the `NON_LANE_PLANS` exclusion) must be overridable per repo rather than baked
+into the global tool body — the mechanism the repo already has for this is
+`.claude/skill-context/{skill}.md` for skills and named env-overridable constants
+for tools.
 
 ## Appetite
 
-Large. [skeleton — Phase 2 fill]
+**Large**, split into three independently shippable milestones. Each one ends
+green and useful on its own, so the appetite can be spent down and stopped at any
+boundary without leaving a half-built channel standing.
+
+| Milestone | Deliverable | Standalone value if the plan stops here |
+|---|---|---|
+| **M1 — Harvester** | `tools/open_questions`: enumerate, classify disposition, score unblock leverage, CLI with `--json` | The corpus becomes machine-readable. `/ask-me` and the existing poll channel can consume it immediately, which is most of the velocity win without any audio. |
+| **M2 — Preparation and clip library** | `tools/question_tree`: leverage ranking, answer dispositions, pruning edges, spoken-text authoring, content-addressed OGG/Opus clip cache | A prepared, inspectable question tree with audio. Usable manually (send clips by hand) and reusable by any future transport including the deferred live call. |
+| **M3 — Delivery and writeback** | The voice session loop over Telegram voice notes, plus parallel-draft / sequential-apply writeback | The full loop the issue asks for. |
+
+**Why Large and not Medium.** Three genuine gaps have to be built, not wired:
+there is no clip library (the current send path actively deletes clips), no
+cross-document question harvester, and no answer-to-question binding. The
+classifier in M1 alone has to handle seven mutually incompatible resolution
+conventions across nine distinct heading strings. Medium would force dropping
+either the classifier's fidelity — which produces a channel that asks resolved
+questions and loses owner trust on its first call — or the writeback, which leaves
+the answers in chat where they already are.
+
+**What the appetite buys generously, by design.** All intelligence runs in M2,
+before the session starts, where it has full context and no latency budget. The
+owner's explicit trade: spend heavily on preparation so the delivery loop is dumb
+and the call traverses the shortest path to unblocking work. Preparation cost is
+therefore not a thing to optimize in this plan.
+
+**What the appetite does not buy.** Everything in No-Gos, most importantly the
+live phone call and any plan-doc locking protocol.
 
 ## Prerequisites
 
