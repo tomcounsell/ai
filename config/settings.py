@@ -711,6 +711,28 @@ class ImprovementSettings(BaseModel):
             "TUNABLE. Env: IMPROVEMENT__MAX_DISPATCH_ATTEMPTS."
         ),
     )
+    promise_detector_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether the no-promises observer adapter (charter §10) runs on "
+            "the evidence-collection tick. Off by default because it spends "
+            "money: each sampled outbound message costs one cheap-model judge "
+            "call against the daily paid-inference pool, so turning it on is "
+            "a deliberate act on the owning machine. When off the adapter "
+            "records a skip, never an error. Env: "
+            "IMPROVEMENT__PROMISE_DETECTOR_ENABLED."
+        ),
+    )
+    cheap_inference_model: str = Field(
+        default="",
+        description=(
+            "The OpenRouter model id the promise detector's yes/no judge "
+            "runs on, metered under the purpose ``promise_detector``. Empty "
+            "means the adapter declines and records a skip rather than "
+            "guessing a model, because a guessed model is an unaudited "
+            "spend. PROVISIONAL/TUNABLE. Env: IMPROVEMENT__CHEAP_INFERENCE_MODEL."
+        ),
+    )
 
 
 class RedisSettings(BaseModel):
