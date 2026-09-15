@@ -774,6 +774,29 @@ class TestImprovementMigrationRegistration:
         assert fn is _migrate_retire_sdlc_reflection
         assert description
 
+    def test_improvement_controller_state_is_registered_and_reads_cleanly(self, tmp_path):
+        """Lane 5's third migration (#3217, critique round 3): the planner
+        tick's one-row-per-project cursor is confirmed readable. The record is
+        not in ``models.__all__`` (the eight-record export is pinned), so the
+        marker imports its module directly."""
+        from models.improvement_controller_state import ImprovementControllerState
+        from scripts.update.migrations import _migrate_improvement_controller_state
+
+        assert "improvement_controller_state" in MIGRATIONS
+        fn, description = MIGRATIONS["improvement_controller_state"]
+        assert fn is _migrate_improvement_controller_state
+        assert description
+        keys_ = list(MIGRATIONS)
+        assert (
+            keys_.index("improvement_investigation_stage_field")
+            < keys_.index("improvement_controller_state")
+            < keys_.index("retire_sdlc_reflection")
+        )
+        assert _migrate_improvement_controller_state(tmp_path) is None
+        ImprovementControllerState.get_or_create("valor").record(last_tick_at="2026-09-15")
+        assert _migrate_improvement_controller_state(tmp_path) is None  # idempotent, read-only
+        assert ImprovementControllerState.get("valor").last_tick_at == "2026-09-15"
+
     def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
         """The subprocess-shaped migrations name a script by filename.
 

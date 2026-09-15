@@ -1264,7 +1264,7 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_improvement_evidence.py::TestCollectCorrections` and siblings (`:260-344`) — no change to existing cases; the file gains `TestCollectLessons` and `TestCollectPromises` classes on the same fixture shape.
 - [ ] `tests/unit/test_improvement_evidence.py` (no existing case asserts the `len(findings) == 3` literal) — no change to existing cases; the file gains two `run_improvement_collect` status cases (all-skipped is `success`, all-failed is `error`) pinning the new `failed`/`skipped` rule.
 - [ ] `tests/unit/test_improvement_models.py::FORBIDDEN_INDEX_NAMES` (`:104`) — UPDATE: gains `stage`, `dedup_identity`, `evaluation_ids`, `blocked_by`, `research_process_spec`; the loop at `:186` keeps refusing an index on any of them.
-- [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the two entries this lane registers (`retire_sdlc_reflection` and `improvement_investigation_stage_field`).
+- [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the three entries this lane registers (`improvement_investigation_stage_field`, `improvement_controller_state`, and `retire_sdlc_reflection`).
 - [ ] (lane 4) `tests/unit/test_improvement_eval_arena.py::test_carries_the_four_arm_keys` (`:48`) — no change; the arm env is untouched. The arm worker's job-spec test file gains cases for the `rrf_k` and `min_rrf_score` pass-throughs, asserting an absent key leaves `retrieve_memories` at its defaults.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change: lane 7 already tests the `on_escalation` sink both present and absent (`tools/infrastructure_budget.py:568-574`); this lane supplies the callable and adds one integration case in its own digest test file.
 - [ ] `tests/unit/test_improvement_resources.py` (`:75`, `:142`, `:200`) — no change to existing cases: each asserts `set(report) == set(RESOURCES)`, which follows the tuple when `meta_model_api` is appended; the file gains one case asserting a vault title containing "Meta Model API" classifies under `meta_model_api` and one asserting a title with neither keyword set reports `absent` for it.
@@ -1546,7 +1546,7 @@ records an override, plus this plan's own.
 - [ ] The qualified-result report for the real cycle is generated from records, carries the three
   mandatory sections, and is posted on #3217
 - [ ] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
-  kinds with their cardinality argument, and both migrations registered
+  kinds with their cardinality argument, and all three migrations registered
 - [ ] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
   dashboard's ranking partial and `valor-improve ranking` read the same artifact
 - [ ] The brief opens with the pinned charter verbatim; the research skill's first step prints it
@@ -1899,7 +1899,7 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | The digest text says silence validates nothing and asks nothing | `scripts/pytest-clean.sh tests/unit/test_improvement_assumption_digest.py -k "silence_validates_nothing and asks_nothing" -q` | exit code 0 |
 | `scripts/sdlc_reflection.py`, its installer, and its plist are gone | `ls scripts/sdlc_reflection.py scripts/install_sdlc_reflection.sh com.valor.sdlc-reflection.plist 2>/dev/null \| wc -l` | match count == 0 |
 | `sdlc-reflection` is in the obsolete-service sweep | `grep -c '"sdlc-reflection"' scripts/update/service.py` | output > 0 |
-| No live reference to the deleted script remains | `grep -rn "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| wc -l` | match count == 0 |
+| No live reference to the deleted script remains (task 8 note: the exclusion list also names the `retire_sdlc_reflection` migration, its tests, and the obsolete-sweep test, which the rows above require to name the script) | `grep -rn "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| grep -v "scripts/update/migrations.py" \| grep -v "tests/unit/test_migrations.py" \| grep -v "tests/unit/test_update_remove_obsolete_services.py" \| wc -l` | match count == 0 |
 | Lesson adapter is wired into the tick | `grep -c "collect_lessons" reflections/improvement_collect.py` | output > 1 |
 | Promise adapter is wired into the tick and gated | `grep -c "collect_promises\|promise_detector" reflections/improvement_collect.py` | output > 1 |
 | No planner or verdict path writes `state` by ORM | `grep -nE "\.state *= *['\"]" reflections/improvement_plan.py tools/improvement_experiment.py \| wc -l` | `0` |

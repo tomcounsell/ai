@@ -1578,6 +1578,39 @@ def _migrate_improvement_investigation_stage_field(project_dir: Path) -> str | N
     )
 
 
+def _migrate_improvement_controller_state(project_dir: Path) -> str | None:
+    """Confirm the planner tick's cursor record reads cleanly (issue #3217).
+
+    ``models/improvement_controller_state.py::ImprovementControllerState`` is
+    one row per ``project_key`` (``project_key`` is the whole key), written
+    by plain ORM ``save()``: ``last_snapshot_ref``, ``evidence_watermark``,
+    ``last_tick_at``, ``charter_digest``, ``digest_watermark``. Lane 3's
+    journal is per-case only, so this state never goes through
+    ``transition()`` (critique round 3). Nothing to backfill, no index set
+    to strip. The record is not exported from ``models`` (the eight-record
+    export is pinned by ``tests/unit/test_improvement_models.py``), so this
+    marker imports its module directly instead of going through
+    ``_confirm_models_readable``.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable
+    marker for the schema version that introduced the cursor: without it
+    there is no record on a machine that the row was ever registered, and a
+    later subtractive migration has no predecessor to reason from.
+    Read-only; returns None on success, the error string on failure.
+    """
+    try:
+        import importlib
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        module = importlib.import_module("models.improvement_controller_state")
+        model = module.ImprovementControllerState
+        next(iter(model.query.filter(project_key="valor")), None)
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_retire_sdlc_reflection(project_dir: Path) -> str | None:
     """Remove the retired ``sdlc_reflection`` state file (issue #3217).
 
@@ -1770,6 +1803,11 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         "Register the lane 5 research-cycle fields on ImprovementInvestigation, "
         "ImprovementCase, and ImprovementModelRevision (issue #3217) and confirm "
         "their keyspace resolves",
+    ),
+    "improvement_controller_state": (
+        _migrate_improvement_controller_state,
+        "Register the planner tick's one-row-per-project ImprovementControllerState "
+        "cursor (issue #3217) and confirm its keyspace resolves",
     ),
     "retire_sdlc_reflection": (
         _migrate_retire_sdlc_reflection,

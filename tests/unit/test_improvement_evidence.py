@@ -744,7 +744,8 @@ class TestRunImprovementCollect:
         assert any("corrections-failed" in f for f in result["findings"])
         assert result["failed"] == ["corrections"]
 
-    def test_every_adapter_failing_is_an_error(self):
+    def test_all_failed_is_error(self):
+        """Every adapter failing is the one shape that is an error."""
         with _adapters(**{name: RuntimeError(name) for name in ADAPTER_NAMES}):
             result = improvement_collect.run_improvement_collect()
 
@@ -752,7 +753,7 @@ class TestRunImprovementCollect:
         assert sorted(result["failed"]) == sorted(ADAPTER_NAMES)
         assert len(result["findings"]) == len(ADAPTER_NAMES)
 
-    def test_every_adapter_skipping_is_a_success(self):
+    def test_all_skipped_is_success(self):
         """A skip is a rule declining, never a failure: five skips is a healthy tick."""
 
         def _skip(name):
