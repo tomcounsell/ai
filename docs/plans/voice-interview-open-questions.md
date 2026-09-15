@@ -213,11 +213,292 @@ memory store for reuse.
 
 ## Spike Results
 
-[skeleton — Phase 2 fill]
+Four read-only spikes, dispatched in parallel, all returned. Three of the issue's
+five Open Questions are resolved by evidence and do not go to the human. The
+footprint of the plan shrank as a result: no new skill, and the delivery half
+becomes a branch inside machinery that already ships.
+
+### spike-1: Does an answer bind to the question it answers without timestamp alignment?
+
+- **Assumption:** "An inbound voice-note reply carries enough metadata to bind the
+  answer to the specific question clip it answers."
+- **Method:** code-read
+- **Result:** **PARTIALLY CONFIRMED.** The inbound half is free; the outbound half
+  is not. `store_message(..., reply_to_msg_id=message.reply_to_msg_id, ...)` at
+  `bridge/telegram_bridge.py:1579` persists the reply target durably
+  (`models/telegram.py:47`), and `bridge/context.py:745-833` already walks it for
+  session rooting. But **nothing in the repo maps a clip's message id to the
+  question that clip asked.** The outbound history write
+  (`bridge/telegram_relay.py:1499-1515`) passes `content=message.get("text","")`
+  and neither a message id nor a reply target; for a voice note the caption is
+  empty, so the row is contentless. `format_reply_chain`
+  (`bridge/context.py:632-690`) drops `message_id` at format time, so the clip
+  reaches the agent as an anonymous attachment marker.
+  **The seam that closes it already exists:** `--ack-sent-id`
+  (`tools/valor_telegram.py:1437-1443`) sets `payload["ack_sent_id"]`, the relay
+  calls `publish_sent_message_id` (`bridge/telegram_relay.py:1463-1467`) writing
+  `telegram:sent:{session_id}`, and `await_sent_message_id`
+  (`bridge/outbox_ack.py:65-95`) reads it back — single-consumer, delete-on-read,
+  120s TTL (`bridge/outbox_ack.py:48`).
+- **Confidence:** high
+- **Impact:** the plan builds a **session-owned clip registry**: send with
+  `--ack-sent-id`, read the ack immediately, record `{telegram_msg_id → qid}` in
+  the interview state file. This needs **no relay change**. The spike's alternative
+  — teaching `store_message` to persist the outbound voice note's question text —
+  is rejected as a larger change to a hot path for a benefit one caller needs.
+  Positional binding (exactly one clip outstanding) is the fallback when the ack is
+  missed or the owner does not use reply; a disagreement between the two stops the
+  traversal rather than guessing. No timestamp alignment anywhere.
+  Side effect worth naming: because clips are sent **without** `cleanup_file`, the
+  file survives, so the reply-chain hydration renders a readable attachment marker
+  instead of `[unreadable attachment: ... reason: file_missing]`
+  (`bridge/context.py:429-431`).
+
+### spike-2: Can a content-addressed clip library sit on top of `tools/tts` unchanged?
+
+- **Assumption:** "A persistent content-addressed clip library needs no change to
+  the synthesis API, and clips can be sent over Telegram without being deleted."
+- **Method:** code-read
+- **Result:** **PARTIALLY CONFIRMED.** Persistence and send paths are clean; the
+  cache key has one real hole.
+  - `synthesize(text, output_path, voice="default", format="opus",
+    force_cloud=False)` at `tools/tts/__init__.py:360` — `output_path` is required
+    and positional, no tempdir default. Returns
+    `{path, duration, backend, voice, format}`, or **`{"error": ...}` alone** with
+    none of the other keys on failure (`:389, :391, :393, :411`). No audio cache
+    exists; the only cache is a 60s TTL on the Kokoro *availability probe*
+    (`:82-87`).
+  - Cleanup is opt-in and already regression-tested: `payload["cleanup_file"]` is
+    set only inside the `--cleanup-after-send` branch
+    (`tools/valor_telegram.py:1079-1092`), all three relay unlink sites are gated
+    on it (`bridge/telegram_relay.py:690-691, :739, :965-970`), and
+    `tests/unit/test_telegram_relay_voice_note.py:117-132` already asserts "file
+    must survive when cleanup_file is not set."
+  - Re-sending the same local file is safe: Telethon opens it read-only, nothing
+    transcodes in place, no unique-filename requirement, and duration is recomputed
+    by a read-only `ffprobe`.
+  - **The hole:** the backend that actually produces the audio is **not knowable
+    before the call.** `use_kokoro = (not force_cloud) and _is_kokoro_available()`
+    (`:397`) is a stateful, time-windowed probe that runs a live one-character
+    synthesis and can flip between two identical calls; and even after Kokoro is
+    picked, a synthesis-time error falls back to cloud mid-call and re-resolves the
+    voice, so a requested `af_bella` silently becomes `nova` via
+    `_VOICE_FALLBACK_MAP` (`:47-66`). The result dict reports ground truth, but
+    only after the fact.
+- **Confidence:** high
+- **Impact:** the earlier design of putting backend identity *in* the key is wrong
+  — it would require predicting `_is_kokoro_available()`. Corrected design: key on
+  requested inputs plus a recipe-version salt, and validate the recorded actual
+  backend **on read**:
+  `sha256("v1|{text}|{requested_voice}|{force_cloud}|opus")` →
+  `data/clips/<hash>.ogg` with a `<hash>.json` sidecar recording actual backend,
+  actual voice, and duration. A hit whose sidecar backend disagrees with what the
+  caller now wants is treated as a miss. The `v1` salt covers the constants a
+  caller cannot see (`speed=1.0` at `:219`, `-b:a 24k` at `:253`,
+  `kokoro-v1.0.onnx` at `:78`, `tts-1` at `:297`) and is bumped when any change.
+  Location `data/clips/` needs no gitignore work: `data/` is ignored at
+  `.gitignore:181` and `*.ogg` is ignored globally as well.
+
+### spike-3: What does normalizing the resolution convention actually cost?
+
+- **Assumption:** "Normalizing the corpus to one resolution convention is cheaper
+  than teaching a harvester every existing shape."
+- **Method:** code-read (full corpus pass)
+- **Result:** **FALSE.** Normalizing costs **~50 item edits across 15 of 24 docs**
+  (plus ~5 more inside two `Decisions Recorded` sections); 6 of the 15 need a
+  heading rename and all 15 need item-level marker work. Seven of the 24 docs have
+  no question section at all. Six distinct heading strings are in use
+  (`## Open Questions` ×11, `## Resolved Questions`, `## Resolved Decisions` ×2,
+  `## Decisions (Owner, …)`, `## Decisions Recorded`, and one H3
+  `### Schema Gate — Open Decisions from Spikes`). No doc uses a `RETIRED`
+  disposition.
+  Two findings flip the decision:
+  1. **Four of the nine shapes are already mechanically distinguishable** —
+     the blockquote `> **RESOLVED …**` banner, strikethrough
+     (`sdlc-control-plane-asserted-facts.md:1259` item 4), the `Default:` preamble,
+     and the `**Disposition:** … Overturned by:` pair. The defaulted items this
+     plan most feared are the *easiest* to detect: `lane-3:787` says verbatim
+     "Silence keeps the default" and every item carries `Default:`;
+     `lane-5:1882` pairs `**Disposition:**` with `Overturned by:`. **No edit is
+     needed for a harvester to classify them as not-asks.**
+  2. **The root cause is `/do-plan` itself.**
+     `.claude/skills-global/do-plan/SKILL.md:399` Phase 4 Finalize says
+     "**remove Open Questions section**". `PLAN_TEMPLATE.md:495` mandates the
+     heading but says nothing about resolution marking. Every retained-and-marked
+     shape in the corpus is a deviation authors invented *because deletion destroys
+     the decision record*. Nine shapes exist because the official instruction is to
+     delete.
+  Also confirmed: **no hook or validator parses the section.** Zero occurrences of
+  "question" across the 22 validators in `.claude/hooks/validators/`. The
+  convention is entirely unenforced.
+- **Confidence:** high
+- **Impact:** resolves Open Question 1 against normalizing, **and resolves Open
+  Question 4 as a side effect.** The plan teaches the harvester the existing shapes
+  and adds a small fourth milestone that fixes the cause forward: amend
+  `SKILL.md:399` to retain-and-mark instead of delete, and give
+  `PLAN_TEMPLATE.md` one named convention. Retro-editing 15 settled docs on the
+  shared `main` checkout — a known lane collision surface — for zero current
+  mechanical consumer stays a No-Go.
+
+### spike-4: Should the voice channel reuse `/ask-me`'s transport or sit beside it?
+
+- **Assumption:** "A voice question channel needs its own skill and its own wait
+  mechanism."
+- **Method:** code-read
+- **Result:** **FALSE — reuse.** The shipped poll architecture splits into three
+  layers and only the middle one is Telegram-coupled:
+  - **Rendering** (poll vs prose) is Telegram-coupled, and crucially it has
+    **exactly one decision point**: `tools/ask_poll.py:141-164`.
+    `.claude/skill-context/ask-me.md:76` forbids the skill from detecting the
+    surface itself — "Always call `valor-ask-poll`; it degrades... Never try to
+    detect the surface and branch by hand." So a voice surface is an edit to that
+    CLI, **not** to any skill body.
+  - **Ending the turn** is coupled to the *tool name*, not to polls:
+    `_ASK_USER_MATCHER = "AskUserQuestion"` at
+    `agent/session_runner/hook_edge.py:114`, the only PreToolUse → `needs_human`
+    path at `:363-368`. A voice flow ends its turn with the identical trick
+    (render via Bash, then `AskUserQuestion` as the turn's final act). Teaching the
+    matcher about `Bash` is a **rejected** alternative per
+    `docs/features/telegram-poll-questions.md:170-172` — do not revive it.
+  - **Staying stopped** is already generic: `agent/output_router.py:180-181` is a
+    pure function over a plain `has_open_question: bool`, and the Redis read lives
+    in the caller (`agent/session_executor.py:1735-1741` calling
+    `session_has_open_poll`). **This is the one seam to widen.**
+  - **Resuming** is already transport-independent *on purpose*:
+    `bridge/answer_routing.py:43-60, :94` (`AnswerTargetKind`, frozen
+    `AnswerTarget`, `resolve_answer_target`), landed as its own revertible commit
+    and documented as "poll-independent on purpose"
+    (`docs/features/telegram-poll-questions.md:318-320`). An inbound voice message
+    is already an ordinary steering message on this path — **no new plumbing.**
+  - **There is no reusable question value object.** Option validation lives in
+    `tools/ask_poll.py:52-88` `normalize_options`, the escape-hatch literal at
+    `:39`, the text cap in `POLL_QUESTION_MAX_CHARS` imported from
+    `bridge/message_drafter.py` at `:132-135`, and text rendering in
+    `agent/output_handler.py:375-386`. A voice renderer without a shared model
+    would re-implement the escape hatch and both caps.
+  - `#3095` contains **nothing** about a second question mode or transport; it is
+    hardening plus owner decisions on the shipped poll path. One of those decisions
+    bears directly here: `validate_poll_question` violations are
+    logged-and-discarded at `agent/output_handler.py:1560` but hard-exit at
+    `tools/ask_poll.py:134` — **two enforcement points for one invariant**, which a
+    second renderer would inherit unresolved.
+- **Confidence:** high, with one stated gap: the spike did not read
+  `bridge/poll_reconcile.py` or `bridge/poll_vote.py` directly, so its note that
+  #3095's FloodWait item looks stale against source is doc-vs-issue inference, not
+  source-verified. That does not affect this plan's conclusion.
+- **Impact:** resolves Open Question 3 in favor of reuse and largely dissolves
+  Open Question 5. **No new skill.** The generic `ask-me/SKILL.md` body does not
+  change at all — it is already surface-agnostic. The plan instead: extract a
+  shared frozen question model, add a voice branch inside the single degradation
+  point in `tools/ask_poll.py` (never a second CLI), generalize
+  `session_has_open_poll` → `session_has_open_question` while leaving
+  `output_router`'s pure-function contract untouched, and add a voice row to
+  `.claude/skill-context/ask-me.md`. Ranking is **not** reused: the harvester's
+  disk-based leverage scoring replaces `/ask-me`'s context-derived ranking, which
+  is the whole point of the harvester.
+
+### What the spikes did not resolve
+
+Open Question 2 (how defaulted questions are marked *going forward*) survives, but
+much narrower than filed: the existing shapes are already greppable, so this is now
+a convention choice bundled into the M4 template amendment rather than a blocker.
+One new question is raised by spike-4 and is carried below: whether #3095's
+two-enforcement-points item must be settled before a second renderer inherits it.
 
 ## Data Flow
 
-[skeleton — Phase 2 fill]
+Four stages. Stages 1-2 run before the call with no latency budget; stage 3 is the
+only thing that runs while the owner is on the line; stage 4 runs after.
+
+```
+1. HARVEST  (offline, cheap, deterministic)
+   docs/plans/*.md  ──┐
+                      ├─► tools.open_questions.extract
+   gh issue list ─────┘        │  heading discovery → item parse → disposition classify
+   (this repo only)            ▼
+                        list[OpenQuestion]  {qid, text, path, line, tracking, disposition}
+                               │
+                               ▼  tools.open_questions.score
+                        leverage per question  (blocked plans + blocked issues + prunes)
+
+2. PREPARE  (offline, expensive, LLM, generous by design)
+   open questions ──► run_typed()  per question:
+                        · spoken question text (no multi-digit identifiers)
+                        · deeper-context clip text ("what's this about?")
+                        · readback line
+                        · plausible answer dispositions
+                        · for each disposition: which other qids it moots
+                        · draft writeback per disposition
+                               │
+                               ▼  tree build: pick root maximizing expected pruning,
+                                  bound by target session length
+                        QuestionTree {nodes, pruning_edges, order}
+                               │
+                               ▼  tools.question_tree.clips
+                        for each clip text: key = sha256(text)+voice+speed+backend+model_fp
+                        cache hit → reuse   miss → tools.tts.synthesize(text, path)
+                        data/question_clips/{key}.ogg  +  index.json
+
+3. DELIVER  (online, dumb, no LLM in the loop)
+   state file: exactly ONE outstanding clip at a time
+        │
+        ├─► valor-telegram send --voice-note <clip> --ack-sent-id
+        │     (NO --cleanup-after-send: that would delete the library)
+        │        └─► Redis outbox ─► telegram_relay voice branch ─► owner's phone
+        │        └─► relay publishes the sent message id to telegram:sent:{session_id}
+        │              (opt-in, single-consumer, delete-on-read, 120s TTL)
+        ▼
+   read the ack ─► write {telegram_msg_id → qid} into the session state file
+                   THIS is the registry. Nothing in the repo maps a clip's
+                   message id to the question it asked (see Spike Results).
+        ▼
+   owner replies with a voice note
+        └─► bridge/media.py downloads + transcribes (SuperWhisper → whisper-1)
+                └─► store_message persists reply_to_msg_id
+                    (bridge/telegram_bridge.py:1579, TelegramMessage field at
+                    models/telegram.py:47)
+                        │
+                        ▼  bind answer → outstanding clip
+                           primary: reply_to_msg_id → registry lookup → qid
+                           fallback: positional (exactly one clip outstanding),
+                             used when the ack was missed or the owner did not
+                             use reply
+                           mismatch between the two: stop, do not guess
+                        ▼
+                   classify against the node's pre-computed dispositions
+                     on-script  → follow pruning edges → next node
+                     off-script → record verbatim, stop traversal
+                     pruned-out → never asked
+
+4. WRITEBACK  (offline; drafts in parallel, applies strictly sequentially)
+   answers ──► fan out ONE drafting subagent per plan doc  (read-only, parallel)
+                   each returns: the exact Edit it wants, re-verified against
+                   current main (the pre-drafted text was authored against an
+                   older tree)
+                        │
+                        ▼  ONE writer, one doc at a time:
+                           Edit (never Write — four PostToolUse validators match
+                           Write on docs/plans with a propagating exit policy)
+                           then ONE atomic shell invocation:
+                           git add <explicit paths> && git commit -m "..."
+                           (never git add -A — #2650's stated mitigation)
+                        ▼
+                   docs/plans/*.md on main, answers attributed and dated
+```
+
+**Where the intelligence lives, and why.** Every model call is in stage 2. Stage 3
+holds no LLM at all: it plays a file, reads a transcript, and follows a
+pre-computed edge. That is what makes the owner's "spend extra to be overly
+prepared" trade cash out — the call never waits on inference, and the measured
+`granite4.1:3b` in-loop latency (~1.1s median / ~1.4s p95, `config/settings.py:383`)
+never enters the picture.
+
+**The layer each failure belongs to.** A misclassified disposition is a stage-1
+bug and shows up as a resolved question being asked. A bad spoken rendering is a
+stage-2 bug and shows up as an unintelligible clip. A lost answer is a stage-3
+bug. A clobbered plan doc is a stage-4 bug. Keeping these in separate packages with
+separate CLIs is what makes a bad call diagnosable after the fact instead of
+mysterious.
 
 ## Architectural Impact
 
