@@ -887,15 +887,149 @@ orphans that other agents on this machine pay for.
 
 ## Rabbit Holes
 
-[skeleton — Phase 2 fill]
+- **Chasing 100% disposition-classification accuracy.** The corpus has nine shapes
+  and will grow new ones until M4 lands. Aim for zero false positives on *defaulted
+  and resolved* items (asking a settled question is what costs owner trust) and
+  accept false negatives (a genuinely open question missed this week gets asked next
+  week). Do not build a general markdown-semantics engine.
+- **Making the leverage score "correct."** The weights are guesses. Resist tuning
+  them before a real call has produced evidence about which ordering actually
+  unblocks work. Ship named constants with a grain-of-salt comment and move on.
+- **Perfecting the pruning DAG.** Expected-pruning root selection is a heuristic over
+  a model's guess about which answers moot which questions. A tree that prunes
+  nothing is still a correctly ordered list — which is the worst case, not a failure.
+- **Byte-level clip determinism.** Tempting after the Kokoro research, and
+  irrelevant: the cache is a reuse cache, not a verification cache. Key coverage
+  plus read-time sidecar validation is the whole requirement.
+- **Unifying the two question extractors.** Explicitly deferred. See Architectural
+  Impact. Revisit with months of evidence, not now.
+- **Fixing #3095's poll backlog while in the neighborhood.** Only P2 (the two
+  enforcement points) touches this work. The FloodWait items, the reconcile coverage
+  gap, and the orphan-adoption RPC burn are someone else's lane.
+- **Building the live call because the pipeline now exists.** It is a No-Go for
+  reasons that are unchanged by anything this plan ships: licensing, a PBX, and no
+  streaming STT.
+- **Retro-normalizing the corpus once M4 defines the convention.** M4 fixes the
+  cause forward. The 15 settled docs stay as they are.
 
 ## Risks
 
-[skeleton — Phase 2 fill]
+### Risk 1: The first call asks a question the owner already answered
+
+The single failure that kills adoption. If the classifier reads a
+`> **RESOLVED 2026-07-27 (owner).**` banner as an open question, the owner spends
+their fifteen minutes re-deciding settled things and does not take a second call.
+
+**Mitigation:** the classification table is verified against the real corpus with
+the audited counts as a fixture assertion, ordered most-specific-first so resolution
+markers win over the mere presence of a question heading. Before the first real call,
+`list --json` output is reviewed by eye against the corpus — cheap, once.
+
+### Risk 2: An answer is written into the wrong plan doc
+
+A mis-bound answer is worse than a lost one: it silently corrupts a decision record
+and there is no signal that it happened.
+
+**Mitigation:** two independent binding sources (registry lookup via
+`reply_to_msg_id`, positional fallback), and a hard stop when they disagree rather
+than a tie-break. Plus `--dry-run` on writeback showing every `Edit` before
+anything is written.
+
+### Risk 3: Writeback damages a concurrent lane's work
+
+#2650's 2026-08-13 incident was unrecoverable: a plan-doc agent's `git add -A`
+swallowed another lane's staged code onto `main` under an unrelated issue reference.
+This plan writes to `main` on the shared checkout, so it is exposed to exactly that.
+
+**Mitigation:** sequential single-writer, `Edit` never `Write`, explicit paths never
+`-A`, one atomic stage-and-commit per doc. No lock is built — that is a No-Go — so
+the mitigation is entirely in discipline enforced by the writeback tool rather than
+by convention, which is why it is a tool and not an instruction to an agent.
+
+### Risk 4: Incision 2 breaks the nudge loop for poll sessions
+
+Widening `session_has_open_poll` → `session_has_open_question` sits on the path that
+decides whether a session gets nudged. A bug here does not break the voice channel;
+it breaks polls and ordinary sessions.
+
+**Mitigation:** `agent/output_router.py:180`'s pure-function contract and its
+`has_open_question: bool = False` default are untouched, so a failure in the new
+registry read degrades to today's behavior. Three existing suites
+(`test_output_router.py`, `test_poll_prose_answer_closeout.py`, plus the drafter
+gate) are the proof and must pass unchanged.
+
+### Risk 5: The prepared tree is stale by the time the call happens
+
+Preparation is expensive and generous by design, which means it happens ahead of
+time — and plan docs change constantly on this repo.
+
+**Mitigation:** qids are content-hashed, not position-keyed, so ordinary edits
+elsewhere in a doc do not churn them. Every pre-drafted writeback is re-verified
+against current `main` before being applied, and a question whose text changed since
+preparation is reported as drift rather than answered. Re-preparation re-cuts only
+the clips whose keys changed.
+
+### Risk 6: The interview inherits an unresolved invariant from the poll path
+
+P2: `validate_poll_question` is enforced two different ways. A voice renderer on the
+same seam either hard-exits mid-interview or ships a degraded question, and nobody
+has ruled which.
+
+**Mitigation:** raised as an Open Question rather than absorbed. If it is not settled
+before M3, the voice branch fails closed (hard-exit, matching
+`tools/ask_poll.py:134`, the stricter of the two) and says so in its output.
 
 ## Race Conditions
 
-[skeleton — Phase 2 fill]
+### Race 1: Two writeback appliers on the shared `main` checkout
+
+**Hazard:** the whole of #2650. Two agents staging and committing plan-doc edits
+concurrently can interleave, and one `git add -A` can swallow the other's staged work.
+
+**Prevention:** writeback has exactly one applier by construction — drafting is the
+only parallel phase and it is read-only. Each doc's stage-and-commit is a single
+shell invocation with explicit paths. This plan does **not** guard against a
+*different* lane committing concurrently; no lock exists and building one is a
+No-Go. What it guarantees is that this tool is never itself the second writer.
+
+### Race 2: The sent-id ack is consumed or expires before it is read
+
+**Hazard:** `telegram:sent:{session_id}` is single-consumer, delete-on-read, 120s TTL
+(`bridge/outbox_ack.py:48`). If anything else reads it first, or the read is slow, the
+clip's message id is gone and the registry entry is never written.
+
+**Prevention:** the ack is read immediately after the send returns, in the same
+function, before anything else happens. A miss is not an error — it degrades to
+positional binding, which is correct as long as exactly one clip is outstanding.
+
+### Race 3: An answer arrives while the next clip is being sent
+
+**Hazard:** the owner answers fast, or answers a clip two questions back. Two clips
+transiently outstanding would break the positional fallback.
+
+**Prevention:** the driver sends the next clip only after the current answer is bound
+and recorded, and the state file holds at most one outstanding clip as an invariant
+rather than a convention. A second inbound voice note while nothing is outstanding is
+recorded as unsolicited and does not advance the traversal.
+
+### Race 4: A plan doc changes between preparation and writeback
+
+**Hazard:** the pre-drafted writeback was authored against an older tree. Applying it
+blind would overwrite an edit made in between.
+
+**Prevention:** re-verification against current `main` before every apply, comparing
+the question's current text against the text the draft was authored from. A mismatch
+is reported as drift and skipped.
+
+### Race 5: Two preparation passes writing the same clip file
+
+**Hazard:** content-addressed paths mean two concurrent preparation passes can target
+the identical `data/clips/<hash>.ogg`, producing a torn file.
+
+**Prevention:** synthesize to a temp path in the same directory and `os.replace()`
+into place — atomic on the same filesystem. Identical content makes the write
+idempotent, so the loser of the race is harmless. The sidecar JSON is written the same
+way, after the audio.
 
 ## No-Gos (Out of Scope)
 
