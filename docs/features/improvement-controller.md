@@ -209,9 +209,10 @@ not a quota.
 questions: the controller resolves uncertainty from Tom-sourced memories and
 online research, and records what it cannot resolve as a provisional assumption
 with its evidence, shown on the dashboard as an assumption rather than a fact.
-One message class is permitted, the evidence-backed charter amendment request,
-and it arrives with lane 3. A Verification row fails the build if a routine
-question path reappears.
+One message class is permitted, the evidence-backed charter amendment request:
+`valor-improve propose-amendment` records it as a `charter_amendment`
+investigation in `awaiting_authorization` and pages Tom once. A Verification row
+fails the build if a routine question path reappears.
 
 ## Unit-3 metering and teardown
 
