@@ -41,6 +41,10 @@ class ImprovementControllerState(Model):
         charter_digest: The pinned charter digest the last tick ran under.
             A pinned digest that differs from it is how the tick notices an
             amendment landed.
+        digest_watermark: ISO timestamp of the newest row the assumption
+            digest rendered and delivered (``reflections/
+            improvement_assumption_digest.py``). Written only after a
+            successful send, so a failed send re-sends next time.
     """
 
     project_key = KeyField()
@@ -48,6 +52,7 @@ class ImprovementControllerState(Model):
     evidence_watermark = Field(null=True)
     last_tick_at = Field(null=True)
     charter_digest = Field(null=True)
+    digest_watermark = Field(null=True)
 
     @classmethod
     def get(cls, project_key: str) -> ImprovementControllerState | None:
@@ -63,7 +68,13 @@ class ImprovementControllerState(Model):
 
     def record(self, **fields) -> ImprovementControllerState:
         """Set the given cursor fields and save. Unknown names are refused."""
-        allowed = {"last_snapshot_ref", "evidence_watermark", "last_tick_at", "charter_digest"}
+        allowed = {
+            "last_snapshot_ref",
+            "evidence_watermark",
+            "last_tick_at",
+            "charter_digest",
+            "digest_watermark",
+        }
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"ImprovementControllerState has no field(s) {sorted(unknown)}")
