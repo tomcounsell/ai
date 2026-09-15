@@ -4,10 +4,32 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
 
 - KeyField set = ``{id, project_key}``; recency
   ``SortedField(created_at, partition_by="project_key")``.
-- Two IndexedFields, both low-cardinality: ``kind`` (five values, see
-  :data:`INVESTIGATION_KINDS`) and ``state`` (four values, see
+- Two IndexedFields, both low-cardinality: ``kind`` (eight values, see
+  :data:`INVESTIGATION_KINDS`) and ``state`` (five values, see
   :data:`INVESTIGATION_STATES`). ``case_id`` is unbounded and stays a plain
   field; a case's investigations are found through the recency partition.
+  Eight kinds is the schema gate's default maximum
+  (``tests/unit/test_improvement_models.py::DEFAULT_VOCABULARY_MAXIMUM``), so
+  a ninth kind costs a reasoned ``VOCABULARY_MAXIMUMS`` entry there.
+- **``stage`` is a plain field, never an index** (lane 5, #3217, spike-3).
+  The lifecycle an investigation moves through has ten steps, in order:
+  ``draft``, ``deduplicated``, ``policy_checked``, ``running``, ``recorded``,
+  ``interpreted``, ``applied``, ``cancelled``, ``superseded``, ``failed``. Ten
+  is past the gate's eight-value cap, and the only query the loop runs is
+  "open or closed", which ``state`` already answers. ``state`` stays the
+  open/closed index; ``stage`` is read off the row. The lifecycle helper
+  advances it in order and refuses a skip.
+- **Five more plain fields** (lane 5, #3217), all ``null=True`` and none
+  indexed because each is unbounded or free text: ``sources`` (JSON list of
+  ``{url, retrieved_at, title}``, the raw source pointers a claim keeps),
+  ``prior_answers`` (JSON list of the investigation and case ids the novelty
+  check surfaced), ``expected_information_value`` (free text),
+  ``decision_affected`` (free text), and ``assumption_detail`` (JSON
+  ``{charter_passage, evidence_ids, confidence, consequence,
+  overturning_observation}``, the structured form behind
+  ``provisional_assumption``). ``resolved_at`` (a plain ``DatetimeField``)
+  is the moment ``resolve()`` closed the row; the assumption digest's
+  watermark is the newest ``resolved_at`` it rendered, read off the row.
 - **The controller asks no human anything.** There is no question kind, no
   attention queue, no daily question ceiling, and no poll-registry binding on
   this record. Uncertainty is resolved from Tom-sourced memories and online
@@ -49,6 +71,8 @@ INVESTIGATION_KINDS: tuple[str, ...] = (
     "probe",  # running something to see what happens
     "resource_acquisition",  # checking what a provider actually offers today
     "charter_amendment",  # a deferred decision that needs Tom's authorization (lane 3, #3215)
+    "inspiration_intake",  # charter §4: reading a Tom-sourced inspiration into a case (lane 5)
+    "skill_acquisition",  # charter §5: learning a named skill the loop lacks (lane 5, #3217)
 )
 
 #: Where the investigation stands. Low-cardinality on purpose.
@@ -83,6 +107,18 @@ class ImprovementInvestigation(Model):
             daily reservation.
         charter_digest: The ``sha256:<hex>`` of the charter in force when this
             investigation was admitted. Not indexed (unbounded).
+        stage: Where in the ten-step lifecycle this investigation stands (see
+            the module docstring). Plain field; ``state`` is the index.
+        sources: JSON list of ``{url, retrieved_at, title}`` source pointers.
+        prior_answers: JSON list of investigation and case ids the novelty
+            check surfaced before this one was opened.
+        expected_information_value: What knowing the answer is worth, in
+            the planner's own words.
+        decision_affected: Which decision the answer changes.
+        assumption_detail: JSON ``{charter_passage, evidence_ids, confidence,
+            consequence, overturning_observation}`` behind
+            ``provisional_assumption``.
+        resolved_at: When ``resolve()`` closed the row. Plain, unindexed.
     """
 
     id = AutoKeyField()
@@ -99,6 +135,13 @@ class ImprovementInvestigation(Model):
     expires_at = DatetimeField(null=True)
     cost_usd = Field(null=True)
     charter_digest = Field(null=True)
+    stage = Field(null=True)
+    sources = Field(null=True)
+    prior_answers = Field(null=True)
+    expected_information_value = Field(null=True)
+    decision_affected = Field(null=True)
+    assumption_detail = Field(null=True)
+    resolved_at = DatetimeField(null=True)
 
     class Meta:
         # 30 days, matching ReflectionRun. Retrieval-dated external claims

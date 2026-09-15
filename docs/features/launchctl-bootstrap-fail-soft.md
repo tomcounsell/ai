@@ -73,7 +73,6 @@ every one of them, so they stay 3-arg.
 | `install_worker.sh` (watchdog) | `com.valor.worker-watchdog` | StartInterval 300 | no | no |
 | `valor-service.sh` (`bootstrap_plist_idempotent`, watchdog) | `com.valor.bridge-watchdog` | StartInterval 60 | no | no |
 | `install_nightly_tests.sh` | `com.valor.nightly-tests` | StartCalendarInterval | no | no |
-| `install_sdlc_reflection.sh` | `com.valor.sdlc-reflection` | StartInterval | no | no |
 | `valor-service.sh` (`bootstrap_plist_idempotent`, update-cron) | `com.valor.update` | StartInterval | no | no |
 
 The resident (verify-pid) set is exactly: **worker, bridge, reflection-worker,
@@ -130,7 +129,7 @@ a resident service that never came up live). Success is never masked.
 
 ## Tests
 
-- `tests/unit/test_install_scripts_bootstrap.py` — the five `install_*.sh`
+- `tests/unit/test_install_scripts_bootstrap.py` — the four `install_*.sh`
   helpers, including retry-then-succeed and PID-verification-failure cases, and
   the resident-emits-a-`print`-probe / scheduled-does-not assertion.
 - `tests/unit/test_valor_service_bootstrap.py` — `valor-service.sh` bridge

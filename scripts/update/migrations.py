@@ -1548,6 +1548,102 @@ def _migrate_confirm_improvement_release_lane6_fields(project_dir: Path) -> str 
     )
 
 
+def _migrate_improvement_investigation_stage_field(project_dir: Path) -> str | None:
+    """Confirm the lane 5 research-cycle fields (issue #3217) read cleanly.
+
+    Purely additive to three existing models, every field a plain unindexed
+    ``Field(null=True)``: ``ImprovementInvestigation`` gains ``stage``,
+    ``sources``, ``prior_answers``, ``expected_information_value``,
+    ``decision_affected``, and ``assumption_detail``; ``ImprovementCase``
+    gains ``evaluation_ids``, ``rejected_reason``, ``dedup_identity``, and
+    ``blocked_by``; ``ImprovementModelRevision`` gains
+    ``research_process_spec``. Two vocabulary values were appended to
+    ``INVESTIGATION_KINDS`` and two to ``EVIDENCE_KINDS``; both are index
+    sets that begin empty, so there is nothing to backfill and no index set
+    to strip.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable marker
+    for the schema version that introduced the investigation lifecycle:
+    without it there is no record on a machine that the fields were ever
+    registered, and a later subtractive migration has no predecessor to reason
+    from.
+    """
+    return _confirm_models_readable(
+        project_dir,
+        (
+            "ImprovementInvestigation",
+            "ImprovementCase",
+            "ImprovementModelRevision",
+        ),
+    )
+
+
+def _migrate_improvement_controller_state(project_dir: Path) -> str | None:
+    """Confirm the planner tick's cursor record reads cleanly (issue #3217).
+
+    ``models/improvement_controller_state.py::ImprovementControllerState`` is
+    one row per ``project_key`` (``project_key`` is the whole key), written
+    by plain ORM ``save()``: ``last_snapshot_ref``, ``evidence_watermark``,
+    ``last_tick_at``, ``charter_digest``, ``digest_watermark``. Lane 3's
+    journal is per-case only, so this state never goes through
+    ``transition()`` (critique round 3). Nothing to backfill, no index set
+    to strip. The record is not exported from ``models`` (the eight-record
+    export is pinned by ``tests/unit/test_improvement_models.py``), so this
+    marker imports its module directly instead of going through
+    ``_confirm_models_readable``.
+
+    This entry exists so ``run_pending_migrations()`` carries a durable
+    marker for the schema version that introduced the cursor: without it
+    there is no record on a machine that the row was ever registered, and a
+    later subtractive migration has no predecessor to reason from.
+    Read-only; returns None on success, the error string on failure.
+    """
+    try:
+        import importlib
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        module = importlib.import_module("models.improvement_controller_state")
+        model = module.ImprovementControllerState
+        next(iter(model.query.filter(project_key="valor")), None)
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def _migrate_retire_sdlc_reflection(project_dir: Path) -> str | None:
+    """Remove the retired ``sdlc_reflection`` state file (issue #3217).
+
+    Lane 5 retires ``scripts/sdlc_reflection.py`` whole: its lesson scraping
+    moves into the ``collect_lessons`` observer adapter, which writes
+    ``lesson`` evidence rows and keeps its own watermark on those rows. The
+    script's last-run marker, ``data/sdlc_reflection_last_run.json``, has no
+    reader once the script is gone, so this one-shot sweep removes it.
+
+    Only the state file is touched. The script itself is deleted by the
+    checkout, not by this migration, so the sweep succeeds whether or not
+    ``scripts/sdlc_reflection.py`` still exists on the machine running it.
+    Idempotent: a second run finds no file and does nothing, and a missing
+    ``data/`` directory is left missing.
+
+    Returns None unconditionally; a bookkeeping cleanup must never fail
+    ``/update``. A failure is logged, never swallowed silently, because
+    ``run_pending_migrations`` records a ``None`` return as permanently
+    completed and a silently swallowed exception here would never retry.
+    """
+    try:
+        state_file = project_dir / "data" / "sdlc_reflection_last_run.json"
+        if state_file.exists():
+            state_file.unlink()
+            logger.info("[migration:retire_sdlc_reflection] removed %s", state_file)
+        else:
+            logger.info("[migration:retire_sdlc_reflection] no state file; nothing to remove")
+        return None
+    except Exception as e:
+        logger.warning("retire_sdlc_reflection: %s", e)
+        return None
+
+
 MIGRATIONS: dict[str, tuple[callable, str]] = {
     "side_effect_job_model": (
         _migrate_side_effect_job_model,
@@ -1701,6 +1797,21 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
         _migrate_confirm_improvement_release_lane6_fields,
         "Register the lane-6 release lifecycle fields and the accepted state on "
         "ImprovementRelease (issue #3218) and confirm its keyspace resolves",
+    ),
+    "improvement_investigation_stage_field": (
+        _migrate_improvement_investigation_stage_field,
+        "Register the lane 5 research-cycle fields on ImprovementInvestigation, "
+        "ImprovementCase, and ImprovementModelRevision (issue #3217) and confirm "
+        "their keyspace resolves",
+    ),
+    "improvement_controller_state": (
+        _migrate_improvement_controller_state,
+        "Register the planner tick's one-row-per-project ImprovementControllerState "
+        "cursor (issue #3217) and confirm its keyspace resolves",
+    ),
+    "retire_sdlc_reflection": (
+        _migrate_retire_sdlc_reflection,
+        "Remove the retired scripts/sdlc_reflection.py last-run state file (issue #3217)",
     ),
     "backfill_job_last_active_scores": (
         _migrate_backfill_job_last_active_scores,

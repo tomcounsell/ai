@@ -1,0 +1,82 @@
+{# Improvement: the opportunity ranking and its movement (lane 5, #3217).
+
+   The latest ranking snapshot, verified on load. Three distinguishable
+   states on the goals partial's pattern: the order with each case's
+   movement against the previous snapshot, "no snapshot yet", or
+   "unavailable" with the integrity or store error. A snapshot that does
+   not verify never renders as an order; the error is the whole panel.
+#}
+<div class="improvement-panel" id="improvement-ranking">
+    <h4>Opportunity ranking</h4>
+    {% if ranking.unavailable %}
+    <p class="improvement-warning">
+        Ranking unavailable; the snapshot could not be read or did not verify.
+    </p>
+    <p class="improvement-meta"><code>{{ ranking.error }}</code></p>
+    {% elif ranking.no_snapshot_yet %}
+    <p class="improvement-meta">
+        No ranking snapshot yet. The planner tick writes the first one when it
+        has open cases to rank.
+    </p>
+    {% else %}
+    <p class="improvement-meta">
+        Snapshot at {{ ranking.at }} under charter <code>{{ ranking.charter_digest }}</code>.
+    </p>
+    <p class="improvement-meta"><code>{{ ranking.digest }}</code></p>
+    {% if not ranking.order %}
+    <p class="improvement-meta">The snapshot holds no open cases.</p>
+    {% else %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>Position</th>
+                <th>Case</th>
+                <th>Factors</th>
+                <th>Movement</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in ranking.order %}
+            <tr>
+                <td>{{ entry.position }}</td>
+                <td>
+                    {{ entry.title or entry.case_id }}
+                    {% if entry.priority_area %}
+                    <br><span class="improvement-meta">{{ entry.priority_area | replace('_', ' ') }}</span>
+                    {% endif %}
+                    {% if entry.blocked_by %}
+                    <br><span class="improvement-meta">blocked by <code>{{ entry.blocked_by }}</code></span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% for name, value in entry.factors.items() %}{{ name | replace('_', ' ') }} {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+                    <br><span class="improvement-meta">{{ entry.reason or 'no reason recorded' }}</span>
+                </td>
+                <td>{{ entry.movement or 'unchanged' }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    {% if ranking.left %}
+    <h4>Left the order</h4>
+    <ul class="improvement-list">
+        {% for entry in ranking.left %}
+        <li>{{ entry.case_id }}: {{ entry.reason }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h4>Intake pool</h4>
+    {% if not ranking.intake_pool %}
+    <p class="improvement-meta">No inspiration waiting for a case.</p>
+    {% else %}
+    <ul class="improvement-list">
+        {% for investigation_id in ranking.intake_pool %}
+        <li><code>{{ investigation_id }}</code></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% endif %}
+</div>

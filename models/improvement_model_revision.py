@@ -13,6 +13,17 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   research process was in force when each gain was measured, so every revision
   names what changed, on what evidence, and what it predicts. A revision with
   no falsifiable prediction is a note, and the loop treats it as one.
+- **``research_process_spec`` is the canonical spec, ``research_process_digest``
+  its hash, and only one routine computes the hash** (lane 5, #3217). The
+  spec field holds the bytes ``json.dumps(asdict(spec), sort_keys=True,
+  separators=(",", ":"))`` of a ``ResearchProcessSpec`` as text; a plain
+  unindexed field because it is unbounded. The digest is set only by lane 6's
+  ``tools.improvement_recursion.process.research_process_digest`` and stays
+  ``None`` until that import succeeds: a second hashing routine here would
+  be the drift the verifying store exists to prevent, since one field-order
+  or float-formatting difference makes every pre-merge digest incomparable
+  with every post-merge one. Keeping the spec bytes on the row is what makes
+  a later backfill of the digest possible.
 - **TTL decision: immortal, no ``Meta.ttl``.** These rows are the spine of the
   recursion claim: an evaluation is only interpretable against the model
   revision it ran under. Expiring them would erase the comparison the whole
@@ -55,6 +66,10 @@ class ImprovementModelRevision(Model):
         supersedes_id: The revision this one replaces.
         research_process_digest: Digest of the research process in force, so a
             later comparison can tell whether the process itself changed.
+            Set only through lane 6's ``research_process_digest``; ``None``
+            until that function is importable.
+        research_process_spec: The canonical spec JSON the digest is computed
+            from, as text. Not indexed (unbounded).
     """
 
     id = AutoKeyField()
@@ -68,3 +83,4 @@ class ImprovementModelRevision(Model):
     evidence_ids = Field(null=True)
     supersedes_id = Field(null=True)
     research_process_digest = Field(null=True)
+    research_process_spec = Field(null=True)

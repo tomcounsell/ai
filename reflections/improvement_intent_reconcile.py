@@ -16,10 +16,10 @@ def run_improvement_intent_reconcile() -> dict:
     """Reflection entrypoint: one :func:`tools.improvement_control.recovery.reconcile`
     for the owning project. Standard reflection result dict."""
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
+    from reflections.redis_access import get_project_key
     from tools.improvement_control.recovery import reconcile
 
-    project_key = DEFAULT_PROJECT_KEY
+    project_key = get_project_key()
     result = reconcile(project_key)
     return {
         "status": "completed",

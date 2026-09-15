@@ -33,16 +33,30 @@ class RankedBaseline:
     corpus_digest: str
 
 
-def retrieve_ranked_ids(query_text: str, project_key: str, *, limit: int = 10) -> list[str]:
+def retrieve_ranked_ids(
+    query_text: str,
+    project_key: str,
+    *,
+    limit: int = 10,
+    rrf_k: int | None = None,
+    min_rrf_score: float | None = None,
+) -> list[str]:
     """Return the ranked memory ids for one retrieval input.
 
     Thin adapter over the production retrieval path; the ids (not scores)
     are what the parity gate compares, because a float equality across two
-    processes fails for reasons nobody wants to debug.
+    processes fails for reasons nobody wants to debug. ``rrf_k`` and
+    ``min_rrf_score`` reach ``retrieve_memories`` only when given; ``None``
+    means "the retrieval path's own default", never an explicit ``None``.
     """
     from agent.memory_retrieval import retrieve_memories
 
-    records = retrieve_memories(query_text, project_key, limit=limit)
+    kwargs: dict = {"limit": limit}
+    if rrf_k is not None:
+        kwargs["rrf_k"] = rrf_k
+    if min_rrf_score is not None:
+        kwargs["min_rrf_score"] = min_rrf_score
+    records = retrieve_memories(query_text, project_key, **kwargs)
     ranked = []
     for record in records:
         memory_id = getattr(record, "memory_id", None)

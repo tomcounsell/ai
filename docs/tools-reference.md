@@ -344,17 +344,20 @@ auto_tag_session("session-123")  # called automatically at session completion
 
 ### Improvement Controller (`valor-improve`)
 
-Shipped in lane 3 ([#3215](https://github.com/tomcounsell/ai/issues/3215)). Like
-every other `valor-*` tool, the console script lives in `.venv/bin` only, never
-on system PATH (Decision 14) — invoke it as
+The control CLI from lane 3 ([#3215](https://github.com/tomcounsell/ai/issues/3215))
+with lane 5's research subcommands ([#3217](https://github.com/tomcounsell/ai/issues/3217)).
+Like every other `valor-*` tool, the console script lives in `.venv/bin` only,
+never on system PATH (Decision 14); invoke it as
 `"$CLAUDE_PROJECT_DIR/.venv/bin/valor-improve"` or `~/src/ai/.venv/bin/valor-improve`.
-`--json` on every subcommand; the human format is the default. See
-[Improvement Controller](features/improvement-controller.md).
+`--json` on every subcommand; the human format is the default. The CLI is bound
+to the `valor` project. See [Improvement Controller](features/improvement-controller.md)
+and [Improvement Research Cycle](features/improvement-research-cycle.md).
 
 ```bash
+# control (lane 3)
 valor-improve case show --case ID           # the journal head, its revision, and the journal tail
 valor-improve case explain --case ID        # why this case exists: state, pause reason, blocking intents, charter pin
-valor-improve propose --case ID --payload FILE [--action-id ID]  # the only way a research session writes a proposed action; break-glass mints an action id when none is given
+valor-improve propose --case ID --payload FILE [--action-type investigate|experiment] [--action-id ID]  # the one door for a proposed action; break-glass mints an action id when none is given
 valor-improve propose-amendment --case ID --request TEXT # a deferred charter decision; pages Tom once
 valor-improve budget                        # all three units, with window boundaries disclosed
 valor-improve release compare               # a release against the incumbent it would replace
@@ -364,22 +367,39 @@ valor-improve doctor                        # paused heads, reconciliation_requi
 valor-improve export [--root PATH]          # dump the namespace against lane 7's export-root contract
 valor-improve import --archive PATH [--force]  # restore a dumped namespace
 valor-improve replay-projection --case ID   # reconcile the ImprovementCase projection to the journal head
+
+# research (lane 5)
+valor-improve brief --case ID               # the research brief: pinned charter verbatim, then the case, evidence, prior answers, envelope
+valor-improve ranking [--at REF]            # the latest ranking snapshot, or the $CF: reference named; exit 2 on an integrity error
+valor-improve case open [--evidence-ids A,B]  # open cases through the planner's open_cases: same clustering, same novelty check
+valor-improve investigation open --kind K [--case ID] --uncertainty T --query T --decision-affected T --expected-information-value T [--state open]
+valor-improve investigation record --id ID --claims JSON|@path [--sources JSON|@path]  # {claim, url, retrieved_at} is a claim; anything less is a note
+valor-improve investigation resolve --id ID --interpretation T [--assumption T --assumption-detail JSON|@path] [--disposition D --resource-name N]
+valor-improve investigation list [--case ID]
+valor-improve revise-model --case ID --summary T --rationale T --prediction T  # a revision with no prediction is refused EMPTY_PREDICTION
+valor-improve revise-model --backfill-digests  # digest every stored research_process_spec that has none; writes no revision
+valor-improve experiment freeze --case ID [--n-queries N] [--seed S] [--hypothesis T --mechanism T --falsifier T --candidate JSON|@path] [--envelope retrieval_parameters]
+valor-improve experiment evaluate --id ID   # reserve the judge spend, run lane 4's harness, apply the verdict; refuses SLOT_NOT_HELD outside the dispatched session
+valor-improve experiment show --id ID       # state, verdict, notes
+valor-improve experiment repair --id ID     # return a running or aborted experiment to frozen so Gate 0 admits a retry
+valor-improve report --case ID              # the qualified-result report, generated from records
 ```
 
 Research sessions reach research state only through this CLI (see
 `.claude/skills/improve-research/SKILL.md`), which resolves the session through
 `AGENT_SESSION_ID`, enforces journal authorization, and never exposes a raw
-transition. `pause`, `resume`, and `doctor` are the break-glass path; the manual
-procedure lives in
+transition. Every invocation also registers the planner tick as a comparison
+arm (`PlannerArmRunner`) so `release compare` under the same CLI finds it.
+`pause`, `resume`, and `doctor` are the break-glass path; the manual procedure
+lives in
 [Improvement Controller § Break-glass](features/improvement-controller.md#break-glass).
 The recursive comparison of two research processes runs under the separate
 `valor-improve-release compare` binary, below.
 
-**The evidence side** predates the CLI and still has none of its own (the
-release side has its own binary, `valor-improve-release`, below): the
-`improvement-evidence-collect` reflection runs on a 900s tick and writes
-`ImprovementEvidence` rows, visible on the root dashboard's Improvement section.
-Read it directly if you need to:
+**The evidence side** is written by the `improvement-evidence-collect`
+reflection (900s tick, five observer adapters) and read by the planner tick,
+`brief`, `ranking`, and the root dashboard's Improvement section. Read it
+directly if you need to:
 
 ```python
 from models.improvement_evidence import ImprovementEvidence

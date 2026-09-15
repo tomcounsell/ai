@@ -21,10 +21,17 @@ the provisional-assumptions list, the goals record, the release lineage, and
   ``reconciliation_required`` wedges. Read through
   ``tools.improvement_control.intents.list_intents`` over each open case's
   own set, never a keyspace scan.
-
-Hypotheses and rejected experiments deliberately do not appear. Nothing writes
-those records yet; each one arrives with the lane that first writes it (5 for
-hypotheses and rejected approaches).
+- **Ranking** (:func:`get_ranking`, lane 5, #3217) — the latest ranking
+  snapshot's order with each case's movement against the previous snapshot,
+  the cases that left, and the intake pool. A snapshot that does not verify
+  is ``unavailable`` with the integrity error, never a stale order.
+- **Hypotheses** (:func:`get_hypotheses`, lane 5) — experiments in flight
+  (``proposed``, ``frozen``, ``running``) with hypothesis, mechanism,
+  falsifier, contract digest, and when the contract froze.
+- **Rejected approaches** (:func:`get_rejected_approaches`, lane 5) — cases
+  in ``rejected`` with the reason, the latest evaluation's verdict, effect
+  and interval per endpoint, and the snapshot in which the case left the
+  order, found by walking the snapshot chain.
 
 **Two things this module will never show.** Experiment count and merged-patch
 count are activity, not improvement, and presenting either as improvement is
@@ -38,6 +45,10 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
+
+#: How many snapshots :func:`get_rejected_approaches` walks back along
+#: ``previous_ref`` before giving up on locating a departure.
+SNAPSHOT_WALK_LIMIT = 500
 
 #: Default window for the dashboard panels, in days. Shorter than the evidence
 #: TTL (30 days) so the panels show a settled window rather than one whose tail
@@ -225,7 +236,10 @@ CHARTER_PRIORITIES = (
 PENDING_SECTIONS = (
     ("Acquired abilities", "lane 3 records these as it acquires them"),
     ("Evaluations", "lane 4 writes the paired blinded evaluations"),
-    ("Rejected approaches", "lane 5 records what was tried and set aside"),
+    (
+        "Rejected approaches",
+        "the rejected partial below lists what was tried and set aside, with each evaluation",
+    ),
     ("Resource use by budget unit", "lane 3 meters paid inference and infrastructure"),
 )
 
@@ -323,6 +337,17 @@ def get_goals(project_key: str = "valor") -> dict:
         logger.warning("improvement dashboard: charter read failed: %s", exc)
         charter_unavailable = True
 
+    # Positions come from the latest ranking snapshot when one exists. A
+    # snapshot that is missing or does not verify leaves every position
+    # ``None``; the ranking partial is where that failure is named.
+    ranking = get_ranking(project_key=project_key)
+    ranking_available = not ranking["unavailable"] and not ranking["no_snapshot_yet"]
+    positions = (
+        {entry["case_id"]: entry["position"] for entry in ranking["order"]}
+        if ranking_available
+        else {}
+    )
+
     cases = []
     cases_unavailable = False
     try:
@@ -331,8 +356,8 @@ def get_goals(project_key: str = "valor") -> dict:
         # One indexed lookup per open state, which is what the ``state``
         # IndexedField is declared for. Cases are immortal, so hydrating the
         # whole partition and filtering in Python would grow without bound on a
-        # partial that polls every 60 seconds. The open-state vocabulary is the
-        # model's, never restated here.
+        # partial that refreshes every 60 seconds. The open-state vocabulary is
+        # the model's, never restated here.
         open_rows = []
         for state in OPEN_CASE_STATES:
             open_rows.extend(ImprovementCase.query.filter(project_key=project_key, state=state))
@@ -340,9 +365,13 @@ def get_goals(project_key: str = "valor") -> dict:
             key=lambda r: getattr(r, "created_at", None) or datetime.min.replace(tzinfo=UTC),
             reverse=True,
         )
+        # Ranked cases first in snapshot order, then the unranked newest first.
+        open_rows.sort(key=lambda r: positions.get(getattr(r, "id", None), float("inf")))
         for row in open_rows:
             cases.append(
                 {
+                    "id": getattr(row, "id", None),
+                    "position": positions.get(getattr(row, "id", None)),
                     "title": getattr(row, "title", None),
                     "state": getattr(row, "state", None),
                     "priority": getattr(row, "priority", None),
@@ -372,6 +401,7 @@ def get_goals(project_key: str = "valor") -> dict:
         "cases": cases,
         "cases_unavailable": cases_unavailable,
         "no_cases_yet": not cases and not cases_unavailable,
+        "ranking_available": ranking_available,
         "assumptions": assumptions,
         "assumptions_unavailable": assumptions_unavailable,
         "pending_sections": [
@@ -457,4 +487,300 @@ def get_release_lineage(project_key: str = "valor") -> dict:
         ),
         "unavailable": bool(lineage.get("unavailable")),
         "no_releases_yet": bool(lineage.get("no_releases_yet")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Lane 5 (#3217): ranking, hypotheses, rejected approaches
+# ---------------------------------------------------------------------------
+
+
+def _case_rows_by_id(project_key: str, case_ids) -> dict:
+    """``{case_id: row}`` for the ids given; a missing or unreadable row is absent."""
+    from tools.improvement_release.rows import lookup
+
+    out = {}
+    for case_id in case_ids:
+        try:
+            from models.improvement_case import ImprovementCase
+
+            row = lookup(ImprovementCase, project_key, case_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement dashboard: case %s read failed: %s", case_id, exc)
+            row = None
+        if row is not None:
+            out[case_id] = row
+    return out
+
+
+def get_ranking(project_key: str = "valor") -> dict:
+    """The latest ranking snapshot with movement (lane 5, #3217).
+
+    ``order`` is the snapshot's order, each entry carrying the case title
+    and its ``movement`` against the previous snapshot (``entered``,
+    ``moved from N``, or ``None``); ``left`` names the cases that dropped
+    out and why; ``intake_pool`` is the ``inspiration_intake`` investigation
+    ids waiting for a case. ``no_snapshot_yet`` when the controller state
+    names none; ``unavailable`` with ``error`` when the store read raised or
+    the snapshot did not verify. A corrupted snapshot never renders as an
+    order: the integrity error is the whole answer.
+    """
+    empty = {
+        "project_key": project_key,
+        "unavailable": False,
+        "error": None,
+        "no_snapshot_yet": False,
+        "ref": None,
+        "digest": None,
+        "at": None,
+        "charter_digest": None,
+        "order": [],
+        "entered": [],
+        "left": [],
+        "moved": [],
+        "intake_pool": [],
+    }
+    try:
+        from models.improvement_controller_state import ImprovementControllerState
+        from tools.improvement_ranking import load_snapshot, snapshot_digest
+
+        state = ImprovementControllerState.get(project_key)
+        ref = getattr(state, "last_snapshot_ref", None) if state is not None else None
+        if not ref:
+            return {**empty, "no_snapshot_yet": True}
+        doc = load_snapshot(ref)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: ranking read failed for %s: %s", project_key, exc)
+        return {**empty, "unavailable": True, "error": str(exc)}
+
+    diff = doc.get("diff") or {}
+    entered = list(diff.get("entered") or [])
+    moved = {m.get("case_id"): m for m in (diff.get("moved") or [])}
+    order = list(doc.get("order") or [])
+    titles = _case_rows_by_id(project_key, [o.get("case_id") for o in order])
+    entries = []
+    for entry in order:
+        case_id = entry.get("case_id")
+        movement = None
+        if case_id in entered:
+            movement = "entered"
+        elif case_id in moved:
+            movement = f"moved from {moved[case_id].get('from')}: {moved[case_id].get('why')}"
+        row = titles.get(case_id)
+        entries.append(
+            {
+                "case_id": case_id,
+                "position": entry.get("position"),
+                "title": getattr(row, "title", None),
+                "priority_area": getattr(row, "priority_area", None),
+                "state": getattr(row, "state", None),
+                "factors": dict(entry.get("factors") or {}),
+                "reason": entry.get("reason"),
+                "blocked_by": entry.get("blocked_by"),
+                "movement": movement,
+            }
+        )
+    return {
+        **empty,
+        "ref": ref,
+        "digest": snapshot_digest(ref),
+        "at": doc.get("at"),
+        "charter_digest": doc.get("charter_digest"),
+        "order": entries,
+        "entered": entered,
+        "left": [dict(e) for e in (diff.get("left") or [])],
+        "moved": list(moved.values()),
+        "intake_pool": list(doc.get("intake_pool") or []),
+    }
+
+
+#: Experiment states whose hypothesis is still in flight.
+IN_FLIGHT_EXPERIMENT_STATES = ("proposed", "frozen", "running")
+
+
+def get_hypotheses(project_key: str = "valor") -> dict:
+    """Experiments in flight, each with the hypothesis it is testing (lane 5).
+
+    Reads the ``state`` index once per in-flight state. Newest first.
+    ``no_hypotheses_yet`` on an empty read, ``unavailable`` with ``error``
+    when the read raised. Never a count.
+    """
+    try:
+        from models.improvement_experiment import ImprovementExperiment
+        from tools.improvement_release.rows import recency
+
+        rows = []
+        for state in IN_FLIGHT_EXPERIMENT_STATES:
+            rows.extend(ImprovementExperiment.query.filter(project_key=project_key, state=state))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: experiment read failed for %s: %s", project_key, exc)
+        return {
+            "project_key": project_key,
+            "unavailable": True,
+            "error": str(exc),
+            "no_hypotheses_yet": False,
+            "experiments": [],
+        }
+    rows.sort(key=recency, reverse=True)
+    cases = _case_rows_by_id(project_key, {getattr(r, "case_id", None) for r in rows})
+    experiments = []
+    for row in rows:
+        case = cases.get(getattr(row, "case_id", None))
+        experiments.append(
+            {
+                "id": getattr(row, "id", None),
+                "state": getattr(row, "state", None),
+                "case_id": getattr(row, "case_id", None),
+                "case_title": getattr(case, "title", None),
+                "priority_area": getattr(case, "priority_area", None),
+                "hypothesis": getattr(row, "hypothesis", None),
+                "mechanism": getattr(row, "mechanism", None),
+                "falsifier": getattr(row, "falsifier", None),
+                "contract_digest": getattr(row, "contract_digest", None),
+                "frozen_at": getattr(row, "frozen_at", None),
+                "frozen_at_text": _stamp_text(getattr(row, "frozen_at", None)),
+            }
+        )
+    return {
+        "project_key": project_key,
+        "unavailable": False,
+        "error": None,
+        "no_hypotheses_yet": not experiments,
+        "experiments": experiments,
+    }
+
+
+def _latest_evaluation(project_key: str, case) -> dict | None:
+    """The newest evaluation the case's ``evaluation_ids`` names, shaped for
+    the partial, or ``None`` when the case names none."""
+    from models.improvement_evaluation import ImprovementEvaluation
+    from tools.improvement_release.evaluation_read import json_field, notes_of
+    from tools.improvement_release.rows import lookup
+
+    ids = json_field(getattr(case, "evaluation_ids", None)) or []
+    if not isinstance(ids, list) or not ids:
+        return None
+    evaluation = lookup(ImprovementEvaluation, project_key, ids[-1])
+    if evaluation is None:
+        return {"id": str(ids[-1]), "missing": True}
+    effects_raw = json_field(getattr(evaluation, "effect", None))
+    intervals_raw = json_field(getattr(evaluation, "confidence_interval", None))
+    effects_raw = effects_raw if isinstance(effects_raw, dict) else {}
+    intervals_raw = intervals_raw if isinstance(intervals_raw, dict) else {}
+    endpoints = sorted(set(effects_raw) | set(intervals_raw))
+    return {
+        "id": str(evaluation.id),
+        "missing": False,
+        "verdict": getattr(evaluation, "verdict", None),
+        "state": getattr(evaluation, "state", None),
+        "blinded": getattr(evaluation, "blinded", None),
+        "trials": getattr(evaluation, "trials", None),
+        "effects": [
+            {
+                "endpoint": endpoint,
+                "effect": effects_raw.get(endpoint),
+                "interval": intervals_raw.get(endpoint)
+                if isinstance(intervals_raw.get(endpoint), dict)
+                else None,
+            }
+            for endpoint in endpoints
+        ],
+        "notes": notes_of(evaluation),
+    }
+
+
+def _departures(project_key: str) -> tuple[dict, str | None]:
+    """``{case_id: {ref, digest, at, reason}}`` for every case a snapshot in
+    the chain lists under ``diff.left``, newest departure winning, plus the
+    error text when the walk stopped on an unreadable snapshot."""
+    from models.improvement_controller_state import ImprovementControllerState
+    from tools.improvement_ranking import load_snapshot, snapshot_digest
+
+    found: dict = {}
+    state = ImprovementControllerState.get(project_key)
+    ref = getattr(state, "last_snapshot_ref", None) if state is not None else None
+    steps = 0
+    while ref and steps < SNAPSHOT_WALK_LIMIT:
+        steps += 1
+        try:
+            doc = load_snapshot(ref)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement dashboard: snapshot %s unreadable: %s", ref, exc)
+            return found, str(exc)
+        for entry in (doc.get("diff") or {}).get("left") or []:
+            case_id = entry.get("case_id")
+            if case_id and case_id not in found:
+                found[case_id] = {
+                    "ref": ref,
+                    "digest": snapshot_digest(ref),
+                    "at": doc.get("at"),
+                    "reason": entry.get("reason"),
+                }
+        ref = doc.get("previous_ref")
+    return found, None
+
+
+def get_rejected_approaches(project_key: str = "valor") -> dict:
+    """Cases in ``rejected`` with why, the evaluation, and where they left (lane 5).
+
+    One indexed read of the ``rejected`` state. Each row carries the
+    ``rejected_reason``, the latest evaluation's verdict with effect and
+    interval per endpoint, and ``left_in``: the snapshot whose diff lists
+    the case under ``left``, found by walking the chain from the newest
+    snapshot along ``previous_ref``. ``snapshot_error`` names the integrity
+    or store error when that walk stopped early; the cases still render,
+    with ``left_in`` unset for any departure the walk did not reach.
+    ``unavailable`` with ``error`` when the case read itself raised.
+    """
+    try:
+        from models.improvement_case import ImprovementCase
+        from tools.improvement_release.rows import recency
+
+        rows = list(ImprovementCase.query.filter(project_key=project_key, state="rejected"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: rejected read failed for %s: %s", project_key, exc)
+        return {
+            "project_key": project_key,
+            "unavailable": True,
+            "error": str(exc),
+            "no_rejected_yet": False,
+            "snapshot_error": None,
+            "cases": [],
+        }
+    rows.sort(key=recency, reverse=True)
+    departures: dict = {}
+    snapshot_error = None
+    if rows:
+        try:
+            departures, snapshot_error = _departures(project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement dashboard: snapshot walk failed: %s", exc)
+            snapshot_error = str(exc)
+    cases = []
+    for row in rows:
+        try:
+            evaluation = _latest_evaluation(project_key, row)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "improvement dashboard: evaluation read failed for case %s: %s", row.id, exc
+            )
+            evaluation = {"id": None, "missing": True}
+        cases.append(
+            {
+                "id": getattr(row, "id", None),
+                "title": getattr(row, "title", None),
+                "priority_area": getattr(row, "priority_area", None),
+                "rejected_reason": getattr(row, "rejected_reason", None),
+                "dedup_identity": getattr(row, "dedup_identity", None),
+                "evaluation": evaluation,
+                "left_in": departures.get(getattr(row, "id", None)),
+            }
+        )
+    return {
+        "project_key": project_key,
+        "unavailable": False,
+        "error": None,
+        "no_rejected_yet": not cases,
+        "snapshot_error": snapshot_error,
+        "cases": cases,
     }

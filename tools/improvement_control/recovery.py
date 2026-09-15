@@ -48,11 +48,11 @@ def _control_redis():
 
 
 def _bound_row(agent_session_id: str | None):
-    if not agent_session_id:
-        return None
-    from models.session_lifecycle import get_authoritative_session
+    """The AgentSession the intent bound, by its ``agent_session_id`` (the
+    AutoKeyField hex id the push seam returned), never by ``session_id``."""
+    from models.agent_session import AgentSession
 
-    return get_authoritative_session(agent_session_id)
+    return AgentSession.get_by_id(agent_session_id)
 
 
 def _head_revision(project_key: str, case_id: str) -> int:

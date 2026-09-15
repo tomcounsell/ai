@@ -1,9 +1,12 @@
-"""Tests for the improvement evidence writers (#3177).
+"""Tests for the improvement evidence writers (#3177, #3217).
 
 The plan's user-visible criterion for lane 2 is that the correction detector
 runs against real sessions *because something ticks it*. These tests cover both
 halves: the durable row (``ImprovementEvidence.record_once`` and its dedup), and
-the three observer adapters the reflection tick calls.
+the five observer adapters the reflection tick calls. Lane 5 (#3217) adds the
+``lesson`` adapter (merged PR bodies through an injectable ``gh`` runner) and
+the ``promise`` adapter (sampled outbound chat entries through an injectable
+judge transport, metered under ``purpose="promise_detector"``).
 
 They are deliberately unkind to the classifier. A regex cannot tell an
 architectural rescue from a preference most of the time, and the honest answer
@@ -16,6 +19,7 @@ is never touched, and every row is written under a test-scoped ``project_key``.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -389,6 +393,26 @@ class TestDetectorInputsHaveProductionWriters:
         assert "Memory.safe_save(" in src
         assert 'source="human"' in src
 
+    def test_outbound_chat_message_log_has_bridge_writers(self):
+        """The promise detector's input: ``direction="out"`` entries.
+
+        The sole production writer of an outbound ``chat_message_log`` entry is
+        ``bridge/telegram_relay.py::_append_outbound_chat_log``, called from the
+        relay's send path. (``bridge/telegram_bridge.py`` writes
+        ``direction="out"`` into the chat history store through
+        ``store_message``, a different field on a different model.) A detector
+        keyed on an entry direction nothing writes would be structurally always
+        zero, so the writer is pinned here at source level, the same way the
+        inbound writer is pinned above.
+        """
+        from pathlib import Path as _Path
+
+        src = _Path("bridge/telegram_relay.py").read_text()
+        assert "_append_outbound_chat_log" in src
+        assert 'append_chat_log("out"' in src
+        # Called from the send path, not merely defined.
+        assert "to_thread(_append_outbound_chat_log" in src
+
     def test_the_retired_input_still_has_no_production_writer(self):
         """If ``start_transcript`` ever gains a caller this can be revisited."""
         import subprocess
@@ -603,7 +627,7 @@ class TestKillSwitch:
         session = _session("sess-killswitch", turns=["that's wrong"])
         with (
             _improvement_enabled(False),
-            patch("config.memory_defaults.DEFAULT_PROJECT_KEY", PK),
+            patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
             patch.object(improvement_collect, "human_memories", return_value=[]),
             patch("models.job.Job.with_open_expectations", return_value=[]),
@@ -621,7 +645,7 @@ class TestKillSwitch:
         session = _session("sess-killswitch-on", turns=["that's wrong"])
         with (
             _improvement_enabled(True),
-            patch("config.memory_defaults.DEFAULT_PROJECT_KEY", PK),
+            patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
             patch.object(improvement_collect, "human_memories", return_value=[]),
             patch("models.job.Job.with_open_expectations", return_value=[]),
@@ -640,15 +664,45 @@ class TestKillSwitch:
         assert ImprovementSettings().enabled is False
 
 
+ADAPTER_NAMES = ("corrections", "inspirations", "expectation_coverage", "lessons", "promises")
+
+_ADAPTER_FUNCS = {
+    "corrections": "collect_corrections",
+    "inspirations": "collect_inspirations",
+    "expectation_coverage": "collect_expectation_coverage",
+    "lessons": "collect_lessons",
+    "promises": "collect_promises",
+}
+
+
+@contextmanager
+def _adapters(real=(), **outcomes):
+    """Patch every adapter at once, except the ones named in ``real``.
+
+    ``outcomes`` maps adapter name to either an int (the count it returns),
+    an exception instance (what it raises), or a callable (used as the
+    replacement). Unnamed adapters return 0.
+    """
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        stack.enter_context(_improvement_enabled(True))
+        stack.enter_context(patch.object(improvement_collect, "human_memories", return_value=[]))
+        for name, func in _ADAPTER_FUNCS.items():
+            if name in real:
+                continue
+            outcome = outcomes.get(name, 0)
+            if isinstance(outcome, Exception) or callable(outcome):
+                kwargs = {"side_effect": outcome}
+            else:
+                kwargs = {"return_value": outcome}
+            stack.enter_context(patch.object(improvement_collect, func, **kwargs))
+        yield
+
+
 class TestRunImprovementCollect:
     def test_returns_a_reflection_result_dict(self):
-        with (
-            _improvement_enabled(True),
-            patch.object(improvement_collect, "human_memories", return_value=[]),
-            patch.object(improvement_collect, "collect_corrections", return_value=2),
-            patch.object(improvement_collect, "collect_inspirations", return_value=1),
-            patch.object(improvement_collect, "collect_expectation_coverage", return_value=1),
-        ):
+        with _adapters(corrections=2, inspirations=1, expectation_coverage=1, lessons=1):
             result = improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
@@ -656,10 +710,17 @@ class TestRunImprovementCollect:
             "corrections": 2,
             "inspirations": 1,
             "expectation_coverage": 1,
+            "lessons": 1,
+            "promises": 0,
         }
-        assert "4 new evidence row" in result["summary"]
+        assert "5 new evidence row" in result["summary"]
         assert result["findings"] == []
+        assert result["failed"] == []
+        assert result["skipped"] == []
         assert isinstance(result["duration"], float)
+
+    def test_the_tick_runs_exactly_five_adapters(self):
+        assert improvement_collect.ADAPTER_NAMES == ADAPTER_NAMES
 
     def test_the_memory_partition_is_enumerated_once_per_tick(self):
         """Both adapters read the same partition; two fetches would double the cost."""
@@ -667,47 +728,537 @@ class TestRunImprovementCollect:
             _improvement_enabled(True),
             patch.object(improvement_collect, "human_memories", return_value=[]) as fetch,
             patch.object(improvement_collect, "collect_expectation_coverage", return_value=0),
+            patch.object(improvement_collect, "collect_lessons", return_value=0),
+            patch.object(improvement_collect, "collect_promises", return_value=0),
             patch.object(improvement_collect, "_recent_sessions", return_value=[]),
         ):
             improvement_collect.run_improvement_collect()
         assert fetch.call_count == 1
 
     def test_one_broken_adapter_degrades_the_tick_rather_than_ending_it(self):
-        with (
-            _improvement_enabled(True),
-            patch.object(improvement_collect, "human_memories", return_value=[]),
-            patch.object(
-                improvement_collect, "collect_corrections", side_effect=RuntimeError("boom")
-            ),
-            patch.object(improvement_collect, "collect_inspirations", return_value=3),
-            patch.object(improvement_collect, "collect_expectation_coverage", return_value=0),
-        ):
+        with _adapters(corrections=RuntimeError("boom"), inspirations=3):
             result = improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["counts"]["corrections"] == 0
         assert result["counts"]["inspirations"] == 3
         assert any("corrections-failed" in f for f in result["findings"])
+        assert result["failed"] == ["corrections"]
 
-    def test_all_three_failing_is_an_error(self):
-        with (
-            _improvement_enabled(True),
-            patch.object(improvement_collect, "human_memories", return_value=[]),
-            patch.object(improvement_collect, "collect_corrections", side_effect=RuntimeError("a")),
-            patch.object(
-                improvement_collect, "collect_inspirations", side_effect=RuntimeError("b")
-            ),
-            patch.object(
-                improvement_collect, "collect_expectation_coverage", side_effect=RuntimeError("c")
-            ),
-        ):
+    def test_all_failed_is_error(self):
+        """Every adapter failing is the one shape that is an error."""
+        with _adapters(**{name: RuntimeError(name) for name in ADAPTER_NAMES}):
             result = improvement_collect.run_improvement_collect()
 
         assert result["status"] == "error"
-        assert len(result["findings"]) == 3
+        assert sorted(result["failed"]) == sorted(ADAPTER_NAMES)
+        assert len(result["findings"]) == len(ADAPTER_NAMES)
+
+    def test_all_skipped_is_success(self):
+        """A skip is a rule declining, never a failure: five skips is a healthy tick."""
+
+        def _skip(name):
+            def adapter(project_key, **kwargs):
+                skipped = kwargs.get("skipped")
+                if skipped is not None:
+                    skipped.append(f"{name}-skipped: by rule")
+                return 0
+
+            return adapter
+
+        with _adapters(**{name: _skip(name) for name in ADAPTER_NAMES}):
+            result = improvement_collect.run_improvement_collect()
+
+        assert result["status"] == "success"
+        assert result["failed"] == []
+        assert len(result["skipped"]) == len(ADAPTER_NAMES)
+
+    def test_a_detector_that_is_off_is_a_skip_not_a_failure(self):
+        """The promise detector defaults off; the tick must read that as a skip."""
+        with (
+            _adapters(real=("promises",)),
+            _promise_detector_enabled(False),
+        ):
+            result = improvement_collect.run_improvement_collect()
+
+        assert result["status"] == "success"
+        assert result["failed"] == []
+        assert any(s.startswith("promises-skipped") for s in result["skipped"])
 
 
 class TestVocabulariesStayInSync:
     def test_adapters_only_emit_declared_kinds(self):
-        for kind in ("correction", "inspiration", "shipped_work", "owner_liveness"):
+        for kind in (
+            "correction",
+            "inspiration",
+            "shipped_work",
+            "owner_liveness",
+            "lesson",
+            "promise",
+        ):
             assert kind in EVIDENCE_KINDS
+
+
+# --- lane 5 (#3217): lessons -------------------------------------------------
+
+
+def _completed(stdout: str, returncode: int = 0, stderr: str = ""):
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        args=["gh"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def _pr(number, title, body, merged_at="2026-09-10T12:00:00Z"):
+    return {"number": number, "title": title, "body": body, "mergedAt": merged_at}
+
+
+def _gh_runner(prs):
+    """A runner that answers any ``gh`` invocation with the given PR list."""
+    import json
+
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(list(args))
+        return _completed(json.dumps(prs))
+
+    runner.calls = calls
+    return runner
+
+
+class TestCollectLessons:
+    """Merged PR bodies, the seven prefixes, one ``lesson`` row per line."""
+
+    def test_writes_one_row_per_prefixed_line(self):
+        body = (
+            "Summary of the change.\n"
+            "- lesson: run the guard from the worktree\n"
+            "- pattern: mutation-check each guard\n"
+            "- unrelated: this line has no recognized prefix\n"
+        )
+        runner = _gh_runner([_pr(101, "Fix the thing", body)])
+        written = improvement_collect.collect_lessons(PK, runner=runner)
+
+        assert written == 2
+        rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="lesson"))
+        assert sorted(r.text for r in rows) == [
+            "- lesson: run the guard from the worktree",
+            "- pattern: mutation-check each guard",
+        ]
+        assert all(r.source_ref.startswith("pr:101:") for r in rows)
+        assert all(len(r.source_ref.split(":")[2]) == 16 for r in rows)
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "- lesson:",
+            "- pattern:",
+            "- note:",
+            "- convention:",
+            "- learning:",
+            "- reminder:",
+            "- caveat:",
+        ],
+    )
+    def test_every_one_of_the_seven_prefixes_is_scraped(self, prefix):
+        runner = _gh_runner([_pr(7, "t", f"{prefix} something worth keeping")])
+        assert improvement_collect.collect_lessons(PK, runner=runner) == 1
+
+    def test_prefix_match_is_case_insensitive_and_whitespace_tolerant(self):
+        runner = _gh_runner([_pr(8, "t", "   - Lesson: indented and capitalized")])
+        assert improvement_collect.collect_lessons(PK, runner=runner) == 1
+
+    def test_detail_carries_title_and_stage_guess_and_observed_at_is_merged_at(self):
+        import json
+
+        runner = _gh_runner(
+            [_pr(9, "Tighten the do-test gate", "- lesson: pytest needs the worktree PYTHONPATH")]
+        )
+        improvement_collect.collect_lessons(PK, runner=runner)
+        rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="lesson"))
+        detail = json.loads(rows[0].detail)
+        assert detail["title"] == "Tighten the do-test gate"
+        assert detail["stage_guess"] == "do-test"
+        assert rows[0].observed_at.replace(tzinfo=UTC) == datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    def test_stage_guess_is_unknown_when_nothing_matches(self):
+        import json
+
+        runner = _gh_runner([_pr(10, "zzz", "- note: qqq")])
+        improvement_collect.collect_lessons(PK, runner=runner)
+        rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="lesson"))
+        assert json.loads(rows[0].detail)["stage_guess"] == "unknown"
+
+    def test_rerunning_the_tick_writes_nothing_new(self):
+        runner = _gh_runner([_pr(11, "t", "- caveat: dedup on source_ref")])
+        assert improvement_collect.collect_lessons(PK, runner=runner) == 1
+        assert improvement_collect.collect_lessons(PK, runner=runner) == 0
+
+    def test_a_none_body_or_no_prefixed_lines_yields_zero_rows(self):
+        runner = _gh_runner([_pr(12, "t", None), _pr(13, "t", "no prefixed lines here")])
+        assert improvement_collect.collect_lessons(PK, runner=runner) == 0
+
+    def test_since_defaults_to_fourteen_days_and_then_to_the_newest_lesson(self):
+        runner = _gh_runner([])
+        improvement_collect.collect_lessons(PK, runner=runner)
+        (args,) = runner.calls
+        search = args[args.index("--search") + 1]
+        expected = (datetime.now(UTC) - timedelta(days=14)).date().isoformat()
+        assert search == f"merged:>={expected}"
+        assert args[:4] == ["pr", "list", "--state", "merged"]
+        assert "number,title,body,mergedAt" in args
+
+        ImprovementEvidence.record_once(
+            PK,
+            "lesson",
+            source_ref="pr:1:abc",
+            text="- lesson: x",
+            observed_at=datetime(2026, 9, 3, 8, 0, tzinfo=UTC),
+        )
+        runner = _gh_runner([])
+        improvement_collect.collect_lessons(PK, runner=runner)
+        (args,) = runner.calls
+        assert args[args.index("--search") + 1] == "merged:>=2026-09-03"
+
+    def test_a_raising_runner_is_a_warning_and_a_findings_entry_never_a_raise(self, caplog):
+        def runner(args):
+            raise RuntimeError("gh exploded")
+
+        findings: list[str] = []
+        with caplog.at_level("WARNING", logger="reflections.improvement_collect"):
+            written = improvement_collect.collect_lessons(PK, runner=runner, findings=findings)
+
+        assert written == 0
+        assert findings == ["lessons-gh-failed: gh exploded"]
+        assert any("gh exploded" in rec.getMessage() for rec in caplog.records)
+
+    def test_a_non_zero_gh_exit_or_bad_json_yields_zero_rows(self):
+        assert (
+            improvement_collect.collect_lessons(PK, runner=lambda a: _completed("", 1, "nope")) == 0
+        )
+        assert improvement_collect.collect_lessons(PK, runner=lambda a: _completed("not json")) == 0
+        assert improvement_collect.collect_lessons(PK, runner=lambda a: None) == 0
+
+    def test_a_raising_runner_leaves_the_other_adapters_untouched_in_the_tick(self):
+        def runner(args):
+            raise RuntimeError("gh exploded")
+
+        with (
+            _adapters(real=("lessons",), inspirations=2),
+            patch.object(improvement_collect, "_default_gh_runner", return_value=runner),
+        ):
+            result = improvement_collect.run_improvement_collect()
+
+        assert result["status"] == "success"
+        assert result["counts"]["inspirations"] == 2
+        assert result["counts"]["lessons"] == 0
+        assert any("lessons-gh-failed" in f for f in result["findings"])
+        assert result["failed"] == []
+
+    def test_the_default_runner_strips_the_token_env_and_asks_for_the_project_repo(self):
+        """The keyring auth answers; a stale GITHUB_TOKEN in the environment must not."""
+        import os
+
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            seen["env"] = kwargs.get("env")
+            return _completed("[]")
+
+        with (
+            patch.dict(os.environ, {"GITHUB_TOKEN": "stale", "GH_TOKEN": "stale"}),
+            patch("subprocess.run", side_effect=fake_run),
+            patch.object(improvement_collect, "_project_repository", return_value="org/repo"),
+        ):
+            improvement_collect.collect_lessons(PK)
+
+        assert seen["argv"][0] == "gh"
+        assert "GITHUB_TOKEN" not in seen["env"] and "GH_TOKEN" not in seen["env"]
+        assert seen["argv"][seen["argv"].index("--repo") + 1] == "org/repo"
+
+
+# --- lane 5 (#3217): promises ------------------------------------------------
+
+
+@contextmanager
+def _promise_detector_enabled(flag: bool, model: str | None = None):
+    from config.settings import settings
+
+    previous = (
+        settings.improvement.promise_detector_enabled,
+        settings.improvement.cheap_inference_model,
+    )
+    settings.improvement.promise_detector_enabled = flag
+    if model is not None:
+        settings.improvement.cheap_inference_model = model
+    try:
+        yield
+    finally:
+        (
+            settings.improvement.promise_detector_enabled,
+            settings.improvement.cheap_inference_model,
+        ) = previous
+
+
+def _yes(span="I will have it done by Friday", confidence=0.9):
+    import json
+
+    return json.dumps({"answer": "yes", "span": span, "confidence": confidence})
+
+
+def _no():
+    import json
+
+    return json.dumps({"answer": "no", "span": "", "confidence": 0.8})
+
+
+def _transport(replies):
+    """A judge transport that answers from a queue and records every prompt."""
+    replies = list(replies)
+    prompts: list[str] = []
+
+    def transport(prompt):
+        prompts.append(prompt)
+        return replies.pop(0)
+
+    transport.prompts = prompts
+    return transport
+
+
+@pytest.fixture
+def promise_env():
+    """Detector on, meter patched to accept, judged-set cleared, sessions patched by the test."""
+    from tools import paid_inference_meter as meter
+
+    reservation = meter.Reservation("res-1", PK, 1, "promise_detector", None, "2026-09-15")
+    with (
+        _improvement_enabled(True),
+        _promise_detector_enabled(True),
+        patch.object(meter, "reserve", return_value=reservation) as reserve,
+        patch.object(meter, "settle") as settle,
+        patch.object(meter, "release") as release,
+    ):
+        improvement_collect._clear_judged(PK)
+        yield {"reserve": reserve, "settle": settle, "release": release}
+
+
+class TestCollectPromises:
+    """Sampled outbound entries, one cheap yes/no judge call each, metered."""
+
+    def test_a_yes_writes_a_promise_row_with_span_and_confidence(self, promise_env):
+        session = _session("sess-p1", outbound=["I will have it done by Friday, guaranteed."])
+        transport = _transport([_yes()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            written = improvement_collect.collect_promises(PK, transport=transport)
+
+        assert written == 1
+        rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
+        assert rows[0].text == "I will have it done by Friday, guaranteed."
+        assert rows[0].detail == "I will have it done by Friday"
+        assert float(rows[0].confidence) == 0.9
+        assert rows[0].source_session_id == "sess-p1"
+        assert rows[0].source_ref.startswith("promise:sess-p1:")
+
+    def test_the_prompt_quotes_the_charter_paragraph_and_the_question(self, promise_env):
+        session = _session("sess-p2", outbound=["Working on it now."])
+        transport = _transport([_no()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            improvement_collect.collect_promises(PK, transport=transport)
+
+        (prompt,) = transport.prompts
+        assert "Valor makes no promises." in prompt
+        assert "Optimism is not control." in prompt
+        assert (
+            "Does this message guarantee delivery, future effort, future communication, "
+            "or an outcome the sender does not control, without qualification?"
+        ) in prompt
+        assert "Working on it now." in prompt
+
+    def test_a_no_writes_nothing_and_is_not_rejudged_next_tick(self, promise_env):
+        """The judged set is a control-namespace key declared in
+        ``tools.improvement_control.keys`` and carries the 30-day TTL."""
+        from tools.improvement_control.keys import promise_judged_key
+        from utils.redis_client import text_redis
+
+        session = _session("sess-p3", outbound=["Working on it now."])
+        transport = _transport([_no(), _no()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+        assert len(transport.prompts) == 1
+        judged_key = promise_judged_key(PK)
+        assert judged_key == f"improve:{PK}:_ns:promise_judged"
+        assert text_redis().scard(judged_key) == 1
+        assert 0 < text_redis().ttl(judged_key) <= improvement_collect.PROMISE_JUDGED_EXPIRY_SECONDS
+
+    def test_inbound_entries_are_never_judged(self, promise_env):
+        session = _session("sess-p4", turns=["can you promise me it ships?"])
+        transport = _transport([_yes()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+        assert transport.prompts == []
+        promise_env["reserve"].assert_not_called()
+
+    def test_empty_log_and_empty_content_yield_zero_rows_and_no_spend(self, promise_env):
+        empty = _session("sess-p5")
+        empty.chat_message_log = None
+        blank = _session("sess-p6", outbound=["", "   "])
+        transport = _transport([])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[empty, blank]):
+            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+        assert transport.prompts == []
+        promise_env["reserve"].assert_not_called()
+
+    def test_samples_at_most_the_cap_newest_first(self, promise_env):
+        cap = improvement_collect.PROMISE_SAMPLE_PER_TICK
+        session = _session("sess-p7", outbound=[f"msg {i}" for i in range(cap + 5)])
+        for i, entry in enumerate(e for e in session.chat_message_log if e["direction"] == "out"):
+            entry["ts"] = float(i)
+        transport = _transport([_no()] * cap)
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            improvement_collect.collect_promises(PK, transport=transport)
+
+        assert len(transport.prompts) == cap
+        assert f"msg {cap + 4}" in transport.prompts[0]
+        assert not any("msg 0" in p for p in transport.prompts)
+
+    def test_unparseable_judge_output_is_zero_rows_plus_a_findings_entry(self, promise_env):
+        session = _session("sess-p8", outbound=["I promise."])
+        transport = _transport(["definitely maybe"])
+        findings: list[str] = []
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            written = improvement_collect.collect_promises(
+                PK, transport=transport, findings=findings
+            )
+
+        assert written == 0
+        assert len(findings) == 1
+        assert findings[0].startswith("promises-judge-unparseable")
+        assert not list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
+
+    def test_a_raising_transport_is_a_warning_and_a_findings_entry_never_a_raise(
+        self, promise_env, caplog
+    ):
+        session = _session("sess-p9", outbound=["I promise."])
+
+        def transport(prompt):
+            raise RuntimeError("judge exploded")
+
+        findings: list[str] = []
+        with (
+            caplog.at_level("WARNING", logger="reflections.improvement_collect"),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
+        ):
+            written = improvement_collect.collect_promises(
+                PK, transport=transport, findings=findings
+            )
+
+        assert written == 0
+        assert findings == ["promises-judge-failed: judge exploded"]
+        assert any("judge exploded" in rec.getMessage() for rec in caplog.records)
+        # The reservation is not left dangling.
+        assert promise_env["settle"].called or promise_env["release"].called
+
+    def test_a_raising_transport_leaves_the_other_adapters_untouched_in_the_tick(self, promise_env):
+        session = _session("sess-p10", outbound=["I promise."])
+
+        def transport(prompt):
+            raise RuntimeError("judge exploded")
+
+        with (
+            _adapters(real=("promises",), corrections=4),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
+            patch("tools.improvement_eligibility.is_open_source", return_value=True),
+            patch.object(improvement_collect, "_openrouter_judge", return_value=transport),
+        ):
+            result = improvement_collect.run_improvement_collect()
+
+        assert result["status"] == "success"
+        assert result["counts"]["corrections"] == 4
+        assert result["counts"]["promises"] == 0
+        assert any("promises-judge-failed" in f for f in result["findings"])
+        assert result["failed"] == []
+
+    def test_the_meter_is_reserved_under_the_promise_detector_purpose_and_settled(
+        self, promise_env
+    ):
+        session = _session("sess-p11", outbound=["I promise."])
+        transport = _transport([_no()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
+            improvement_collect.collect_promises(PK, transport=transport)
+
+        promise_env["reserve"].assert_called_once()
+        _, kwargs = promise_env["reserve"].call_args
+        assert kwargs["purpose"] == "promise_detector"
+        promise_env["settle"].assert_called_once()
+        assert promise_env["settle"].call_args.kwargs["metering"] == "unknown"
+
+    def test_a_meter_refusal_writes_nothing_and_records_a_skip(self, promise_env):
+        from tools import paid_inference_meter as meter
+
+        session = _session("sess-p12", outbound=["I promise."])
+        transport = _transport([_yes()])
+        skipped: list[str] = []
+        with (
+            patch.object(meter, "reserve", return_value=meter.Refusal(meter.REFUSAL_EXHAUSTED)),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
+        ):
+            written = improvement_collect.collect_promises(PK, transport=transport, skipped=skipped)
+
+        assert written == 0
+        assert skipped == ["promises-skipped: unit 2 unavailable"]
+        assert transport.prompts == []
+
+    @pytest.mark.parametrize("enabled, detector", [(False, True), (True, False)])
+    def test_either_gate_off_is_a_skip_never_a_failure(self, enabled, detector):
+        session = _session("sess-p13", outbound=["I promise."])
+        transport = _transport([_yes()])
+        skipped: list[str] = []
+        with (
+            _improvement_enabled(enabled),
+            _promise_detector_enabled(detector),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
+        ):
+            written = improvement_collect.collect_promises(PK, transport=transport, skipped=skipped)
+
+        assert written == 0
+        assert len(skipped) == 1 and skipped[0].startswith("promises-skipped")
+        assert transport.prompts == []
+
+    def test_the_default_transport_is_refused_on_a_client_project(self, promise_env):
+        """Charter §7: the judge leaves the machine, so eligibility is checked at the call site."""
+        session = _session("sess-p14", outbound=["I promise."])
+        skipped: list[str] = []
+        with (
+            patch("tools.improvement_eligibility.is_open_source", return_value=False),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
+            patch.object(improvement_collect, "_openrouter_judge") as judge,
+        ):
+            written = improvement_collect.collect_promises(PK, skipped=skipped)
+
+        assert written == 0
+        assert skipped == ["promises-skipped: project is not open source (charter §7)"]
+        judge.assert_not_called()
+        promise_env["reserve"].assert_not_called()
+
+    def test_the_default_model_falls_back_to_the_free_gemma(self, promise_env):
+        from config.models import OPENROUTER_GEMMA4_FREE
+
+        with _promise_detector_enabled(True, model=""):
+            assert improvement_collect._judge_model() == OPENROUTER_GEMMA4_FREE
+        with _promise_detector_enabled(True, model="meta/muse-spark-1.3"):
+            assert improvement_collect._judge_model() == "meta/muse-spark-1.3"
+
+    def test_dedup_is_per_session_and_entry_hash(self, promise_env):
+        """The same words in two sessions are two observations; a repeat in one is one."""
+        a = _session("sess-p15a", outbound=["I promise.", "I promise."])
+        b = _session("sess-p15b", outbound=["I promise."])
+        transport = _transport([_yes(), _yes(), _yes()])
+        with patch.object(improvement_collect, "_recent_sessions", return_value=[a, b]):
+            written = improvement_collect.collect_promises(PK, transport=transport)
+
+        assert written == 2
+        assert len(transport.prompts) == 2

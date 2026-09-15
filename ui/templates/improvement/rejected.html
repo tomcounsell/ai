@@ -1,0 +1,81 @@
+{# Improvement: rejected approaches (lane 5, #3217).
+
+   Charter §11 asks for a readable record of rejected approaches. Each row
+   is a case in the rejected state with why, the evaluation that decided
+   it (verdict, effect and interval per endpoint), and the ranking snapshot
+   in which it left the order. Three distinguishable states on the goals
+   partial's pattern: the list, "nothing yet", or "unavailable" with the
+   read error. When the snapshot chain could not be walked the cases still
+   render and the error is named beside them.
+#}
+<div class="improvement-panel" id="improvement-rejected">
+    <h4>Rejected approaches</h4>
+    {% if rejected.unavailable %}
+    <p class="improvement-warning">Rejected approaches unavailable; the case read failed.</p>
+    <p class="improvement-meta"><code>{{ rejected.error }}</code></p>
+    {% elif rejected.no_rejected_yet %}
+    <p class="improvement-meta">
+        Nothing rejected yet. A case arrives here when an evaluation rejects
+        its candidate or the novelty check sets it aside.
+    </p>
+    {% else %}
+    {% if rejected.snapshot_error %}
+    <p class="improvement-warning">
+        The snapshot chain could not be walked, so the departure column may be incomplete.
+    </p>
+    <p class="improvement-meta"><code>{{ rejected.snapshot_error }}</code></p>
+    {% endif %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>Case</th>
+                <th>Why rejected</th>
+                <th>Evaluation</th>
+                <th>Left the order</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for case in rejected.cases %}
+            <tr>
+                <td>
+                    {{ case.title or case.id }}
+                    {% if case.priority_area %}
+                    <br><span class="improvement-meta">{{ case.priority_area | replace('_', ' ') }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ case.rejected_reason or 'no reason recorded' }}</td>
+                <td>
+                    {% if case.evaluation is none %}
+                    no evaluation recorded
+                    {% elif case.evaluation.missing %}
+                    evaluation {{ case.evaluation.id or 'unknown' }} not found
+                    {% else %}
+                    verdict {{ case.evaluation.verdict or 'none recorded' }}
+                    {% if case.evaluation.blinded is not none %}
+                    <br><span class="improvement-meta">{% if case.evaluation.blinded %}blinded{% else %}not blinded{% endif %}, {{ case.evaluation.trials or 0 }} trials</span>
+                    {% endif %}
+                    {% for row in case.evaluation.effects %}
+                    <br>{{ row.endpoint }}:
+                    {% if row.effect is not none %}effect {{ '%.3f' | format(row.effect) }}{% else %}effect not recorded{% endif %}{% if row.interval and row.interval.lower is not none and row.interval.upper is not none %},
+                    interval [{{ '%.3f' | format(row.interval.lower) }}, {{ '%.3f' | format(row.interval.upper) }}]{% else %}, interval not recorded{% endif %}
+                    {% endfor %}
+                    {% if not case.evaluation.effects %}
+                    <br>no endpoint effects recorded
+                    {% endif %}
+                    {% endif %}
+                </td>
+                <td>
+                    {% if case.left_in %}
+                    snapshot at {{ case.left_in.at }}<br>
+                    <code>{{ case.left_in.digest }}</code><br>
+                    <span class="improvement-meta">{{ case.left_in.reason }}</span>
+                    {% else %}
+                    no snapshot records its departure
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>

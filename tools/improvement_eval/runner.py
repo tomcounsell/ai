@@ -300,11 +300,14 @@ class TrialResult:
     metrics: dict[str, float]
 
 
-#: The only protocol arm-param keys that reach the arm worker's job spec. The
-#: worker also honors ``clock_skew_s``, which is the clock-gap test's lever and
-#: is set only by ``run_arm_job(clock_skew_s=...)``; a frozen protocol cannot
-#: name it, so no contract input can skew a real arm's clock.
-ARM_PARAM_KEYS = frozenset({"limit"})
+#: The only protocol arm-param keys that reach the arm worker's job spec: the
+#: retrieval-parameter envelope ``retrieve_memories`` accepts per call (lane 5,
+#: #3217). ``retrieval_mode`` is an environment setting the arena pins and is
+#: refused here. The worker also honors ``clock_skew_s``, which is the
+#: clock-gap test's lever and is set only by ``run_arm_job(clock_skew_s=...)``;
+#: a frozen protocol cannot name it, so no contract input can skew a real
+#: arm's clock.
+ARM_PARAM_KEYS = frozenset({"limit", "rrf_k", "min_rrf_score"})
 
 
 def _validate_arm_params(arm_name: str, arm_params: dict) -> None:

@@ -160,7 +160,7 @@ class TestRunningWithLiveRowIsUntouched:
         case = new_case()
         r1 = admitted_intent(case.id, "a1")
         session_id = f"test-recovery-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -176,7 +176,7 @@ class TestRunningWithLiveRowIsUntouched:
             "a1",
             expected_revision=r1.revision,
             generation=1,
-            agent_session_id=session_id,
+            agent_session_id=row.agent_session_id,
         )
         assert r2.accepted
         r_run = record_running(PK, case.id, "a1", expected_revision=r2.revision, generation=1)
@@ -216,7 +216,7 @@ class TestForcedFinalizeLogging:
         case = new_case()
         r1 = admitted_intent(case.id, "a1")
         session_id = f"test-recovery-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -232,7 +232,7 @@ class TestForcedFinalizeLogging:
             "a1",
             expected_revision=r1.revision,
             generation=1,
-            agent_session_id=session_id,
+            agent_session_id=row.agent_session_id,
         )
         for _ in range(3):
             age_intent(case.id, "a1", LEASE_TTL * 4 + 1)
@@ -250,7 +250,7 @@ class TestForcedFinalizeLogging:
         case = new_case()
         r1 = admitted_intent(case.id, "a1")
         session_id = f"test-recovery-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -267,7 +267,7 @@ class TestForcedFinalizeLogging:
             "a1",
             expected_revision=r1.revision,
             generation=1,
-            agent_session_id=session_id,
+            agent_session_id=row.agent_session_id,
         )
         for _ in range(3):
             age_intent(case.id, "a1", LEASE_TTL * 4 + 1)

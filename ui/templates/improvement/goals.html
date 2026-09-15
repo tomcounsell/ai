@@ -4,8 +4,10 @@
    to the charter, opportunity ranking, acquired abilities, evaluations,
    rejected approaches, unresolved assumptions, and resource use.
 
-   Most of that has no writer yet. Every heading below therefore renders one of
-   three distinguishable states (content, "nothing yet, written by lane N", or
+   The ranking, hypotheses, and rejected partials beside this one carry the
+   opportunity ranking, the experiments in flight, and the rejected
+   approaches. Every heading below renders one of three distinguishable
+   states (content, "nothing yet, written by lane N", or
    "unavailable" when the read failed) and never a bare zero. A zero claims a
    measurement was taken, and the charter is explicit that an absence of
    detection is not a result.
@@ -46,13 +48,20 @@
     <p class="improvement-warning">Case records unavailable; the read failed.</p>
     {% elif goals.no_cases_yet %}
     <p class="improvement-meta">
-        No cases opened yet. Lane 3 opens the first one, ranked under the
-        charter digest above.
+        No cases opened yet. Lane 5's planner tick opens the first one, ranked
+        under the charter digest above.
     </p>
     {% else %}
+    {% if not goals.ranking_available %}
+    <p class="improvement-meta">
+        Positions come from the ranking snapshot; none is readable yet, so
+        the cases below are listed newest first.
+    </p>
+    {% endif %}
     <table class="improvement-table">
         <thead>
             <tr>
+                <th>Position</th>
                 <th>Case</th>
                 <th>Area</th>
                 <th>State</th>
@@ -62,6 +71,7 @@
         <tbody>
             {% for case in goals.cases %}
             <tr>
+                <td>{{ case.position if case.position is not none else 'unranked' }}</td>
                 <td>{{ case.title or 'untitled' }}</td>
                 <td>{{ (case.priority_area or 'other') | replace('_', ' ') }}</td>
                 <td>{{ case.state }}</td>

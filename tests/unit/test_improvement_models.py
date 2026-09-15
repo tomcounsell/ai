@@ -97,6 +97,13 @@ VOCABULARY_MAXIMUMS: dict[tuple[type, str], int] = {
     # charter §3 vocabulary; eleven index sets per project partition,
     # membership reads only.
     (ImprovementCase, "priority_area"): 11,
+    # lane 5 (#3217) adds `lesson` and `promise` to lane 7's eight. Each new
+    # kind is written by its own observer adapter and read by its own
+    # consumer (the planner's case-opening rules for lessons, the dashboard's
+    # burden panel for promises), so each needs its own index set: a `lesson`
+    # coerced to `other` is unqueryable as a lesson. Ten index sets per
+    # project partition, membership reads only.
+    (ImprovementEvidence, "kind"): 10,
 }
 
 #: Cardinality tripwire: field names that must never carry an index, whatever
@@ -118,6 +125,14 @@ FORBIDDEN_INDEX_NAMES = (
     "charter_digest",
     "model_revision_id",
     "supersedes_id",
+    # lane 5 (#3217): the investigation lifecycle stage is a ten-value
+    # vocabulary the gate would refuse as an index, and the other four are
+    # unbounded (a cluster identity, a JSON list, a vault pointer, spec bytes).
+    "stage",
+    "dedup_identity",
+    "evaluation_ids",
+    "blocked_by",
+    "research_process_spec",
 )
 
 
@@ -290,6 +305,136 @@ class TestLane7EvidenceKinds:
         )
         assert row is not None
         assert row.kind == "resource_probe"
+
+
+class TestLane5EvidenceKinds:
+    """Lane 5 (#3217) owns ``lesson`` and ``promise``.
+
+    Both must round-trip through ``record_once`` without being coerced to
+    ``other``: the planner reads lessons and the dashboard's burden panel
+    reads promises, and neither can find its rows in the ``other`` set.
+    """
+
+    @pytest.mark.parametrize("kind", ["lesson", "promise"])
+    def test_kind_is_declared(self, kind):
+        assert kind in EVIDENCE_KINDS
+
+    @pytest.mark.parametrize("kind", ["lesson", "promise"])
+    def test_kind_round_trips_without_coercion(self, kind):
+        row = ImprovementEvidence.record_once(
+            PK,
+            kind,
+            text=f"lane 5 {kind} probe",
+            source_ref=f"lane5-{kind}-probe",
+        )
+        assert row is not None
+        assert row.kind == kind
+
+
+class TestLane5PlainFields:
+    """Lane 5 (#3217) adds plain, unindexed, nullable fields to three records.
+
+    Each round-trips through the ORM as a plain ``Field(null=True)``; the
+    index tripwire above (``FORBIDDEN_INDEX_NAMES``) is what keeps them plain.
+    """
+
+    @pytest.mark.parametrize(
+        "model,field_names",
+        [
+            (
+                ImprovementInvestigation,
+                (
+                    "stage",
+                    "sources",
+                    "prior_answers",
+                    "expected_information_value",
+                    "decision_affected",
+                    "assumption_detail",
+                ),
+            ),
+            (
+                ImprovementCase,
+                ("evaluation_ids", "rejected_reason", "dedup_identity", "blocked_by"),
+            ),
+            (ImprovementModelRevision, ("research_process_spec",)),
+        ],
+        ids=lambda x: x.__name__ if isinstance(x, type) else "fields",
+    )
+    def test_fields_are_plain_and_nullable(self, model, field_names):
+        fields = _fields(model)
+        for name in field_names:
+            assert name in fields, f"{model.__name__}.{name} is not declared"
+            assert not isinstance(fields[name], IndexedField)
+            assert getattr(fields[name], "null", False) is True
+
+    def test_investigation_stage_round_trips(self):
+        row = ImprovementInvestigation.create(
+            project_key=PK, created_at=datetime.now(UTC), stage="deduplicated"
+        )
+        found = ImprovementInvestigation.query.get(id=row.id, project_key=PK)
+        assert found.stage == "deduplicated"
+
+    def test_case_blocked_by_round_trips(self):
+        row = ImprovementCase.create(
+            project_key=PK, created_at=datetime.now(UTC), blocked_by="vault:meta_model_api"
+        )
+        found = ImprovementCase.query.get(id=row.id, project_key=PK)
+        assert found.blocked_by == "vault:meta_model_api"
+
+    def test_revision_process_spec_round_trips(self):
+        spec = '{"selection_rule":"ordinal-lexicographic-v1"}'
+        row = ImprovementModelRevision.create(
+            project_key=PK, created_at=datetime.now(UTC), research_process_spec=spec
+        )
+        found = ImprovementModelRevision.query.get(id=row.id, project_key=PK)
+        assert found.research_process_spec == spec
+        assert found.research_process_digest is None
+
+
+class TestLane5InvestigationVocabularies:
+    """Lane 5 (#3217) brings ``INVESTIGATION_KINDS`` to the gate's maximum."""
+
+    def test_eight_kinds_including_the_two_lane_5_adds(self):
+        assert len(INVESTIGATION_KINDS) == DEFAULT_VOCABULARY_MAXIMUM
+        assert "inspiration_intake" in INVESTIGATION_KINDS
+        assert "skill_acquisition" in INVESTIGATION_KINDS
+
+    def test_five_states(self):
+        assert len(INVESTIGATION_STATES) == 5
+
+
+class TestLane5ControllerState:
+    """``ImprovementControllerState`` (lane 5, #3217) is the planner tick's
+    cursor, not a record: one row per project, keyed by ``project_key`` alone,
+    with no index, no recency sort, and no TTL. It stays outside
+    ``INDEXED_VOCABULARIES`` because the shape tests there demand an
+    ``AutoKeyField`` id and a partitioned recency sort a singleton cursor does
+    not have; the cardinality rule still applies and is asserted here."""
+
+    def test_keyed_by_project_key_alone_with_no_index_and_no_ttl(self):
+        from popoto import Field
+
+        from models.improvement_controller_state import ImprovementControllerState
+
+        fields = _fields(ImprovementControllerState)
+        assert isinstance(fields["project_key"], KeyField)
+        assert not any(isinstance(f, AutoKeyField) for f in fields.values())
+        assert _indexed_names(ImprovementControllerState) == set()
+        assert not any(isinstance(f, SortedField) for f in fields.values())
+        for name in ("last_snapshot_ref", "evidence_watermark", "last_tick_at", "charter_digest"):
+            assert type(fields[name]) is Field
+        assert getattr(ImprovementControllerState._meta, "ttl", None) in (None, 0)
+
+    def test_one_row_per_project_and_record_refuses_unknown_fields(self):
+        from models.improvement_controller_state import ImprovementControllerState
+
+        first = ImprovementControllerState.get_or_create(PK)
+        first.record(last_snapshot_ref="$CF:abc:x/y.txt")
+        second = ImprovementControllerState.get_or_create(PK)
+        assert second.last_snapshot_ref == "$CF:abc:x/y.txt"
+        assert len(list(ImprovementControllerState.query.filter(project_key=PK))) == 1
+        with pytest.raises(ValueError):
+            first.record(nope=1)
 
 
 class TestExportedFromModelsPackage:

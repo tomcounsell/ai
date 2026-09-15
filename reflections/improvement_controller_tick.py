@@ -15,10 +15,10 @@ def run_improvement_controller_tick() -> dict:
     """Reflection entrypoint: one :func:`tools.improvement_control.scheduler_adapter.tick`
     for the owning project. Standard reflection result dict."""
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
     from config.settings import settings
+    from reflections.redis_access import get_project_key
 
-    project_key = DEFAULT_PROJECT_KEY
+    project_key = get_project_key()
 
     if not settings.improvement.enabled:
         return {

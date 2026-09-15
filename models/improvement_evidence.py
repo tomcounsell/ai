@@ -6,7 +6,7 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   ``project_key`` (``KeyField``) for the partition. A single recency
   ``SortedField(created_at, partition_by="project_key")`` serves every "what
   has the system observed lately" read.
-- Two IndexedFields, both low-cardinality: ``kind`` (seven values, see
+- Two IndexedFields, both low-cardinality: ``kind`` (ten values, see
   :data:`EVIDENCE_KINDS`) and ``classification`` (five values, see
   :data:`EVIDENCE_CLASSIFICATIONS`). The schema gate's rule is a cardinality
   rule — never index a pid, uuid, or timestamp. ``source_session_id`` and
@@ -65,6 +65,18 @@ logger = logging.getLogger(__name__)
 #: other ``other`` row. Two is the whole ask; a third value needs its own
 #: index-cardinality argument here, not a free append.
 #:
+#: Lane 5 (#3217) brings two more, ``lesson`` and ``promise``, and the
+#: cardinality argument is the same shape: each is written by its own observer
+#: adapter (``collect_lessons`` scrapes merged PR bodies, ``collect_promises``
+#: asks a cheap judge about outbound messages) and read by its own consumer
+#: (the planner's case-opening rules for lessons, the dashboard's burden panel
+#: for promises), so each needs its own index set. A ``lesson`` coerced to
+#: ``other`` is unqueryable as a lesson. That makes ten, past the gate's
+#: default of eight, and the reasoned exemption lives in
+#: ``tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS`` under
+#: ``(ImprovementEvidence, "kind"): 10``. An eleventh kind moves that number
+#: with a new argument, never with a free append.
+#:
 #: TTL decision (lane 7, #3274): the 30-day window stands. A budget week is 7
 #: days, so a settled dollar stays queryable for a full month of audit after
 #: its week closes; anything that must outlive that is distilled onto the
@@ -79,9 +91,11 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "resource_probe",  # one immutable probe record per run (lane 7, #3274)
     "resource_acquired",  # tools/vault_write.py wrote a credential (lane 3, #3215)
     "other",
-    # 8 kinds: exactly DEFAULT_VOCABULARY_MAXIMUM in tests/unit/test_improvement_models.py;
-    # the next kind brings a reasoned VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")]
-    # entry (#3215)
+    "lesson",  # one line scraped from a merged PR's lessons section (lane 5, #3217)
+    "promise",  # an outbound message the judge read as an unqualified guarantee (lane 5, #3217)
+    # 10 kinds: two past DEFAULT_VOCABULARY_MAXIMUM, carried by the reasoned
+    # VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")] entry in
+    # tests/unit/test_improvement_models.py (lane 5, #3217)
 )
 
 #: How a correction is read. ``unknown`` is the honest default: classification

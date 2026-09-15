@@ -7,8 +7,10 @@ drives two private ``redis-server`` arms and the whole set takes over ten
 minutes on one worker; under ``--dist loadfile`` one file lands on one xdist
 worker, and a lone worker that long trips ``scripts/pytest-clean.sh``'s
 idle-controller wedge guard. Two files keep each below the guard's window.
-``TestArmParamAllowlist`` is the one exception: it calls ``_retrieve_job``
-in-process against a mocked export and spawns no arms at all.
+``TestArmParamAllowlist`` and ``TestArmJobPassThroughs`` are the exceptions:
+the first calls ``_retrieve_job`` in-process against a mocked export, the
+second runs ``handle_job`` in-process with ``retrieve_memories`` replaced by
+a spy, and neither spawns an arm.
 
 Fixtures and helpers come from ``improvement_eval_runner_support``.
 """
@@ -30,6 +32,7 @@ from tests.unit.improvement_eval_runner_support import (  # noqa: F401 -- fixtur
     _freeze,
     _reload,
     _reload_evaluation,
+    _seed_memory,
     charter_fixture,
     corpus_fixture,
 )
@@ -157,6 +160,97 @@ class TestArmParamAllowlist:
         export = mock.Mock(jsonl_text="x")
         with pytest.raises(InfraFailure, match="mode"):
             runner._retrieve_job(export, PK, {"query_text": "q"}, {"mode": "restore"})
+
+    def test_rrf_keys_are_forwarded_and_retrieval_mode_is_refused(self):
+        """Lane 5 (#3217) widens the allowlist to the retrieval-parameter
+        envelope, and no further: ``retrieval_mode`` is an environment
+        setting the arena pins, never a contract input."""
+        export = mock.Mock(jsonl_text="x")
+        job = runner._retrieve_job(
+            export, PK, {"query_text": "q"}, {"limit": 2, "rrf_k": 30, "min_rrf_score": 0.1}
+        )
+        assert job["rrf_k"] == 30
+        assert job["min_rrf_score"] == 0.1
+        assert runner.ARM_PARAM_KEYS == frozenset({"limit", "rrf_k", "min_rrf_score"})
+        with pytest.raises(InfraFailure, match="retrieval_mode"):
+            runner._validate_arm_params("candidate", {"limit": 2, "retrieval_mode": "hybrid"})
+        with pytest.raises(InfraFailure, match="retrieval_mode"):
+            runner._retrieve_job(export, PK, {"query_text": "q"}, {"retrieval_mode": "current"})
+
+
+class TestArmJobPassThroughs:
+    """``handle_job`` forwards ``rrf_k``/``min_rrf_score`` only when the job
+    carries them (lane 5, #3217). Runs ``handle_job`` in-process against the
+    test db with ``retrieve_memories`` replaced by a spy; no arm is spawned."""
+
+    @staticmethod
+    def _run(job_extra: dict) -> dict:
+        from tools.improvement_eval import arm_worker, writer_guard
+        from tools.improvement_eval.corpus import export_corpus
+
+        _seed_memory(PK, "pass-through probe memory")
+        export = export_corpus(PK)
+        seen: dict = {}
+
+        def spy(query_text, project_key, **kwargs):
+            seen.update(kwargs)
+            return []
+
+        job = {
+            "mode": "retrieve",
+            "jsonl": export.jsonl_text,
+            "project_key": PK,
+            "query_text": "anything",
+            **job_extra,
+        }
+        try:
+            with mock.patch("agent.memory_retrieval.retrieve_memories", spy):
+                arm_worker.handle_job(job)
+        finally:
+            writer_guard.disarm()
+        return seen
+
+    def test_absent_keys_leave_retrieve_memories_at_its_defaults(self):
+        seen = self._run({"limit": 3})
+        assert seen == {"limit": 3}
+
+    def test_present_keys_are_forwarded(self):
+        seen = self._run({"limit": 3, "rrf_k": 45, "min_rrf_score": 0.25})
+        assert seen == {"limit": 3, "rrf_k": 45, "min_rrf_score": 0.25}
+
+    def test_non_numeric_pass_through_is_a_harness_error(self):
+        with pytest.raises(InfraFailure, match="rrf_k"):
+            self._run({"rrf_k": "many"})
+
+    def test_retrieve_ranked_ids_forwards_only_non_none_values(self):
+        from tools.improvement_eval.retrieval import retrieve_ranked_ids
+
+        seen: list[dict] = []
+
+        def spy(query_text, project_key, **kwargs):
+            seen.append(kwargs)
+            return [mock.Mock(memory_id="m1")]
+
+        with mock.patch("agent.memory_retrieval.retrieve_memories", spy):
+            assert retrieve_ranked_ids("q", PK, limit=4) == ["m1"]
+            assert retrieve_ranked_ids("q", PK, limit=4, rrf_k=None, min_rrf_score=None) == ["m1"]
+            assert retrieve_ranked_ids("q", PK, limit=4, rrf_k=9) == ["m1"]
+            assert retrieve_ranked_ids("q", PK, min_rrf_score=0.5) == ["m1"]
+        assert seen == [
+            {"limit": 4},
+            {"limit": 4},
+            {"limit": 4, "rrf_k": 9},
+            {"limit": 10, "min_rrf_score": 0.5},
+        ]
+
+    def test_handle_job_source_never_names_retrieval_mode(self):
+        import inspect
+
+        from tools.improvement_eval import arm_worker
+
+        src = inspect.getsource(arm_worker.handle_job)
+        assert "rrf_k" in src and "min_rrf_score" in src
+        assert "retrieval_mode" not in src
 
 
 class TestContract:

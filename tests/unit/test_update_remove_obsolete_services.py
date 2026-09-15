@@ -195,6 +195,51 @@ class TestAutoexperimentRetirement:
         assert not any(c[:2] == ["launchctl", "bootout"] for c in calls)
 
 
+class TestSdlcReflectionRetirement:
+    """Lane 5 (#3217) retired scripts/sdlc_reflection.py; `/update` reaps its job.
+
+    The script, its installer, and com.valor.sdlc-reflection.plist are gone
+    from the repo; lesson scraping lives in
+    reflections/improvement_collect.py::collect_lessons. A machine that ever
+    ran the installer still has a three-day LaunchAgent pointing at a deleted
+    file, and the suffix entry is what boots it out fleet-wide.
+    """
+
+    def test_sdlc_reflection_is_registered_as_obsolete(self):
+        assert "sdlc-reflection" in service.OBSOLETE_SERVICE_SUFFIXES
+
+    def test_the_retired_files_are_gone_from_the_checkout(self):
+        root = Path(__file__).resolve().parents[2]
+        for rel in (
+            "scripts/sdlc_reflection.py",
+            "scripts/install_sdlc_reflection.sh",
+            "com.valor.sdlc-reflection.plist",
+        ):
+            assert not (root / rel).exists(), f"{rel} is back; the sweep entry would be a lie"
+
+    def test_boots_out_and_unlinks_sdlc_reflection(self, tmp_path, monkeypatch):
+        fake_home = _fake_home(tmp_path, monkeypatch)
+        label = f"{service.SERVICE_PREFIX}.sdlc-reflection"
+        plist = fake_home / "Library" / "LaunchAgents" / f"{label}.plist"
+        plist.write_text("<plist>dead</plist>\n")
+
+        calls: list[list[str]] = []
+
+        def fake_run_cmd(cmd, **kwargs):
+            calls.append(cmd)
+            if cmd[:2] == ["launchctl", "list"]:
+                return MagicMock(returncode=0, stdout=f"-\t0\t{label}\n")
+            return MagicMock(returncode=0, stdout="")
+
+        monkeypatch.setattr(service, "run_cmd", fake_run_cmd)
+
+        removed = service.remove_obsolete_services()
+
+        assert label in removed
+        assert any(c[:2] == ["launchctl", "bootout"] and c[2].endswith(label) for c in calls)
+        assert not plist.exists()
+
+
 class TestLaunchctlLoadedLabels:
     def test_parses_three_column_output(self):
         out = "1234\t0\tcom.valor.worker\n-\t0\tcom.valor.autoexperiment\n"

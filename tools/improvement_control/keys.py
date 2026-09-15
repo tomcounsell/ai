@@ -11,6 +11,7 @@ description; this is a compact index, not a restatement)::
     improve:{project}:_ns:schema                 string  schema version "1"
     improve:{project}:_ns:pause                  hash    namespace-wide pause
     improve:{project}:_ns:slots                  hash    unit-1 reservations
+    improve:{project}:_ns:promise_judged         set     promise-detector judged refs (TTL)
     improve:{project}:budget:unit2:{day_key}     hash    unit-2 day window
     improve:{project}:budget:unit2:res:{res_id}  hash    one unit-2 reservation
     improve:{project}:{case}:head                hash    the case's revision head
@@ -53,6 +54,10 @@ def pause_key(project_key: str) -> str:
 
 def slots_key(project_key: str) -> str:
     return assert_control_key(f"improve:{project_key}:_ns:slots")
+
+
+def promise_judged_key(project_key: str) -> str:
+    return assert_control_key(f"improve:{project_key}:_ns:promise_judged")
 
 
 def unit2_window_key(project_key: str, day_key: str) -> str:

@@ -148,6 +148,12 @@ FEATURE_MAP: dict[str, str] = {
     "link_analysis": "tools",
     "doc_summary": "tools",
     "image_analysis": "tools",
+    # The improvement controller's research-cycle integration test (#3217).
+    # "search" below would otherwise win as a fragment of "research" and R3
+    # would flag it; this whole-token key names the file's real subject, the
+    # reflection ticks that drive the loop. Placed before "search" because
+    # first hit wins and the two keys map to different markers.
+    "improvement_research_cycle": "reflections",
     "search": "tools",
     "test_judge": "tools",
     "ai_judge": "tools",

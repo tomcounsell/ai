@@ -5,8 +5,8 @@ from ``ImprovementEvidence`` rows. Nothing writes those rows unless something
 runs, so this module is the observer side of the loop: a scheduled reflection
 that reads what already happened and records what is worth reasoning about.
 
-Three adapters, each independently fail-soft — one broken source must never
-stop the other two:
+Five adapters, each independently fail-soft — one broken source must never
+stop the other four:
 
 1. **Corrections.** ``reflections.utilities.CORRECTION_PATTERNS`` has existed
    for a while and its output was a transient dict inside a daily analysis run.
@@ -47,6 +47,40 @@ stop the other two:
    this adapter records the coverage half — how many open outbound expectations
    exist, how many have an owner that is gone — so a later reading of "rescue
    incidence" knows what the denominator was.
+4. **Lessons.** Merged PR bodies carry explicitly flagged learnings on lines
+   that start with one of :data:`LESSON_PREFIXES` (``- lesson:``,
+   ``- pattern:``, and five siblings). The adapter fetches recently merged PRs
+   through ``gh pr list`` and writes one ``lesson`` row per flagged line, with
+   the PR title and a :data:`STAGE_KEYWORDS` stage guess in ``detail`` so the
+   planner can route the row to a priority area.
+
+   **Production writer:** the merged PR body itself, read through ``gh`` on
+   the machine that owns the project. Dedup is on
+   ``source_ref="pr:{number}:{sha256(line)[:16]}"``, so a body edited after
+   merge contributes only its new lines. Fail-soft: a ``gh`` failure yields
+   zero rows, a warning, and a ``findings`` entry, never a raise.
+5. **Promises.** Charter §10 says Valor makes no promises. This adapter reads
+   the same session window as the correction detector, takes the outbound
+   entries, samples the newest unjudged ones under :data:`PROMISE_SAMPLE_PER_TICK`,
+   and asks a cheap model one yes/no question per entry with the charter
+   paragraph quoted. A ``yes`` writes a ``promise`` row whose ``detail`` is the
+   judge's quoted span and whose ``confidence`` is the judge's own number.
+
+   **Production writer:** ``AgentSession.chat_message_log`` entries with
+   ``direction="out"``, appended by
+   ``bridge/telegram_relay.py::_append_outbound_chat_log`` on the relay's send
+   path for every outbound Telegram message. Dedup is on
+   ``source_session_id`` plus an entry hash inside
+   ``source_ref="promise:{session_id}:{sha256(session_id + content)[:16]}"``.
+   Judged-but-clean entries are remembered in a plain Redis set under the
+   improvement control namespace so a ``no`` verdict is not bought again on
+   the next tick. The judge call is metered through
+   ``tools.paid_inference_meter`` under ``purpose="promise_detector"``; a
+   refusal is a skip, never a failure. Gated by
+   ``ImprovementSettings.promise_detector_enabled`` (off by default, it spends
+   money) on top of the module-wide kill switch, and the default transport is
+   refused on a project ``tools.improvement_eligibility.is_open_source`` does
+   not clear (charter §7).
 
 **No question path.** Nothing here asks a human anything. Uncertainty the
 adapters cannot resolve is recorded as evidence with ``classification="unknown"``
@@ -58,6 +92,12 @@ reports ``status="skipped"``, and writes nothing, which is what
 ``config/settings.py`` and ``.env.example`` say it means. The reflection stays
 registered either way, so turning the switch on needs no re-registration.
 
+**Failed versus skipped.** The tick keeps two lists: ``failed`` holds the
+adapters that raised, ``skipped`` holds the adapters that declined by rule (the
+detector is off, the meter refused, the project is not open source). Only a
+tick in which every adapter failed reports ``status="error"``; a routine skip
+is a healthy tick.
+
 Registered by ``scripts/update/reflection_register.py::register_improvement_collect``
 and called from ``scripts/update/run.py``, so it survives ``/update`` and lands
 on the machine that owns the ``valor`` project. See
@@ -66,10 +106,18 @@ on the machine that owns the ``valor`` project. See
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import os
 import re
+import subprocess
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from tools.improvement_control.keys import promise_judged_key
 
 logger = logging.getLogger("reflections.improvement_collect")
 
@@ -81,6 +129,71 @@ SESSION_SCAN_LIMIT = 40
 #: How many memory rows the inspiration adapter considers per tick, newest
 #: first. Provisional/tunable.
 MEMORY_SCAN_LIMIT = 200
+
+#: The adapter names the tick runs, in order. The status rule counts against
+#: this tuple's length, never a literal.
+ADAPTER_NAMES = ("corrections", "inspirations", "expectation_coverage", "lessons", "promises")
+
+#: Line prefixes in a merged PR body that flag an explicit learning. Matched
+#: case-insensitively after stripping leading whitespace.
+LESSON_PREFIXES = (
+    "- lesson:",
+    "- pattern:",
+    "- note:",
+    "- convention:",
+    "- learning:",
+    "- reminder:",
+    "- caveat:",
+)
+
+#: Keyword table for guessing which SDLC stage a lesson belongs to. Checked
+#: against the line, then the PR title, then the body; most hits wins.
+STAGE_KEYWORDS: dict[str, list[str]] = {
+    "do-plan": ["plan", "planning", "do-plan", "shape up", "appetite", "slug"],
+    "do-plan-critique": ["critique", "war room", "critic", "skeptic", "do-plan-critique"],
+    "do-build": ["build", "implement", "worktree", "do-build", "builder"],
+    "do-test": ["test", "pytest", "do-test", "unit test", "integration test"],
+    "do-patch": ["patch", "fix", "do-patch", "failing test", "lint error"],
+    "do-pr-review": ["review", "pr review", "do-pr-review", "pull request review"],
+    "do-docs": ["docs", "documentation", "do-docs", "readme", "feature doc"],
+    "do-merge": ["merge", "do-merge", "merge gate", "squash"],
+}
+
+#: How far back the lesson adapter looks when no ``lesson`` row exists yet.
+LESSON_LOOKBACK_DAYS = 14
+
+#: Upper bound on merged PRs fetched per tick.
+LESSON_PR_LIMIT = 100
+
+#: How many outbound entries the promise detector judges per tick, newest
+#: first. Each one is a paid judge call, so this is the spend cap per tick.
+#: Provisional/tunable.
+PROMISE_SAMPLE_PER_TICK = 10
+
+#: The per-tick reservation against unit 2 for the promise judge, in USD. Ten
+#: calls on a free or near-free model fit inside one cent; the meter refuses a
+#: zero, so this is the smallest amount it accepts.
+PROMISE_RESERVE_USD = 0.01
+
+#: TTL of the judged-ref set, ``keys.promise_judged_key`` (lane 3's
+#: non-Popoto ``improve:`` namespace, same rationale as the meter's keys). A
+#: ``no`` verdict writes no evidence row, so without the set a tick would buy
+#: the same ten verdicts again every fifteen minutes.
+PROMISE_JUDGED_EXPIRY_SECONDS = 30 * 86400
+
+#: The charter §10 paragraph the judge is shown, verbatim.
+CHARTER_NO_PROMISES = (
+    "Valor makes no promises. This is the strict interpretation of the false-promises "
+    "rule. He can agree on goals and desired outcomes, state current actions, and offer "
+    "clearly qualified forecasts. He cannot guarantee delivery, future effort, future "
+    "communication, or other outcomes dependent on circumstances he does not control. "
+    "Infrastructure failure alone can prevent knowledge work. Optimism is not control."
+)
+
+PROMISE_QUESTION = (
+    "Does this message guarantee delivery, future effort, future communication, "
+    "or an outcome the sender does not control, without qualification?"
+)
 
 #: Phrasings that mark a correction as architectural rather than a preference:
 #: the human is redirecting the approach or naming a missed end-to-end journey,
@@ -237,8 +350,18 @@ def human_memories(project_key: str) -> list:
     return human[:MEMORY_SCAN_LIMIT]
 
 
-def collect_corrections(project_key: str, memories: list | None = None) -> int:
+def collect_corrections(
+    project_key: str,
+    memories: list | None = None,
+    *,
+    findings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> int:
     """Persist one ``ImprovementEvidence`` row per newly detected correction.
+
+    ``findings`` and ``skipped`` are the shared adapter interface the tick
+    passes to every adapter; this one declines nothing by rule and reports
+    its source failures through warnings, so it leaves both untouched.
 
     Two real sources, each independently fail-soft:
 
@@ -326,8 +449,16 @@ def collect_corrections(project_key: str, memories: list | None = None) -> int:
     return written
 
 
-def collect_inspirations(project_key: str, memories: list | None = None) -> int:
+def collect_inspirations(
+    project_key: str,
+    memories: list | None = None,
+    *,
+    findings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> int:
     """Persist one row per Tom-sourced memory the loop has not seen yet.
+
+    ``findings`` and ``skipped`` are the shared adapter interface; unused here.
 
     Ideas arrive as links Tom sends; the memory bridge stores them with
     ``source="human"`` and, until now, nothing read them as research input.
@@ -366,8 +497,15 @@ def collect_inspirations(project_key: str, memories: list | None = None) -> int:
     return written
 
 
-def collect_expectation_coverage(project_key: str) -> int:
+def collect_expectation_coverage(
+    project_key: str,
+    *,
+    findings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> int:
     """Record what the expectation reconciler saw, so a rate has a denominator.
+
+    ``findings`` and ``skipped`` are the shared adapter interface; unused here.
 
     The reconciler already computes owner liveness on every open outbound
     expectation and discards the aggregate. Without it, "the system needed
@@ -448,8 +586,504 @@ def collect_expectation_coverage(project_key: str) -> int:
     return written
 
 
+# --- lessons -----------------------------------------------------------------
+
+
+def _project_repository(project_key: str) -> str | None:
+    """``org/repo`` for the project from ``projects.json``, or None."""
+    from tools.improvement_eligibility import _resolve_repository
+
+    return _resolve_repository(project_key)
+
+
+def _default_gh_runner(
+    project_key: str,
+) -> Callable[[list[str]], subprocess.CompletedProcess | None]:
+    """A ``gh`` runner in the ``reflections/sdlc_progress.py::_run_gh`` shape.
+
+    ``GITHUB_TOKEN`` and ``GH_TOKEN`` are removed from the child environment so
+    ``gh`` answers with its keyring auth rather than a token some launcher
+    exported. The repository is passed explicitly when ``projects.json`` names
+    one, because ``gh`` reads ``GH_REPO`` before cwd and a wrong-repo answer
+    exits 0 and looks healthy. Returns None on any failure to run at all.
+    """
+    from config.settings import settings
+
+    repo = _project_repository(project_key)
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    cwd = str(Path(__file__).resolve().parent.parent)
+
+    def runner(args: list[str]) -> subprocess.CompletedProcess | None:
+        argv = ["gh", *args]
+        if repo:
+            argv += ["--repo", repo]
+        try:
+            return subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=int(settings.timeouts.git_subprocess_s),
+                check=False,
+                cwd=cwd,
+                env=env,
+            )
+        except FileNotFoundError:
+            logger.warning("improvement_collect: gh CLI not on PATH; lessons skipped")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning("improvement_collect: gh %s timed out", " ".join(args[:2]))
+            return None
+
+    return runner
+
+
+def _lesson_since(project_key: str) -> datetime:
+    """The newest ``lesson`` row's ``observed_at``, or the lookback default."""
+    from models.improvement_evidence import ImprovementEvidence
+
+    newest: datetime | None = None
+    try:
+        for row in ImprovementEvidence.query.filter(project_key=project_key, kind="lesson"):
+            observed = getattr(row, "observed_at", None)
+            if not isinstance(observed, datetime):
+                continue
+            observed = observed if observed.tzinfo else observed.replace(tzinfo=UTC)
+            if newest is None or observed > newest:
+                newest = observed
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement_collect: lesson watermark read failed: %s", exc)
+    return newest or datetime.now(UTC) - timedelta(days=LESSON_LOOKBACK_DAYS)
+
+
+def _lesson_lines(body: str | None) -> list[str]:
+    """The flagged lines of a PR body, stripped, in order."""
+    if not body:
+        return []
+    lines: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if line.lower().startswith(LESSON_PREFIXES):
+            lines.append(line)
+    return lines
+
+
+def _stage_guess(line: str, title: str, body: str) -> str:
+    """The stage whose :data:`STAGE_KEYWORDS` hit the line most often.
+
+    The line is consulted first, then the PR title, then the body; the first
+    text with any hit decides, and inside it the stage with the most keyword
+    hits wins (ties go to table order). A guess, recorded as one.
+    """
+    for text in (line, title, body):
+        lowered = text.lower()
+        hits = {
+            stage: sum(1 for kw in keywords if kw in lowered)
+            for stage, keywords in STAGE_KEYWORDS.items()
+        }
+        best = max(hits, key=hits.get)
+        if hits[best]:
+            return best
+    return "unknown"
+
+
+def _parse_merged_at(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def collect_lessons(
+    project_key: str,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess | None] | None = None,
+    findings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> int:
+    """Persist one ``lesson`` row per flagged line in a recently merged PR body.
+
+    ``runner`` takes the ``gh`` argument list (without the leading ``gh``) and
+    returns a ``CompletedProcess`` or None; the default runs the real CLI. The
+    window starts at the newest ``lesson`` row's ``observed_at`` (or
+    :data:`LESSON_LOOKBACK_DAYS` ago) and dedup on ``source_ref`` makes the
+    overlap free.
+
+    Fail-soft: a raising runner, a non-zero exit, or unparseable JSON yields
+    zero rows and a warning; a raising runner also lands in ``findings`` so the
+    tick summary shows it. Returns the number of rows written.
+    """
+    from models.improvement_evidence import ImprovementEvidence
+
+    if findings is None:
+        findings = []
+    if runner is None:
+        runner = _default_gh_runner(project_key)
+
+    since = _lesson_since(project_key).date().isoformat()
+    args = [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--search",
+        f"merged:>={since}",
+        "--limit",
+        str(LESSON_PR_LIMIT),
+        "--json",
+        "number,title,body,mergedAt",
+    ]
+    try:
+        result = runner(args)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement_collect: lessons gh run failed: %s", exc)
+        findings.append(f"lessons-gh-failed: {exc}")
+        return 0
+    if result is None or result.returncode != 0:
+        stderr = (getattr(result, "stderr", "") or "")[:300]
+        logger.warning("improvement_collect: gh pr list failed for lessons: %s", stderr)
+        return 0
+    try:
+        prs = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        logger.warning("improvement_collect: gh pr list returned bad JSON: %s", exc)
+        return 0
+    if not isinstance(prs, list):
+        return 0
+
+    written = 0
+    for pr in prs:
+        if not isinstance(pr, dict) or pr.get("number") is None:
+            continue
+        number = pr["number"]
+        title = str(pr.get("title") or "").strip()
+        body = pr.get("body") or ""
+        merged_at = _parse_merged_at(pr.get("mergedAt"))
+        for line in _lesson_lines(body):
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+            try:
+                row = ImprovementEvidence.record_once(
+                    project_key,
+                    "lesson",
+                    source_ref=f"pr:{number}:{digest}",
+                    text=line[:2000],
+                    detail=json.dumps(
+                        {"title": title, "stage_guess": _stage_guess(line, title, body)}
+                    ),
+                    observed_at=merged_at,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "improvement_collect: lesson write failed for PR %s: %s", number, exc
+                )
+                continue
+            if row is not None:
+                written += 1
+    return written
+
+
+# --- promises ----------------------------------------------------------------
+
+
+def _judge_model() -> str:
+    """The cheap model the promise judge runs on."""
+    from config.models import OPENROUTER_GEMMA4_FREE
+    from config.settings import settings
+
+    return (settings.improvement.cheap_inference_model or "").strip() or OPENROUTER_GEMMA4_FREE
+
+
+class _OpenRouterJudge:
+    """The default transport: one chat completion per prompt through OpenRouter.
+
+    Accumulates ``usage.cost`` from every response so the adapter can settle
+    the reservation exactly; ``metering`` degrades to ``"unknown"`` the moment
+    a response carries no cost (charter §8: uncertain metering is not zero).
+    """
+
+    def __init__(self, model: str, api_key: str) -> None:
+        self.model = model
+        self._api_key = api_key
+        self.cost_usd = 0.0
+        self.metering = "exact"
+
+    def __call__(self, prompt: str) -> str:
+        import requests
+
+        from config.models import OPENROUTER_URL
+
+        response = requests.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 200,
+                "usage": {"include": True},
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        cost = (payload.get("usage") or {}).get("cost")
+        if isinstance(cost, (int, float)):
+            self.cost_usd += float(cost)
+        else:
+            self.metering = "unknown"
+        return str((payload.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+
+
+def _openrouter_judge(model: str) -> Callable[[str], str] | None:
+    """Build the default transport, or None when no OpenRouter key is configured."""
+    from config.settings import settings
+
+    api_key = settings.api.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+    return _OpenRouterJudge(model, api_key)
+
+
+def _promise_prompt(content: str) -> str:
+    return (
+        "You are checking one outbound message from Valor against this rule from "
+        "his charter (section 10):\n\n"
+        f'"{CHARTER_NO_PROMISES}"\n\n'
+        f"Question: {PROMISE_QUESTION}\n\n"
+        "Message:\n"
+        f"<<<\n{content}\n>>>\n\n"
+        "Answer with one JSON object and nothing else: "
+        '{"answer": "yes" or "no", "span": the exact quoted words that make the guarantee '
+        '(empty when the answer is no), "confidence": a number from 0 to 1}.'
+    )
+
+
+def _parse_verdict(raw: str) -> tuple[bool, str, float | None] | None:
+    """``(is_promise, span, confidence)`` from the judge's reply, or None."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    answer = str(data.get("answer") or "").strip().lower()
+    if answer not in ("yes", "no"):
+        return None
+    confidence = data.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        confidence = None
+    else:
+        confidence = min(1.0, max(0.0, float(confidence)))
+    return answer == "yes", str(data.get("span") or "")[:500], confidence
+
+
+def _judged_refs(project_key: str) -> set[str]:
+    from utils.redis_client import text_redis
+
+    try:
+        return set(text_redis().smembers(promise_judged_key(project_key)))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement_collect: judged-set read failed: %s", exc)
+        return set()
+
+
+def _mark_judged(project_key: str, ref: str) -> None:
+    from utils.redis_client import text_redis
+
+    try:
+        client = text_redis()
+        client.sadd(promise_judged_key(project_key), ref)
+        client.expire(promise_judged_key(project_key), PROMISE_JUDGED_EXPIRY_SECONDS)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement_collect: judged-set write failed: %s", exc)
+
+
+def _clear_judged(project_key: str) -> None:
+    """Forget every judged ref for a project. Test seam; never called by the tick."""
+    from utils.redis_client import text_redis
+
+    text_redis().delete(promise_judged_key(project_key))
+
+
+def _outbound_candidates(project_key: str) -> list[tuple[str, str, str, float]]:
+    """``(source_ref, session_id, content, ts)`` for every outbound entry in the window.
+
+    Newest first by entry ``ts``; one tuple per distinct ``source_ref``, so a
+    repeated line inside one session is judged once.
+    """
+    seen: set[str] = set()
+    candidates: list[tuple[str, str, str, float]] = []
+    for session in _recent_sessions(project_key, SESSION_SCAN_LIMIT):
+        session_id = getattr(session, "session_id", None)
+        if not session_id:
+            continue
+        for entry in getattr(session, "chat_message_log", None) or []:
+            if not isinstance(entry, dict) or entry.get("direction") != "out":
+                continue
+            content = (entry.get("content") or "").strip()
+            if not content:
+                continue
+            digest = hashlib.sha256(f"{session_id}\n{content}".encode()).hexdigest()[:16]
+            ref = f"promise:{session_id}:{digest}"
+            if ref in seen:
+                continue
+            seen.add(ref)
+            ts = entry.get("ts")
+            candidates.append(
+                (ref, str(session_id), content, float(ts) if isinstance(ts, (int, float)) else 0.0)
+            )
+    candidates.sort(key=lambda c: c[3], reverse=True)
+    return candidates
+
+
+def collect_promises(
+    project_key: str,
+    *,
+    transport: Callable[[str], str] | None = None,
+    findings: list[str] | None = None,
+    skipped: list[str] | None = None,
+) -> int:
+    """Persist one ``promise`` row per sampled outbound entry the judge flags.
+
+    ``transport`` takes the judge prompt and returns the judge's reply text.
+    The default sends it to :func:`_judge_model` through OpenRouter and is only
+    built when ``tools.improvement_eligibility.is_open_source`` clears the
+    project (charter §7); an injected transport is the caller's responsibility.
+
+    Order of gates, each a ``skipped`` entry and never a failure: the module
+    kill switch, ``promise_detector_enabled``, project eligibility, a missing
+    OpenRouter key, and the meter's refusal. Nothing new to judge is plain
+    zero, not a skip, and reserves nothing. One
+    reservation covers the tick's sample; it is settled from the transport's
+    ``cost_usd``/``metering`` when it reports them and otherwise as the full
+    reserved amount under ``metering="unknown"``, or released when no call was
+    made. An unparseable verdict and a raising transport each land in
+    ``findings`` and write nothing. Returns the number of rows written.
+    """
+    from config.settings import settings
+    from models.improvement_evidence import ImprovementEvidence
+    from tools import paid_inference_meter as meter
+
+    if findings is None:
+        findings = []
+    if skipped is None:
+        skipped = []
+
+    if not settings.improvement.enabled:
+        skipped.append("promises-skipped: ImprovementSettings.enabled is False")
+        return 0
+    if not settings.improvement.promise_detector_enabled:
+        skipped.append("promises-skipped: promise_detector_enabled is False")
+        return 0
+
+    judged = _judged_refs(project_key)
+    sample: list[tuple[str, str, str, float]] = []
+    for candidate in _outbound_candidates(project_key):
+        ref, session_id, _content, _ts = candidate
+        if ref in judged:
+            continue
+        if ImprovementEvidence.already_recorded(project_key, "promise", source_ref=ref):
+            continue
+        sample.append(candidate)
+        if len(sample) >= PROMISE_SAMPLE_PER_TICK:
+            break
+    if not sample:
+        return 0
+
+    if transport is None:
+        from tools.improvement_eligibility import is_open_source
+
+        if not is_open_source(project_key):
+            skipped.append("promises-skipped: project is not open source (charter §7)")
+            return 0
+        transport = _openrouter_judge(_judge_model())
+        if transport is None:
+            skipped.append("promises-skipped: no OpenRouter key configured")
+            return 0
+
+    reservation = meter.reserve(project_key, PROMISE_RESERVE_USD, purpose="promise_detector")
+    if isinstance(reservation, meter.Refusal):
+        logger.info("improvement_collect: promise judge refused by meter: %s", reservation.reason)
+        skipped.append("promises-skipped: unit 2 unavailable")
+        return 0
+
+    written = 0
+    calls = 0
+    try:
+        for ref, session_id, content, ts in sample:
+            try:
+                calls += 1
+                raw = transport(_promise_prompt(content))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("improvement_collect: promise judge call failed: %s", exc)
+                findings.append(f"promises-judge-failed: {exc}")
+                break
+            # The call was bought, so the entry is judged whatever came back;
+            # an unparseable reply is reported, never bought again.
+            _mark_judged(project_key, ref)
+            verdict = _parse_verdict(raw)
+            if verdict is None:
+                logger.warning(
+                    "improvement_collect: promise judge reply unparseable for %s: %r",
+                    ref,
+                    str(raw)[:120],
+                )
+                findings.append(f"promises-judge-unparseable: {ref}")
+                continue
+            is_promise, span, confidence = verdict
+            if not is_promise:
+                continue
+            try:
+                row = ImprovementEvidence.record_once(
+                    project_key,
+                    "promise",
+                    source_ref=ref,
+                    source_session_id=session_id,
+                    text=content[:2000],
+                    detail=span or None,
+                    observed_at=datetime.fromtimestamp(ts, tz=UTC) if ts else None,
+                    confidence=confidence,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("improvement_collect: promise write failed for %s: %s", ref, exc)
+                continue
+            if row is not None:
+                written += 1
+    finally:
+        if calls == 0:
+            meter.release(project_key, reservation.reservation_id)
+        else:
+            cost = getattr(transport, "cost_usd", None)
+            metering = getattr(transport, "metering", None)
+            if isinstance(cost, (int, float)) and metering in ("exact", "estimated"):
+                meter.settle(
+                    project_key, reservation.reservation_id, float(cost), metering=metering
+                )
+            else:
+                meter.settle(
+                    project_key, reservation.reservation_id, PROMISE_RESERVE_USD, metering="unknown"
+                )
+    return written
+
+
 def run_improvement_collect() -> dict:
     """Reflection entrypoint: run every observer adapter for the owning project.
+
+    The owning project is ``reflections.redis_access.get_project_key()``
+    (``VALOR_PROJECT_KEY``, falling back to ``"valor"``), the same key
+    ``valor-improve`` is bound to, so the rows land where the CLI reads.
 
     Standard reflection result dict. Each adapter is wrapped independently so a
     single broken source degrades the tick rather than ending it — the loop
@@ -467,10 +1101,10 @@ def run_improvement_collect() -> dict:
     re-registration and history starts accumulating from that moment.
     """
     t0 = time.time()
-    from config.memory_defaults import DEFAULT_PROJECT_KEY
     from config.settings import settings
+    from reflections.redis_access import get_project_key
 
-    project_key = DEFAULT_PROJECT_KEY
+    project_key = get_project_key()
 
     if not settings.improvement.enabled:
         return {
@@ -487,21 +1121,30 @@ def run_improvement_collect() -> dict:
 
     counts: dict[str, int] = {}
     findings: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
 
     # One enumeration of the memory partition per tick, shared by the two
     # adapters that read it. Fail-soft already, so no separate guard here.
     memories = human_memories(project_key)
 
-    for name, adapter in (
-        ("corrections", lambda pk: collect_corrections(pk, memories=memories)),
-        ("inspirations", lambda pk: collect_inspirations(pk, memories=memories)),
+    adapters = (
+        ("corrections", lambda **kw: collect_corrections(memories=memories, **kw)),
+        ("inspirations", lambda **kw: collect_inspirations(memories=memories, **kw)),
         ("expectation_coverage", collect_expectation_coverage),
-    ):
+        ("lessons", collect_lessons),
+        ("promises", collect_promises),
+    )
+    assert tuple(name for name, _ in adapters) == ADAPTER_NAMES
+    n_adapters = len(adapters)
+
+    for name, adapter in adapters:
         try:
-            counts[name] = adapter(project_key)
+            counts[name] = adapter(project_key=project_key, findings=findings, skipped=skipped)
         except Exception as exc:  # noqa: BLE001
             logger.warning("improvement_collect: adapter %s failed: %s", name, exc)
             counts[name] = 0
+            failed.append(name)
             findings.append(f"{name}-failed: {exc}")
 
     total = sum(counts.values())
@@ -509,11 +1152,17 @@ def run_improvement_collect() -> dict:
         f"improvement-evidence-collect: {total} new evidence row(s) "
         f"(corrections={counts.get('corrections', 0)}, "
         f"inspirations={counts.get('inspirations', 0)}, "
-        f"coverage={counts.get('expectation_coverage', 0)})"
+        f"coverage={counts.get('expectation_coverage', 0)}, "
+        f"lessons={counts.get('lessons', 0)}, "
+        f"promises={counts.get('promises', 0)})"
     )
+    if skipped:
+        summary += "; skipped: " + "; ".join(skipped)
     return {
-        "status": "error" if len(findings) == 3 else "success",
+        "status": "error" if len(failed) == n_adapters else "success",
         "findings": findings,
+        "failed": failed,
+        "skipped": skipped,
         "summary": summary,
         "counts": counts,
         "duration": time.time() - t0,

@@ -27,16 +27,18 @@ def _emit(args, human: str, payload: dict) -> None:
 
 def _own_session():
     """The calling process's own AgentSession row, resolved through
-    AGENT_SESSION_ID (the worker exports it to every harness subprocess).
-    Returns None when unset (an operator at a terminal -- break-glass)."""
+    AGENT_SESSION_ID (the worker exports the row's ``agent_session_id``, the
+    AutoKeyField hex id, to every harness subprocess; the lookup is by that
+    id, never by ``session_id``). Returns None when unset (an operator at a
+    terminal -- break-glass)."""
     import os
 
-    session_id = os.environ.get("AGENT_SESSION_ID")
-    if not session_id:
+    agent_session_id = os.environ.get("AGENT_SESSION_ID")
+    if not agent_session_id:
         return None
-    from models.session_lifecycle import get_authoritative_session
+    from models.agent_session import AgentSession
 
-    return get_authoritative_session(session_id)
+    return AgentSession.get_by_id(agent_session_id)
 
 
 def _acquire_lease(case_id: str):
@@ -114,7 +116,7 @@ def cmd_propose(args) -> int:
             )
             return 1
         action_id = ec["action_id"]
-        agent_session_id = session.session_id
+        agent_session_id = session.agent_session_id
     elif not action_id:
         # Break-glass: mint one so the proposal is admittable. The scheduler
         # adapter skips a journaled proposal with an empty action_id forever.
@@ -581,6 +583,404 @@ def cmd_release_compare(args) -> int:
     return 0
 
 
+def cmd_ranking(args) -> int:
+    """``ranking [--at REF]``: the latest ranking snapshot, or the one named.
+    Thin: the reader and the renderer live in ``tools/improvement_ranking.py``
+    (lane 5, #3217)."""
+    from tools.improvement_ranking import cmd_ranking as run_ranking
+
+    return run_ranking(args, project_key=PROJECT_KEY)
+
+
+# --- lane 5 (#3217): the brief, investigations, model revisions, case open ---
+
+
+def _refused(args, reason: str, message: str = "", **extra) -> int:
+    payload = {"accepted": False, "reason": reason, "message": message or reason}
+    payload.update(extra)
+    _emit(args, f"refused: {reason}" + (f" ({message})" if message else ""), payload)
+    return 1
+
+
+def cmd_brief(args) -> int:
+    """Print the research brief for one case (charter first, then the case)."""
+    from tools.improvement_brief import build_brief
+
+    try:
+        text = build_brief(args.case, PROJECT_KEY)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, text.rstrip("\n"), {"case_id": args.case, "brief": text})
+    return 0
+
+
+def _outcome_exit(args, outcome, human_ok: str) -> int:
+    if not outcome.accepted:
+        return _refused(
+            args, outcome.reason, outcome.message, investigation_id=outcome.investigation_id
+        )
+    payload = {"accepted": True, "investigation_id": outcome.investigation_id, **outcome.extra}
+    _emit(args, f"{human_ok}: {outcome.investigation_id}", payload)
+    return 0
+
+
+def cmd_investigation_open(args) -> int:
+    from tools.improvement_investigations import open_investigation
+
+    outcome = open_investigation(
+        PROJECT_KEY,
+        kind=args.kind,
+        case_id=args.case,
+        uncertainty=args.uncertainty,
+        query=args.query,
+        decision_affected=args.decision_affected,
+        expected_information_value=args.expected_information_value,
+        state=args.state,
+    )
+    return _outcome_exit(args, outcome, "opened")
+
+
+def _load_json_arg(raw: str):
+    """A JSON literal, or ``@path`` naming a file holding one."""
+    if raw.startswith("@"):
+        raw = open(raw[1:], encoding="utf-8").read()
+    return json.loads(raw)
+
+
+def cmd_investigation_record(args) -> int:
+    from tools.improvement_investigations import InvestigationRefusedError, record_claims
+
+    try:
+        claims = _load_json_arg(args.claims)
+        sources = _load_json_arg(args.sources) if args.sources else None
+    except (OSError, ValueError) as e:
+        return _refused(args, "INVALID_CLAIMS_JSON", str(e))
+    try:
+        recorded = record_claims(args.id, claims, sources)
+    except InvestigationRefusedError as e:
+        return _refused(args, e.reason, e.message, investigation_id=args.id)
+    except ValueError as e:
+        return _refused(args, "INVALID_CLAIMS", str(e), investigation_id=args.id)
+    _emit(
+        args,
+        f"recorded {recorded} entr{'y' if recorded == 1 else 'ies'} on {args.id}",
+        {"accepted": True, "investigation_id": args.id, "recorded": recorded},
+    )
+    return 0
+
+
+def cmd_investigation_resolve(args) -> int:
+    from tools.improvement_investigations import resolve
+
+    detail = None
+    if args.assumption_detail:
+        try:
+            detail = _load_json_arg(args.assumption_detail)
+        except (OSError, ValueError) as e:
+            return _refused(args, "INVALID_ASSUMPTION_DETAIL_JSON", str(e))
+    outcome = resolve(
+        args.id,
+        interpretation=args.interpretation,
+        provisional_assumption=args.assumption,
+        assumption_detail=detail,
+        disposition=args.disposition,
+        resource_name=args.resource_name,
+    )
+    return _outcome_exit(args, outcome, "resolved")
+
+
+def cmd_investigation_list(args) -> int:
+    from tools.improvement_investigations import list_investigations, row_as_dict
+
+    rows = list_investigations(PROJECT_KEY, case_id=args.case)
+    lines = [
+        f"{r.id} {r.kind} {r.state} stage={r.stage or 'draft'} case={r.case_id or '-'}: "
+        f"{(r.query or '')[:80]}"
+        for r in rows
+    ]
+    _emit(
+        args,
+        "\n".join(lines) or "no investigations",
+        {"investigations": [row_as_dict(r) for r in rows]},
+    )
+    return 0
+
+
+def _research_process_spec():
+    """The ``ResearchProcessSpec`` this lane pins (Provided to lane 6, item 1):
+    ``selection_rule="ordinal-lexicographic-v1"``, an empty budget split, the
+    controller tick cadence, the brief template digest, the research skill
+    digest, and the ranking module digest under ``extra``."""
+    import hashlib
+    from pathlib import Path
+
+    from config.settings import settings
+    from tools.improvement_brief import brief_template_digest
+    from tools.improvement_recursion.process import ResearchProcessSpec
+
+    root = Path(__file__).resolve().parents[1]
+    skill = root / ".claude" / "skills" / "improve-research" / "SKILL.md"
+    ranking = root / "tools" / "improvement_ranking.py"
+
+    def _file_digest(path: Path) -> str:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ""
+
+    return ResearchProcessSpec(
+        selection_rule="ordinal-lexicographic-v1",
+        investigation_budget_split={},
+        revision_cadence_seconds=settings.improvement.controller_tick_seconds,
+        planner_prompt_digest="sha256:" + brief_template_digest(),
+        skill_digest=_file_digest(skill),
+        extra={"ranking_module_digest": _file_digest(ranking)},
+    )
+
+
+def _spec_from_text(text: str):
+    """Rebuild a ``ResearchProcessSpec`` from the canonical text a revision stores."""
+    from tools.improvement_recursion.process import ResearchProcessSpec
+
+    return ResearchProcessSpec(**json.loads(text))
+
+
+def backfill_research_process_digests(project_key: str) -> list[str]:
+    """Set ``research_process_digest`` on every revision that stores a spec
+    and no digest. Returns the revision ids written. The digest is lane 6's
+    ``research_process_digest`` over the stored canonical text, so a
+    pre-merge revision digests identically to a post-merge one."""
+    from models.improvement_model_revision import ImprovementModelRevision
+    from tools.improvement_recursion.process import research_process_digest
+
+    written: list[str] = []
+    rows = []
+    for state in ("current", "superseded"):
+        rows.extend(ImprovementModelRevision.query.filter(project_key=project_key, state=state))
+    for row in rows:
+        spec_text = getattr(row, "research_process_spec", None)
+        if not spec_text or getattr(row, "research_process_digest", None):
+            continue
+        row.research_process_digest = research_process_digest(_spec_from_text(spec_text))
+        row.save()
+        written.append(row.id)
+    return written
+
+
+def cmd_revise_model(args) -> int:
+    """Write one ``ImprovementModelRevision`` for the case, carrying the
+    canonical process spec text and lane 6's digest of it. A revision with
+    no prediction is a note, and is refused ``EMPTY_PREDICTION``.
+    ``--backfill-digests`` instead digests every stored spec that has none."""
+    from datetime import UTC, datetime
+
+    from models.improvement_case import ImprovementCase
+    from models.improvement_model_revision import ImprovementModelRevision
+    from tools.improvement_ranking import process_spec_json
+    from tools.improvement_recursion.process import research_process_digest
+
+    if getattr(args, "backfill_digests", False):
+        written = backfill_research_process_digests(PROJECT_KEY)
+        _emit(
+            args,
+            f"backfilled research_process_digest on {len(written)} revision(s)",
+            {"accepted": True, "backfilled": written},
+        )
+        return 0
+    for name in ("case", "summary", "rationale", "prediction"):
+        if getattr(args, name, None) is None:
+            return _refused(args, "MISSING_ARGUMENT", f"--{name} is required")
+    if not (args.prediction or "").strip():
+        return _refused(args, "EMPTY_PREDICTION", "a revision with no prediction is a note")
+    try:
+        case = ImprovementCase.query.get(project_key=PROJECT_KEY, id=args.case)
+    except Exception:
+        case = None
+    if case is None:
+        return _refused(args, "CASE_NOT_FOUND", f"no case {args.case}")
+
+    spec = _research_process_spec()
+    spec_text = process_spec_json(spec)
+    digest = research_process_digest(spec)
+
+    current = [
+        r for r in ImprovementModelRevision.query.filter(project_key=PROJECT_KEY, state="current")
+    ]
+    current.sort(key=lambda r: (int(getattr(r, "revision", 0) or 0), r.id))
+    previous = current[-1] if current else None
+    revision_number = max((int(getattr(r, "revision", 0) or 0) for r in current), default=0) + 1
+    row = ImprovementModelRevision.create(
+        project_key=PROJECT_KEY,
+        created_at=datetime.now(UTC),
+        state="current",
+        revision=revision_number,
+        summary=args.summary,
+        rationale=args.rationale,
+        prediction=args.prediction.strip(),
+        evidence_ids=case.evidence_ids or "[]",
+        supersedes_id=previous.id if previous is not None else None,
+        research_process_digest=digest,
+        research_process_spec=spec_text,
+    )
+    if previous is not None:
+        previous.state = "superseded"
+        previous.save()
+    _emit(
+        args,
+        f"model revision {row.revision} written: {row.id} ({digest})",
+        {
+            "accepted": True,
+            "revision_id": row.id,
+            "revision": row.revision,
+            "research_process_digest": digest,
+            "supersedes_id": row.supersedes_id,
+        },
+    )
+    return 0
+
+
+def cmd_case_open(args) -> int:
+    """Open cases through the planner's ``open_cases``: the same clustering,
+    novelty check, and ``case_opened`` journal write the tick runs. With
+    ``--evidence-ids`` only those rows are considered; without it the
+    planner's bounded recent scan runs. Refuses ``CHARTER_NOT_PINNED`` when
+    no charter row exists."""
+    from models.improvement_charter import ImprovementCharter
+    from reflections.improvement_plan import open_cases
+
+    charter = ImprovementCharter.pinned(PROJECT_KEY)
+    if charter is None:
+        return _refused(args, "CHARTER_NOT_PINNED", "no charter row; run the planner tick first")
+
+    if args.evidence_ids:
+        from models.improvement_evidence import ImprovementEvidence
+
+        wanted = [e.strip() for e in args.evidence_ids.split(",") if e.strip()]
+        rows = []
+        for eid in wanted:
+            try:
+                row = ImprovementEvidence.query.get(project_key=PROJECT_KEY, id=eid)
+            except Exception:
+                row = None
+            if row is None:
+                return _refused(args, "EVIDENCE_NOT_FOUND", f"no evidence row {eid}")
+            rows.append(row)
+        result = open_cases(PROJECT_KEY, charter, evidence=rows)
+    else:
+        result = open_cases(PROJECT_KEY, charter)
+
+    payload = {
+        "accepted": True,
+        "opened": list(result.opened),
+        "attached": list(result.attached),
+        "intake": list(result.intake),
+        "refused": list(result.refused),
+        "findings": list(result.findings),
+    }
+    _emit(
+        args,
+        f"opened {len(result.opened)} case(s): {', '.join(result.opened) or 'none'}; "
+        f"attached {len(result.attached)}, intake {len(result.intake)}, "
+        f"refused {len(result.refused)}",
+        payload,
+    )
+    return 0
+
+
+# --- lane 5 (#3217), task 6: experiments and the qualified-result report ---
+
+
+def _experiment_exit(args, outcome, human_ok: str) -> int:
+    if not outcome.accepted:
+        return _refused(args, outcome.reason, outcome.message, experiment_id=outcome.experiment_id)
+    payload = {"accepted": True, "experiment_id": outcome.experiment_id, **outcome.extra}
+    _emit(args, f"{human_ok}: {outcome.experiment_id}", payload)
+    return 0
+
+
+def cmd_experiment_freeze(args) -> int:
+    """``experiment freeze --case ID``: freeze the case's latest ``proposed``
+    experiment, or create one from ``--hypothesis/--mechanism/--falsifier/
+    --candidate`` when none exists, then run the seven freeze steps."""
+    from tools import improvement_experiment as experiments
+
+    experiment = experiments.latest_proposed_experiment(PROJECT_KEY, args.case)
+    if experiment is None:
+        if not (args.hypothesis and args.mechanism and args.falsifier and args.candidate):
+            return _refused(
+                args,
+                "NO_PROPOSED_EXPERIMENT",
+                f"case {args.case} has no proposed experiment; pass --hypothesis, "
+                "--mechanism, --falsifier, and --candidate to create one",
+            )
+        try:
+            candidate = _load_json_arg(args.candidate)
+        except (OSError, ValueError) as e:
+            return _refused(args, "INVALID_CANDIDATE_JSON", str(e))
+        proposed = experiments.propose_experiment(
+            PROJECT_KEY,
+            args.case,
+            hypothesis=args.hypothesis,
+            mechanism=args.mechanism,
+            falsifier=args.falsifier,
+            candidate=candidate,
+            envelope=args.envelope,
+        )
+        if not proposed.accepted:
+            return _experiment_exit(args, proposed, "proposed")
+        experiment_id = proposed.experiment_id
+    else:
+        experiment_id = experiment.id
+    kwargs = {}
+    if args.n_queries is not None:
+        kwargs["n_queries"] = args.n_queries
+    if args.seed is not None:
+        kwargs["seed"] = args.seed
+    outcome = experiments.freeze_experiment(PROJECT_KEY, experiment_id, **kwargs)
+    return _experiment_exit(args, outcome, "frozen")
+
+
+def cmd_experiment_evaluate(args) -> int:
+    """``experiment evaluate --id ID``: reserve the judge spend and run lane 4's
+    evaluation; refuses ``SLOT_NOT_HELD`` for a session without the lane slot."""
+    from tools import improvement_experiment as experiments
+
+    outcome = experiments.evaluate_experiment(PROJECT_KEY, args.id)
+    return _experiment_exit(args, outcome, "evaluated")
+
+
+def cmd_experiment_show(args) -> int:
+    """``experiment show --id ID``: state, the latest verdict, and the notes."""
+    from tools import improvement_experiment as experiments
+
+    try:
+        shown = experiments.show_experiment(PROJECT_KEY, args.id)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, experiments.render_show(shown), shown)
+    return 0
+
+
+def cmd_experiment_repair(args) -> int:
+    """``experiment repair --id ID``: lane 4's Race 1b repair, back to ``frozen``."""
+    from tools import improvement_experiment as experiments
+
+    outcome = experiments.repair(PROJECT_KEY, args.id)
+    return _experiment_exit(args, outcome, "repaired")
+
+
+def cmd_report(args) -> int:
+    """``report --case ID``: the qualified-result report, from records alone."""
+    from tools.improvement_report import build_report
+
+    try:
+        text = build_report(args.case, PROJECT_KEY)
+    except LookupError as e:
+        reason, _, message = str(e).partition(": ")
+        return _refused(args, reason, message)
+    _emit(args, text.rstrip("\n"), {"case_id": args.case, "report": text})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-improve")
     parser.add_argument("--json", action="store_true")
@@ -620,6 +1020,9 @@ def main(argv: list[str] | None = None) -> int:
     p_explain = case_sub.add_parser("explain")
     p_explain.add_argument("--case", required=True)
     p_explain.set_defaults(func=cmd_case_explain)
+    p_open = case_sub.add_parser("open")
+    p_open.add_argument("--evidence-ids", default=None, help="comma-separated evidence ids")
+    p_open.set_defaults(func=cmd_case_open)
 
     p = sub.add_parser("budget")
     p.set_defaults(func=cmd_budget)
@@ -641,6 +1044,90 @@ def main(argv: list[str] | None = None) -> int:
     release_sub = p.add_subparsers(dest="release_command", required=True)
     p_compare = release_sub.add_parser("compare")
     p_compare.set_defaults(func=cmd_release_compare)
+
+    # lane 5 (#3217): the planner's ranking snapshot
+    p = sub.add_parser("ranking")
+    p.add_argument("--at", default=None, help="a $CF: snapshot reference; default: the latest")
+    p.set_defaults(func=cmd_ranking)
+
+    # lane 5 (#3217): the research session's own subcommands
+    p = sub.add_parser("brief")
+    p.add_argument("--case", required=True)
+    p.set_defaults(func=cmd_brief)
+
+    p = sub.add_parser("investigation")
+    inv_sub = p.add_subparsers(dest="investigation_command", required=True)
+    p_iopen = inv_sub.add_parser("open")
+    p_iopen.add_argument("--kind", required=True)
+    p_iopen.add_argument("--case", default=None)
+    p_iopen.add_argument("--uncertainty", required=True)
+    p_iopen.add_argument("--query", required=True)
+    p_iopen.add_argument("--decision-affected", required=True)
+    p_iopen.add_argument("--expected-information-value", required=True)
+    p_iopen.add_argument("--state", default="open")
+    p_iopen.set_defaults(func=cmd_investigation_open)
+    p_irecord = inv_sub.add_parser("record")
+    p_irecord.add_argument("--id", required=True)
+    p_irecord.add_argument("--claims", required=True, help="JSON list, or @path to one")
+    p_irecord.add_argument("--sources", default=None, help="JSON list, or @path to one")
+    p_irecord.set_defaults(func=cmd_investigation_record)
+    p_iresolve = inv_sub.add_parser("resolve")
+    p_iresolve.add_argument("--id", required=True)
+    p_iresolve.add_argument("--interpretation", required=True)
+    p_iresolve.add_argument("--assumption", default=None)
+    p_iresolve.add_argument("--assumption-detail", default=None, help="JSON object, or @path")
+    p_iresolve.add_argument("--disposition", default=None)
+    p_iresolve.add_argument("--resource-name", default=None)
+    p_iresolve.set_defaults(func=cmd_investigation_resolve)
+    p_ilist = inv_sub.add_parser("list")
+    p_ilist.add_argument("--case", default=None)
+    p_ilist.set_defaults(func=cmd_investigation_list)
+
+    p = sub.add_parser("revise-model")
+    p.add_argument("--case", default=None)
+    p.add_argument("--summary", default=None)
+    p.add_argument("--rationale", default=None)
+    p.add_argument("--prediction", default=None)
+    p.add_argument(
+        "--backfill-digests",
+        action="store_true",
+        help="digest every stored research_process_spec that has no digest; writes no revision",
+    )
+    p.set_defaults(func=cmd_revise_model)
+
+    # lane 5 (#3217), task 6: experiments and the qualified-result report
+    p = sub.add_parser("experiment")
+    exp_sub = p.add_subparsers(dest="experiment_command", required=True)
+    p_efreeze = exp_sub.add_parser("freeze")
+    p_efreeze.add_argument("--case", required=True)
+    p_efreeze.add_argument("--n-queries", type=int, default=None)
+    p_efreeze.add_argument("--seed", type=int, default=None)
+    p_efreeze.add_argument("--hypothesis", default=None)
+    p_efreeze.add_argument("--mechanism", default=None)
+    p_efreeze.add_argument("--falsifier", default=None)
+    p_efreeze.add_argument("--candidate", default=None, help="JSON object, or @path to one")
+    p_efreeze.add_argument("--envelope", default="retrieval_parameters")
+    p_efreeze.set_defaults(func=cmd_experiment_freeze)
+    p_eevaluate = exp_sub.add_parser("evaluate")
+    p_eevaluate.add_argument("--id", required=True)
+    p_eevaluate.set_defaults(func=cmd_experiment_evaluate)
+    p_eshow = exp_sub.add_parser("show")
+    p_eshow.add_argument("--id", required=True)
+    p_eshow.set_defaults(func=cmd_experiment_show)
+    p_erepair = exp_sub.add_parser("repair")
+    p_erepair.add_argument("--id", required=True)
+    p_erepair.set_defaults(func=cmd_experiment_repair)
+
+    p = sub.add_parser("report")
+    p.add_argument("--case", required=True)
+    p.set_defaults(func=cmd_report)
+
+    # lane 5 (#3217): register the planner tick as one of lane 6's comparison
+    # arms, so `compare run` under this CLI finds it without --arm-runner.
+    from tools.improvement_plan_arm import PlannerArmRunner
+    from tools.improvement_recursion.arms import register_arm_runner
+
+    register_arm_runner(PlannerArmRunner())
 
     args = parser.parse_args(argv)
     return args.func(args)

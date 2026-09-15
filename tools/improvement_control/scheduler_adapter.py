@@ -66,6 +66,25 @@ def _project_root() -> str:
     return str(Path(__file__).resolve().parent.parent.parent)
 
 
+def _lane_slug(root: str) -> str | None:
+    """The lane slug when ``root`` is itself a ``.worktrees/<slug>`` checkout.
+
+    The executor gives a slugless eng session a synthetic slug and a fresh
+    worktree of its own, and refuses a pre-provisioned worktree on any other
+    branch (#1377). Dispatching from a lane worktree therefore names the lane,
+    so the research session runs in the checkout the case was proposed from;
+    a primary checkout names nothing and the executor's isolation stands.
+    """
+    from pathlib import Path
+
+    from agent.worktree_manager import WORKTREES_DIR
+
+    path = Path(root)
+    if path.parent.name == WORKTREES_DIR and path.name:
+        return path.name
+    return None
+
+
 def _open_case_rows(project_key: str):
     """One filter call per state (Popoto's IndexedField filter is exact-match,
     not IN) -- the same pattern ``ui/data/improvement.py``'s goals partial uses."""
@@ -230,12 +249,15 @@ def _admit_and_dispatch(project_key, case, generation, push, settings, result: T
     message_text = f"/improve-research case={case_id} action={action_id} type={action_type}"
     if proposal.artifact_ref:
         message_text += f" brief_ref={proposal.artifact_ref}"
+    root = _project_root()
+    lane = {"slug": _lane_slug(root)} if _lane_slug(root) else {}
     depth, agent_session_id = asyncio.run(
         push(
             project_key=project_key,
             session_id=str(uuid.uuid4()),
-            working_dir=_project_root(),
+            working_dir=root,
             message_text=message_text,
+            **lane,
             sender_name="improvement-controller",
             chat_id="0",
             telegram_message_id=0,
@@ -295,11 +317,8 @@ def _activate(
     """Data Flow step 8 / Race 7: re-read the row fresh and branch on what a
     retry actually finds, never on what this tick assumed at its start."""
     from agent.session_health import any_worker_alive
-    from models.session_lifecycle import (
-        TERMINAL_STATUSES,
-        get_authoritative_session,
-        transition_status,
-    )
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import TERMINAL_STATUSES, transition_status
 
     action_id = intent.action_id
     agent_session_id = intent.agent_session_id
@@ -311,7 +330,11 @@ def _activate(
         result.skipped[case_id] = "no_live_worker"
         return
 
-    fresh = get_authoritative_session(agent_session_id) if agent_session_id else None
+    # The intent carries the row's ``agent_session_id`` (the AutoKeyField hex
+    # id the push seam returned), so the lookup is by id, never by
+    # ``session_id``: ``get_authoritative_session`` filters on the latter and
+    # reports every dispatched row as missing.
+    fresh = AgentSession.get_by_id(agent_session_id)
     if fresh is None:
         result.skipped[case_id] = "session_row_missing"
         return

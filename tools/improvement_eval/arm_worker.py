@@ -14,7 +14,9 @@ Protocol: one JSON job spec on stdin, one JSON response on stdout.
   frozen corpus, arm the writer guard, and report the re-export digest.
 - ``{"mode": "retrieve", "jsonl": ..., "project_key": ...,
   "query_text": ..., "limit": ...}``: restore, arm, retrieve, and report
-  the ranked ids with the digests.
+  the ranked ids with the digests. ``rrf_k`` and ``min_rrf_score`` are
+  forwarded to ``retrieve_memories`` only when the job carries them; an
+  absent key leaves the retrieval path at its own default.
 - ``{"mode": "digest", "jsonl": ..., "project_key": ...}``: restore, arm,
   and report the re-export digest plus the canonical remaining manifest
   (the runner asserts byte-equality between arms).
@@ -109,12 +111,20 @@ def handle_job(job: dict) -> dict:
 
         query_text = job.get("query_text", "")
         limit = int(job.get("limit", 10))
+        params: dict = {}
+        try:
+            if "rrf_k" in job:
+                params["rrf_k"] = int(job["rrf_k"])
+            if "min_rrf_score" in job:
+                params["min_rrf_score"] = float(job["min_rrf_score"])
+        except (TypeError, ValueError) as exc:
+            raise InfraFailure(f"arm job rrf_k/min_rrf_score is not a number: {exc}") from exc
         try:
             skew = float(job.get("clock_skew_s") or 0.0)
         except (TypeError, ValueError) as exc:
             raise InfraFailure(f"arm job 'clock_skew_s' is not a number: {exc}") from exc
         with _skewed_clock(skew):
-            response["ids"] = retrieve_ranked_ids(query_text, project_key, limit=limit)
+            response["ids"] = retrieve_ranked_ids(query_text, project_key, limit=limit, **params)
 
     digest_final, manifest_final = _arm_digest(project_key)
     writer_guard.verify_digest_unchanged(

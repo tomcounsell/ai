@@ -28,8 +28,29 @@ logger = logging.getLogger(__name__)
 #: through their own scripts; those event names are not in this set because
 #: they never flow through this function. `state_changed` is the one writer
 #: of the head's `state` field after the seed (see :func:`set_state`).
+#:
+#: Lane 5 (#3217) records the research cycle through this same function, one
+#: event per step the planner tick, the evaluation, and the unblock pass
+#: take. The set stays closed: an event the cycle does not name is still
+#: refused `INVALID_ARGUMENT` before any Redis call.
 KNOWN_EVENTS: frozenset[str] = frozenset(
-    {"action_proposed", "paused", "resumed", "amendment_proposed", "state_changed"}
+    {
+        "action_proposed",
+        "paused",
+        "resumed",
+        "amendment_proposed",
+        "state_changed",
+        # lane 5 (#3217): the first complete research cycle
+        "ranking_recorded",
+        "case_opened",
+        "evidence_attached",
+        "evidence_attached_to_rejected",
+        "investigation_opened",
+        "hypothesis_proposed",
+        "experiment_frozen",
+        "verdict_applied",
+        "case_unblocked",
+    }
 )
 
 #: One EVAL per Decision 3: schema check, pause check, generation compare,

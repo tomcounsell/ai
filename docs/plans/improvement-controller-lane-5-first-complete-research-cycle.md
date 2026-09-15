@@ -1,13 +1,13 @@
 ---
-status: Ready
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-09-14
 tracking: https://github.com/tomcounsell/ai/issues/3217
-last_comment_id: 5662856978
+last_comment_id: 5668628952
 revision_applied: true
-revision_applied_at: 2026-09-14T11:54:11Z
+revision_applied_at: 2026-09-15T08:53:49Z
 ---
 
 # Improvement controller lane 5: the first complete research cycle
@@ -142,6 +142,22 @@ reconciliation on the issue itself.
 contract (Technical Approach, "Consumed from lane 3") and gated by import checks in Prerequisites.
 If lane 3's build names things differently, the build adapts to lane 3's names; the contract is
 what this lane needs, not what it is called.
+
+**Build-time addendum (comment 5668628952):** PR #3318 (`session/sdlc-3218`, open, not merged)
+has built lane 6's seam with these shapes: `from tools.improvement_recursion.arms import
+ArmResult, BudgetUse, get_arm_runner, register_arm_runner`; `ArmRunner.run(self, process_digest:
+str, opportunity_ids: list[str], budget_cap, arm_run_id: str) -> ArmResult`; `ArmResult(gains:
+dict[str, float | None], budget_use: BudgetUse)`; `BudgetUse(unit2_usd, unit3_usd,
+subscription_turns, wall_seconds)` all optional (round-3 correction: the dataclass has no
+`unit1_usd`; unit 1 is the subscription lane slot and appears only as `subscription_turns`, so the
+arm's paid-inference figure from lane 3's meter is keyworded `unit2_usd=`); `from tools.improvement_recursion.process import
+ResearchProcessSpec, research_process_digest` hashing `json.dumps(asdict(spec), sort_keys=True,
+separators=(",", ":"))` to `sha256:<hex>`; `compare run --arm-runner
+tools.improvement_plan_arm:PlannerArmRunner` constructs the class with NO arguments; unit 3 is
+accounted only through `InfrastructureReservation` rows whose resource name starts with
+`arm:<arm_run_id>:`. Two build-time confirmations follow: `PlannerArmRunner()` accepts no
+constructor arguments, and any infrastructure the arm admits carries that prefix. The method-body
+import and `ImportError` fallback stand.
 
 ## Prior Art
 
@@ -344,9 +360,11 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
    (opportunity cost, quality, resource cost, uncertainty, unlocked capacity), each derived from
    named record fields and each stated as a rule in the module docstring, orders by the §3 starting
    hypotheses first and evidence second, and writes the immutable snapshot (ordered ids, factors,
-   rationale, charter digest, diff against the previous snapshot); (d) `ranking_recorded` journal
-   event on the case-independent controller head (lane 3's journal) carrying the snapshot
-   reference; (e) **one action proposal** for the top-ranked case that is not blocked: an
+   rationale, charter digest, diff against the previous snapshot); (d) the snapshot reference and
+   the new evidence watermark are written to the lane-5-owned `ImprovementControllerState` row
+   (one per `project_key`, plain ORM `save()`; lane 3's journal has no namespace-wide head), and a
+   `ranking_recorded` journal event (already in lane 3's `KNOWN_EVENTS`) is written on each case
+   whose rank position changed, under that case's lease as in "Lease-fenced journal writes" below; (e) **one action proposal** for the top-ranked case that is not blocked: an
    investigation intent if the case is `observed`/`investigating`, an experiment intent if a
    proposed experiment exists and no frozen one does. The proposal is a journal event; lane 3's
    scheduler adapter admits, reserves the lane slot, and dispatches the research session.
@@ -385,8 +403,11 @@ All six spikes were code-reads against `main` at `89f800876` and `session/sdlc-3
    `accept` leaves the case at `evaluating` with the verdict recorded, for lane 6; `inconclusive`
    returns the case to `investigating` with the evaluation attached and raises its `uncertainty`
    factor; `infra_failure` and `invalidated` leave the case where it was, mark the experiment
-   `aborted`, and record a `probe` investigation naming the failure. Each transition is a journal
-   event first and an ORM `save()` second.
+   `aborted`, and record a `probe` investigation naming the failure. Each state change goes through
+   `journal.set_state(project_key, case_id, generation=g, state=..., by="apply_verdict")` under
+   the case lease, then `projection.apply(project_key, case_id)`, and only then a plain
+   `case.save()` for the non-state fields (`rejected_reason`, `evaluation_ids`); a direct save of
+   `state` is reverted by the next projection (lane 3's head-state contract).
 7. **The next tick** re-ranks. The rejected case has left the open set; the snapshot's diff names
    it under `left` with the evaluation id as the reason. The novelty check refuses a new case with
    the same identity. That diff is the demonstration the acceptance criterion asks for.
@@ -422,7 +443,7 @@ hypothesis with a falsifier, frozen, and measured by the harness, and the record
   code. `INVESTIGATION_KINDS` grows from five to eight; `INVESTIGATION_STATES` from four to five;
   `EVIDENCE_KINDS` from seven (eight with lane 3) to ten. `ImprovementCase` gains `blocked_by`;
   `ImprovementModelRevision` gains `research_process_spec`. `ui/data/improvement.py` exports
-  seven getters. `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
+  nine getters (lane 3 shipped `get_control_status`, lane 6 shipped `get_release_lineage`). `valor-improve` gains six subcommand groups. `reflections/improvement_collect.py`'s
   adapter tuple grows from three to five and its status rule counts failures per adapter instead
   of against the literal three. `tools.improvement_resources.RESOURCES` grows from six names to
   seven (`meta_model_api`) with its `_VAULT_TITLE_KEYWORDS` entry; `probe()` is unchanged.
@@ -548,7 +569,8 @@ each is checked by a Prerequisites row and the build's first commit corrects any
 
 | Need | Requirement | Where this lane calls it |
 |---|---|---|
-| Journal event | A function that records `(case_id or controller head, action_id, event, payload_digest)` through the Lua `transition`, returns a reason code on refusal, never raises | `ranking_recorded` on the case-independent controller head each tick; `case_opened`, `investigation_opened`, `hypothesis_proposed`, `experiment_frozen`, `verdict_applied` per case |
+| Journal event | `journal.transition(project_key, case_id, *, expected_revision, generation, event, payload_digest, action_id, artifact_ref)` records one per-case event through the Lua script and `journal.set_state(project_key, case_id, *, generation, state, by)` is the only writer of case `state` (then `projection.apply`); both return a `TransitionResult` reason code, never raise. There is no namespace-wide head: the tick's own state lives on `ImprovementControllerState`. | `ranking_recorded` per case whose rank position changed, lease-fenced as in "Lease-fenced journal writes"; `case_opened`, `investigation_opened`, `hypothesis_proposed`, `experiment_frozen`, `verdict_applied` per case |
+| Case lease | `tools/improvement_control/lease.py::default_lease().acquire(keys.lease_key(project_key, case_id), ttl)` mints the `generation` every controller-authored `transition()`/`set_state()` presents; `None` means held. | Every per-case journal write the planner tick, `apply_verdict`, or the unblock pass makes ("Lease-fenced journal writes") |
 | Action proposal | `valor-improve propose` accepts a proposed action (investigation or experiment) for a case, refuses an unranked case (empty `ranking_rationale`, unset `priority_area`, or a digest that is not the pinned one) with a reason code, and writes the intent the scheduler adapter reads | The planner tick calls the same Python function the CLI wraps; the research session calls the CLI |
 | Dispatch | The scheduler adapter admits an intent, reserves the lane slot, checks worker liveness, and dispatches a research session running the `improve-research` skill with `research_case_id`, `action_id` provenance and the case id available to the session | The planner never dispatches; it proposes |
 | Amendment request | `valor-improve propose-amendment` records a `charter_amendment` investigation in `awaiting_authorization` and sends one plain Telegram message | The research session, when a decision depends on ungranted authority |
@@ -559,6 +581,18 @@ each is checked by a Prerequisites row and the build's first commit corrects any
 
 If lane 3 lands `propose` without a Python-callable seam, the planner shells to the CLI; the
 requirement is the refusal semantics, not the call shape.
+
+**Lease-fenced journal writes (round 3).** Every per-case journal event this lane writes
+(`case_opened`, `investigation_opened`, `hypothesis_proposed`, `experiment_frozen`,
+`verdict_applied`, `case_unblocked`, `ranking_recorded`) and every `set_state` call follows one
+shape, mirroring `scheduler_adapter._tick_one_case` and `tools/improvement.py::_acquire_lease`:
+`generation = default_lease().acquire(keys.lease_key(project_key, case_id), ttl=settings.improvement.lease_ttl_seconds)`;
+on `None` the tick records a `lease_busy:<case_id>` finding and skips that case's write this
+tick, never presenting a fixed or omitted generation; `head = read_head(...)`;
+`transition(project_key, case_id, expected_revision=head.revision if head else 0, generation=generation, event=..., payload_digest=..., artifact_ref=...)`;
+release in `finally`. A refused `TransitionResult` is a finding with its reason code. Once
+`scheduler_adapter.tick()` has dispatched a case, its `highest_accepted` only rises, so a write
+without a lease-minted generation is `STALE_GENERATION` forever; the lease is the only path.
 
 #### Provided to lane 6 (#3218), from its 2026-09-14 comment on #3217
 
@@ -594,26 +628,23 @@ built here so the recursive comparison can run on real arms later.
    named opportunities and returns lane 6's `ArmResult`: per-opportunity gains taken from
    `accept` evaluations **already on record** for those cases and budget use from lane 3's meter
    keyed by `arm_run_id`. Its docstring states the limit: a multi-tick arm that dispatches and
-   evaluates inside `run` is #3311's. **Lane 6 has no PR and the two lanes build concurrently
-   with no stated order**, so nothing in this lane imports `tools.improvement_recursion.arms`
-   at module level and nothing re-declares its types: `PlannerArmRunner.run` does
-   `from tools.improvement_recursion.arms import ArmResult, BudgetUse` inside the method body
-   and raises `ArmRunnerUnavailable("ARM_RUNNER_UNAVAILABLE: lane 6 not merged")` on
-   `ImportError`; `tools/improvement.py`'s CLI entry does
-   `try: from tools.improvement_recursion.arms import register_arm_runner`
-   `except ImportError: register_arm_runner = None` and calls
-   `register_arm_runner(PlannerArmRunner())` only when it is not `None`, so `compare run` under
-   the same CLI finds it once lane 6 lands. Tests, written so they hold before and after lane 6
-   merges: `tests/unit/test_improvement_planner.py::test_arm_runner_registers_from_cli_entry`
-   installs a fake module via `monkeypatch.setitem(sys.modules,
-   "tools.improvement_recursion.arms", types.SimpleNamespace(register_arm_runner=<records into a
-   list>, get_arm_runner=<reads it>, ArmResult=<dataclass>, BudgetUse=<dataclass>))` before
-   invoking `tools.improvement.main([...])`, and asserts the fake registry holds a
-   `PlannerArmRunner`; `test_arm_runner_nothing_registers_at_import` removes the module from
-   `sys.modules` (and blocks its import via a `meta_path` finder that raises `ImportError` for
-   that name), asserts `import tools.improvement` succeeds, and that `PlannerArmRunner().run(...)`
-   raises `ArmRunnerUnavailable`. When lane 6 merges, the fake is swapped for the real import
-   and both assertions stand; the build never stubs lane 6's types in production code.
+   evaluates inside `run` is #3311's. **Lane 6 (PR #3318) is merged**, so the binding is
+   direct: `tools/improvement_plan_arm.py` imports `ArmResult` and `BudgetUse` at module level
+   and `PlannerArmRunner.run` returns the real types
+   (`BudgetUse(unit2_usd=None, unit3_usd=None, subscription_turns=0, wall_seconds=elapsed)`);
+   `tools/improvement.py`'s CLI entry calls `register_arm_runner(PlannerArmRunner())` on every
+   invocation through the real registry, so `compare run` under the same CLI finds it, and
+   `compare run --arm-runner tools.improvement_plan_arm:PlannerArmRunner` resolves the class by
+   lazy import and constructs it with no arguments. `revise-model` builds the real
+   `ResearchProcessSpec`, stores `process_spec_json(spec)` (canonical text) on the revision, and
+   sets `research_process_digest` through lane 6's `research_process_digest`;
+   `revise-model --backfill-digests` digests every stored spec that has none. Tests:
+   `tests/unit/test_improvement_planner.py::test_arm_runner_registers_from_cli_entry` clears the
+   registry, invokes `tools.improvement.main([...])`, and asserts `get_arm_runner()` returns a
+   `PlannerArmRunner` whose `run` yields lane 6's `ArmResult`/`BudgetUse`;
+   `test_arm_runner_constructs_with_no_arguments_and_resolves_by_spec` covers the `--arm-runner`
+   resolution shape; `test_arm_runner_gains_come_from_accept_evaluations_on_record` pins the gain
+   source. No fake module, no `ImportError` fallback, no stub of lane 6's types anywhere.
 3. **`candidate_ref` and `base_revision` on the manifest.** This lane's manifest is
    `{"protocol_ref", "base_revision", "candidate_ref", "candidate", "incumbent", "envelope",
    "corpus_digest"}`. `base_revision` is the checkout SHA at freeze (lane 4's key); `candidate_ref`
@@ -696,8 +727,9 @@ built here so the recursive comparison can run on real arms later.
   varies, and `manifest` holds `{"protocol_ref", "base_revision", "candidate_ref", "candidate":
   {...}, "incumbent": {...}, "envelope": "retrieval_parameters", "corpus_digest"}` (the two ref
   keys per lane 6's request, "Provided to lane 6").
-- Two migrations in `scripts/update/migrations.py`, registered in `MIGRATIONS`, idempotent:
-  `improvement_investigation_stage_field` (additive confirm, on the
+- Three migrations in `scripts/update/migrations.py`, registered in `MIGRATIONS`, idempotent:
+  `improvement_controller_state` (confirms the one-row-per-project `ImprovementControllerState`
+  model, round 3), `improvement_investigation_stage_field` (additive confirm, on the
   `_migrate_confirm_improvement_v2_fields` precedent at `:1463`, registered in `MIGRATIONS` at
   `:1644`) and `retire_sdlc_reflection`
   (removes `data/sdlc_reflection_last_run.json` if present and records the retirement).
@@ -743,7 +775,7 @@ built here so the recursive comparison can run on real arms later.
 #### Case opening and the novelty check
 
 - `reflections/improvement_plan.py::open_cases(project_key, charter)` clusters **unconsumed**
-  rows, not a time window. A watermark on the controller head payload (never a file) is only a
+  rows, not a time window. The `evidence_watermark` on `ImprovementControllerState` (never a file) is only a
   scan bound: the tick reads evidence rows with `observed_at` newer than
   `watermark - EVIDENCE_TTL` (the rows still alive under the 30-day TTL), then drops every id that
   any case already holds:
@@ -840,8 +872,8 @@ built here so the recursive comparison can run on real arms later.
   blocked_by}], "intake_pool": [investigation ids not yet cases], "previous_ref", "diff":
   {"entered": [...], "left": [{case_id, reason}], "moved": [{case_id, from, to, why}]}}`, saved
   through the verifying store as spike-4 describes. The `at` timestamp and `previous_ref` make
-  the chain reconstructable from any snapshot. The latest reference is stored on the controller
-  head payload by the `ranking_recorded` event.
+  the chain reconstructable from any snapshot. The latest reference is stored as
+  `ImprovementControllerState.last_snapshot_ref` by the tick's plain `save()`.
 - `load_snapshot(ref)` and `latest_snapshot(project_key)` back both the dashboard and
   `valor-improve ranking [--at DIGEST]`; a `--at` that does not verify prints the
   `ArtifactIntegrityError` and exits 2.
@@ -864,11 +896,8 @@ built here so the recursive comparison can run on real arms later.
   pinned digest changed); `open_cases`; `rank` + `write_snapshot` + `ranking_recorded`;
   `propose_one_action`; the `apply_verdict` backstop. The backstop imports
   `tools.improvement_experiment.apply_verdict` **inside the step function**, never at module
-  level: task 6 creates that module after task 5 lands, and a module-level import would make
-  task 5's tests fail until task 6 exists. An `ImportError` there is reported as
-  `findings=["verdict backstop unavailable: tools.improvement_experiment not built"]` and the
-  tick continues; once task 6 lands the step runs for real, and the integration test exercises
-  it.
+  level, so the planner module carries no experiment machinery at import time
+  (`test_no_llm_or_dispatch_imports` pins that); the integration test exercises the step.
 - **Unblock step, exactly**: `report = tools.improvement_resources.probe()` once per tick (the
   function takes no item argument, `tools/improvement_resources.py:204`, and returns one entry
   per name in `RESOURCES`); for every open case with `blocked_by`:
@@ -884,8 +913,13 @@ built here so the recursive comparison can run on real arms later.
   `sha256(case_id + snapshot_ref + action_kind)[:16]`, so a re-run of the same tick proposes the
   same action and lane 3's intent record dedups it. A case with an intent already `admitted`,
   `materialized`, or `running` is skipped as busy.
-- The controller head payload carries `{last_snapshot_ref, evidence_watermark, last_tick_at}`;
-  the tick reads it first and refuses to run when the head is `paused` (lane 3's break-glass).
+- `models/improvement_controller_state.py::ImprovementControllerState` (one row per
+  `project_key`, plain ORM `save()`, migration-registered) carries
+  `{last_snapshot_ref, evidence_watermark, last_tick_at, digest_watermark}`; lane 3's journal
+  is per-case only, so this state never goes through `transition()`;
+  a namespace or per-case pause (lane 3's break-glass) is enforced inside the Lua script, so it
+  surfaces to the tick as a `PAUSED` reason from `transition()`/`set_state()`; the tick records
+  `paused:<case_id>` as a finding and skips that case, never pre-reading a pause hash itself.
 - No LLM call anywhere in the tick. The one place judgment enters is the research session.
 
 #### The brief and the research skill
@@ -1055,8 +1089,10 @@ built here so the recursive comparison can run on real arms later.
   sized from `n_queries * 2 * judge_price_estimate`, then `runner.evaluate`. The session runs it
   with `run_in_background` and polls `valor-improve experiment show --id` (prints state, verdict,
   and `notes`). Refuses to start when the lane slot is not held by this session's action id.
-- **Apply verdict** (`apply_verdict(evaluation)`): the rule in Data Flow step 6, each transition a
-  journal event then a `save()`. `reject` sets `rejected_reason` from the evaluation's
+- **Apply verdict** (`apply_verdict(evaluation)`): the rule in Data Flow step 6, each state change
+  `journal.set_state(...)` under the case lease, then `projection.apply`, then the non-state
+  `save()`; `test_apply_verdict_state_survives_projection` runs one `projection.apply` after a
+  `reject` and asserts `rejected` survived it. `reject` sets `rejected_reason` from the evaluation's
   `rationale`/`notes` and appends the evaluation id to `evaluation_ids`. Called by `experiment
   evaluate` after `runner.evaluate` returns and, as a backstop, by the planner tick for any
   `complete` evaluation whose case still reads `evaluating`.
@@ -1078,7 +1114,7 @@ demonstrates the cycle's shape, not an acquired ability.**
 
 - `reflections/improvement_assumption_digest.py::run_improvement_assumption_digest()`, registered
   as `improvement-assumption-digest` with `cadence="259200s"`. Reads investigations resolved since
-  the last digest (watermark on the controller head payload) that carry a
+  the last digest (`digest_watermark` on `ImprovementControllerState`) that carry a
   `provisional_assumption`, `resource_acquired` evidence rows, lane 7's `spend_receipt` overrun
   rows (and exposes `on_escalation(payload)` for `tools/infrastructure_budget.py:568-574` to call,
   which appends to a pending list the next digest drains), and vault requests (investigations of
@@ -1105,7 +1141,8 @@ demonstrates the cycle's shape, not an acquired ability.**
   interval, and the snapshot in which it left). Three templates under `ui/templates/improvement/`,
   three inline routes in `ui/app.py`, three links from `/`. `get_goals`'s "Open cases" section reads
   positions from `get_ranking` when a snapshot exists and its placeholder text names lane 5, not
-  lane 3. The exact-list test moves to seven names and gains the no-activity-counter assertion.
+  lane 3. The exact-list test moves to nine names (lane 3's `get_control_status` and lane 6's
+  `get_release_lineage` are already exported) and gains the no-activity-counter assertion.
 
 #### The qualified-result report
 
@@ -1216,7 +1253,7 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_improvement_models.py::INDEXED_VOCABULARIES` (`:60-63`) — UPDATE: `ImprovementInvestigation.kind` grows to eight values and `state` to five (`awaiting_authorization`); the tuple import picks the new values up, and the test keeps failing if a ninth kind or a sixth state appears without an argument here.
 - [ ] `tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS` (`:93-97`) — UPDATE: add `(ImprovementEvidence, "kind"): 10` with the cardinality argument (two adapter-owned kinds, `lesson` and `promise`, each an index set with its own reader; `other` would make both unqueryable). This is the "named entry carrying its reason" the test's own message demands.
 - [ ] `tests/unit/test_improvement_models.py::TestLane7EvidenceKinds` (`:259`) — UPDATE: gains the sibling class `TestLane5EvidenceKinds` asserting `lesson` and `promise` are declared and round-trip without coercion to `other`, on the same shape as `:267-292`.
-- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` (`:719-733`) — UPDATE: the exact getter list becomes `["get_coverage", "get_goals", "get_hypotheses", "get_intervention_burden", "get_provisional_assumptions", "get_ranking", "get_rejected_approaches"]`. The rule the test protects (no activity counter) stands: none of the three new getters returns a count of experiments or patches, and a new assertion checks that no getter's result dict carries a key named `experiment_count` or `merged_patch_count`.
+- [ ] `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts` (`:719-733`) — UPDATE: the exact getter list becomes `["get_control_status", "get_coverage", "get_goals", "get_hypotheses", "get_intervention_burden", "get_provisional_assumptions", "get_ranking", "get_rejected_approaches", "get_release_lineage"]` (lane 3 already exports `get_control_status`; lane 6 already exports `get_release_lineage`). The rule the test protects (no activity counter) stands: none of the three new getters returns a count of experiments or patches, and a new assertion checks that no getter's result dict carries a key named `experiment_count` or `merged_patch_count`.
 - [ ] `tests/unit/test_ui_app.py::test_index_page_links_all_improvement_partials` (`:735`) — UPDATE: asserts the three new partial routes (`/_partials/improvement/ranking/`, `/hypotheses/`, `/rejected/`) are linked from `/`.
 - [ ] `tests/unit/test_sdlc_stubs.py::TestCheckExistingReflectionPR` (`:156-194`) — DELETE: it tests `scripts.sdlc_reflection._check_existing_reflection_pr`, and the script is deleted whole. The stub-creation tests above it (`:34-141`) test `scripts/update/migrations.py`'s `create_sdlc_stubs` and stay.
 - [ ] `tests/unit/test_install_scripts_bootstrap.py` (`:62`, `:84`) — UPDATE: remove the `install_sdlc_reflection.sh` entries from both dicts; the installer is deleted with the script.
@@ -1224,7 +1261,7 @@ Every file below was read on `main` at `89f800876` (or on `session/sdlc-3216` at
 - [ ] `tests/unit/test_improvement_evidence.py::TestCollectCorrections` and siblings (`:260-344`) — no change to existing cases; the file gains `TestCollectLessons` and `TestCollectPromises` classes on the same fixture shape.
 - [ ] `tests/unit/test_improvement_evidence.py` (no existing case asserts the `len(findings) == 3` literal) — no change to existing cases; the file gains two `run_improvement_collect` status cases (all-skipped is `success`, all-failed is `error`) pinning the new `failed`/`skipped` rule.
 - [ ] `tests/unit/test_improvement_models.py::FORBIDDEN_INDEX_NAMES` (`:104`) — UPDATE: gains `stage`, `dedup_identity`, `evaluation_ids`, `blocked_by`, `research_process_spec`; the loop at `:186` keeps refusing an index on any of them.
-- [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the two entries this lane registers (`retire_sdlc_reflection` and `improvement_investigation_stage_field`).
+- [ ] `tests/unit/test_migrations.py` — UPDATE: the registered-migration assertions gain the three entries this lane registers (`improvement_investigation_stage_field`, `improvement_controller_state`, and `retire_sdlc_reflection`).
 - [ ] (lane 4) `tests/unit/test_improvement_eval_arena.py::test_carries_the_four_arm_keys` (`:48`) — no change; the arm env is untouched. The arm worker's job-spec test file gains cases for the `rrf_k` and `min_rrf_score` pass-throughs, asserting an absent key leaves `retrieve_memories` at its defaults.
 - [ ] `tests/unit/test_infrastructure_budget.py` — no change: lane 7 already tests the `on_escalation` sink both present and absent (`tools/infrastructure_budget.py:568-574`); this lane supplies the callable and adds one integration case in its own digest test file.
 - [ ] `tests/unit/test_improvement_resources.py` (`:75`, `:142`, `:200`) — no change to existing cases: each asserts `set(report) == set(RESOURCES)`, which follows the tuple when `meta_model_api` is appended; the file gains one case asserting a vault title containing "Meta Model API" classifies under `meta_model_api` and one asserting a title with neither keyword set reports `absent` for it.
@@ -1320,12 +1357,13 @@ Python functions the CLI wraps.
 **Location:** `reflections/improvement_plan.py::propose_one_action`
 **Trigger:** The reflection scheduler restarts while a tick is mid-flight, or an operator runs the
 tick by hand during a scheduled one.
-**Data prerequisite:** The snapshot reference on the controller head payload.
+**Data prerequisite:** The snapshot reference on `ImprovementControllerState`.
 **State prerequisite:** The case's intent state in lane 3's record.
 **Mitigation:** The action id is a digest of `(case_id, snapshot_ref, action_kind)`, so both ticks
-compute the same id and lane 3's intent record dedups on it; the journal's `transition` refuses
-the second `ranking_recorded` at the same expected revision with a reason code, and the loser
-reports `findings=["ranking_recorded refused: revision moved"]` and writes no proposal.
+compute the same id and lane 3's intent record dedups on it; the second tick's per-case
+`ranking_recorded` presents a stale `expected_revision` and is refused with a reason code, and
+the loser reports `findings=["ranking_recorded refused: REVISION_MISMATCH"]` and writes no
+proposal.
 
 ### Race 2: The evaluation finishes while the planner tick is reading the case
 **Location:** `tools/improvement_experiment.py::apply_verdict` versus
@@ -1360,6 +1398,22 @@ watermark write.
 **Mitigation:** The watermark is the newest `resolved_at` the digest actually rendered, not
 "now", so a row resolved after the read is newer than the watermark and appears in the next
 digest. Watermark writes happen only after a successful send.
+
+### Race 5: The planner tick and `scheduler_adapter.tick()` contend for one case's lease
+**Location:** `reflections/improvement_plan.py` (every per-case journal write) versus
+`tools/improvement_control/scheduler_adapter.py::_tick_one_case`
+**Trigger:** Both reflections fire in the same minute, or an operator runs one by hand.
+**Data prerequisite:** The case head exists (`read_head` non-`None`) and its `highest_accepted`
+reflects the adapter's last dispatch.
+**State prerequisite:** The case lease key `improve:{project}:{case_id}:lease` is held by one
+writer at a time.
+**Mitigation:** Both writers acquire the same per-case lease before any `transition()` or
+`set_state()`; the loser gets `None` from `acquire`, records `lease_busy:<case_id>`, and skips
+that case this tick (the next tick retries). A generation minted by the holder is
+`>= highest_accepted` by construction, so no write from either side is ever refused
+`STALE_GENERATION` for a stale copy. `test_planner_skips_case_when_lease_held` holds the lease
+with a second `default_lease()` handle and asserts the tick writes nothing to that case's journal
+and reports the finding.
 
 ## No-Gos (Out of Scope)
 
@@ -1402,7 +1456,7 @@ digest. Watermark writes happen only after a successful send.
 - `"sdlc-reflection"` joins `OBSOLETE_SERVICE_SUFFIXES` (`scripts/update/service.py:39-51`), so
   `/update` boots out `com.valor.sdlc-reflection` and removes its plist on every fleet machine
   that ever ran `install_sdlc_reflection.sh`, by exact label match as the sweep already does.
-- Two migrations registered in `MIGRATIONS` (Records, above), idempotent, recorded once in
+- Three migrations registered in `MIGRATIONS` (Records, above), idempotent, recorded once in
   `data/migrations_completed.json`.
 - Two new `ImprovementSettings` fields (`promise_detector_enabled`, `cheap_inference_model`),
   both defaulting off, both declared in `.env.example` with `# @optional` and a
@@ -1442,7 +1496,7 @@ digest. Watermark writes happen only after a successful send.
 
 ### Feature Documentation
 - [ ] Create `docs/features/improvement-research-cycle.md`: the planner tick, the ranking snapshot and its diff, the investigation lifecycle (eight kinds, five indexed states, the unindexed `stage`), the claim rule, provisional assumptions and the three-day digest, the brief contract, the experiment envelope for this lane (retrieval arm parameters), the verdict-to-selection rule, the two new observer adapters, and the qualified-result report format
-- [ ] Update `docs/features/improvement-controller.md`: "What exists today" (`:12-21`) names lane 5; the Three layers "Research reasoning" paragraph (`:29-32`) drops "Not built yet (lane 5)"; the Dashboard section (`:364-395`) documents the three new partials and the seven-getter list; the Evidence collection table (`:92-96`) gains the `lesson` and `promise` adapter rows; a "Research cycle" section links the new feature doc
+- [ ] Update `docs/features/improvement-controller.md`: "What exists today" (`:12-21`) names lane 5; the Three layers "Research reasoning" paragraph (`:29-32`) drops "Not built yet (lane 5)"; the Dashboard section (`:364-395`) documents the three new partials and the nine-getter list; the Evidence collection table (`:92-96`) gains the `lesson` and `promise` adapter rows; a "Research cycle" section links the new feature doc
 - [ ] Update `docs/features/sdlc-repo-addenda.md` (`:46-92`): the reflection-agent section is replaced by one paragraph stating that lessons in PR bodies are now `ImprovementEvidence` rows of kind `lesson` read by the planner, and the `com.valor.sdlc-reflection` rows leave the file table
 - [ ] Update `docs/features/launchctl-bootstrap-fail-soft.md:76`: remove the `install_sdlc_reflection.sh` row
 - [ ] Update `docs/features/log-rotation.md:40` and `docs/features/nightly-regression-tests.md:371`: remove the `sdlc_reflection.py` / `sdlc_reflection_last_run.json` references
@@ -1462,61 +1516,66 @@ digest. Watermark writes happen only after a successful send.
 The issue's seven acceptance criteria, restated against charter v2 where the Freshness Check
 records an override, plus this plan's own.
 
-- [ ] One autonomous hypothesis inside the retrieval-parameter envelope is frozen under a contract
+- [x] One autonomous hypothesis inside the retrieval-parameter envelope is frozen under a contract
   (digest stored before any arm runs) and measured by lane 4's harness with paired blinded
   evaluation, producing `accept`, `reject`, `inconclusive`, or `infra_failure` with complete
   lineage (case, investigations, model revision, experiment, evaluation, charter digest) readable
   from the records alone
-- [ ] **The verdict changes the next selection, demonstrated**: two consecutive ranking snapshots
+- [x] **The verdict changes the next selection, demonstrated**: two consecutive ranking snapshots
   exist whose diff names the case under `left` (reject) or `moved` (inconclusive) with the
-  evaluation id as the reason, and a seeded `rejected` case is refused re-opening by the tick
-- [ ] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
+  evaluation id as the reason, and a seeded `rejected` case is refused re-opening by the tick;
+  the `rejected` state was written through `journal.set_state` and survives a `projection.apply`
+- [x] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
   to end in the real cycle, with claims carrying URLs and retrieval dates; the runbook seeds a
   `Memory`, never an evidence row, and the tick's `counts["inspirations"] >= 1` is recorded
-- [ ] Seeded provenance is stated, not hidden: every seeded evidence row carries the `seed`
+- [x] Seeded provenance is stated, not hidden: every seeded evidence row carries the `seed`
   marker (`source_ref="seed:..."` or a `seed` key in `detail`), the report's "What this does not
   establish" names every case opened from seeded evidence, and the report posted on #3217 states
   whether any case in the real cycle opened from organically collected evidence (the expected
   answer for the first cycle is "none besides the seeded inference case, unless the lesson or
   correction adapters opened one", and the report says which)
-- [ ] The `resource_acquisition` investigation produces a prepared adapter and a written vault
+- [x] The `resource_acquisition` investigation produces a prepared adapter and a written vault
   request rendered in the digest, and places no credential; the anti-criterion row passes
-- [ ] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
+- [x] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
   `lesson` rows from merged PR bodies; `sdlc-reflection` is in the obsolete-service sweep
-- [ ] At least one provisional assumption is recorded with its charter passage, confidence,
+- [x] At least one provisional assumption is recorded with its charter passage, confidence,
   consequence, and overturning observation, rendered on the goals partial and in a digest
-- [ ] The qualified-result report for the real cycle is generated from records, carries the three
+- [x] The qualified-result report for the real cycle is generated from records, carries the three
   mandatory sections, and is posted on #3217
-- [ ] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
-  kinds with their cardinality argument, and both migrations registered
-- [ ] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
+- [x] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
+  kinds with their cardinality argument, and all three migrations registered
+- [x] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
   dashboard's ranking partial and `valor-improve ranking` read the same artifact
-- [ ] The brief opens with the pinned charter verbatim; the research skill's first step prints it
-- [ ] The digest asks nothing, says silence validates nothing, and renders `resource_acquired`
+- [x] The brief opens with the pinned charter verbatim; the research skill's first step prints it
+- [x] The digest asks nothing, says silence validates nothing, and renders `resource_acquired`
   rows and lane 7's overrun payload under their own headings
-- [ ] The `skill_acquisition` kind runs stages 1 through 3 in the real cycle and resolves stage 4
+- [x] The `skill_acquisition` kind runs stages 1 through 3 in the real cycle and resolves stage 4
   as a provisional assumption citing #3311
-- [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
-- [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
-  is exactly seven and carries no activity counter
-- [ ] Lane 6's three seams exist: every model revision carries `research_process_spec` in the
-  canonical bytes and a `research_process_digest` computed only by lane 6's function (`None`
-  until lane 6 merges; no second hashing routine in this lane), `PlannerArmRunner` registers
-  from the CLI entry when lane 6's module is importable and this lane imports cleanly when it is
-  not (method-body import, `ArmRunnerUnavailable`, tests via a fake `sys.modules` entry), and
-  every manifest carries `base_revision` and `candidate_ref`
-- [ ] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
+- [x] The `promise` adapter is wired, gated off by default, and tested with an injected transport
+- [x] Three new dashboard partials render content, empty, and unavailable states; the getter list
+  is exactly nine (the six existing including lane 3's `get_control_status` and lane 6's
+  `get_release_lineage`, plus `get_ranking`, `get_hypotheses`, `get_rejected_approaches`) and carries no activity counter
+- [x] Lane 6's three seams are bound directly (lane 6, PR #3318, is merged): every model
+  revision carries `research_process_spec` in the canonical bytes and a
+  `research_process_digest` set through `tools.improvement_recursion.process.research_process_digest`
+  (no second hashing routine in this lane; `revise-model --backfill-digests` fills older rows
+  through the same function), `PlannerArmRunner` (`tools/improvement_plan_arm.py`) is registered
+  from the CLI entry through lane 6's real `register_arm_runner` and returns lane 6's own
+  `ArmResult` and `BudgetUse` (money read from records: `unit2_usd=None`, `unit3_usd=None`; only
+  `subscription_turns` and `wall_seconds` come from the arm), and every manifest carries
+  `base_revision` and `candidate_ref`
+- [x] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
   passes; a seeded row carrying `priority_area` opens a case on the first tick
   (`test_seeded_inspiration_opens_a_case`); and the two human-paced waits (vault request,
   amendment request) survive the investigation TTL through `case.blocked_by` (shape
   `vault:{resource_name}`, validated against `RESOURCES`), `case.summary`, and the tick's
   keep-alive save, with the block cleared on a `verified` probe of `meta_model_api`
   (`test_blocked_case_unblocks_on_verified_probe`)
-- [ ] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
+- [x] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
   `batch_size` equals the number of queries actually generated
-- [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -1712,6 +1771,12 @@ task 0 passes.
   single proposal, the `apply_verdict` backstop with its **function-local** import of
   `tools.improvement_experiment.apply_verdict` (task 6 lands after this task) and the
   `ImportError` finding
+- `models/improvement_controller_state.py::ImprovementControllerState` (one row per `project_key`,
+  `last_snapshot_ref`, `evidence_watermark`, `last_tick_at`, `digest_watermark`; migration
+  registered) and the lease-fenced write helper the tick, the unblock pass, and `apply_verdict`
+  share ("Lease-fenced journal writes"): `acquire` → `read_head` → `transition`/`set_state` →
+  `projection.apply` → release in `finally`; `test_planner_skips_case_when_lease_held`, and every
+  planner state change asserted to survive one `projection.apply`
 - `rank()` reads `case.blocked_by` for `blocked`; `process_spec_json` in
   `tools/improvement_ranking.py` (canonical bytes only; the digest comes from lane 6's import or
   stays `None`), called by `revise-model`; `test_process_spec_canonical_bytes` with the fixture
@@ -1719,7 +1784,9 @@ task 0 passes.
   import of `ArmResult`/`BudgetUse` and `ArmRunnerUnavailable("ARM_RUNNER_UNAVAILABLE: lane 6
   not merged")` on `ImportError`; the CLI entry's `try`/`except ImportError` around
   `register_arm_runner`; `test_arm_runner_registers_from_cli_entry` (fake
-  `tools.improvement_recursion.arms` via `monkeypatch.setitem(sys.modules, ...)`) and
+  `tools.improvement_recursion.arms` via `monkeypatch.setitem(sys.modules, ...)`, whose fake
+  `BudgetUse.__init__` accepts exactly `unit2_usd, unit3_usd, subscription_turns, wall_seconds`
+  so a wrong keyword fails in this suite) and
   `test_arm_runner_nothing_registers_at_import` (module absent, import succeeds, `run` raises)
 - `register_improvement_planner` and `register_improvement_assumption_digest` in
   `reflection_register.py` and `scripts/update/run.py`; parametrize the six registration tests
@@ -1740,7 +1807,9 @@ task 0 passes.
   numbered steps (unconditional #2082 `prior_answers` entry, `MIN_QUERIES` /
   `KNOWN_ITEM_SHORTFALL`, incumbent exactly `{"limit": 10}`, `batch_size = len(queries)` after
   generation, manifest carries `base_revision` and `candidate_ref`), `evaluate_experiment`
-  (reservation then `runner.evaluate`), `apply_verdict`, `repair`; tests for the shortfall
+  (reservation then `runner.evaluate`), `apply_verdict` through the shared lease-fenced helper
+  (`set_state` then `projection.apply` then the non-state `save()`;
+  `test_apply_verdict_state_survives_projection`), `repair`; tests for the shortfall
   refusal, the batch-size-after-generation rule, and `prior_answers` naming `#2082`
 - `arm_worker.py::handle_job` and `retrieval.py::retrieve_ranked_ids` pass-throughs, absent keys
   not forwarded
@@ -1759,7 +1828,7 @@ task 0 passes.
   fixed closing line, the sections, `send_host_eng_telegram`
 - `get_ranking`, `get_hypotheses`, `get_rejected_approaches`; three templates; three inline
   routes; three index links; the goals partial's placeholder text and position column
-- The exact-list test to seven names plus the no-activity-counter assertion
+- The exact-list test to nine names plus the no-activity-counter assertion
 
 ### 8. Validate wave 2 and the integration test
 - **Task ID**: validate-loop
@@ -1820,9 +1889,9 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | Lint clean | `python -m ruff check reflections/ tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py tools/improvement_plan_arm.py ui/data/improvement.py models/improvement_investigation.py models/improvement_evidence.py scripts/update/` | exit code 0 |
 | Format clean | `python -m ruff format --check reflections/ tools/ ui/data/ models/` | exit code 0 |
 | Eight investigation kinds, exactly | `python -c "from models.improvement_investigation import INVESTIGATION_KINDS as K; assert set(K)=={'probe','trace_analysis','memory_retrieval','inspiration_intake','web_research','resource_acquisition','skill_acquisition','charter_amendment'}, K"` | exit code 0 |
-| No question kind and no attention queue | `grep -rEn "\"question\"|attention_queue|daily_question|AskUserQuestion" models/improvement_*.py reflections/improvement_*.py tools/improvement_*.py \| wc -l` | match count == 0 |
+| No question kind and no attention queue | `grep -rEn "\"question\"\|attention_queue\|daily_question\|AskUserQuestion" models/improvement_*.py reflections/improvement_*.py tools/improvement_*.py \| wc -l` | match count == 0 |
 | The poll registry and answer routing are untouched | `git diff --stat origin/main -- tools/ask_poll.py bridge/poll_registry.py bridge/answer_routing.py \| wc -l` | match count == 0 |
-| No controller module writes `.env` or invokes `op` (`probe` and `vault_write` excluded) | `grep -rEln "\"op\"|\bop \b|/\.env\b|\.env\"" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py \| wc -l` | match count == 0 |
+| No controller module writes `.env` or invokes `op` (`probe` and `vault_write` excluded) | `grep -rEln "\"op\"\|\bop \b\|/\.env\b\|\.env\"" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py \| wc -l` | match count == 0 |
 | Every recorded claim carries a URL and a retrieval date | `scripts/pytest-clean.sh tests/unit/test_improvement_investigations.py -k "claim_without_url_is_a_note or claim_without_date_is_a_note" -q` | exit code 0 |
 | A rejected hypothesis is not re-proposed on the next tick | `scripts/pytest-clean.sh tests/integration/test_improvement_research_cycle.py -k rejected_is_not_reproposed -q` | exit code 0 |
 | The verdict moves the ranking, visibly, between two snapshots | `scripts/pytest-clean.sh tests/integration/test_improvement_research_cycle.py -k verdict_moves_ranking -q` | exit code 0 |
@@ -1830,15 +1899,17 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | The digest text says silence validates nothing and asks nothing | `scripts/pytest-clean.sh tests/unit/test_improvement_assumption_digest.py -k "silence_validates_nothing and asks_nothing" -q` | exit code 0 |
 | `scripts/sdlc_reflection.py`, its installer, and its plist are gone | `ls scripts/sdlc_reflection.py scripts/install_sdlc_reflection.sh com.valor.sdlc-reflection.plist 2>/dev/null \| wc -l` | match count == 0 |
 | `sdlc-reflection` is in the obsolete-service sweep | `grep -c '"sdlc-reflection"' scripts/update/service.py` | output > 0 |
-| No live reference to the deleted script remains | `grep -rn "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| wc -l` | match count == 0 |
+| No live reference to the deleted script remains (task 8 note: the exclusion list also names the `retire_sdlc_reflection` migration, its tests, and the obsolete-sweep test, which the rows above require to name the script; task 11 note: the two feature docs the Documentation section requires to name that migration and state the retirement are excluded on the same ground, and the gitignored `PROGRESS.md` scratchpad is excluded because a fresh checkout never carries it) | `grep -rnE "sdlc_reflection\|install_sdlc_reflection\|sdlc-reflection" --include="*.py" --include="*.md" --include="*.sh" --include="*.toml" --include="*.plist" --exclude=PROGRESS.md . --exclude-dir=.worktrees --exclude-dir=archive --exclude-dir=.git \| grep -v "docs/plans/" \| grep -v "scripts/update/service.py" \| grep -v "scripts/update/migrations.py" \| grep -v "tests/unit/test_migrations.py" \| grep -v "tests/unit/test_update_remove_obsolete_services.py" \| grep -v "docs/features/improvement-research-cycle.md" \| grep -v "docs/features/improvement-controller.md" \| wc -l` | match count == 0 |
 | Lesson adapter is wired into the tick | `grep -c "collect_lessons" reflections/improvement_collect.py` | output > 1 |
-| Promise adapter is wired into the tick and gated | `grep -c "collect_promises\|promise_detector" reflections/improvement_collect.py` | output > 1 |
-| The dashboard exports exactly the seven honest getters | `python -c "import ui.data.improvement as m; assert [n for n in dir(m) if n.startswith('get_')]==['get_coverage','get_goals','get_hypotheses','get_intervention_burden','get_provisional_assumptions','get_ranking','get_rejected_approaches']"` | exit code 0 |
-| No dashboard getter returns an activity counter | `grep -rEn "experiment_count|merged_patch_count|patches_merged" ui/data/improvement.py ui/templates/improvement/ \| wc -l` | match count == 0 |
-| No `ImprovementRelease` writer in this lane | `grep -rEn "ImprovementRelease\(|ImprovementRelease\.create|release\.save\(" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_experiment.py tools/improvement_report.py \| wc -l` | match count == 0 |
+| Promise adapter is wired into the tick and gated | `grep -cE "collect_promises\|promise_detector" reflections/improvement_collect.py` | output > 1 |
+| No planner or verdict path writes `state` by ORM | `grep -nE "\.state *= *['\"]" reflections/improvement_plan.py tools/improvement_experiment.py \| wc -l` | match count == 0 |
+| Every lane-5 journal write is lease-fenced | `python -c "import inspect, reflections.improvement_plan as p, tools.improvement_experiment as e; src=inspect.getsource(p)+inspect.getsource(e); assert 'default_lease().acquire(' in src and 'projection' in src"` | exit code 0 |
+| The dashboard exports exactly the nine honest getters | `python -c "import ui.data.improvement as m; assert [n for n in dir(m) if n.startswith('get_')]==['get_control_status','get_coverage','get_goals','get_hypotheses','get_intervention_burden','get_provisional_assumptions','get_ranking','get_rejected_approaches','get_release_lineage']"` | exit code 0 |
+| No dashboard getter returns an activity counter | `grep -rEn "experiment_count\|merged_patch_count\|patches_merged" ui/data/improvement.py ui/templates/improvement/ \| wc -l` | match count == 0 |
+| No `ImprovementRelease` writer in this lane | `grep -rEn "ImprovementRelease\(\|ImprovementRelease\.create\|release\.save\(" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_experiment.py tools/improvement_report.py \| wc -l` | match count == 0 |
 | The arm worker still reads only what `retrieve_memories` accepts (lane 4 surface) | `python -c "import inspect; from agent.memory_retrieval import retrieve_memories as r; from tools.improvement_eval import arm_worker; src=inspect.getsource(arm_worker.handle_job); assert 'rrf_k' in src and 'min_rrf_score' in src and 'retrieval_mode' not in src"` | exit code 0 |
-| Both migrations registered | `python -c "from scripts.update.migrations import MIGRATIONS; ks=' '.join(MIGRATIONS); assert 'retire_sdlc_reflection' in ks and 'improvement_investigation_stage' in ks, ks"` | exit code 0 |
-| Three improvement reflections registered from `run.py` | `grep -c "register_improvement_collect\|register_improvement_planner\|register_improvement_assumption_digest" scripts/update/run.py` | output > 2 |
+| All three migrations registered | `python -c "from scripts.update.migrations import MIGRATIONS; ks=' '.join(MIGRATIONS); assert 'retire_sdlc_reflection' in ks and 'improvement_investigation_stage' in ks and 'improvement_controller_state' in ks, ks"` | exit code 0 |
+| Three improvement reflections registered from `run.py` | `grep -cE "register_improvement_collect\|register_improvement_planner\|register_improvement_assumption_digest" scripts/update/run.py` | output > 2 |
 | Charter unwritten by this lane | `git diff --stat origin/main -- docs/improvement-charter.md models/improvement_charter.py \| wc -l` | match count == 0 |
 | `docs/sdlc/` files untouched by the retirement (eleven on main) | `python -c "import glob,sys; sys.exit(0 if len(glob.glob('docs/sdlc/*.md'))==11 else 1)"` | exit code 0 |
 | Existing auto-generated reflection notes preserved | `git diff --stat origin/main -- docs/sdlc/ \| wc -l` | match count == 0 |
@@ -1851,15 +1922,39 @@ Anti-criteria use the `... | wc -l` shape so a clean tree emits `0` rather than 
 | A vault request survives the investigation TTL on the case and unblocks on a verified probe | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_investigations.py -k "blocked_by_survives_expiry or awaiting_row_kept_alive or unblocks_on_verified_probe or blocked_by_names_a_known_resource" -q` | exit code 0 |
 | `meta_model_api` is a probeable resource | `python -c "from tools.improvement_resources import RESOURCES, _VAULT_TITLE_KEYWORDS as K; assert 'meta_model_api' in RESOURCES and 'meta_model_api' in K, (RESOURCES, K)"` | exit code 0 |
 | A seeded inspiration row opens a case on the first tick | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k seeded_inspiration_opens_a_case -q` | exit code 0 |
-| Lane 6's module is never imported at module level in this lane | `grep -rEn "^(from\|import) tools\.improvement_recursion" reflections/improvement_*.py tools/improvement_ranking.py tools/improvement_investigations.py tools/improvement_brief.py tools/improvement_experiment.py tools/improvement_report.py tools/improvement_plan_arm.py tools/improvement.py \| wc -l` | match count == 0 |
+| Lane 6's types are bound directly, with no fallback or stub (lane 6 merged) | `grep -rEn "ImportError\|SimpleNamespace\|ArmRunnerUnavailable" tools/improvement_plan_arm.py \| wc -l` | match count == 0 |
 | The report names seeded cases | `scripts/pytest-clean.sh tests/unit/test_improvement_report.py -k seeded_inputs_line -q` | exit code 0 |
 | Tick status counts failures per adapter, never skips | `scripts/pytest-clean.sh tests/unit/test_improvement_evidence.py -k "all_skipped_is_success or all_failed_is_error" -q` | exit code 0 |
 | The three-adapter status literal is gone | `grep -n "len(findings) == 3" reflections/improvement_collect.py \| wc -l` | match count == 0 |
-| Arm runner registers only from the CLI entry | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py -k "arm_runner" -q` | exit code 0 |
+| Arm runner registers from the CLI entry through lane 6's real registry, and lane 6's canonical-bytes test activates | `scripts/pytest-clean.sh tests/unit/test_improvement_planner.py tests/unit/test_improvement_recursion_process.py -k "arm_runner or lane5_canonical_bytes" -q` | exit code 0 |
 | Retrieval envelope refuses `retrieval_mode` | `scripts/pytest-clean.sh tests/unit/test_improvement_experiment.py -k "refuses_retrieval_mode" -q` | exit code 0 |
 | Plan critique verdict recorded | `grep -c "READY TO BUILD" docs/plans/improvement-controller-lane-5-first-complete-research-cycle.md` | output > 0 |
 
 ## Critique Results
+
+Critique round 5 (verification of revision 4 at `a1eae369b`). Mode: independent roster (3 critics, `sonnet`, foreground, result-file barrier complete 3/3, all grounded). Verdict: READY TO BUILD (no concerns). No findings from the war room: all three critics confirmed the round-4 residue is gone, "controller head" and the seven-getter count appear nowhere outside these tables, and the rounds 2 and 3 embeddings are intact.
+
+### Round 4 (addressed; retained as the record)
+
+Critique round 4 (verification of revision 3 at `33500d185`). Mode: independent roster (3 critics, `sonnet`, foreground, result-file barrier complete 3/3, all grounded). Verdict: NEEDS REVISION (1 blocker reached independently by all three critics, 2 concerns, 0 nits). Every finding is residue of revision 3's own edit; items 2 (set_state then projection.apply), 3 (`BudgetUse.unit2_usd`), and the round-2 embeddings were verified intact by all three.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness, Scope & Value, History & Consistency | The Consumed-from-lane-3 Journal row's "Where this lane calls it" cell (line 572) still reads "`ranking_recorded` on the case-independent controller head each tick", contradicting the same row's rewritten Requirement cell and the shipped `journal.py` (every key, lease, and `transition()` is keyed by a real `ImprovementCase.id`), and the cell carries an orphaned duplicate fragment ("...never raise. ... returns a reason code on refusal, never raises"). The Ranking subsection (line 879) likewise still says the latest reference "is stored on the controller head payload by the `ranking_recorded` event". | Technical Approach: Consumed-from-lane-3 Journal row third cell rewritten and the duplicate fragment removed; Ranking subsection now names `ImprovementControllerState.last_snapshot_ref` | Third cell becomes "`ranking_recorded` per case whose rank position changed, lease-fenced as in 'Lease-fenced journal writes'"; delete the duplicate fragment; line 879 becomes "stored as `ImprovementControllerState.last_snapshot_ref` by the tick's plain `save()`". |
+| CONCERN | Risk & Robustness | "The planner tick" says the tick "reads it first and refuses to run when the head is `paused`" (line 926), naming a pre-read no shipped surface offers: `ImprovementControllerState` has no pause field and lane 3 exposes only the raw `keys.pause_key(project_key)` hash; the pause is enforced inside the Lua script (`journal.py:101-108`) and surfaces as a `PAUSED` `TransitionResult`. | "The planner tick" `ImprovementControllerState` bullet: pause surfaces as a `PAUSED` reason, tick records `paused:<case_id>` and skips | Replace the pre-read with: a namespace or per-case pause surfaces as a `PAUSED` reason from `transition()`/`set_state()`; the tick records `paused:<case_id>` as a finding and skips that case, never pre-reading a pause hash itself. |
+| CONCERN | History & Consistency | Test Impact (line 1260) and Documentation (line 1503) still carry the seven-getter list and count without `get_control_status`, contradicting the Verification row, Success Criteria, and Architectural Impact, which say eight; a builder following line 1260 verbatim writes an assertion that fails against the shipped module. | Test Impact `test_dashboard_never_offers_experiment_or_patch_counts` row (eight names, `get_control_status` first); Documentation `improvement-controller.md` task ("eight-getter list") | Line 1260's list gains `"get_control_status"` first (alphabetical); line 1503 says "eight-getter list". |
+
+### Round 3 (addressed; retained as the record)
+
+Critique round 3 (re-critique after the round-2 revision at `c3852d389`; recorded verdict hash was stale). Mode: independent roster (3 critics, `sonnet`, foreground, result-file barrier complete 3/3, all grounded). Verdict: NEEDS REVISION (2 blockers, 1 concern, 0 nits). The blocker below was reached independently by two critics; the concern by all three. Lanes 3 and 4 merged between rounds 2 and 3, so this round checked the plan against lane 3's shipped surface and lane 6's PR-visible `#3318` diff.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness, Scope & Value | The "case-independent controller head" does not exist in lane 3's shipped surface. Every key builder (`head_key`, `journal_key`, `intent_key`), every lease (`improve:{project}:{case_id}:lease`), and `transition()`'s mandatory `case_id` (`tools/improvement_control/journal.py:232-245`) are keyed by a real `ImprovementCase.id`; the `Head` schema (`journal.py:180-187`) is `{revision, state, epoch, highest_accepted, owner, updated_at, paused, pause_reason}` with no slot for `last_snapshot_ref`/`evidence_watermark`/`last_tick_at`. The plan journals `ranking_recorded` "on the case-independent controller head (lane 3's journal)" (Data Flow step 2(d), line 362), the Consumed table's Journal row says `(case_id or controller head, ...)` (line 565), and Race 1 relies on that head's revision fence. Separately, the plan never says where the planner tick's mandatory `generation` comes from: the only fenced source is `CaseLease.acquire(keys.lease_key(project_key, case_id), ttl)` (`lease.py:117-120`, `keys.py:82-83`), the pattern `scheduler_adapter._tick_one_case` (`scheduler_adapter.py:565-590`) and `tools/improvement.py::_acquire_lease`/`cmd_propose` use. Once `scheduler_adapter.tick()` has dispatched a case, any planner write to that case without its own lease-minted generation is refused `STALE_GENERATION` for good (`highest_accepted` never decreases), silently blocking `experiment_frozen`/`verdict_applied` on the one case the lane exists to demonstrate. | Technical Approach: "Consumed from lane 3" (rewritten Journal row, new Case lease row) and the new "Lease-fenced journal writes" subsection; Data Flow step 2(d); "The planner tick" (`ImprovementControllerState` replaces the head payload; digest watermark likewise); Records/Update System (third migration); Race 1 (prerequisite and mitigation) and new Race 5; task 5 (model, shared helper, `test_planner_skips_case_when_lease_held`); Verification row "Every lane-5 journal write is lease-fenced" | Two mechanisms, never one invented head. (1) The tick's non-case state `{last_snapshot_ref, evidence_watermark, last_tick_at}` is a lane-5-owned record written by ordinary ORM `save()` (one `ImprovementControllerState` row per `project_key`, or a field group on an existing per-project row), never through `transition()`, because there is no case to fence it against; the ranking snapshot itself stays in the verifying artifact store. (2) Every journaled per-case event (`case_opened`, `investigation_opened`, `hypothesis_proposed`, `experiment_frozen`, `verdict_applied`, `case_unblocked`, and `ranking_recorded` written once per case whose rank moved, since lane 3 already lists it in `KNOWN_EVENTS` at `journal.py:44`) is `generation = default_lease().acquire(keys.lease_key(project_key, case_id), ttl=settings.improvement.lease_ttl_seconds)`; on `None` (lease held, e.g. a concurrent `scheduler_adapter.tick()` pass) record a `lease_busy` finding and skip that write this tick, never fall back to a fixed or omitted generation; `transition(project_key, case_id, expected_revision=head.revision, generation=generation, event=..., payload_digest=..., artifact_ref=...)`; release in `finally`. Add a Race entry for the planner tick contending with `scheduler_adapter.tick()` for one case's lease, and a ninth Consumed-from-lane-3 row naming the lease. |
+| BLOCKER | History & Consistency | `apply_verdict`'s case-state transitions are written as "a journal event first and an ORM `save()` second" (Data Flow step 6) and "each transition a journal event then a `save()`" (Experiments, line 1073). Lane 3's shipped contract makes `ImprovementCase.state` a field with exactly two writers, both inside the transition script: only `journal.set_state(project_key, case_id, generation=, state=, by=)` (`journal.py:364-380`, a `state_changed` event) moves it, and the caller then runs `projection.apply(project_key, case_id)` (`projection.py:38`) to copy it onto the row; "a direct ORM save of `state` is overwritten by the next apply" (`docs/features/improvement-controller.md`, Control namespace contract). Neither `set_state` nor `projection.apply` appears anywhere in the plan, so a builder reading "journal event then `save()`" writes `case.state = "rejected"; case.save()`, which the next projection reverts, breaking the Success Criterion "the verdict changes the next selection". | Data Flow step 6; Experiments "Apply verdict" (`test_apply_verdict_state_survives_projection`); task 5 (every planner state change survives one `projection.apply`) and task 6 (`apply_verdict` through the shared helper); Success Criteria ("survives a `projection.apply`"); Verification row "No planner or verdict path writes `state` by ORM" | Every state-changing path (`apply_verdict`'s `reject` to `rejected`, `inconclusive` to `investigating`, `accept` to `evaluating`/`released`; the tick's `observed` to `investigating`; `case_unblocked`) acquires the case lease as in blocker 1, calls `journal.set_state(project_key, case_id, generation=g, state=<CASE_STATES value>, by="apply_verdict"\|"planner_tick")`, checks `result.ok`, releases the lease, then `from tools.improvement_control.projection import apply as project_case; project_case(project_key, case_id)` (the `_project()` pattern every accepting writer in `tools/improvement.py` follows), and only then writes non-state fields (`rejected_reason`, `evaluation_ids`, `blocked_by`) with a plain `case.save()`. The planner test for "rejected is not re-proposed" must run one `projection.apply` after the verdict and assert the state survived it. |
+| CONCERN | Risk & Robustness, Scope & Value, History & Consistency | The Freshness Check's build-time addendum cites `BudgetUse(unit1_usd, unit3_usd, subscription_turns, wall_seconds)` (line 150); PR #3318's `tools/improvement_recursion/budget.py` declares `unit2_usd, unit3_usd, subscription_turns, wall_seconds` and no `unit1_usd` (unit 1 is the subscription lane slot, accounted only as `subscription_turns`). `PlannerArmRunner.run` built to the cited name raises `TypeError` on its first real `BudgetUse`, and this lane's own tests cannot catch it because `test_arm_runner_registers_from_cli_entry` fakes `tools.improvement_recursion.arms` with a `SimpleNamespace` that accepts any keyword. | Freshness Check addendum (corrected to `unit2_usd`); task 5 (`test_arm_runner_registers_from_cli_entry`'s strict four-keyword fake) | Correct the addendum to `BudgetUse(unit2_usd, unit3_usd, subscription_turns, wall_seconds)`; `tools/improvement_plan_arm.py::PlannerArmRunner.run` keywords the paid-inference figure from lane 3's meter as `unit2_usd=`, never `unit1_usd=`; the registration test's fake module should expose a `BudgetUse` whose `__init__` accepts exactly those four keywords so a wrong name fails in this lane's suite rather than after lane 6 merges. |
+
+### Round 2 (addressed; retained as the record)
 
 Critique round 2 (re-critique after the revision pass at `c3852d389`). Mode: sequential lenses (Agent tool unavailable in the stage runner: not in tool list); three roster lenses applied in sequence, FULL depth (force-FULL: `appetite: Large`, touches `.claude/skills/`). Round 1's seven concerns and two nits were each re-verified against the cited sources and are addressed by the revision (the round-1 table with its "Addressed By" cells is in git history at `c3852d389`). Verdict: READY TO BUILD (with concerns).
 

@@ -718,7 +718,7 @@ class TestImprovementPartials:
         assert "inspiration" in resp.text
         assert "count of nothing" not in resp.text
 
-    def test_dashboard_never_offers_experiment_or_patch_counts(self, client):
+    def test_dashboard_never_offers_experiment_or_patch_counts(self, client, monkeypatch, tmp_path):
         """Activity is not improvement, and the dashboard must not imply it is."""
         import ui.data.improvement as improvement_data
 
@@ -729,15 +729,29 @@ class TestImprovementPartials:
             "get_control_status",
             "get_coverage",
             "get_goals",
+            "get_hypotheses",
             "get_intervention_burden",
             "get_provisional_assumptions",
+            "get_ranking",
+            "get_rejected_approaches",
             "get_release_lineage",
         ]
+
+        monkeypatch.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", str(tmp_path / "content"))
+        pk = "test-3217-ui-no-counter"
+        for name in exported:
+            result = getattr(improvement_data, name)(pk)
+            if isinstance(result, dict):
+                assert "experiment_count" not in result, name
+                assert "merged_patch_count" not in result, name
 
     def test_index_page_links_all_improvement_partials(self, client):
         resp = client.get("/")
         assert resp.status_code == 200
         assert "/_partials/improvement/goals/" in resp.text
+        assert "/_partials/improvement/ranking/" in resp.text
+        assert "/_partials/improvement/hypotheses/" in resp.text
+        assert "/_partials/improvement/rejected/" in resp.text
         assert "/_partials/improvement/coverage/" in resp.text
         assert "/_partials/improvement/burden/" in resp.text
         assert "/_partials/improvement/releases/" in resp.text
@@ -1026,3 +1040,283 @@ class TestImprovementPartials:
         assert resp.status_code == 200
         assert "Assumptions unavailable" in resp.text
         assert "Nothing proceeding on an unresolved assumption" not in resp.text
+
+
+def _snapshot_store(monkeypatch, tmp_path):
+    from models.verifying_artifact_store import VerifyingArtifactStore
+
+    root = str(tmp_path / "content")
+    monkeypatch.setenv("POPOTO_IMPROVEMENT_CONTENT_PATH", root)
+    return VerifyingArtifactStore(base_path=root)
+
+
+def _write_ranking(pk, store, case_ids, *, previous_ref=None, cases=()):
+    from datetime import UTC, datetime
+
+    from models.improvement_controller_state import ImprovementControllerState
+    from tools.improvement_ranking import RankedCase, write_snapshot
+
+    ranked = [
+        RankedCase(
+            case_id=case_id,
+            position=position,
+            factors={"opportunity_cost": 3, "quality": 1},
+            reason="starting priority",
+            blocked_by=None,
+        )
+        for position, case_id in enumerate(case_ids, start=1)
+    ]
+    ref = write_snapshot(
+        ranked,
+        previous_ref=previous_ref,
+        charter_digest="sha256:" + "f" * 64,
+        store=store,
+        at=datetime(2026, 9, 15, 12, 0, tzinfo=UTC),
+        cases=cases,
+    )
+    ImprovementControllerState.get_or_create(pk).record(last_snapshot_ref=ref)
+    return ref
+
+
+def _corrupt(store, ref):
+    """Lane 4's mutation: re-save the key (archiving the original), tamper
+    the archive, remove the live file."""
+    import os
+
+    content_hash, relative_path = ref[len("$CF:") :].split(":", 1)
+    model_class_name, filename = relative_path.split("/", 1)
+    key = filename[: -len(store.extension)]
+    live_path = os.path.join(store.base_path, relative_path)
+    store.save(b"{}", key=key, model_class_name=model_class_name)
+    archive_path = os.path.join(
+        store.base_path, ".versions", content_hash[:2], f"{content_hash}{store.extension}"
+    )
+    with open(archive_path, "ab") as handle:
+        handle.write(b"\n# tampered archive copy\n")
+    os.remove(live_path)
+
+
+class TestLane5Partials:
+    """Ranking, hypotheses, and rejected approaches (lane 5, #3217): each
+    route in each of its three states, asserting the distinguishing text."""
+
+    # -- ranking ---------------------------------------------------------
+
+    def test_ranking_partial_says_no_snapshot_yet(self, client, monkeypatch, tmp_path):
+        _snapshot_store(monkeypatch, tmp_path)
+
+        resp = client.get("/_partials/improvement/ranking/?project_key=test-3217-ui-empty")
+
+        assert resp.status_code == 200
+        assert "improvement-ranking" in resp.text
+        assert "No ranking snapshot yet" in resp.text
+        assert "<table" not in resp.text
+
+    def test_ranking_partial_renders_the_order_with_movement(self, client, monkeypatch, tmp_path):
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+
+        store = _snapshot_store(monkeypatch, tmp_path)
+        pk = "test-3217-ui-ranking"
+        a = ImprovementCase.create(
+            project_key=pk,
+            state="observed",
+            title="cheaper inference",
+            created_at=datetime.now(UTC),
+        )
+        b = ImprovementCase.create(
+            project_key=pk, state="observed", title="skill library", created_at=datetime.now(UTC)
+        )
+        first = _write_ranking(pk, store, [a.id])
+        _write_ranking(pk, store, [b.id, a.id], previous_ref=first)
+
+        resp = client.get(f"/_partials/improvement/ranking/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert "skill library" in resp.text
+        assert "cheaper inference" in resp.text
+        assert "entered" in resp.text
+        assert "moved from 1" in resp.text
+        assert "No ranking snapshot yet" not in resp.text
+        assert "Ranking unavailable" not in resp.text
+
+    def test_ranking_partial_renders_unavailable_on_a_corrupted_snapshot(
+        self, client, monkeypatch, tmp_path
+    ):
+        """A snapshot that does not verify never renders as a stale order."""
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+
+        store = _snapshot_store(monkeypatch, tmp_path)
+        pk = "test-3217-ui-corrupt"
+        a = ImprovementCase.create(
+            project_key=pk,
+            state="observed",
+            title="stale order title",
+            created_at=datetime.now(UTC),
+        )
+        ref = _write_ranking(pk, store, [a.id])
+        _corrupt(store, ref)
+
+        resp = client.get(f"/_partials/improvement/ranking/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert "Ranking unavailable" in resp.text
+        assert "does not match its digest" in resp.text
+        assert "stale order title" not in resp.text
+        assert "<table" not in resp.text
+        assert "No ranking snapshot yet" not in resp.text
+
+    # -- hypotheses -------------------------------------------------------
+
+    def test_hypotheses_partial_says_nothing_yet(self, client):
+        resp = client.get("/_partials/improvement/hypotheses/?project_key=test-3217-ui-empty")
+
+        assert resp.status_code == 200
+        assert "improvement-hypotheses" in resp.text
+        assert "No hypothesis in flight" in resp.text
+        assert "<table" not in resp.text
+
+    def test_hypotheses_partial_renders_a_frozen_experiment(self, client):
+        from datetime import UTC, datetime
+
+        from models.improvement_experiment import ImprovementExperiment
+
+        pk = "test-3217-ui-hypotheses"
+        ImprovementExperiment.create(
+            project_key=pk,
+            created_at=datetime.now(UTC),
+            state="frozen",
+            hypothesis="rrf_k 30 ranks known items higher",
+            mechanism="a smaller k weights top ranks more",
+            falsifier="recall at 10 does not rise",
+            contract_digest="sha256:" + "a" * 64,
+            frozen_at=datetime(2026, 9, 15, 12, 0, tzinfo=UTC),
+        )
+
+        resp = client.get(f"/_partials/improvement/hypotheses/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert "rrf_k 30 ranks known items higher" in resp.text
+        assert "a smaller k weights top ranks more" in resp.text
+        assert "recall at 10 does not rise" in resp.text
+        assert "sha256:" + "a" * 64 in resp.text
+        assert "frozen 2026-09-15 12:00 UTC" in resp.text
+        assert "No hypothesis in flight" not in resp.text
+
+    def test_hypotheses_partial_renders_unavailable_when_the_read_raises(self, client, monkeypatch):
+        from models.improvement_experiment import ImprovementExperiment
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("experiment store unreachable")
+
+        monkeypatch.setattr(ImprovementExperiment.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/hypotheses/?project_key=test-3217-ui-boom")
+
+        assert resp.status_code == 200
+        assert "Hypotheses unavailable" in resp.text
+        assert "experiment store unreachable" in resp.text
+        assert "No hypothesis in flight" not in resp.text
+
+    # -- rejected ---------------------------------------------------------
+
+    def test_rejected_partial_says_nothing_yet(self, client, monkeypatch, tmp_path):
+        _snapshot_store(monkeypatch, tmp_path)
+
+        resp = client.get("/_partials/improvement/rejected/?project_key=test-3217-ui-empty")
+
+        assert resp.status_code == 200
+        assert "improvement-rejected" in resp.text
+        assert "Nothing rejected yet" in resp.text
+        assert "<table" not in resp.text
+
+    def test_rejected_partial_renders_a_case_with_its_evaluation_and_departure(
+        self, client, monkeypatch, tmp_path
+    ):
+        import json
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+        from models.improvement_evaluation import ImprovementEvaluation
+
+        store = _snapshot_store(monkeypatch, tmp_path)
+        pk = "test-3217-ui-rejected"
+        case = ImprovementCase.create(
+            project_key=pk, state="observed", title="rrf_k sweep", created_at=datetime.now(UTC)
+        )
+        evaluation = ImprovementEvaluation.create(
+            project_key=pk,
+            created_at=datetime.now(UTC),
+            state="complete",
+            verdict="reject",
+            effect=json.dumps({"known_item_recall_at_10": -0.04}),
+            confidence_interval=json.dumps(
+                {"known_item_recall_at_10": {"lower": -0.09, "upper": 0.01}}
+            ),
+        )
+        first = _write_ranking(pk, store, [case.id])
+        case.state = "rejected"
+        case.rejected_reason = "evaluation rejected the candidate"
+        case.evaluation_ids = json.dumps([evaluation.id])
+        case.save()
+        _write_ranking(pk, store, [], previous_ref=first, cases=[case])
+
+        resp = client.get(f"/_partials/improvement/rejected/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert "rrf_k sweep" in resp.text
+        assert "evaluation rejected the candidate" in resp.text
+        assert "verdict reject" in resp.text
+        assert "effect -0.040" in resp.text
+        assert "interval [-0.090, 0.010]" in resp.text
+        assert f"rejected: evaluation {evaluation.id}" in resp.text
+        assert "Nothing rejected yet" not in resp.text
+
+    def test_rejected_partial_renders_unavailable_when_the_read_raises(self, client, monkeypatch):
+        from models.improvement_case import ImprovementCase
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("case store unreachable")
+
+        monkeypatch.setattr(ImprovementCase.query, "filter", _raise)
+
+        resp = client.get("/_partials/improvement/rejected/?project_key=test-3217-ui-boom")
+
+        assert resp.status_code == 200
+        assert "Rejected approaches unavailable" in resp.text
+        assert "case store unreachable" in resp.text
+        assert "Nothing rejected yet" not in resp.text
+
+    # -- goals: positions and the lane 5 placeholder ---------------------
+
+    def test_goals_partial_names_lane_5_and_reads_positions_from_the_snapshot(
+        self, client, monkeypatch, tmp_path
+    ):
+        from datetime import UTC, datetime
+
+        from models.improvement_case import ImprovementCase
+
+        store = _snapshot_store(monkeypatch, tmp_path)
+        empty = client.get("/_partials/improvement/goals/?project_key=test-3217-ui-goals-empty")
+        assert "Lane 5" in empty.text
+        assert "Lane 3 opens the first one" not in empty.text
+        assert "rejected partial" in empty.text
+
+        pk = "test-3217-ui-goals"
+        a = ImprovementCase.create(
+            project_key=pk, state="observed", title="case a", created_at=datetime.now(UTC)
+        )
+        b = ImprovementCase.create(
+            project_key=pk, state="observed", title="case b", created_at=datetime.now(UTC)
+        )
+        _write_ranking(pk, store, [b.id, a.id])
+
+        resp = client.get(f"/_partials/improvement/goals/?project_key={pk}")
+
+        assert resp.status_code == 200
+        assert "<th>Position</th>" in resp.text
+        assert resp.text.index("case b") < resp.text.index("case a")
+        assert "unranked" not in resp.text

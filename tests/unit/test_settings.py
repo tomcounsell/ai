@@ -194,6 +194,22 @@ class TestImprovementSettingsControlJournal:
         assert s.improvement.max_dispatch_attempts == 5
 
 
+class TestImprovementSettingsPromiseDetector:
+    """The no-promises detector is off by default and names no model (#3217)."""
+
+    def test_defaults(self):
+        s = ImprovementSettings()
+        assert s.promise_detector_enabled is False
+        assert s.cheap_inference_model == ""
+
+    def test_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("IMPROVEMENT__PROMISE_DETECTOR_ENABLED", "true")
+        monkeypatch.setenv("IMPROVEMENT__CHEAP_INFERENCE_MODEL", "openai/gpt-4o-mini")
+        s = Settings()
+        assert s.improvement.promise_detector_enabled is True
+        assert s.improvement.cheap_inference_model == "openai/gpt-4o-mini"
+
+
 class TestCodexSettings:
     """CODEX__* knobs for the opt-in Codex dev lane (plan #2001, Phase 3)."""
 

@@ -12,6 +12,25 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   readings of one case (lifecycle, urgency, and charter §3 classification),
   and the goals partial reads all three. ``revision`` (an ``IntField``) and
   ``charter_digest`` are deliberately not indexed: both are unbounded.
+- **Four more plain fields, none indexed** (lane 5, #3217). ``evaluation_ids``
+  is a JSON list of ``ImprovementEvaluation`` ids, the same shape as
+  ``evidence_ids``: a list is not a value an index set can hold.
+  ``rejected_reason`` is free text set by ``apply_verdict`` when a case is
+  rejected, kept on the immortal case so the loop remembers why the idea
+  died. ``dedup_identity`` is the evidence-cluster identity the novelty check
+  compares a new cluster against; it is unbounded (one per cluster) and the
+  check reads the open cases by state and compares in Python, so an index
+  would be a second unbounded set with no reader. ``blocked_by`` is a plain
+  string of the exact shape ``vault:{resource_name}`` where ``resource_name``
+  is a member of ``tools.improvement_resources.RESOURCES`` (for example
+  ``vault:meta_model_api``); it is set by ``resolve()`` on a
+  ``vault_request_written`` disposition and cleared by the tick when
+  ``tools.improvement_resources.probe()`` reports that resource ``verified``.
+  The human-readable item title lives on ``summary``, never here, because the
+  probe is keyed by resource name. The block lives on the case and not on an
+  investigation because a human-paced wait has no deadline and the
+  investigation row carries a 30-day TTL. ``rank()`` reads ``blocked_by`` off
+  the open rows it already holds, so it needs no index.
 - **The projection is not the authority.** The control journal's Redis head
   holds the authoritative state and revision; this row is the queryable
   projection of it, updated through ORM ``save()`` after the journal commits.
@@ -108,6 +127,12 @@ class ImprovementCase(Model):
         priority_area: One of :data:`PRIORITY_AREAS`. Low-cardinality index.
         ranking_rationale: Why this case sits where it does in the order.
         updated_at: Last projection write.
+        evaluation_ids: JSON list of ``ImprovementEvaluation`` ids.
+        rejected_reason: Why ``apply_verdict`` rejected the case, when it did.
+        dedup_identity: The evidence-cluster identity the novelty check
+            compares. Not indexed (unbounded).
+        blocked_by: ``vault:{resource_name}`` while the case waits on a
+            vault item a human must add; ``None`` otherwise. Not indexed.
     """
 
     id = AutoKeyField()
@@ -126,3 +151,7 @@ class ImprovementCase(Model):
     charter_digest = Field(null=True)
     ranking_rationale = Field(null=True)
     updated_at = Field(null=True)
+    evaluation_ids = Field(null=True)
+    rejected_reason = Field(null=True)
+    dedup_identity = Field(null=True)
+    blocked_by = Field(null=True)

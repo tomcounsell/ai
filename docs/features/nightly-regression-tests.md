@@ -368,7 +368,7 @@ exit, bucketing every node `inconclusive`.
 fragile regex against pytest's output format.
 
 **Local JSON state, not Redis** — Two fields (`failed`, `run_at`) don't justify a Redis
-dependency. Matches the `sdlc_reflection_last_run.json` pattern.
+dependency.
 
 **The tracker is the only output surface (#3134)** — The detector notifies
 nothing: no Telegram, no mail, no page. Owner ruling, verbatim: *"i don't want

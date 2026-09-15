@@ -70,6 +70,10 @@ class ImprovementExperiment(Model):
         frozen_at: When the contract was frozen.
         model_revision_id: The system model revision in force.
         charter_version: The charter version in force.
+        notes: JSON the freeze path keeps beside the contract: the prior
+            answers it cites, the candidate, and its envelope. Plain and
+            unindexed; deliberately outside ``manifest`` because every string
+            in the manifest is a blinding identity token.
     """
 
     id = AutoKeyField()
@@ -86,3 +90,4 @@ class ImprovementExperiment(Model):
     frozen_at = DatetimeField(null=True)
     model_revision_id = Field(null=True)
     charter_version = Field(null=True)
+    notes = Field(null=True)
