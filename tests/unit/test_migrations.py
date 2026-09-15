@@ -750,6 +750,22 @@ class TestImprovementMigrationRegistration:
         assert fn is _migrate_improvement_evaluation_charter_digest
         assert description
 
+    def test_improvement_investigation_stage_field_marker_exists(self):
+        from scripts.update.migrations import _migrate_improvement_investigation_stage_field
+
+        assert "improvement_investigation_stage_field" in MIGRATIONS
+        fn, description = MIGRATIONS["improvement_investigation_stage_field"]
+        assert fn is _migrate_improvement_investigation_stage_field
+        assert description
+
+    def test_retire_sdlc_reflection_is_registered(self):
+        from scripts.update.migrations import _migrate_retire_sdlc_reflection
+
+        assert "retire_sdlc_reflection" in MIGRATIONS
+        fn, description = MIGRATIONS["retire_sdlc_reflection"]
+        assert fn is _migrate_retire_sdlc_reflection
+        assert description
+
     def test_the_retirement_script_exists_and_is_what_the_migration_runs(self):
         """The subprocess-shaped migrations name a script by filename.
 
@@ -765,6 +781,52 @@ class TestImprovementMigrationRegistration:
         assert "migrate_retire_task_type_profile.py" in source
         repo_root = Path(__file__).resolve().parents[2]
         assert (repo_root / "scripts" / "migrate_retire_task_type_profile.py").exists()
+
+
+class TestRetireSdlcReflection:
+    """Lane 5 (#3217) retires ``scripts/sdlc_reflection.py`` and its state file.
+
+    Hermetic ``tmp_path`` cases: the migration touches one gitignored JSON
+    file under ``data/``. The script's own deletion is a separate change, so
+    the migration must succeed whether or not the script still exists.
+    """
+
+    def test_removes_the_state_file_when_present(self, tmp_path):
+        from scripts.update.migrations import _migrate_retire_sdlc_reflection
+
+        (tmp_path / "data").mkdir()
+        state = tmp_path / "data" / "sdlc_reflection_last_run.json"
+        state.write_text('{"last_run_at": null, "last_pr_number": 0}')
+
+        assert _migrate_retire_sdlc_reflection(tmp_path) is None
+
+        assert not state.exists()
+
+    def test_no_op_when_the_state_file_is_absent(self, tmp_path):
+        from scripts.update.migrations import _migrate_retire_sdlc_reflection
+
+        (tmp_path / "data").mkdir()
+
+        assert _migrate_retire_sdlc_reflection(tmp_path) is None
+        assert _migrate_retire_sdlc_reflection(tmp_path) is None
+
+    def test_no_op_when_there_is_no_data_directory_at_all(self, tmp_path):
+        from scripts.update.migrations import _migrate_retire_sdlc_reflection
+
+        assert not (tmp_path / "data").exists()
+        assert _migrate_retire_sdlc_reflection(tmp_path) is None
+        assert not (tmp_path / "data").exists()
+
+    def test_succeeds_while_the_script_still_exists(self, tmp_path):
+        from scripts.update.migrations import _migrate_retire_sdlc_reflection
+
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "scripts" / "sdlc_reflection.py").write_text("# retired\n")
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "sdlc_reflection_last_run.json").write_text("{}")
+
+        assert _migrate_retire_sdlc_reflection(tmp_path) is None
+        assert not (tmp_path / "data" / "sdlc_reflection_last_run.json").exists()
 
 
 class TestTaskTypeProfileRetirementStub:
