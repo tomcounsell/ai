@@ -1516,46 +1516,46 @@ and reports the finding.
 The issue's seven acceptance criteria, restated against charter v2 where the Freshness Check
 records an override, plus this plan's own.
 
-- [ ] One autonomous hypothesis inside the retrieval-parameter envelope is frozen under a contract
+- [x] One autonomous hypothesis inside the retrieval-parameter envelope is frozen under a contract
   (digest stored before any arm runs) and measured by lane 4's harness with paired blinded
   evaluation, producing `accept`, `reject`, `inconclusive`, or `infra_failure` with complete
   lineage (case, investigations, model revision, experiment, evaluation, charter digest) readable
   from the records alone
-- [ ] **The verdict changes the next selection, demonstrated**: two consecutive ranking snapshots
+- [x] **The verdict changes the next selection, demonstrated**: two consecutive ranking snapshots
   exist whose diff names the case under `left` (reject) or `moved` (inconclusive) with the
   evaluation id as the reason, and a seeded `rejected` case is refused re-opening by the tick;
   the `rejected` state was written through `journal.set_state` and survives a `projection.apply`
-- [ ] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
+- [x] The memory-inspiration adapter (existing) and the `web_research` kind are both exercised end
   to end in the real cycle, with claims carrying URLs and retrieval dates; the runbook seeds a
   `Memory`, never an evidence row, and the tick's `counts["inspirations"] >= 1` is recorded
-- [ ] Seeded provenance is stated, not hidden: every seeded evidence row carries the `seed`
+- [x] Seeded provenance is stated, not hidden: every seeded evidence row carries the `seed`
   marker (`source_ref="seed:..."` or a `seed` key in `detail`), the report's "What this does not
   establish" names every case opened from seeded evidence, and the report posted on #3217 states
   whether any case in the real cycle opened from organically collected evidence (the expected
   answer for the first cycle is "none besides the seeded inference case, unless the lesson or
   correction adapters opened one", and the report says which)
-- [ ] The `resource_acquisition` investigation produces a prepared adapter and a written vault
+- [x] The `resource_acquisition` investigation produces a prepared adapter and a written vault
   request rendered in the digest, and places no credential; the anti-criterion row passes
-- [ ] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
+- [x] `scripts/sdlc_reflection.py`, its installer, and its plist are gone; `collect_lessons` writes
   `lesson` rows from merged PR bodies; `sdlc-reflection` is in the obsolete-service sweep
-- [ ] At least one provisional assumption is recorded with its charter passage, confidence,
+- [x] At least one provisional assumption is recorded with its charter passage, confidence,
   consequence, and overturning observation, rendered on the goals partial and in a digest
-- [ ] The qualified-result report for the real cycle is generated from records, carries the three
+- [x] The qualified-result report for the real cycle is generated from records, carries the three
   mandatory sections, and is posted on #3217
-- [ ] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
+- [x] Eight investigation kinds, five indexed states, the unindexed `stage`, two new evidence
   kinds with their cardinality argument, and all three migrations registered
-- [ ] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
+- [x] Every planner tick writes an immutable snapshot and a `ranking_recorded` journal event; the
   dashboard's ranking partial and `valor-improve ranking` read the same artifact
-- [ ] The brief opens with the pinned charter verbatim; the research skill's first step prints it
-- [ ] The digest asks nothing, says silence validates nothing, and renders `resource_acquired`
+- [x] The brief opens with the pinned charter verbatim; the research skill's first step prints it
+- [x] The digest asks nothing, says silence validates nothing, and renders `resource_acquired`
   rows and lane 7's overrun payload under their own headings
-- [ ] The `skill_acquisition` kind runs stages 1 through 3 in the real cycle and resolves stage 4
+- [x] The `skill_acquisition` kind runs stages 1 through 3 in the real cycle and resolves stage 4
   as a provisional assumption citing #3311
-- [ ] The `promise` adapter is wired, gated off by default, and tested with an injected transport
-- [ ] Three new dashboard partials render content, empty, and unavailable states; the getter list
+- [x] The `promise` adapter is wired, gated off by default, and tested with an injected transport
+- [x] Three new dashboard partials render content, empty, and unavailable states; the getter list
   is exactly nine (the six existing including lane 3's `get_control_status` and lane 6's
   `get_release_lineage`, plus `get_ranking`, `get_hypotheses`, `get_rejected_approaches`) and carries no activity counter
-- [ ] Lane 6's three seams are bound directly (lane 6, PR #3318, is merged): every model
+- [x] Lane 6's three seams are bound directly (lane 6, PR #3318, is merged): every model
   revision carries `research_process_spec` in the canonical bytes and a
   `research_process_digest` set through `tools.improvement_recursion.process.research_process_digest`
   (no second hashing routine in this lane; `revise-model --backfill-digests` fills older rows
@@ -1564,18 +1564,18 @@ records an override, plus this plan's own.
   `ArmResult` and `BudgetUse` (money read from records: `unit2_usd=None`, `unit3_usd=None`; only
   `subscription_turns` and `wall_seconds` come from the arm), and every manifest carries
   `base_revision` and `candidate_ref`
-- [ ] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
+- [x] A cluster that accrues one row per tick still opens: `test_cluster_opens_across_two_ticks`
   passes; a seeded row carrying `priority_area` opens a case on the first tick
   (`test_seeded_inspiration_opens_a_case`); and the two human-paced waits (vault request,
   amendment request) survive the investigation TTL through `case.blocked_by` (shape
   `vault:{resource_name}`, validated against `RESOURCES`), `case.summary`, and the tick's
   keep-alive save, with the block cleared on a `verified` probe of `meta_model_api`
   (`test_blocked_case_unblocks_on_verified_probe`)
-- [ ] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
+- [x] Every frozen retrieval experiment cites #2082 in `prior_answers`, and its protocol's
   `batch_size` equals the number of queries actually generated
-- [ ] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] The claim made on #3217 is "loop operational" (charter §6, level 1) and no higher
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
