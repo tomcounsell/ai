@@ -11,8 +11,8 @@ North star: [`docs/improvement-charter.md`](../improvement-charter.md), which To
 
 ## What exists today
 
-Lanes 1, 2, 3, 4, 6, and lane 7's unit-3 budget work. The records, the settings, the evidence
-collection tick, the verifying artifact store, five dashboard panels, the evaluation harness
+Lanes 1 through 6 and lane 7's unit-3 budget work. The records, the settings, the evidence
+collection tick, the verifying artifact store, eight dashboard panels, the evaluation harness
 (`tools/improvement_eval/`, see [Improvement Evaluation](improvement-evaluation.md)), and the
 release lane (`tools/improvement_release/` and `tools/improvement_recursion/`, see
 [Improvement Release](improvement-release.md)): the six-state release lifecycle, the rollback
@@ -28,11 +28,22 @@ checkout. The cloud sandbox itself is decided and unbuilt; see
 shipped the control journal, dispatch intents, the `admitted` session status,
 the reconcile reflection, the unit-2 paid-inference meter, the vault writer,
 and the `valor-improve` CLI, the only door through which a research session
-proposes anything. The research sessions arrive with lane 5 as its own child
-issue; lane 5's planner tick is the production `ArmRunner`, and lane 3's
-paid-inference meter is what lets a comparison account unit 2 (the parent
-plan's Gap D numbering: unit 1 is the subscription lane slot, unit 2 daily paid
-inference, unit 3 weekly infrastructure).
+writes anything. Lane 5 ([#3217](https://github.com/tomcounsell/ai/issues/3217))
+shipped the reasoning half: the planner tick that opens cases from evidence
+and ranks them, the immutable ranking snapshot, the investigation lifecycle,
+the brief, the research skill, the retrieval-parameter experiment envelope and
+the verdict-to-selection rule, the `lesson` and `promise` observer adapters,
+the three-day assumption digest, three more dashboard panels, the
+qualified-result report, and the production `ArmRunner` for lane 6's
+comparison. See [Improvement Research Cycle](improvement-research-cycle.md).
+Lane 3's paid-inference meter is what lets a comparison account unit 2 (the
+parent plan's Gap D numbering: unit 1 is the subscription lane slot, unit 2
+daily paid inference, unit 3 weekly infrastructure).
+
+The first real cycle ran on 2026-09-15 and established charter §6 level 1,
+"loop operational", and nothing higher; its report is posted on
+[#3217](https://github.com/tomcounsell/ai/issues/3217#issuecomment-5680368659)
+and its limits are stated in the research-cycle doc.
 
 Read the capability matrix before believing anything is working. It grades each
 component on four separate axes (implemented, deployed, measured, effect) and
@@ -43,7 +54,11 @@ component on four separate axes (implemented, deployed, measured, effect) and
 **Research reasoning.** Bounded sessions that read evidence, revise the system's
 model of itself, generate hypotheses with a mechanism and a falsifier, and
 propose actions. Natural-language research instructions live in one narrowly
-scoped skill; authority lives in code. Not built yet (lane 5).
+scoped skill (`.claude/skills/improve-research/SKILL.md`); authority lives in
+code. The deterministic planner tick decides what a session is asked about,
+and the session reaches state through `valor-improve` alone. Shipped in lane 5
+(`reflections/improvement_plan.py`, `tools/improvement_*.py`); see
+[Improvement Research Cycle](improvement-research-cycle.md).
 
 **Control journal.** A small non-Popoto Redis namespace, `improve:{project}:{case}:*`,
 whose Lua transition script is the sole authority for research-state
@@ -102,17 +117,40 @@ to make.
 Every one records its TTL decision in prose in its module docstring, and
 `tests/unit/test_improvement_models.py` fails if a docstring stops saying so.
 
+A ninth module, `models/improvement_controller_state.py::ImprovementControllerState`,
+is the planner tick's cursor rather than a record of anything that happened:
+one row per `project_key`, keyed by `project_key` alone, no index, no TTL,
+written by ordinary `save()` because the control journal is keyed by case and
+there is no case to fence a cursor against. It holds `last_snapshot_ref`,
+`evidence_watermark`, `last_tick_at`, `charter_digest`, and
+`digest_watermark`, and it is imported directly rather than through
+`models.__all__`, which pins exactly eight `Improvement*` exports.
+
+Lane 5's plain, unindexed fields on the records above: `ImprovementCase`
+gains `evaluation_ids`, `rejected_reason`, `dedup_identity`, and `blocked_by`
+(the exact shape `vault:{resource_name}`); `ImprovementInvestigation` gains
+`stage`, `sources`, `prior_answers`, `expected_information_value`,
+`decision_affected`, `assumption_detail`, and `resolved_at`;
+`ImprovementModelRevision` gains `research_process_spec`;
+`ImprovementExperiment` gains `notes`. `INVESTIGATION_KINDS` holds eight
+values, `INVESTIGATION_STATES` five, and `EVIDENCE_KINDS` ten, each with its
+cardinality argument in the model docstring.
+
 ## Evidence collection
 
-`reflections/improvement_collect.py` runs three observer adapters on a 900-second
+`reflections/improvement_collect.py` runs five observer adapters on a 900-second
 tick. Each is independently fail-soft; one broken source degrades the tick
-rather than ending it.
+rather than ending it. The tick keeps `failed` (an adapter raised) and
+`skipped` (an adapter declined by rule) as separate lists, and reports
+`status="error"` only when every adapter failed.
 
 | Adapter | Reads | Writes |
 |---|---|---|
 | `collect_corrections` | Inbound `AgentSession.chat_message_log` turns and Tom-sourced `Memory` rows, via `reflections.utilities.CORRECTION_PATTERNS` | One `correction` row per session that needed correcting, plus one per correcting memory |
 | `collect_inspirations` | `Memory` rows with `source="human"` (the links Tom sends) | One `inspiration` row per memory, preserving the text, its reference, and its date |
 | `collect_expectation_coverage` | Open outbound expectations on Jobs | One `owner_liveness` row per gone owner, plus one coverage row per tick |
+| `collect_lessons` | Merged PR bodies over the last 14 days through `gh pr list`, the seven `LESSON_PREFIXES` lines (`- lesson:`, `- pattern:`, `- note:`, `- convention:`, `- learning:`, `- reminder:`, `- caveat:`) | One `lesson` row per flagged line, `source_ref="pr:{number}:{sha256(line)[:16]}"`, with the PR title and a `stage_guess` in `detail` |
+| `collect_promises` | Outbound `AgentSession.chat_message_log` entries (`bridge/telegram_relay.py::_append_outbound_chat_log`), up to 10 newest unjudged per tick, judged by a cheap model under the charter §10 paragraph | One `promise` row per `yes`, with the judge's quoted span and confidence. Metered under `purpose="promise_detector"`; gated by `promise_detector_enabled`, off by default |
 
 `expectation_reconciler` additionally records its shipped-work signal at the
 point it computes it, so "how often did a lane ship without discharging its
@@ -163,14 +201,24 @@ Machine pinning is inherited from `register_reflection`'s existing
 `_this_machine_owns_valor` guard, not re-implemented, so only the machine that
 owns the `valor` project schedules the tick.
 
+The same file registers the planner tick (`register_improvement_planner`,
+`improvement-planner-tick`, cadence `controller_tick_seconds`) and the
+assumption digest (`register_improvement_assumption_digest`,
+`improvement-assumption-digest`, `259200s`), beside lane 3's
+`improvement-controller-tick` and `improvement-intent-reconcile`. All five
+improvement reflection entry points resolve the owning project through
+`reflections.redis_access.get_project_key()` (`VALOR_PROJECT_KEY`, fallback
+`valor`), the key `valor-improve` is bound to.
+
 ### The kill switch
 
 `ImprovementSettings.enabled` (`IMPROVEMENT__ENABLED`) gates every write in
-`reflections/improvement_collect.py`. False, the default, means
-`run_improvement_collect` returns `status="skipped"` and writes nothing, which
-is exactly what `config/settings.py` and `.env.example` promise it means. So an
-`/update` that registers the reflection does not, by itself, start a
-15-minute writer against production Redis.
+`reflections/improvement_collect.py`, the planner tick, and the assumption
+digest. False, the default, means each entry point returns `status="skipped"`
+and writes nothing, which is exactly what `config/settings.py` and
+`.env.example` promise it means. So an `/update` that registers the
+reflections does not, by itself, start a 15-minute writer against production
+Redis.
 
 Registration is independent of the switch, so turning collection on is a single
 `IMPROVEMENT__ENABLED=true` in the vault `.env` on the machine that owns the
@@ -190,7 +238,12 @@ Turning it back off is the same edit in reverse; no hand edit of the vault
 | `weekly_infrastructure_usd` | `50.00` | Weekly pool for sandboxes, storage, and Cloudflare, charter §8's second spending category |
 | `budget_day_boundary` | `UTC` | The timezone whose midnight ends a budget day |
 | `budget_week_start` | `monday` | The weekday an infrastructure budget week begins on |
-| `controller_tick_seconds` | `900` | Cadence, matching the registered reflection |
+| `controller_tick_seconds` | `900` | Cadence of the evidence, controller, and planner ticks |
+| `lease_ttl_seconds` | `90` | TTL of the interim case lease; the reconcile pass's staleness threshold is four times it |
+| `journal_max_entries` | `1000` | Entries the per-case journal list retains |
+| `max_dispatch_attempts` | `3` | Stale sweeps an `admitted`/`materialized` intent survives before `reconciliation_required` |
+| `promise_detector_enabled` | `False` | Whether the `promise` adapter runs; off because each sampled message costs a judge call. `IMPROVEMENT__PROMISE_DETECTOR_ENABLED` |
+| `cheap_inference_model` | `""` | The OpenRouter model id the promise judge runs on; empty falls back to `config.models.OPENROUTER_GEMMA4_FREE`. `IMPROVEMENT__CHEAP_INFERENCE_MODEL` |
 
 Three budget units, reserved separately, and one of them is not money: Claude
 work runs on the subscription and is budgeted as lane concurrency. The window
@@ -426,15 +479,25 @@ the same terminal hook the worker uses; a missing row is left for the reconcile 
 publish (`agent.agent_session_queue.publish_session_notify`) runs strictly after the row is
 `pending`, so the worker's own pickup loop finds it within one notify hop. The dispatched
 session's `message_text` is `/improve-research case=... action=... type=...` with the
-checkout's absolute path as `working_dir`; when the proposal's payload is in the verifying
-store the message also carries `brief_ref=<$CF: reference>`, which the skill loads through
+checkout's absolute path as `working_dir`; when the adapter runs from a lane worktree
+(`.worktrees/<slug>`) it also passes that slug, because the executor gives a slugless eng
+session a fresh worktree of its own and refuses a pre-provisioned one on another branch
+(#1377). When the proposal's payload is in the verifying store the message also carries
+`brief_ref=<$CF: reference>`, which the skill loads through
 `VerifyingArtifactStore().load(ref)`.
 
-The only write a research session ever makes is `valor-improve propose`, which resolves
-its own row through `AGENT_SESSION_ID`, presents its intent binding, and writes one
-`action_proposed` journal event. `finalize_session` gains one post-transition hook (step 7,
-gated on `extra_context.action_id`, lazy-imported, exception-isolated) that releases the
-session's lane slot and settles its intent by outcome on every termination path.
+`_push_agent_session` returns the row's `agent_session_id`, the worker exports that same
+id as `AGENT_SESSION_ID`, and the adapter's activation, the reconcile pass, and the CLI's
+own session lookup all resolve the bound row through `AgentSession.get_by_id` on it.
+
+A research session writes only through `valor-improve`. `propose` resolves the session's
+own row through `AGENT_SESSION_ID`, presents its intent binding, and writes one
+`action_proposed` journal event; the investigation, model-revision, experiment, and
+report subcommands lane 5 added take the same door
+([Improvement Research Cycle](improvement-research-cycle.md)). `finalize_session` gains
+one post-transition hook (step 7, gated on `extra_context.action_id`, lazy-imported,
+exception-isolated) that releases the session's lane slot and settles its intent by
+outcome on every termination path.
 
 ## Artifacts
 
@@ -455,25 +518,21 @@ Improvement artifacts live under their own retention root
 retention and export policy for evaluation evidence can differ from ordinary
 content without a path heuristic. The default sits outside any repo checkout, beside the shared
 popoto content directory, so an image rebuild cannot destroy gathered artifacts. The archive path is
-`.versions/{prefix}/{hash}{ext}` under the root. Lane 3's future `valor-improve export` and `import`
-write against this destination contract; see [Improvement Cloud Execution](improvement-cloud-execution.md)
+`.versions/{prefix}/{hash}{ext}` under the root. `valor-improve export` and `import` write against
+this destination contract, and lane 5's ranking snapshots live here as `ImprovementRankingSnapshot/`; see [Improvement Cloud Execution](improvement-cloud-execution.md)
 for the sandbox-local Redis topology and the export path behind it.
 
 ## Dashboard
 
-Four panels on the root dashboard.
+Eight panels on the root dashboard.
 
 **Goals** is the charter §11 readable record: which charter version and digest
 the work is ranked under, the §3 early priorities marked as starting hypotheses
-rather than an allocation, open cases with their `priority_area` and
-`ranking_rationale`, and unresolved assumptions. Every heading no lane writes
-yet says so and names the lane that will fill it: acquired abilities and
-resource use are lane 3's, recorded as cases run (resource use also has its own
-panel now, Control, below); evaluations are lane 4's (the harness writes
-`ImprovementEvaluation` rows today; the panel itself is unwritten); rejected
-approaches are lane 5's. Each section renders one of three distinguishable
-states: content, "nothing yet, written by lane N", or "unavailable" when the
-read failed. A bare zero would claim a measurement was taken.
+rather than an allocation, open cases with their `priority_area`,
+`ranking_rationale`, and ranking position (read from `get_ranking` when a
+snapshot exists), and unresolved assumptions. Each section renders one of
+three distinguishable states: content, "nothing yet", or "unavailable" when
+the read failed. A bare zero would claim a measurement was taken.
 
 Two panels are backed by `ImprovementEvidence`.
 
@@ -497,15 +556,36 @@ exercised its rollback plan ("drilled (worktree)"), the observation window, and
 the outcome scored when the window closed, plus the promotion gate as a
 sentence on every load. See [Improvement Release](improvement-release.md).
 
-`ui/data/improvement.py` exports exactly six getters (`get_control_status`,
-`get_coverage`, `get_goals`, `get_intervention_burden`,
-`get_provisional_assumptions`, `get_release_lineage`), and a test pins that
-list as an exact list. **Experiment count and merged-patch count are activity,
-not improvement**, and there is deliberately no function here that returns them.
+**Ranking** (`/_partials/improvement/ranking/`, `get_ranking`) renders the
+latest ranking snapshot: each case's position, factors, `blocked_by`, and
+movement against the previous snapshot, the cases that left and why, and the
+intake pool. A snapshot that does not verify renders as "unavailable" with the
+integrity error, never as an order.
 
-Cases, hypotheses, and rejected experiments arrive with the lane that first
-writes each one (5 for cases, hypotheses, and rejected approaches). Permanently
-empty tiles for content nothing writes yet is not a dashboard.
+**Hypotheses** (`/_partials/improvement/hypotheses/`, `get_hypotheses`)
+renders experiments in `proposed`, `frozen`, and `running` with hypothesis,
+mechanism, falsifier, contract digest, and `frozen_at`.
+
+**Rejected approaches** (`/_partials/improvement/rejected/`,
+`get_rejected_approaches`) renders `rejected` cases with `rejected_reason`,
+the evaluation's verdict with effect and interval per endpoint, and the
+snapshot in which the case left the order.
+
+`ui/data/improvement.py` exports exactly nine getters (`get_control_status`,
+`get_coverage`, `get_goals`, `get_hypotheses`, `get_intervention_burden`,
+`get_provisional_assumptions`, `get_ranking`, `get_rejected_approaches`,
+`get_release_lineage`), and `tests/unit/test_ui_app.py::test_dashboard_never_offers_experiment_or_patch_counts`
+pins that list as an exact list and asserts no result carries an activity
+counter. **Experiment count and merged-patch count are activity, not
+improvement**, and there is deliberately no function here that returns them.
+
+## Research cycle
+
+The planner tick, the ranking snapshot, the investigation lifecycle, the
+brief, the research skill, the experiment envelope, the verdict-to-selection
+rule, the observer adapters, the assumption digest, the qualified-result
+report, and the first real cycle's record are documented in
+[Improvement Research Cycle](improvement-research-cycle.md).
 
 ## Break-glass
 
@@ -605,6 +685,14 @@ or run on any machine in this fleet: no log, no dated result, no run history.
 Its evaluation corpora are retained under `data/experiments/` as marked-legacy
 evidence.
 
+`scripts/sdlc_reflection.py`, its installer, and `com.valor.sdlc-reflection.plist`
+are gone: lessons flagged in merged PR bodies enter the loop as `lesson`
+evidence rows written by `collect_lessons`, read by the planner. The
+`retire_sdlc_reflection` migration removes `data/sdlc_reflection_last_run.json`,
+and `/update`'s service sweep boots the launchd job out by exact label on every
+machine that ever installed it. The "Reflection Notes (auto-generated)"
+sections it appended to `docs/sdlc/*.md` stay as they are.
+
 ## Claim levels
 
 The plan's yardstick, restated so nobody grades on a curve:
@@ -620,6 +708,7 @@ unbounded acceleration are out of scope.
 
 ## See also
 
+- [Improvement Research Cycle](improvement-research-cycle.md): planner tick, ranking snapshot, investigations, brief, research skill, experiment envelope, verdict rule, observer adapters, assumption digest, qualified-result report, the first real cycle
 - [Improvement Evaluation](improvement-evaluation.md): contract fields, manifest, judge envelope, statistics, holdout policy
 - [Improvement Release](improvement-release.md): release lifecycle, rollback drill, observation window, promotion gate, denylist, recursive comparison, claim report, `valor-improve-release`
 - [Improvement Cloud Execution](improvement-cloud-execution.md): provider decision, auth verdict, sandbox topology, host updates, evidence path
