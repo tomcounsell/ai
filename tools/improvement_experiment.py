@@ -334,6 +334,15 @@ def _case_state(project_key: str, case) -> str:
     return case.state
 
 
+def _set_experiment_state(experiment, state: str):
+    """The one door for ``ImprovementExperiment.state`` in this module and the
+    save that carries every field set before it. The experiment lifecycle is
+    a plain ORM field (lane 4's runner moves it the same way); only the case
+    lifecycle goes through the journal."""
+    experiment.state = state
+    return experiment.save()
+
+
 def experiment_notes(experiment) -> dict:
     """The experiment's ``notes`` JSON as a dict (``{}`` when absent)."""
     parsed = _load_json(getattr(experiment, "notes", None), {})
@@ -679,7 +688,6 @@ def freeze_experiment(
             )
         pinned = ImprovementCharter.pinned(project_key)
         experiment.contract_digest = contract_digest
-        experiment.state = "frozen"
         experiment.frozen_at = _now()
         experiment.model_revision_id = _revision_in_force(project_key)
         experiment.charter_version = (
@@ -693,7 +701,7 @@ def freeze_experiment(
             "records_available": len(records),
         }
         experiment.notes = json.dumps(notes, sort_keys=True)
-        if experiment.save() is False:
+        if _set_experiment_state(experiment, "frozen") is False:
             return _refuse(
                 "SAVE_FAILED", "ImprovementExperiment.save() returned False", experiment_id
             )
@@ -968,8 +976,7 @@ def apply_verdict(project_key: str, evaluation_id: str) -> Outcome:
     }
     if target is None:
         if experiment.state != "aborted":
-            experiment.state = "aborted"
-            experiment.save()
+            _set_experiment_state(experiment, "aborted")
         from tools.improvement_investigations import open_investigation
 
         probe = open_investigation(
