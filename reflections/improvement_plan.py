@@ -760,7 +760,7 @@ def _rank_and_record(
     now: datetime,
     case_ids: list[str] | None,
     findings: list[str],
-) -> tuple[list, str, set[str]]:
+) -> tuple[list, str | None, set[str]]:
     """Rank the open set, write (or reuse) the snapshot, journal the moves.
 
     Returns ``(ranked, snapshot_ref, refused_case_ids)``. A ``case_ids``
