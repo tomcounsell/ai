@@ -850,8 +850,28 @@ def _rank_and_record(
 # ---------------------------------------------------------------------------
 
 
-def action_id_for(case_id: str, snapshot_ref: str, action_kind: str) -> str:
-    return hashlib.sha256(f"{case_id}{snapshot_ref}{action_kind}".encode()).hexdigest()[:16]
+def action_id_for(case_id: str, snapshot_ref: str, action_kind: str, attempt: int = 0) -> str:
+    """The deterministic action id for one (case, snapshot, kind) proposal.
+
+    ``attempt`` is the number of intents the case already carries: an intent
+    hash in any state (cancelled included) makes the adapter read a proposal
+    under that id as already admitted, so a re-proposal after a cancelled
+    dispatch mints the successor rather than a spent id. Attempt 0 is the
+    original shape, so ids minted before this parameter existed are stable.
+    """
+    suffix = "" if attempt == 0 else str(attempt)
+    return hashlib.sha256(f"{case_id}{snapshot_ref}{action_kind}{suffix}".encode()).hexdigest()[:16]
+
+
+def _fresh_action_id(project_key: str, case_id: str, snapshot_ref: str, kind: str) -> str:
+    """:func:`action_id_for` at the first attempt no intent on the case has spent."""
+    from tools.improvement_control.intents import list_intents
+
+    spent = {i.action_id for i in list_intents(project_key, case_id)}
+    attempt = 0
+    while action_id_for(case_id, snapshot_ref, kind, attempt) in spent:
+        attempt += 1
+    return action_id_for(case_id, snapshot_ref, kind, attempt)
 
 
 def _last_journal_entry(project_key: str, case_id: str) -> dict | None:
@@ -924,7 +944,7 @@ def propose_one_action(
         if kind is None:
             continue
         pending = _pending_proposal(project_key, case.id)
-        action_id = action_id_for(case.id, snapshot_ref, kind)
+        action_id = _fresh_action_id(project_key, case.id, snapshot_ref, kind)
         if pending is not None:
             return {
                 "case_id": case.id,

@@ -384,6 +384,68 @@ class TestProposal:
         assert len(journal_tail(PK, case.id, 50)) == before
         assert _unadmitted_proposal(PK, case.id).action_id == proposal["action_id"]
 
+    def test_a_cancelled_intent_never_gets_its_action_id_back(self, charter_path, store):
+        """The first real cycle (#3217): the dispatched session died at launch,
+        the reconcile pass cancelled the intent, and the next tick re-proposed
+        the same snapshot-derived action id. The adapter reads an intent hash
+        in any state as "already admitted" and skips it silently, so the case
+        was never dispatched again. A re-proposal after any intent exists for
+        the id must mint a successor, and a re-run with nothing new stays
+        idempotent on that successor."""
+        from tools.improvement_control.intents import (
+            admit,
+            list_intents,
+            mark_reconciliation_required,
+        )
+        from tools.improvement_control.journal import read_head
+        from tools.improvement_control.recovery import cancel_wedge
+
+        evidence(text="you lost the journey again and shipped half", classification="architectural")
+        first = tick(charter_path, store)
+        (case,) = cases()
+        spent = first.proposal["action_id"]
+        key = keys.lease_key(PK, case.id)
+        generation = lease().acquire(key, ttl=90)
+        try:
+            r = admit(
+                PK,
+                case.id,
+                spent,
+                expected_revision=read_head(PK, case.id).revision,
+                generation=generation,
+                action_type="investigate",
+                max_concurrent=5,
+            )
+            assert r.accepted, r
+            r = mark_reconciliation_required(
+                PK,
+                case.id,
+                spent,
+                expected_revision=read_head(PK, case.id).revision,
+                generation=generation,
+                from_state="admitted",
+                reason="test",
+            )
+            assert r.accepted, r
+            r = cancel_wedge(PK, case.id, spent, generation=generation, by="test")
+            assert r.accepted, r
+        finally:
+            lease().release(key, generation)
+        assert [i.state for i in list_intents(PK, case.id)] == ["cancelled"]
+
+        second = tick(charter_path, store)
+        assert second.snapshot_ref == first.snapshot_ref
+        assert second.proposal["status"] == "proposed"
+        assert second.proposal["action_id"] != spent
+        admittable = _unadmitted_proposal(PK, case.id)
+        assert admittable is not None
+        assert admittable.action_id == second.proposal["action_id"]
+
+        third = tick(charter_path, store)
+        assert third.proposal["status"] == "already_proposed"
+        assert third.proposal["action_id"] == second.proposal["action_id"]
+        assert third.proposal["idempotent"] is True
+
     def test_experiment_kind_when_a_proposed_experiment_exists(self, charter_path, store):
         from models.improvement_experiment import ImprovementExperiment
 
