@@ -22,7 +22,7 @@ class TestReadTheRoomWiring:
     def _make_handler(self, mock_redis):
         from agent.output_handler import TelegramRelayOutputHandler
 
-        handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        handler = TelegramRelayOutputHandler()
         handler._redis = mock_redis
         return handler
 
@@ -396,7 +396,7 @@ class TestRedundancyFilterWiring:
     def _make_handler(self, mock_redis=None):
         from agent.output_handler import TelegramRelayOutputHandler
 
-        h = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+        h = TelegramRelayOutputHandler()
         if mock_redis is not None:
             h._redis = mock_redis
         return h

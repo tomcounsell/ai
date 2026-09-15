@@ -131,7 +131,7 @@ def rtr_handler_setup(monkeypatch):
     from agent.output_handler import TelegramRelayOutputHandler
     from bridge.message_drafter import MessageDraft
 
-    handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+    handler = TelegramRelayOutputHandler()
     mock_redis = MagicMock()
     mock_redis.rpush = MagicMock()
     mock_redis.expire = MagicMock()
@@ -294,7 +294,7 @@ def redundancy_handler_setup(monkeypatch):
     from agent.output_handler import TelegramRelayOutputHandler
     from bridge.message_drafter import MessageDraft
 
-    handler = TelegramRelayOutputHandler(redis_url="redis://localhost:6379/0")
+    handler = TelegramRelayOutputHandler()
     mock_redis = MagicMock()
     mock_redis.rpush = MagicMock(return_value=1)
     mock_redis.expire = MagicMock()

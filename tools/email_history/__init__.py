@@ -12,7 +12,6 @@ so the CLI can render a clean error without a traceback. Missing per-msg blobs
 from __future__ import annotations
 
 import json
-import os
 import time
 from datetime import datetime
 
@@ -35,11 +34,10 @@ __all__ = [
 
 
 def _get_redis():
-    """Return a Redis connection using the standard project env var."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 def _ts_to_iso(ts: float | None) -> str | None:
