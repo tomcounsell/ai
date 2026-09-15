@@ -196,8 +196,19 @@ def _probe_cloudflare_cli(runner: Runner) -> dict:
 
 
 def _probe_vault_write() -> dict:
+    """Classify the sanctioned vault writer as ``absent`` or ``unknown``.
+
+    An existence check establishes that the writer is on disk and nothing
+    more, so the probe reports ``unknown`` with what it established. It
+    spawns no ``op`` call to settle whether a write would be accepted,
+    because a probe that can hang is worse than one that abstains.
+    """
     if _VAULT_WRITER.exists():
-        return _entry("verified", "the sanctioned vault writer is present")
+        return _entry(
+            "unknown",
+            "the sanctioned vault writer module is on disk; whether `op` accepts a "
+            "write here is not checked by this probe",
+        )
     return _entry("absent", "no sanctioned vault writer exists yet; acquisition is not wired")
 
 

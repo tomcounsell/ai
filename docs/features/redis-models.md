@@ -164,22 +164,31 @@ a field whose name marks it unbounded fails on sight.
 
 ### The control-namespace exception
 
-The improvement controller (#3177) keeps its research state in a **non-Popoto**
-Redis namespace, `improve:{project_key}:{case_id}:*`, whose Lua transition
-script is the sole authority for state changes. Raw Redis there is correct and
-already precedented in this repo — `models/session_lifecycle.py` states the same
-exemption for its lock key and carries the working Lua CAS.
+The improvement controller keeps its research state in a **non-Popoto**
+Redis namespace, `improve:{project_key}:*` (shipped in lane 3,
+[#3215](https://github.com/tomcounsell/ai/issues/3215),
+`tools/improvement_control/keys.py`), whose Lua transition script is the sole
+authority for state changes. Raw Redis there is correct and already
+precedented in this repo — `models/session_lifecycle.py` states the same
+exemption for its lock key and carries the working Lua CAS. Unit 2's meter
+(`tools/paid_inference_meter.py`, also lane 3) and unit 3's meter
+(`tools/infrastructure_budget.py`, lane 7) both bind the same way for the same
+reason: a compare-and-set counter cannot be modeled in Popoto, which has none.
 
 Two rules make the exception safe rather than a loophole:
 
 - **The exemption is for keys popoto does not manage, and nothing else.** The
   flat `Improvement*` Popoto records are ordinary models and every read and
-  write of them goes through the ORM.
+  write of them goes through the ORM. The control package's own `keys.py`
+  enforces this at the key-builder level: `assert_control_key()` raises on
+  any key outside the `improve:` prefix, so a typo cannot address a
+  Popoto-managed key or #3220's `lease:session:*` key by accident.
 - **The raw-Redis guard is a text heuristic, not a namespace check.** It fires
   when one command string contains both a Popoto-context substring and a block
   pattern, so it will misfire on a plain `improve:*` key. The control journal
-  therefore binds its client under a private alias in its own module, never
-  `from popoto.redis_db import POPOTO_REDIS_DB as _R` in a file where an
+  therefore binds its client under a private alias in its own module
+  (`journal.py::_control_redis()`, wrapping `utils.redis_client.text_redis()`),
+  never `from popoto.redis_db import POPOTO_REDIS_DB as _R` in a file where an
   operator would type a debug one-liner, and its compare-and-delete is exercised
   through a pytest file rather than an inline `python -c`.
 

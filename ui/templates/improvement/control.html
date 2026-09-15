@@ -1,0 +1,84 @@
+{# Improvement: lane-3 control panel (#3215).
+
+   Intents, slots, unit-2 spend, paused heads, and reconciliation_required
+   wedges -- the same three-state rendering as every other panel in this
+   directory (content, "nothing yet, written by lane 3 when a case is
+   admitted", or "unavailable" when the read raised).
+#}
+<div class="improvement-panel" id="improvement-control">
+    {% if control.unavailable %}
+    <p class="improvement-warning">
+        The control namespace could not be read.
+    </p>
+    {% elif control.empty %}
+    <p class="improvement-meta">
+        Nothing yet, written by lane 3 when a case is admitted.
+    </p>
+    {% else %}
+    <h4>Lane slots</h4>
+    <p class="improvement-meta">{{ control.slot_count }} slot(s) in use.</p>
+
+    <h4>Intents by state</h4>
+    {% if not control.intents_by_state %}
+    <p class="improvement-meta">No dispatch intents recorded yet.</p>
+    {% else %}
+    <table class="improvement-table">
+        <thead>
+            <tr>
+                <th>State</th>
+                <th>Case</th>
+                <th>Action</th>
+                <th>Type</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for state, rows in control.intents_by_state.items() %}
+            {% for row in rows %}
+            <tr>
+                <td>{{ state }}</td>
+                <td>{{ row.case_id }}</td>
+                <td>{{ row.action_id }}</td>
+                <td>{{ row.action_type }}</td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <h4>Paused heads</h4>
+    {% if not control.paused_heads %}
+    <p class="improvement-meta">No paused cases.</p>
+    {% else %}
+    <ul class="improvement-list">
+        {% for row in control.paused_heads %}
+        <li>{{ row.case_id }}: {{ row.pause_reason or 'no reason recorded' }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h4>Reconciliation required</h4>
+    {% if not control.reconciliation_required %}
+    <p class="improvement-meta">No wedged intents.</p>
+    {% else %}
+    <ul class="improvement-list">
+        {% for row in control.reconciliation_required %}
+        <li>
+            {{ row.case_id }} / {{ row.action_id }} -- clear with
+            <code>valor-improve resume --case {{ row.case_id }} --force</code>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h4>Unit 2: paid inference</h4>
+    {% if not control.unit2 %}
+    <p class="improvement-warning">Unit-2 spend unavailable; the read failed.</p>
+    {% else %}
+    <p class="improvement-meta">
+        Window {{ control.unit2.day_key }}: reserved ${{ "%.2f"|format(control.unit2.reserved_usd) }},
+        settled ${{ "%.2f"|format(control.unit2.settled_usd) }}.
+    </p>
+    {% endif %}
+    {% endif %}
+</div>

@@ -158,6 +158,17 @@ Two-layer degradation ensures the user always gets a response when a tool hang t
 
 See [Agent Session Health Monitor §Per-Tool Timeout Sub-Loop](agent-session-health-monitor.md#how-it-works) for the full design, including the v1 single-slot `current_tool_name` limitation and out-of-scope items (per-`tool_use_id` registries, synthetic `tool_result` injection).
 
+### 11. Improvement Intent Reconcile (`improvement-intent-reconcile`, #3215)
+
+| Property | Value |
+|----------|-------|
+| Location | `tools/improvement_control/recovery.py::reconcile()`, `reflections/improvement_intent_reconcile.py` |
+| Trigger | Reflection scheduler, fixed 300s cadence |
+| What it does | Recovers the `admitted` session status's own inert window. Reads dispatch intents (never the session's own status) per open `ImprovementCase`: an `admitted`/`materialized` intent past `4 * lease_ttl_seconds` gets its own `stale_sweeps` counter incremented; at `max_dispatch_attempts` sweeps it moves to `reconciliation_required`, its lane slot releases, and a still-live bound row is forced `abandoned` through the existing `finalize_session()`. A `running` intent whose bound row is missing or already terminal is acted on the first qualifying sweep, no budget applies (the session holding the slot is already gone). |
+| Terminal safety | **Safe by design** -- it is itself a controller: acquires the case's own lease (the same `improve:{project}:{case}:lease` the scheduler adapter uses) before writing any of that case's intents, so it never races a live adapter tick for the same case. Forcing a row terminal reuses `finalize_session()`'s own terminal-safety guards (rejects a source already terminal) rather than writing status directly. |
+| Guard | `if row is not None and row.status not in TERMINAL_STATUSES` before calling `finalize_session` -- `finalize_session` raises `StatusConflictError` on an already-terminal row (`reject_from_terminal=True` by default), so this guard turns what would otherwise be an ERROR-logged no-op into a silent one. |
+| Owner | `reflection` -- a new `RECOVERY_OWNERSHIP` value, since `admitted` is inert to the worker, the health check, and every other mechanism above by construction (excluded from `RESUMABLE_STATUSES`, the resume drip, and every non-terminal-session query the worker/watchdog run). |
+
 ## Recovery Ownership
 
 Session recovery is split between two processes: the **worker** and the **bridge-hosted watchdog**. Each non-terminal status has exactly one owner responsible for detecting stuck sessions and recovering them.
@@ -174,6 +185,7 @@ The authoritative registry is `RECOVERY_OWNERSHIP` in `models/session_lifecycle.
 | `paused` | bridge-watchdog | `reflections/agents/session_recovery_drip.py` `run` (dripped after paused_circuit) |
 | `paused_circuit` | bridge-watchdog | `reflections/agents/session_recovery_drip.py` `run` (dripped first) |
 | `superseded` | none | Transitional status; superseded sessions are finalized immediately |
+| `admitted` | reflection | `improvement-intent-reconcile` (mechanism 11 above), 300s cadence. Inert to the worker, the health check, startup recovery, and the resume drip by construction -- a session created `admitted` by the improvement scheduler adapter waits for that same adapter's own liveness check to flip it to `pending`, never a status-map scan |
 
 **Why the split exists:** The worker process owns execution lifecycle (pending, running, hierarchy). The bridge-hosted watchdog owns monitoring of sessions that are paused or waiting outside the execution loop (active, dormant, paused variants). This split emerged naturally from the bridge/worker separation (PR #826) and is now formally documented here.
 

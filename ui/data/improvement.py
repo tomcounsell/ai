@@ -4,9 +4,9 @@ Read-only. All functions are synchronous (``def``, not ``async def``) because
 Popoto uses synchronous Redis calls and FastAPI runs sync handlers in a
 threadpool.
 
-**Renders only what a lane writes.** Two views backed by
-``ImprovementEvidence``, the provisional-assumptions list, the goals record,
-and the release lineage:
+**Renders only what a lane writes.** Views backed by ``ImprovementEvidence``,
+the provisional-assumptions list, the goals record, the release lineage, and
+(lane 3, #3215) the control namespace:
 
 - **Coverage** — how much the system is actually observing, so a rate has a
   denominator. A falling correction count with a falling scan count is not an
@@ -16,11 +16,15 @@ and the release lineage:
 - **Release lineage** (#3218) — every release joined to its evaluation,
   experiment, case, drill, window, and outcome, beside the promotion gate's
   sentence. Lineage, never a tally.
+- **Control status** (:func:`get_control_status`) — dispatch intents by
+  state, lane slots, unit-2 spend, paused heads, and
+  ``reconciliation_required`` wedges. Read through
+  ``tools.improvement_control.intents.list_intents`` over each open case's
+  own set, never a keyspace scan.
 
-Hypotheses, rejected experiments, spend, and the paused/inconclusive/
-reconciliation-required renderings deliberately do not appear. Nothing writes
-those records yet; each one arrives with the lane that first writes it (3 for
-intents and reservations, 5 for hypotheses and rejected approaches).
+Hypotheses and rejected experiments deliberately do not appear. Nothing writes
+those records yet; each one arrives with the lane that first writes it (5 for
+hypotheses and rejected approaches).
 
 **Two things this module will never show.** Experiment count and merged-patch
 count are activity, not improvement, and presenting either as improvement is
@@ -224,6 +228,72 @@ PENDING_SECTIONS = (
     ("Rejected approaches", "lane 5 records what was tried and set aside"),
     ("Resource use by budget unit", "lane 3 meters paid inference and infrastructure"),
 )
+
+
+def get_control_status(project_key: str = "valor") -> dict:
+    """The lane-3 control panel: intents by state, slots, unit-2 spend,
+    paused heads, and reconciliation_required intents (#3215).
+
+    Three-state rendering like every other panel in this module: content,
+    "nothing yet, written by lane 3 when a case is admitted" on an empty
+    namespace, and "unavailable" when the underlying read raised. Reads
+    through ``intents.list_intents`` over each open case's own ``intents``
+    set -- never a keyspace scan -- exactly like ``doctor`` and
+    ``case explain``.
+    """
+    try:
+        from models.improvement_case import OPEN_CASE_STATES, ImprovementCase
+        from tools.improvement_control import keys
+        from tools.improvement_control.intents import list_intents
+        from tools.improvement_control.journal import read_head
+        from utils.redis_client import text_redis
+
+        cases = []
+        for state in OPEN_CASE_STATES:
+            cases.extend(ImprovementCase.query.filter(project_key=project_key, state=state))
+
+        intents_by_state: dict[str, list[dict]] = {}
+        paused_heads: list[dict] = []
+        reconciliation_required: list[dict] = []
+        for case in cases:
+            head = read_head(project_key, case.id)
+            if head is not None and head.paused:
+                paused_heads.append({"case_id": case.id, "pause_reason": head.pause_reason})
+            for intent in list_intents(project_key, case.id):
+                row = {
+                    "case_id": case.id,
+                    "action_id": intent.action_id,
+                    "action_type": intent.action_type,
+                    "agent_session_id": intent.agent_session_id,
+                }
+                intents_by_state.setdefault(intent.state, []).append(row)
+                if intent.state == "reconciliation_required":
+                    reconciliation_required.append(row)
+
+        r = text_redis()
+        slots = r.hgetall(keys.slots_key(project_key))
+
+        try:
+            from tools.paid_inference_meter import status_dict as unit2_status_dict
+
+            unit2 = unit2_status_dict(project_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement dashboard: unit-2 read failed: %s", exc)
+            unit2 = None
+
+        return {
+            "unavailable": False,
+            "empty": not cases and not slots,
+            "project_key": project_key,
+            "intents_by_state": intents_by_state,
+            "slot_count": len(slots),
+            "paused_heads": paused_heads,
+            "reconciliation_required": reconciliation_required,
+            "unit2": unit2,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("improvement dashboard: control status read failed: %s", exc)
+        return {"unavailable": True, "empty": False, "project_key": project_key}
 
 
 def get_goals(project_key: str = "valor") -> dict:

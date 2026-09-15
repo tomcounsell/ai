@@ -690,6 +690,44 @@ class ImprovementSettings(BaseModel):
             "Env: IMPROVEMENT__CONTROLLER_TICK_SECONDS."
         ),
     )
+    lease_ttl_seconds: int = Field(
+        default=90,
+        ge=1,
+        le=3600,
+        description=(
+            "TTL, in seconds, for the interim case lease "
+            "(``tools/improvement_control/lease.py``). A controller that "
+            "stalls past this long loses its generation to the next "
+            "acquirer; the reconcile pass's staleness threshold is "
+            "``4 * lease_ttl_seconds``. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__LEASE_TTL_SECONDS."
+        ),
+    )
+    journal_max_entries: int = Field(
+        default=1000,
+        ge=1,
+        le=100_000,
+        description=(
+            "How many journal entries the control journal's per-case list "
+            "retains (``LTRIM`` on every accepted transition). The head is "
+            "always authoritative; a tail trimmed past a replay's reach is "
+            "reported, never treated as an error. PROVISIONAL/TUNABLE. "
+            "Env: IMPROVEMENT__JOURNAL_MAX_ENTRIES."
+        ),
+    )
+    max_dispatch_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "How many stale sweeps an ``admitted``/``materialized`` intent "
+            "survives before the reconcile pass moves it to "
+            "``reconciliation_required`` and forces its bound session "
+            "terminal. A ``running`` intent whose session is gone is acted "
+            "on the first sweep regardless of this bound. PROVISIONAL/"
+            "TUNABLE. Env: IMPROVEMENT__MAX_DISPATCH_ATTEMPTS."
+        ),
+    )
 
 
 class RedisSettings(BaseModel):

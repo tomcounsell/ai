@@ -265,6 +265,23 @@ def run_judge(diff: str, pr_number: int | None = None) -> dict:
         prompt_tokens,
         completion_tokens,
     )
+    # Record-only receipt (#3215 Decision 7): the judge runs for any repo and
+    # holds no project key of its own, so this is pinned to "valor" -- the
+    # paid-inference pool's owner, not the repository under review. Never
+    # gated: purpose="sdlc_review" never counts against unit 2.
+    try:
+        from tools.paid_inference_meter import record_receipt
+
+        record_receipt(
+            project_key="valor",
+            purpose="sdlc_review",
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            metering="estimated",
+        )
+    except Exception as e:
+        logger.debug("[cross-vendor-judge] receipt record failed (non-fatal): %s", e)
     return envelope
 
 

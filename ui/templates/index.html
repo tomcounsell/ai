@@ -98,6 +98,9 @@ function toggleStats() {
         <div id="improvement-releases-panel"
              hx-get="/_partials/improvement/releases/" hx-trigger="revealed, every 60s"
              hx-swap="innerHTML"></div>
+        <div id="improvement-control-panel"
+             hx-get="/_partials/improvement/control/" hx-trigger="revealed, every 60s"
+             hx-swap="innerHTML"></div>
     </section>
 
     <section id="pipeline-integrity" class="compact-panel">

@@ -346,8 +346,10 @@ carries lower, upper, `n`, and both raw and adjusted p-values.
 A crash between the `frozen -> running` write and the verdict write leaves the
 experiment at `state="running"`, and Gate 0 refuses every retry. The harness
 does not reclaim it automatically: `ImprovementExperiment` carries no liveness
-timestamp, so nothing can tell a live run from a dead one. A heartbeat and an
-automatic reclaim belong to lane 3.
+timestamp, so nothing can tell a live run from a dead one. The control plane's
+reconcile pass (`improvement-intent-reconcile`, [Improvement Controller](improvement-controller.md#dispatch-lane-3))
+reclaims the dispatch intent and its lane slot; the experiment row itself is
+repaired by hand as below.
 
 The repair is explicit, through the ORM:
 
@@ -374,14 +376,15 @@ the same object.
 A second `evaluate()` for one experiment that reads a state other than
 `frozen` writes an `infra_failure` evaluation naming the state it found and
 touches nothing else. Popoto offers no compare-and-set, so that window is a
-small tolerated race; a real lease is lane 3's.
+small tolerated race; the control plane's case lease (`CaseLease`, [Improvement Controller](improvement-controller.md#control-namespace-contract-lane-3))
+fences dispatch, not this per-experiment write.
 
 ## Mutation proofs
 
 Every guard in the harness ships with a recorded red-state proof: the named
 mutation was applied, the named test went red, the mutation was reverted, and
 the test went green. The table lives in the plan
-(`docs/plans/improvement-controller-lane-4-frozen-evaluation-inputs.md`,
+(`docs/archive/plans-completed/improvement-controller-lane-4-frozen-evaluation-inputs.md`,
 "Mutation proofs"), and the proof record from the build is in the PR that
 landed #3216.
 
@@ -414,5 +417,5 @@ improvement is the specific dishonesty the plan names, and
 - [Improvement Controller](improvement-controller.md), records, evidence collection, control namespace, break-glass
 - [Improvement Release](improvement-release.md), what consumes an `accept` verdict: the release lifecycle, drill, observation window, and the recursive comparison
 - [`docs/plans/recursive-self-improvement.md`](../plans/recursive-self-improvement.md), the full design
-- [`docs/plans/improvement-controller-lane-4-frozen-evaluation-inputs.md`](../plans/improvement-controller-lane-4-frozen-evaluation-inputs.md), the lane 4 plan with the mutation table and verification rows
+- [`docs/archive/plans-completed/improvement-controller-lane-4-frozen-evaluation-inputs.md`](../archive/plans-completed/improvement-controller-lane-4-frozen-evaluation-inputs.md), the lane 4 plan with the mutation table and verification rows
 - [Capability matrix](../plans/critiques/recursive-self-improvement-capability-matrix.md), what is implemented versus measured

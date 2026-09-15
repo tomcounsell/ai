@@ -25,12 +25,14 @@ the process.
 
 **Unknown unit-2 spend refuses a claim.** Charter section 8: uncertain or
 missing metering is never zero cost. Unit 2, daily paid inference in the
-parent plan's numbering, has no meter until lane 3 (#3215) lands its
-``tools/paid_inference_meter.py``, so ``LedgerBudgetReader.unit2_usd``
-answers ``None``, the comparability check names ``BUDGET_UNKNOWN:unit2``,
-and the verdict is ``inconclusive``. A ``None`` read as ``0`` would let two arms with wildly
-different paid-inference spend look matched and a level-3 claim would
-measure the budget. The evaluation's ``budget=`` notes line carries every
+parent plan's numbering, is metered by lane 3's
+``tools/paid_inference_meter.py`` against the daily pool, but that meter
+carries no ``arm_run_id``, so there is nothing arm-scoped to sum:
+``LedgerBudgetReader.unit2_usd`` answers ``None``, the comparability check
+names ``BUDGET_UNKNOWN:unit2``, and the verdict is ``inconclusive``. A
+``None`` read as ``0`` would let two arms with wildly different
+paid-inference spend look matched and a level-3 claim would measure the
+budget. The evaluation's ``budget=`` notes line carries every
 unit for both arms whether or not the verdict is a claim, so the report can
 say exactly which unit is unknown.
 

@@ -5459,6 +5459,32 @@ def _worker_pid_heartbeat_fresh(pid: int) -> bool:
         return False
 
 
+def any_worker_alive() -> bool:
+    """True the moment any registered worker PID has a fresh heartbeat (#3215).
+
+    The improvement scheduler adapter checks this before flipping an
+    ``admitted`` research session to ``pending`` -- publishing a wake to a
+    live worker is instant; publishing into a stopped fleet just waits for
+    the ordinary health check's own eventual restart. Reuses the existing
+    ``WORKER_REGISTERED_PID_KEY_PREFIX`` scan and
+    :func:`_worker_pid_heartbeat_fresh` verbatim; no other change to this
+    module (the orphan reaper's own loop is untouched).
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+    for key in _R.scan_iter(f"{WORKER_REGISTERED_PID_KEY_PREFIX}*"):
+        raw_pid = _R.get(key)
+        if raw_pid is None:
+            continue
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if _worker_pid_heartbeat_fresh(pid):
+            return True
+    return False
+
+
 def _write_worker_heartbeat() -> None:
     """Write worker heartbeat file so the dashboard can show worker status.
 

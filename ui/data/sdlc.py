@@ -29,7 +29,14 @@ logger = logging.getLogger(__name__)
 # the point: they were two literals that disagreed on "in_progress", so a
 # session could be live on one path and inactive on the other. One name, one
 # membership test, one place to add a status.
-ACTIVE_STATUSES = ("running", "pending", "in_progress", "active", "waiting_for_children")
+ACTIVE_STATUSES = (
+    "running",
+    "pending",
+    "in_progress",
+    "active",
+    "waiting_for_children",
+    "admitted",  # created by the improvement scheduler adapter (#3215); inert but live
+)
 
 # Configurable retention for inactive sessions (default 48h)
 DASHBOARD_RETENTION_HOURS = int(os.environ.get("DASHBOARD_RETENTION_HOURS", "48"))

@@ -109,6 +109,20 @@ def test_drip_skips_paused_budget_but_drips_paused(drip_project):
     assert ok, f"paused_budget must never be dripped (flapping-loop guard). {detail}"
 
 
+def test_drip_never_touches_admitted(drip_project):
+    """`admitted` (#3215) is inert until the improvement scheduler adapter's
+    own liveness check flips it to `pending`; the drip must never do that
+    for it, the same shape as the `paused_budget` case above."""
+    pk, make = drip_project
+    admitted = make("admitted")
+
+    for _ in range(5):
+        session_recovery_drip.run()
+
+    ok, detail = _readback(admitted.session_id, pk, "admitted")
+    assert ok, f"admitted must never be dripped (improvement adapter owns the flip). {detail}"
+
+
 def test_drip_ignores_flag_only_running_session(drip_project):
     """A ``running`` session carrying the ``budget_tripped`` flag is untouched.
 

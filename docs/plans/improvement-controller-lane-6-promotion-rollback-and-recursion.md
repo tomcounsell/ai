@@ -75,7 +75,7 @@ be provably unworked, and the two arms' budgets have to be accounted in the same
 - A claim report states, for each ladder level, whether the evidence supports it, with the
   confidence interval, the correction, and the observation that would falsify it, and says plainly
   when it does not.
-- The dashboard renders release lineage as a fifth getter and never presents experiment count or
+- The dashboard renders release lineage as a getter on the pinned list and never presents experiment count or
   merged-patch count as improvement.
 
 ## Freshness Check
@@ -1078,7 +1078,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 
 ### Feature Documentation
 - [ ] Create `docs/features/improvement-release.md`: the release lifecycle and its state machine, the drill record shape and what it does and does not exercise, the exposure and observation-window semantics with the frozen baseline, the promotion gate and both preconditions, the denylist, the recursive comparison's contract and budget accounting, the claim ladder report, and the `valor-improve-release` reference.
-- [ ] Update `docs/features/improvement-controller.md`: "What exists today" gains lane 6; the authority table's "Evaluation and release" row cites the gate module; the records table's `ImprovementRelease` row names the new fields; the dashboard section lists the fifth getter.
+- [ ] Update `docs/features/improvement-controller.md`: "What exists today" gains lane 6; the authority table's "Evaluation and release" row cites the gate module; the records table's `ImprovementRelease` row names the new fields; the dashboard section lists the release-lineage getter.
 - [ ] Update `docs/features/improvement-evaluation.md` (lane 4's doc) with one paragraph on what consumes an `accept` verdict, linking to the release doc; no change to the harness description.
 - [ ] Add `docs/features/improvement-release.md` to the `docs/features/README.md` index table.
 - [ ] Update `docs/tools-reference.md`: add `valor-improve-release` with every subcommand in the Agent Integration list, including `revision supersede`, `drill --sweep`, `close-window --due`, `rollback --branch`, and `compare run --arm-runner`; re-point the planned `valor-improve release compare` line.
@@ -1282,7 +1282,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | No promotion flag exists (anti-criterion) | `grep -rciE 'promot[a-z_]*\s*[:=]' config/settings.py .env.example` | match count == 0 |
 | No file-flag enable for promotion (anti-criterion) | `grep -rc 'promotion-enabled\|promote-enabled' tools/improvement_release tools/improvement_recursion` | match count == 0 |
 | Charter is a denied surface | `.venv/bin/python -c "from tools.improvement_release.denylist import denied_surfaces; d = denied_surfaces(['docs/improvement-charter.md', 'models/improvement_charter.py', 'tools/x.py']); assert d == ['docs/improvement-charter.md', 'models/improvement_charter.py'], d; print('denied')"` | output contains denied |
-| Dashboard exports exactly five getters | `.venv/bin/python -c "import ui.data.improvement as m; names = [n for n in dir(m) if n.startswith('get_')]; assert names == ['get_coverage', 'get_goals', 'get_intervention_burden', 'get_provisional_assumptions', 'get_release_lineage'], names; print('pinned')"` | output contains pinned |
+| Dashboard exports exactly six getters | `.venv/bin/python -c "import ui.data.improvement as m; names = [n for n in dir(m) if n.startswith('get_')]; assert names == ['get_control_status', 'get_coverage', 'get_goals', 'get_intervention_burden', 'get_provisional_assumptions', 'get_release_lineage'], names; print('pinned')"` | output contains pinned |
 | Dashboard never returns an experiment or patch count (anti-criterion) | `grep -c 'experiment_count\|merged_patch\|patch_count\|len(experiments)' ui/data/improvement.py ui/templates/improvement/releases.html` | match count == 0 |
 | Lane 4 harness untouched (diffed against `origin/main`, correct now that #3309 has merged; the prior `origin/session/sdlc-3216` fallback read a deleted branch's stale local remote-tracking ref instead of falling through) | `BASE=$(git merge-base HEAD origin/main); git diff --stat "$BASE" -- tools/improvement_eval/ \| tail -1 \| grep -c 'changed'` | match count == 0 |
 | Process digest is deterministic and canonical | `.venv/bin/python -c "from tools.improvement_recursion.process import ResearchProcessSpec, research_process_digest as d; a = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'probe': 0.5, 'web_research': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); b = ResearchProcessSpec(selection_rule='rank', investigation_budget_split={'web_research': 0.5, 'probe': 0.5}, revision_cadence_seconds=3600, planner_prompt_digest='sha256:0', skill_digest='sha256:0'); assert d(a) == d(b) and d(a).startswith('sha256:'); print('canonical')"` | output contains canonical |

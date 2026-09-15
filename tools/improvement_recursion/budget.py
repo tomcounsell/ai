@@ -102,7 +102,14 @@ class LedgerBudgetReader:
         self.project_key = project_key
 
     def unit2_usd(self, arm_run_id: str) -> float | None:
-        """No paid-inference meter exists until lane 3 (#3215); always unknown."""
+        """Always unknown: unit 2 has no arm-scoped read.
+
+        Lane 3 (#3215) shipped ``tools/paid_inference_meter.py``, but it meters
+        the daily pool by window and reservation, with no ``arm_run_id``
+        dimension to sum over. Until an arm's inference reservations carry the
+        arm, an arm's unit-2 spend is unknown, and charter section 8 forbids
+        reading unknown as zero.
+        """
         return None
 
     def unit3_usd(self, arm_run_id: str) -> float | None:
