@@ -610,21 +610,168 @@ live phone call and any plan-doc locking protocol.
 
 ## Prerequisites
 
-[skeleton — Phase 2 fill]
+Nothing here blocks starting M1. Two items must be settled before M3 lands, and two
+are side findings that belong in their own issues rather than in this plan's scope.
+
+| # | Prerequisite | Blocks | Disposition |
+|---|---|---|---|
+| P1 | **A resolution-marking convention for the future.** The nine existing shapes are teachable (spike-3), so this is not a blocker for the harvester — but M4 has to name one convention, and which marker it names is Open Question 2. | M4 only | Decide during M4. M1 ships against the existing shapes regardless. |
+| P2 | **`validate_poll_question` has two enforcement points for one invariant** — logged-and-discarded at `agent/output_handler.py:1560`, hard-exit at `tools/ask_poll.py:134`. It is an open owner decision on #3095. A voice renderer added to the same seam inherits it unresolved, which means an invalid question either hard-exits the interview or ships degraded, and nobody has ruled which. | M3 | Raised as an Open Question below. Not this plan's to settle unilaterally. |
+| P3 | **The single-writer-lease plan was archived as completed without being built.** `docs/archive/plans-completed/plan-doc-single-writer-lease.md` still reads `status: Ready` and was moved by a content-free rename (`433c166a9`), apparently swept up by PR #2942's bulk move. | Nothing | **This plan does not depend on it.** Sequential single-writer writeback sidesteps the hazard entirely. File separately — the discrepancy is a ledger problem, not a blocker. |
+| P4 | **`bf_alice` is named in `.claude/skill-context/do-debrief.md:21` but absent from `KOKORO_VOICES`** (`tools/tts/__init__.py:27-38`), so that documented invocation hits the unknown-voice path. Re-verified at the baseline commit. | Nothing | File separately. Relevant only as a warning: this plan pins its clip voice to a name verified present in the catalog, and records the *actual* voice from the result dict rather than trusting the request. |
+
+**Not prerequisites, explicitly.** No new external dependency, no vendor key beyond
+`OPENAI_API_KEY` (already declared), no PBX, no streaming STT, no Popoto migration,
+no plan-doc lock.
 
 ## Solution
 
 ### Key Elements
 
-[skeleton — Phase 2 fill]
+1. **`tools/open_questions` — the harvester.** Walks `docs/plans/*.md` (minus
+   `NON_LANE_PLANS`) and this repo's open issues, emits typed `OpenQuestion`
+   records, classifies each one's disposition against the nine shapes the corpus
+   actually uses, and scores unblock leverage. Standalone CLI with `--json`.
+2. **`tools/question_tree` — the preparation pass.** Ranks by leverage, enumerates
+   plausible answer dispositions per question, computes which questions each
+   disposition moots, picks the root that maximizes expected pruning, and bounds the
+   tree by a target session length. Authors the spoken text for every node and
+   synthesizes it into a content-addressed clip library.
+3. **`tools/voice_interview` — the delivery driver.** Holds exactly one outstanding
+   clip, owns the `{telegram_msg_id → qid}` registry that spike-1 showed does not
+   exist anywhere else, binds each inbound answer, and walks the pre-computed
+   pruning edges. No model call in this loop.
+4. **A voice branch in `tools/ask_poll.py`.** One more arm on the existing single
+   degradation point, fed by a shared frozen question model extracted from the
+   pieces currently scattered across `ask_poll.py` and `output_handler.py`.
+5. **`tools/open_questions.writeback` — parallel draft, sequential apply.**
+   One drafting subagent per plan doc, read-only and concurrent; one writer,
+   `Edit`-only, one doc at a time, one atomic stage-and-commit per doc.
+6. **The M4 convention amendment.** `/do-plan` stops deleting the Open Questions
+   section on finalize and marks it instead.
 
 ### Flow
 
-[skeleton — Phase 2 fill]
+The end-to-end path is drawn in Data Flow above. The load-bearing sequencing
+decisions, restated:
+
+- **All intelligence runs before the call.** Every model call is in element 2. The
+  delivery loop plays a file, reads a transcript, and follows an edge.
+- **One clip outstanding at a time.** This is what makes binding tractable and what
+  lets the whole interview reuse the poll flow's one-question-per-turn shape: each
+  clip is one render, one turn-end, one wait, one answer, one resume. The traversal
+  is N of those in sequence, not a new interaction model.
+- **Pruning happens between turns, from pre-computed edges.** Nothing is inferred
+  live.
+- **Writeback is a separate invocation after the call ends**, never interleaved with
+  delivery. An interview that dies mid-traversal loses no answers: they are in the
+  Telegram history and in the state file.
 
 ### Technical Approach
 
-[skeleton — Phase 2 fill]
+**Records and identity.** `OpenQuestion` is a frozen dataclass — matching the
+`PollEligibility` style at `bridge/poll_gating.py:36-37` — carrying `qid`, `text`,
+`source_path`, `source_line`, `source_kind` (`plan` | `issue`), `tracking_issue`,
+`disposition` (`open` | `resolved` | `defaulted` | `deferred`), and the leverage
+inputs. `qid` is `sha256` of the *normalized* question text truncated to 12 hex
+chars: stable across line-number drift, which matters because plan docs are edited
+constantly and a qid keyed on position would churn every commit.
+
+**Disposition classification.** A table of named, env-overridable rules rather than
+one regex — this is the part that has to be right, and the part that must be
+overridable per repo. Ordered most-specific-first:
+
+| Shape | Signal |
+|---|---|
+| Section-level empty | body is `None.` / `**None.**` / `None blocking.` / `None outstanding.` |
+| Heading renamed | `## Resolved Questions`, `## Resolved Decisions`, `## Decisions Recorded`, `## Decisions (Owner, …)` |
+| Prose all-clear | "All open questions resolved", "nothing remains open", "Nothing is open" |
+| Blockquote banner | `> **RESOLVED <date> (owner).**` preceding retained original text |
+| Strikethrough | `~~**…**~~` followed by `**Resolved …**` |
+| Per-item inline marker | `Resolved:`, `— DECIDED`, `(resolved <date>, …)`, `RATIFIED`, `**D1 —**` |
+| **Defaulted (not an ask)** | section preamble contains "Silence keeps the default", or the item carries `Default:`, or the item pairs `**Disposition:**` with `Overturned by:` |
+| Genuinely open | none of the above |
+
+Spike-3 verified every one of these against the corpus, including that the
+defaulted items in `lane-3:787` and `lane-5:1882` are greppable without any edit.
+The H3 heading at `durability-room-job-agentrun.md:512` is why heading discovery
+scans `^#{2,4}\s` rather than `^## `.
+
+**The deliberate non-refactor, restated.** `bridge/message_drafter.py:100` stays as
+it is. See Architectural Impact for the reasoning; the practical contract is a test
+asserting the harvester's classifier and `_extract_open_questions` agree on the
+narrow single-well-formed-section case, so the duplication cannot drift silently.
+
+**Leverage scoring.** `leverage = w_plans · (plan docs blocked) + w_issues · (open
+issues blocked) + w_prune · (questions this answer would moot)`. The weights are
+named env-overridable constants with an explicit grain-of-salt comment — they are
+guesses until a few real calls produce evidence, and pretending otherwise in code
+would be worse than saying so.
+
+**Authoring and tree construction.** `run_typed()` (PydanticAI), not `claude -p`:
+this is a non-harness call, and the repo's pattern for structured classification is
+the Literal-typed Pydantic output shape at `tools/classifier.py:305-440`. Per
+question the model returns spoken text, a deeper-context clip text, a readback line,
+the plausible dispositions, the qids each disposition moots, and a draft writeback
+per disposition. Prompts carry no specific numbers or identifiers — partly because
+prompts with baked-in numerals invite hallucination, and partly because the
+`/do-voice-recording` prosody rules forbid reciting multi-digit identifiers aloud,
+so clips reference work by name. A validator rejects any spoken text containing a
+multi-digit run or exceeding `MAX_TEXT_LENGTH` (4096, `tools/tts/__init__.py:24`)
+before synthesis is attempted.
+
+**Clip cache.** Key: `sha256("v1|{text}|{requested_voice}|{force_cloud}|opus")` →
+`data/clips/<hash>.ogg`, with `<hash>.json` recording the **actual** `backend`,
+**actual** `voice`, and `duration` from the result dict. Validation happens on read,
+not in the key: a hit whose sidecar backend disagrees with what the caller now wants
+is a miss. Backend cannot go in the key because `_is_kokoro_available()`
+(`tools/tts/__init__.py:397`) is a stateful time-windowed live probe and the
+Kokoro→cloud fallback re-resolves the voice mid-call (`:426-437`). The `v1` salt
+covers the constants a caller cannot observe (`speed=1.0`, `-b:a 24k`,
+`kokoro-v1.0.onnx`, `tts-1`) and is bumped when any of them change. Every call site
+must handle the `{"error": ...}`-only return shape (`:389-411`), which carries none
+of the other keys.
+
+**Sending.** `valor-telegram send --voice-note <clip> --ack-sent-id`, and
+**never** `--cleanup-after-send` — that sets `payload["cleanup_file"]`, which all
+three relay unlink sites are gated on, and would destroy the library. The
+already-shipped negative test at
+`tests/unit/test_telegram_relay_voice_note.py:117-132` pins the survival behavior,
+so the plan adds no new test for it. `--ack-sent-id` is single-consumer,
+delete-on-read, with a 120s TTL (`bridge/outbox_ack.py:48`), so the ack is read
+immediately after send and recorded in the registry; a missed ack degrades to
+positional binding rather than failing.
+
+**Binding.** Primary: inbound `reply_to_msg_id` (persisted at
+`bridge/telegram_bridge.py:1579`) looked up in the registry. Fallback: positional,
+since exactly one clip is outstanding. If both are available and disagree, the
+traversal stops and reports — a wrong binding writes an answer into the wrong plan
+doc, which is strictly worse than stopping.
+
+**Waiting and resuming.** Unchanged mechanisms. Render via `Bash`, then
+`AskUserQuestion` as the turn's final act to fire the `needs_human` edge
+(`agent/session_runner/hook_edge.py:363-368`); stay stopped via the widened
+`session_has_open_question` feeding `agent/output_router.py:180`'s existing pure
+bool; resume through `bridge/answer_routing.py`, which is already
+transport-independent.
+
+**Writeback.** Drafting fans out one read-only subagent per plan doc, in parallel,
+each returning the exact `Edit` it wants plus a re-verification against current
+`main` (the drafts were authored against an older tree, so a drifted question is
+reported, not overwritten). Applying is one writer, one doc at a time:
+
+- `Edit`, never `Write` — four PostToolUse validators match `Write` on
+  `docs/plans` with `exit_policy = "propagate"` (`.claude/hooks/manifest.toml:133-167`).
+  This was confirmed live during this plan's own authoring.
+- Staging and committing are **one** shell invocation with explicit paths, never
+  `git add -A`. This is #2650's stated mitigation and the direct lesson of the
+  2026-08-13 incident.
+- A plan-only commit carries **no** closing keyword: `scripts/check_issue_disposition.py`
+  exempts `docs/plans/` (`:86`, applied at `:183`) but blocks
+  `Closes|Fixes|Resolves #N` on plan-only commits (#2890). Anything reaching outside
+  that prefix needs `Closes #N`, `Refs #N`, or `No-issue: <reason>`.
+- `--dry-run` prints every `Edit` and the exact `git` invocation before anything is
+  written. Given what #2650 catalogues, an unreviewable writeback is not acceptable.
 
 ## Failure Path Test Strategy
 
