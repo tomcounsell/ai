@@ -16,6 +16,7 @@ import pytest
 
 from tools.improvement_control import keys
 from tools.improvement_control.journal import (
+    KNOWN_EVENTS,
     TransitionResult,
     journal_length,
     journal_tail,
@@ -298,6 +299,33 @@ class TestInvalidArgument:
         assert result.reason == "INVALID_ARGUMENT"
         assert result.accepted is False
         assert text_redis().llen(length_before_key) == 0
+
+
+class TestLane5KnownEvents:
+    """Lane 5 (#3217) writes nine case-lifecycle events through ``transition``.
+
+    ``KNOWN_EVENTS`` is closed and ``transition`` refuses any other name
+    ``INVALID_ARGUMENT`` (see ``TestInvalidArgument``), so every event the
+    planner tick, the evaluation, and the unblock pass record must be
+    declared here or the whole cycle is refused at its first write.
+    """
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            "ranking_recorded",
+            "case_opened",
+            "evidence_attached",
+            "evidence_attached_to_rejected",
+            "investigation_opened",
+            "hypothesis_proposed",
+            "experiment_frozen",
+            "verdict_applied",
+            "case_unblocked",
+        ],
+    )
+    def test_lane_5_event_is_known(self, event):
+        assert event in KNOWN_EVENTS
 
 
 class TestUnavailable:
