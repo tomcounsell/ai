@@ -502,23 +502,38 @@ mysterious.
 
 ## Architectural Impact
 
-**Net-new, mostly additive.** Three new packages under `tools/`, one new skill,
-one new gitignored artifact directory. No change to the bridge, the worker, the
-relay, the session model, or any Popoto schema — which also means **no migration**
-(the repo's Popoto migration requirement does not apply to this plan).
+**Mostly additive, with three narrow incisions into shipped code.** Three new
+packages under `tools/`, one new gitignored artifact directory, and **no new
+skill** (spike-4). No change to the bridge, the relay, the worker, the session
+model, or any Popoto schema — which also means **no migration**, so the repo's
+Popoto migration requirement does not apply to this plan.
 
 | Surface | Impact |
 |---|---|
-| `tools/open_questions/` | New package. Harvester, disposition classifier, leverage scoring, writeback. |
-| `tools/question_tree/` | New package. Tree construction, spoken-text authoring, clip cache. |
-| `tools/voice_interview/` | New package. The delivery session loop and its state file. |
-| `tools/tts/` | **Unchanged.** `synthesize(text, output_path, ...)` already lets the caller choose the destination, so the clip library is a pure caller-side concern. |
-| `tools/transcribe/` | **Unchanged.** Inbound voice notes are already transcribed into the agent's message text at `bridge/media.py:461`. |
-| `bridge/telegram_relay.py` | **Unchanged.** The unlink is opt-in on `cleanup_file`; the clip sender simply never sets it. |
+| `tools/open_questions/` | **New package.** Harvester, disposition classifier, leverage scoring, writeback. |
+| `tools/question_tree/` | **New package.** Tree construction, spoken-text authoring, clip cache. |
+| `tools/voice_interview/` | **New package.** The interview driver, the clip registry, and the session state file. |
+| `data/clips/` | **New**, already gitignored twice over (`data/` at `.gitignore:181`, plus a global `*.ogg` rule). Clips and their metadata sidecars. |
+| `tools/ask_poll.py` | **Incision 1.** A voice branch inside the existing single degradation point at `:141-164`, plus a shared frozen question model extracted from `normalize_options` (`:52-88`), the escape-hatch literal (`:39`), and the imported `POLL_QUESTION_MAX_CHARS` (`:132-135`). Never a second CLI — `.claude/skill-context/ask-me.md:76` forbids the skill from choosing a surface. |
+| `agent/session_executor.py` | **Incision 2.** `session_has_open_poll` (`:1739`) widens to `session_has_open_question`, consulting a voice registry alongside the poll registry. |
+| `agent/output_router.py` | **Unchanged.** `:180-181` stays a pure function over a plain `has_open_question: bool` defaulting to `False`, which is what bounds the blast radius of incision 2. |
+| `agent/session_runner/hook_edge.py` | **Unchanged.** The voice flow ends its turn the same way the poll flow does: render via `Bash`, then `AskUserQuestion` as the turn's final act. Teaching `_ASK_USER_MATCHER` (`:114`) about `Bash` is a rejected alternative per `docs/features/telegram-poll-questions.md:170-172`. |
+| `bridge/answer_routing.py` | **Unchanged.** Already transport-independent on purpose (`:43-60, :94`); an inbound voice message is an ordinary steering message on this path. |
+| `tools/tts/` | **Unchanged.** `synthesize(text, output_path, ...)` at `:360` already lets the caller own the destination, so the clip library is purely caller-side. |
+| `tools/transcribe/` | **Unchanged.** Inbound voice notes are already transcribed into the agent's message text at `bridge/media.py:461-467`. |
+| `bridge/telegram_relay.py` | **Unchanged.** The unlink is opt-in on `cleanup_file` and all three sites are gated on it; the clip sender simply never sets it. `--ack-sent-id` and `publish_sent_message_id` (`:1463-1467`) already exist and are used as-is. |
 | `bridge/message_drafter.py` | **Unchanged** — see the deliberate non-refactor below. |
-| `data/question_clips/` | New, gitignored (`data/` is ignored at `.gitignore:181`). The clip library and its index. |
-| A new skill | The delivery half. Location (`.claude/skills-global/` vs `.claude/skills/`) is Open Question 5. |
-| `docs/features/`, `docs/tools-reference.md` | New feature doc and CLI entry. |
+| `.claude/skills-global/ask-me/SKILL.md` | **Unchanged.** Already surface-agnostic; it owns ranking and altitude, not transport. |
+| `.claude/skill-context/ask-me.md` | **Incision 3.** A voice row in the branch table (`:9-19`) and the degradation matrix (`:57-79`). Project-only, which is where repo-specific behavior belongs. |
+| `.claude/skills-global/do-plan/` | **M4 only.** `SKILL.md:399` (Phase 4 "remove Open Questions section") and `PLAN_TEMPLATE.md:495` gain one retain-and-mark convention. |
+| `docs/features/`, `docs/tools-reference.md` | New feature doc and CLI entries. |
+
+**What ranking is and is not reused.** `/ask-me` owns which questions to ask and
+at what altitude, derived from model context per invocation. The harvester replaces
+exactly that with disk-based leverage scoring — reproducible between runs — which is
+the whole point of M1. What gets reused is the *transport and wait* machinery below
+it. Confusing the two would either duplicate the wait mechanism or throw away the
+harvester.
 
 **The deliberate non-refactor.** `bridge/message_drafter.py:100`
 `_extract_open_questions` looks like the natural thing to lift and share. It has
@@ -538,16 +553,21 @@ classifier proves stable over a few months, unifying then is a cheap follow-up
 with evidence behind it; doing it now is a guess.
 
 **Direction of dependency.** `tools/question_tree` imports `tools/open_questions`;
-`tools/voice_interview` imports both. Nothing in `bridge/`, `worker/`, or `agent/`
-imports any of the three, so the blast radius of a bug is confined to a manually
-invoked CLI and one skill.
+`tools/voice_interview` imports both. Nothing in `bridge/` or `worker/` imports any
+of the three. The single inbound edge from shipped code is incision 2, where
+`agent/session_executor.py` consults the voice registry — and that edge is a bool
+that defaults to `False`, so a bug there degrades to today's behavior rather than
+breaking the nudge loop.
 
-**Replication.** Other machines run this against their own project. Anything
-encoding *this* repo's plan-doc dialect (heading synonyms, disposition markers,
-the `NON_LANE_PLANS` exclusion) must be overridable per repo rather than baked
-into the global tool body — the mechanism the repo already has for this is
-`.claude/skill-context/{skill}.md` for skills and named env-overridable constants
-for tools.
+**Replication.** Other machines run this against their own project, each with its
+own calling link tied to that project. Anything encoding *this* repo's plan-doc
+dialect (heading synonyms, disposition markers, the `NON_LANE_PLANS` exclusion)
+must be overridable per repo rather than baked into a global body. The mechanisms
+already exist and this plan uses both: `.claude/skill-context/{skill}.md` for the
+skill layer, and named env-overridable constants for the tool layer. Spike-4
+makes this cheap — the only skill file that changes is the project-only
+`.claude/skill-context/ask-me.md`, and the global `ask-me/SKILL.md` body stays
+untouched, so nothing repo-specific rides the hardlink sync to other machines.
 
 ## Appetite
 
@@ -559,16 +579,25 @@ boundary without leaving a half-built channel standing.
 |---|---|---|
 | **M1 — Harvester** | `tools/open_questions`: enumerate, classify disposition, score unblock leverage, CLI with `--json` | The corpus becomes machine-readable. `/ask-me` and the existing poll channel can consume it immediately, which is most of the velocity win without any audio. |
 | **M2 — Preparation and clip library** | `tools/question_tree`: leverage ranking, answer dispositions, pruning edges, spoken-text authoring, content-addressed OGG/Opus clip cache | A prepared, inspectable question tree with audio. Usable manually (send clips by hand) and reusable by any future transport including the deferred live call. |
-| **M3 — Delivery and writeback** | The voice session loop over Telegram voice notes, plus parallel-draft / sequential-apply writeback | The full loop the issue asks for. |
+| **M3 — Delivery and writeback** | A voice branch in `tools/ask_poll.py`'s single degradation point, a widened pause predicate, the interview driver, and parallel-draft / sequential-apply writeback | The full loop the issue asks for. |
+| **M4 — Fix the cause forward** | Amend `/do-plan` Phase 4 to retain-and-mark the Open Questions section instead of deleting it, and name one convention in `PLAN_TEMPLATE.md` | Stops the shape set growing. Small, and the only milestone that makes every *future* harvest cheap rather than every future harvest a parsing problem. |
 
 **Why Large and not Medium.** Three genuine gaps have to be built, not wired:
 there is no clip library (the current send path actively deletes clips), no
-cross-document question harvester, and no answer-to-question binding. The
-classifier in M1 alone has to handle seven mutually incompatible resolution
-conventions across nine distinct heading strings. Medium would force dropping
+cross-document question harvester, and no mapping from a sent clip to the question
+it asked (spike-1). The classifier in M1 alone has to handle nine resolution shapes
+across six distinct heading strings, one of them an H3. Medium would force dropping
 either the classifier's fidelity — which produces a channel that asks resolved
 questions and loses owner trust on its first call — or the writeback, which leaves
 the answers in chat where they already are.
+
+**Where the spikes bought appetite back.** M3 got materially cheaper than filed:
+there is no new skill, no new wait mechanism, and no new resume path, because
+`/ask-me`'s turn-ending and resume seams were deliberately built
+transport-independent and can be reused as-is (spike-4). M2 got cheaper too:
+`tools/tts.synthesize()` already lets the caller own the output path, so the clip
+library needs no change to the synthesis API (spike-2). That headroom is what pays
+for M4.
 
 **What the appetite buys generously, by design.** All intelligence runs in M2,
 before the session starts, where it has full context and no latency budget. The
@@ -660,7 +689,30 @@ and siblings by name. Never a full `tests/unit/` sweep for this work.
   #3330's downstream constraints state that concluding a lock is required is a
   scope change to raise, not absorb.
 - **Retro-editing the existing plan-doc corpus to one resolution convention.**
-  Justification: [skeleton — decided by spike-normalize + Open Question 1].
+  Justification: spike-3 measured it at ~50 item edits across 15 of 24 docs, 6 of
+  them needing heading renames, on the shared `main` checkout — a known lane
+  collision surface — bought for **zero current mechanical consumer**, since no hook
+  or validator parses the section today. Four of the nine shapes are already
+  greppable, including the defaulted items this plan most needed to exclude. M4
+  fixes the cause forward instead of rewriting history.
+- **A second question-rendering CLI alongside `valor-ask-poll`.** Justification:
+  `.claude/skill-context/ask-me.md:76` forbids the skill from detecting the surface
+  and branching by hand, and `tools/ask_poll.py:141-164` is deliberately the single
+  decision point. A second CLI would put surface detection back into the skill body.
+- **Teaching the `AskUserQuestion` PreToolUse matcher about `Bash`.**
+  Justification: already considered and rejected in
+  `docs/features/telegram-poll-questions.md:170-172`. The voice flow uses the same
+  render-then-`AskUserQuestion` sequence the poll flow uses.
+- **Persisting the outbound voice note's question text in `store_message`.**
+  Justification: spike-1's alternative fix. It changes a hot relay path
+  (`bridge/telegram_relay.py:1499-1515`) for a benefit exactly one caller needs,
+  when `--ack-sent-id` already exposes the message id and a session-owned registry
+  closes the gap with no shipped-code change.
+- **Telegram `file_id` caching to avoid re-uploading clips.** Justification: a real
+  optimization — re-sending re-uploads the bytes — but the clip library's purpose is
+  to save *synthesis* cost, and `file_id` handling differs between voice and audio
+  sends in ways that would need their own verification. Out of scope, noted for
+  later.
 - **Timestamped transcript alignment.** Justification: unnecessary on the
   Telegram transport, where one inbound voice note answers one outbound clip, and
   it would force the cloud STT path since the local SuperWhisper backend returns
