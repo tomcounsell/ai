@@ -358,7 +358,7 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
    (`arm_assignment_digest`), calls `ArmRunner.run` once per arm with the same opportunity ids and
    the same cap, receives per-opportunity validated gains and a `BudgetUse`, reads accounted spend
    through `BudgetReader` (unit 3 from `InfrastructureReservation` rows whose `resource` name
-   carries the `arm:<arm_run_id>:` prefix; unit 2 from the seam, `None` until lane 3), and checks
+   carries the `arm:<arm_run_id>:` prefix; unit 2 from the seam, `None` until an arm-scoped read exists), and checks
    `budgets_comparable`.
 5. **Statistics**: paired deltas per opportunity (`gain_b - gain_a`, with a rejected or inconclusive
    arm result scored 0), `clustered_bootstrap_ci` clustered by `priority_area`, `evaluate_family` for
@@ -381,7 +381,7 @@ writes; nothing here mutates an evaluation or an experiment after the fact.
   are invoked through an injectable runner, the shape `tools/improvement_resources.py` already
   uses.
 - **Interface changes**: `ImprovementRelease` gains eight fields and one state, all additive.
-  `ui/data/improvement.py` gains one getter; the pinned list grows to five. `pyproject.toml` gains
+  `ui/data/improvement.py` gains one getter; the pinned list grows to six with lane 3's `get_control_status` merged in. `pyproject.toml` gains
   one script. Nothing in `tools/improvement_eval/` changes.
 - **Coupling**: the release lifecycle depends on lane 4's evaluation shape (`verdict`, `effect`,
   `charter_digest`) and on the experiment manifest carrying `base_revision`. The comparison depends
@@ -874,8 +874,8 @@ priority_area}`, `drill: {result, drilled_at}`, `window: {exposed_at, ends_at, d
 `outcome: {verdict, claim_level_2_supported}`), `promotion_gate: {automated, unmet}`,
 `unavailable`, `no_releases_yet`. The partial `ui/templates/improvement/releases.html` renders the lineage as one
 row per release and the gate as a sentence ("Automated promotion: disabled; unmet: ..."). The
-index page links it beside the other three. The exact pinned list in
-`test_dashboard_never_offers_experiment_or_patch_counts` grows to five.
+index page links it beside the others. The exact pinned list in
+`test_dashboard_never_offers_experiment_or_patch_counts` grows to six with lane 3's `get_control_status` merged in.
 
 **CLI (`cli.py`).** `argparse` with subparsers; every subcommand takes `--project-key` (default
 `valor`), prints one JSON object on stdout, exits 0 on success, 2 on a `ReleaseRefused` or
@@ -956,7 +956,7 @@ Every guard below is mutated once during the build and the test that catches it 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact pinned list becomes five names with `get_release_lineage` inserted in sorted position (`get_coverage`, `get_goals`, `get_intervention_burden`, `get_provisional_assumptions`, `get_release_lineage`); the assertion stays an exact list.
+- [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_dashboard_never_offers_experiment_or_patch_counts` — UPDATE: the exact pinned list becomes six names with `get_release_lineage` inserted in sorted position beside lane 3's `get_control_status` (`get_control_status`, `get_coverage`, `get_goals`, `get_intervention_burden`, `get_provisional_assumptions`, `get_release_lineage`); the assertion stays an exact list.
 - [ ] `tests/unit/test_ui_app.py::TestImprovementPartials::test_index_page_links_all_improvement_partials` — UPDATE: add the `/_partials/improvement/releases/` link assertion.
 - [ ] `tests/unit/test_improvement_models.py` (`INDEXED_VOCABULARIES[ImprovementRelease]`) — UPDATE: `RELEASE_STATES` gains `accepted` (six values, under the cap of 8); the vocabulary map reads the constant, so the update is to the docstring-recorded TTL/state expectations only if any test enumerates the five names literally (none does today; the row is a no-op guard).
 - [ ] `tests/unit/test_migrations.py` — UPDATE: add a per-migration registration test `test_confirm_improvement_release_lane6_fields_registered` in the shape of `test_improvement_models_registration_marker_exists` (`tests/unit/test_migrations.py:738-742`): `assert "confirm_improvement_release_lane6_fields" in MIGRATIONS`, unpack `fn, description = MIGRATIONS[...]`, `assert fn is _migrate_confirm_improvement_release_lane6_fields`, `assert description`. No test enumerates `MIGRATIONS` keys as a list; each migration pins its own registration.
@@ -988,7 +988,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 
 ### Risk 3: Budget accounting is incomplete and reads as matched
 **Impact:** Unit 2 is unmetered. If `None` were ever read as zero, two arms with wildly different paid-inference spend would look budget-matched and a level-3 claim would measure the budget.
-**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit2` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until lane 3 meters unit 2, no level-3 claim can be made here, and the report says so in the `why_not` field.
+**Mitigation:** `budgets_comparable` refuses on any `None`; the evaluation's notes carry every unit for both arms; `test_compare_refuses_claim_on_unknown_unit2` is mutation-checked. Unit 3 has the same hazard in a quieter form: a ledger sum over zero matched rows is `0.0` unless the reader says otherwise, so `LedgerBudgetReader.unit3_usd` returns `None` on zero matched rows and the arm runner tags its reservations through `ResourceDecl.name` (the only field `admit()` lets a caller set); `test_unit3_unknown_when_no_arm_rows` is mutation-checked. The plan states plainly that until unit 2 has an arm-scoped read (lane 3's meter carries no `arm_run_id`; lane 5 tags the reservations), no level-3 claim can be made here, and the report says so in the `why_not` field.
 
 ### Risk 4: The canonical bytes drift between lane 5's spec JSON and this lane's digest
 **Impact:** Lane 5 stores the canonical spec bytes (`process_spec_json`) and computes the digest only through this lane's function (lane 5 plan, "Provided to lane 6 (#3218)" item 1, `1c3d17185`), so there is one hashing routine. The remaining hazard is the byte form itself: a `separators`, `sort_keys`, or float-formatting difference between `process_spec_json` and `research_process_digest`'s `json.dumps` call makes every stored spec un-rehashable to its own digest, and a revision written before this lane merged carries `research_process_digest=None` until backfilled.
@@ -1054,7 +1054,7 @@ No existing test covers a release row, a drill, a promotion gate, a process dige
 - [EXTERNAL] Separating evaluator secrets and production credentials from candidate execution. A separate process identity and credential scope is an operations change on Tom's machines; this lane names it as precondition 1 and cannot satisfy it.
 - [EXTERNAL] Amending `docs/improvement-charter.md` to name reversible surfaces. Only Tom authorizes charter changes (§12). The gate checks the pinned text for the section; writing it is not this lane's, and `docs/improvement-charter.md` is on the denylist.
 - [SEPARATE-SLUG #3217] The production `ArmRunner` (lane 5's planner tick run under a pinned process spec), the writer of planner-tick `ImprovementModelRevision` rows, and `candidate_ref` on the candidate manifest. This lane ships the protocol, the replay runner, the digest function, and the `ARM_RUNNER_ABSENT` refusal. Anti-criterion: the "Comparison refuses without an arm runner" Verification row.
-- [SEPARATE-SLUG #3215] Unit-2 paid-inference metering, the `valor-improve` CLI, the control journal, and scheduling `close-window --due` on the controller tick. `BudgetReader.unit2_usd` returns `None` until lane 3 meters it; `valor-improve-release` is a separate binary by design.
+- [SEPARATE-SLUG #3215] Unit-2 paid-inference metering, the `valor-improve` CLI, the control journal, and scheduling `close-window --due` on the controller tick. `BudgetReader.unit2_usd` returns `None` until an arm-scoped read exists over lane 3's meter; `valor-improve-release` is a separate binary by design.
 - [SEPARATE-SLUG #3216] Any change to `tools/improvement_eval/`. Imported, never modified. Anti-criterion: the "Lane 4 harness untouched" Verification row.
 - [DESTRUCTIVE] Auto-rollback on a regressed observation window. `close_window` writes `rollback_recommended`; a human runs `rollback`. Anti-criterion: `grep -c 'rollback(' tools/improvement_release/lifecycle.py` inside `close_window`'s body is asserted zero by `test_close_window_never_calls_rollback`.
 - [DESTRUCTIVE] Running the drill or the rollback inside the repo checkout. Both refuse any path that is not a worktree they created under the retention root. Anti-criteria: `test_drill_refuses_checkout_path` and `test_rollback_refuses_checkout_path`.
@@ -1100,7 +1100,7 @@ Mapped to the issue's acceptance criteria in order.
 - [ ] **`research_process_digest` distinguishes the arms.** `run` refuses `ARMS_IDENTICAL` on equal digests; the accept path writes an `ImprovementModelRevision` whose `research_process_digest` equals arm B's and whose `supersedes_id` names the prior current revision.
 - [ ] **Automated promotion remains disabled, and the code path names both preconditions.** `promotion_gate("valor")` returns `automated=False` with both names in `unmet` against the real pinned charter; `promote_automatically` raises `PromotionDisabled` listing them; a synthetic charter with a "Reversible surfaces" section clears only precondition 2 and the gate still refuses; no `PROMOTION` key exists in `config/settings.py` or `.env.example`.
 - [ ] **A level-2 or level-3 claim states its interval, correction, and falsifier, or the report says plainly that the evidence does not support it.** `claim_report` on an empty project returns all three levels `supported=False` with a `why_not` sentence each; on the end-to-end fixture, level 2 is `supported=True` with the interval, correction, and falsifier populated; level 3 is `supported=False` with `why_not` naming `BUDGET_UNKNOWN:unit2` when unit 2 is unmetered.
-- [ ] **The dashboard never presents experiment count or merged-patch count as improvement.** The pinned getter list is exactly five; the anti-criterion grep over `ui/data/improvement.py` and the releases template is zero; the partial renders lineage, not counts.
+- [ ] **The dashboard never presents experiment count or merged-patch count as improvement.** The pinned getter list is exactly six; the anti-criterion grep over `ui/data/improvement.py` and the releases template is zero; the partial renders lineage, not counts.
 - [ ] Tests pass (`/do-test`), including the full `tests/unit/test_ui_app.py` and `tests/unit/test_improvement_models.py`.
 - [ ] Documentation updated (`/do-docs`): `docs/features/improvement-release.md` exists and is indexed; `improvement-controller.md`, `improvement-evaluation.md`, `tools-reference.md`, and the capability matrix are updated.
 - [ ] `pyproject.toml` references `tools.improvement_release.cli:main` and `valor-improve-release --help` exits 0 from the venv.

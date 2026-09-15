@@ -18,9 +18,10 @@ Unit 3 is read from lane 7's ledger. ``admit()`` writes ``reason="admitted"``
 on every admitted row, so the arm run id rides on the one field an admitting
 caller controls, the resource name: an arm runner admits every reservation
 as ``ResourceDecl(name=f"arm:{arm_run_id}:{resource_name}", ...)`` and
-:class:`LedgerBudgetReader` sums the rows carrying that prefix. Unit 2 has
-no meter until lane 3 (#3215) lands; the reader answers ``None`` and the
-comparison says ``BUDGET_UNKNOWN:unit2``.
+:class:`LedgerBudgetReader` sums the rows carrying that prefix. Unit 2 is
+metered by lane 3's ``tools/paid_inference_meter.py`` against the daily pool,
+with no ``arm_run_id`` dimension to sum over; the reader answers ``None`` and
+the comparison says ``BUDGET_UNKNOWN:unit2``.
 
 This module imports nothing from ``arms.py``: ``ArmResult`` holds a
 :class:`BudgetUse`, and the dependency runs arms → budget only.

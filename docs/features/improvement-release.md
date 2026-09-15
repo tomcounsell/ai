@@ -571,9 +571,11 @@ and answers `None` when zero rows match, so an arm that admitted nothing
 through the ledger is unknown rather than free. Turns and wall seconds come
 from the `ArmResult`, since no record outside the arm carries them.
 
-`unit2_usd` is unmetered until lane 3 lands its paid-inference meter;
-`LedgerBudgetReader.unit2_usd` answers `None`, so every comparison today
-carries `BUDGET_UNKNOWN:unit2` and no level-3 claim can be made. Charter §8:
+`unit2_usd` has no arm-scoped read: lane 3's `tools/paid_inference_meter.py`
+meters the daily pool by window and reservation, with no `arm_run_id`
+dimension to sum over. `LedgerBudgetReader.unit2_usd` answers `None`, so every
+comparison today carries `BUDGET_UNKNOWN:unit2` and no level-3 claim can be
+made until an arm's inference reservations carry the arm (lane 5). Charter §8:
 uncertain or missing metering is never zero cost.
 
 `budgets_comparable(a, b, cap, tolerance=0.10)` returns `(ok, reasons)`,
@@ -648,9 +650,10 @@ or its rendering. `render(report)` prints it as text (`report --render`).
 
 ## The dashboard
 
-`ui/data/improvement.py::get_release_lineage(project_key)` is the fifth
-getter, beside `get_coverage`, `get_goals`, `get_intervention_burden`, and
-`get_provisional_assumptions`; a test pins that list as an exact list. It
+`ui/data/improvement.py::get_release_lineage(project_key)` is one of the six
+pinned getters, beside `get_control_status`, `get_coverage`, `get_goals`,
+`get_intervention_burden`, and `get_provisional_assumptions`; a test pins
+that list as an exact list. It
 delegates to `lineage.release_lineage`, which joins each release to its
 evaluation (verdict, and `effect` and `confidence_interval` for the
 protocol's primary endpoint through `evaluation_read`), experiment
