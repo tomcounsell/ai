@@ -21,6 +21,8 @@ for how a global skill layers in repo-specific behavior, and
 | checking-system-logs | Model only | Find bridge events, agent responses, errors in system logs |
 | do-deploy | Infra | Deploy merged changes to production across bridge machines |
 | ebook-ingest | User + Model | Find, download, and prepare an ebook for AI ingestion |
+| improve-preflight | User + Model | Read-only pre-freeze check for an improvement experiment: doctor, budget, calibration floor |
+| improve-research | Model only | The improvement research session's own skill, dispatched by the scheduler adapter |
 | linkedin | User + Model | Browse LinkedIn, read/post, comment, check DMs |
 | officecli | User + Model | Create, inspect, and edit Office docs (.docx/.xlsx/.pptx) |
 | prime | Infra | Codebase onboarding and architecture deep-dive |

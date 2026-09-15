@@ -28,6 +28,7 @@ control journal, dispatch, the base CLI), [Improvement Evaluation](improvement-e
 | `models/improvement_controller_state.py` | `ImprovementControllerState`, the tick's cursor row |
 | `ui/data/improvement.py` | `get_ranking`, `get_hypotheses`, `get_rejected_approaches` |
 | `.claude/skills/improve-research/SKILL.md` | The research session's own skill, project-only |
+| `.claude/skills/improve-preflight/SKILL.md` | The read-only pre-freeze check (doctor, budget, calibration floor), project-only |
 
 Every write a research session makes goes through `valor-improve`
 (`tools/improvement.py`); the subcommands are listed in
@@ -354,7 +355,10 @@ steps:
 5. `propose --case ID --payload FILE` with one hypothesis, mechanism,
    falsifier, and candidate inside the envelope, or `propose-amendment` when
    the decision depends on authority the charter has not granted.
-6. `experiment freeze --case ID`, `experiment evaluate --id ID` in the
+6. The `improve-preflight` skill (`doctor`, `--json budget`, and the
+   calibration-floor read, all read-only; below the floor the hypothesis
+   stays `proposed` and the reading becomes a `probe` investigation), then
+   `experiment freeze --case ID`, `experiment evaluate --id ID` in the
    background, `experiment show --id ID` until the state leaves `running`,
    then `report --case ID`.
 

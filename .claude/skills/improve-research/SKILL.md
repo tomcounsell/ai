@@ -179,7 +179,14 @@ This records a `charter_amendment` investigation in `awaiting_authorization`
 and pages Tom once. Silence is not approval; continue the work you are
 authorized to do.
 
-## Step 6: freeze, evaluate, report
+## Step 6: preflight, freeze, evaluate, report
+
+Run the `improve-preflight` skill first (`.claude/skills/improve-preflight/SKILL.md`):
+`doctor`, `--json budget`, and the calibration-floor read, all read-only. A
+freeze pays for known-item generation before the runner learns whether the
+judge can calibrate, and below the floor the only reachable verdict is
+`infra_failure` with zero trials. On `NOT READY` record the reading as a
+`probe` investigation and leave the hypothesis `proposed`.
 
 ```bash
 "$VI" experiment freeze --case "$CASE_ID"          # validates the candidate, exports the corpus, freezes the protocol
