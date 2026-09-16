@@ -178,6 +178,13 @@ No live read can substitute. The bridge's only externally-driven consumer is the
 
 **Build split while this is open:** Tasks 1, 3, 4 (capture/storage, outbound default topic, context rendering) proceed and merge. **Task 2 (keying correction) is held** — it does not merge until the observation lands, per Risk 1 and Owner Ruling 5.
 
+**Mitigation for the split window (critique CONCERN 3 / Note N3):** Task 4 ships the topic line
+with an explicit `(session keying not yet topic-aware — messages from sibling topics may share
+this session)` caveat, so the visible topic label never reads as a promise that routing is
+topic-correct. Task 2 deletes the caveat in the same commit that lands the keying fix. The
+alternative (a default-OFF feature flag) was considered and rejected — see Note N3 for the
+reasoning. This is a required build behavior with a named owner, not a noted risk.
+
 Recorded on the issue: https://github.com/tomcounsell/ai/issues/2652#issuecomment-5695879375
 
 ## Solution
@@ -403,43 +410,80 @@ that shadow these.
 ### Team Members
 
 - **Builder (resolver + storage)** — Name: `topic-capture-builder` — Role: resolver helper, TelegramMessage field, migration, scanner threading — Agent Type: builder — Resume: true
-- **Builder (keying + outbound)** — Name: `topic-routing-builder` — Role: continuation branch, walk termination, cache bump, default-topic outbound, env plumbing — Agent Type: builder — Resume: true (Domain: Redis/Popoto data + async — paste matching DOMAIN_FRAMING rules)
+- **Builder (keying)** — Name: `topic-routing-builder` — Role: continuation branch, walk termination, root-cache namespace bump, cross-topic-bleed fixture, caveat removal — Agent Type: builder — Resume: true (Domain: Redis/Popoto data + async — paste matching DOMAIN_FRAMING rules)
+- **Builder (outbound)** — Name: `topic-outbound-builder` — Role: `projects.json` keys + validation posture, producer default-topic resolution (PM briefings, `tools/send_message.py`, poll sends), relay `GENERAL_TOPIC_ID` guard, `TELEGRAM_TOPIC_ID` env plumbing — Agent Type: builder — Resume: true (**added 2026-09-16 per critique CONCERN 6 / Note N6**: splitting this off `topic-routing-builder` is what lets Task 3 merge while Task 2 is held)
 - **Test engineer** — Name: `topic-test-engineer` — Role: synthetic-header unit suites, recovery-scanner parity tests, relay send-path tests — Agent Type: test-engineer — Resume: true
 - **Validator** — Name: `topic-validator` — Role: run Verification table, confirm Success Criteria, byte-identical non-forum regression check — Agent Type: validator — Resume: true
 - **Documentarian** — Name: `topic-documentarian` — Role: feature doc + index — Agent Type: documentarian — Resume: true
 
 ## Step by Step Tasks
 
+### Parallelism Contract (revised 2026-09-16, critique CONCERN 6 / Note N6)
+
+`do-build`'s `Parallel: true` means *may run concurrently with its wave peers*, and concurrent
+builders must write **disjoint file sets**. The waves and their file sets:
+
+| Wave | Tasks | Builder | Files written |
+|------|-------|---------|---------------|
+| 1 | Task 1 (build-capture) | `topic-capture-builder` | `bridge/topic.py` (new), `models/telegram.py`, `tools/telegram_history/__init__.py`, `scripts/update/migrations.py`, `bridge/telegram_bridge.py` (intake), `bridge/catchup.py`, `bridge/reconciler.py`, `bridge/agent_catchup.py`, `tests/unit/test_model_relationships.py` |
+| 2 | Task 3 (build-outbound) **‖** Task 4 (build-context) | `topic-outbound-builder` **‖** `topic-capture-builder` | Task 3: `bridge/telegram_relay.py`, `bridge/config_validation.py`, `reflections/pm_briefings/delivery.py`, `tools/send_message.py`, `agent/sdk_client.py` — Task 4: `bridge/context.py`, `bridge/topic.py` |
+| 3 | Task 2 (build-keying) — **held** behind Task 7 | `topic-routing-builder` | `bridge/routing.py`, `bridge/context.py`, `tests/unit/test_context_helpers.py`, `tests/unit/test_config_driven_routing.py` |
+
+Two collisions the critique surfaced, and how this resolves them:
+
+1. **Tasks 2 and 3 shared `topic-routing-builder`** while being marked parallel — one agent
+   cannot run concurrently with itself. Resolved by the new `topic-outbound-builder`
+   (distinct-builder option, explicitly preferred by the critique over serializing Task 3 behind
+   the held Task 2, because serializing would strand outbound work behind an owner action).
+2. **Tasks 2 and 4 both write `bridge/context.py`** — found while verifying the disjointness of
+   the new assignment. Task 4 edits `build_context_prefix` (`:110`); Task 2 edits
+   `resolve_root_session_id` (`:742`) and `_cache_walk_root` (`:839`). Same file, so they cannot
+   be a parallel wave. Resolved by putting Task 4 in wave 2 and Task 2 alone in wave 3, with
+   Task 2 gaining `Depends On: build-context`. This costs nothing: Task 2 is held behind Task 7
+   regardless, and it makes Task 2's caveat-removal edit a trivial delete of a string Task 4
+   already landed.
+
+With that, every `Parallel: true` pair writes disjoint files and no builder is scheduled against
+itself.
+
 ### 1. Topic resolver + storage
 - **Task ID**: build-capture
 - **Depends On**: none
 - **Validates**: tests/unit/test_topic_resolver.py (create)
 - **Informed By**: spike-1, spike-3, Research header truth table
-- **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true
+- **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true (sole task in wave 1)
 - Resolver helper with the truth table + #3831 defense; `TelegramMessage.topic_id`; `store_message(topic_id=...)` kwarg; migration in `MIGRATIONS`; bump the field-count assertion in `tests/unit/test_model_relationships.py:110` (20 → 21) in the same commit; thread the resolver through live intake (row persistence) and the three scanners (session context only).
+- **Note N2 applies**: in `bridge/agent_catchup.py`, call the resolver at the `ThreadMessage(...)` construction site (`:435`, raw `m`/`reply_header` in scope) and add `topic_id: int | None = None` to the dataclass at `:98`. Never sniff the header at `:680-700`.
 
 ### 2. Keying correction + cache hygiene
 - **Task ID**: build-keying
-- **Depends On**: build-capture
+- **Depends On**: build-capture, build-context (shares `bridge/context.py` with Task 4 — see the Parallelism Contract)
 - **Validates**: tests/unit/test_config_driven_routing.py, tests/unit/test_context_helpers.py
-- **Informed By**: spike-1 (two sites only), Risk 2
-- **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: false
-- Continuation branch + walk termination + cache namespace bump.
+- **Informed By**: spike-1 (two sites only), Risk 2, critique CONCERNs 3/4/5
+- **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: false (wave 3, alone)
+- Continuation branch (`bridge/routing.py:1310`/`:1323`) + walk termination (`resolve_root_session_id` `:742`, `_cache_walk_root` `:839`) + root-cache namespace bump (`_set_cached_root` `:720`).
+- **Gating checkboxes on this task (all in the same commit as the keying change):**
+  - [ ] Delete the `(session keying not yet topic-aware — ...)` caveat clause Task 4 landed in `build_context_prefix` (Note N3). The plan is not done while both the caveat and the fix exist.
+  - [ ] Add the cross-topic-bleed fixture to `tests/unit/test_context_helpers.py` asserting on rendered context (Note N4).
+  - [ ] Both range-scoped anti-criterion Verification rows return `0` (Note N5).
 
 ### 3. Outbound default topic + env plumbing
 - **Task ID**: build-outbound
 - **Depends On**: build-capture
 - **Validates**: tests/unit/test_bridge_relay.py, tests/unit/test_send_message.py
 - **Informed By**: spike-2 (reply_to suffices; General omit rule)
-- **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: true (with build-keying only if file sets stay disjoint; otherwise serialize after it)
-- Config keys + validation posture, producer resolution (PM briefings, send_message, poll sends), relay General-guard, `TELEGRAM_TOPIC_ID`.
+- **Assigned To**: topic-outbound-builder — **Agent Type**: builder — **Parallel**: true (wave 2, with build-context; file sets are disjoint — see the Parallelism Contract)
+- Config keys + validation posture, producer resolution (PM briefings, send_message, poll sends), relay General-guard, `TELEGRAM_TOPIC_ID` (inject beside `TELEGRAM_REPLY_TO` at `agent/sdk_client.py:495-500`).
+- **Note N1 applies**: introduce a named `GENERAL_TOPIC_ID = 1` in `bridge/telegram_relay.py` and branch on it; no bare `== 1` in the topic guard.
+- This task is **not** held behind Task 7 and merges independently of Task 2.
 
 ### 4. Context rendering + name resolution
 - **Task ID**: build-context
 - **Depends On**: build-capture
 - **Validates**: context snapshot test
-- **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true
-- Topic line in agent context; lazy GetForumTopics cache, fail-soft; advisory subdir hint when configured.
+- **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true (wave 2, with build-outbound)
+- Topic line in agent context (`bridge/context.py::build_context_prefix`, `:110`); lazy GetForumTopics cache, fail-soft; advisory subdir hint when configured.
+- **Note N3 applies — this is the mitigation for the split-merge window, not a comment about it.** While Task 2 is held, the topic line MUST render as `topic: <name-or-id> (session keying not yet topic-aware — messages from sibling topics may share this session)`. This task owns writing the caveat; Task 2 owns deleting it. Shipping the bare topic line before Task 2 merges is a blocker for this task's review.
 
 ### 5. Test suites
 - **Task ID**: test-suites
