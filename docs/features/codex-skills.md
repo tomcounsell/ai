@@ -1,13 +1,13 @@
 # Codex skills
 
-This repository maintains 57 Codex skills corresponding one-for-one to its Claude
-skills: 14 project skills and 43 general skills. The Claude sources are unchanged.
+This repository maintains 59 Codex skills corresponding one-for-one to its Claude
+skills: 16 project skills and 43 general skills. The Claude sources are unchanged.
 Codex entrypoints are independently maintained rewrites, not symlinks to Claude
 instructions and not generated search-and-replace output.
 
 ## Discovery and installation
 
-- `.agents/skills/`: 14 project skills, discovered when Codex works in this checkout
+- `.agents/skills/`: 16 project skills, discovered when Codex works in this checkout
   or its subdirectories.
 - `.agents/skills-global/`: canonical sources for 43 general skills. This directory
   is deliberately outside automatic repository discovery.
@@ -36,7 +36,7 @@ skills are not automatically deleted from user storage.
 General skills are absent from the repo discovery directory to avoid loading two
 copies of every skill when both user and repository locations are enabled. Project
 skills are not installed globally. While this change is on a worktree branch, those
-14 project skills are available in that worktree; they reach the main checkout when
+16 project skills are available in that worktree; they reach the main checkout when
 the branch is integrated. All skills allow implicit selection by default, and can
 also be requested by `$name`. No explicit-only policies were carried over.
 
@@ -161,6 +161,8 @@ preserves the repository's original project/global distinction.
 | google-workspace | global | [source](../../.claude/skills-global/google-workspace/SKILL.md) | [Codex](../../.agents/skills-global/google-workspace/SKILL.md) |
 | grill-me | global | [source](../../.claude/skills-global/grill-me/SKILL.md) | [Codex](../../.agents/skills-global/grill-me/SKILL.md) |
 | imagine-agent | global | [source](../../.claude/skills-global/imagine-agent/SKILL.md) | [Codex](../../.agents/skills-global/imagine-agent/SKILL.md) |
+| improve-preflight | project | [source](../../.claude/skills/improve-preflight/SKILL.md) | [Codex](../../.agents/skills/improve-preflight/SKILL.md) |
+| improve-research | project | [source](../../.claude/skills/improve-research/SKILL.md) | [Codex](../../.agents/skills/improve-research/SKILL.md) |
 | linkedin | project | [source](../../.claude/skills/linkedin/SKILL.md) | [Codex](../../.agents/skills/linkedin/SKILL.md) |
 | mermaid-render | global | [source](../../.claude/skills-global/mermaid-render/SKILL.md) | [Codex](../../.agents/skills-global/mermaid-render/SKILL.md) |
 | new-audit-skill | global | [source](../../.claude/skills-global/new-audit-skill/SKILL.md) | [Codex](../../.agents/skills-global/new-audit-skill/SKILL.md) |

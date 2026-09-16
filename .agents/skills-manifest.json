@@ -698,13 +698,13 @@
       "scope": "project",
       "source": ".claude/skills/setup/SKILL.md",
       "source_files": {
-        ".claude/skills/setup/SKILL.md": "36d3e33c55887a684572f7f7eaf92e4e2683dfcb6b6be9990f15b50b96bda936",
-        ".claude/skills/setup/references/environment.md": "04e2c28b58c7d36b0a3a2fcb066fe486eb56135583cda73683a1842706ebce8d",
-        ".claude/skills/setup/references/optional-surfaces.md": "f6f10b80e5d416084c2560ffd87785950c28d259e89b47613ea8e81dfc47efae",
-        ".claude/skills/setup/references/verification.md": "7a807a1c9f0f17c88c193d5f8c21f791504c9038ec189597d52dfebecf47c233",
+        ".claude/skills/setup/SKILL.md": "596064e96d1470e8d60cdd776051260f73dd642f3de2b988a4c24115ced20a40",
         ".claude/skills/setup/references/auth.md": "5c2e2a780be5bdf5b4d9583dda7287da312553ee6ca8b12fecb255fb74940463",
+        ".claude/skills/setup/references/environment.md": "04e2c28b58c7d36b0a3a2fcb066fe486eb56135583cda73683a1842706ebce8d",
         ".claude/skills/setup/references/mesh-network.md": "0cd23d8b36a19a35b589646351fd6f3ace6779acbb8f0a5f9074bf9d7de0b5b3",
-        ".claude/skills/setup/references/projects-config.md": "b3e8ad9e7efa255056e82fa5dc5c4489a1ad402937ff409b2b3262a7ea4fab59"
+        ".claude/skills/setup/references/optional-surfaces.md": "f6f10b80e5d416084c2560ffd87785950c28d259e89b47613ea8e81dfc47efae",
+        ".claude/skills/setup/references/projects-config.md": "b3e8ad9e7efa255056e82fa5dc5c4489a1ad402937ff409b2b3262a7ea4fab59",
+        ".claude/skills/setup/references/verification.md": "7a807a1c9f0f17c88c193d5f8c21f791504c9038ec189597d52dfebecf47c233"
       },
       "target": ".agents/skills/setup",
       "resources": [
@@ -734,9 +734,9 @@
       "scope": "project",
       "source": ".claude/skills/update/SKILL.md",
       "source_files": {
-        ".claude/skills/update/SKILL.md": "a53f42e15d7d4449a11ddc9c66142b777c3a7c1c78dde5b7bbe16f149cc2e26b",
-        ".claude/skills/update/references/troubleshooting.md": "0977825431b18fcf57b973a6dc1c079aa92bd111fefd30248d1d0e2681ce0065",
-        ".claude/skills/update/references/modules.md": "7b4be0912adcb4131c4ce3e3f3d73e2be407df4fdeb5b164a85330ea6eb34608"
+        ".claude/skills/update/SKILL.md": "a095c8e1a0b933b24e0502ed61fd324d54206300b8e1e130eb3326c71c360d46",
+        ".claude/skills/update/references/modules.md": "7b4be0912adcb4131c4ce3e3f3d73e2be407df4fdeb5b164a85330ea6eb34608",
+        ".claude/skills/update/references/troubleshooting.md": "0977825431b18fcf57b973a6dc1c079aa92bd111fefd30248d1d0e2681ce0065"
       },
       "target": ".agents/skills/update",
       "resources": [
@@ -768,6 +768,30 @@
         ".claude/skills/x-com/references/posting.md": "57476d6346dedf2db33672f8a37bce26f46431d89a356f20746ae0beb3ca20e9"
       },
       "target": ".agents/skills/x-com",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "improve-preflight",
+      "scope": "project",
+      "source": ".claude/skills/improve-preflight/SKILL.md",
+      "source_files": {
+        ".claude/skills/improve-preflight/SKILL.md": "45ac105757175aa60134cc17ef38d6f6e0ba085783dbfbf0e5acfea3e59de623"
+      },
+      "target": ".agents/skills/improve-preflight",
+      "resources": [
+        "SKILL.md"
+      ]
+    },
+    {
+      "name": "improve-research",
+      "scope": "project",
+      "source": ".claude/skills/improve-research/SKILL.md",
+      "source_files": {
+        ".claude/skills/improve-research/SKILL.md": "b67121e71fa031c9e319593dae513920d3b459cda4cf83dd946fc9ff146ab8e1"
+      },
+      "target": ".agents/skills/improve-research",
       "resources": [
         "SKILL.md"
       ]
