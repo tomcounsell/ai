@@ -693,8 +693,17 @@ that a partially-populated row set still yields the correct run_id.
 - [SEPARATE-SLUG #3169] Giving the `superseded` status a writer, and reconciling existing duplicate
   pairs. Belongs with the migration that makes uniqueness hold.
 - [SEPARATE-SLUG #3065] Hardening the `session-ensure` write path against duplicates (readback by
-  primary key, candidate provenance). Already planned there; this lane does not modify
-  `tools/sdlc_session_ensure.py`.
+  primary key, candidate provenance). Already planned there; this lane makes **no behavior change** to
+  `tools/sdlc_session_ensure.py`. The one edit to that file is the gate-marking **comment** at `:776`
+  — comment-only, and not a #3065 collision.
+- [NOT-DOING] Migrating the three test-local filter predicates at
+  `tests/integration/test_sdlc_session_ensure_integration.py:141,212,305`. They build their own
+  filters to pick a seeded row out of a list; routing them through `prefer_type` would couple the
+  assertion to the thing under test and weaken it. Deliberately left, with the reason stated here and
+  in Test Impact rather than left to the sweep's `tests/` exclusion.
+- [NEVER] Editing anything under `docs/archive/plans-completed/`. Archived plans are historical
+  records. A sweep that proposes editing one is a sweep with the wrong anchor — treat that as the
+  signal, not as work to do.
 - [SEPARATE-SLUG #3169] Replacing the `issue_url` linear scan at `tools/_sdlc_utils.py:339` with an
   indexed lookup. A scale concern, not a correctness one, and not a `session_id` tie-break.
 
@@ -720,10 +729,15 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/agent-session-model.md` — it already documents the newest-wins resolver
-      (added by `3c77e1eab`). Extend that section to describe `prefer_type`, state that it is the
-      single owner of the eng preference, and record *why* eng wins (it owns `stage_states` and
-      `active_run_id`).
+- [ ] **DELETE the fall-back-to-`[0]` sanction at `docs/features/agent-session-model.md:145-148`** —
+      not merely append `prefer_type` prose beside it. The paragraph currently reads "Callers with a
+      domain preference (an eng-typed row owns `stage_states`) iterate `rows_for_session_id` and fall
+      back to `[0]`…". **The documentation is part of the defect, not a description of it**: it is the
+      same sanction as the `models/agent_session.py:1297` docstring, replicated into the repo's own
+      feature doc, and neither is discoverable by editing code. Both must be in the diff. Replace the
+      paragraph with `prefer_type`: state that it is the single owner of the eng preference, that the
+      ordering is a stable partition, and *why* eng wins (it owns `stage_states` and `active_run_id`).
+      Closing check: the docs sweep (`fall back to .*\[0\]` over `docs/features/ models/`) goes 2 → 0.
 - [ ] Update `docs/features/sdlc-lane-identity.md` if it describes how a lane's session row is
       located; point it at the shared ordering rather than at any call site.
 - [ ] No new `docs/features/README.md` index entry — this extends an existing documented feature
@@ -743,6 +757,16 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
       once #3169 lands.
 - [ ] A comment at `agent/session_executor.py`'s renewal scan recording that the single pass relies
       on the resolver's ordering — so nobody "restores" the second pass.
+- [ ] **Gate-marking comments at the two surviving sweep sites** — `tools/sdlc_session_ensure.py:776`
+      and `agent/session_executor.py:1373`. Risk 4's named failure mode is the sweep being disabled as
+      noisy; a site-local comment is the cheapest defense and makes the expected residue of exactly 2
+      self-documenting at the call site rather than only in a plan document nobody greps. The comment
+      states **why the shape differs**, never merely that the site is excluded — "excluded from the
+      sweep" tells the next reader nothing and invites the question again. Mandated wording: *tests one
+      already-resolved row's type; does not choose among rows.*
+      **The `sdlc_session_ensure.py` edit is comment-only** and does not violate the No-Go against
+      modifying that file's behavior, nor does it collide with #3065 — stated here so a reviewer does
+      not read a touched file as a lane collision.
 
 ## Success Criteria
 
@@ -750,10 +774,17 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
       in exactly one place in the codebase.
 - [ ] All six sites use it: `tools/sdlc_stage_query.py`, `tools/_sdlc_utils.py` (×3),
       `tools/stage_states_helpers.py`, `agent/session_executor.py`.
-- [ ] **The grep sweep closes the issue** — `session_type", None) == "eng"` over production code
-      returns exactly the two documented gates and nothing else. The acceptance mechanism is the
-      sweep, not the site list above, and the pattern is proven RED against a reintroduced block
-      before it is trusted.
+- [ ] **Both sweeps close the issue.** Code sweep: `session_type", None) == "eng"` over production
+      code goes 8 → exactly 2, and those 2 are `tools/sdlc_session_ensure.py:776` and
+      `agent/session_executor.py:1373` **by name**. Docs sweep: `fall back to .*\[0\]` over
+      `docs/features/ models/` goes 2 → 0. The acceptance mechanism is the sweeps, not the site list
+      above, and the code pattern is proven RED against a reintroduced block before it is trusted.
+- [ ] **Every migrated site preserves its empty-row-set fall-through.** An empty row set falls
+      through; it does not return `None`. Asserted per site with a zero-rows-no-exception test.
+- [ ] Both gate-marking comments are present, and each states *why* the shape differs — "tests one
+      already-resolved row's type; does not choose among rows" — not merely that the site is excluded.
+- [ ] The `docs/features/agent-session-model.md` sanction paragraph is **deleted**, not appended to.
+      The documentation was part of the defect; both copies are in the diff.
 - [ ] **`prefer_type` is implemented as a stable partition, not a composite sort key** — all matching
       rows first, then the rest, each group independently newest-first. No interleaving.
 - [ ] **The named Risk 2 test exists and was proven RED against the known-bad ordering:** an eng row
@@ -826,8 +857,13 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Assigned To**: `resolver-tests`
 - **Agent Type**: test-engineer
 - **Parallel**: true
-- Run the defining sweep over production directories against current `main`: it must report **8**
-  hits — the six in-scope sites plus the two documented gates.
+- Run the **code** sweep over production directories against current `main`: it must report **8** hits
+  — the six in-scope sites plus the two documented gates. Baseline verified at plan time; BUILD
+  inherits the number rather than re-deriving it.
+- Run the **docs** sweep (`grep -rnE 'fall back to .*\[0\]' docs/features/ models/`): it must report
+  **2** — `docs/features/agent-session-model.md:146` and `models/agent_session.py:1297`. Also verified
+  at plan time. Confirm the regex catches **both** backtick forms; a single-backtick literal misses the
+  model docstring.
 - Confirm it does **not** flag `tools/_sdlc_utils.py:339`'s `issue_url` eng scan.
 - Record which two of the eight are the gates that legitimately survive the fix.
 - Save the RED output verbatim for the PR description.
@@ -850,9 +886,34 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - Rewrite the `rows_for_session_id` docstring per the Documentation section — remove the
   "iterate and fall back to `[0]`" sanction.
 
+### 2b. Produce both RED proofs
+- **Task ID**: build-red-proofs
+- **Depends On**: build-resolver
+- **Validates**: tests/unit/test_agent_session_newest_wins.py, tests/unit/session_lookup_mock.py
+- **Assigned To**: `resolver-tests`
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- **Why this is its own task, and not prose inside tasks 3/5:** the two RED proofs are the plan's two
+  non-waivable items, and a non-waivable item enforced by a sentence with no `Depends On` edge is not
+  non-waivable — it is a wish. A builder who honors only the dependency graph could otherwise land
+  both collapses before either proof exists. This task exists so the graph says what the prose says.
+- **Proof A — the Risk 2 ordering proof.** Write
+  `test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id` in
+  `tests/unit/test_agent_session_newest_wins.py`: an eng row with `active_run_id=None` plus an
+  **older** non-eng row with a real `active_run_id`; assert `_fetch_live_active_run_id` returns the
+  older non-eng row's id. Run it against the **pre-collapse** two-pass code and capture the RED
+  output. A test green both before and after has pinned the happy path, not the ordering.
+- **Proof B — the Risk 1 seam proof.** Configure a mock with a **newer non-eng row and an older eng
+  row**, read through a production site that takes `[0]`, and assert the **eng row** comes back. Run
+  it against the **unextended** `wire_session_lookup` and capture the RED output. A test that only
+  proves the kwarg is forwarded does not count — the unextended helper already forwards it and then
+  ignores it.
+- Both RED outputs go verbatim into the PR description. They are the real gate; the Verification greps
+  are only smoke checks.
+
 ### 3. Extend the mocked-test seam
 - **Task ID**: build-mock-seam
-- **Depends On**: build-resolver
+- **Depends On**: build-resolver, build-red-proofs
 - **Validates**: tests/unit/session_lookup_mock.py
 - **Assigned To**: `resolver-builder`
 - **Agent Type**: builder
@@ -861,8 +922,8 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
   derived from the mock's own `query.filter`.
 - Land in the same commit as task 2 — a seam that lags the model forwards `prefer_type` and ignores
   it, handing the `[0]` sites the wrong row with no signal.
-- Ship the Risk 1 RED proof with it: newer non-eng row + older eng row, read through a `[0]` site,
-  assert the eng row. Prove it RED against the unextended helper first.
+- Task 2b's Proof B must already be RED before this lands — enforced by the `Depends On` edge above,
+  not by this sentence. Turning it GREEN is this task's completion signal.
 
 ### 4. Migrate the five selection sites
 - **Task ID**: build-selection-sites
@@ -871,17 +932,33 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Assigned To**: `resolver-builder`
 - **Agent Type**: builder
 - **Parallel**: false
+- **Read the fall-through contract in Technical Approach before touching any of these.** A bare
+  `return AgentSession.newest_for_session_id(sid, prefer_type="eng")` is wrong at four of the five
+  sites: its `None` on an empty row set converts a fall-through into an early return, and at
+  `_sdlc_utils.py:468` that silently drops three live resolution tiers. The contract: **an empty row
+  set falls through, it does not return.**
 - `tools/sdlc_stage_query.py:87-95` → `newest_for_session_id(session_id, prefer_type="eng")`, kept
-  **inside** `class_set_retry_attempts()`, `log_class_set_exhaustion` preserved.
-- `tools/_sdlc_utils.py:470` and `:495` → `newest_for_session_id(..., prefer_type="eng")`.
-- `tools/_sdlc_utils.py:357-368` → `rows_for_session_id(local_id, prefer_type="eng")`, then the
-  existing identity re-check and `include_terminal` narrowing (order-preserving), then the head.
-- `tools/stage_states_helpers.py:103-110` → `newest_for_session_id(..., prefer_type="eng")`.
+  **inside** `class_set_retry_attempts()`, `log_class_set_exhaustion` preserved. This is the one site
+  where the direct form is correct — the retry loop owns the empty case.
+- `tools/_sdlc_utils.py:464-472` (Step 1) and `:489-497` (Step 3) →
+  `found = AgentSession.newest_for_session_id(..., prefer_type="eng")`, then
+  `if found is not None: return found`, and **fall through** otherwise. Never `return` the call
+  directly.
+- `tools/_sdlc_utils.py:364-371` → `rows_for_session_id(local_id, prefer_type="eng")`, then the
+  existing identity re-check and `include_terminal` narrowing (order-preserving), then
+  `if local: return local[0]` and fall through to the `message_text` regex fallback.
+- `tools/stage_states_helpers.py:103-110` →
+  `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")` then
+  `return matches[0] if matches else session` — the **original** session object on empty, matching the
+  contract `_reload_ledger` states at `tools/stage_states_helpers.py:203`.
 - Delete every hand-rolled block. No commented-out remnants.
+- Add the gate-marking comment at `tools/sdlc_session_ensure.py:776` with the mandated wording: *tests
+  one already-resolved row's type; does not choose among rows.* **Comment-only** — no behavior change,
+  and not a #3065 collision.
 
 ### 5. Collapse the session_executor scan
 - **Task ID**: build-executor-scan
-- **Depends On**: build-mock-seam
+- **Depends On**: build-mock-seam, build-red-proofs
 - **Validates**: the session_executor issue-lock-renewal test module
 - **Informed By**: Risk 2 (the collapse must keep one predicate, not become preference-then-fallback)
 - **Assigned To**: `resolver-builder`
@@ -890,12 +967,14 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - `_fetch_live_active_run_id` (`agent/session_executor.py:328-338`) →
   `rows_for_session_id(sid, prefer_type="eng")`, then **one** loop returning the first non-empty
   `active_run_id`. Delete the duplicated eng pass. One predicate, never preference-then-fallback.
-- Do not land this task until task 6's named Risk 2 test has been proven RED against the known-bad
-  ordering.
+- Task 2b's Proof A must already be RED before this lands — enforced by the `Depends On` edge above,
+  not by prose. Turning it GREEN is this task's completion signal.
 - Preserve the surrounding `try/except` that skips the tick on failure.
 - Add the comment recording that the single pass relies on the resolver's stable partition, and that
   restoring a second pass or switching to a composite sort key reintroduces the #1915 lock-wedge
   failure described in the function's docstring.
+- Add the gate-marking comment at `agent/session_executor.py:1373` with the mandated wording: *tests
+  one already-resolved row's type; does not choose among rows.*
 
 ### 6. Resolver and failure-path tests
 - **Task ID**: build-tests
@@ -908,19 +987,21 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
   rows; no eng row yields the `prefer_type=None` order exactly; group-internal newest-first holds for
   both groups; empty set → `[]` / `None`; `prefer_type=None` degrades to newest; a row missing
   `session_type` neither matches nor raises; repeated calls are stable.
-- **Named Risk 2 test (required, RED-proof mandatory):** seed an eng row with `active_run_id=None`
-  and an **older** non-eng row with a real `active_run_id`; assert `_fetch_live_active_run_id` returns
-  the **older non-eng row's** id. Prove it RED first — stash the refactor and run against main's
-  two-pass code, or run it against a deliberately mis-ordered resolver. Capture the RED output for the
-  PR description. A test that is green both before and after has pinned the happy path, not the
-  ordering, and does not satisfy this task.
+- The **named Risk 2 test** (`test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`, in
+  `tests/unit/test_agent_session_newest_wins.py`) and the mocked-seam ordering test are both written
+  and proven RED in **task 2b**, not here. This task confirms they are GREEN after the collapse and
+  adds the remaining cases below.
 - Partition-shape test: with eng and non-eng rows interleaved by `created_at`, assert the returned
   list is all-eng-then-all-non-eng and newest-first *within* each group — the property the single-pass
   scan depends on.
 - Risk 3 case: terminal eng row loses to live non-eng row when `include_terminal=False`.
 - `_reload_session` returns the original session when the resolver raises; the renewal tick returns
   `None` rather than crashing.
-- The mocked-seam test that is RED before task 3.
+- **Fall-through cases — one per migrated site, zero rows and no exception raised:** `_reload_session`
+  returns the original session (`assert result is session`); `find_session` Steps 1 and 3 continue to
+  the next tier and to auto-ensure rather than returning `None`; the deterministic-id pass continues
+  to the `message_text` fallback. These are a different branch from the raising cases above — a
+  zero-row return never enters the `except`.
 - **Hygiene:** real Redis via the autouse `redis_test_db` fixture, `test-` `project_key` prefix, rows
   deleted in fixture teardown — the pattern `tests/unit/test_agent_session_newest_wins.py` already
   uses. Run **only** the touched test files via `scripts/pytest-clean.sh`; never bare `pytest`, never
@@ -928,11 +1009,13 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 
 ### 7. Validate
 - **Task ID**: validate-all
-- **Depends On**: build-sweep-red, build-tests, build-selection-sites, build-executor-scan
+- **Depends On**: build-sweep-red, build-red-proofs, build-tests, build-selection-sites, build-executor-scan
 - **Assigned To**: `resolver-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run the task-1 sweep: must now report exactly the two gates.
+- Re-run **both** sweeps. Code sweep: 8 → exactly 2, and those 2 are `sdlc_session_ensure.py:776` and
+  `session_executor.py:1373` by name, not by count. Docs sweep (`fall back to .*\[0\]` over
+  `docs/features/ models/`): 2 → 0.
 - Run every test file named in Test Impact via `scripts/pytest-clean.sh`, recording counts as
   evidence rather than assumption.
 - Confirm behavior parity at each migrated site.
@@ -953,18 +1036,20 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 | Tests pass | `scripts/pytest-clean.sh tests/unit/test_agent_session_newest_wins.py tests/unit/test_sdlc_stage_query.py tests/unit/test_sdlc_utils.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Sweep: only the two documented gates remain | `grep -rn --include='*.py' 'session_type", None) == "eng"' agent/ bridge/ tools/ models/ reflections/ ui/ .claude/hooks/ \| wc -l` | output contains 2 |
+| **Code sweep: only the two documented gates remain** | `grep -rn --include='*.py' 'session_type", None) == "eng"' agent/ bridge/ tools/ models/ reflections/ ui/ .claude/hooks/` | exactly 2 lines, and they are `tools/sdlc_session_ensure.py:776` and `agent/session_executor.py:1373` **by name** (**baseline today: exactly 8**). Read the lines, do not just count them — a bare count invites a future sweeper to delete a survivor the design depends on |
 | Sweep: no tie-break left in the five tools sites | `grep -rn 'session_type", None) == "eng"' tools/sdlc_stage_query.py tools/_sdlc_utils.py tools/stage_states_helpers.py \| wc -l` | output contains 0 |
 | All six sites use prefer_type | `grep -rn 'prefer_type="eng"' tools/sdlc_stage_query.py tools/_sdlc_utils.py tools/stage_states_helpers.py agent/session_executor.py \| wc -l` | output contains 6 |
 | Resolver accepts prefer_type | `grep -c 'prefer_type' models/agent_session.py` | output > 0 |
 | Mocked seam covers prefer_type | `grep -c 'prefer_type' tests/unit/session_lookup_mock.py` | output > 0 |
-| session_executor scan is single-pass | `sed -n '300,345p' agent/session_executor.py \| grep -c 'for row in rows'` | output contains 1 |
-| Named Risk 2 test exists | `grep -rn 'active_run_id' tests/unit/test_agent_session_newest_wins.py \| wc -l` | output > 0 |
+| session_executor scan is single-pass | `python -c "import ast,sys;f=[n for n in ast.walk(ast.parse(open('agent/session_executor.py').read())) if isinstance(n,ast.FunctionDef) and n.name=='_fetch_live_active_run_id'][0];print(sum(1 for n in ast.walk(f) if isinstance(n,ast.For)))"` | output contains 1 (baseline today: 2). Coordinate-free — resolves the function by name, so it survives any edit above it |
+| Named Risk 2 test exists, by exact name | `grep -c 'def test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id' tests/unit/test_agent_session_newest_wins.py` | output contains 1 (baseline today: 0). Anchored on a string that cannot pre-exist; the module is pinned, not "or". The pasted RED output in the PR description is the real gate — this row is only a smoke check |
 | prefer_type is a partition, not a composite sort key | `grep -n 'prefer_type' -A12 models/agent_session.py \| grep -c 'is_eng(r), _newest_first_key'` | match count == 0 |
 | Class-set retry preserved | `grep -c 'log_class_set_exhaustion' tools/sdlc_stage_query.py` | output > 0 |
 | Bridge presence checks untouched | `grep -c 'query.filter(session_id=guard_session_id)' bridge/telegram_bridge.py` | output contains 2 |
 | No Popoto migration added | `git diff --name-only main -- scripts/update/migrations.py \| wc -l` | output contains 0 |
-| Docstring no longer sanctions hand-rolling | `sed -n '1282,1310p' models/agent_session.py \| grep -c 'fall back to'` | match count == 0 |
+| **Docs sweep: the `[0]` sanction is gone from both places** | `grep -rnE 'fall back to .*\[0\]' docs/features/ models/ \| wc -l` | output contains 0 (**baseline today: exactly 2** — `docs/features/agent-session-model.md:146`, markdown single-backtick, and `models/agent_session.py:1297`, RST double-backtick). Backtick-agnostic by design: a single-backtick literal matches the markdown and misses the model docstring. Scoped to `docs/features/ models/` because this plan document quotes the sanction it deletes (a `docs/`-wide check is RED forever on a correct build) and because `docs/archive/plans-completed/` is never touched |
+| Mocked-seam ordering proof exists | `grep -rc 'prefer_type' tests/unit/session_lookup_mock.py` | output > 0, **and** task 2b's Proof B RED output is pasted in the PR description |
+| Gate-marking comments present at both survivors | `grep -c 'does not choose among rows' tools/sdlc_session_ensure.py agent/session_executor.py` | 1 in each file (baseline today: 0 in both) |
 
 ## Critique Results
 
