@@ -69,6 +69,7 @@ from tools.improvement_eval.corpus import export_corpus
 from tools.improvement_eval.errors import InfraFailure
 from tools.improvement_eval.runner import (
     CALIBRATION_NOTE_PREFIX,
+    _validate_agent_manifest,
     capture_agent_baseline,
     capture_baseline,
     compute_contract_digest,
@@ -275,7 +276,9 @@ def _validate_agent_candidate(candidate: dict) -> Outcome:
 
     Manifest strings must be non-blank text; ``bounds`` must be a mapping of
     the worker's bound keys to numbers (``timeout_s`` above zero,
-    ``max_turns`` at least one, ``spend_cap`` at least zero). The retrieval
+    ``max_turns`` at least one) and must carry a non-negative ``spend_cap``,
+    so every metered trial reserves its frozen per-task budget instead of
+    billing with no reservation held. The retrieval ``IDENTICAL_TO_INCUMBENT``
     ``IDENTICAL_TO_INCUMBENT`` comparison cannot match a manifest candidate,
     so it is kept as the shared tail: harmless, never a false refusal.
     """
@@ -292,6 +295,17 @@ def _validate_agent_candidate(candidate: dict) -> Outcome:
         bounds = candidate["bounds"]
         if not isinstance(bounds, dict):
             return _refuse("VALUE_OUTSIDE_RANGE", f"bounds must be a mapping, got {bounds!r}")
+        spend_cap = bounds.get("spend_cap")
+        if (
+            isinstance(spend_cap, bool)
+            or not isinstance(spend_cap, (int, float))
+            or not spend_cap >= 0
+        ):
+            return _refuse(
+                "VALUE_OUTSIDE_RANGE",
+                "bounds needs a non-negative 'spend_cap' so every metered trial "
+                f"reserves its frozen per-task budget, got {spend_cap!r}",
+            )
         unknown = sorted(set(bounds) - set(AGENT_RUN_BOUND_KEYS))
         if unknown:
             return _refuse(
@@ -342,6 +356,29 @@ def _validate_agent_tasks(tasks) -> Outcome:
                 f"agent_task task {task.get('id')!r} needs a non-blank 'prompt'",
             )
     return Outcome(True, "OK", None, "tasks admitted", {"n_tasks": len(tasks)})
+
+
+def _validate_agent_endpoints(endpoints) -> Outcome:
+    """Check the rubric endpoint names an ``agent_task`` proposal carries.
+
+    Refuses ``ENDPOINTS_MISSING`` for anything but a non-empty list and
+    ``ENDPOINTS_INVALID`` for entries that are not non-blank strings. The
+    freeze re-checks: falling back to the retrieval endpoint names would
+    freeze a protocol no rubric judge can score, dying at
+    :func:`tools.improvement_eval.runner._score_agent_trials` instead of
+    producing a verdict.
+    """
+    if not isinstance(endpoints, list) or not endpoints:
+        return _refuse(
+            "ENDPOINTS_MISSING", f"agent_task needs a non-empty 'endpoints' list, got {endpoints!r}"
+        )
+    for endpoint in endpoints:
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            return _refuse(
+                "ENDPOINTS_INVALID",
+                f"agent_task endpoints must be non-blank strings, got {endpoint!r}",
+            )
+    return Outcome(True, "OK", None, "endpoints admitted", {"n_endpoints": len(endpoints)})
 
 
 def prior_answers_for(envelope: str) -> list[dict]:
@@ -458,6 +495,8 @@ def propose_experiment(
     candidate: dict,
     envelope: str = "retrieval_parameters",
     tasks: list[dict] | None = None,
+    incumbent: dict | None = None,
+    endpoints: list[str] | None = None,
 ) -> Outcome:
     """Create the ``proposed`` experiment and journal ``hypothesis_proposed``.
 
@@ -467,8 +506,11 @@ def propose_experiment(
     the envelope keys the candidate varies; ``notes`` holds the prior
     answers, the candidate, and the envelope until the freeze writes the
     manifest. An ``agent_task`` proposal carries its frozen task set in
-    ``tasks`` (``TASKS_MISSING``/``TASKS_INVALID``); retrieval proposals
-    never read it.
+    ``tasks`` (``TASKS_MISSING``/``TASKS_INVALID``), the prior-capability
+    manifest it compares against in ``incumbent`` (``INCUMBENT_INVALID``),
+    and the rubric endpoint names in ``endpoints``
+    (``ENDPOINTS_MISSING``/``ENDPOINTS_INVALID``); retrieval proposals
+    never read any of them.
     """
     admitted = validate_candidate(candidate, envelope=envelope)
     if not admitted.accepted:
@@ -477,6 +519,13 @@ def propose_experiment(
         checked = _validate_agent_tasks(tasks)
         if not checked.accepted:
             return Outcome(False, checked.reason, None, checked.message)
+        try:
+            _validate_agent_manifest("incumbent", incumbent or {})
+        except InfraFailure as exc:
+            return _refuse("INCUMBENT_INVALID", f"agent_task incumbent: {exc}")
+        checked_endpoints = _validate_agent_endpoints(endpoints)
+        if not checked_endpoints.accepted:
+            return Outcome(False, checked_endpoints.reason, None, checked_endpoints.message)
     if not all((text or "").strip() for text in (hypothesis, mechanism, falsifier)):
         return _refuse(
             "INCOMPLETE_HYPOTHESIS", "hypothesis, mechanism, and falsifier are all required"
@@ -502,6 +551,10 @@ def propose_experiment(
     if envelope == "agent_task":
         payload["tasks"] = [dict(task) for task in (tasks or [])]
         notes["tasks"] = [dict(task) for task in (tasks or [])]
+        payload["incumbent"] = dict(incumbent)
+        notes["incumbent"] = dict(incumbent)
+        payload["endpoints"] = list(endpoints or [])
+        notes["endpoints"] = list(endpoints or [])
     key, generation = _lease(project_key, case_id)
     if generation is None:
         return _refuse("CASE_BUSY", f"case {case_id} lease is held")
@@ -637,18 +690,31 @@ def _freeze_agent_inputs(
     """Steps 3-6 for ``agent_task`` envelopes.
 
     Returns ``(protocol, export, incumbent, frozen_note, count_key, count)``
-    or an :class:`Outcome` refusal. The frozen task set comes from the
-    proposal notes and is re-validated here (``TASKS_MISSING`` /
-    ``TASKS_INVALID``); the corpus still exports for the digest Gate 1
+    or an :class:`Outcome` refusal. The frozen task set, the prior-capability
+    incumbent manifest, and the rubric endpoint names all come from the
+    proposal notes and are re-validated here (``TASKS_MISSING`` /
+    ``TASKS_INVALID``, ``INCUMBENT_INVALID``, ``ENDPOINTS_MISSING`` /
+    ``ENDPOINTS_INVALID``); the corpus still exports for the digest Gate 1
     compares; the baseline runs through the metered agent capture under an
     ``<experiment_id>:baseline`` spend id (``BASELINE_FAILED`` on any
     failure, including a meter refusal). There is no known-item generation
-    and no known-item reservation: tasks are authored, not sampled.
+    and no known-item reservation: tasks are authored, not sampled. The
+    endpoints never fall back to the retrieval names: no rubric judge can
+    score those, so a fallback would freeze a protocol that dies at scoring.
     """
     checked = _validate_agent_tasks(notes.get("tasks"))
     if not checked.accepted:
         return Outcome(False, checked.reason, experiment_id, checked.message)
     agent_tasks = [dict(task) for task in notes["tasks"]]
+    try:
+        _validate_agent_manifest("incumbent", notes.get("incumbent") or {})
+    except InfraFailure as exc:
+        return _refuse("INCUMBENT_INVALID", f"agent_task incumbent: {exc}", experiment_id)
+    incumbent = dict(notes["incumbent"])
+    checked_endpoints = _validate_agent_endpoints(notes.get("endpoints"))
+    if not checked_endpoints.accepted:
+        return Outcome(False, checked_endpoints.reason, experiment_id, checked_endpoints.message)
+    agent_endpoints = list(notes["endpoints"])
     tolerance = notes.get("tolerance") or {"kind": "pass_fail"}
     if not isinstance(tolerance, dict):
         return _refuse(
@@ -660,7 +726,6 @@ def _freeze_agent_inputs(
         export = (exporter or export_corpus)(project_key)
     except Exception as exc:  # noqa: BLE001 -- an export failure is a refusal
         return _refuse("EXPORT_FAILED", f"export_corpus failed: {exc}", experiment_id)
-    incumbent = dict(INCUMBENT)
     try:
         agent_recorded = (agent_baseline or capture_agent_baseline)(
             project_key,
@@ -672,16 +737,10 @@ def _freeze_agent_inputs(
         )
     except Exception as exc:  # noqa: BLE001 -- an arm failure is a refusal
         return _refuse("BASELINE_FAILED", f"capture_agent_baseline failed: {exc}", experiment_id)
-    noted_endpoints = notes.get("endpoints")
-    endpoints = (
-        list(noted_endpoints)
-        if isinstance(noted_endpoints, list) and noted_endpoints
-        else list(ENDPOINTS)
-    )
     protocol = {
         "mode": "agent",
         "batch_size": len(agent_tasks),
-        "endpoints": endpoints,
+        "endpoints": agent_endpoints,
         "thresholds": {k: dict(v) for k, v in THRESHOLDS.items()},
         "holdout_partition": notes.get("holdout_partition") or f"agent-task-{seed}",
         "tasks": agent_tasks,
@@ -829,9 +888,11 @@ def freeze_experiment(
        ``frozen_at``, ``model_revision_id``, ``charter_version``, and the
        ``experiment_frozen`` event under the case lease.
 
-    An ``agent_task`` envelope replaces steps 3-6: the frozen task set is
+    An ``agent_task`` envelope replaces steps 3-6: the frozen task set, the
+    prior-capability incumbent manifest, and the rubric endpoint names are
     re-validated from the proposal notes (``TASKS_MISSING`` /
-    ``TASKS_INVALID``), the corpus still exports for the digest Gate 1
+    ``TASKS_INVALID``, ``INCUMBENT_INVALID``, ``ENDPOINTS_MISSING`` /
+    ``ENDPOINTS_INVALID``), the corpus still exports for the digest Gate 1
     compares, and the baseline runs through the metered agent capture under
     an ``<experiment_id>:baseline`` spend id. There is no known-item
     generation and no known-item reservation: tasks are authored, not

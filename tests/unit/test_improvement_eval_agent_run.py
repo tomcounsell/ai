@@ -562,6 +562,24 @@ class TestCrossModeKeys:
         )
         assert runner.ARM_PARAM_KEYS == runner.RETRIEVAL_PARAM_KEYS | runner.AGENT_PARAM_KEYS
 
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"model": MODEL_TOKEN},
+            {"model": MODEL_TOKEN, "bounds": {"timeout_s": 30}},
+            {"model": MODEL_TOKEN, "bounds": {"timeout_s": 30, "spend_cap": -1.0}},
+            {"model": MODEL_TOKEN, "bounds": {"timeout_s": 30, "spend_cap": True}},
+        ],
+        ids=["no-bounds", "no-spend-cap", "negative-spend-cap", "bool-spend-cap"],
+    )
+    def test_agent_manifest_requires_a_spend_budget(self, params):
+        """A protocol arm without a non-negative spend_cap never reaches an
+        arm: metered trials would otherwise bill with no reservation held."""
+        from tools.improvement_eval import runner
+
+        with pytest.raises(InfraFailure, match="spend_cap"):
+            runner._validate_agent_manifest("candidate", params)
+
     def test_retrieve_job_refuses_agent_keys(self):
         from tools.improvement_eval import runner
 
@@ -605,7 +623,7 @@ class TestCrossModeKeys:
 
         with pytest.raises(InfraFailure, match="model"):
             runner._validate_agent_manifest("candidate", {"skill": "s"})
-        runner._validate_agent_manifest("candidate", {"model": "m"})
+        runner._validate_agent_manifest("candidate", {"model": "m", "bounds": {"spend_cap": 1.0}})
 
 
 class TestAgentTaskEnvelope:
@@ -613,7 +631,7 @@ class TestAgentTaskEnvelope:
         from tools.improvement_experiment import validate_candidate
 
         outcome = validate_candidate(
-            {"model": "m", "skill": "s", "bounds": {"timeout_s": 30}},
+            {"model": "m", "skill": "s", "bounds": {"timeout_s": 30, "spend_cap": 1.0}},
             envelope="agent_task",
         )
         assert outcome.accepted
@@ -798,29 +816,28 @@ class TestAgentTrialSpend:
                 )
         assert [c[0] for c in meter.calls] == ["reserve"]
 
-    def test_no_spend_cap_runs_unmetered(self):
-        """A task with no frozen per-task budget runs; the timeout backstops it."""
+    def test_missing_spend_cap_refused_before_spawn(self):
+        """A metered task with no frozen per-task budget is refused; the
+        session would otherwise bill with no reservation held."""
         from tools.improvement_eval import runner
 
         meter = _FakeMeter()
-        seen = []
 
-        def _spy_run(arm, project_key, job):
-            seen.append(job)
-            return {"trials": [_trial_outcome("t1", "prior work summary")]}
+        def _must_not_spawn(arm, project_key, job):
+            raise AssertionError("budgetless trial must not spawn a session")
 
-        with mock.patch("tools.improvement_eval.arena.run_arm_job", _spy_run):
-            runner._run_agent_arm(
-                object(),
-                _spend_export(),
-                PK_RUNNER,
-                _spend_trial(),
-                _spend_params(spend_cap=None),
-                arm_run_id="exp3311:candidate",
-                meter=meter,
-            )
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _must_not_spawn):
+            with pytest.raises(InfraFailure, match="spend_cap"):
+                runner._run_agent_arm(
+                    object(),
+                    _spend_export(),
+                    PK_RUNNER,
+                    _spend_trial(),
+                    _spend_params(spend_cap=None),
+                    arm_run_id="exp3311:candidate",
+                    meter=meter,
+                )
         assert meter.calls == []
-        assert seen[0]["bounds"] == {}
 
     def test_over_budget_trials_count_as_harness_errors_never_zero_scores(self):
         """End to end at the trial loop: refused trials are excluded and
@@ -973,3 +990,37 @@ class TestAgentRerunWorkerError:
             )
         assert paired == []
         assert errors == [("incumbent", "t1"), ("incumbent", "t2")]
+
+
+class TestAgentCapEnforcement:
+    def test_rerun_harness_error_trips_a_zero_cap(self, agent_charter, agent_corpus):
+        """The production cap logic aborts the run when a re-run harness
+        error exceeds it: verdict infra_failure naming the cap."""
+        from tools.improvement_eval import runner
+
+        baseline = {
+            t["id"]: _trial_outcome(t["id"], "prior work summary", True, INCUMBENT_MODEL)
+            for t in AGENT_TASKS
+        }
+        experiment = _freeze_agent(
+            _agent_protocol(agent_corpus.digest, incumbent_outcomes=baseline)
+        )
+        seen: list[str] = []
+
+        def _flaky_incumbent(arm, export, project_key, task, arm_params):
+            seen.append(task["id"])
+            if seen.count(task["id"]) > 1:
+                raise InfraFailure(f"worker lost on re-run {task['id']}")
+            return _trial_outcome(task["id"], "prior work summary", True, INCUMBENT_MODEL)
+
+        with mock.patch.object(runner, "_run_agent_arm", _flaky_incumbent):
+            evaluation = _reload_agent_evaluation(
+                runner.evaluate(
+                    str(experiment.id),
+                    PK_RUNNER,
+                    judges=[_rubric_judge()],
+                    _candidate_agent_arm=_candidate_fake(),
+                )
+            )
+        assert evaluation.verdict == "infra_failure"
+        assert "exceed the cap" in (evaluation.notes or "")

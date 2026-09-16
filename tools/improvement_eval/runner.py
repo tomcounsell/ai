@@ -374,14 +374,29 @@ def _validate_arm_params(arm_name: str, arm_params: dict, *, mode: str = "retrie
 
 
 def _validate_agent_manifest(arm_name: str, arm_params: dict) -> None:
-    """Require the agent arm's session identity: a non-blank model.
+    """Require the agent arm's session identity and its spend budget.
 
-    Skill, persona, and prompt hash ride along when the protocol names
-    them. The worker refuses a missing model at job load; this refuses it
-    at protocol load, before any arm spawns.
+    A non-blank model names the session; ``bounds`` must carry a numeric,
+    non-negative ``spend_cap`` so every metered trial reserves its frozen
+    per-task budget before anything spawns. Skill, persona, and prompt hash
+    ride along when the protocol names them. The worker refuses a missing
+    model at job load; this refuses a missing model or budget at protocol
+    load, before any arm spawns.
     """
     if not isinstance(arm_params.get("model"), str) or not arm_params["model"].strip():
         raise InfraFailure(f"protocol {arm_name} params need a non-blank 'model' for the agent arm")
+    bounds = arm_params.get("bounds")
+    spend_cap = bounds.get("spend_cap") if isinstance(bounds, dict) else None
+    if (
+        not isinstance(bounds, dict)
+        or isinstance(spend_cap, bool)
+        or not isinstance(spend_cap, (int, float))
+        or not spend_cap >= 0
+    ):
+        raise InfraFailure(
+            f"protocol {arm_name} params need bounds with a non-negative "
+            f"'spend_cap' for the agent arm, got {bounds!r}"
+        )
 
 
 def _retrieve_job(export, project_key: str, query: dict, arm_params: dict) -> dict:
@@ -459,12 +474,14 @@ def _run_agent_arm(
 ) -> dict:
     """Run one agent trial on an arm; return its outcome mapping.
 
-    With a meter and a frozen per-task spend cap, the task budget is
-    reserved pre-trial (unit 2, ``arm:<arm_run_id>:<trial>``) and settled
-    as estimated post-trial. A project that is not provably open-source is
-    refused before any reservation or spawn. A refused reservation is a harness error
-    raised before anything spawns; a worker error leaves the reservation
-    open for the reconcile pass and settles nothing.
+    With a meter, the frozen per-task spend cap is reserved pre-trial
+    (unit 2, ``arm:<arm_run_id>:<trial>``) and settled as estimated
+    post-trial; a metered trial with no spend cap is a frozen-contract
+    defect and is refused before anything spawns. A project that is not
+    provably open-source is refused before any reservation or spawn. A
+    refused reservation is a harness error raised before anything spawns;
+    a worker error leaves the reservation open for the reconcile pass and
+    settles nothing.
     """
     from tools.improvement_eval.arena import run_arm_job
 
@@ -478,6 +495,12 @@ def _run_agent_arm(
         )
     spend_cap = (arm_params.get("bounds") or {}).get("spend_cap")
     reservation_id = None
+    if meter is not None and spend_cap is None:
+        raise InfraFailure(
+            f"agent trial {trial_id} refused: a metered trial needs a frozen "
+            "per-task 'spend_cap' in bounds; without it the session would bill "
+            "with no reservation held"
+        )
     if meter is not None and spend_cap is not None:
         case_id = f"arm:{arm_run_id}:{trial_id}" if arm_run_id else f"arm:{trial_id}"
         reservation = meter.reserve(project_key, spend_cap, purpose="agent_trial", case_id=case_id)
@@ -1342,7 +1365,17 @@ def _run_gates(
             candidate: TrialResult | None = None
             for arm_name in assignment.run_order:
                 if arm_name == INCUMBENT_ARM:
-                    again = _run_arm(incumbent_arm, export, project_key, query, incumbent_params)
+                    try:
+                        again = _run_arm(
+                            incumbent_arm, export, project_key, query, incumbent_params
+                        )
+                    except InfraFailure as exc:
+                        # A worker error on the re-run is a harness error
+                        # exactly like the agent path: the trial is excluded
+                        # and counted toward the cap. Only a clean re-run
+                        # that disagrees fails the run for drift.
+                        _harness_error(INCUMBENT_ARM, trial_id, exc)
+                        break
                     if again != incumbent.ranked_ids:
                         raise InfraFailure(
                             f"incumbent ranking moved within the run on trial {trial_id!r}: "
