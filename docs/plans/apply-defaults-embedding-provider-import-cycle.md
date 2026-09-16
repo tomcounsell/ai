@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -202,8 +202,8 @@ No agent integration required — no new CLI entry point and no bridge changes; 
 
 ## Documentation
 
-- [ ] Update `docs/features/subconscious-memory.md` configuration notes with the import-order guarantee
-- [ ] Add entry to `docs/features/README.md` index table if a new feature doc is created
+- [x] Update `docs/features/subconscious-memory.md` configuration notes with the import-order guarantee
+- [x] Add entry to `docs/features/README.md` index table if a new feature doc is created (no new doc created, no entry needed)
 
 ## Success Criteria
 
