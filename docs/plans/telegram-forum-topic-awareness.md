@@ -110,9 +110,9 @@ lose topic identity like everything else.
 ### spike-3: Do recovery scanners need the same fix?
 - **Assumption**: "Catchup/reconciler re-enqueues share the keying defect."
 - **Method**: code-read
-- **Finding**: They key `tg_{project}_{chat}_{message.id}` directly (catchup.py:405, reconciler.py:321, agent_catchup.py:693) — immune to collapse, but topic-blind: recovered messages need the same topic capture at their persistence sites.
+- **Finding**: They key `tg_{project}_{chat}_{message.id}` directly (catchup.py:409, reconciler.py:316, agent_catchup.py:688) — immune to collapse, but topic-blind. Re-verified 2026-09-16: they do **not** write `TelegramMessage` rows at all. The only production callers of `tools/telegram_history.store_message()` are `bridge/telegram_bridge.py:1567` (live intake), `bridge/telegram_bridge.py:3218` (outbound record) and `bridge/telegram_relay.py:383`. The scanners call `enqueue_agent_session`.
 - **Confidence**: high
-- **Impact on plan**: topic capture must be a shared helper the scanners call too, not inline bridge code.
+- **Impact on plan**: topic capture must be a shared helper, not inline bridge code — but it lands in two distinct shapes: (a) row persistence via one new `store_message` kwarg threaded from live intake, and (b) session-context threading at the three scanners' `enqueue_agent_session` sites. Do not look for a scanner-side `TelegramMessage` write; there isn't one.
 
 ## Data Flow
 
@@ -172,7 +172,7 @@ Recorded on the issue: https://github.com/tomcounsell/ai/issues/2652#issuecommen
 ### Key Elements
 
 - **Topic resolver helper** (`bridge/topic.py` or inside `bridge/routing.py`): one function from a Telethon message to `(topic_id | None, is_top_level_topic_message)` implementing the header rules and the #3831 quirk defensively.
-- **Capture + storage**: `TelegramMessage.topic_id`; populated by live intake and the three recovery scanners through the shared helper; Popoto migration registered in `MIGRATIONS`.
+- **Capture + storage**: `TelegramMessage.topic_id`; `tools/telegram_history.store_message()` gains a `topic_id` kwarg populated by live intake (`bridge/telegram_bridge.py:1567`) through the shared helper; the three recovery scanners carry the topic into the enqueued session context instead (they write no rows — see spike-3); Popoto migration registered in `MIGRATIONS`.
 - **Keying correction**: continuation branch and chain walk treat top-level topic messages as fresh sessions; walk never crosses a topic root; root-cache hygiene for the semantics change.
 - **Context rendering**: topic id + best-effort name (GetForumTopics, cached, fail-soft to id-only) in the agent's context; optional advisory subdirectory hint from config.
 - **Outbound default topic**: `default_topic_id` per group in `projects.json`; ALL producers of unsolicited sends resolve it — PM briefings, `tools/send_message.py`, and poll sends (#3080 surface, included per owner ruling: same one-line producer resolution); relay guard maps General/none to a plain send; reply-inside-topic uses raw `InputReplyToMessage` where both ids are known.
@@ -348,12 +348,12 @@ that shadow these.
 - **Validates**: tests/unit/test_topic_resolver.py (create)
 - **Informed By**: spike-1, spike-3, Research header truth table
 - **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true
-- Resolver helper with the truth table + #3831 defense; `TelegramMessage.topic_id`; migration in `MIGRATIONS`; thread through live intake and the three scanners.
+- Resolver helper with the truth table + #3831 defense; `TelegramMessage.topic_id`; `store_message(topic_id=...)` kwarg; migration in `MIGRATIONS`; bump the field-count assertion in `tests/unit/test_model_relationships.py:110` (20 → 21) in the same commit; thread the resolver through live intake (row persistence) and the three scanners (session context only).
 
 ### 2. Keying correction + cache hygiene
 - **Task ID**: build-keying
 - **Depends On**: build-capture
-- **Validates**: tests/unit/test_bridge_routing.py, tests/unit/test_context_helpers.py
+- **Validates**: tests/unit/test_config_driven_routing.py, tests/unit/test_context_helpers.py
 - **Informed By**: spike-1 (two sites only), Risk 2
 - **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: false
 - Continuation branch + walk termination + cache namespace bump.
@@ -361,7 +361,7 @@ that shadow these.
 ### 3. Outbound default topic + env plumbing
 - **Task ID**: build-outbound
 - **Depends On**: build-capture
-- **Validates**: tests/unit/test_reply_delivery.py + new relay cases
+- **Validates**: tests/unit/test_bridge_relay.py, tests/unit/test_send_message.py
 - **Informed By**: spike-2 (reply_to suffices; General omit rule)
 - **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: true (with build-keying only if file sets stay disjoint; otherwise serialize after it)
 - Config keys + validation posture, producer resolution (PM briefings, send_message, poll sends), relay General-guard, `TELEGRAM_TOPIC_ID`.
