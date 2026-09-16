@@ -173,8 +173,19 @@ correct fix as FAILURE and a broken one as PASS.
 
 ## Critique Results (round 1, 2026-09-16)
 
-**Verdict: NEEDS REVISION.** Three blockers, each independently re-verified
+**Verdict: NEEDS REVISION.** Six blockers, each independently re-verified
 against source by the orchestrator rather than taken from the critique.
+
+The plan's central insight is correct and survives: the repo guards worktree
+*deletion* and not worktree *acquisition*. Almost everything else about the
+implementation is wrong. The guard is at a site the incident path never
+reaches (B1), the probe it calls cannot answer the question asked of it (B2),
+its busy predicate would wedge normal lanes (B3), its process scan refuses the
+caller itself (B4), the skill points agents at a different door entirely (B5),
+and its verification cannot run (B6).
+
+**This plan must not go to build in its current form.** The revision is large
+enough to be a re-plan of Tasks 1-4, not an edit pass.
 
 ### B1 — The guard is wired to a call site the incident path never reaches
 
@@ -244,6 +255,54 @@ rather than a probe-refreshed `updated_at`, and with the single-authoritative-
 liveness convention owned by the session runner (`AgentSession.live_fence` is
 referenced at `agent/session_executor.py:1570-1580`). Deletion may keep the
 conservative status-only predicate; acquisition may not.
+
+### B4 — The OS process scan refuses the legitimate owner, and refuses the caller itself
+
+`_worktree_has_live_process` (`agent/worktree_manager.py:716-750`) returns the
+first live process whose cwd is rooted in the worktree, **with no session
+attribution**. Task 1 step 3 runs it unconditionally after the identity
+carve-out.
+
+Two consequences. A resuming owner with a leftover pytest, server or shell in
+its lane is locked out of its own worktree. Worse, this repo's documented
+acquisition entry point (`docs/sdlc/do-build.md:63`) is a `python -c` invocation
+run by an agent **whose cwd is already inside the lane** — so the acquiring
+process is itself a live process rooted in the worktree. That is self-refusal on
+every single build, by construction.
+
+**Required revision:** restrict the OS scan to the *creation* branch, where a
+brand-new worktree can hold no legitimate process. On the re-entry branch either
+drop it or exclude the caller's own process and its ancestry before treating a
+pid as an owner.
+
+### B5 — A third lane-entry route bypasses any guard on the wrapper
+
+`get_or_create_worktree` is a one-line delegation to `create_worktree`
+(`agent/worktree_manager.py:1642`), and `create_worktree` (`:1507`) is public.
+The shipped skill points agents at the *inner* function and at raw git:
+
+- `.claude/skills-global/do-build/SKILL.md:94` tells cross-repo builders to call
+  `create_worktree(Path(TARGET_REPO), slug)` — not `get_or_create_worktree`.
+- `:118-119` offers a raw `git -C "$TARGET_REPO" worktree add ...` baseline.
+
+So guarding the wrapper leaves open both the door the skill actually names and
+the raw-git door beside it.
+
+**Required revision:** the check belongs in `create_worktree`, or in a shared
+`_enter_lane` helper both call. Task 3 must also fix `SKILL.md:94` and the
+raw-git fallback so the raw form is not offered where the context declares a
+worktree manager.
+
+### B6 — Verification rows that cannot pass
+
+- Plan `:162` and `:267` name `tests/unit/test_worktree_manager.py`, which
+  **does not exist**. The suite is a package:
+  `tests/unit/worktree_manager/test_worktree_manager_{busy_guards,cleanup,creation,uncommitted,venv_provisioning}.py`.
+  pytest exits 4 on a missing path, so the row can never pass. Point both at
+  `tests/unit/worktree_manager/`.
+- Remaining rows must be re-derived once the guard's location is settled, since
+  several assert on symbols in `agent/session_executor.py` that the revised
+  design may not place there.
 
 ### Live evidence: this failure class occurred during Phase 0
 
