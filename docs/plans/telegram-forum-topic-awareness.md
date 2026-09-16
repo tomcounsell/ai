@@ -5,7 +5,9 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
-last_comment_id: 5220047921
+last_comment_id: 5695879375
+revision_applied: true
+revision_applied_at: 2026-09-16T10:26:43Z
 ---
 
 # Telegram Forum-Topic Awareness
@@ -60,10 +62,13 @@ default topic; a topic can be mapped to a working subdirectory as advisory conte
 General-topic default; `bridge/utc` moved to `utils/` (#2900) — cosmetic for this plan.
 
 **Active plans overlapping this area:** `reply-chain-media-renders-as-literal-string.md`
-(#2732, In Progress) also edits `bridge/context.py` (`fetch_reply_chain`). Coordination
-signal: this plan's walk-termination change touches the session-root walk
-(`_cache_walk_root`), a different function in the same file — merge order matters, no design
-conflict.
+(#2732). **Resolved 2026-09-16:** PR #3146 **merged** 2026-09-05 (`9ebcb5754`), and
+`bridge/context.py` has moved again since (`9b25ffd0e`, email attachments). `fetch_reply_chain`'s
+signature and both bridge call sites are unchanged, so this plan's No-Go boundary and the
+`def fetch_reply_chain` verification row remain valid as written. The lane worktree must be
+rebased onto current main before editing `bridge/context.py` — the file no longer matches the
+`c99cb231d` baseline. This plan's walk-termination change touches the session-root walk
+(`_cache_walk_root`), a different function in the same file — no design conflict.
 
 **Notes:** recovery scanners (`bridge/catchup.py:405`, `bridge/reconciler.py:321`,
 `bridge/agent_catchup.py:693`) key sessions per-message and never walk the reply chain, so
