@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -86,7 +86,7 @@ No relevant external findings — this is an internal schema and reflection chan
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1 (settle the Open Questions before build)
+- PM check-ins: 0 (the four open questions are settled in Technical Approach → Settled Decisions; nothing is waiting on a human)
 - Review rounds: 1
 
 ## Prerequisites
@@ -136,14 +136,17 @@ These four were open at first draft and are decided here; the rationale is recor
 ### Empty/Invalid Input Handling
 - [ ] `block_expectation` with an unknown code, an empty code, or an unknown/discharged expectation id: `ValueError` for the code, `False` for a missing/discharged id (mirrors `discharge_expectation`). Tests for each.
 - [ ] `detail` may be empty; `code` may not.
+- [ ] `by` outside `{"reconciler", "pm", "lane"}`: `ValueError`.
+- [ ] `code="attempts_exhausted"` with `by="lane"` or `by="pm"`: `ValueError` (Settled Decision 2 — the forgery guard). And `by="reconciler"` with any code other than `attempts_exhausted`: `ValueError`.
+- [ ] The vocabulary is frozen: a test asserts `BLOCKED_REASONS` equals the exact five-member set, so widening it is a deliberate two-file edit.
 
 ### Error State Rendering
 - [ ] `job_tool show` renders `blocked` on the entry; `job_tool expectation-block` on a Job in another Room fails with the Room-scope `JobToolError`.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_job_model.py` — UPDATE: add a `TestBlockedExpectations` class (block, unblock, discharge-preserves-annotation, absent key reads as not blocked, unknown code rejected, corrupt goal refuses, `has_open_expectations` and `status` unchanged by block).
-- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; escalation seam writes `attempts_exhausted`; a refused write (corrupt goal) still escalates.
+- [ ] `tests/unit/test_job_model.py` — UPDATE: add a `TestBlockedExpectations` class (block, unblock, discharge-preserves-annotation, absent key reads as not blocked, unknown code rejected, unknown `by` rejected, the `attempts_exhausted`/`by` cross-guard in both directions, the frozen-vocabulary assertion, corrupt goal refuses, `has_open_expectations` and `status` unchanged by block, a blocked inbound expectation still counts as open).
+- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; the `attempts >= _max_attempts()` branch writes `attempts_exhausted`; the other two `_escalate_once` sites write **no** annotation (anti-test — guards Settled Decision's seam choice against a build that annotates all three); a refused write (corrupt goal) still escalates.
 - [ ] `tests/unit/test_job_tool.py` — UPDATE: two new subcommands, Room scope, error conversion.
 - [ ] `tests/unit/test_promise_advisory.py` — no change: the gate clears on an open inbound expectation; a blocked inbound expectation is still open (asserted by one new row in `test_job_model.py`, not here).
 
@@ -162,7 +165,7 @@ These four were open at first draft and are decided here; the rationale is recor
 
 ### Risk 2: Trust asymmetry between writers
 **Impact:** A lane self-reports `needs_human` to get out of work; the reconciler backs off.
-**Mitigation:** `by` is recorded, and the PM prime already frames discharge as PM-authored; the same framing applies to block. The reconciler's own code is the only writer of `attempts_exhausted`. This is a policy question (Open Question 2).
+**Mitigation:** structural, not policy (see Settled Decision 2). Blocking retires nothing: the row stays open, the Job stays `active`, a `blocked:` finding prints every tick, and `job_tool show` exposes it — a lane that blocks to escape work is more visible, not less. `attempts_exhausted`, the one code that carries the reconciler's authority, is rejected with any `by` other than `"reconciler"`, so it cannot be forged. `by` is recorded on every annotation.
 
 ### Risk 3: A block write races a concurrent expectation mutation
 **Impact:** Two read-modify-write cycles on the same goal JSON; the later full write wins and drops the other's change.
@@ -184,7 +187,7 @@ These four were open at first draft and are decided here; the rationale is recor
 
 ## Update System
 
-No update system changes required. The annotation is an additive key inside the existing `goal` JSON field: no Popoto field is added, renamed, or retyped, so no entry in `scripts/update/migrations.py::MIGRATIONS` is registered. Pre-existing entries read as not blocked by construction (`entry.get("blocked")`). Restarting the worker/reflection scheduler after deploy picks up the reconciler change through the normal `/update` path.
+No update system changes required, and **no `MIGRATIONS` entry is registered — this is deliberate, not an oversight** (Settled Decision 4). `docs/sdlc/do-plan.md` requires a migration on "changes to any Popoto model"; that requirement is scoped to the field set, because `run_pending_migrations()` exists to backfill Popoto-managed keys and rebuild indexes. This plan adds a key *inside* the existing `goal = Field(null=True)` JSON payload: no field is added, renamed, retyped, or indexed, no index needs rebuilding, and `entry.get("blocked")` makes an absent key semantically identical to not-blocked, so there is nothing to backfill. A no-op migration would write a false record into `data/migrations_completed.json` and establish the wrong precedent for JSON-payload changes. Restarting the worker/reflection scheduler after deploy picks up the reconciler change through the normal `/update` path.
 
 ## Agent Integration
 
@@ -193,8 +196,8 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/durability-model.md`: add rule 9 (blocked annotation: shape, vocabulary, writers, rest unchanged) after rule 8.
-- [ ] Update `docs/features/expectation-reconciler.md`: amend the "no writes" invariant, add the `blocked:` finding, document the back-off.
+- [ ] Update `docs/features/durability-model.md`: add rule 9 (blocked annotation: shape, the frozen vocabulary, the three writers and the `attempts_exhausted` fence, rest unchanged, and the deliberate no-migration reading) after rule 8.
+- [ ] Update `docs/features/expectation-reconciler.md`: amend the "no writes" invariant, add the `blocked:` finding, document the back-off, and state explicitly that a blocked row stops re-escalating and that only the `attempts >= _max_attempts()` seam annotates.
 - [ ] Update `docs/tools-reference.md` for the two `job_tool` subcommands.
 
 ### Inline Documentation
@@ -208,6 +211,9 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - [ ] `has_open_expectations`, `status="active"` forcing, and rest-by-age are unchanged by a block; documented in rule 9.
 - [ ] Entries without the key read as not blocked (test on a hand-written legacy entry).
 - [ ] A corrupt goal refuses block/unblock (test), and the reconciler still escalates when the annotation write is refused.
+- [ ] `attempts_exhausted` is unforgeable: only `by="reconciler"` may write it, and the reconciler writes nothing else (test, both directions).
+- [ ] Only the `attempts >= _max_attempts()` escalation site annotates; the other two `_escalate_once` sites leave the row un-annotated and re-steerable (test).
+- [ ] No entry is added to `scripts/update/migrations.py::MIGRATIONS`, and the reason is stated in the Update System section and in rule 9.
 - [ ] Tests pass (`scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_reflections_expectation_reconciler.py tests/unit/test_job_tool.py -n 2`).
 - [ ] Documentation updated per the Documentation section.
 
@@ -248,9 +254,10 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - **Assigned To**: job-blocked-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `BLOCKED_REASONS`, `block_expectation`, `unblock_expectation`, `blocked_expectations` to `models/job.py`; both writers go through `_mutable_goal_data()` and `_write_goal_data`.
+- Add `BLOCKED_REASONS` (the frozen five), `BLOCKED_BY` (`reconciler`, `pm`, `lane`), `block_expectation`, `unblock_expectation`, `blocked_expectations` to `models/job.py`; both writers go through `_mutable_goal_data()` and `_write_goal_data`.
+- Enforce the `attempts_exhausted` ↔ `by="reconciler"` biconditional in `block_expectation` (`ValueError` either way).
 - Update the `goal` schema comment.
-- Add `TestBlockedExpectations` per Test Impact, including the corrupt-goal refusal and the legacy-entry row.
+- Add `TestBlockedExpectations` per Test Impact, including the corrupt-goal refusal, the legacy-entry row, the frozen-vocabulary assertion, and the cross-guard in both directions.
 
 ### 2. Tool: subcommands and error conversion
 - **Task ID**: build-tool
@@ -269,9 +276,10 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - **Assigned To**: reconciler-backoff-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Skip blocked rows with a `blocked: <eid> <code>` finding before the age/liveness checks.
-- At the `attempts >= _max_attempts()` branch: escalate first, then `block_expectation(..., code="attempts_exhausted", by="reconciler")` on the fresh snapshot inside the existing per-entry `try`.
-- Tests: skip + finding + no action; seam write; refused write still escalates.
+- Skip blocked rows with a `blocked: <eid> <code>` finding before the age/liveness checks (`:461`), inside the existing per-entry `try`.
+- At the `attempts >= _max_attempts()` branch (`:480`) **only**: escalate first, then re-fetch the Job (this branch has none today — the re-fetch at `:499` is below it) and `block_expectation(..., code="attempts_exhausted", by="reconciler")` on that snapshot, inside the existing per-entry `try`.
+- Leave `:523` and `:554` untouched — they escalate with attempts remaining and must stay re-steerable.
+- Tests: skip + finding + no action; seam write at `:480`; no annotation from `:523`/`:554`; refused write still escalates.
 
 ### 4. Validate
 - **Task ID**: validate-all
@@ -299,18 +307,11 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 | No new index (anti-criterion, #2494 No-Go) | `grep -c "IndexedField(" models/job.py` | output contains 2 |
 | Reconciler never discharges (anti-criterion) | `grep -c "discharge_expectation" reflections/expectation_reconciler.py` | match count == 0 |
 | Vocabulary is closed | `grep -c "BLOCKED_REASONS" models/job.py` | output > 1 |
+| Only one escalation site annotates (anti-criterion) | `grep -c "block_expectation" reflections/expectation_reconciler.py` | match count == 1 |
+| No migration registered (anti-criterion, Settled Decision 4) | `grep -ci "blocked" scripts/update/migrations.py` | output == 0 |
 | Rule 9 documented | `grep -c "blocked" docs/features/durability-model.md` | output > 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-
----
-
-## Open Questions
-
-1. **Vocabulary members.** The proposed five (`owner_gone`, `attempts_exhausted`, `needs_human`, `missing_credential`, `upstream_unmergeable`) come from the reconciler's decision points and the issue's examples, not from a corpus of observed stalls. Ship these five and extend on evidence, or ship only `attempts_exhausted` + `needs_human` (the two with a writer in this plan) and add the rest when a writer exists?
-2. **Lane self-report trust.** Should a lane be allowed to block its own outbound expectation, or only the PM (holder) and the reconciler? The plan proposes all three with `by` recorded; the conservative alternative is holder-or-reconciler only, with the lane steering its PM instead.
-3. **Rest.** The plan keeps a blocked expectation pinning the Job `active` (blocked is not finished). The alternative in the issue, letting a blocked Job rest while staying visible, needs a new "visible" channel that is not `status`; the finding line and `job_tool show` are that channel today. Confirm the plan's choice.
-4. **Migration registration.** The repo addendum asks for a `MIGRATIONS` entry on any Popoto model change. This plan changes the JSON payload, not the field set, and registers nothing. Confirm that reading, or name the no-op migration you want recorded.
