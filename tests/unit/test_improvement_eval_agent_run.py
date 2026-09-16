@@ -1,5 +1,6 @@
-"""Tests for the agent_run arm job mode (#3311, Task 1) and the runner's
-agent-trial branch (#3311, Task 2).
+"""Tests for the agent_run arm job mode (#3311, Task 1), the runner's
+agent-trial branch (#3311, Task 2), and agent-trial spend plumbing
+(#3311, Task 3).
 
 Task 1 covers mode dispatch (one bounded trial per task plus the candidate
 manifest), the teardown digest parity check (a session write to the
@@ -13,6 +14,11 @@ agent-run envelope passes the pre-judge scan with the candidate manifest
 in the identity dict (a hit records, never fails), Gate 1 compares
 incumbent outcomes against the recorded baseline under a frozen
 per-task tolerance, and each mode's validator rejects the other's keys.
+
+Task 3 covers spend: each agent trial reserves its task budget against
+unit 2 pre-trial (with the ``arm:<arm_run_id>:`` resource prefix) and
+settles post-trial; a refused reservation is a harness error counting
+toward ``infra_failure_cap``, never a scored zero.
 """
 
 from __future__ import annotations
@@ -636,3 +642,220 @@ class TestAgentTaskEnvelope:
 
         outcome = validate_candidate({"model": None}, envelope="agent_task")
         assert outcome.reason == "NONE_VALUE"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: agent-trial spend plumbing (unit 2 reserve/settle per task budget)
+# ---------------------------------------------------------------------------
+
+
+class _FakeReservation:
+    def __init__(self, reservation_id: str, cents: int) -> None:
+        self.reservation_id = reservation_id
+        self.cents = cents
+
+
+class _FakeRefusal:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+
+class _FakeMeter:
+    """Mirror of the unit-2 meter surface ``_run_agent_arm`` touches."""
+
+    Refusal = _FakeRefusal
+
+    def __init__(self, *, refuse_with: str | None = None) -> None:
+        self.calls: list[tuple] = []
+        self._refuse_with = refuse_with
+
+    def reserve(self, project_key, amount_usd, *, purpose, case_id=None, **kwargs):
+        self.calls.append(("reserve", project_key, amount_usd, purpose, case_id))
+        if self._refuse_with is not None:
+            return _FakeRefusal(self._refuse_with)
+        return _FakeReservation(f"res-{len(self.calls)}", round(float(amount_usd) * 100))
+
+    def settle(self, project_key, reservation_id, usd, *, metering):
+        self.calls.append(("settle", project_key, reservation_id, usd, metering))
+
+    def release(self, project_key, reservation_id):
+        self.calls.append(("release", project_key, reservation_id))
+
+
+def _spend_trial(task_id="t1"):
+    return {"id": task_id, "prompt": "summarize the lighthouse log"}
+
+
+def _spend_params(spend_cap=1.0):
+    params = {"model": MODEL_TOKEN}
+    if spend_cap is not None:
+        params["bounds"] = {"timeout_s": 30, "max_turns": 2, "spend_cap": spend_cap}
+    return params
+
+
+def _spend_export():
+    return mock.Mock(jsonl_text="x", digest="sha256:spend-3311")
+
+
+class TestAgentTrialSpend:
+    def test_reserve_called_pre_trial_with_arm_prefixed_resource(self):
+        """Reserve precedes the spawn and carries the arm-prefixed resource."""
+        from tools.improvement_eval import runner
+
+        meter = _FakeMeter()
+        order: list[str] = []
+        orig_reserve = meter.reserve
+
+        def _spy_run(arm, project_key, job):
+            order.append("run")
+            return {"trials": [_trial_outcome("t1", "prior work summary")]}
+
+        def _spy_reserve(project_key, amount_usd, *, purpose, case_id=None, **kwargs):
+            order.append("reserve")
+            return orig_reserve(project_key, amount_usd, purpose=purpose, case_id=case_id, **kwargs)
+
+        meter.reserve = _spy_reserve  # type: ignore[method-assign]
+        orig_settle = meter.settle
+
+        def _spy_settle(project_key, reservation_id, usd, *, metering):
+            order.append("settle")
+            return orig_settle(project_key, reservation_id, usd, metering=metering)
+
+        meter.settle = _spy_settle  # type: ignore[method-assign]
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _spy_run):
+            outcome = runner._run_agent_arm(
+                object(),
+                _spend_export(),
+                PK_RUNNER,
+                _spend_trial(),
+                _spend_params(),
+                arm_run_id="exp3311:candidate",
+                meter=meter,
+            )
+        assert outcome["task_id"] == "t1"
+        assert order == ["reserve", "run", "settle"]
+        assert meter.calls[0] == (
+            "reserve",
+            PK_RUNNER,
+            1.0,
+            "agent_trial",
+            "arm:exp3311:candidate:t1",
+        )
+        assert meter.calls[1] == ("settle", PK_RUNNER, "res-1", 1.0, "estimated")
+
+    def test_refusal_is_a_harness_error_before_any_spawn(self):
+        """An over-budget trial raises InfraFailure; the worker never spawns."""
+        from tools.improvement_eval import runner
+
+        meter = _FakeMeter(refuse_with="day_exhausted")
+
+        def _must_not_spawn(arm, project_key, job):
+            raise AssertionError("refused trial must not spawn a session")
+
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _must_not_spawn):
+            with pytest.raises(InfraFailure, match="t1.*day_exhausted"):
+                runner._run_agent_arm(
+                    object(),
+                    _spend_export(),
+                    PK_RUNNER,
+                    _spend_trial(),
+                    _spend_params(),
+                    arm_run_id="exp3311:candidate",
+                    meter=meter,
+                )
+        assert [c[0] for c in meter.calls] == ["reserve"]
+
+    def test_worker_error_leaves_the_reservation_for_reconcile(self):
+        """A failed trial settles nothing and releases nothing (charter 8:
+        uncertain metering is not zero cost; the reconcile pass receipts it)."""
+        from tools.improvement_eval import runner
+
+        meter = _FakeMeter()
+
+        def _boom(arm, project_key, job):
+            raise InfraFailure("arm worker timed out after 30s on job mode 'agent_run'")
+
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _boom):
+            with pytest.raises(InfraFailure, match="timed out"):
+                runner._run_agent_arm(
+                    object(),
+                    _spend_export(),
+                    PK_RUNNER,
+                    _spend_trial(),
+                    _spend_params(),
+                    arm_run_id="exp3311:incumbent",
+                    meter=meter,
+                )
+        assert [c[0] for c in meter.calls] == ["reserve"]
+
+    def test_no_spend_cap_runs_unmetered(self):
+        """A task with no frozen per-task budget runs; the timeout backstops it."""
+        from tools.improvement_eval import runner
+
+        meter = _FakeMeter()
+        seen = []
+
+        def _spy_run(arm, project_key, job):
+            seen.append(job)
+            return {"trials": [_trial_outcome("t1", "prior work summary")]}
+
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _spy_run):
+            runner._run_agent_arm(
+                object(),
+                _spend_export(),
+                PK_RUNNER,
+                _spend_trial(),
+                _spend_params(spend_cap=None),
+                arm_run_id="exp3311:candidate",
+                meter=meter,
+            )
+        assert meter.calls == []
+        assert seen[0]["bounds"] == {}
+
+    def test_over_budget_trials_count_as_harness_errors_never_zero_scores(self):
+        """End to end at the trial loop: refused trials are excluded and
+        counted, the candidate never runs, and no trial scores zero."""
+        import types
+
+        from tools.improvement_eval import runner
+
+        meter = _FakeMeter(refuse_with="day_exhausted")
+        spawned: list[str] = []
+        errors: list[tuple[str, str]] = []
+
+        def _must_not_spawn(arm, project_key, job):
+            spawned.append("spawn")
+            raise AssertionError("refused trial must not spawn a session")
+
+        def _harness_error(arm_name, trial_id, exc):
+            errors.append((arm_name, trial_id))
+
+        def _never_candidate(arm, export, project_key, task, arm_params):
+            raise AssertionError("the candidate must not run when Gate 1 trials fail")
+
+        ctx = types.SimpleNamespace(notes=[])
+        export = _spend_export()
+        recorded = {t["id"]: {"passed": True} for t in AGENT_TASKS}
+        with mock.patch("tools.improvement_eval.arena.run_arm_job", _must_not_spawn):
+            paired = runner._run_agent_trials(
+                ctx=ctx,
+                export=export,
+                project_key=PK_RUNNER,
+                tasks=[dict(t) for t in AGENT_TASKS],
+                recorded_outcomes=recorded,
+                tolerance={"kind": "pass_fail"},
+                baseline_digest=export.digest,
+                incumbent_params=dict(_spend_params()),
+                candidate_params=dict(_spend_params()),
+                incumbent_arm=object(),
+                candidate_arm_server=object(),
+                candidate_agent_arm=_never_candidate,
+                assignment=mock.Mock(run_order=["incumbent", "candidate"]),
+                harness_error=_harness_error,
+                arm_run_id="exp3311",
+                meter=meter,
+            )
+        assert paired == []
+        assert [trial for _, trial in errors] == ["t1", "t2"]
+        assert spawned == []
+        assert all("harness error" in note for note in ctx.notes[-2:])

@@ -437,10 +437,31 @@ def _agent_job(export, project_key: str, task: dict, arm_params: dict) -> dict:
     }
 
 
-def _run_agent_arm(arm, export, project_key: str, task: dict, arm_params: dict) -> dict:
-    """Run one agent trial on an arm; return its outcome mapping."""
+def _run_agent_arm(
+    arm, export, project_key: str, task: dict, arm_params: dict, *, arm_run_id=None, meter=None
+) -> dict:
+    """Run one agent trial on an arm; return its outcome mapping.
+
+    With a meter and a frozen per-task spend cap, the task budget is
+    reserved pre-trial (unit 2, ``arm:<arm_run_id>:<trial>``) and settled
+    as estimated post-trial. A refused reservation is a harness error
+    raised before anything spawns; a worker error leaves the reservation
+    open for the reconcile pass and settles nothing.
+    """
     from tools.improvement_eval.arena import run_arm_job
 
+    trial_id = str(task.get("id", task.get("trial_id")))
+    spend_cap = (arm_params.get("bounds") or {}).get("spend_cap")
+    reservation_id = None
+    if meter is not None and spend_cap is not None:
+        case_id = f"arm:{arm_run_id}:{trial_id}" if arm_run_id else f"arm:{trial_id}"
+        reservation = meter.reserve(project_key, spend_cap, purpose="agent_trial", case_id=case_id)
+        reservation_id = getattr(reservation, "reservation_id", None)
+        if reservation_id is None:
+            raise InfraFailure(
+                f"agent trial {trial_id} refused a unit-2 reservation: "
+                f"{getattr(reservation, 'reason', 'unknown')}"
+            )
     response = run_arm_job(arm, project_key, _agent_job(export, project_key, task, arm_params))
     trials = response.get("trials") or []
     if len(trials) != 1 or not isinstance(trials[0], dict):
@@ -448,6 +469,8 @@ def _run_agent_arm(arm, export, project_key: str, task: dict, arm_params: dict) 
             f"agent arm returned {len(trials)} trial outcome(s) for task {task.get('id')!r}; "
             "expected exactly one outcome mapping"
         )
+    if meter is not None and reservation_id is not None:
+        meter.settle(project_key, reservation_id, spend_cap, metering="estimated")
     return trials[0]
 
 
@@ -732,6 +755,8 @@ def _run_agent_trials(
     candidate_agent_arm,
     assignment: ArmAssignment,
     harness_error,
+    arm_run_id=None,
+    meter=None,
 ) -> list[tuple[TrialResult, TrialResult]]:
     """Gate 1 plus paired trials for agent protocols.
 
@@ -751,10 +776,19 @@ def _run_agent_trials(
         )
     incumbent_outcomes: dict[str, dict] = {}
     agreement: dict[str, bool] = {}
+    # Existing callers patch _run_agent_arm with five-arg fakes; spread the
+    # spend kwargs only when metering is in play so those fakes keep working.
+    arm_kwargs: dict = (
+        {"arm_run_id": arm_run_id, "meter": meter}
+        if (arm_run_id is not None or meter is not None)
+        else {}
+    )
     for task in tasks:
         trial_id = str(task["id"])
         try:
-            outcome = _run_agent_arm(incumbent_arm, export, project_key, task, incumbent_params)
+            outcome = _run_agent_arm(
+                incumbent_arm, export, project_key, task, incumbent_params, **arm_kwargs
+            )
         except InfraFailure as exc:
             harness_error(INCUMBENT_ARM, trial_id, exc)
             continue
@@ -767,13 +801,14 @@ def _run_agent_trials(
             raise InfraFailure(f"agent Gate 1: baseline names no outcome for trial {trial_id!r}")
         agreement[trial_id] = _agent_baseline_agree(outcome, recorded, tolerance, trial_id=trial_id)
         incumbent_outcomes[trial_id] = outcome
-    ctx.notes.append(
-        f"agent baseline ({(tolerance or {}).get('kind', 'pass_fail')}): "
-        + ", ".join(
-            f"{task['id']}={'agree' if agreement.get(str(task['id'])) else 'differ'}"
-            for task in tasks
+    if agreement:
+        ctx.notes.append(
+            f"agent baseline ({(tolerance or {}).get('kind', 'pass_fail')}): "
+            + ", ".join(
+                f"{task['id']}={'agree' if agreement.get(str(task['id'])) else 'differ'}"
+                for task in tasks
+            )
         )
-    )
     mismatched = sorted(trial_id for trial_id, agreed in agreement.items() if not agreed)
     if mismatched:
         raise InfraFailure(
@@ -789,7 +824,9 @@ def _run_agent_trials(
         candidate_outcome: dict | None = None
         for arm_name in assignment.run_order:
             if arm_name == INCUMBENT_ARM:
-                again = _run_agent_arm(incumbent_arm, export, project_key, task, incumbent_params)
+                again = _run_agent_arm(
+                    incumbent_arm, export, project_key, task, incumbent_params, **arm_kwargs
+                )
                 if not _agent_baseline_agree(
                     again, incumbent_outcome, tolerance, trial_id=trial_id
                 ):
