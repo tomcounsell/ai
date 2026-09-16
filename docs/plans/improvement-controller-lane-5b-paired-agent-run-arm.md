@@ -346,8 +346,10 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-
----
+| CONCERN | Risk & Robustness | Gate 1 tolerance undecided: pass/fail vs margin parked in Open Questions while Task 3 needs the baseline record shape now | pending | Freeze pass/fail agreement per task as default; baseline stores per-trial outcome plus agreed bit; Gate 1 requires all(agree) and names mismatching trial ids |
+| CONCERN | Risk & Robustness | Spend-cap enforcement point missing: bounds travel in the job spec but nothing enforces spend mid-session | pending | Pre-trial meter reserve plus post-trial settle on the arm:<arm_run_id>: prefix; run_arm_job timeout_s is the hard backstop; over-budget trial is a harness error toward the cap |
+| CONCERN | History & Consistency | Success criterion 1 names parity/corruption/disjointness suites but the Verification table runs only arena/blinding/calibration/runner_guards; Test Impact omits the runner suite Task 3 branches | pending | Add scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner.py -q and test_improvement_eval_corpus.py -q rows (exit code 0); list the runner suite as UPDATE in Test Impact |
+| NIT | Scope & Value | Risk 1 assumes 2-4 tasks while Open Question 1 asks whether small is right | pending | State 2-4 tasks as the frozen default in Technical Approach; reframe the question as confirm-or-override |
 
 ## Open Questions
 
