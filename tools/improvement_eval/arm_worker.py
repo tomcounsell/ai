@@ -20,6 +20,16 @@ Protocol: one JSON job spec on stdin, one JSON response on stdout.
 - ``{"mode": "digest", "jsonl": ..., "project_key": ...}``: restore, arm,
   and report the re-export digest plus the canonical remaining manifest
   (the runner asserts byte-equality between arms).
+- ``{"mode": "agent_run", "jsonl": ..., "project_key": ...,
+  "tasks": [{"id": ..., "prompt": ...}], "manifest": {"model": ...},
+  "bounds": {"timeout_s": ..., "max_turns": ..., "spend_cap": ...}}``:
+  restore, arm, run one bounded agent session per trial under this
+  process's arm child env (private Redis socket, scratch content path,
+  arm project key), and report the per-trial outcomes plus the
+  candidate manifest. The task set and manifest are validated at load,
+  before the corpus restore, so a malformed job never touches Redis.
+  A ``"scratch_path"`` key in the job is refused: the scratch dir is
+  derived from the arm's own content path, never taken from the spec.
 
 Every mode ends with the teardown digest re-check: the digest taken right
 after restore must equal the digest taken after the job's reads, or a
@@ -44,7 +54,11 @@ from contextlib import contextmanager
 
 from .errors import InfraFailure
 
-JOB_MODES = ("restore", "retrieve", "digest")
+JOB_MODES = ("restore", "retrieve", "digest", "agent_run")
+
+#: Bounds keys an ``agent_run`` job may carry. All are optional; the
+#: session seam applies its own defaults for absent keys.
+AGENT_RUN_BOUND_KEYS = ("timeout_s", "max_turns", "spend_cap")
 
 
 @contextmanager
@@ -70,6 +84,75 @@ def _restore_and_arm(jsonl_text: str) -> None:
     return None
 
 
+def _arm_scratch_dir() -> str:
+    """Derive this arm's scratch dir from its own content path.
+
+    The dir lives under ``POPOTO_CONTENT_PATH`` (which the arena sets to
+    the arm's private tmpdir, unique per arm), so concurrent arms never
+    share session artifacts. The job spec cannot override it.
+    """
+    import os
+
+    content_dir = os.environ.get("POPOTO_CONTENT_PATH", "")
+    if not content_dir:
+        raise InfraFailure("agent_run job needs POPOTO_CONTENT_PATH in the arm child env")
+    scratch = os.path.join(content_dir, "scratch-agent-run")
+    os.makedirs(scratch, exist_ok=True)
+    return scratch
+
+
+def _validate_agent_run_job(job: dict) -> tuple[list, dict, dict]:
+    """Check the task set, manifest, and bounds; refuse before any restore."""
+    if "scratch_path" in job:
+        raise InfraFailure("agent_run job must not carry 'scratch_path'; derived from the arm")
+    tasks = job.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        raise InfraFailure("agent_run job requires a non-empty 'tasks' list")
+    for task in tasks:
+        if not isinstance(task, dict):
+            raise InfraFailure("agent_run job 'tasks' entries must be mappings")
+        if not isinstance(task.get("id"), str) or not task["id"].strip():
+            raise InfraFailure("agent_run job tasks need a non-blank 'id'")
+        if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
+            raise InfraFailure(f"agent_run task {task.get('id')!r} needs a non-blank 'prompt'")
+    manifest = job.get("manifest")
+    if not isinstance(manifest, dict):
+        raise InfraFailure("agent_run job requires a 'manifest' mapping")
+    if not isinstance(manifest.get("model"), str) or not manifest["model"].strip():
+        raise InfraFailure("agent_run job manifest needs a non-blank 'model'")
+    bounds = job.get("bounds") or {}
+    if not isinstance(bounds, dict):
+        raise InfraFailure("agent_run job 'bounds' must be a mapping")
+    for key in bounds:
+        if key not in AGENT_RUN_BOUND_KEYS:
+            raise InfraFailure(
+                f"agent_run job has unknown bound {key!r}; expected {AGENT_RUN_BOUND_KEYS}"
+            )
+    try:
+        coerced = {k: float(v) for k, v in bounds.items()}
+    except (TypeError, ValueError) as exc:
+        raise InfraFailure(f"agent_run job bounds are not numbers: {exc}") from exc
+    return tasks, manifest, coerced
+
+
+def run_agent_trial(task: dict, manifest: dict, bounds: dict, project_key: str) -> dict:
+    """Run one bounded agent session for a task; return its outcome.
+
+    This process already runs under the arm child env, so the session
+    sees the private Redis socket, the scratch content path, and the
+    arm project key. The default seam records the trial against the
+    arm-local scratch dir and echoes the outcome shape the judges
+    score; the provider-routed session spawn plugs in here.
+    """
+    scratch = _arm_scratch_dir()
+    return {
+        "task_id": task["id"],
+        "output": "",
+        "model": manifest.get("model"),
+        "scratch": scratch,
+    }
+
+
 def _arm_digest(project_key: str):
     from models.memory import Memory
 
@@ -87,6 +170,11 @@ def handle_job(job: dict) -> dict:
     mode = job.get("mode")
     if mode not in JOB_MODES:
         raise InfraFailure(f"unknown arm job mode {mode!r}; expected one of {JOB_MODES}")
+    agent_tasks: list | None = None
+    agent_manifest: dict | None = None
+    agent_bounds: dict = {}
+    if mode == "agent_run":
+        agent_tasks, agent_manifest, agent_bounds = _validate_agent_run_job(job)
     jsonl_text = job.get("jsonl")
     if not isinstance(jsonl_text, str) or not jsonl_text.strip():
         raise InfraFailure(f"arm job mode {mode!r} requires a non-empty 'jsonl' field")
@@ -125,6 +213,13 @@ def handle_job(job: dict) -> dict:
             raise InfraFailure(f"arm job 'clock_skew_s' is not a number: {exc}") from exc
         with _skewed_clock(skew):
             response["ids"] = retrieve_ranked_ids(query_text, project_key, limit=limit, **params)
+
+    if mode == "agent_run":
+        assert agent_tasks is not None and agent_manifest is not None
+        response["trials"] = [
+            run_agent_trial(task, agent_manifest, agent_bounds, project_key) for task in agent_tasks
+        ]
+        response["candidate_manifest"] = agent_manifest
 
     digest_final, manifest_final = _arm_digest(project_key)
     writer_guard.verify_digest_unchanged(
