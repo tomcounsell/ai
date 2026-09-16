@@ -67,19 +67,51 @@ This plan changes only step 2 (what matches) and the reason text. Dispatcher wir
 
 ## Appetite
 
-Placeholder.
+**Size:** Small
+
+**Team:** Solo dev
+
+**Interactions:**
+- PM check-ins: 0 (scope is fully specified in the issue's Fix shape; the one design fork — widen vs invert — is already resolved in the issue's Recon Summary)
+- Review rounds: 1 (standard PR review)
+
+Solo dev work is fast — the bottleneck is alignment and review. One validator file plus its test plus one feature doc; no spikes needed because every assumption was verified by code read during recon.
 
 ## Prerequisites
 
-Placeholder.
+No prerequisites — this work has no external dependencies. It touches one hook script and its unit test; both run with the repo's existing interpreter and pytest setup.
 
 ## Solution
 
-Placeholder.
+### Key Elements
+
+- **Service table**: a data-driven list of `(pattern, sanctioned stop path)` pairs for the long-lived services — `ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog`. Adding the next service is one table row, not a new regex. This answers the triage's arms-race concern structurally without taking on the inversion's false-positive risk.
+- **Reused verb shapes**: the existing four `_BLOCK_PATTERNS` shapes (`pkill`, `kill $(pgrep ...)`, `killall`, `pgrep | xargs kill`) are parameterized over the service table instead of hardcoded to the test-runner pattern. The test-runner block keeps working exactly as before.
+- **Reason router**: `find_violation` returns the existing pytest-specific reason for test-runner matches and a new service-specific reason (naming the sanctioned stop path plus kill-by-PID for throwaway instances) for service matches. The current single `_REASON` string cannot serve both audiences.
+
+### Flow
+
+**Starting point** → agent types a pattern kill naming a service → **hook blocks before execution** → reason names the sanctioned stop path → **agent runs the stop script or kills by PID** → services untouched
+
+### Technical Approach
+
+- Keep `_TEST_RUNNER_PATTERN` and the `_SANCTIONED` (`reap-xdist.sh`) exemption exactly as is; keep the dispatcher wiring untouched.
+- Build the service patterns as plain substring alternatives (`ui\.app`, `telegram_bridge`, `reflection_worker`, plain `worker` bounded so it does not fire on words like `reap-xdist.sh`'s worker mentions or `homework` — match against the process-name position the kill shapes already anchor on, and cover with negative test rows). Per PR #3208's lesson, avoid clever regex; prefer literal alternatives.
+- Careful scoping point the builder must handle: bare `worker` is a substring of many innocent strings. The plan requires negative rows (e.g. `pkill -f 'node dev-server'`, `killall Dock` already exist; add e.g. a command containing "worker" in a non-service sense that must stay allowed, or scope the pattern to `python -m worker` / `reflection_worker` / `worker-watchdog` / `worker-stop`-adjacent forms). The exact scoping is the builder's call; the test rows are the contract.
+- `find_violation` checks the test-runner patterns first (preserving the existing reason text byte-for-byte, since existing tests assert `"reap-xdist.sh" in reason`), then the service table (returning the service-specific reason).
+- Test rows per the issue's Fix shape: one BLOCKED row per service per verb shape, plus a negative row for a PID kill and rows proving the sanctioned stop commands (`scripts/valor-service.sh stop`, `worker-stop`) are not blocked.
 
 ## Failure Path Test Strategy
 
-Placeholder.
+### Exception Handling Coverage
+No exception handlers in scope — `find_violation` is a pure predicate with no try/except, and this plan adds none. A malformed command string simply matches nothing and is allowed through, which is the safe default for a blocklist.
+
+### Empty/Invalid Input Handling
+- [ ] `find_violation("")` returns `None` — already covered by `test_empty_command_is_allowed`; keep passing
+- [ ] Add a test row for a non-string-adjacent edge already in scope: a command mentioning a service name in a read-only context (`ps aux | grep "ui.app"`, `pgrep -f worker | wc -l`) must stay allowed, mirroring the existing pytest read-only rows
+
+### Error State Rendering
+- [ ] The service-specific block reason names the sanctioned stop path — assert in tests that the reason for a service match contains the stop-path hint (mirroring the existing `assert "reap-xdist.sh" in reason` pattern for pytest matches), so a reason that renders without remediation fails the build
 
 ## Test Impact
 
