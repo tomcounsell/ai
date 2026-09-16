@@ -7,7 +7,7 @@ created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3311
 last_comment_id: 5685151250
 revision_applied: true
-revision_applied_at: 2026-09-16T09:31:00Z
+revision_applied_at: 2026-09-16T09:40:00Z
 ---
 
 # Improvement controller lane 5b: paired agent-run arm and the deferred evaluations
@@ -138,7 +138,7 @@ TODO
 
 - Extend `tools/improvement_eval/arm_worker.py` with the `agent_run` mode: restore corpus, arm the writer guard, run the bounded session per trial under the arm's child env (private Redis socket, scratch content path, arm project key), assert the frozen digest unchanged at teardown, return per-trial outcomes with the manifest. Bounds (timeout, max turns, spend cap) travel in the job spec; the runner's allowlist keeps ambient config out.
 - Extend `ARM_PARAM_KEYS` with exactly the agent-manifest keys (model, skill, persona, prompt hash, bounds) and `ENVELOPES` in `tools/improvement_experiment.py` with `agent_task` ranges. Retrieval keys stay refused on agent protocols and vice versa; each mode's validator rejects the other's keys.
-- Adapt the runner's trial loop by branch, not by rewrite: retrieval trials keep ranked-id scoring against gold ids; agent trials score outcomes through the `JudgeFn` roster. Gate 1 for agent trials compares the incumbent's outcomes against the recorded baseline under a frozen per-task tolerance, defaulting to pass/fail agreement per task (score-within-margin is a named per-rubric extension the operator may choose at freeze time). The baseline record stores each trial's outcome plus the agreed bit; the Gate 1 check requires all(agree) and names mismatching trial ids in the evaluation note.
+- Adapt the runner's trial loop by branch, not by rewrite: retrieval trials keep ranked-id scoring against gold ids; agent trials score outcomes through the `JudgeFn` roster. Before any judge sees a trial, the serialized agent-run envelope plus the candidate manifest pass through the existing `scan_for_identity` check at the same point the runner scans the retrieve envelope today; a manifest model, skill, or persona string reaching the envelope unscanned fails the trial. A red-first test places a manifest model string in the envelope and proves the scan fires. Gate 1 for agent trials compares the incumbent's outcomes against the recorded baseline under a frozen per-task tolerance, defaulting to pass/fail agreement per task (score-within-margin is a named per-rubric extension the operator may choose at freeze time). The baseline record stores each trial's outcome plus the agreed bit; the Gate 1 check requires all(agree) and names mismatching trial ids in the evaluation note.
 - Task rubrics are frozen text in the protocol, scored by a rubric judge that returns a numeric outcome per trial. serves-charter stays on the roster for the charter leg; with 0 of 20 reference items present it reports its floor refusal, which the evaluation records alongside the rubric scores. The verdict rests on rubrics; the report names the charter leg as unmeasured.
 - The skill-acquisition evaluation consumes lane 5's recorded `skill_acquisition` investigation (gap, candidates, vetting, integration) and the prior capability as incumbent; on completion it writes the reuse observation to the case and clears the deferred disposition.
 - The cheap-inference experiment gates on the recorded `keyless_integrated` disposition (the credential is already usable; no vault wait), checks `is_open_source` at the call site for both arms, and carries a test proving a client-keyed project is refused before any session spawns.
@@ -304,7 +304,7 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 - Branch the trial loop: agent trials score through the `JudgeFn` roster; Gate 1 uses the frozen per-task tolerance
 - Run the skill-acquisition evaluation end to end; record the reuse observation on the case
 - Run the cheap-inference experiment gated on `keyless_integrated`; prove client-keyed refusal at the call site
-- Settle spend through the meter with the `arm:<arm_run_id>:` prefix
+- Settle spend through the meter with the `arm:<arm_run_id>:` prefix, reserving each task budget pre-trial
 
 ### 4. Validate evaluations and report
 - **Task ID**: validate-evaluations
@@ -344,6 +344,7 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 | Mode validators refuse cross-mode keys | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner_guards.py -q` | exit code 0 |
 | Lane 4 runner tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner.py -q` | exit code 0 |
 | Lane 4 corpus tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_corpus.py -q` | exit code 0 |
+| Agent-run envelope scanned for identity | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_agent_run.py -q` | exit code 0 |
 | Client-keyed refusal at call site | `scripts/pytest-clean.sh tests/unit/test_improvement_eligibility.py -q` | exit code 0 |
 | No ImprovementRelease writer in this lane | `grep -rn "ImprovementRelease(" tools/improvement_eval/arm_worker.py tools/improvement_experiment.py \| wc -l` | match count == 0 |
 
@@ -355,6 +356,8 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 | CONCERN | Risk & Robustness | Spend-cap enforcement point missing: bounds travel in the job spec but nothing enforces spend mid-session | rev1: pre-trial reserve plus post-trial settle added to Technical Approach money bullet | Pre-trial meter reserve plus post-trial settle on the arm:<arm_run_id>: prefix; run_arm_job timeout_s is the hard backstop; over-budget trial is a harness error toward the cap |
 | CONCERN | History & Consistency | Success criterion 1 names parity/corruption/disjointness suites but the Verification table runs only arena/blinding/calibration/runner_guards; Test Impact omits the runner suite Task 3 branches | rev1: runner plus corpus rows added to Verification; runner suite listed as UPDATE in Test Impact | Add scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner.py -q and test_improvement_eval_corpus.py -q rows (exit code 0); list the runner suite as UPDATE in Test Impact |
 | NIT | Scope & Value | Risk 1 assumes 2-4 tasks while Open Question 1 asks whether small is right | rev1: 2-4 tasks stated as frozen default; question reframed as confirm-or-override | State 2-4 tasks as the frozen default in Technical Approach; reframe the question as confirm-or-override |
+| CONCERN | Risk & Robustness (r2) | Candidate manifest fields and the agent-run envelope have no wired path through the existing scan_for_identity call sites | rev2: envelope plus manifest scanned before judge scoring, red-first test required | Route the serialized agent-run envelope plus manifest through scan_for_identity at the runner scan point; red-first test with a manifest model string in the envelope |
+| NIT | Scope & Value (r2) | Task 3 tells the builder to settle spend but omits the pre-trial reserve the approach requires | rev2: reserve added to the Task 3 bullet | Add the pre-trial reserve to the Task 3 bullet alongside settle |
 
 
 ## Open Questions
