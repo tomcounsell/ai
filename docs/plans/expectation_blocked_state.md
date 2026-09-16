@@ -43,7 +43,9 @@ An expectation can carry a machine-readable blocked annotation (a closed reason 
 - The Part 2 hotfix (this lane, `Refs #2862`) — partially addresses the issue (Part 2 entirely; Part 1 untouched).
 - #2860/#2861 field-scoped saves — irrelevant to the blocked schema, load-bearing for its concurrency story.
 
-**Active plans in `docs/plans/` overlapping this area:** `durability-room-job-agentrun.md` (umbrella, #2494) and `promise-gate-recorded-obligations.md` (the gate reads open inbound expectations; blocked state must not change what clears the gate). No plan addresses blocked state.
+**Active plans in `docs/plans/` overlapping this area:** `durability-room-job-agentrun.md` (umbrella, #2494) and `durability-m1-fence-canary.md`. No plan addresses blocked state. *(Revision pass: an earlier draft of this line cited `docs/plans/promise-gate-recorded-obligations.md`; a direct existence check — `ls docs/plans/ | grep -i "promise\|gate\|obligat"` returns nothing — shows no such file exists, so the citation is dropped. The promise-gate claim it carried is re-anchored on source below.)*
+
+**Promise gate, anchored on source rather than a plan:** `bridge/promise_gate.py::promise_override_active` (`bridge/promise_gate.py:451`) clears the gate on `job.open_expectations(direction="inbound")` being non-empty. A blocked entry is still open (`removed_ts is None`, the orthogonality decision below), so the gate's behavior is unchanged by this plan. That is why `tests/unit/test_promise_advisory.py` needs no change; the property is instead asserted by one new row in `tests/unit/test_job_model.py` ("a blocked inbound expectation still counts as open").
 
 **Notes:** the issue's open questions are answered in Technical Approach as proposals, each with its rationale.
 
@@ -307,9 +309,23 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 | No new index (anti-criterion, #2494 No-Go) | `grep -c "IndexedField(" models/job.py` | output contains 2 |
 | Reconciler never discharges (anti-criterion) | `grep -c "discharge_expectation" reflections/expectation_reconciler.py` | match count == 0 |
 | Vocabulary is closed | `grep -c "BLOCKED_REASONS" models/job.py` | output > 1 |
-| Only one escalation site annotates (anti-criterion) | `grep -c "block_expectation" reflections/expectation_reconciler.py` | match count == 1 |
-| No migration registered (anti-criterion, Settled Decision 4) | `grep -ci "blocked" scripts/update/migrations.py` | output == 0 |
-| Rule 9 documented | `grep -c "blocked" docs/features/durability-model.md` | output > 0 |
+| Exactly the two sanctioned annotate sites (anti-criterion) | `grep -c "block_expectation" reflections/expectation_reconciler.py` | output == 2 (the fresh-escalation write and the crash-window repair write, both inside the `attempts >= _max_attempts()` logic; `:523` / `:554` stay bare) |
+| Annotation is reconciler-attributed only (anti-criterion) | `grep -c 'by="reconciler"' reflections/expectation_reconciler.py` | output == 2 |
+| No migration registered — MIGRATIONS dict clean (anti-criterion, Settled Decision 4) | `awk '/^MIGRATIONS/,0' scripts/update/migrations.py \| grep -ci blocked` | output == 0 |
+| No migration registered — whole file at baseline (anti-criterion) | `grep -ci "blocked" scripts/update/migrations.py` | output == 1 |
+| Rule 9 documented — vocabulary named | `grep -c "BLOCKED_REASONS" docs/features/durability-model.md` | output > 0 |
+| Rule 9 documented — rule exists | `grep -c "^9\. \*\*" docs/features/durability-model.md` | output == 1 |
+
+**Baseline measurements (taken on `761cf7b58`, the revision-pass baseline — every anti-criterion above is stated relative to a measured number, never an assumed zero):**
+
+| Command | Baseline output | Reads |
+|---|---|---|
+| `grep -ci "blocked" scripts/update/migrations.py` | `1` (line 1559, an unrelated `blocked_by` docstring on `ImprovementModelRevision`) | GREEN at baseline, GREEN on a correct build, RED the moment a `blocked` migration is registered anywhere in the file. The previously written `== 0` was RED at baseline and would have failed the validator on a correct build. |
+| `awk '/^MIGRATIONS/,0' scripts/update/migrations.py \| grep -ci blocked` | `0` | Scopes the assertion to the registration block, so the unrelated docstring cannot mask a real registration. |
+| `grep -c "BLOCKED_REASONS" docs/features/durability-model.md` | `0` | RED before task 5, GREEN only after rule 9 names the vocabulary. The previously written `grep -c "blocked" … > 0` was already satisfied at baseline by unrelated "blocked draft" prose at line 151 and would have passed with task 5 skipped entirely. |
+| `grep -c "^9\. \*\*" docs/features/durability-model.md` | `0` (the numbered rule list currently ends at rule 8, line 190) | RED before task 5, GREEN only once rule 9 is written in the list's own format. |
+| `grep -c "block_expectation" reflections/expectation_reconciler.py` | `0` | RED before task 3, GREEN at exactly 2 after. Note this replaces the pre-revision `== 1`, which the crash-window resolution below invalidates by adding a second sanctioned call site. |
+| `grep -c 'by="reconciler"' reflections/expectation_reconciler.py` | `0` | Same shape; pins both writes to the reconciler attribution. |
 
 ## Critique Results
 
