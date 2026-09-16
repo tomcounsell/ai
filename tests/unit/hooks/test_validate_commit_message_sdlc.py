@@ -537,6 +537,51 @@ class TestMultiLineCommitMessages:
         assert parts == ["git add -A", "git commit -m x", "git push"]
 
 
+class TestCdOptionGrammar:
+    """`cd` has options too, and rung 2 must not mistake one for the path.
+
+    Same defect class as `-C`: a non-path token taken as a path resolves to a
+    directory that does not exist, every `_git` call fails, and the hook fails
+    open on the protected branch.
+    """
+
+    def test_double_dash_is_not_the_path(self):
+        command = "cd -- /lane && git commit -m x"
+        assert sdlc_context.effective_git_dir(command, "/payload") == "/lane"
+
+    def test_physical_and_logical_options_are_skipped(self):
+        for option in ("-P", "-L", "-LP"):
+            command = f"cd {option} /lane && git commit -m x"
+            assert sdlc_context.effective_git_dir(command, "/payload") == "/lane"
+
+    def test_path_after_double_dash_may_start_with_a_dash(self):
+        command = "cd -- -lane && git commit -m x"
+        assert sdlc_context.effective_git_dir(command, "/payload") == "/payload/-lane"
+
+    def test_bare_cd_falls_through_to_the_payload_cwd(self):
+        assert sdlc_context.effective_git_dir("cd && git commit -m x", "/payload") == "/payload"
+
+
+class TestCommentsDoNotHideACommit:
+    """An apostrophe in a `#` comment must not swallow the commit after it."""
+
+    def test_comment_before_the_commit(self):
+        assert hook.is_git_commit("# don't forget\ngit commit -m x") is True
+
+    def test_comment_between_two_commands(self):
+        command = "git add -A\n# don't forget\ngit commit -m x"
+        assert hook.is_git_commit(command) is True
+
+    def test_trailing_comment_on_the_commit_line(self):
+        assert hook.is_git_commit("git commit -m x # don't push") is True
+
+    def test_hash_inside_quotes_is_message_text_not_a_comment(self):
+        """The `Closes #N` disposition line makes this the common case."""
+        assert hook.is_git_commit("git commit -m 'fix #3259 bug'") is True
+        assert hook.is_git_commit('git commit -m "subject\n\nCloses #3259"') is True
+        assert hook.is_git_commit("git log --grep '#123'") is False
+
+
 class TestWorkTreeAndGitDirResolution:
     """`--work-tree` / `--git-dir` relocate git exactly as `-C` does."""
 

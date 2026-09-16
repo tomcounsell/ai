@@ -59,9 +59,18 @@ def split_simple_commands(command: str) -> list:
     That is a false ALLOW, the exact direction #3259 exists to close, so the
     splitter tracks quote state instead (PR #3342 review blocker 1).
 
-    Still not a full shell parser: an unterminated quote simply carries to the
-    end of the string, where `shlex` rejects it and the caller fails open, as
-    it did before.
+    Comments are skipped for the same reason. Tracking quote state made one
+    input worse than the old regex did: an apostrophe inside a `#` comment
+    ("# don't forget") opens a quote that never closes, so every later
+    separator is swallowed and a commit AFTER the comment stops being
+    recognized -- false ALLOW again. The old regex split blindly and happened
+    to leave one fragment that parsed. In real bash an unbalanced quote is a
+    syntax error everywhere EXCEPT inside a comment, so skipping comments
+    removes the only shape where this bites (PR #3342 review blocker 3).
+
+    Still not a full shell parser: an unterminated quote outside a comment
+    simply carries to the end of the string, where `shlex` rejects it and the
+    caller fails open, as it did before.
     """
     command = command or ""
     parts = []
@@ -92,6 +101,16 @@ def split_simple_commands(command: str) -> list:
             buf.append(ch)
             buf.append(command[i + 1])
             i += 2
+            continue
+        if ch == "#" and (not buf or buf[-1].isspace()):
+            # A comment runs to end of line. Skipping it (rather than letting
+            # an apostrophe in it open a quote) keeps the commit that follows
+            # recognizable. The newline that ends it is still a separator.
+            while i < n and command[i] != "\n":
+                i += 1
+            parts.append("".join(buf))
+            buf = []
+            i += 1
             continue
         if command.startswith("&&", i) or command.startswith("||", i):
             parts.append("".join(buf))
@@ -241,8 +260,27 @@ def effective_git_dir(command: str, hook_cwd: str) -> str:
             except ValueError:
                 first_tokens = []
             if len(first_tokens) >= 2 and first_tokens[0] == "cd":
-                if _is_literal_path_token(first_tokens[1]):
-                    return _resolve_against(first_tokens[1], base)
+                # `cd` has an option grammar of its own: `-L`/`-P` are real
+                # options and `cd -- "$dir"` is a standard defensive idiom.
+                # Taking token[1] blindly turns the option into the path, the
+                # directory does not exist, every `_git` call fails, and the
+                # hook fails open -- the same shape as the `-C` defect this
+                # parser exists to close (PR #3342 review blocker 2).
+                target = None
+                rest = first_tokens[1:]
+                for index, token in enumerate(rest):
+                    if token == "--":
+                        # Everything after `--` is a path, even if it starts
+                        # with a dash.
+                        if index + 1 < len(rest):
+                            target = rest[index + 1]
+                        break
+                    if token.startswith("-"):
+                        continue
+                    target = token
+                    break
+                if target is not None and _is_literal_path_token(target):
+                    return _resolve_against(target, base)
 
         # Rungs 3 and 4.
         return base
