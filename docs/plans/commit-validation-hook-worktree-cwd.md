@@ -151,7 +151,7 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 ### Technical Approach
 
 - **Resolution precedence**, highest first, implemented in `effective_git_dir`:
-  1. `git -C <path>` appearing in the simple command that contains `commit` (relative paths resolved against the next rung down).
+  1. `git -C <path>` appearing in the simple command that contains `commit` (a relative path is resolved against the payload `cwd` — rung 3 — not against a preceding `cd`, matching `effective_git_dir`'s docstring and implementation. `cd /a/b && git -C sub commit` therefore yields `<payload_cwd>/sub`. No lane emits that shape; the rung exists for the absolute `git -C <worktree> commit` form the harness actually issues).
   2. A leading `cd <path>` simple command, resolved against `hook_cwd` when relative — ported from `validate_no_uv_sync_in_worktree.py::_effective_dir`, including `_split_simple_commands` splitting on `&& || ; |` and newlines and `shlex` tokenization with a `ValueError` fail-open.
 - **Unexpanded-shell-construct rejection** (critique concern): rungs 1 and 2 accept a path token only if it is literal. A token containing `$(`, a backtick, `${`, or a leading `$` is an unexpanded shell construct — `shlex.split` hands it back verbatim, and `git -C '$(git rev-parse --show-toplevel)/.worktrees/lane-a'` then fails into the existing fail-open handlers and *allows*. Reject such tokens and fall through to the next rung, where the payload `cwd` is a real, already-resolved directory and is the correct answer for precisely this command shape. This mirrors the `shlex.split` `ValueError` fall-through already specified for the same two rungs.
   3. The payload `cwd`.
