@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3091
-last_comment_id: 5695855298
+last_comment_id: 5696048394
+revision_applied: true
+revision_applied_at: 2026-09-16T10:58:52Z
 ---
 
 # One ordering owns the eng preference for every session_id read
@@ -638,11 +640,23 @@ terminal eng row loses to a live non-eng row when `include_terminal=False`.
 **Impact:** Too loose and it permanently flags the two gates and three test assertions, so the check
 gets disabled as noisy. Too tight and a reformatted copy of the preference slips past, reopening the
 defect class silently.
-**Mitigation:** The sweep is the lane owner's defining pattern
-(`session_type", None) == "eng"`), scoped to production directories, with an expected residue of
-**exactly 2** — the two documented gates — named in this plan and in the check row. Prove the pattern
-RED by reintroducing one deleted block on a scratch copy before landing, and paste that RED output
-into the PR. A guard certifying absence is worthless until proven red against the known-bad input.
+**Mitigation:** The code sweep uses the defining pattern (`session_type", None) == "eng"`), scoped to
+production directories, baseline **8**, expected residue **exactly 2** — `sdlc_session_ensure.py:776`
+and `session_executor.py:1373`, **named** rather than counted, in this plan and in the check row, and
+marked by a site-local comment at each so the next reader does not re-open the question. Prove the
+pattern RED by reintroducing one deleted block on a scratch copy before landing, and paste that RED
+output into the PR. A guard certifying absence is worthless until proven red against the known-bad
+input.
+
+**The same failure mode killed the first draft of the docs check**, which is why Two Independent
+Sweeps is spelled out in Technical Approach. That draft proposed `fall back to [0]` over `docs/`: it
+was **false-red by construction** (this plan document quotes the sanction it deletes, so the check
+could never reach 0 on a correct build), it used a single-backtick anchor that **misses the model
+docstring** entirely, and widening it to a bare `fall back to` adds 5 unrelated hits in
+`models/agent_session.py`. A check that is false-red on a correct build is worse than no check: it
+gets "fixed" by loosening it, and then passes vacuously forever. Every closing check in this plan was
+**run against the tree** and its baseline recorded before being written down. Do not harden a check
+that has not been run.
 
 ### Risk 5: Behavior change where no eng row exists
 **Impact:** Today five sites fall back to `rows[0]`, which since `3c77e1eab` is the newest row. The
@@ -1057,33 +1071,50 @@ FULL roster (3 critics), independent roster. Verdict: **NEEDS REVISION** (1 bloc
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness + aggregator (independent convergence) | The empty-row-set fall-through contract is dropped at four of the five selection sites. Today each site branches on a falsy list and CONTINUES: `tools/stage_states_helpers.py:104` `if not matches: return session`; `tools/_sdlc_utils.py:468` Step 1 `if sessions:` falls through to Step 2 (issue-based) and Step 3; `tools/_sdlc_utils.py:493` Step 3 `if sessions:` falls through to auto-ensure; `tools/_sdlc_utils.py:369-370` deterministic pass `if local: return local[0]` falls through to the message_text fallback. Task 4 instructs a bare `newest_for_session_id(..., prefer_type="eng")` at each, which returns `None` on an empty row set — converting a fall-through into a returned `None`. Only `tools/sdlc_stage_query.py` is guarded ("kept inside `class_set_retry_attempts()`"). Failure Path Test Strategy covers only the resolver-RAISES path, which is a different branch. | pending | State it as a contract rule, not a site list: **`newest_for_session_id` returning `None` is NOT equivalent to the old falsy-list branch; every migrated site keeps its current empty-set behavior.** Concretely: `stage_states_helpers` → `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng"); return matches[0] if matches else session` (never a bare `return newest_for_session_id(...)`, whose `None` would be handed to the `stage_states` write loop at `tools/stage_states_helpers.py:203` where `_reload_ledger` proves the intended contract with `return fresh if fresh is not None else ledger`). `_sdlc_utils` Steps 1/3 → `found = AgentSession.newest_for_session_id(sid, prefer_type="eng")` then `if found is not None: return found` and FALL THROUGH otherwise — never `return` the call directly. Deterministic pass → keep `rows_for_session_id(...)`, narrow, then `if local: return local[0]` and fall through. Add a Test Impact case per site seeding **zero rows with no exception raised** and asserting the pre-existing fall-through still happens (for `_reload_session`, `assert result is session`). |
-| CONCERN | aggregator (verified against source) | `docs/features/agent-session-model.md:146` replicates the exact sanction this plan exists to delete — "iterate `rows_for_session_id` and fall back to `[0]`" — so the defect's instruction survives the docstring rewrite in the repo's own feature doc. The Documentation section only says "Extend that section to describe `prefer_type`". The sanction is a replicated value in two places, and the plan treats only one. | pending | The Documentation task must DELETE the fall-back-to-`[0]` guidance at `docs/features/agent-session-model.md:146` (not merely append `prefer_type` prose), and the closing check must be a grep, matching this plan's own sweep-not-checklist doctrine: `grep -rn 'fall back to `\[0\]`\|fall back to \[0\]' docs/ models/` returns 0 hits. Add that as a Verification row alongside the existing docstring row. |
-| CONCERN | Risk & Robustness + aggregator | The Verification row "Named Risk 2 test exists" (`grep -rn 'active_run_id' tests/unit/test_agent_session_newest_wins.py \| wc -l` → `> 0`) proves nothing about the Risk 2 scenario — any incidental mention passes. It also breaks in the other direction: Test Impact permits the test to land in "`tests/unit/test_agent_session_newest_wins.py` (or the session_executor test module covering issue-lock renewal)", in which case this hard-coded path yields 0 and fails spuriously. A non-waivable acceptance item is gated by a check that can be both false-green and false-red. | pending | Pin the test's home and its name. Name the function `test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`, decide its module in the plan (not "or"), and change the row to `grep -rc 'def test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id' <that module>` expecting `1`. The pasted RED output in the PR description stays the real gate; the grep is only the smoke check. |
-| CONCERN | aggregator (structural) | The two non-waivable RED proofs are enforced by prose only; the machine-readable `Depends On` graph contradicts it. Task 5 says "Do not land this task until task 6's named Risk 2 test has been proven RED" but `build-executor-scan` depends on `build-mock-seam` alone. Task 3 says "Prove it RED against the unextended helper first" while the mocked-seam test is owned by task 6, which has no edge to task 3. A builder honoring only the dependency graph can land both collapses before either RED proof exists. | pending | Encode the ordering: split the RED proofs out of task 6 into their own task (`build-red-proofs`, depending on `build-resolver` only, producing both RED outputs), then add `build-red-proofs` to `Depends On` for `build-mock-seam` (task 3) and `build-executor-scan` (task 5). Do not rely on the "Do not land this task until…" sentence surviving a builder's task-by-task read. |
-| CONCERN | History & Consistency | The Problem section and the Freshness Check's "still holds" bullet both cite `models/agent_session.py:156-157` for `id = AutoKeyField()` / `session_id = Field()`. The real coordinates are `163-164` (`id = AutoKeyField()` at 163, `session_id = Field()` at 164). The Freshness Check explicitly asserts this citation was re-verified, so the drift falsifies a stated verification claim rather than being a stale reference. | pending | Replace both occurrences of `models/agent_session.py:156-157` with `models/agent_session.py:163-164`. The other cited coordinates were checked against source and are correct: `1282-1302`, `1295-1298`, `sdlc_stage_query.py:93`, `_sdlc_utils.py:368,470,495`, `stage_states_helpers.py:108`, `session_executor.py:298,330,384,1373`, `sdlc_session_ensure.py:776`. |
-| NIT | aggregator | Team Orchestration references `DOMAIN_FRAMING.md` bare; the file lives at `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. | pending | n/a (NIT) |
-| NIT | aggregator | The Verification row `sed -n '300,345p' agent/session_executor.py \| grep -c 'for row in rows'` is coordinate-brittle: deleting the eng pass shifts the function, and any unrelated edit above line 298 invalidates the window. | pending | n/a (NIT) |
+| BLOCKER | Risk & Robustness + aggregator (independent convergence) | The empty-row-set fall-through contract is dropped at four of the five selection sites. Today each site branches on a falsy list and CONTINUES: `tools/stage_states_helpers.py:104` `if not matches: return session`; `tools/_sdlc_utils.py:468` Step 1 `if sessions:` falls through to Step 2 (issue-based) and Step 3; `tools/_sdlc_utils.py:493` Step 3 `if sessions:` falls through to auto-ensure; `tools/_sdlc_utils.py:369-370` deterministic pass `if local: return local[0]` falls through to the message_text fallback. Task 4 instructs a bare `newest_for_session_id(..., prefer_type="eng")` at each, which returns `None` on an empty row set — converting a fall-through into a returned `None`. Only `tools/sdlc_stage_query.py` is guarded ("kept inside `class_set_retry_attempts()`"). Failure Path Test Strategy covers only the resolver-RAISES path, which is a different branch. | **applied** | State it as a contract rule, not a site list: **`newest_for_session_id` returning `None` is NOT equivalent to the old falsy-list branch; every migrated site keeps its current empty-set behavior.** Concretely: `stage_states_helpers` → `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng"); return matches[0] if matches else session` (never a bare `return newest_for_session_id(...)`, whose `None` would be handed to the `stage_states` write loop at `tools/stage_states_helpers.py:203` where `_reload_ledger` proves the intended contract with `return fresh if fresh is not None else ledger`). `_sdlc_utils` Steps 1/3 → `found = AgentSession.newest_for_session_id(sid, prefer_type="eng")` then `if found is not None: return found` and FALL THROUGH otherwise — never `return` the call directly. Deterministic pass → keep `rows_for_session_id(...)`, narrow, then `if local: return local[0]` and fall through. Add a Test Impact case per site seeding **zero rows with no exception raised** and asserting the pre-existing fall-through still happens (for `_reload_session`, `assert result is session`). |
+| CONCERN | aggregator (verified against source) | `docs/features/agent-session-model.md:146` replicates the exact sanction this plan exists to delete — "iterate `rows_for_session_id` and fall back to `[0]`" — so the defect's instruction survives the docstring rewrite in the repo's own feature doc. The Documentation section only says "Extend that section to describe `prefer_type`". The sanction is a replicated value in two places, and the plan treats only one. | **applied** | The Documentation task must DELETE the fall-back-to-`[0]` guidance at `docs/features/agent-session-model.md:146` (not merely append `prefer_type` prose), and the closing check must be a grep, matching this plan's own sweep-not-checklist doctrine: `grep -rn 'fall back to `\[0\]`\|fall back to \[0\]' docs/ models/` returns 0 hits. Add that as a Verification row alongside the existing docstring row. |
+| CONCERN | Risk & Robustness + aggregator | The Verification row "Named Risk 2 test exists" (`grep -rn 'active_run_id' tests/unit/test_agent_session_newest_wins.py \| wc -l` → `> 0`) proves nothing about the Risk 2 scenario — any incidental mention passes. It also breaks in the other direction: Test Impact permits the test to land in "`tests/unit/test_agent_session_newest_wins.py` (or the session_executor test module covering issue-lock renewal)", in which case this hard-coded path yields 0 and fails spuriously. A non-waivable acceptance item is gated by a check that can be both false-green and false-red. | **applied** | Pin the test's home and its name. Name the function `test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`, decide its module in the plan (not "or"), and change the row to `grep -rc 'def test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id' <that module>` expecting `1`. The pasted RED output in the PR description stays the real gate; the grep is only the smoke check. |
+| CONCERN | aggregator (structural) | The two non-waivable RED proofs are enforced by prose only; the machine-readable `Depends On` graph contradicts it. Task 5 says "Do not land this task until task 6's named Risk 2 test has been proven RED" but `build-executor-scan` depends on `build-mock-seam` alone. Task 3 says "Prove it RED against the unextended helper first" while the mocked-seam test is owned by task 6, which has no edge to task 3. A builder honoring only the dependency graph can land both collapses before either RED proof exists. | **applied** | Encode the ordering: split the RED proofs out of task 6 into their own task (`build-red-proofs`, depending on `build-resolver` only, producing both RED outputs), then add `build-red-proofs` to `Depends On` for `build-mock-seam` (task 3) and `build-executor-scan` (task 5). Do not rely on the "Do not land this task until…" sentence surviving a builder's task-by-task read. |
+| CONCERN | History & Consistency | The Problem section and the Freshness Check's "still holds" bullet both cite `models/agent_session.py:156-157` for `id = AutoKeyField()` / `session_id = Field()`. The real coordinates are `163-164` (`id = AutoKeyField()` at 163, `session_id = Field()` at 164). The Freshness Check explicitly asserts this citation was re-verified, so the drift falsifies a stated verification claim rather than being a stale reference. | **applied** | Replace both occurrences of `models/agent_session.py:156-157` with `models/agent_session.py:163-164`. The other cited coordinates were checked against source and are correct: `1282-1302`, `1295-1298`, `sdlc_stage_query.py:93`, `_sdlc_utils.py:368,470,495`, `stage_states_helpers.py:108`, `session_executor.py:298,330,384,1373`, `sdlc_session_ensure.py:776`. |
+| NIT | aggregator | Team Orchestration references `DOMAIN_FRAMING.md` bare; the file lives at `.claude/skills-global/do-plan/DOMAIN_FRAMING.md`. | **applied** | n/a (NIT) |
+| NIT | aggregator | The Verification row `sed -n '300,345p' agent/session_executor.py \| grep -c 'for row in rows'` is coordinate-brittle: deleting the eng pass shifts the function, and any unrelated edit above line 298 invalidates the window. | **applied** | n/a (NIT) |
 | RULING | aggregator (Open Question 1) | **`prefer_type` stays a concrete `session_type` string; no predicate.** All six sites test the identical literal `getattr(row, "session_type", None) == "eng"`; a `prefer=lambda` would be an abstraction for one use case, and it would defeat the plan's own acceptance mechanism — the sweep greps for the literal comparison and the Verification row greps for `prefer_type="eng"`, neither of which can see an equivalent lambda. The argument is also deleted when #3169 lands. No plan change. | n/a — ruling | Independently reached by the Scope & Value critic and the aggregator. |
-| RULING | aggregator (Open Question 2) | **No. `tests/unit/test_steering_writer_census.py` does NOT need the new keyword registered.** Verified against source: `_is_resolver_call` (`tests/unit/test_steering_writer_census.py:205-210`) matches solely on `value.func.attr in RESOLVER_METHODS` and never inspects `node.value.keywords`, so adding `prefer_type="eng"` to a resolver call cannot change what the census counts. | pending | Replace the Test Impact "VERIFY" checkbox with this answered fact plus the `:205-210` citation, so BUILD does not re-investigate a closed question. |
-| RULING | aggregator (Open Question 3) | **Yes — add the marking comments at `tools/sdlc_session_ensure.py:776` and `agent/session_executor.py:1373`, with the plan's mandated wording.** Risk 4's named failure mode is the sweep being disabled as noisy; a site-local comment is the cheapest defense and makes the expected residue of exactly 2 self-documenting at the call site rather than only in a plan document nobody greps. | pending | The comment states WHY the shape differs, never merely that the site is excluded: *tests one already-resolved row's type; does not choose among rows.* Add it as an explicit bullet in a task (the plan notes it is "Not currently in the task list") and add a Success Criterion; task 5 is the natural home for the `session_executor` one, and the `sdlc_session_ensure.py:776` comment is a comment-only edit that does not violate the No-Go against modifying that file's behavior — say so in the plan so a reviewer does not read it as a #3065 collision. |
+| RULING | aggregator (Open Question 2) | **No. `tests/unit/test_steering_writer_census.py` does NOT need the new keyword registered.** Verified against source: `_is_resolver_call` (`tests/unit/test_steering_writer_census.py:205-210`) matches solely on `value.func.attr in RESOLVER_METHODS` and never inspects `node.value.keywords`, so adding `prefer_type="eng"` to a resolver call cannot change what the census counts. | **applied** | Replace the Test Impact "VERIFY" checkbox with this answered fact plus the `:205-210` citation, so BUILD does not re-investigate a closed question. |
+| RULING | aggregator (Open Question 3) | **Yes — add the marking comments at `tools/sdlc_session_ensure.py:776` and `agent/session_executor.py:1373`, with the plan's mandated wording.** Risk 4's named failure mode is the sweep being disabled as noisy; a site-local comment is the cheapest defense and makes the expected residue of exactly 2 self-documenting at the call site rather than only in a plan document nobody greps. | **applied** | The comment states WHY the shape differs, never merely that the site is excluded: *tests one already-resolved row's type; does not choose among rows.* Add it as an explicit bullet in a task (the plan notes it is "Not currently in the task list") and add a Success Criterion; task 5 is the natural home for the `session_executor` one, and the `sdlc_session_ensure.py:776` comment is a comment-only edit that does not violate the No-Go against modifying that file's behavior — say so in the plan so a reviewer does not read it as a #3065 collision. |
 
 ---
 
 ## Open Questions
 
-1. **Is `prefer_type` the right shape, or should the preference be a general predicate?** A
-   `prefer=lambda s: ...` would generalize beyond `session_type`, but nothing else needs it today and
-   a predicate makes the sweep pattern harder to write. The plan chooses the concrete form.
-2. **Does `tests/unit/test_steering_writer_census.py` need the new keyword registered?** `3c77e1eab`
-   taught it to recognize resolver-bound names. Flagged as "verify" in Test Impact rather than assumed
-   either way; if it does, that is a one-line addition, not a scope change.
-3. **Should the two surviving gate sites get a short comment** marking them as gates rather than
-   tie-breaks, so the next sweep reader does not re-open the question? Cheap, and it makes the sweep's
-   expected residue of 2 self-documenting at the call site rather than only in this plan. Not
-   currently in the task list.
-   **Steer, if the answer is yes:** the comment must state **why the shape differs**, not merely that
-   the site is excluded. A comment reading "excluded from the sweep" tells the next reader nothing and
-   invites the question again. The wording to use is: *tests one already-resolved row's type; does not
-   choose among rows.* That distinction — testing a row versus selecting among rows — is the whole
-   reason the sweep pattern matches here and the defect does not live here.
+**None open.** All three were ruled during critique and the rulings are folded into the plan body.
+Recorded here so a later reader sees they were decided, not dropped:
+
+1. **Predicate vs. concrete `session_type` string** → **concrete string, no predicate.** The deciding
+   argument is that a predicate makes the **sweep unfalsifiable**: the close-out is a grep returning a
+   known count, and a lambda is invisible to it — an equivalent-but-lambda-shaped copy would pass every
+   check while re-opening the defect class. See Technical Approach.
+2. **Does `tests/unit/test_steering_writer_census.py` need the new keyword registered?** → **No.**
+   `_is_resolver_call` (`tests/unit/test_steering_writer_census.py:205-210`) matches solely on
+   `value.func.attr in RESOLVER_METHODS` and never inspects `node.value.keywords`. Recorded as an
+   answered fact in Test Impact, with the citation, so BUILD does not re-investigate.
+3. **Gate-marking comments at the two surviving sweep sites?** → **Yes**, at
+   `tools/sdlc_session_ensure.py:776` and `agent/session_executor.py:1373`, with the mandated wording
+   *tests one already-resolved row's type; does not choose among rows*. Now a task bullet (tasks 4 and
+   5), a Documentation item, a Success Criterion, and a Verification row. The `sdlc_session_ensure.py`
+   edit is comment-only and not a #3065 collision.
+
+### Positions this lane will defend on the merits
+
+Recorded so a later round argues the substance rather than re-deriving it. These are defended by the
+reasoning below, not by who asked for them:
+
+- **No predicate argument.** It makes the sweep unfalsifiable — see ruling 1. "Abstraction for one use
+  case" is the weaker form of the argument and is not the reason.
+- **Risk 2's stable-partition test is non-waivable and carries a real `Depends On` edge** (task 2b),
+  not a sentence. It is the only thing standing between this refactor and a wedged issue lock: per
+  `agent/session_executor.py:305-313`, a wrong return there gets a lapsed lock SET-NX re-acquired
+  under a **dead identity** and renewed every tick, wedging the live run's own calls behind
+  `ISSUE_LOCKED` until a worker restart. A non-waivable item enforced only by prose is a wish.
+- **The fall-through contract is stated in words** because a for-loop-to-helper diff hides the branch
+  that disappears. A reviewer cannot see a deleted `if sessions:` in a diff that reads as a tidy
+  one-line replacement.
