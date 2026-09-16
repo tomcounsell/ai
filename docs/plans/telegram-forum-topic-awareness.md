@@ -145,9 +145,27 @@ lose topic identity like everything else.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Bridge-owning machine for live verification | `python -c "import json,os;cfg=json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json')));print(any('cyndra' in k for k in cfg.get('projects',{})))"` | Tasks 7-8 need a host whose bridge owns the Cyndra forum group; THIS host (worker-only, no bridge) cannot run them — see the [EXTERNAL] No-Go. |
+| A forum group owned by the executing machine | `scutil --get ComputerName` compared against `projects.<key>.machine` in `~/Desktop/Valor/projects.json` | Task 7 needs a host that **owns** (not merely receives updates for) a group with Telegram Topics enabled. See OPEN QUESTION below. |
 
 No other prerequisites — all remaining work is code + unit tests with synthetic `MessageReplyHeader` objects.
+
+### OPEN QUESTION (owner) — the live observation, re-scoped
+
+**Corrects an earlier premise.** This plan previously recorded that the planning host "runs no bridge" and that Cyndra Devs was "not configured on this machine at all". Re-verified on **Valor the Cowboy** (2026-09-16): `com.valor.bridge` **is** live here, `projects.cyndra.telegram.groups` **does** contain `"Cyndra Devs" (-1004385743413)`, and `logs/bridge.log` shows this client receiving that channel's updates. The real blocker is narrower: `projects.cyndra.machine` is **"Valor the Bald"**, so under single-machine ownership this host receives those updates but never persists them — `TelegramMessage.query.filter(chat_id=-1004385743413)` returns **0 rows**.
+
+No live read can substitute. The bridge's only externally-driven consumer is the relay, whose payload `type` is a closed `Literal["reaction", "custom_emoji_message", "poll"] | None` (`bridge/wire_schemas.py:52`) dispatching four **send** branches (`bridge/telegram_relay.py:1377-1412`); `bridge/history_fetch.py:24` does reuse the bridge's own client but only from internally-scheduled call sites (`telegram_bridge.py:3362`, `:3402`) with fixed arguments. Reaching `channels.GetForumTopics` would mean adding a new job type to the hot I/O path purely to answer a prerequisite — rejected. `tools/valor_telegram.py:247-266` builds a second client on `data/valor_bridge` and is unsafe while the bridge runs (#726). Historical records cannot answer it either: `models/telegram.py:47` stores only the flattened `reply_to_msg_id`, and Telethon's property discards `forum_topic` and `reply_to_top_id` (`telethon/tl/custom/message.py:715-722`).
+
+**But the observation needs no code and no Cyndra access.** Both values the acceptance criterion asks for are already persisted today (`TelegramMessage.reply_to_msg_id`, `AgentSession.session_id`), so *any* owned forum group answers it identically.
+
+**Action requested of the owner — either resolves the criterion:**
+- **(A) On Valor the Cowboy, preferred:** in `Eng: Valor` (-1003449100931), enable Telegram **Topics**, create one topic, post a single **top-level** message in it (a new message, not a reply). Reversible. Then this lane reads back the stored `reply_to_msg_id` and `session_id`.
+- **(B) On Valor the Bald:** post one top-level message in an existing non-General topic of `Cyndra Devs` and hand back the `TelegramMessage`/`AgentSession` read.
+
+**Verdict rule, fixed in advance:** `session_id` ending in the **topic root's** message id ⇒ item 3 **confirmed**. Ending in the **new message's own** id ⇒ item 3 **refuted**, and scope shrinks to inbound identity plus the outbound default topic.
+
+**Build split while this is open:** Tasks 1, 3, 4 (capture/storage, outbound default topic, context rendering) proceed and merge. **Task 2 (keying correction) is held** — it does not merge until the observation lands, per Risk 1 and Owner Ruling 5.
+
+Recorded on the issue: https://github.com/tomcounsell/ai/issues/2652#issuecomment-5695879375
 
 ## Solution
 
@@ -233,7 +251,7 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 
 ## No-Gos (Out of Scope)
 
-- [EXTERNAL] Live confirmation of the top-level-topic header shape and the "Cyndra Devs" forum flag needs a bridge-owning machine (Cowboy/Captain/Bald); this host runs no bridge and a second Telethon client on the shared session file is unsafe (#726). Tasks 7-8 name this constraint; they execute on a bridge host during build, not from here.
+- [EXTERNAL] Live confirmation of the top-level-topic header shape needs a machine that **owns** a Topics-enabled group. Cowboy runs a bridge but does not own the Cyndra group (owner is Bald), so it stores none of its messages; a second Telethon client on the shared session file is unsafe (#726) and the bridge exposes no external read job. Resolution is an owner action, not a code path — see the OPEN QUESTION under Prerequisites. Tasks 1/3/4 proceed without it; Task 2 is held behind it.
 - [SEPARATE-SLUG #2732] Reply-chain media rendering in `bridge/context.py` — active sibling lane; this plan does not touch `fetch_reply_chain`.
 - [SEPARATE-SLUG #2494] Recovery-path durability semantics — this plan only threads topic capture through the scanners' existing persistence sites; their dispatch/durability behavior is #2494's.
 - Historical backfill of `topic_id` — deliberately not done (Rabbit Holes); old rows remain None and the field is nullable precisely so absence is honest.
@@ -367,4 +385,4 @@ All five plan questions are settled; the sections above already incorporate them
 2. **Config shape**: `default_topic_id: int` plus optional advisory `topics: {id: subdir}` map, keyed by topic **id**. Ids survive admin renames; names-as-keys was rejected for the rename hazard and the extra `GetForumTopics` resolution it would require.
 3. **Mapping semantics**: advisory context only. Enforcement (topic mapping constraining a session's writable scope) is out of scope and would start as its own issue.
 4. **Poll sends**: included. The #3080 poll surface resolves `default_topic_id` like every other unsolicited-send producer.
-5. **Live verification**: during build, before the keying change merges. Task 7 executes from a bridge-owning machine (Cowboy/Captain/Bald); this planning host runs no bridge and cannot run it.
+5. **Live verification**: during build, before the keying change merges. Task 7 executes from a machine that **owns** a Topics-enabled group. Re-scoped 2026-09-16 (see the OPEN QUESTION under Prerequisites): it needs no code and no Cyndra access, because `TelegramMessage.reply_to_msg_id` and `AgentSession.session_id` are already persisted — any owned forum group answers it. It is now an owner action, and only Task 2 is gated on it.
