@@ -256,6 +256,4 @@ def apply_defaults() -> None:
     except Exception as exc:
         # Embedding is optional; never block Memory model definition. Log
         # loudly (#3310) so a missing provider is visible instead of silent.
-        logger.warning(
-            "[apply_defaults] embedding provider configuration failed: %s", exc
-        )
+        logger.warning("[apply_defaults] embedding provider configuration failed: %s", exc)
