@@ -54,6 +54,31 @@ skill comparison that needs blinding must reckon with this: behavior reveals
 the skill, and stripping skill names from judge inputs would distort exactly
 the outcomes under test.
 
+## Review history (PR #3350, Refs #3311)
+
+Four review rounds, risk plus correctness lenses, every finding patched
+red-first with a mutation check per guard:
+
+- **Round 1 (9 findings, commit `7f6b316b9`).** Freeze owns the agent_task
+  envelope, meter plus spend id forwarded to evaluate, judge reserve sized
+  from the task count, harness-error parity for agent re-runs. Both lenses
+  confirmed all 9 closed.
+- **Round 2 (2 Majors, commit `00c1354ac`).** Risk: metered trials without a
+  frozen per-task `spend_cap` refused before spawn, with the cap required in
+  both arm manifests. Correctness: propose and freeze validate tasks,
+  incumbent, and endpoints together with no retrieval `ENDPOINTS` fallback;
+  retrieval re-runs route through the harness-error counter.
+- **Round 3 (3 Minors, commit `fb3e3da94`).** Correctness: an incumbent
+  re-run worker error drops any already-recorded candidate outcome, so
+  candidate-first assignments exclude the trial instead of pairing a fresh
+  candidate against a stale Gate-1 incumbent or ranking; agent_task
+  candidates require bounds with a non-negative `spend_cap` at propose and
+  freeze, failing fast instead of burning baseline budget. Risk lens
+  APPROVED on the round-2 head with no new findings.
+- **Round 4 (double APPROVED on `fb3e3da94`).** Risk: spend posture holds,
+  resets and the unconditional bounds requirement are fail-closed. No open
+  findings on either lens.
+
 ## What would change the answer
 
 - More trials per evaluation (the stopping rule, not the arm, forced both
