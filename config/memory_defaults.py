@@ -27,7 +27,11 @@ Tuning guide:
         (0.9/0.1) to avoid overreacting to noisy bigram detection.
 """
 
+import logging
+
 from popoto import Defaults
+
+logger = logging.getLogger(__name__)
 
 # Tuned for subconscious memory use case
 MEMORY_DECAY_RATE = 0.3
@@ -249,5 +253,9 @@ def apply_defaults() -> None:
         from agent.embedding_provider import configure_embedding_provider
 
         configure_embedding_provider()
-    except Exception:
-        pass  # Embedding is optional; fail silently
+    except Exception as exc:
+        # Embedding is optional; never block Memory model definition. Log
+        # loudly (#3310) so a missing provider is visible instead of silent.
+        logger.warning(
+            "[apply_defaults] embedding provider configuration failed: %s", exc
+        )
