@@ -68,7 +68,7 @@ No relevant external findings — this is an internal schema and reflection chan
 ## Data Flow
 
 1. **Entry point (lane self-report)**: a lane that cannot deliver runs `python -m tools.job_tool expectation-block --job-id J --expectation-id E --code needs_human --detail "..."`. `job_tool` enforces Room scope, then calls `Job.block_expectation(E, code=..., detail=..., by="lane")`.
-2. **Entry point (reconciler inference)**: in `_reconcile_project`, inside the `attempts >= _max_attempts()` branch (`reflections/expectation_reconciler.py:480`) and only that branch, after `_escalate_once` returns, the reconciler re-fetches the Job (`Job.query.get(id=job.id, room_id=job.room_id)`) and calls `block_expectation(E, code="attempts_exhausted", detail=<escalation text>, by="reconciler")` on that snapshot. **This branch has no existing re-fetch** — the one at `:499` sits below it, past the `continue` at `:494` — so the build adds one here rather than writing through the stale scan object. Escalation and the annotation are written in that order so a Job whose write is refused (corrupt goal) still pages.
+2. **Entry point (reconciler inference)**: in `_reconcile_project`, the annotation is written when and only when the recovery budget is spent (`attempts >= _max_attempts()`), from two call sites that together make the write crash-safe — the fresh-escalation write and the crash-window repair write. Both re-fetch the Job (`Job.query.get(id=job.id, room_id=job.room_id)`) and call `block_expectation(E, code="attempts_exhausted", detail=<escalation text>, by="reconciler")` on that snapshot; **neither branch has an existing re-fetch** (the one at `:499` sits below both, past the `continue` at `:494`), so the build adds one at each rather than writing through the stale scan object. On the fresh-escalation path, escalation is written first and the annotation second, so a Job whose write is refused (corrupt goal) still pages. See **Technical Approach → Crash-window resolution** for the exact control flow and why two sites, not one.
 3. **Model**: `block_expectation` reads through `_mutable_goal_data()` (refuses on corruption), finds the open entry, sets `entry["blocked"] = {"code", "detail", "ts", "by"}`, and writes through `_write_goal_data`. `has_open_expectations` stays `True`; `status` stays `active`.
 4. **Readers**: `open_expectations()` still returns the entry (it is open). New `blocked_expectations()` filters `entry.get("blocked")`. `job_tool show` includes the annotation. The reconciler's loop skips a blocked row and appends `blocked: <eid> <code>` to findings.
 5. **Unblock**: `job_tool expectation-unblock` → `Job.unblock_expectation(E)` sets `entry["blocked"] = None` through the same chokepoint; the reconciler resumes on the next tick. Discharge (`expectation-remove`) works on a blocked row exactly as on an unblocked one and clears nothing else (history is append-only; the last `blocked` value stays on the discharged entry as the record of why it stalled).
@@ -114,7 +114,56 @@ Lane cannot deliver → `job_tool expectation-block` → entry carries `blocked`
 - **Annotation, not a third state.** A row can block and later unblock without ever being discharged; a state field would need a back-transition and would tempt readers into treating blocked as done (the #1208 shape). `removed_ts` keeps its single meaning.
 - **No projection field.** The reconciler's scan root is already bounded by `has_open_expectations`; blocked rows are a subset of that set, so a third `IndexedField` buys nothing and adds a projection to keep honest. `blocked_expectations()` is a reader over the goal JSON.
 - **All writes through `_write_goal_data`, all reads for write through `_mutable_goal_data()`.** A corrupt goal therefore refuses a block/unblock too, and the Job stays on the corrupt-goal path (rule 8, `durability-model.md`).
-- **Escalation writes the annotation, not the first steer — and only at one of the three escalation sites.** The first re-steer is legitimate recovery, not a stall. `_escalate_once` is called from three places; only the `attempts >= _max_attempts()` branch (`reflections/expectation_reconciler.py:480`) writes the annotation, because it is the only one where the recovery budget is *spent*. The evidence-path escalation (`:523`) and the no-PM-no-slug escalation (`:554`) both happen with attempts remaining and are followed by further ticks that can still steer or respawn; annotating them would freeze a row the reconciler is still legitimately working. An owner-gone row that has been respawned successfully is not blocked.
+- **Escalation writes the annotation, not the first steer — and only at the budget-spent seam.** The first re-steer is legitimate recovery, not a stall. `_escalate_once` is called from three places; only the `attempts >= _max_attempts()` condition writes the annotation, because it is the only one where the recovery budget is *spent*. The evidence-path escalation (`:523`) and the no-PM-no-slug escalation (`:554`) both happen with attempts remaining and are followed by further ticks that can still steer or respawn; annotating them would freeze a row the reconciler is still legitimately working. An owner-gone row that has been respawned successfully is not blocked.
+
+- **Crash-window resolution: the annotation must be reachable without the escalation key.** *(Added by the revision pass; this is the critique's KEY CONCERN and it is real.)* The pre-revision plan put the annotation strictly after `_escalate_once`, which claims a Redis key with a multi-day TTL via SETNX. Read against the real code, that ordering reintroduces the bug this issue exists to fix:
+
+  ```
+  :472   if _escalation_exists(job.job_id, eid) is not False:   # ← gate
+  :473       continue
+  :474   attempts = _attempts_count(job.job_id, eid)
+  :480   if attempts >= _max_attempts():
+  :481       sent, sup = _escalate_once(...)                    # ← claims the TTL key
+             <pre-revision plan wrote the annotation HERE>
+  :494       continue
+  ```
+
+  If the reconciler dies (or the worker is restarted, or Redis write of the goal fails hard) between `_escalate_once` returning and `block_expectation` landing, the TTL key exists but the annotation does not. Every later tick for the whole escalation TTL hits the `:472` gate and `continue`s: no re-steer, no re-escalation, no annotation, and `blocked_expectations()` reports nothing. One page fired and then silence — the exact silent stall in the Problem statement.
+
+  **Chosen resolution: make the annotate step reachable independently of the escalation key, as a self-healing repair at the `:472` gate — not by reordering the escalation.** Reordering (annotate before escalate) was considered and rejected: `block_expectation` raises `CorruptGoalError` on a corrupt goal, the per-entry `try` at `:567` swallows it, and the `continue` that unwinding implies would skip the escalation entirely — a corrupt-goal Job would stop paging, which is a strictly worse failure than the one being fixed. Escalate-first is load-bearing and stays.
+
+  The build instead lifts the attempts read above the gate and adds an idempotent repair inside it:
+
+  ```python
+  attempts = _attempts_count(job.job_id, eid)
+  if attempts is None:
+      findings.append(f"gate-unknown: attempts-read {eid}")
+      continue
+  budget_spent = attempts >= _max_attempts()
+
+  escalated = _escalation_exists(job.job_id, eid)
+  if escalated is not False:
+      # Crash-window repair (#2862): a prior tick may have claimed the
+      # escalation key and died before annotating. Re-assert the annotation
+      # idempotently, then skip exactly as before.
+      if escalated is True and budget_spent and entry.get("blocked") is None:
+          <re-fetch; block_expectation(code="attempts_exhausted", by="reconciler")>
+          findings.append(f"blocked: {eid} attempts_exhausted")
+      continue
+  if budget_spent:
+      sent, sup = _escalate_once(...)        # unchanged, still first
+      ...
+      <re-fetch; block_expectation(code="attempts_exhausted", by="reconciler")>
+      continue
+  ```
+
+  Four properties this preserves, each one a test in Test Impact:
+  1. `escalated is True`, never `is not False` — `_escalation_exists` returns `None` on a Redis read failure (`reflections/expectation_reconciler.py:166-173`), and a read failure is not evidence that an escalation happened. The `continue` still fires on `None`, matching today's behavior.
+  2. `entry.get("blocked") is None` makes the repair idempotent: once annotated, the blocked-skip added at `:461` catches the row before it ever reaches the gate again, so the repair runs at most once per row.
+  3. Moving `_attempts_count` above the gate costs one extra Redis read per escalated row per tick and changes no behavior: its `None` branch keeps the same `gate-unknown` finding and the same `continue`.
+  4. Both writes carry `by="reconciler"` and `code="attempts_exhausted"` and sit inside the existing per-entry `try`, so the `attempts_exhausted` ↔ `by="reconciler"` biconditional and the three-escalation-site rule are untouched. `:523` and `:554` still write nothing.
+
+  The cost of the resolution is that `grep -c "block_expectation" reflections/expectation_reconciler.py` is now `2`, not `1`. The Verification table is updated accordingly, and the anti-criterion that `:523`/`:554` stay bare moves to a test rather than a grep count.
 - **Blocked rows stop re-escalating; the finding line is the recurring signal.** Because the blocked skip sits above the age/liveness checks, a row annotated `attempts_exhausted` is skipped on every later tick and `_escalation_exists`'s TTL-expiry re-escalation never fires for it again. That is the intended trade: one page plus a `blocked:` line every tick, instead of a page every escalation TTL forever. Documented in rule 9.
 - **`owner_gone` ships unwired.** It is in the vocabulary so the enum does not need reopening when the session-health drift advisory grows a writer; the frozen-set test is what keeps the unwired member honest. `missing_credential` and `upstream_unmergeable` likewise ship for lane/PM use, which is a writer — they are reachable from day one through `job_tool expectation-block`.
 
@@ -180,7 +229,25 @@ These four were open at first draft and are decided here; the rationale is recor
 **Trigger:** PM discharges E between the reconciler's scan and its `block_expectation` call.
 **Data prerequisite:** the snapshot written through must show E still open.
 **State prerequisite:** none. The escalation branch runs *before* the cooldown claim at `:495` and before the fresh re-fetch at `:499`, so it holds neither — it is reached only once per escalation TTL, gated by `_escalation_exists` at `:472`.
-**Mitigation:** two layers. The build adds a re-fetch inside the escalation branch (see Data Flow step 2), and independently `block_expectation` on a discharged or unknown id returns `False` and writes nothing — so even a fully stale object cannot resurrect a discharged row. A PM discharge always wins. The `False` return is the load-bearing guard; the re-fetch is what keeps the annotation from being written onto an otherwise stale goal payload and clobbering a concurrent `add_expectation`.
+**Mitigation:** two layers. The build adds a re-fetch inside both annotate sites (see Data Flow step 2), and independently `block_expectation` on a discharged or unknown id returns `False` and writes nothing — so even a fully stale object cannot resurrect a discharged row. A PM discharge always wins. The `False` return is the load-bearing guard; the re-fetch is what keeps the annotation from being written onto an otherwise stale goal payload and clobbering a concurrent `add_expectation`.
+
+### Race 2: crash between the escalation claim and the annotation write
+**Location:** `reflections/expectation_reconciler.py::_reconcile_project`, between `_escalate_once` (`:481`) and the new `block_expectation` call, gated downstream by `_escalation_exists` at `:472`.
+**Trigger:** the reflection process dies, the worker restarts, or the goal write fails hard after `_escalate_once` has already claimed the multi-day-TTL Redis key via SETNX.
+**Data prerequisite:** the escalation key exists; the entry carries no `blocked` annotation.
+**State prerequisite:** `attempts >= _max_attempts()` — the row's recovery budget is spent.
+**Consequence if unmitigated:** every later tick short-circuits at the `:472` gate for the whole escalation TTL. No re-steer, no re-escalation, no annotation, `blocked_expectations()` empty. One page, then silence — the Problem statement's silent stall, reintroduced by the fix.
+**Mitigation:** the crash-window repair (site A) in **Technical Approach → Crash-window resolution**. The annotation becomes reachable through the `:472` gate itself, so the next tick after any crash re-asserts it. Self-healing rather than transactional: there is no cross-store transaction available between the Redis escalation key and the goal JSON, so convergence-on-next-tick is the right shape. Regression test named in Test Impact.
+
+### Race 3: lane/PM annotation vs reconciler annotation on the same entry
+**Location:** `models/job.py::block_expectation`, `entry["blocked"]` on one entry.
+**Trigger:** a lane runs `job_tool expectation-block --code needs_human` while the reconciler is writing `attempts_exhausted` on the same entry. Both are read-modify-write cycles over the whole goal JSON; the later write wins silently.
+**Consequence if unmitigated:** one annotation is lost with no error and no surfaced conflict — and the two carry materially different trust semantics (Settled Decision 2), so losing the reconciler's verdict to a lane's self-report is exactly the wrong direction.
+**Precedence rule, decided here rather than in the builder's head:** **a `by="reconciler"` annotation is authoritative and is never overwritten by a `pm` or `lane` write.** `block_expectation` reads the existing `entry.get("blocked")` after `_mutable_goal_data()` and:
+- existing `blocked.by == "reconciler"` and the incoming `by` is `"pm"` or `"lane"` → **no write, return `False`**. `job_tool` renders this as an explicit refusal ("expectation E is blocked by the reconciler as attempts_exhausted; unblock it first"), never as a silent success.
+- every other combination (no existing annotation; existing `pm`/`lane` overwritten by anyone; existing `reconciler` overwritten by the reconciler) → writes normally. A later human annotation legitimately supersedes an earlier one, and the reconciler's own repeat write is the idempotent repair from Race 2.
+- `unblock_expectation` is **not** restricted by precedence: a PM can always clear any annotation, including the reconciler's, and then re-block with their own code. That keeps the human the final authority without letting a lane forge past the reconciler.
+The residual exposure is the ordinary whole-payload last-write-wins on `goal` shared with `add_expectation` / `discharge_expectation` (Risk 3), which this plan does not change.
 
 ## No-Gos (Out of Scope)
 
@@ -279,9 +346,11 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - **Agent Type**: builder
 - **Parallel**: true
 - Skip blocked rows with a `blocked: <eid> <code>` finding before the age/liveness checks (`:461`), inside the existing per-entry `try`.
-- At the `attempts >= _max_attempts()` branch (`:480`) **only**: escalate first, then re-fetch the Job (this branch has none today — the re-fetch at `:499` is below it) and `block_expectation(..., code="attempts_exhausted", by="reconciler")` on that snapshot, inside the existing per-entry `try`.
-- Leave `:523` and `:554` untouched — they escalate with attempts remaining and must stay re-steerable.
-- Tests: skip + finding + no action; seam write at `:480`; no annotation from `:523`/`:554`; refused write still escalates.
+- Restructure the gate region exactly as **Technical Approach → Crash-window resolution** specifies: lift `_attempts_count` / `budget_spent` above the `_escalation_exists` gate at `:472`, keeping its `None` → `gate-unknown` finding and `continue` unchanged.
+- **Site A (crash-window repair)**, inside the `_escalation_exists` gate: when `escalated is True` AND `budget_spent` AND `entry.get("blocked") is None`, re-fetch the Job and `block_expectation(..., code="attempts_exhausted", by="reconciler")`, append the `blocked:` finding, then `continue` as before. Use `is True`, never `is not False` — a `None` read failure must not be treated as an escalation.
+- **Site B (fresh escalation)**, in the `budget_spent` branch (`:480`): escalate first, then re-fetch the Job (this branch has none today — the re-fetch at `:499` is below it) and `block_expectation(..., code="attempts_exhausted", by="reconciler")` on that snapshot. Escalate-first is load-bearing; do not reorder.
+- Both sites sit inside the existing per-entry `try`. Leave `:523` and `:554` untouched — they escalate with attempts remaining and must stay re-steerable.
+- Tests: skip + finding + no action; site B writes on fresh escalation; **site A repairs a row whose escalation key exists but whose annotation is absent** (the crash-window regression test); site A does not fire when `_escalation_exists` returns `None`; site A does not re-write an already-annotated row; no annotation from `:523`/`:554`; refused write still escalates.
 
 ### 4. Validate
 - **Task ID**: validate-all
