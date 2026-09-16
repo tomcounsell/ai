@@ -304,6 +304,45 @@ worktree manager.
   several assert on symbols in `agent/session_executor.py` that the revised
   design may not place there.
 
+### Live evidence, incident 2 (2026-09-16, the #3259 lane)
+
+A second double-owner event on the same lane, caught by accident rather than by
+any guard. Between a successful `git push` of `8267c7b7` and the next commit in
+the same lane, the reflog records:
+
+```
+8267c7b71 HEAD@{1}: checkout: moving from session/sdlc-3259 to 8267c7b71
+```
+
+The orchestrating session did not run that checkout. Some other writer entered
+`.worktrees/sdlc-3259` and detached HEAD. The next commit therefore landed on a
+detached HEAD, and `git push origin HEAD` failed with "not a full refname" --
+which is the **only** reason it was noticed. Had that commit been pushed with an
+explicit branch name, or had the session not read the error, the work would have
+been silently orphaned at the next checkout.
+
+Recovery was clean because nothing was lost: branch tip == remote tip ==
+`8267c7b7`, and the new commit sat directly on top, so `git merge --ff-only`
+reattached it. By the time the lane was inspected there was no process with a
+cwd inside the worktree and no index lock, so the second writer had already left.
+
+Three things this incident adds to the plan:
+
+1. **It is not rare.** Two occurrences in one day, on two different lanes,
+   during a period when the orchestrator was deliberately running one agent per
+   slug. Whatever is dispatching second writers is not the fan-out being
+   critiqued here.
+2. **Detection was luck.** No guard fired. The signal was a push error whose
+   text is about refspecs, not ownership. B4's point stands: a check that runs
+   only at acquisition cannot see a writer that arrives afterward.
+3. **`_worktree_has_live_process` would have returned clean.** The intruder was
+   gone by inspection time, but its effect (detached HEAD) persisted. A liveness
+   probe answers "is someone here now", and the damage here outlived the
+   presence. The refusal log C3 asks for should therefore record the lane's
+   **branch state** (attached/detached, and to what), not only holder ids and
+   mtimes -- a detached lane HEAD is evidence a second owner has already been
+   through, and it is cheap to read.
+
 ### Live evidence: this failure class occurred during Phase 0
 
 Hours after this plan was committed, two sessions were independently
