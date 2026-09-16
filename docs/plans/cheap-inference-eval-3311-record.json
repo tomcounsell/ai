@@ -1,0 +1,48 @@
+{
+  "assembly": "live",
+  "blinded": true,
+  "candidate_model": "openrouter:meta/muse-spark-1.3",
+  "case_id": "1ec40086ca1d422e90ef747775ff7f64",
+  "charter_leg": "serves-charter calibration floor refusal: Calibration reference set holds 0 architectural corrections, below the floor of 20; the serves-charter judge is uncalibrated for this project.",
+  "confidence_interval": {
+    "provider-verdict": {
+      "adjusted_p_value": 1.0,
+      "lower": -1.0,
+      "n": 2,
+      "raw_p_value": 1.0,
+      "upper": 0.0
+    }
+  },
+  "contract_digest": "sha256:31558454b4fdce857213a5ffd682f1024766f2a2c3d1c78013ab37088feeeed2",
+  "corpus_digest": "23ed4c7587bd6f536dcc472bea459abf3ae13d052321418faf9892bdf71153c5",
+  "disposition": "keyless_integrated",
+  "effect": {
+    "provider-verdict": -0.5
+  },
+  "eligibility": "'valor' verified open-source for both arms before any spawn",
+  "evaluation_id": "b5adfc7d089846ef89c2716ea0f93af5",
+  "evaluation_notes": "agent baseline (pass_fail): t1=agree, t2=agree\nendpoints not distinguished: ['provider-verdict']",
+  "experiment_id": "c817399b719844ba938c198802df8494",
+  "incumbent_model": "claude-subscription",
+  "investigation_id": "78bc12729199442fa8bf0a641a18427e",
+  "observation": "Cheap-inference observation (evaluation b5adfc7d089846ef89c2716ea0f93af5 on experiment c817399b719844ba938c198802df8494, lane 5b agent-run arm): the openrouter:meta/muse-spark-1.3 session was compared against the subscription incumbent (claude-subscription, no checklist) on 2 frozen readiness snapshots, one rubric endpoint (provider-verdict). Verdict=inconclusive over 2 paired trials; per-trial rubric scores: t1/arm-b/provider-verdict=1.0, t1/arm-a/provider-verdict=0.0, t2/arm-b/provider-verdict=1.0, t2/arm-a/provider-verdict=1.0. Gate 1 baseline agreement held on both tasks. Eligibility: 'valor' verified open-source for both arms before any spawn; no client context in either arm. Charter leg: serves-charter calibration floor refusal: Calibration reference set holds 0 architectural corrections, below the floor of 20; the serves-charter judge is uncalibrated for this project.; the verdict rests on rubrics and the charter leg is unmeasured. Unit-2 meter: {'day_key': '2026-09-16', 'window_start': '2026-09-16T00:00:00+00:00', 'window_end': '2026-09-17T00:00:00+00:00', 'reserved_usd': 0.0, 'settled_usd': 0.4} -> {'day_key': '2026-09-16', 'window_start': '2026-09-16T00:00:00+00:00', 'window_end': '2026-09-17T00:00:00+00:00', 'reserved_usd': 0.0, 'settled_usd': 0.56} (estimated settlements per frozen per-task budget $0.02; the cheap provider bills per token on top of the estimate). This measures lane 5 investigation 78bc12729199442fa8bf0a641a18427e's keyless_integrated path: an eligible open-source session on the cheap provider under a frozen contract.",
+  "protocol_ref": "$CF:fee106931aa620991d5717e85eeff8f27865415429d0fe033c776a9c461f887d:ImprovementProtocol/protocol-fee106931aa62099.txt",
+  "provider_route": "OpenRouter chat-completions with OPENROUTER_API_KEY (OpenAI-compatible call path lane 5 exercised)",
+  "trials": 2,
+  "unit2_after": {
+    "day_key": "2026-09-16",
+    "reserved_usd": 0.0,
+    "settled_usd": 0.56,
+    "window_end": "2026-09-17T00:00:00+00:00",
+    "window_start": "2026-09-16T00:00:00+00:00"
+  },
+  "unit2_before": {
+    "day_key": "2026-09-16",
+    "reserved_usd": 0.0,
+    "settled_usd": 0.4,
+    "window_end": "2026-09-17T00:00:00+00:00",
+    "window_start": "2026-09-16T00:00:00+00:00"
+  },
+  "verdict": "inconclusive",
+  "wall_seconds": 244
+}

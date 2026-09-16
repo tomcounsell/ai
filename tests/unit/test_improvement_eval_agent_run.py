@@ -44,6 +44,16 @@ def _disarmed_guard():
     writer_guard.disarm()
 
 
+@pytest.fixture(autouse=True)
+def _open_source_project(monkeypatch):
+    """These tests exercise the trial path, not the eligibility gate.
+
+    The gate itself is covered in ``test_improvement_eligibility.py``; here
+    every fake project reads as open-source so trials reach the arm.
+    """
+    monkeypatch.setattr("tools.improvement_eligibility.is_open_source", lambda project_key: True)
+
+
 def _seed_memory(project_key, content):
     from models.memory import Memory
 

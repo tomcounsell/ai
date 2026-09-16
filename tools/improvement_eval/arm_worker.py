@@ -163,6 +163,20 @@ SUBSCRIPTION_SESSION_TIMEOUT_S = 300.0
 #: session to end on exactly one of these; the rubric judges score it.
 SESSION_VERDICTS = ("FREEZE", "HOLD")
 
+#: Manifest-model prefix routing a trial session to the cheap provider.
+#: ``claude-subscription`` (or any unprefixed model) runs one headless
+#: ``claude -p`` turn; ``openrouter:<model-id>`` reaches that OpenRouter
+#: model id through the existing ``OPENROUTER_API_KEY`` over the
+#: OpenAI-compatible chat-completions route lane 5's cheap-inference
+#: investigation exercised (``keyless_integrated``: no vault wait).
+OPENROUTER_MODEL_PREFIX = "openrouter:"
+
+#: Cap on one cheap-provider completion. The cheap model reasons before it
+#: answers and the trace counts against this cap, so a short cap truncates
+#: the turn before any decision line: the trial needs room for the trace
+#: plus the verdict. Per-trial cost stays well under the frozen spend cap.
+OPENROUTER_MAX_TOKENS = 4096
+
 
 def _checkout_root() -> Path:
     """The checkout this worker runs from: where frozen skill files live."""
@@ -253,6 +267,82 @@ def _run_session_via_subscription(prompt: str, timeout_s: float) -> str:
     return completed.stdout
 
 
+def _run_session_via_openrouter(prompt: str, timeout_s: float, model_id: str) -> str:
+    """Run one chat completion on the cheap provider; return its text.
+
+    The OpenAI-compatible route lane 5's investigation exercised: POST the
+    model id and the prompt to the chat-completions endpoint with the
+    existing ``OPENROUTER_API_KEY``. A missing key refuses with
+    :class:`InfraFailure` before anything is posted; any transport or
+    shape failure raises so the worker reports an error and the trial
+    becomes a harness error, never a scored zero.
+    """
+    import os
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise InfraFailure(
+            "agent_run openrouter session needs OPENROUTER_API_KEY in the arm child env"
+        )
+    import requests
+
+    from config.models import OPENROUTER_URL
+
+    try:
+        response = requests.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "Valor Agent-Run Arm",
+            },
+            json={
+                "model": model_id,
+                "max_tokens": OPENROUTER_MAX_TOKENS,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=timeout_s,
+        )
+        response.raise_for_status()
+        result = response.json()
+    except Exception as exc:
+        raise RuntimeError(f"openrouter session on {model_id!r} failed: {exc}") from exc
+    choices = (result or {}).get("choices") if isinstance(result, dict) else None
+    if not choices:
+        raise RuntimeError(f"openrouter session on {model_id!r} returned no choices")
+    content = choices[0].get("message", {}).get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    # A 200 with choices but no usable text is a malformed session output,
+    # not a transport failure: the trial comes back undecided and the
+    # rubric scores it zero, matching the subscription path.
+    return ""
+
+
+def _default_transport_for(model: str):
+    """The session transport the manifest model names.
+
+    Returns a ``(prompt, timeout_s)`` callable: the OpenRouter transport
+    pinned to the model id behind the ``openrouter:`` prefix, or the
+    subscription transport for anything else.
+    """
+    if isinstance(model, str) and model.startswith(OPENROUTER_MODEL_PREFIX):
+        model_id = model[len(OPENROUTER_MODEL_PREFIX) :].strip()
+        if not model_id:
+            raise InfraFailure(
+                "agent_run manifest model names the openrouter route with no model id"
+            )
+        return lambda prompt, timeout_s: _run_session_via_openrouter(prompt, timeout_s, model_id)
+    return _run_session_via_subscription
+
+
 def run_agent_trial(
     task: dict, manifest: dict, bounds: dict, project_key: str, _complete=None
 ) -> dict:
@@ -266,8 +356,8 @@ def run_agent_trial(
     into the ``passed`` bit: a session with no decision line comes back
     with ``passed=False`` for the rubric to score zero, while a transport
     failure raises for the worker to report as a harness error.
-    ``_complete`` injects the session transport (tests); the default runs
-    one headless ``claude -p`` turn on the subscription.
+    ``_complete`` injects the session transport (tests); the default follows
+    the manifest model to the subscription or the cheap OpenRouter route.
     """
     skill_text = _resolve_skill_text(manifest.get("skill") or "", manifest.get("prompt_hash"))
     prompt = _compose_session_prompt(task, manifest, skill_text)
@@ -275,7 +365,7 @@ def run_agent_trial(
         timeout_s = float((bounds or {}).get("timeout_s") or SUBSCRIPTION_SESSION_TIMEOUT_S)
     except (TypeError, ValueError) as exc:
         raise InfraFailure(f"agent_run bounds timeout_s is not a number: {exc}") from exc
-    complete = _complete or _run_session_via_subscription
+    complete = _complete or _default_transport_for(manifest.get("model"))
     output = complete(prompt, timeout_s)
     if not isinstance(output, str):
         output = str(output)

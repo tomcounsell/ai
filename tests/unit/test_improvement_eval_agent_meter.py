@@ -145,6 +145,16 @@ def _rubric_ok(endpoint="readiness-verdict"):
     return _judge
 
 
+@pytest.fixture(autouse=True)
+def _open_source_project(monkeypatch):
+    """These tests exercise spend plumbing, not the eligibility gate.
+
+    The gate itself is covered in ``test_improvement_eligibility.py``; here
+    every fake project reads as open-source so trials reach the arm.
+    """
+    monkeypatch.setattr("tools.improvement_eligibility.is_open_source", lambda project_key: True)
+
+
 class TestMeterThreading:
     def test_capture_agent_baseline_meters_each_task(self):
         from tools.improvement_eval import runner

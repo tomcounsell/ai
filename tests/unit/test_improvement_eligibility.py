@@ -193,3 +193,99 @@ class TestCache:
         with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))) as run:
             assert is_open_source("open-thing") is True
         assert run.call_count == 1, "the indeterminate outcome must not have been cached"
+
+
+class _TrialMeter:
+    """Minimal unit-2 meter double: records reserve/settle, never refuses."""
+
+    def __init__(self):
+        self.calls = []
+
+    def reserve(self, project_key, amount_usd, *, purpose, case_id=None, **kwargs):
+        self.calls.append(("reserve", project_key, amount_usd, purpose, case_id))
+
+        class _Reservation:
+            reservation_id = "res-3311"
+
+        return _Reservation()
+
+    def settle(self, project_key, reservation_id, usd, *, metering):
+        self.calls.append(("settle", project_key, reservation_id, usd, metering))
+
+
+class _TrialExport:
+    jsonl_text = "[]"
+
+
+class TestAgentCallSiteRefusal:
+    """The agent-trial call site refuses client-keyed projects (#3311, Task 5).
+
+    ``_run_agent_arm`` is the single funnel every agent session flows through:
+    the incumbent baseline capture and both evaluate arms. It must check
+    ``is_open_source`` before reserving spend or spawning a session, so a
+    client-keyed project is refused with an InfraFailure and the session
+    transport is never invoked.
+    """
+
+    def test_client_keyed_project_refused_before_any_session_spawns(self):
+        from unittest.mock import patch
+
+        from tools.improvement_eval import runner
+        from tools.improvement_eval.errors import InfraFailure
+
+        meter = _TrialMeter()
+        params = {"model": "claude-subscription", "bounds": {"timeout_s": 30, "spend_cap": 0.02}}
+        with (
+            _gh(return_value=_completed(json.dumps({"visibility": "PRIVATE"}))),
+            patch("tools.improvement_eval.arena.run_arm_job") as spawned,
+        ):
+            with pytest.raises(InfraFailure, match="not provably open-source"):
+                runner._run_agent_arm(
+                    object(),
+                    _TrialExport(),
+                    "client-thing",
+                    {"id": "t1", "prompt": "decide the freeze"},
+                    params,
+                    arm_run_id="refusal-3311",
+                    meter=meter,
+                )
+        assert spawned.call_count == 0, "no session may spawn for a client-keyed project"
+        assert meter.calls == [], "no spend may be reserved for a client-keyed project"
+
+    def test_open_source_project_proceeds_to_spawn(self):
+        from unittest.mock import patch
+
+        from tools.improvement_eval import runner
+
+        meter = _TrialMeter()
+        params = {"model": "claude-subscription", "bounds": {"timeout_s": 30, "spend_cap": 0.02}}
+
+        def _fake_job(arm, project_key, job):
+            return {
+                "trials": [
+                    {
+                        "task_id": "t1",
+                        "output": "checks read\nVERDICT: FREEZE",
+                        "passed": True,
+                        "model": "claude-subscription",
+                        "scratch": "s",
+                    }
+                ],
+            }
+
+        with (
+            _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))),
+            patch("tools.improvement_eval.arena.run_arm_job", side_effect=_fake_job),
+        ):
+            outcome = runner._run_agent_arm(
+                object(),
+                _TrialExport(),
+                "open-thing",
+                {"id": "t1", "prompt": "decide the freeze"},
+                params,
+                arm_run_id="refusal-3311",
+                meter=meter,
+            )
+        assert outcome["passed"] is True
+        assert ("reserve", "open-thing", 0.02, "agent_trial", "arm:refusal-3311:t1") in meter.calls
+        assert meter.calls[-1][0] == "settle"

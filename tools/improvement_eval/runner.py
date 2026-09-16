@@ -461,13 +461,21 @@ def _run_agent_arm(
 
     With a meter and a frozen per-task spend cap, the task budget is
     reserved pre-trial (unit 2, ``arm:<arm_run_id>:<trial>``) and settled
-    as estimated post-trial. A refused reservation is a harness error
+    as estimated post-trial. A project that is not provably open-source is
+    refused before any reservation or spawn. A refused reservation is a harness error
     raised before anything spawns; a worker error leaves the reservation
     open for the reconcile pass and settles nothing.
     """
     from tools.improvement_eval.arena import run_arm_job
 
     trial_id = str(task.get("id", task.get("trial_id")))
+    from tools.improvement_eligibility import is_open_source
+
+    if not is_open_source(project_key):
+        raise InfraFailure(
+            f"agent trial {trial_id} refused: project {project_key!r} is not "
+            "provably open-source; agent sessions stay on the subscription"
+        )
     spend_cap = (arm_params.get("bounds") or {}).get("spend_cap")
     reservation_id = None
     if meter is not None and spend_cap is not None:
