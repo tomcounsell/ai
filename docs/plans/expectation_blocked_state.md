@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2862
 last_comment_id: 5571046486
+revision_applied: true
+revision_applied_at: 2026-09-16T10:39:31Z
 ---
 
 # Expectation blocked state and reason code
