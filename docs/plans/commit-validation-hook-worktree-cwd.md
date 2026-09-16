@@ -148,10 +148,18 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 - **Resolution precedence**, highest first, implemented in `effective_git_dir`:
   1. `git -C <path>` appearing in the simple command that contains `commit` (relative paths resolved against the next rung down).
   2. A leading `cd <path>` simple command, resolved against `hook_cwd` when relative — ported from `validate_no_uv_sync_in_worktree.py::_effective_dir`, including `_split_simple_commands` splitting on `&& || ; |` and newlines and `shlex` tokenization with a `ValueError` fail-open.
+- **Unexpanded-shell-construct rejection** (critique concern): rungs 1 and 2 accept a path token only if it is literal. A token containing `$(`, a backtick, `${`, or a leading `$` is an unexpanded shell construct — `shlex.split` hands it back verbatim, and `git -C '$(git rev-parse --show-toplevel)/.worktrees/lane-a'` then fails into the existing fail-open handlers and *allows*. Reject such tokens and fall through to the next rung, where the payload `cwd` is a real, already-resolved directory and is the correct answer for precisely this command shape. This mirrors the `shlex.split` `ValueError` fall-through already specified for the same two rungs.
   3. The payload `cwd`.
   4. `os.getcwd()` — reached only when the payload carries no `cwd`, and commented as an explicit last resort rather than the accidental default it is today.
 - **Call form**: `git -C <effective_dir> ...` for all three queries, matching `validate_no_destructive_git_in_shared_checkout.py::_git_toplevel:201-208`, rather than `subprocess.run(cwd=...)`. A directory that no longer exists then produces a git error the existing handlers already absorb, instead of a `FileNotFoundError` from `subprocess` itself.
-- **Repo identity** (spike-3): `git -C <dir> rev-parse --path-format=absolute --git-common-dir`, then `Path(that).parent.name`. Fall back to `--show-toplevel`'s basename when `--path-format` is unsupported (git < 2.31) or the call fails. Both paths agree for a non-worktree checkout; only the worktree case diverges, and the worktree case is the one the guard exists for.
+- **Repo identity** (spike-3, revised after critique): a two-tier probe, and **`--show-toplevel` is deleted from the file entirely** — it is never an identity source on any path.
+  1. `git -C <dir> rev-parse --path-format=absolute --git-common-dir`, then `Path(that).parent.name`. (`--path-format` requires git ≥ 2.31, March 2021.)
+  2. On non-zero exit or empty output, retry `git -C <dir> rev-parse --git-common-dir` **without** `--path-format`. `--git-common-dir` itself has existed since git 2.5 (2015), so this rung covers every plausible fleet machine; the result may be relative, so resolve it against the effective directory (`(Path(dir) / out).resolve()`) before taking `.parent.name`.
+  3. If both rungs fail, repo identity is **unknown** — and unknown takes the *restrictive* branch: the hook does **not** `allow()` at the repo-name gate, it falls through to the branch + staged-code check as though the repo were protected. A guard that cannot identify its repo must not conclude "not popoto, therefore fine".
+
+  Rationale (this is the critique blocker): `--show-toplevel` inside a linked worktree returns the worktree root, whose basename is the lane slug. Keeping it as any kind of fallback reintroduces false-allow-always for exactly the population this fix exists to protect, on any machine where the primary probe fails. There is no version of the fallback worth keeping, because rung 2 already covers the only realistic reason rung 1 fails.
+
+  Cost of rung 3's restrictiveness: in a *non*-popoto repo whose git-dir probe fails outright (a directory that is not a git repo at all), the hook proceeds to `get_current_branch`, which also fails, yielding no branch and therefore no block. So the restrictive branch degrades to allow only where git itself is unusable — never where git works and merely reports an unexpected identity.
 - **Testability seam**: extract the decision into `commit_block_reason(command: str, hook_cwd: str) -> str | None`, returning the block reason or `None`. `main()` becomes payload-parsing plus `block(...)` / `allow()`. Every behavioral test drives the pure function; one thin test drives `main()` over real stdin to prove the wiring.
 - **Fail-open is preserved verbatim**: the outer `except Exception: sys.exit(0)` at `:108-110` stays, and the new resolver never raises on malformed input — it returns a directory, always.
 - **3.9 floor**: `from __future__ import annotations` is already at the top of the hook (`:26`) and must be added to `sdlc_context.py` if any new annotation there needs it. `tests/unit/test_hook_interpreter.py` enforces this and will fail the build if violated.
@@ -167,6 +175,9 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 - [ ] `effective_git_dir("", "")` and `effective_git_dir(cmd, "")` — assert a usable directory is returned (the process cwd rung), never `None` and never an exception.
 - [ ] `command` containing unbalanced quotes — `shlex.split` raises `ValueError`; assert the resolver falls through to the next rung rather than propagating.
 - [ ] `cd` with no argument, and `git -C` with no argument — assert the rung is skipped, not indexed into.
+- [ ] **Unexpanded shell constructs in the path token** — `cd "$(git rev-parse --show-toplevel)/.worktrees/lane-a" && git commit -m x`, and the `git -C "$REPO_ROOT" commit` shape. Assert `effective_git_dir` returns the payload `cwd` (the next rung), not the literal unexpanded string, so the verdict is computed against a real directory instead of fail-opening.
+- [ ] **Repo-identity probe failure from inside a worktree** — force both `--git-common-dir` rungs to return non-zero (stub `git` on `PATH`, or monkeypatch the subprocess helper) while the effective directory is a linked worktree on `main` with a staged `.py`. Assert the verdict does **not** degrade to allow: unknown identity takes the restrictive branch. This is the test that makes the deleted `--show-toplevel` fallback un-reintroducible.
+- [ ] **Old-git compatibility rung** — force only `--path-format=absolute` to fail (unsupported-option exit), leaving bare `--git-common-dir` working and returning a *relative* path. Assert identity still resolves to `popoto` from a worktree.
 - [ ] Empty staged set and a `git diff` returning only blank lines — assert allow (the existing `if f` filter at `:92` covers this; the test pins it).
 
 ### Error State Rendering
@@ -174,7 +185,8 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 
 ## Test Impact
 
-- [ ] `tests/unit/test_hook_interpreter.py::` (AST floor over global-scope scripts) — UPDATE: no code change expected, but the new `sdlc_context.py` helpers fall under its scan; confirm it still passes and that it covers `sdlc_context.py` and not only the three registered scripts. If it scans only registered scripts, extend it to sibling modules in `hooks/sdlc/` so the 3.9 floor cannot be broken through the helper module.
+- [ ] `tests/unit/test_hook_interpreter.py` — NO CHANGE (verified at revision time): `_EXTRA_GLOBAL_SCRIPTS = ("sdlc/sdlc_context.py",)` at `:59`, extended into the scan at `:65`, so the AST 3.9 floor already covers the helper module. Re-run the parametrized node `test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]` as a verification line only; no investigation task is warranted.
+- [ ] `tests/unit/test_update_hardlinks.py` — UPDATE: add coverage for the new post-sync self-check (task 4) — that `sync_user_hooks` runs it, that a passing self-check leaves the sync green, and that a self-check returning "allow" for the synthetic worktree-on-`main`-with-staged-`.py` fixture fails the sync loudly rather than silently.
 - [ ] `tests/unit/test_hook_migration.py` — UPDATE only if the file set under `hooks/sdlc/` changes. This plan adds no file there, so no change is expected; verify.
 - [ ] `tests/unit/test_hook_manifest.py` — no change: registration (event, matcher, scope, exit_policy, timeout) is untouched.
 - [ ] `tests/unit/test_validate_sdlc_on_stop.py` — REFERENCE, not modified: its `sys.path` setup (inserting both `.claude/hooks` and `.claude/hooks/validators`) is the import pattern the new test file copies.
@@ -227,6 +239,11 @@ The hook is `scope = "global"`: `scripts/update/hardlinks.py::sync_user_hooks` h
 
 - No change to `scripts/remote-update.sh` or the `/update` skill is required. Both files this plan edits are already in the synced set, and no manifest entry changes (event, matcher, script path, scope, timeout, and exit policy all stay as they are).
 - **Propagation is required to take effect**: until `/update` runs on a machine, that machine keeps the buggy guard. The plan's rollout note is simply that the fix is inert fleet-wide until `/update` lands there.
+- **Post-sync self-check (added in revision, critique concern)**: `sync_user_hooks` gains a smoke assertion that runs after the global hooks are hardlinked. Rollout has three states, not two — updated, not-yet-updated, and *updated-but-silently-fail-opening* — and only the third is dangerous, because a fail-open guard emits nothing and looks identical to a working one. The self-check closes it per machine:
+  - Build a throwaway fixture under `tempfile.mkdtemp()`: `git init` a repo whose directory basename is `popoto`, one empty commit, `git worktree add` a linked worktree checked out on `main`, stage a `.py` file there.
+  - Invoke the deployed `~/.claude/hooks/sdlc/validate_commit_message_sdlc.py` end-to-end over stdin under the **resolved global interpreter** (the same one `hardlinks.py` pins the hooks to — the check must exercise the interpreter the harness will actually use, not the repo venv), with `cwd` set to the worktree and a `git commit` command.
+  - Assert a block decision comes back. If it does not, fail the sync loudly with the fixture's git version and the hook's stdout/stderr. Clean up the fixture unconditionally.
+  - Cost is one `git init` plus one `git worktree add` (sub-second) per `/update`. A self-check failure must be a hard failure, not a warning: a silently fail-opening guard on a fleet machine is the failure mode this whole plan exists to prevent.
 - No migration is needed. No new file appears under `hooks/sdlc/`, so `RENAMED_REMOVALS` in `hardlinks.py` is untouched and no `scripts/update/migrations.py` entry is warranted.
 - No Popoto model changes, so no schema migration.
 
@@ -250,7 +267,10 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 
 - [ ] All three git calls in `validate_commit_message_sdlc.py` are `-C`-scoped to the resolved effective directory; no unscoped git call remains in the file.
 - [ ] `effective_git_dir` resolves, in order: `git -C <path>` on the commit command, a leading `cd <path>`, the payload `cwd`, then `os.getcwd()` — each rung covered by a test.
-- [ ] Repo identity derives from `git -C <dir> rev-parse --path-format=absolute --git-common-dir`; a worktree of a repo named `popoto` is identified as `popoto`.
+- [ ] Repo identity derives from `git -C <dir> rev-parse [--path-format=absolute] --git-common-dir`; a worktree of a repo named `popoto` is identified as `popoto`. The string `--show-toplevel` does not appear in the hook at all.
+- [ ] When both `--git-common-dir` rungs fail, identity is unknown and the hook takes the restrictive branch — a test forces the probe to fail from inside a worktree on `main` with a staged `.py` and asserts the verdict does not degrade to allow.
+- [ ] `effective_git_dir` rejects unexpanded shell constructs (`$(`, backtick, `${`, leading `$`) in a `cd` / `-C` path token and falls through to the payload `cwd`.
+- [ ] `/update` fails loudly on any machine where the deployed guard, run end-to-end under the global interpreter against a synthetic worktree fixture, does not block a staged `.py` commit on `main`.
 - [ ] Two-checkout regression test exists and is **proven red against the pre-fix hook**: it must fail on the parent commit and pass on the fix. Both directions are asserted — false block (worktree on a feature branch, main checkout on `main` with stale staged `.py` → allow) and false allow (worktree on `main` with staged `.py`, main checkout on a feature branch → block).
 - [ ] Block reason names the effective directory's staged files and not the other checkout's.
 - [ ] Fail-open preserved: malformed stdin, unparseable command, missing directory, and non-git directory each exit 0 with empty stdout.
