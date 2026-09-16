@@ -91,16 +91,25 @@ BLOCKED_SERVICES = [
     "killall reflection_worker",
     "pgrep -f reflection_worker | xargs kill -9",
     'kill $(pgrep -f "python -m reflections")',
+    # The reap-xdist.sh exemption is scoped to the test-runner branch only:
+    # mentioning it (even in a chained command or a trailing comment) must
+    # not also disable the service guard (#3316 review round 1 tech debt).
+    'scripts/reap-xdist.sh --apply && pkill -f "python -m ui.app"',
+    'pkill -f "python -m ui.app"  # after reap-xdist.sh',
 ]
 
-# (service kill command, stop-path hint the block reason must name).
+# (service kill command, stop-path hint the block reason must name). Each hint
+# must be a command that actually targets that service -- `scripts/
+# valor-service.sh stop` only stops the Telegram bridge (`stop_bridge`), so it
+# is wrong for the dashboard and the watchdog (#3316 review round 1 blocker).
 BLOCKED_SERVICE_REASONS = [
-    ('pkill -f "python -m ui.app"', "scripts/valor-service.sh stop"),
+    ('pkill -f "python -m ui.app"', "scripts/valor-service.sh restart"),
     ('pkill -f "python -m worker"', "worker-stop"),
+    ("killall worker", "worker-stop"),
     ("pkill -f telegram_bridge", "scripts/valor-service.sh stop"),
     ("pkill -f email_bridge", "email-stop"),
-    ("pkill -f monitoring/worker_watchdog.py", "scripts/valor-service.sh stop"),
-    ("pkill -f worker-watchdog", "scripts/valor-service.sh stop"),
+    ("pkill -f monitoring/worker_watchdog.py", "com.valor.worker-watchdog"),
+    ("pkill -f worker-watchdog", "com.valor.worker-watchdog"),
     ('pkill -f "python -m reflections"', "com.valor.reflection-worker"),
     ("pkill -f reflection_worker", "com.valor.reflection-worker"),
 ]

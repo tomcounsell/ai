@@ -44,24 +44,31 @@ _TEST_RUNNER_PATTERN = r"(?:py\.?test|xdist|pytest-clean)"
 # service-shaped forms (`-m worker`, the watchdog path/labels) match.
 _SERVICES = [
     # Dashboard (port 8500): `pkill -f "python -m ui.app"` killed production
-    # while aiming at a throwaway instance (issue #3316).
-    ("python -m ui.app", r"ui\.app", "scripts/valor-service.sh stop"),
+    # while aiming at a throwaway instance (issue #3316). `valor-service.sh`
+    # has no dashboard-only stop verb -- `restart` is the sanctioned path that
+    # actually cycles it (stop_bridge only touches the Telegram bridge).
+    ("python -m ui.app", r"ui\.app", "scripts/valor-service.sh restart"),
     # Session execution engine (com.valor.worker.plist runs `python -m worker`).
     ("python -m worker", r"-m\s+worker\b", "worker-stop (worker-disable to keep it down)"),
     # Telegram bridge: the sole session intake; killing it drops messages.
     ("bridge/telegram_bridge.py", r"telegram_bridge", "scripts/valor-service.sh stop"),
     # Email bridge (com.valor.email-bridge.plist runs `-m bridge.email_bridge`).
+    # `email_bridge` alone also matches `bridge.email_bridge` as a substring,
+    # so that alternative is documentation of the production command line,
+    # not a live second branch.
     (
         "bridge/email_bridge.py",
-        r"bridge\.email_bridge|email_bridge",
+        r"email_bridge",
         "email-stop (email-disable to keep it down)",
     ),
-    # Watchdog (runs as monitoring/worker_watchdog.py; hyphen form catches the
-    # com.valor.worker-watchdog launchd label instead of the command line).
+    # Watchdog: an independent launchd job (com.valor.worker-watchdog), not
+    # something `valor-service.sh` manages -- stop it the same way as the
+    # reflection worker below. `worker_watchdog` alone also matches the
+    # `monitoring/worker_watchdog.py` command line as a substring.
     (
         "monitoring/worker_watchdog.py",
-        r"monitoring/worker_watchdog\.py|worker_watchdog|worker-watchdog",
-        "scripts/valor-service.sh stop",
+        r"worker_watchdog|worker-watchdog",
+        "launchctl bootout gui/$(id -u)/com.valor.worker-watchdog",
     ),
     # Reflection worker (runs as `python -m reflections`; aliases catch the
     # com.valor.reflection-worker launchd label and the module attribute form).
@@ -80,7 +87,7 @@ _SERVICE_PATTERN = "(?:" + "|".join(f"(?:{pattern})" for _, pattern, _ in _SERVI
 _SANCTIONED = re.compile(r"reap-xdist\.sh")
 
 
-def _kill_verb_patterns(target_pattern: str) -> list:
+def _kill_verb_patterns(target_pattern: str) -> list[re.Pattern[str]]:
     """The four kill shapes parameterized over a target pattern."""
     return [
         # kill/killall taking its targets from a pgrep substitution:
@@ -102,16 +109,23 @@ def _kill_verb_patterns(target_pattern: str) -> list:
 
 
 _BLOCK_PATTERNS = _kill_verb_patterns(_TEST_RUNNER_PATTERN)
-_SERVICE_BLOCK_PATTERNS = _kill_verb_patterns(_SERVICE_PATTERN) + [
-    # killall takes a process NAME, not a command-line substring, so a
-    # standalone `worker` token here names the service itself -- the
-    # process-name position the kill shapes anchor on. This stays scoped to
-    # killall: pkill -f matches arbitrary command-line substrings, where a
-    # bare worker over-matches (homework, coworker, my-worker) and is
-    # deliberately never matched. The exact-token match keeps
-    # `killall my-worker` and `killall CoWorker` allowed.
-    re.compile(r"\bkillall\b\s+(?:-\w+\s+)?worker(?:\s|$|[;&\n])", re.IGNORECASE),
-]
+
+# killall takes a process NAME, not a command-line substring, so a standalone
+# `worker` token here names the service itself -- the process-name position
+# the kill shapes anchor on. This stays scoped to killall: pkill -f matches
+# arbitrary command-line substrings, where a bare worker over-matches
+# (homework, coworker, my-worker) and is deliberately never matched. The
+# exact-token match keeps `killall my-worker` and `killall CoWorker` allowed.
+# Kept separate from `python -m worker`'s own pattern (rather than folded into
+# _SERVICE_PATTERN) so it only ever widens the killall shape, never pkill/kill/
+# pgrep -- `_service_reason` below routes a match of this token to the worker
+# service's own reason explicitly, so it isn't silently misnamed as "shared
+# service".
+_KILLALL_WORKER_TOKEN = re.compile(
+    r"\bkillall\b\s+(?:-\w+\s+)?worker(?:\s|$|[;&\n])", re.IGNORECASE
+)
+
+_SERVICE_BLOCK_PATTERNS = _kill_verb_patterns(_SERVICE_PATTERN) + [_KILLALL_WORKER_TOKEN]
 
 _REASON = """Blocked: machine-wide pattern kill of pytest processes (issue #2562).
 
@@ -158,6 +172,10 @@ def _service_reason(command: str) -> str:
     Names the matched service and its sanctioned stop path so the agent knows
     what to run instead of the pattern kill.
     """
+    if _KILLALL_WORKER_TOKEN.search(command):
+        for service, _pattern, stop in _SERVICES:
+            if service == "python -m worker":
+                return _SERVICE_REASON_TEMPLATE.format(service=service, stop=stop)
     for service, pattern, stop in _SERVICES:
         if re.search(pattern, command, re.IGNORECASE):
             return _SERVICE_REASON_TEMPLATE.format(service=service, stop=stop)
@@ -180,11 +198,16 @@ def find_violation(command: str) -> str | None:
     """
     if not command:
         return None
-    if _SANCTIONED.search(command):
-        return None
-    for pattern in _BLOCK_PATTERNS:
-        if pattern.search(command):
-            return _REASON
+    # _SANCTIONED only exempts the test-runner branch (it names the pytest
+    # reaper, `reap-xdist.sh`). Widening to production services means a
+    # command that merely mentions that string -- e.g. in a trailing comment
+    # or a chained `&&` -- must not also disable the service guard, or the
+    # escape hatch built for pytest becomes an escape hatch for killing the
+    # dashboard or bridge too.
+    if not _SANCTIONED.search(command):
+        for pattern in _BLOCK_PATTERNS:
+            if pattern.search(command):
+                return _REASON
     for pattern in _SERVICE_BLOCK_PATTERNS:
         if pattern.search(command):
             return _service_reason(command)

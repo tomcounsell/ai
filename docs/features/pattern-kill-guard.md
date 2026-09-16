@@ -27,11 +27,11 @@ alternatives, sanctioned stop path):
 
 | Service | Production command line | Sanctioned stop |
 |---------|------------------------|-----------------|
-| Dashboard | `python -m ui.app` | `scripts/valor-service.sh stop` |
+| Dashboard | `python -m ui.app` | `scripts/valor-service.sh restart` (`valor-service.sh` has no dashboard-only stop verb; `stop` only stops the Telegram bridge) |
 | Worker | `python -m worker` | `worker-stop` (`worker-disable` to keep it down) |
 | Telegram bridge | `bridge/telegram_bridge.py` | `scripts/valor-service.sh stop` |
 | Email bridge | `python -m bridge.email_bridge` | `email-stop` (`email-disable` to keep it down) |
-| Watchdog | `monitoring/worker_watchdog.py` (plus `worker-watchdog` launchd-label alias) | `scripts/valor-service.sh stop` |
+| Watchdog | `monitoring/worker_watchdog.py` (plus `worker-watchdog` launchd-label alias) | `launchctl bootout gui/$(id -u)/com.valor.worker-watchdog` (an independent launchd job, not managed by `valor-service.sh`) |
 | Reflection worker | `python -m reflections` (plus `reflection_worker` alias) | `launchctl bootout gui/$(id -u)/com.valor.reflection-worker` |
 
 Adding the next service is one table row, not a new regex. The alternatives stay literal
@@ -40,15 +40,19 @@ clever regex. Bare `worker` is deliberately never matched: it is a substring of 
 innocent strings (`homework`, `coworker`), so only service-shaped forms (`-m worker`, the
 watchdog path and labels) block. The one exception is `killall`, which takes a process
 name rather than a command-line substring: a standalone `killall worker` token names the
-service itself, so it blocks while `killall my-worker` and `killall CoWorker` stay allowed.
+service itself, so it blocks while `killall my-worker` and `killall CoWorker` stay allowed
+-- and its reason is routed to the worker service's own stop path explicitly, not the
+generic "shared service" fallback.
 
 ## Reason routing
 
 `find_violation` checks test-runner shapes first (keeping the original pytest reason
-byte-for-byte), then the service table. A service block names that service's sanctioned
-stop path plus the kill-by-PID rule for throwaway instances: find the PID with read-only
-inspection (`pgrep -af`, `ps`, both always allowed) and `kill <pid>`. Never clear processes
-by pattern.
+byte-for-byte), then the service table. The `reap-xdist.sh` exemption is scoped to the
+test-runner branch only: a command mentioning it is never exempted from the service
+guard, so `scripts/reap-xdist.sh --apply && pkill -f "python -m ui.app"` still blocks.
+A service block names that service's sanctioned stop path plus the kill-by-PID rule
+for throwaway instances: find the PID with read-only inspection (`pgrep -af`, `ps`, both
+always allowed) and `kill <pid>`. Never clear processes by pattern.
 
 ## Enforcement path
 
