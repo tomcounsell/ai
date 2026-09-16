@@ -43,12 +43,26 @@ Fires when Claude attempts to end a session.
 
 ### 2. `validate_commit_message_sdlc.py` — PreToolUse/Bash Hook
 
-Fires before any Bash tool call containing `git commit`.
+Fires before any Bash tool call that invokes `git commit`.
 
 - **Blocks code file commits on main unconditionally**: If on `main` branch and staged files include `.py`, `.js`, or `.ts` files, the commit is blocked regardless of SDLC context. Non-code files (docs, plans, configs) are allowed on main.
-- Blocks commits with `Co-Authored-By:` trailers (case-insensitive)
-- Blocks commits with empty messages
 - All other Bash commands pass through immediately
+
+Co-author trailers and empty messages are **not** this hook's concern. That check lives in the project-scope `.claude/hooks/validators/validate_commit_message.py` (listed below), and no such logic exists anywhere in the `sdlc/` fork.
+
+**What counts as a commit** is decided by tokenizing, never by a substring search (`is_git_commit`). `git -C <worktree> commit` is a commit even though the literal string `git commit` never appears in it, and `echo "git commit"` is not one. The recognizer steps over leading `VAR=value` assignments and the values of git's value-taking global options (`-C`, `-c`, `--git-dir`, `--work-tree`), then requires the first bare subcommand token to be `commit`.
+
+Recognition and directory resolution share one parser (`parse_git_invocation`), and it **stops at the subcommand**. That boundary carries weight in both directions. Everything after the subcommand belongs to the subcommand, so `git commit -C HEAD` is `--reuse-message` and not a directory change; treating it as a path produced an effective directory that could not exist, which failed every git query into the fail-open handler and allowed the commit. The same requirement keeps `grep -C 3 commit README.md` from being read as a git invocation at all.
+
+**Command splitting is quote-aware.** A newline, `&&`, `;` or `|` separates commands only outside quotes. A multi-line `-m` message — the normal shape here, and the shape of every message carrying a `Closes #N` disposition line — would otherwise be shredded into fragments with unbalanced quotes, none of which tokenize, so the command would not be recognized as a commit and would be allowed. Comments are skipped for the same reason: an apostrophe inside a `#` comment opens a quote that never closes, swallowing every separator after it, so a commit further down the script stops being recognized. In real bash an unbalanced quote is a syntax error everywhere except inside a comment, which is why that is the one shape worth handling. A `#` inside quotes stays message text.
+
+**Every git query is scoped to the directory the command will actually run in.** `effective_git_dir` (in `sdlc_context.py`) resolves, in order: a directory-bearing **global** option of the git invocation that carries the commit (`-C`, else `--work-tree`, else `--git-dir`, whose parent is the working tree), a leading `cd <path>` (read through `cd`'s own option grammar — `-L`, `-P` and the `cd -- "$dir"` idiom are options, not the path), the hook payload's `cwd`, and only as a last resort the hook process's own working directory. A path token that was never expanded is rejected in favor of the next rung — `$(...)`, `` ` ``, `${...}`, a leading `$`, or a leading `~` (tilde expansion is the shell's job, not `shlex`'s). Using any of them as a directory would send every git call into its fail-open handler, which allows.
+
+Reading git state from the process working directory is the defect this replaced (#3259). It produced false blocks (the lane is on a feature branch, the shared checkout is on main) and, worse, false allows in the other direction.
+
+**Repository identity comes from the common git dir**, via `git rev-parse --path-format=absolute --git-common-dir` with a fallback to the bare flag for git < 2.31. The worktree-root probe (`--show-toplevel`) is not used on any path: inside `popoto/.worktrees/lane-a` it returns the *worktree* root, whose basename is the lane slug, so the commit clears the `!= "popoto"` gate and is allowed — a false-allow-always for exactly the population this guard protects. When identity cannot be determined at all, the hook takes the **restrictive** branch: a guard that cannot tell which repo it is in must not conclude "not the protected one, therefore fine."
+
+**Deployment is verified, not assumed.** `sync_user_hooks` ends in `verify_deployed_commit_guard`, which builds a throwaway `popoto` repo with a linked worktree on `main`, stages a `.py` file, and asks the *deployed* hook — through the same interpreter the generated settings command names — whether it blocks. It asks in **both** directions: the staged commit must block, and a read-only `git status` must be allowed. Asserting only that something blocks would certify a deny-all guard as healthy, which wedges every session on the machine. A fixture that cannot be built warns and continues (it must still be *said* — a behavioral proof that can silently stop running is not a proof); either wrong answer is a hard error that fails the run — routed to `result.errors`, not `result.warnings`, because a guard that is deployed and wrong is not a file that failed to link. The hardlink existing and the script importing were both green throughout the #3259 window; this is the only signal that asks the question the fleet depends on.
 
 ### 3. `sdlc_reminder.py` — PostToolUse/Write+Edit Hook
 
@@ -233,7 +247,7 @@ is swallowed rather than blocking the agent's turn-end.
 
 ### Shared Context Module
 
-All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
+All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`, plus `effective_git_dir` / `split_simple_commands` for directory resolution). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
 
 The `is_sdlc_context()` detection is two-tier:
 1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)

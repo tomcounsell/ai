@@ -216,6 +216,68 @@ def _append_warning(result: UpdateResult, text: str) -> None:
     result.warnings.append(" ".join(text.split("\n")))
 
 
+def report_hardlink_actions(result: UpdateResult, v: bool) -> None:
+    """Render the hardlink sync's actions and set the run's disposition.
+
+    Extracted from `run_update` so the dispositions can be tested directly.
+    They could not be before, and the one that mattered most was wrong in both
+    directions: a self-check FAILURE (the deployed guard is wrong, the fleet is
+    unprotected) rendered as a generic warning and left `success` True, while a
+    self-check SKIP (nothing was learned about the guard) had no reader at all
+    and rendered as nothing. A behavioral proof that can silently stop running
+    is not a proof (#3259).
+    """
+    hr = result.hardlink_result
+    if hr is None:
+        return
+
+    if hr.created > 0:
+        log(f"Created {hr.created} new hardlink(s)", v, always=True)
+        for action in hr.actions:
+            if action.action == "created":
+                log(f"  {action.dst}", v, always=True)
+
+    if hr.removed > 0:
+        # "removed" covers four unrelated events: a stale hardlink swept by
+        # RENAMED_REMOVALS, the ~/.claude/{skills,hooks} dir-symlink migration,
+        # a hook deregistered by the dead-script sweep, and one deregistered by
+        # the marker-keyed removal pass. Naming them all "stale hardlink(s)"
+        # told an operator the wrong thing about three of the four, so the
+        # count is generic and each line carries its own detail. Every pass
+        # that increments `removed` must emit a matching "removed" action, or
+        # this prints a bare number with nothing under it.
+        log(f"Removed {hr.removed} item(s) from ~/.claude/", v, always=True)
+        for action in hr.actions:
+            if action.action == "removed":
+                detail = f" ({action.error})" if action.error else ""
+                log(f"  {action.dst}{detail}", v, always=True)
+
+    if hr.errors > 0:
+        for action in hr.actions:
+            if action.action != "error":
+                continue
+            if hardlinks.SELF_CHECK_DETAIL in (action.error or ""):
+                # The one hardlink action whose failure means the fleet is
+                # unprotected rather than that a file did not link. As a
+                # warning it rendered "COMPLETED with N warning(s)" under the
+                # generic "Hardlink step failed" text and left success True.
+                log(f"ERROR: {action.error}", v, always=True)
+                _append_error(result, action.error or "")
+                continue
+            log(f"WARN: {action.error} ({action.dst})", v)
+            _append_warning(result, f"Hardlink step failed: {action.dst}")
+
+    if hr.skipped > 0:
+        for action in hr.actions:
+            # The fail-soft arm. Nothing was learned about the deployed guard,
+            # which is not an error -- but it must still be SAID, or the
+            # machines whose fixture cannot be built (the hostile-config ones
+            # most likely to need the check) report a clean run forever.
+            if action.action == "skipped" and hardlinks.SELF_CHECK_DETAIL in (action.error or ""):
+                log(f"WARN: {action.error}", v, always=True)
+                _append_warning(result, action.error or "")
+
+
 def _append_error(result: UpdateResult, text: str) -> None:
     """Append an error with embedded newlines collapsed — the same hole
     exists on the failure path, and it is the path where the dropped tail
@@ -1100,34 +1162,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("hooks: MISSING sdlc_context (see #2561)", v, always=True)
         _append_warning(result, "hooks: MISSING sdlc_context (see #2561)")
 
-    if result.hardlink_result.created > 0:
-        log(f"Created {result.hardlink_result.created} new hardlink(s)", v, always=True)
-        for action in result.hardlink_result.actions:
-            if action.action == "created":
-                log(f"  {action.dst}", v, always=True)
-    if result.hardlink_result.removed > 0:
-        # "removed" covers four unrelated events: a stale hardlink swept by
-        # RENAMED_REMOVALS, the ~/.claude/{skills,hooks} dir-symlink migration,
-        # a hook deregistered by the dead-script sweep, and one deregistered by
-        # the marker-keyed removal pass. Naming them all "stale hardlink(s)"
-        # told an operator the wrong thing about three of the four, so the
-        # count is generic and each line carries its own detail. Every pass
-        # that increments `removed` must emit a matching "removed" action, or
-        # this prints a bare number with nothing under it.
-        log(
-            f"Removed {result.hardlink_result.removed} item(s) from ~/.claude/",
-            v,
-            always=True,
-        )
-        for action in result.hardlink_result.actions:
-            if action.action == "removed":
-                detail = f" ({action.error})" if action.error else ""
-                log(f"  {action.dst}{detail}", v, always=True)
-    if result.hardlink_result.errors > 0:
-        for action in result.hardlink_result.actions:
-            if action.action == "error":
-                log(f"WARN: {action.error} ({action.dst})", v)
-                _append_warning(result, f"Hardlink step failed: {action.dst}")
+    report_hardlink_actions(result, v)
 
     # Step 1.55: Heal launchd plist PATH entries (ensure ~/.local/bin is present)
     healed_plists = service.heal_plist_paths(project_dir)

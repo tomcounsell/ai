@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -302,6 +303,205 @@ def hooks_were_migrated(result: HardlinkSyncResult) -> bool:
 def _tilde(path: Path) -> str:
     """``$HOME``-relative rendering, the form every action in this module uses."""
     return str(path).replace(str(Path.home()), "~")
+
+
+# The commit guard's path under the hooks root, and the seconds allowed for one
+# end-to-end self-check. Provisional/tunable: the fixture is three git calls and
+# one interpreter start, so the ceiling is generous on purpose -- a slow machine
+# must not be reported as a broken deployment.
+COMMIT_GUARD_SCRIPT = PurePosixPath("sdlc/validate_commit_message_sdlc.py")
+_SELF_CHECK_TIMEOUT = 30.0
+
+# Stamped on the self-check's actions so /update and the tests can match on a
+# token rather than on prose.
+SELF_CHECK_DETAIL = "commit-guard self-check"
+
+
+def _build_self_check_fixture(tmp: Path) -> Path:
+    """Build a `popoto` repo on `main` with a linked worktree, also on `main`.
+
+    Returns the worktree path. Raises on any failure -- the caller turns that
+    into a WARN, never into a failed sync, because a fixture that cannot be
+    built says nothing about the deployed hook.
+
+    Hermetic by construction: it trusts nothing about the host's git config.
+    The branch is pinned with ``symbolic-ref`` before the first commit rather
+    than through ``init.defaultBranch``, which is still ``master`` on many
+    hosts, and identity is passed on every call so a host with no configured
+    ``user.email`` still produces a commit.
+
+    Three more global settings are neutralized because each one makes the
+    fixture raise on an otherwise healthy machine, and a fixture that cannot
+    be built downgrades to WARN -- so the deployment-time behavioral proof
+    would silently stop running on exactly the developer machines most likely
+    to have them set: ``core.hooksPath`` (a global hook that rejects the
+    commit), ``commit.gpgsign`` (no signing key in this throwaway repo), and
+    ``gpg.format``.
+
+    The shape is the defect's shape (#3259): the guard must be asked about a
+    commit in a linked worktree whose basename is NOT ``popoto``, from a
+    process whose own cwd is somewhere else entirely.
+    """
+    identity = [
+        "-c",
+        "user.email=selfcheck@localhost",
+        "-c",
+        "user.name=selfcheck",
+        "-c",
+        "core.hooksPath=",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "gpg.format=openpgp",
+    ]
+
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *identity, "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_SELF_CHECK_TIMEOUT,
+        )
+
+    repo = tmp / "popoto"
+    repo.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", str(repo)],
+        capture_output=True,
+        check=True,
+        timeout=_SELF_CHECK_TIMEOUT,
+    )
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/main")
+    (repo / "README.md").write_text("base\n")
+    git(repo, "add", "README.md")
+    git(repo, "commit", "-qm", "base")
+
+    # git refuses to check out one branch in two places, so the primary
+    # checkout moves off main first. That ordering is not a workaround: it is
+    # exactly the live layout, where the lane worktree sits on the branch the
+    # shared checkout has left.
+    git(repo, "checkout", "-q", "-b", "selfcheck/primary")
+    worktree = tmp / "lane-selfcheck"
+    git(repo, "worktree", "add", str(worktree), "main")
+
+    (worktree / "staged.py").write_text("x = 1\n")
+    git(worktree, "add", "staged.py")
+    return worktree
+
+
+def verify_deployed_commit_guard(
+    hooks_root: Path, interpreter: str | None, result: HardlinkSyncResult
+) -> None:
+    """Prove the DEPLOYED commit guard still blocks the #3259 case.
+
+    Two failure classes, two dispositions:
+
+    * The fixture could not be BUILT (no git, a sandbox that forbids
+      ``worktree add``, a full disk) -- **WARN and continue**. Nothing was
+      learned about the hook, and refusing to finish a sync over a broken
+      fixture would brick ``/update`` on machines whose deployment is fine.
+    * The fixture built and the deployed hook ALLOWED the commit -- **record an
+      error**. The guard is deployed and wrong, which is the silent
+      false-allow this whole fix exists to end, and a sync that reports success
+      would leave every machine on the fleet believing it is protected.
+
+    The check runs the deployed file through the same interpreter the generated
+    settings command names, so it exercises the real deployment: a stale
+    hardlink, a missing ``sdlc_context.py`` sibling, or a syntax error under the
+    3.9 floor all surface here as a non-blocking hook.
+    """
+    script = hooks_root / COMMIT_GUARD_SCRIPT
+    if interpreter is None or not script.is_file():
+        return  # Nothing deployed to check; the caller already reported why.
+
+    tmp = Path(tempfile.mkdtemp(prefix="hookselfcheck-"))
+    try:
+        try:
+            worktree = _build_self_check_fixture(tmp)
+        except Exception as e:
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(script),
+                    "skipped",
+                    f"{SELF_CHECK_DETAIL} skipped: fixture could not be built ({e})",
+                )
+            )
+            result.skipped += 1
+            return
+
+        def run_payload(command):
+            payload = json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                    # Deliberately NOT the worktree: the defect was the hook
+                    # reading git state from wherever the process happened to be.
+                    "cwd": str(tmp),
+                }
+            )
+            return subprocess.run(
+                [interpreter, str(script)],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=_SELF_CHECK_TIMEOUT,
+            )
+
+        lane = shlex.quote(str(worktree))
+        try:
+            proc = run_payload(f"git -C {lane} commit -m wip")
+            # Both directions, because asserting only that something blocks
+            # certifies a deny-all guard as healthy -- a hook that blocked
+            # every Bash call would pass the check above and wedge the fleet.
+            allow_proc = run_payload(f"git -C {lane} status")
+        except Exception as e:
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(script),
+                    "error",
+                    f"{SELF_CHECK_DETAIL} FAILED: the deployed hook could not be run ({e})",
+                )
+            )
+            result.errors += 1
+            return
+
+        if '"block"' in allow_proc.stdout:
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(script),
+                    "error",
+                    f"{SELF_CHECK_DETAIL} FAILED: the deployed guard BLOCKED a read-only "
+                    "`git status`. It is denying commands it must allow, which wedges every "
+                    f"session on this machine. stdout={allow_proc.stdout.strip()!r}",
+                )
+            )
+            result.errors += 1
+            return
+
+        if '"block"' in proc.stdout:
+            result.actions.append(
+                LinkAction("", _tilde(script), "exists", f"{SELF_CHECK_DETAIL} passed")
+            )
+            return
+
+        result.actions.append(
+            LinkAction(
+                "",
+                _tilde(script),
+                "error",
+                f"{SELF_CHECK_DETAIL} FAILED: the deployed guard ALLOWED a code commit to "
+                "main from a linked worktree (#3259). Global hooks on this machine are not "
+                f"protecting main. exit={proc.returncode} stdout={proc.stdout.strip()!r} "
+                f"stderr={proc.stderr.strip()[-400:]!r}",
+            )
+        )
+        result.errors += 1
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # Detail string stamped on the ~/.claude/hooks migration action, and the token
@@ -1127,6 +1327,12 @@ def sync_user_hooks(
     Only ``scope == "global"`` manifest entries (the SDLC-fork scripts that
     run inside foreign repos) are synced to user level. Other hooks
     (validators, calendar, etc.) remain project-specific.
+
+    Every path that leaves scripts deployed ends in
+    ``verify_deployed_commit_guard``, which proves the deployed commit guard
+    still blocks the #3259 case against a throwaway fixture. A guard that is
+    present but silently non-blocking looks identical to a healthy one in every
+    other signal this function produces.
     """
     result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
@@ -1229,6 +1435,7 @@ def sync_user_hooks(
             _register_deployed_only(
                 user_claude / "settings.json", hooks_root, global_decls, interpreter, result
             )
+            verify_deployed_commit_guard(hooks_root, interpreter, result)
             return result
 
     seen_scripts: set[str] = set()
@@ -1278,6 +1485,8 @@ def sync_user_hooks(
     _register_deployed_only(
         user_claude / "settings.json", hooks_root, global_decls, interpreter, result
     )
+
+    verify_deployed_commit_guard(hooks_root, interpreter, result)
 
     return result
 

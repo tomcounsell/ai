@@ -151,7 +151,7 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 ### Technical Approach
 
 - **Resolution precedence**, highest first, implemented in `effective_git_dir`:
-  1. `git -C <path>` appearing in the simple command that contains `commit` (relative paths resolved against the next rung down).
+  1. `git -C <path>` appearing in the simple command that contains `commit` (a relative path is resolved against the payload `cwd` — rung 3 — not against a preceding `cd`, matching `effective_git_dir`'s docstring and implementation. `cd /a/b && git -C sub commit` therefore yields `<payload_cwd>/sub`. No lane emits that shape; the rung exists for the absolute `git -C <worktree> commit` form the harness actually issues).
   2. A leading `cd <path>` simple command, resolved against `hook_cwd` when relative — ported from `validate_no_uv_sync_in_worktree.py::_effective_dir`, including `_split_simple_commands` splitting on `&& || ; |` and newlines and `shlex` tokenization with a `ValueError` fail-open.
 - **Unexpanded-shell-construct rejection** (critique concern): rungs 1 and 2 accept a path token only if it is literal. A token containing `$(`, a backtick, `${`, or a leading `$` is an unexpanded shell construct — `shlex.split` hands it back verbatim, and `git -C '$(git rev-parse --show-toplevel)/.worktrees/lane-a'` then fails into the existing fail-open handlers and *allows*. Reject such tokens and fall through to the next rung, where the payload `cwd` is a real, already-resolved directory and is the correct answer for precisely this command shape. This mirrors the `shlex.split` `ValueError` fall-through already specified for the same two rungs.
   3. The payload `cwd`.
@@ -419,13 +419,18 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Resolver exists in the deployed sibling | `grep -c 'def effective_git_dir' .claude/hooks/sdlc/sdlc_context.py` | output > 0 |
 | Anti-criterion: no `hook_utils` import in the global fork | `! grep -rq 'hook_utils' .claude/hooks/sdlc/` | exit code 0 |
 | Anti-criterion: the flag is gone from the hook's argv | `! grep -q '"--show-toplevel"' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | exit code 0 |
-
-> Every anti-criterion row above is written in the negated-quiet `! grep -q` form on purpose. `grep -c` exits **1** when the count is zero and **0** when there are matches, so an "Expected: match count == 0" row read by process exit status scores a correct fix as FAILURE and a broken hook as PASS. `grep -qc` does not fix it — the exit status is identical. Task 6 runs every row by exit status, so absence must map to exit 0. The `--show-toplevel` pattern is quote-anchored to the argv literal so an explanatory comment naming the flag does not trip it.
-| Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k identity_probe_failure -q` | exit code 0 |
+| Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k probe_failure -q` | exit code 0 |
 | Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
 | 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
 | Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |
-| Deployed hardlink intact | `python -c "import os,pathlib,subprocess; r=pathlib.Path(subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True).stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+| Deployed hardlink intact | `python -c "import os,pathlib,subprocess; p=subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True); assert p.returncode==0 and p.stdout.strip(), 'common-dir probe failed'; r=pathlib.Path(p.stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+
+> Both notes below sit *after* the whole table on purpose. A blockquote placed
+> between two rows terminates the markdown table, and the automated Verification
+> runner then treats everything past the break as a separate non-check table and
+> silently skips it — five rows went unrun that way in round 4.
+
+> Every anti-criterion row above is written in the negated-quiet `! grep -q` form on purpose. `grep -c` exits **1** when the count is zero and **0** when there are matches, so an "Expected: match count == 0" row read by process exit status scores a correct fix as FAILURE and a broken hook as PASS. `grep -qc` does not fix it — the exit status is identical. Task 6 runs every row by exit status, so absence must map to exit 0. The `--show-toplevel` pattern is quote-anchored to the argv literal so an explanatory comment naming the flag does not trip it.
 
 > The hardlink row is anchored to the MAIN checkout, resolved from the common
 > git dir, and not to the invoking directory. Deployment hardlinks
@@ -434,7 +439,10 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 > form of this row stats that copy and prints `False` for a deployment that is
 > perfectly healthy -- a false failure that Task 6 would hit every time. This
 > is the same class of defect as #3259 itself: reading git state from wherever
-> the process happens to be standing.
+> the process happens to be standing. The row asserts the probe's returncode
+> before using its output: on git < 2.31 `--path-format=absolute` errors,
+> `stdout.strip()` is empty, `Path("").parent` is `.`, and the row would
+> silently revert to the worktree-relative stat it was hardened against.
 
 ## Critique Results
 

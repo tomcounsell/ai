@@ -2117,3 +2117,166 @@ def test_a_non_string_command_neither_crashes_the_sweep_nor_is_removed(
     settings = json.loads((user_claude / "settings.json").read_text())
     commands = [e["command"] for b in settings["hooks"]["PreToolUse"] for e in b["hooks"]]
     assert None in commands and 42 in commands, "the sweep did not leave malformed entries alone"
+
+
+# ---------------------------------------------------------------------------
+# Post-sync commit-guard self-check (#3259)
+#
+# The hook these tests exercise was fleet-deployed and silently non-blocking
+# from inside a linked worktree. Every other signal /update produces -- the
+# hardlink exists, the inode matches, the script imports -- was GREEN the whole
+# time. The self-check is the only one that asks the deployed file the question
+# the fleet actually depends on, so it gets its own coverage here.
+# ---------------------------------------------------------------------------
+
+
+def _deployed_guard(home: Path) -> Path:
+    return home / ".claude" / "hooks" / str(hardlinks.COMMIT_GUARD_SCRIPT)
+
+
+def _self_check_actions(result) -> list:
+    return [a for a in result.actions if hardlinks.SELF_CHECK_DETAIL in (a.error or "")]
+
+
+def test_self_check_passes_against_the_real_deployed_guard(fake_home):
+    """A full sync of the real repo deploys a guard that blocks the #3259 case.
+
+    This is the production path, not a fixture of one: whatever
+    ``sync_user_hooks`` actually puts on disk is what gets interrogated.
+    """
+    _require_global_interpreter()
+
+    result = hardlinks.sync_user_hooks(_REPO_ROOT)
+
+    assert result.errors == 0, [a.error for a in result.actions if a.error]
+    checks = _self_check_actions(result)
+    assert len(checks) == 1, f"expected exactly one self-check action, got {checks}"
+    assert checks[0].error.endswith("passed")
+
+
+def test_self_check_hard_fails_on_a_deployed_guard_that_allows(fake_home):
+    """A guard that is present, importable, and wrong is an ERROR, not a pass.
+
+    The deployed file is replaced (unlink first -- writing through the hardlink
+    would edit the checkout) with a hook that always allows. That is precisely
+    the pre-fix behavior from inside a linked worktree, and the sync must refuse
+    to call it healthy.
+    """
+    interpreter = _require_global_interpreter()
+    hardlinks.sync_user_hooks(_REPO_ROOT)
+
+    guard = _deployed_guard(fake_home)
+    guard.unlink()
+    guard.write_text("import sys\nsys.exit(0)\n")
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.verify_deployed_commit_guard(guard.parent.parent, interpreter, result)
+
+    assert result.errors == 1
+    (action,) = _self_check_actions(result)
+    assert "FAILED" in action.error
+    assert "#3259" in action.error
+
+
+def test_self_check_hard_fails_when_the_deployed_guard_cannot_run(fake_home):
+    """An interpreter that does not exist is a deployment failure, not a warn.
+
+    A hook that cannot be executed blocks nothing, which is indistinguishable
+    from a false-allow for anyone relying on it.
+    """
+    _require_global_interpreter()
+    hardlinks.sync_user_hooks(_REPO_ROOT)
+    guard = _deployed_guard(fake_home)
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.verify_deployed_commit_guard(guard.parent.parent, "/nonexistent/python3", result)
+
+    assert result.errors == 1
+    (action,) = _self_check_actions(result)
+    assert "could not be run" in action.error
+
+
+def test_self_check_warns_when_the_fixture_cannot_be_built(fake_home, monkeypatch):
+    """No git, no sandbox permission, no disk -- WARN and continue.
+
+    Nothing was learned about the deployed hook, and failing the sync over a
+    fixture the host would not let us build would brick ``/update`` on machines
+    whose deployment is perfectly healthy.
+    """
+    interpreter = _require_global_interpreter()
+    hardlinks.sync_user_hooks(_REPO_ROOT)
+    guard = _deployed_guard(fake_home)
+
+    def boom(_tmp):
+        raise RuntimeError("git: command not found")
+
+    monkeypatch.setattr(hardlinks, "_build_self_check_fixture", boom)
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.verify_deployed_commit_guard(guard.parent.parent, interpreter, result)
+
+    assert result.errors == 0
+    assert result.skipped == 1
+    (action,) = _self_check_actions(result)
+    assert "fixture could not be built" in action.error
+    assert "git: command not found" in action.error
+
+
+def test_self_check_is_a_noop_when_no_guard_is_deployed(tmp_path):
+    """An empty hooks root records nothing. The caller has already reported why
+    a script is missing; a second, differently-worded error would be noise."""
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.verify_deployed_commit_guard(tmp_path, "/usr/bin/python3", result)
+
+    assert result.actions == []
+    assert result.errors == 0
+
+
+def test_self_check_removes_its_fixture(fake_home, monkeypatch):
+    """The fixture is a throwaway. It is removed on the success path too --
+    an /update that leaks a git repo per run into the temp dir is its own bug."""
+    interpreter = _require_global_interpreter()
+    hardlinks.sync_user_hooks(_REPO_ROOT)
+    guard = _deployed_guard(fake_home)
+
+    made: list[str] = []
+    real_mkdtemp = hardlinks.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        made.append(path)
+        return path
+
+    monkeypatch.setattr(hardlinks.tempfile, "mkdtemp", recording_mkdtemp)
+
+    result = hardlinks.HardlinkSyncResult()
+    hardlinks.verify_deployed_commit_guard(guard.parent.parent, interpreter, result)
+
+    assert len(made) == 1
+    assert not Path(made[0]).exists(), "the self-check left its fixture behind"
+
+
+def test_self_check_fixture_is_the_worktree_shape(tmp_path):
+    """The fixture must reproduce the DEFECT's layout, not merely a repo.
+
+    A fixture whose only checkout is a directory named ``popoto`` sitting on
+    ``main`` would pass against the buggy hook, and the self-check would certify
+    the exact deployment it exists to catch. Assert the shape explicitly: the
+    worktree is on ``main``, its basename is not ``popoto``, and a ``.py`` file
+    is staged.
+    """
+    worktree = hardlinks._build_self_check_fixture(tmp_path)
+
+    assert worktree.name != "popoto"
+    branch = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch == "main"
+    staged = subprocess.run(
+        ["git", "-C", str(worktree), "diff", "--cached", "--name-only"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert staged == ["staged.py"]

@@ -201,6 +201,8 @@ echo '{}' | env -i /usr/bin/python3 .claude/hooks/sdlc/validate_commit_message_s
 
 The first must resolve and print a version with exit 0 from both the main checkout and any `.worktrees/{slug}/` checkout. The second is the global-scope floor check: every declared global script must exit 0 on an empty JSON payload under the oldest system interpreter.
 
+Both tokens are *liveness* checks: they prove a hook starts, not that it still decides correctly. `sync_user_hooks` adds a behavioral one for the commit guard (`verify_deployed_commit_guard`), which interrogates the deployed file against a throwaway fixture repo and asks it in both directions: a guard that runs cleanly while blocking nothing, **and** one that blocks a read-only `git status`, are both errors rather than a healthy sync. Asserting only the blocking direction would certify a deny-all guard as healthy, which wedges every session on the machine. See [`sdlc-enforcement.md`](sdlc-enforcement.md). A fixture that cannot be built on the host warns and continues — a hostile sandbox must not brick `/update`, since `/update` is what repairs a broken deployment — but it does warn: the skip had no reader at all, so those machines reported a clean run while the behavioral proof had silently stopped running.
+
 ## Per-Event Dispatcher
 
 `.claude/hooks/dispatch/pre_tool_use_bash.py` collapses what used to be 8 separate interpreter starts — one process per PreToolUse/Bash validator — into a single process that reads the hook JSON from stdin once and calls each validator's predicate function in-process:
