@@ -35,8 +35,6 @@ Claude Code hook protocol:
 from __future__ import annotations
 
 import os
-import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +42,14 @@ from pathlib import Path
 # Standalone script — sys.path mutation is safe (never imported as library)
 # Import shared utilities from sibling module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sdlc_context import allow, block, effective_git_dir, read_stdin, split_simple_commands
+from sdlc_context import (
+    allow,
+    block,
+    effective_git_dir,
+    parse_git_invocation,
+    read_stdin,
+    split_simple_commands,
+)
 
 _GIT_TIMEOUT_S = 5
 _CODE_EXTENSIONS = (".py", ".js", ".ts")
@@ -109,55 +114,19 @@ def get_repo_name(cwd: str) -> str | None:
     return Path(common_dir).parent.name
 
 
-# Global options that take a VALUE, so the token after them is an argument and
-# never the subcommand. `git -C /x commit` must not be read as running `/x`.
-_GIT_VALUE_OPTS = (
-    "-C",
-    "-c",
-    "--git-dir",
-    "--work-tree",
-    "--namespace",
-    "--exec-path",
-    "--super-prefix",
-)
-
-
 def is_git_commit(command: str) -> bool:
     """True if `command` invokes `git commit` in any of its spellings.
 
-    A substring test for the literal `"git commit"` is what this replaces, and
-    it was wrong in both directions. It MISSES `git -C <dir> commit`, which is
-    precisely the worktree-scoped form this hook exists to catch -- resolving
-    `-C` is pointless when the fast path drops every command that uses it. And
-    it MATCHES `echo "run git commit"`, blocking on prose.
-
-    So: split on shell control operators, and in each simple command require
-    that the program is `git` and that the first non-option token (skipping the
-    values of the global options above) is `commit`.
+    Recognition and directory resolution share one parser
+    (`sdlc_context.parse_git_invocation`) on purpose: when they disagreed,
+    the fast path here dropped every `git -C <dir> commit` before the
+    resolver ever ran, which made the whole `-C` resolution unreachable
+    through the real entry point.
     """
     for simple_cmd in split_simple_commands(command or ""):
-        try:
-            tokens = shlex.split(simple_cmd)
-        except ValueError:
-            continue
-        # Step over leading VAR=value environment assignments.
-        i = 0
-        while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
-            i += 1
-        if i >= len(tokens) or os.path.basename(tokens[i]) != "git":
-            continue
-        i += 1
-        while i < len(tokens):
-            token = tokens[i]
-            if token in _GIT_VALUE_OPTS:
-                i += 2
-                continue
-            if token.startswith("-"):
-                i += 1
-                continue
-            if token == "commit":
-                return True
-            break  # some other git subcommand; keep scanning the rest
+        parsed = parse_git_invocation(simple_cmd)
+        if parsed is not None and parsed["subcommand"] == "commit":
+            return True
     return False
 
 

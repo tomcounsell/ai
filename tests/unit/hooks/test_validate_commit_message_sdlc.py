@@ -442,6 +442,17 @@ class TestCommitRecognition:
             "/usr/bin/git commit -m x",
             "git status && git -C /lane commit -m x",
             "git commit --amend --no-edit",
+            # Multi-line messages: the repo's normal commit shape. A splitter
+            # that breaks on a bare newline shreds these into fragments with
+            # unbalanced quotes, none of which parse, and the command is not
+            # recognized as a commit at all -- a false ALLOW (review blocker 1).
+            "git commit -m 'subject\n\nbody'",
+            'git commit -m "subject\n\nCloses #3259"',
+            "git add -A && git commit -m 'subject\nbody'",
+            "git commit -m \"$(cat <<'EOF'\nsubject\n\nbody\nEOF\n)\"",
+            # `-C` as commit's own --reuse-message, not a directory change.
+            "git commit -C HEAD",
+            "git commit --amend -C ORIG_HEAD",
         ],
     )
     def test_recognized_as_a_commit(self, command):
@@ -457,10 +468,85 @@ class TestCommitRecognition:
             'echo "run git commit next"',
             "grep -r 'git commit' docs/",
             "git -C /lane push",
+            # `-C` belongs to grep here, and the word `commit` is a search
+            # term. Nothing in this is a git invocation at all.
+            "grep -C 3 commit README.md",
         ],
     )
     def test_not_recognized_as_a_commit(self, command):
         assert hook.is_git_commit(command) is False
+
+
+class TestSubcommandOptionsAreNotDirectoryOverrides:
+    """`-C` means two different things either side of the subcommand.
+
+    Before the subcommand it is git's global "run as if started in <path>".
+    After it, `git commit -C <commit>` is `--reuse-message`. Scanning the whole
+    token list for `-C` turned a commit-ish into a path, so the effective
+    directory became `<cwd>/HEAD`, every git query failed, and the hook's
+    fail-open handler ALLOWED a code commit to main (PR #3342 review blocker 2).
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git commit -C HEAD",
+            "git commit --amend -C ORIG_HEAD",
+            "git commit -C HEAD -m x",
+        ],
+    )
+    def test_reuse_message_does_not_become_the_effective_dir(self, command):
+        resolved = sdlc_context.effective_git_dir(command, "/payload")
+        assert resolved == "/payload"
+
+    def test_a_non_git_command_carrying_dash_c_is_ignored(self):
+        """`grep -C 3 commit file` used to yield an effective dir of `<cwd>/3`."""
+        command = "grep -C 3 commit README.md; git -C /lane commit -m x"
+        assert sdlc_context.effective_git_dir(command, "/payload") == "/lane"
+
+    def test_reuse_message_still_blocks_end_to_end(self, tmp_path):
+        """The verdict must come from the worktree, not from a bogus path."""
+        repo = make_repo(tmp_path, "popoto")
+        lane = worktree_on_main(repo, tmp_path / "lane-a")
+        (lane / "mod.py").write_text("x = 1\n")
+        git(lane, "add", "mod.py")
+        reason = hook.commit_block_reason("git commit -C HEAD", str(lane))
+        assert reason is not None
+        assert "mod.py" in reason
+
+
+class TestMultiLineCommitMessages:
+    """A newline inside a quoted `-m` is message text, not a command separator."""
+
+    def test_multi_line_message_still_blocks_end_to_end(self, tmp_path):
+        repo = make_repo(tmp_path, "popoto")
+        lane = worktree_on_main(repo, tmp_path / "lane-a")
+        (lane / "mod.py").write_text("x = 1\n")
+        git(lane, "add", "mod.py")
+        command = f"git -C {lane} commit -m 'subject\n\nbody line\n\nCloses #3259'"
+        reason = hook.commit_block_reason(command, str(tmp_path))
+        assert reason is not None
+        assert "mod.py" in reason
+
+    def test_quoted_separators_do_not_split_the_command(self):
+        parts = sdlc_context.split_simple_commands("git commit -m 'a && b; c | d'")
+        assert parts == ["git commit -m 'a && b; c | d'"]
+
+    def test_unquoted_separators_still_split(self):
+        parts = sdlc_context.split_simple_commands("git add -A && git commit -m x\ngit push")
+        assert parts == ["git add -A", "git commit -m x", "git push"]
+
+
+class TestWorkTreeAndGitDirResolution:
+    """`--work-tree` / `--git-dir` relocate git exactly as `-C` does."""
+
+    def test_work_tree_wins(self):
+        command = "git --git-dir=/r/.git --work-tree=/lane commit -m x"
+        assert sdlc_context.effective_git_dir(command, "/payload") == "/lane"
+
+    def test_git_dir_resolves_to_its_parent(self):
+        command = "git --git-dir=/lane/.git commit -m x"
+        assert sdlc_context.effective_git_dir(command, "/payload") == "/lane"
 
     def test_dash_c_worktree_commit_blocks_end_to_end(self, tmp_path):
         """The regression the self-check caught, driven through the real

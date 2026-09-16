@@ -423,7 +423,7 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
 | 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
 | Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |
-| Deployed hardlink intact | `python -c "import os,pathlib,subprocess; r=pathlib.Path(subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True).stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+| Deployed hardlink intact | `python -c "import os,pathlib,subprocess; p=subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True); assert p.returncode==0 and p.stdout.strip(), 'common-dir probe failed'; r=pathlib.Path(p.stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
 
 > Both notes below sit *after* the whole table on purpose. A blockquote placed
 > between two rows terminates the markdown table, and the automated Verification
@@ -439,7 +439,10 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 > form of this row stats that copy and prints `False` for a deployment that is
 > perfectly healthy -- a false failure that Task 6 would hit every time. This
 > is the same class of defect as #3259 itself: reading git state from wherever
-> the process happens to be standing.
+> the process happens to be standing. The row asserts the probe's returncode
+> before using its output: on git < 2.31 `--path-format=absolute` errors,
+> `stdout.strip()` is empty, `Path("").parent` is `.`, and the row would
+> silently revert to the worktree-relative stat it was hardened against.
 
 ## Critique Results
 

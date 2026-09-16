@@ -330,11 +330,30 @@ def _build_self_check_fixture(tmp: Path) -> Path:
     hosts, and identity is passed on every call so a host with no configured
     ``user.email`` still produces a commit.
 
+    Three more global settings are neutralized because each one makes the
+    fixture raise on an otherwise healthy machine, and a fixture that cannot
+    be built downgrades to WARN -- so the deployment-time behavioral proof
+    would silently stop running on exactly the developer machines most likely
+    to have them set: ``core.hooksPath`` (a global hook that rejects the
+    commit), ``commit.gpgsign`` (no signing key in this throwaway repo), and
+    ``gpg.format``.
+
     The shape is the defect's shape (#3259): the guard must be asked about a
     commit in a linked worktree whose basename is NOT ``popoto``, from a
     process whose own cwd is somewhere else entirely.
     """
-    identity = ["-c", "user.email=selfcheck@localhost", "-c", "user.name=selfcheck"]
+    identity = [
+        "-c",
+        "user.email=selfcheck@localhost",
+        "-c",
+        "user.name=selfcheck",
+        "-c",
+        "core.hooksPath=",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "gpg.format=openpgp",
+    ]
 
     def git(cwd: Path, *args: str) -> None:
         subprocess.run(
