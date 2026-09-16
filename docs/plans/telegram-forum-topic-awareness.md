@@ -263,7 +263,7 @@ that shadow these.
 
 ### Risk 1: The empirical pre-requisite invalidates the header model
 **Impact:** If a real top-level topic message does NOT carry the predicted header shape, the disambiguation rule is wrong and the keying fix misfires.
-**Mitigation:** Unit tests encode the documented shapes; Task 7 verifies live on a bridge-owning machine BEFORE the keying change ships to the fleet (build order puts capture/storage first, keying second); the #3831 quirk is handled defensively.
+**Mitigation:** Unit tests encode the documented shapes; Task 7 (an owner action on any owned Topics-enabled group, not a code path) verifies live BEFORE the keying change ships to the fleet — build order puts capture/storage/outbound/context first and holds keying alone; the #3831 quirk is handled defensively.
 
 ### Risk 2: Root-cache poisoning across the semantics change
 **Impact:** Pre-fix cached walk roots keep collapsing sessions after the fix.
@@ -324,7 +324,7 @@ that shadow these.
 - [ ] A synthetic top-level topic message (forum_topic=True, reply_to_top_id absent) creates a session keyed by its OWN message id, never the topic root's.
 - [ ] A synthetic in-topic reply continues its conversation session and stores the correct `topic_id`.
 - [ ] Non-forum and DM behavior is byte-identical to today (existing routing/context suites green without semantic edits beyond the new-field assertions).
-- [ ] `TelegramMessage.topic_id` persists through live intake AND all three recovery scanners (one test each).
+- [ ] `TelegramMessage.topic_id` persists through live intake via `store_message` (round-trip test), and the three recovery scanners carry the topic into their enqueued session context (one test each) — they write no message rows.
 - [ ] An unsolicited send in a group with `default_topic_id` configured produces `reply_to=<topic_id>`; with General or no config, `reply_to` is omitted.
 - [ ] Agent context for a topic message names the topic (name or id) — snapshot test.
 - [ ] Migration runs idempotently; second run is a no-op.
@@ -387,8 +387,13 @@ that shadow these.
 ### 7. Live verification on a bridge host [EXTERNAL constraint]
 - **Task ID**: verify-live
 - **Depends On**: build-capture (can precede keying rollout; see Risk 1). Owner ruling 2026-09-05: runs DURING BUILD, before the keying change merges — never deferred to post-deploy.
-- **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: true
-- On a bridge-owning machine: post a top-level message in a non-General Cyndra topic; inspect stored `TelegramMessage` header capture and resulting session id; confirm the forum flag on the group. Record results in the PR.
+- **Assigned To**: **owner action** (no agent can perform the post); `topic-validator` reads back the result — **Agent Type**: validator — **Parallel**: true
+- **This task needs no code and no Cyndra access.** Both values the criterion reads
+  (`TelegramMessage.reply_to_msg_id`, `AgentSession.session_id`) are already persisted today,
+  so any forum group **owned by a bridge host** answers it identically. Owner performs (A) or
+  (B) from the OPEN QUESTION under Prerequisites; this lane then reads back the stored row and
+  the resulting session id and applies the pre-fixed verdict rule. Record results in the PR.
+- Gating: **only Task 2 (build-keying) is held behind this.** Tasks 1, 3, 4 proceed and merge.
 
 ### 8. Final validation
 - **Task ID**: validate-all
@@ -402,7 +407,8 @@ that shadow these.
 | Tests pass | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Resolver exists with truth table | `grep -c "reply_to_top_id" bridge/` -r | output > 0 |
+| Resolver exists with truth table | `grep -rc "reply_to_top_id" bridge/ \| grep -v ":0"` | at least one file with a non-zero count |
+| Field-count assertion updated | `grep -n "field_names) == 21" tests/unit/test_model_relationships.py` | one match |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
 | No topic in session key (anti-criterion, owner ruling) | `grep -rn "topic" bridge/context.py \| grep -c "session_id = f"` | match count == 0 |
