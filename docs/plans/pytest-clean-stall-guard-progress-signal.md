@@ -153,11 +153,11 @@ Nothing deferred — every relevant item is in scope for this plan.
 
 ## Update System
 
-TODO fill.
+No update system changes required — this feature is purely internal test infrastructure. The wrapper and plugin ship in-repo (no propagated config, no new dependency, no migration); every checkout picks the change up on its next pull. The only operator-visible surface is the existing `PYTEST_STALL_LIMIT_S` env knob, whose semantics are unchanged (still the low-CPU-and-no-progress window).
 
 ## Agent Integration
 
-TODO fill.
+No agent integration required — this is a test-runner-internal change. No new CLI entry point, no bridge import, no MCP surface: the agent keeps invoking `scripts/pytest-clean.sh` exactly as today. The new `PYTEST_CLEAN_PROGRESS_FILE` env var is minted and consumed inside the wrapper run, never set by callers.
 
 ## Documentation
 
@@ -171,21 +171,51 @@ TODO fill.
 
 ## Success Criteria
 
-TODO fill.
+- [ ] Slow-but-live synthetic module (outcomes arriving within each window) completes with exit 0 and no WEDGED in stderr
+- [ ] Synthetic true wedge (blocked `pytest_sessionfinish`, no reports, no CPU) still prints the WEDGED banner and exits non-zero
+- [ ] Tap-broken run (unwritable progress path) completes live via the CPU-only fallback
+- [ ] `tests/unit/test_pytest_clean_zero_tests.py` still green (no interference with the count verdict)
+- [ ] Documentation updated (`/do-docs`): `docs/features/pytest-clean-stall-guard.md` created and indexed
+- [ ] New tests add under ~120s wall time to the unit suite
 
 ## Team Orchestration
 
-TODO fill.
+Solo builder plus a read-only validator. The lead NEVER builds directly — it deploys the pair below and coordinates.
+
+### Team Members
+
+- **Builder (stall-guard)**
+  - Name: stall-guard-builder
+  - Role: wrapper + plugin + new tests, per Step by Step Tasks
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (stall-guard)**
+  - Name: stall-guard-validator
+  - Role: verifies Success Criteria against the Verification table, checks no existing tests regressed
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
-TODO fill.
+- [ ] TC1 (builder): mint/export/clean up `PYTEST_CLEAN_PROGRESS_FILE` in `scripts/pytest-clean.sh` (own `*_MINTED` tracker, `cleanup()` removal, never honor inherited value)
+- [ ] TC2 (builder): add the controller-side heartbeat append in `pytest_executed_count.py` (`pytest_runtest_logreport`, after the existing early return, `OSError`-swallowed, no-op when unset)
+- [ ] TC3 (builder): extend `watch_for_stall` with the progress path — `mark_cpu`/`mark_lines`, either-delta-resets logic, per-sample CPU-only fallback, one-line banner addition
+- [ ] TC4 (builder): write `tests/unit/test_pytest_clean_stall_progress.py` (slow-live, true-wedge, tap-broken fail-open, plugin-absent fallback, nested-invocation isolation) reusing the zero-tests sandbox pattern
+- [ ] TC5 (builder): docs — create `docs/features/pytest-clean-stall-guard.md`, index it in `docs/features/README.md`, comment the watcher OR-condition and the `PYTEST_STALL_LIMIT_S=0` hatch
+- [ ] TC6 (validator): run the Verification table end to end and confirm every Success Criterion
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Placeholder check replaced during fill | `echo ok` | output contains ok |
+| Slow-live module not flagged | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_stall_progress.py -k slow_live` (under short `PYTEST_STALL_LIMIT_S`) | exit 0, stderr contains no WEDGED |
+| True wedge still caught | same harness, `-k true_wedge` | non-zero exit, stderr contains WEDGED, no ZERO TESTS headline |
+| Zero-tests suite unaffected | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py` | exit 0 |
+| Lint clean | `python -m ruff check pytest_executed_count.py` | exit code 0 |
+| Format clean | `python -m ruff format --check pytest_executed_count.py` | exit code 0 |
+| No tee on pytest stdout | `grep -c "tee" scripts/pytest-clean.sh` | match count == 0 |
+| Caller verbosity untouched | `grep -c "\-v" scripts/pytest-clean.sh` | match count == 0 |
 
 ## Critique Results
 
@@ -196,4 +226,7 @@ TODO fill.
 
 ## Open Questions
 
-TODO fill.
+1. Progress-file env var name (`PYTEST_CLEAN_PROGRESS_FILE`): acceptable, or prefer folding into the existing count file as a second line? Default: separate file (no truncation race with the verdict write). Say nothing to accept.
+2. Heartbeat granularity (every controller-side report vs. executed-only per the counting rule)? Default: every report — any arrival proves liveness, including skips. Say nothing to accept.
+3. The issue's fix shape suggested `-v` line counting; this plan uses plugin heartbeats instead (no stdout coupling, no TTY risk, no caller-visible `-v`). Confirm the deviation is welcome.
+4. Two agents filled this plan concurrently on main (see commit history). Before critique, confirm no section carries a stale tee/`-v` reference the other author intended differently.
