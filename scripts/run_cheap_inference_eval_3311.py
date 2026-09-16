@@ -378,12 +378,14 @@ def step_observe(
         "an eligible open-source session on the cheap provider under a frozen contract."
     )
     current = (case.summary or "").rstrip()
-    case.summary = f"{current}\n\n{observation}" if current else observation
     applied = _json.loads(case.evaluation_ids or "[]")
     if not isinstance(applied, list):
         applied = []
-    if evaluation.id not in applied:
-        applied.append(evaluation.id)
+    if evaluation.id in applied:
+        print(f"observation for evaluation {evaluation.id} already recorded; not duplicating")
+        return observation
+    case.summary = f"{current}\n\n{observation}" if current else observation
+    applied.append(evaluation.id)
     case.evaluation_ids = _json.dumps(applied)
     case.save()
     print("observation written to case")

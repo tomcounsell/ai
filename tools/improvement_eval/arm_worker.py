@@ -244,8 +244,10 @@ def _run_session_via_subscription(prompt: str, timeout_s: float) -> str:
 
     Runs from an empty temporary directory with every tool disabled (see
     :data:`SUBSCRIPTION_SESSION_ARGV`): the only thing the session sees is
-    the prompt. Raises on transport failure so the worker reports an error
-    and the trial becomes a harness error, never a scored zero.
+    the prompt. A nonzero exit raises for the worker to report as a harness
+    error; empty output is a malformed session output, not a transport
+    failure, so it comes back as ``""`` for the trial to score zero --
+    matching the OpenRouter path.
     """
     with tempfile.TemporaryDirectory(prefix="agent-run-trial-") as empty_cwd:
         completed = subprocess.run(
@@ -255,9 +257,11 @@ def _run_session_via_subscription(prompt: str, timeout_s: float) -> str:
             timeout=timeout_s,
             cwd=empty_cwd,
         )
-    if completed.returncode != 0 or not (completed.stdout or "").strip():
+    if completed.returncode != 0:
         tail = (completed.stderr or "").strip()[-500:]
         raise RuntimeError(f"claude -p exited {completed.returncode}: {tail}")
+    if not (completed.stdout or "").strip():
+        return ""
     try:
         payload = json.loads(completed.stdout)
     except ValueError as exc:
@@ -352,20 +356,32 @@ def run_agent_trial(
     inherits the private Redis socket, the scratch content path, and the
     arm project key. The manifest shapes the prompt (persona preamble plus
     the frozen skill text when it names a skill, pinned by ``prompt_hash``);
-    ``bounds["timeout_s"]`` caps the turn. The ``VERDICT:`` line parses
-    into the ``passed`` bit: a session with no decision line comes back
-    with ``passed=False`` for the rubric to score zero, while a transport
-    failure raises for the worker to report as a harness error.
+    ``bounds["timeout_s"]`` caps the turn and must be positive (a zero or
+    negative timeout is a frozen-contract defect, never a silent default).
+    ``bounds["max_turns"]`` is accepted and carried but reserved, not
+    enforced: the subscription transport runs one ``claude -p`` turn with
+    tools disabled, so there is no second turn to bound. The ``VERDICT:``
+    line parses into the ``passed`` bit: a session with no decision line
+    comes back with ``passed=False`` for the rubric to score zero, while a
+    transport failure raises for the worker to report as a harness error.
     ``_complete`` injects the session transport (tests); the default follows
-    the manifest model to the subscription or the cheap OpenRouter route.
+    the manifest model to the subscription or the cheap OpenRouter route,
+    and a missing or blank model is refused outright.
     """
+    model = manifest.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise InfraFailure(f"agent_run manifest needs a non-blank model, got {model!r}")
     skill_text = _resolve_skill_text(manifest.get("skill") or "", manifest.get("prompt_hash"))
     prompt = _compose_session_prompt(task, manifest, skill_text)
+    timeout_raw = (bounds or {}).get("timeout_s")
     try:
-        timeout_s = float((bounds or {}).get("timeout_s") or SUBSCRIPTION_SESSION_TIMEOUT_S)
+        raw = timeout_raw if timeout_raw is not None else SUBSCRIPTION_SESSION_TIMEOUT_S
+        timeout_s = float(raw)
     except (TypeError, ValueError) as exc:
         raise InfraFailure(f"agent_run bounds timeout_s is not a number: {exc}") from exc
-    complete = _complete or _default_transport_for(manifest.get("model"))
+    if timeout_s <= 0:
+        raise InfraFailure(f"agent_run bounds timeout_s must be positive, got {timeout_raw!r}")
+    complete = _complete or _default_transport_for(model)
     output = complete(prompt, timeout_s)
     if not isinstance(output, str):
         output = str(output)

@@ -869,3 +869,107 @@ class TestAgentTrialSpend:
         assert [trial for _, trial in errors] == ["t1", "t2"]
         assert spawned == []
         assert all("harness error" in note for note in ctx.notes[-2:])
+
+
+class TestAgentTrialSessionContract:
+    """Review fixes on the session-transport contract: a quiet session
+    scores zero like the OpenRouter path (C4), a non-positive timeout is a
+    frozen-contract defect (R1), and a blank model never reaches a
+    transport (R3)."""
+
+    def _trial_args(self):
+        task = {"id": "t1", "prompt": "summarize the lighthouse log"}
+        manifest = {"model": "plain-model-3311"}
+        bounds = {"timeout_s": 30}
+        return task, manifest, bounds
+
+    def test_empty_subscription_output_scores_zero(self, tmp_path, monkeypatch):
+        from tools.improvement_eval import arm_worker
+
+        monkeypatch.setenv("POPOTO_CONTENT_PATH", str(tmp_path))
+        completed = mock.Mock(returncode=0, stdout="  \n", stderr="")
+        with mock.patch("subprocess.run", return_value=completed):
+            result = arm_worker.run_agent_trial(*self._trial_args(), PK_AGENT_RUN)
+        assert result["task_id"] == "t1"
+        assert result["output"] == ""
+        assert result["passed"] is False
+
+    @pytest.mark.parametrize("timeout", [0, 0.0, -5])
+    def test_non_positive_timeout_is_a_contract_defect(self, tmp_path, monkeypatch, timeout):
+        from tools.improvement_eval import arm_worker
+
+        monkeypatch.setenv("POPOTO_CONTENT_PATH", str(tmp_path))
+        task, manifest, _ = self._trial_args()
+        with pytest.raises(InfraFailure, match="timeout_s.*positive"):
+            arm_worker.run_agent_trial(
+                task,
+                manifest,
+                {"timeout_s": timeout},
+                PK_AGENT_RUN,
+                _complete=lambda prompt, timeout_s: "VERDICT: done",
+            )
+
+    @pytest.mark.parametrize("model", ["", "   ", None])
+    def test_blank_model_refused_before_transport(self, tmp_path, monkeypatch, model):
+        from tools.improvement_eval import arm_worker
+
+        monkeypatch.setenv("POPOTO_CONTENT_PATH", str(tmp_path))
+        task, _, bounds = self._trial_args()
+        calls = []
+        with pytest.raises(InfraFailure, match="model"):
+            arm_worker.run_agent_trial(
+                task,
+                {"model": model},
+                bounds,
+                PK_AGENT_RUN,
+                _complete=lambda prompt, timeout_s: calls.append((prompt, timeout_s)),
+            )
+        assert calls == []
+
+
+class TestAgentRerunWorkerError:
+    def test_incumbent_rerun_failure_is_a_harness_error(self):
+        """Review C5: a worker error on the incumbent re-run excludes the
+        trial and counts toward the cap instead of aborting the run."""
+        import types
+
+        from tools.improvement_eval import runner
+
+        seen: list[str] = []
+
+        def _flaky_incumbent(arm, export, project_key, task, arm_params):
+            seen.append(task["id"])
+            if seen.count(task["id"]) > 1:
+                raise InfraFailure(f"worker lost on re-run {task['id']}")
+            return _trial_outcome(task["id"], "prior work summary", True, INCUMBENT_MODEL)
+
+        errors: list[tuple[str, str]] = []
+
+        def _harness_error(arm_name, trial_id, exc):
+            errors.append((arm_name, trial_id))
+
+        ctx = types.SimpleNamespace(notes=[])
+        export = _spend_export()
+        recorded = {
+            task["id"]: _trial_outcome(task["id"], "prior work summary", True, INCUMBENT_MODEL)
+            for task in AGENT_TASKS
+        }
+        with mock.patch.object(runner, "_run_agent_arm", _flaky_incumbent):
+            paired = runner._run_agent_trials(
+                ctx=ctx,
+                export=export,
+                project_key=PK_RUNNER,
+                tasks=[dict(task) for task in AGENT_TASKS],
+                recorded_outcomes=recorded,
+                tolerance={"kind": "pass_fail"},
+                baseline_digest=export.digest,
+                incumbent_params=dict(INCUMBENT_PARAMS),
+                candidate_params=dict(CANDIDATE_PARAMS),
+                incumbent_arm=object(),
+                candidate_arm_server=object(),
+                candidate_agent_arm=_candidate_fake(),
+                assignment=mock.Mock(run_order=["incumbent", "candidate"]),
+                harness_error=_harness_error,
+            )
+        assert paired == []
+        assert errors == [("incumbent", "t1"), ("incumbent", "t2")]

@@ -872,14 +872,22 @@ def _run_agent_trials(
         candidate_outcome: dict | None = None
         for arm_name in assignment.run_order:
             if arm_name == INCUMBENT_ARM:
-                again = _run_agent_arm(
-                    incumbent_arm,
-                    export,
-                    project_key,
-                    task,
-                    incumbent_params,
-                    **arm_kwargs,
-                )
+                try:
+                    again = _run_agent_arm(
+                        incumbent_arm,
+                        export,
+                        project_key,
+                        task,
+                        incumbent_params,
+                        **arm_kwargs,
+                    )
+                except InfraFailure as exc:
+                    # A worker error on the re-run is a harness error exactly
+                    # like Gate 1's: the trial is excluded and counted toward
+                    # the cap. Only a clean re-run that disagrees fails the
+                    # run for drift.
+                    harness_error(INCUMBENT_ARM, trial_id, exc)
+                    break
                 if not _agent_baseline_agree(
                     again, incumbent_outcome, tolerance, trial_id=trial_id
                 ):
