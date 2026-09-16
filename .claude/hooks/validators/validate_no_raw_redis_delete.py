@@ -255,6 +255,7 @@ _POPOTO_CONTEXT = [
     "DocumentChunk",
     "ImprovementCase",
     "ImprovementCharter",
+    "ImprovementControllerState",
     "ImprovementEvaluation",
     "ImprovementEvidence",
     "ImprovementExperiment",
