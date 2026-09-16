@@ -125,11 +125,38 @@ No prerequisites — this work has no external dependencies.
 
 ## Solution
 
-Filling in next.
+### Key Elements
+
+- **Lazy back-edge import**: `Memory` moves from module top level to its single function-level use site in `agent/session_health.py`, so importing the `agent` package never reaches back into a half-initialized `models.memory`.
+- **Loud provider failure**: The bare `except Exception: pass` in `apply_defaults` becomes a logged warning naming the failure, so a missing provider is visible in logs instead of silent.
+- **Import-order regression test**: A subprocess test that imports `models.memory` first and asserts a provider is configured, locking the fix against reintroduction.
+- **Preserved graceful degradation**: Missing `OPENAI_API_KEY` remains a legitimate, already-logged warning path inside `configure_embedding_provider()`; only the accidental-swallowing layer changes.
+
+### Flow
+
+**Starting point** → fresh process imports `models.memory` first → `apply_defaults()` runs → provider import executes `agent/__init__` chain → chain no longer touches half-initialized `models.memory` → `configure_embedding_provider()` installs the corpus-matched `OpenAIProvider` → `Memory` defines normally → **End state**: `get_default_provider()` returns the provider regardless of import order.
+
+### Technical Approach
+
+- Cut the cycle at its narrowest point: `agent/session_health.py:43` (`from models.memory import Memory`) is the only module-level use, consumed once at line 6201 inside the class-set orphan cleanup routine. Move that import to the top of the enclosing function. `AgentSession` (line 42, `models.agent_session`) stays at module level; verify at build time that `models.agent_session` does not itself import `models.memory` at module scope, or the cycle simply relocates.
+- Replace `except Exception: pass` in `config/memory_defaults.py:247-253` with `except Exception as e: logger.warning(...)` naming `apply_defaults` and the embedding provider, preserving the non-blocking intent (a provider failure must never prevent the `Memory` model from defining) while making it observable.
+- Keep provider configuration inside `apply_defaults` (per spike-2: worker/CLI entrypoints depend on the implicit path). Do not move setup to explicit entrypoint calls.
+- Optional hardening, only if build finds a second import-time path into `models.memory` from the `agent` package: relocate `configure_embedding_provider` to a package-neutral home (e.g. `config/embedding_provider.py`) and update the two call sites (`config/memory_defaults.py`, `scripts/spike/hybrid_retrieval_spikes.py`). Build decides; the lazy import is the primary fix either way.
+- Regression test runs the issue's controlled comparison as a subprocess: import `models.memory` first, assert `get_default_provider()` is not `None`. Subprocess isolation matters because import order is process-global state.
+- Verify the reverse order still works (`import agent` first) and that the full memory test files pass unchanged.
 
 ## Failure Path Test Strategy
 
-Filling in next.
+### Exception Handling Coverage
+- [ ] The `except Exception: pass` block at `config/memory_defaults.py:252` is the failure site of this bug: add the subprocess regression test asserting the provider is configured (observable state change), plus a test asserting a genuine configuration failure emits a log record instead of passing silently.
+- [ ] `configure_embedding_provider()` already logs warnings on its own failure paths; no new handlers are introduced there.
+
+### Empty/Invalid Input Handling
+- [ ] Not applicable: the changed functions take no user input. `configure_embedding_provider()` with a missing `OPENAI_API_KEY` (empty/unset) already returns `None` with a logged warning; the regression test documents that this intentional path still degrades gracefully rather than raising.
+- [ ] If the feature involves agent output processing, verify empty output does not trigger silent loops — not applicable, no agent output processing in scope.
+
+### Error State Rendering
+- [ ] No user-visible output in scope; the observable error surface is the log record from `apply_defaults` on provider failure, covered by the log-assertion test above.
 
 ## Test Impact
 
@@ -137,11 +164,25 @@ No existing tests affected — the change only converts a silently-swallowed Imp
 
 ## Rabbit Holes
 
-Filling in next.
+- Rewriting `agent/__init__.py` to be lazy across the board: a large, behavior-risky refactor when the cycle has exactly one back-edge. Cut the back-edge instead.
+- `importlib` file-path loading of `agent/embedding_provider.py` to dodge the package init: creates dual module identity and fragile path coupling. Excluded by spike-1.
+- Narrowing `except Exception` to `except ImportError`: changes nothing, since the swallowed exception already is an `ImportError`. Dropped during recon.
+- Moving provider setup to explicit entrypoint calls: requires auditing every worker/CLI entrypoint and leaves any missed one silently providerless. Keep the implicit `apply_defaults` path (spike-2).
+- Chasing BM25-only quality deltas in eval harnesses: the eval-arm inheritance problem (#3216) is fixed as a consequence; re-tuning retrieval is a separate project.
 
 ## Risks
 
-Filling in next.
+### Risk 1: A second import-time path from `agent` into `models.memory` exists
+**Impact:** The lazy import fixes the known chain but the cycle persists through another edge, and the regression test fails.
+**Mitigation:** Build runs the regression test first as a red-state proof; if it still fails, enumerate remaining import-time edges with a traceback and apply the optional module-relocation hardening.
+
+### Risk 2: `models.agent_session` also reaches `models.memory` at import time
+**Impact:** `session_health.py` still imports `AgentSession` at module level, so the cycle relocates rather than breaks.
+**Mitigation:** Build verifies `models/agent_session.py` module-level imports before committing to the lazy-import shape; if it reaches `models.memory`, both model imports go lazy or the relocation option is taken.
+
+### Risk 3: Noisy warnings on legitimately providerless processes
+**Impact:** Replacing the silent pass with a warning could log on every import in environments without `OPENAI_API_KEY`, where providerless operation is intended.
+**Mitigation:** Keep the warning at `warning` level with a one-line message, matching the tone of the existing missing-key warning inside `configure_embedding_provider()`; the missing-key path itself stays quiet-by-design beyond its single warning.
 
 ## Race Conditions
 
@@ -149,7 +190,7 @@ No race conditions identified — all operations are synchronous and single-thre
 
 ## No-Gos (Out of Scope)
 
-Filling in next.
+Nothing deferred — every relevant item is in scope for this plan.
 
 ## Update System
 
