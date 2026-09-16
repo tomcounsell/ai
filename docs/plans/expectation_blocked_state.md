@@ -100,7 +100,7 @@ No prerequisites — this work has no external dependencies beyond the repo venv
 ### Key Elements
 
 - **Blocked annotation on an open entry**: `entry["blocked"]` is `None` (or absent, for pre-existing entries) or `{"code": str, "detail": str, "ts": iso, "by": "lane" | "reconciler" | "pm"}`. Orthogonal to `removed_ts`.
-- **Closed reason vocabulary** (`models/job.py::BLOCKED_REASONS`): all five ship — `owner_gone`, `attempts_exhausted`, `needs_human`, `missing_credential`, `upstream_unmergeable`. `block_expectation` rejects any other code loudly (`ValueError`), the same posture as `add_expectation`'s direction check. A test asserts the exact frozen set, so an addition is a deliberate edit in two places rather than a silent widening.
+- **Closed reason vocabulary** (`models/job.py::BLOCKED_REASONS`): **four** members, each with a day-one writer — `attempts_exhausted` (reconciler), `needs_human`, `missing_credential`, `upstream_unmergeable` (lane or PM via `job_tool expectation-block`). `block_expectation` rejects any other code loudly (`ValueError`), the same posture as `add_expectation`'s direction check. A test asserts the exact frozen set, so an addition is a deliberate edit in two places rather than a silent widening. *(Revision pass: `owner_gone` was cut — see Settled Decision 1.)*
 - **Three writers, all recorded, one code reserved**: the reconciler at its escalation seam, and the PM or the owning lane through `job_tool`. `by` is one of `"reconciler" | "pm" | "lane"` and is itself validated against a closed set. `attempts_exhausted` is **reconciler-only**: `block_expectation` raises `ValueError` if that code arrives with any other `by`. No other code may be written with `by="reconciler"`.
 - **Reconciler backs off**: a blocked row is skipped and surfaced as a finding; the attempts/cooldown machinery is never touched for it.
 - **Rest is unchanged**: a blocked expectation is still open and still pins the Job `active`.
@@ -165,13 +165,13 @@ Lane cannot deliver → `job_tool expectation-block` → entry carries `blocked`
 
   The cost of the resolution is that `grep -c "block_expectation" reflections/expectation_reconciler.py` is now `2`, not `1`. The Verification table is updated accordingly, and the anti-criterion that `:523`/`:554` stay bare moves to a test rather than a grep count.
 - **Blocked rows stop re-escalating; the finding line is the recurring signal.** Because the blocked skip sits above the age/liveness checks, a row annotated `attempts_exhausted` is skipped on every later tick and `_escalation_exists`'s TTL-expiry re-escalation never fires for it again. That is the intended trade: one page plus a `blocked:` line every tick, instead of a page every escalation TTL forever. Documented in rule 9.
-- **`owner_gone` ships unwired.** It is in the vocabulary so the enum does not need reopening when the session-health drift advisory grows a writer; the frozen-set test is what keeps the unwired member honest. `missing_credential` and `upstream_unmergeable` likewise ship for lane/PM use, which is a writer — they are reachable from day one through `job_tool expectation-block`.
+- **Every shipped code has a writer.** `missing_credential` and `upstream_unmergeable` are reachable from day one through `job_tool expectation-block` (lane or PM), which is a real writer. `owner_gone` has none and is therefore not shipped (Settled Decision 1); it arrives with the session-health drift-advisory writer.
 
 ### Settled Decisions
 
 These four were open at first draft and are decided here; the rationale is recorded so critique can challenge the reasoning rather than re-derive it.
 
-1. **Vocabulary members — ship all five.** The alternative (ship only the two with a plan-internal writer) saves nothing: `needs_human`, `missing_credential`, and `upstream_unmergeable` all have a writer on day one, the lane or the PM at `job_tool expectation-block`, and that is the entry point the issue exists to serve. Only `owner_gone` is genuinely unwired. Reopening a validated enum later costs a code edit, a test edit, and a doc edit across three files; the cost of carrying one unwired member is one line plus one row in the frozen-set test. The frozen-set test is the guard that keeps "closed vocabulary" a real property rather than a comment.
+1. **Vocabulary members — ship the four that have a day-one writer; `owner_gone` is cut.** *(Reversed by the revision pass. The pre-revision decision shipped five and justified `owner_gone` as "so the enum does not need reopening when the session-health drift advisory grows a writer." The critique named that as speculative future-proofing for an unbuilt feature, and it is right: the repo's posture is no speculative abstraction, and "reopening the enum is expensive" is not true here — it is one constant, one frozen-set row, one docstring line, and one sentence of rule 9, all of which the session-health writer's own change has to touch anyway to explain who writes the new code and why it is trustworthy. Carrying an unemittable member inflates the frozen-set test, the docstrings, rule 9, and the `job_tool --code` choices with a value nothing can produce, which is worse than a four-line diff later.)* `attempts_exhausted`, `needs_human`, `missing_credential`, and `upstream_unmergeable` each have a writer the day this ships — the reconciler for the first, the lane or the PM at `job_tool expectation-block` for the other three, which is the entry point the issue exists to serve. `owner_gone` lands in the change that wires the session-health writer, alongside the trust question that writer raises. The frozen-set test asserts exactly these four and is what keeps "closed vocabulary" a real property rather than a comment.
 2. **Lane self-report — allowed, with `attempts_exhausted` fenced off.** The lane is the only party that knows why it cannot deliver. Refusing it the write does not make the lane deliver; it makes the stall silent, which is precisely the bug this issue exists to fix. The gaming risk (Risk 2) is closed structurally rather than by policy: blocking does not retire the obligation. The row stays open, keeps `has_open_expectations` true, keeps the Job `active`, prints a `blocked:` line in the operator log every tick, and shows in `job_tool show` — a lane that blocks to escape work has made itself *more* visible, not less. The one code that would confer real authority, `attempts_exhausted` (the reconciler's own "budget spent" verdict), is rejected from any `by` other than `"reconciler"`, so a lane cannot forge the reconciler's judgment. `by` is recorded on every annotation.
 3. **Rest — confirmed unchanged: a blocked expectation keeps the Job pinned `active`.** Blocked means unfinished work awaiting a human, which is exactly what `active` already means. Letting a blocked Job rest would make "at rest" mean two different things (nothing outstanding / something outstanding that nobody is working) and would require a second visibility channel to compensate. The finding line and `job_tool show` are that channel today and cost nothing. This also keeps `_write_goal_data`'s existing `status="active"` forcing untouched: the annotation adds no branch to the chokepoint.
 4. **Migration — none registered, deliberately.** The addendum's `MIGRATIONS` requirement is scoped to the Popoto *field set*, because `run_pending_migrations()` exists to backfill Popoto-managed keys and rebuild indexes. This change adds a key inside an existing `Field(null=True)` JSON payload: no field is added, renamed, retyped, or indexed, and `entry.get("blocked")` makes absence semantically identical to not-blocked, so there is nothing to backfill. Registering a no-op would write a false record into `data/migrations_completed.json` and set a precedent that JSON-payload changes need migrations. The reading is stated in **Update System** so a reviewer does not re-litigate it.
@@ -196,8 +196,8 @@ These four were open at first draft and are decided here; the rationale is recor
 
 ## Test Impact
 
-- [ ] `tests/unit/test_job_model.py` — UPDATE: add a `TestBlockedExpectations` class (block, unblock, discharge-preserves-annotation, absent key reads as not blocked, unknown code rejected, unknown `by` rejected, the `attempts_exhausted`/`by` cross-guard in both directions, the frozen-vocabulary assertion, corrupt goal refuses, `has_open_expectations` and `status` unchanged by block, a blocked inbound expectation still counts as open).
-- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; the `attempts >= _max_attempts()` branch writes `attempts_exhausted`; the other two `_escalate_once` sites write **no** annotation (anti-test — guards Settled Decision's seam choice against a build that annotates all three); a refused write (corrupt goal) still escalates.
+- [ ] `tests/unit/test_job_model.py` — UPDATE: add a `TestBlockedExpectations` class (block, unblock, discharge-preserves-annotation, absent key reads as not blocked, unknown code rejected, unknown `by` rejected, the `attempts_exhausted`/`by` cross-guard in both directions, the frozen-vocabulary assertion — **exactly the four members**, corrupt goal refuses, `has_open_expectations` and `status` unchanged by block, a blocked inbound expectation still counts as open, and the Race 3 precedence rule: a `pm`/`lane` block over an existing `by="reconciler"` annotation returns `False` and writes nothing; the reconciler over a `lane` annotation writes; `unblock_expectation` clears a reconciler annotation regardless of caller).
+- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: blocked row is skipped with a `blocked:` finding and no steer/respawn; site B (fresh escalation, budget spent) writes `attempts_exhausted`; **site A crash-window regression test** — seed the escalation key with no annotation and assert the next tick writes `attempts_exhausted` and emits the `blocked:` finding (this test must be RED against a build that only implements site B); site A does **not** fire when `_escalation_exists` returns `None`; site A does not re-write an already-annotated row; the `:523` and `:554` escalation sites write **no** annotation (anti-test — guards the seam choice against a build that annotates all three); a refused write (corrupt goal) still escalates.
 - [ ] `tests/unit/test_job_tool.py` — UPDATE: two new subcommands, Room scope, error conversion.
 - [ ] `tests/unit/test_promise_advisory.py` — no change: the gate clears on an open inbound expectation; a blocked inbound expectation is still open (asserted by one new row in `test_job_model.py`, not here).
 
@@ -206,7 +206,7 @@ These four were open at first draft and are decided here; the rationale is recor
 - Designing a generic state machine for expectations. The obligation primitive is deliberately one entry shape with one discharge; a blocked annotation is the whole scope.
 - Inferring blocked from age alone. Age is already what the reconciler's `min_age` and attempts do; a second age heuristic would disagree with the first.
 - A dashboard surface. `ui/data/sdlc.py` reads `len(job.open_expectations())`; leave it, a blocked count is a follow-on once real data exists.
-- Wiring `owner_gone` from session health in this plan. It is in the vocabulary so the enum is stable; the writer is a separate change with its own trust question.
+- Wiring `owner_gone` from session health in this plan — and, after the revision pass, not even reserving the code. The vocabulary member and its writer land together in that separate change, with its own trust question.
 
 ## Risks
 
@@ -220,7 +220,7 @@ These four were open at first draft and are decided here; the rationale is recor
 
 ### Risk 3: A block write races a concurrent expectation mutation
 **Impact:** Two read-modify-write cycles on the same goal JSON; the later full write wins and drops the other's change.
-**Mitigation:** Same exposure as `add_expectation` vs `discharge_expectation` today, unchanged by this plan; the reconciler re-fetches a fresh snapshot immediately before writing (Race 3 in the reconciler) and writes only at the escalation seam, once per row per escalation TTL.
+**Mitigation:** Same whole-payload exposure as `add_expectation` vs `discharge_expectation` today, unchanged by this plan; the reconciler re-fetches a fresh snapshot immediately before writing at both annotate sites and writes only when the recovery budget is spent, at most once per row per escalation TTL. The *same-field* clobber this plan does introduce — a lane and the reconciler both writing `entry["blocked"]` — is a distinct hazard with its own precedence rule; see **Race Conditions → Race 3**.
 
 ## Race Conditions
 
@@ -265,8 +265,8 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/durability-model.md`: add rule 9 (blocked annotation: shape, the frozen vocabulary, the three writers and the `attempts_exhausted` fence, rest unchanged, and the deliberate no-migration reading) after rule 8.
-- [ ] Update `docs/features/expectation-reconciler.md`: amend the "no writes" invariant, add the `blocked:` finding, document the back-off, and state explicitly that a blocked row stops re-escalating and that only the `attempts >= _max_attempts()` seam annotates.
+- [ ] Update `docs/features/durability-model.md`: add rule 9 after rule 8 (line 190), written in the existing numbered-list format `9. **…**` so the Verification anchor matches. It must name `BLOCKED_REASONS` and its four members literally, and cover the annotation shape, the three writers, the `attempts_exhausted` fence, the Race 3 precedence rule, rest unchanged, and the deliberate no-migration reading.
+- [ ] Update `docs/features/expectation-reconciler.md`: amend the "no writes" invariant, add the `blocked:` finding, document the back-off, and state explicitly that a blocked row stops re-escalating, that only the budget-spent condition annotates, and that the annotation is written from two sites (fresh escalation and the crash-window repair) for the crash-safety reason in Race 2.
 - [ ] Update `docs/tools-reference.md` for the two `job_tool` subcommands.
 
 ### Inline Documentation
@@ -280,8 +280,12 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - [ ] `has_open_expectations`, `status="active"` forcing, and rest-by-age are unchanged by a block; documented in rule 9.
 - [ ] Entries without the key read as not blocked (test on a hand-written legacy entry).
 - [ ] A corrupt goal refuses block/unblock (test), and the reconciler still escalates when the annotation write is refused.
+- [ ] **PM-facing outcome (the Desired Outcome, stated as a criterion):** a PM with only `tools/job_tool` can block an expectation with a reason code, see that annotation and its `code`/`detail`/`ts`/`by` in `job_tool show`, and unblock it so the reconciler resumes — all three verified end to end against real Redis in `tests/unit/test_job_tool.py`, with no direct model access and no log-reading.
 - [ ] `attempts_exhausted` is unforgeable: only `by="reconciler"` may write it, and the reconciler writes nothing else (test, both directions).
-- [ ] Only the `attempts >= _max_attempts()` escalation site annotates; the other two `_escalate_once` sites leave the row un-annotated and re-steerable (test).
+- [ ] Only the `attempts >= _max_attempts()` condition annotates; the `:523` and `:554` `_escalate_once` sites leave the row un-annotated and re-steerable (test).
+- [ ] **The crash window is closed:** an entry whose escalation key exists but whose annotation is absent is annotated on the next tick (Race 2 regression test), and that test is RED against a build that writes only at the fresh-escalation site.
+- [ ] A `pm`/`lane` block cannot overwrite a `by="reconciler"` annotation — it returns `False`, writes nothing, and `job_tool` reports the refusal (Race 3 precedence test).
+- [ ] `BLOCKED_REASONS` is exactly the four codes that have a day-one writer; `owner_gone` is absent (frozen-set test).
 - [ ] No entry is added to `scripts/update/migrations.py::MIGRATIONS`, and the reason is stated in the Update System section and in rule 9.
 - [ ] Tests pass (`scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_reflections_expectation_reconciler.py tests/unit/test_job_tool.py -n 2`).
 - [ ] Documentation updated per the Documentation section.
@@ -323,8 +327,9 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - **Assigned To**: job-blocked-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `BLOCKED_REASONS` (the frozen five), `BLOCKED_BY` (`reconciler`, `pm`, `lane`), `block_expectation`, `unblock_expectation`, `blocked_expectations` to `models/job.py`; both writers go through `_mutable_goal_data()` and `_write_goal_data`.
+- Add `BLOCKED_REASONS` (the frozen **four**: `attempts_exhausted`, `needs_human`, `missing_credential`, `upstream_unmergeable`), `BLOCKED_BY` (`reconciler`, `pm`, `lane`), `block_expectation`, `unblock_expectation`, `blocked_expectations` to `models/job.py`; both writers go through `_mutable_goal_data()` and `_write_goal_data`.
 - Enforce the `attempts_exhausted` ↔ `by="reconciler"` biconditional in `block_expectation` (`ValueError` either way).
+- Enforce the Race 3 precedence rule in `block_expectation`: an incoming `by` of `"pm"` or `"lane"` over an existing `entry["blocked"]["by"] == "reconciler"` returns `False` and writes nothing. `unblock_expectation` carries no such restriction.
 - Update the `goal` schema comment.
 - Add `TestBlockedExpectations` per Test Impact, including the corrupt-goal refusal, the legacy-entry row, the frozen-vocabulary assertion, and the cross-guard in both directions.
 
@@ -336,6 +341,7 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `expectation-block` / `expectation-unblock`; `show` includes `blocked`; convert `ValueError` and `CorruptGoalError` to `JobToolError`.
+- Render the Race 3 precedence refusal explicitly: a `False` return from `block_expectation` against an existing reconciler annotation prints "expectation E is blocked by the reconciler as attempts_exhausted; unblock it first" and exits non-zero — never a silent success.
 - One sentence in the PM prime pointing at `expectation-block`.
 
 ### 3. Reconciler: skip, finding, escalation-seam write
