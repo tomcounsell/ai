@@ -274,11 +274,11 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
 def _validate_agent_candidate(candidate: dict) -> Outcome:
     """Admit an ``agent_task`` candidate by kind, or refuse ``VALUE_OUTSIDE_RANGE``.
 
-    Manifest strings must be non-blank text; ``bounds`` must be a mapping of
-    the worker's bound keys to numbers (``timeout_s`` above zero,
-    ``max_turns`` at least one) and must carry a non-negative ``spend_cap``,
-    so every metered trial reserves its frozen per-task budget instead of
-    billing with no reservation held. The retrieval ``IDENTICAL_TO_INCUMBENT``
+    Manifest strings must be non-blank text; ``bounds`` is required and
+    must be a mapping of the worker's bound keys to numbers (``timeout_s``
+    above zero, ``max_turns`` at least one) carrying a non-negative
+    ``spend_cap``, so every metered trial reserves its frozen per-task
+    budget instead of billing with no reservation held. The retrieval
     ``IDENTICAL_TO_INCUMBENT`` comparison cannot match a manifest candidate,
     so it is kept as the shared tail: harmless, never a false refusal.
     """
@@ -291,42 +291,39 @@ def _validate_agent_candidate(candidate: dict) -> Outcome:
                 return _refuse(
                     "VALUE_OUTSIDE_RANGE", f"{key} must be a non-blank string, got {value!r}"
                 )
-    if "bounds" in candidate:
-        bounds = candidate["bounds"]
-        if not isinstance(bounds, dict):
-            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds must be a mapping, got {bounds!r}")
-        spend_cap = bounds.get("spend_cap")
-        if (
-            isinstance(spend_cap, bool)
-            or not isinstance(spend_cap, (int, float))
-            or not spend_cap >= 0
-        ):
+    bounds = candidate.get("bounds")
+    if not isinstance(bounds, dict):
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            "bounds must be a mapping with a non-negative 'spend_cap' so every "
+            f"metered trial reserves its frozen per-task budget, got {bounds!r}",
+        )
+    spend_cap = bounds.get("spend_cap")
+    if isinstance(spend_cap, bool) or not isinstance(spend_cap, (int, float)) or not spend_cap >= 0:
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            "bounds needs a non-negative 'spend_cap' so every metered trial "
+            f"reserves its frozen per-task budget, got {spend_cap!r}",
+        )
+    unknown = sorted(set(bounds) - set(AGENT_RUN_BOUND_KEYS))
+    if unknown:
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            f"bounds carries unknown keys {unknown}; expected {list(AGENT_RUN_BOUND_KEYS)}",
+        )
+    for key, value in bounds.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[{key}]={value!r} is not a number")
+        if key == "timeout_s" and not value > 0:
+            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[timeout_s]={value!r} must be above zero")
+        if key == "max_turns" and not value >= 1:
             return _refuse(
-                "VALUE_OUTSIDE_RANGE",
-                "bounds needs a non-negative 'spend_cap' so every metered trial "
-                f"reserves its frozen per-task budget, got {spend_cap!r}",
+                "VALUE_OUTSIDE_RANGE", f"bounds[max_turns]={value!r} must be at least one"
             )
-        unknown = sorted(set(bounds) - set(AGENT_RUN_BOUND_KEYS))
-        if unknown:
+        if key == "spend_cap" and not value >= 0:
             return _refuse(
-                "VALUE_OUTSIDE_RANGE",
-                f"bounds carries unknown keys {unknown}; expected {list(AGENT_RUN_BOUND_KEYS)}",
+                "VALUE_OUTSIDE_RANGE", f"bounds[spend_cap]={value!r} must not be negative"
             )
-        for key, value in bounds.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[{key}]={value!r} is not a number")
-            if key == "timeout_s" and not value > 0:
-                return _refuse(
-                    "VALUE_OUTSIDE_RANGE", f"bounds[timeout_s]={value!r} must be above zero"
-                )
-            if key == "max_turns" and not value >= 1:
-                return _refuse(
-                    "VALUE_OUTSIDE_RANGE", f"bounds[max_turns]={value!r} must be at least one"
-                )
-            if key == "spend_cap" and not value >= 0:
-                return _refuse(
-                    "VALUE_OUTSIDE_RANGE", f"bounds[spend_cap]={value!r} must not be negative"
-                )
     if dict(candidate) == INCUMBENT:
         return _refuse("IDENTICAL_TO_INCUMBENT", f"the candidate equals the incumbent {INCUMBENT}")
     return Outcome(True, "OK", None, "candidate admitted", {"surfaces": sorted(candidate)})

@@ -671,6 +671,16 @@ class TestAgentTaskEnvelope:
         outcome = validate_candidate({"model": None}, envelope="agent_task")
         assert outcome.reason == "NONE_VALUE"
 
+    def test_boundless_candidate_refused(self):
+        """Round-3 Finding 3: a candidate with no bounds carries no
+        spend_cap, so propose refuses it instead of freezing a protocol
+        the runner rejects after the baseline budget is burned."""
+        from tools.improvement_experiment import validate_candidate
+
+        outcome = validate_candidate({"model": "m", "skill": "s"}, envelope="agent_task")
+        assert outcome.accepted is False
+        assert outcome.reason == "VALUE_OUTSIDE_RANGE"
+
 
 # ---------------------------------------------------------------------------
 # Task 3: agent-trial spend plumbing (unit 2 reserve/settle per task budget)
@@ -945,7 +955,12 @@ class TestAgentTrialSessionContract:
 
 
 class TestAgentRerunWorkerError:
-    def test_incumbent_rerun_failure_is_a_harness_error(self):
+    @pytest.mark.parametrize("run_order", [["incumbent", "candidate"], ["candidate", "incumbent"]])
+    def test_incumbent_rerun_failure_is_a_harness_error(self, run_order):
+        """Review C5: a worker error on the incumbent re-run excludes the
+        trial and counts toward the cap instead of aborting the run. Both
+        arm orders: candidate-first must not pair the fresh candidate
+        against the stale Gate-1 incumbent."""
         """Review C5: a worker error on the incumbent re-run excludes the
         trial and counts toward the cap instead of aborting the run."""
         import types
@@ -985,7 +1000,7 @@ class TestAgentRerunWorkerError:
                 incumbent_arm=object(),
                 candidate_arm_server=object(),
                 candidate_agent_arm=_candidate_fake(),
-                assignment=mock.Mock(run_order=["incumbent", "candidate"]),
+                assignment=mock.Mock(run_order=run_order),
                 harness_error=_harness_error,
             )
         assert paired == []

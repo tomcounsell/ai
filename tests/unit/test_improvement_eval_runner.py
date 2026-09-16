@@ -268,6 +268,42 @@ class TestInfraFailureConditions:
         # no judge scan ran, so there is no blinding fact to state
         assert _reload_evaluation(evaluation).blinded is None
 
+    def test_incumbent_rerun_failure_excludes_trial_in_candidate_first_order(self, charter, corpus):
+        """Round-3 Finding 1: with a candidate-first assignment, a worker
+        error on the incumbent re-run excludes the trial instead of pairing
+        the fresh candidate against the stale Gate-1 ranking."""
+        from tools.improvement_eval import blinding
+
+        protocol = _protocol(corpus, incumbent={"limit": 10}, candidate={"limit": 1})
+        protocol["infra_failure_cap"] = 2
+        experiment = _freeze(protocol)
+        real_run_arm = runner._run_arm
+        seen: list[str] = []
+
+        def _flaky_incumbent(arm, export, project_key, query, params):
+            if params == {"limit": 10}:
+                seen.append(query["trial_id"])
+                if seen.count(query["trial_id"]) > 1:
+                    raise InfraFailure("worker lost on re-run")
+            return real_run_arm(arm, export, project_key, query, params)
+
+        assignment = next(
+            probed
+            for i in range(256)
+            if (probed := blinding.assign_arms(f"order-probe-{i}")).run_order[0]
+            == runner.CANDIDATE_ARM
+        )
+        with (
+            mock.patch.object(runner, "_run_arm", _flaky_incumbent),
+            mock.patch.object(runner, "assign_arms", return_value=assignment),
+        ):
+            evaluation = _evaluate(experiment)
+
+        assert evaluation.verdict == "inconclusive"
+        assert evaluation.trials == 0
+        assert evaluation.effect is None
+        assert evaluation.notes.count("harness error on incumbent arm") == 2
+
     def test_disallowed_candidate_param_is_infra_failure_even_under_a_high_cap(
         self, charter, corpus
     ):

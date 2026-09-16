@@ -976,6 +976,17 @@ class TestAgentFreezeEvaluate:
         assert outcome.accepted is False
         assert outcome.reason == "VALUE_OUTSIDE_RANGE"
 
+    def test_propose_agent_candidate_without_bounds_refused(self, charter):
+        """Round-3 Finding 3: a boundless candidate carries no spend_cap,
+        so propose refuses it instead of freezing a protocol the runner
+        rejects after the baseline budget is burned."""
+        case = new_case(charter)
+        candidate = {key: value for key, value in self.AGENT_CANDIDATE.items() if key != "bounds"}
+        fields = self._agent_proposal_fields(candidate=candidate)
+        outcome = ex.propose_experiment(PK, case.id, **fields)
+        assert outcome.accepted is False
+        assert outcome.reason == "VALUE_OUTSIDE_RANGE"
+
     def test_propose_agent_incumbent_without_model_refused(self, charter):
         case = new_case(charter)
         outcome = ex.propose_experiment(

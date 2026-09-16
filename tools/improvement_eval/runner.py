@@ -908,8 +908,12 @@ def _run_agent_trials(
                     # A worker error on the re-run is a harness error exactly
                     # like Gate 1's: the trial is excluded and counted toward
                     # the cap. Only a clean re-run that disagrees fails the
-                    # run for drift.
+                    # run for drift. Drop any candidate outcome already
+                    # recorded: with a candidate-first assignment the trial
+                    # must be excluded, not paired against the stale Gate-1
+                    # incumbent.
                     harness_error(INCUMBENT_ARM, trial_id, exc)
+                    candidate_outcome = None
                     break
                 if not _agent_baseline_agree(
                     again, incumbent_outcome, tolerance, trial_id=trial_id
@@ -1373,8 +1377,12 @@ def _run_gates(
                         # A worker error on the re-run is a harness error
                         # exactly like the agent path: the trial is excluded
                         # and counted toward the cap. Only a clean re-run
-                        # that disagrees fails the run for drift.
+                        # that disagrees fails the run for drift. Drop any
+                        # candidate already recorded: with a candidate-first
+                        # assignment the trial must be excluded, not paired
+                        # against the stale Gate-1 ranking.
                         _harness_error(INCUMBENT_ARM, trial_id, exc)
+                        candidate = None
                         break
                     if again != incumbent.ranked_ids:
                         raise InfraFailure(
