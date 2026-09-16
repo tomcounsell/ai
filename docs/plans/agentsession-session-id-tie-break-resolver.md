@@ -44,7 +44,7 @@ return rows[0]
 ```
 
 The sixth is the one that matters most, and it is why the fix is an *ordering* rather than a
-selection. `agent/session_executor.py:318-337` fetches rows, then runs **two** full passes — an
+selection. `agent/session_executor.py:328-338` fetches rows, then runs **two** full passes — an
 eng-preferred pass and an any-row pass — looking for the first row with a non-empty `active_run_id`:
 
 ```python
@@ -101,7 +101,13 @@ This is exactly #3091's own acceptance test: **no caller has to remember a tie-b
 **Cited sibling issues/PRs re-checked:**
 - **#3065** ("SDLC control plane routes on asserted facts") — **still open**; plan at
   `status: Planning`, `revision_applied: true`. Named a pre-requisite by the issue for *time
-  pressure* only. This plan touches neither the ensure path nor the lock, so it is **not a blocker**.
+  pressure* only, and is ruled **NON-BLOCKING** — do not wait on it. Be precise about the boundary:
+  this plan does not modify `tools/sdlc_session_ensure.py`, so there is no file collision with
+  `docs/plans/sdlc-control-plane-asserted-facts.md`. On the lock itself: **this plan does not touch
+  lock acquisition (#3065's territory); it does change the input to lock renewal.** Data Flow entry 6
+  is the path — `agent/session_executor.py:330` feeds `_tick_issue_lock_renewal`. Acquisition and
+  renewal are different halves of the same mechanism; still non-blocking, but a reviewer should not be
+  told this plan sits nowhere near the lock.
 - **#3169** ("Move AgentSession identity into the key") — **opened 2026-09-05, still open**. Carries
   stage two. Out of scope; see No-Gos. Note that this plan **ticks #3169's AC item 4** ("`sdlc_stage_query.py`,
   `_sdlc_utils.py`, and `stage_states_helpers.py` no longer need an eng-type tie-break") ahead of
@@ -143,8 +149,8 @@ issue's `:1991-1992` citation: `models/agent_session.py:1282-1302`.
   not disturb its ordering contract.
 - **Commit `083c961ab`** (`Refs #3091`): wired six more mocked test classes through
   `wire_session_lookup`. **Succeeded**. Relevant as a warning: a new resolver argument must be added
-  to `wire_session_lookup` in the same commit, or every mocked test silently receives a bare
-  `MagicMock` instead of rows.
+  to `wire_session_lookup` in the same commit, or every mocked test silently receives rows in the
+  **wrong order** — the kwarg is forwarded and ignored, not rejected. See Risk 1.
 - **Issue #3065** (open): makes the `session-ensure` *write* path correct in the presence of
   duplicates. Complementary — it hardens a writer, this plan consolidates readers.
 - **Issue #3169** (open): stage two, prevention via `KeyField`. Deferred; this plan ticks its AC
@@ -360,9 +366,11 @@ Folding any of them in would change behavior, not consolidate it.
 
 - [ ] `tests/unit/session_lookup_mock.py::wire_session_lookup` — UPDATE: derive the `prefer_type`
       keyword for both resolver methods, with the real grouping-and-ordering rule. **Highest-risk edit
-      in the plan**: if missed, mocked tests exercising the new path receive a bare `MagicMock` —
-      truthy, with every attribute — and assert nothing while appearing green. Must land in the same
-      commit as the model change.
+      in the plan**: if missed, the mock accepts and forwards `prefer_type` and then **ignores** it,
+      so mocked tests get a plausible list with no preference applied and the five `[0]` sites take
+      the wrong row while appearing green. Tests asserting on call args go RED; tests asserting on
+      returned rows stay green and wrong. Must land in the same commit as the model change. See
+      Risk 1 for the reproduction and the required RED proof.
 - [ ] `tests/unit/test_agent_session_newest_wins.py` — UPDATE: add real-Redis cases for
       `prefer_type`. Seed an eng row *older* than a non-eng row so preference and recency disagree;
       two eng rows to prove newest-eng leads; zero eng rows to prove the order equals the
@@ -418,21 +426,55 @@ Folding any of them in would change behavior, not consolidate it.
 
 ## Risks
 
-### Risk 1: The mocked-test seam silently disarms assertions
-**Impact:** If `wire_session_lookup` is not extended for `prefer_type`, mocked tests exercising the
-new path get a bare `MagicMock` back — truthy, with every attribute — so assertions pass vacuously.
-The suite goes green while six call sites are untested. This is the exact failure mode `083c961ab`
-was written to prevent, which is evidence it is live rather than theoretical.
-**Mitigation:** The seam update lands in the same commit as the model change, and a dedicated test
-asserts a wired mock returns a *seeded row object*, not a `MagicMock`, from
-`rows_for_session_id(..., prefer_type="eng")`. Prove that test RED against the unextended seam before
-landing the fix.
+### Risk 1 (MUST SURVIVE CRITIQUE INTACT): the mocked-test seam returns plausible wrong data
+**This risk is not waivable and its mitigation is not negotiable.** It was reproduced directly, not
+reasoned about. Any proposal to drop or defer the seam update, or to weaken the RED proof below, is
+rejected by this paragraph.
+
+**Mechanism — verified by reproduction** against `tests/unit/session_lookup_mock.py` with the helper
+**unmodified**, calling `rows_for_session_id("s", prefer_type="eng")`:
+
+- **Case 1 — the test configures `query.filter.return_value` (the common shape).** Order returned:
+  `['pm', 'eng']`. Call args: `call(session_id='s', prefer_type='eng')`. The kwarg is accepted,
+  forwarded, and **silently ignored** by the mock. What comes back is newest-first with **no
+  preference applied** — the newer `pm` row first, the older `eng` row second. No error, no warning,
+  a plausible-looking ordered list that is simply wrong.
+- **Case 2 — bare mock, nothing configured.** `rows: []`, `newest: None`. Loud, not silent. **Not the
+  risk.**
+
+**Why this is worse than a truthy sentinel:** under this refactor five of the six sites collapse to
+`[0]` on the ordered list. A mocked test of any of those five then takes `[0]` of a list whose
+preference was never applied, so it gets **the wrong row presented as the right one**, with no signal
+anywhere. A truthy `MagicMock` usually breaks something downstream and gets noticed; plausible wrong
+data does not.
+
+**The safety-net asymmetry — this is the finding, state it in these terms:** tests asserting on
+**call args** go RED, because the call becomes `filter(session_id='s', prefer_type='eng')` and an
+`assert_called_with(session_id='s')` fails. Tests asserting on **what came back** stay green and
+wrong. *Tests that check how the query was called break loudly; tests that check what it returned
+break silently.* A reviewer needs to know which existing tests protect them and which do not.
+
+This is the exact failure mode `083c961ab` was written to prevent, which is evidence it is live
+rather than theoretical.
+
+**Mitigation:** the seam update lands in the **same commit** as the model change.
+
+**The RED proof must be on the ordering, not the wiring.** A test proving `wire_session_lookup`
+forwards a kwarg proves nothing — it already forwards it, as the call args above show. The RED proof
+is: configure a mock with a **newer non-eng row and an older eng row**, call through a production
+site that takes `[0]`, and assert the **eng row** comes back. That fails against the unextended
+helper and passes once the helper applies the preference. Anything weaker certifies the helper the
+way the #3259 self-check certified a deny-all guard as healthy.
 
 ### Risk 2 (NAMED ACCEPTANCE ITEM): the two-pass → one-pass collapse in `_fetch_live_active_run_id`
 This is the highest-risk part of the refactor and is tracked as an explicit acceptance criterion, not
 a footnote.
 
-**Today** `_fetch_live_active_run_id` (`agent/session_executor.py:296-337`) makes **two** passes over
+**Symbol coordinates for grep:** `_fetch_live_active_run_id` is **defined** at
+`agent/session_executor.py:298` and **called** at `agent/session_executor.py:384`, inside
+`_tick_issue_lock_renewal`. Both ends are given so the build agent can grep either.
+
+**Today** `_fetch_live_active_run_id` (`agent/session_executor.py:298-338`) makes **two** passes over
 `rows`: pass 1 returns the first *eng* row with a non-empty `active_run_id`; pass 2 returns the first
 *any* row with one. The refactor collapses that to **one** pass over a pre-ordered list. That is
 behavior-preserving **only if** `prefer_type="eng"` produces a **stable partition** — all eng rows
@@ -443,7 +485,7 @@ partition-not-composite-key constraint in Technical Approach.
 non-eng row does. The two-pass code returns the older non-eng row's run id. Any ordering bug returns
 a different id, or `None`.
 
-**Impact:** not cosmetic. The function's own docstring (`agent/session_executor.py:300-312`) records
+**Impact:** not cosmetic. The function's own docstring (`agent/session_executor.py:307-309`) records
 the consequence: a `None` means renewal skips forever and the lock lapses mid-stage, reopening the
 #1915 takeover window; a *wrong* id means a lapsed lock is SET-NX re-acquired **under a dead
 identity** and renewed every tick, wedging the live run's own calls behind `ISSUE_LOCKED` until a
@@ -466,6 +508,10 @@ until proven red against known-bad.
 `tests/unit/test_agent_session_newest_wins.py`. Run **only** the test files this change touches, via
 `scripts/pytest-clean.sh`; never bare `pytest`, never a full `tests/unit/` run. Multiple lanes are
 live on this machine.
+
+**Not waivable:** the stable-partition ordering test is the entire thing standing between this
+refactor and a wedged issue lock. If CRITIQUE or BUILD ever proposes dropping it as over-engineering,
+that sentence is the answer. It is not a nice-to-have test.
 
 ### Risk 3: Narrow-then-head inverts at the deterministic-id pass
 **Impact:** `find_session_by_issue` narrows by identity re-check and terminal-status exclusion. If the
@@ -515,7 +561,7 @@ row — the same stability property `test_agent_session_newest_wins.py` already 
 `log_class_set_exhaustion` still fires on exhaustion. Explicitly asserted in Test Impact.
 
 ### Race 3: Issue-lock renewal reads a row mid-write on the 60s tick
-**Location:** `agent/session_executor.py:318-337`.
+**Location:** `agent/session_executor.py:328-338`.
 **Trigger:** `active_run_id` is being written on one row while the renewal tick scans rows.
 **Data prerequisite:** At least one row must carry a non-empty `active_run_id` for renewal to
 proceed.
@@ -604,8 +650,10 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
 - [ ] `agent/session_executor.py`'s renewal scan is a single pass with one predicate (`rid`
       non-empty), never a preference-then-fallback.
 - [ ] The `rows_for_session_id` docstring no longer instructs callers to hand-roll the preference.
-- [ ] `tests/unit/session_lookup_mock.py::wire_session_lookup` covers `prefer_type`, proven by a test
-      that is RED against the unextended seam.
+- [ ] `tests/unit/session_lookup_mock.py::wire_session_lookup` covers `prefer_type`, proven by an
+      **ordering** test that is RED against the unextended seam: a newer non-eng row and an older eng
+      row, called through a production site that takes `[0]`, asserting the eng row comes back. A
+      test that only proves the kwarg is forwarded does not count — it already is.
 - [ ] Behavior at every migrated site is unchanged when an eng row exists, when none exists, and when
       the row list is empty.
 - [ ] The class-set retry and its exhaustion logging survive in `sdlc_stage_query.py`.
@@ -697,7 +745,10 @@ write raw Redis ops; this change adds **no** schema field and therefore needs **
 - **Parallel**: false
 - Extend `wire_session_lookup` so both methods honor `prefer_type` with the real grouping rule,
   derived from the mock's own `query.filter`.
-- Land in the same commit as task 2 — a seam that lags the model silently disarms assertions.
+- Land in the same commit as task 2 — a seam that lags the model forwards `prefer_type` and ignores
+  it, handing the `[0]` sites the wrong row with no signal.
+- Ship the Risk 1 RED proof with it: newer non-eng row + older eng row, read through a `[0]` site,
+  assert the eng row. Prove it RED against the unextended helper first.
 
 ### 4. Migrate the five selection sites
 - **Task ID**: build-selection-sites
@@ -722,7 +773,7 @@ write raw Redis ops; this change adds **no** schema field and therefore needs **
 - **Assigned To**: `resolver-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- `_fetch_live_active_run_id` (`agent/session_executor.py:318-337`) →
+- `_fetch_live_active_run_id` (`agent/session_executor.py:328-338`) →
   `rows_for_session_id(sid, prefer_type="eng")`, then **one** loop returning the first non-empty
   `active_run_id`. Delete the duplicated eng pass. One predicate, never preference-then-fallback.
 - Do not land this task until task 6's named Risk 2 test has been proven RED against the known-bad
@@ -823,3 +874,8 @@ write raw Redis ops; this change adds **no** schema field and therefore needs **
    tie-breaks, so the next sweep reader does not re-open the question? Cheap, and it makes the sweep's
    expected residue of 2 self-documenting at the call site rather than only in this plan. Not
    currently in the task list.
+   **Steer, if the answer is yes:** the comment must state **why the shape differs**, not merely that
+   the site is excluded. A comment reading "excluded from the sweep" tells the next reader nothing and
+   invites the question again. The wording to use is: *tests one already-resolved row's type; does not
+   choose among rows.* That distinction — testing a row versus selecting among rows — is the whole
+   reason the sweep pattern matches here and the defect does not live here.
