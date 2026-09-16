@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-05
 tracking: https://github.com/tomcounsell/ai/issues/2862
-last_comment_id:
+last_comment_id: 5571046486
 ---
 
 # Expectation blocked state and reason code
