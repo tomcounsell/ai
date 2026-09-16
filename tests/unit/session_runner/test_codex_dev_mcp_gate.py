@@ -4,6 +4,12 @@
 MCP surface: unflagged sessions get None (byte-identical argv), flagged eng
 sessions get a one-server config carrying ``AGENT_SESSION_ID``.
 ``preflight_codex_dev_lane`` is the executor's fail-fast gate.
+
+Named for the gates rather than the module under test
+(``agent/codex_dev_config.py``) because a ``_config`` basename resolves the
+``config`` FEATURE_MAP marker -- settings and project-setup territory, not
+the codex dev lane -- and mistagged this file into a suite it does not
+belong to (#3286).
 """
 
 from __future__ import annotations
