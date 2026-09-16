@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3311
 last_comment_id: 5685151250
+revision_applied: true
+revision_applied_at: 2026-09-16T09:31:00Z
 ---
 
 # Improvement controller lane 5b: paired agent-run arm and the deferred evaluations
@@ -136,11 +138,11 @@ TODO
 
 - Extend `tools/improvement_eval/arm_worker.py` with the `agent_run` mode: restore corpus, arm the writer guard, run the bounded session per trial under the arm's child env (private Redis socket, scratch content path, arm project key), assert the frozen digest unchanged at teardown, return per-trial outcomes with the manifest. Bounds (timeout, max turns, spend cap) travel in the job spec; the runner's allowlist keeps ambient config out.
 - Extend `ARM_PARAM_KEYS` with exactly the agent-manifest keys (model, skill, persona, prompt hash, bounds) and `ENVELOPES` in `tools/improvement_experiment.py` with `agent_task` ranges. Retrieval keys stay refused on agent protocols and vice versa; each mode's validator rejects the other's keys.
-- Adapt the runner's trial loop by branch, not by rewrite: retrieval trials keep ranked-id scoring against gold ids; agent trials score outcomes through the `JudgeFn` roster. Gate 1 for agent trials compares the incumbent's outcomes against the recorded baseline within a frozen per-task tolerance (agent runs are nondeterministic, so byte-parity is the wrong check; the tolerance is part of the frozen contract).
+- Adapt the runner's trial loop by branch, not by rewrite: retrieval trials keep ranked-id scoring against gold ids; agent trials score outcomes through the `JudgeFn` roster. Gate 1 for agent trials compares the incumbent's outcomes against the recorded baseline under a frozen per-task tolerance, defaulting to pass/fail agreement per task (score-within-margin is a named per-rubric extension the operator may choose at freeze time). The baseline record stores each trial's outcome plus the agreed bit; the Gate 1 check requires all(agree) and names mismatching trial ids in the evaluation note.
 - Task rubrics are frozen text in the protocol, scored by a rubric judge that returns a numeric outcome per trial. serves-charter stays on the roster for the charter leg; with 0 of 20 reference items present it reports its floor refusal, which the evaluation records alongside the rubric scores. The verdict rests on rubrics; the report names the charter leg as unmeasured.
 - The skill-acquisition evaluation consumes lane 5's recorded `skill_acquisition` investigation (gap, candidates, vetting, integration) and the prior capability as incumbent; on completion it writes the reuse observation to the case and clears the deferred disposition.
 - The cheap-inference experiment gates on the recorded `keyless_integrated` disposition (the credential is already usable; no vault wait), checks `is_open_source` at the call site for both arms, and carries a test proving a client-keyed project is refused before any session spawns.
-- Money: agent-run spend settles through lane 3's meter against unit 2 with the `arm:<arm_run_id>:` resource prefix, following the `PlannerArmRunner` convention; subscription turns and wall seconds ride the lane 6 `BudgetUse` shape.
+- Money: agent-run spend settles through lane 3's meter against unit 2 with the `arm:<arm_run_id>:` resource prefix, following the `PlannerArmRunner` convention; subscription turns and wall seconds ride the lane 6 `BudgetUse` shape. Enforcement is pre-trial reserve plus post-trial settle per task budget, with the existing `run_arm_job` timeout as the hard backstop; an over-budget trial is a harness error counting toward `infra_failure_cap`, never a scored zero. First evaluations freeze 2-4 tasks: bounded spend by default, with the supervisor confirming or overriding the weight tradeoff at freeze time.
 
 ## Failure Path Test Strategy
 
@@ -161,6 +163,7 @@ TODO
 - [ ] `tests/unit/test_improvement_eval_arena.py` — UPDATE: extend mode coverage with `agent_run` teardown-digest cases (a session write to the frozen corpus invalidates the arm)
 - [ ] `tests/unit/test_improvement_eval_runner_guards.py` — UPDATE: new allowlist keys rejected/accepted per mode (retrieval keys refused on agent protocols and vice versa)
 - [ ] `tests/unit/test_improvement_eligibility.py` — UPDATE: add the call-site refusal case (client-keyed project refused before any session spawns)
+- [ ] `tests/unit/test_improvement_eval_runner.py` — UPDATE: Gate 1 tolerance branch for agent trials (baseline outcome plus agreed bit, all(agree) check naming mismatches)
 - [ ] Lane 4's parity, blinding, corruption, and verdict-disjointness tests — NO CHANGE: they run unchanged as the regression net (asserted by the Verification rows below)
 
 ## Rabbit Holes
@@ -339,6 +342,8 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 | Lane 4 blinding tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_blinding.py -q` | exit code 0 |
 | Lane 4 calibration tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_calibration.py -q` | exit code 0 |
 | Mode validators refuse cross-mode keys | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner_guards.py -q` | exit code 0 |
+| Lane 4 runner tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner.py -q` | exit code 0 |
+| Lane 4 corpus tests still pass | `scripts/pytest-clean.sh tests/unit/test_improvement_eval_corpus.py -q` | exit code 0 |
 | Client-keyed refusal at call site | `scripts/pytest-clean.sh tests/unit/test_improvement_eligibility.py -q` | exit code 0 |
 | No ImprovementRelease writer in this lane | `grep -rn "ImprovementRelease(" tools/improvement_eval/arm_worker.py tools/improvement_experiment.py \| wc -l` | match count == 0 |
 
@@ -346,10 +351,13 @@ There is no standing pool of "specialist" agents. For domain-specific work, assi
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | Gate 1 tolerance undecided: pass/fail vs margin parked in Open Questions while Task 3 needs the baseline record shape now | rev1: pass/fail agreement frozen as default in Technical Approach, margin as named per-rubric extension | Freeze pass/fail agreement per task as default; baseline stores per-trial outcome plus agreed bit; Gate 1 requires all(agree) and names mismatching trial ids |
+| CONCERN | Risk & Robustness | Spend-cap enforcement point missing: bounds travel in the job spec but nothing enforces spend mid-session | rev1: pre-trial reserve plus post-trial settle added to Technical Approach money bullet | Pre-trial meter reserve plus post-trial settle on the arm:<arm_run_id>: prefix; run_arm_job timeout_s is the hard backstop; over-budget trial is a harness error toward the cap |
+| CONCERN | History & Consistency | Success criterion 1 names parity/corruption/disjointness suites but the Verification table runs only arena/blinding/calibration/runner_guards; Test Impact omits the runner suite Task 3 branches | rev1: runner plus corpus rows added to Verification; runner suite listed as UPDATE in Test Impact | Add scripts/pytest-clean.sh tests/unit/test_improvement_eval_runner.py -q and test_improvement_eval_corpus.py -q rows (exit code 0); list the runner suite as UPDATE in Test Impact |
+| NIT | Scope & Value | Risk 1 assumes 2-4 tasks while Open Question 1 asks whether small is right | rev1: 2-4 tasks stated as frozen default; question reframed as confirm-or-override | State 2-4 tasks as the frozen default in Technical Approach; reframe the question as confirm-or-override |
 
----
 
 ## Open Questions
 
-1. Task-set size for the first evaluations: 2-4 tasks keeps spend bounded but weakens Holm across endpoints. Is a small task set with fewer endpoints the right first shape, or should the first run spend more for statistical weight?
+1. Task-set size for the first evaluations (default frozen at 2-4 tasks per Technical Approach): does the supervisor confirm the bounded-spend default, or override toward more statistical weight for the first run?
 2. Gate 1 tolerance metric: pass/fail agreement per task is simple and robust; score-within-margin preserves more signal but needs a margin per rubric. Which should the frozen contract carry?
