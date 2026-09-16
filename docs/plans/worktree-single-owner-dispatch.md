@@ -304,44 +304,56 @@ worktree manager.
   several assert on symbols in `agent/session_executor.py` that the revised
   design may not place there.
 
-### Live evidence, incident 2 (2026-09-16, the #3259 lane)
+### Live evidence, incident 2 (2026-09-16, the #3259 lane) -- CAUSE IDENTIFIED
 
-A second double-owner event on the same lane, caught by accident rather than by
-any guard. Between a successful `git push` of `8267c7b7` and the next commit in
-the same lane, the reflog records:
+**This entry was initially recorded as an unattributed second writer. That was
+wrong, and the correction is the useful part.** The writer was the lane's own
+review subagent, dispatched by the orchestrator, which ran `git checkout
+8267c7b71` inside `.worktrees/sdlc-3259` to read files at a specific SHA and
+then restored the branch. It disclosed this itself.
+
+What happened, from the reflog:
 
 ```
 8267c7b71 HEAD@{1}: checkout: moving from session/sdlc-3259 to 8267c7b71
 ```
 
-The orchestrating session did not run that checkout. Some other writer entered
-`.worktrees/sdlc-3259` and detached HEAD. The next commit therefore landed on a
-detached HEAD, and `git push origin HEAD` failed with "not a full refname" --
-which is the **only** reason it was noticed. Had that commit been pushed with an
-explicit branch name, or had the session not read the error, the work would have
-been silently orphaned at the next checkout.
+The orchestrator's next commit landed on a detached HEAD. `git push origin HEAD`
+then failed with "not a full refname" -- the **only** signal. Recovery was
+clean (branch tip == remote tip, commit sat directly on top, `merge --ff-only`
+reattached it), but had the push named the branch explicitly, the commit would
+have been silently orphaned at the next checkout.
 
-Recovery was clean because nothing was lost: branch tip == remote tip ==
-`8267c7b7`, and the new commit sat directly on top, so `git merge --ff-only`
-reattached it. By the time the lane was inspected there was no process with a
-cwd inside the worktree and no index lock, so the second writer had already left.
+What this does and does not support:
 
-Three things this incident adds to the plan:
+- **It does NOT show an external dispatcher putting duplicate builders into
+  occupied lanes.** That is incident 1's shape, not this one. Do not cite this
+  incident for B1's motivating scenario.
+- **It DOES show the plan's ownership model is too coarse.** A *reader* that
+  needs a different SHA is not a duplicate builder, but it mutates the shared
+  ref anyway. The plan's acquire/refuse framing has no disposition for it:
+  refusing the reviewer would break review, and admitting it leaves the ref
+  mutable by a non-owner.
+- **A liveness probe would have returned clean.** By inspection time there was
+  no process with a cwd in the worktree and no index lock. The writer had left;
+  its effect persisted. `_worktree_has_live_process` answers "is someone here
+  now", and the damage here outlived the presence.
 
-1. **It is not rare.** Two occurrences in one day, on two different lanes,
-   during a period when the orchestrator was deliberately running one agent per
-   slug. Whatever is dispatching second writers is not the fan-out being
-   critiqued here.
-2. **Detection was luck.** No guard fired. The signal was a push error whose
-   text is about refspecs, not ownership. B4's point stands: a check that runs
-   only at acquisition cannot see a writer that arrives afterward.
-3. **`_worktree_has_live_process` would have returned clean.** The intruder was
-   gone by inspection time, but its effect (detached HEAD) persisted. A liveness
-   probe answers "is someone here now", and the damage here outlived the
-   presence. The refusal log C3 asks for should therefore record the lane's
-   **branch state** (attached/detached, and to what), not only holder ids and
-   mtimes -- a detached lane HEAD is evidence a second owner has already been
-   through, and it is cheap to read.
+Three consequences for the re-plan:
+
+1. **Separate readers from writers.** A second session reading a lane at a
+   pinned SHA is legitimate and common (review, critique, bisect). It must not
+   move the lane's HEAD. The right primitive is not refusal but *non-mutating
+   read*: `git -C <lane> show <sha>:<path>`, `git worktree add` a throwaway
+   detached checkout elsewhere, or `git cat-file`. Guidance belongs in
+   `do-pr-review`, not only in an acquisition guard.
+2. **The refusal/occupancy log should record lane branch state** (attached or
+   detached, and to what), not only holder ids and mtimes. A detached lane HEAD
+   is cheap to read and is evidence a non-owner has already been through, even
+   after they leave.
+3. **Detection cannot depend on a push error.** The signal here was a refspec
+   message with nothing to do with ownership. Whatever the re-plan builds must
+   notice a lane whose HEAD left its branch, on a schedule, not by luck.
 
 ### Live evidence: this failure class occurred during Phase 0
 
