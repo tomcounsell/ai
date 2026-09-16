@@ -321,6 +321,9 @@ the task's assignment. For broad recon use the built-in `Explore` /
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| NIT | Consolidated Critic | Regression test home path unnamed in task 1; name it (e.g. tests/unit/test_memory_import_order.py) so builder and validator agree | pending | n/a (NIT) |
+| NIT | Consolidated Critic | Verification table lists only test_memory_model.py while task 2 also validates test_memory_distill_backfill.py; add the backfill file to the table | pending | n/a (NIT) |
+| NIT | Consolidated Critic | Regression test assumes OPENAI_API_KEY reachable via env or repo .env fallback; note the dependency or skip gracefully when no key resolves | pending | n/a (NIT) |
 
 ---
 
