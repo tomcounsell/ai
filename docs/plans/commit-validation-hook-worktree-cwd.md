@@ -425,7 +425,16 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
 | 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
 | Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |
-| Deployed hardlink intact | `python -c "import os,pathlib; a=os.stat('.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+| Deployed hardlink intact | `python -c "import os,pathlib,subprocess; r=pathlib.Path(subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True).stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+
+> The hardlink row is anchored to the MAIN checkout, resolved from the common
+> git dir, and not to the invoking directory. Deployment hardlinks
+> `~/.claude/hooks/` to the main checkout's file; a worktree carries its own
+> independent copy with an nlink of 1. Run from a lane worktree, the relative
+> form of this row stats that copy and prints `False` for a deployment that is
+> perfectly healthy -- a false failure that Task 6 would hit every time. This
+> is the same class of defect as #3259 itself: reading git state from wherever
+> the process happens to be standing.
 
 ## Critique Results
 
@@ -495,3 +504,29 @@ sound.
 **Run lease:** the router held run_id `b71bbddeaffd4939a1f6d3783c25604a` on this lane through the
 blocked assessment; router mode does not release it. The lane is being resumed, not parked, so the
 lease stays held by the resuming dev agent.
+
+
+## Round-4 note: the self-check found a second defect (orchestrator, 2026-09-16)
+
+Task 4's post-sync self-check went RED on its first run against the hook that
+Tasks 1-3 had already "fixed", and it was right.
+
+`commit_block_reason` still opened with a substring test for the literal
+`"git commit"`. The command a lane actually issues is `git -C <worktree>
+commit`, which does not contain that substring. So the fast path dropped every
+worktree-scoped commit before `effective_git_dir` was ever called: the entire
+`-C` resolution the plan is about was unreachable through the real entry point.
+The 38-test behavioral suite missed it because every `-C` case drove
+`effective_git_dir` directly, and every end-to-end case used a command spelled
+`git commit`. Each half was correct; the pair was not.
+
+Fix: `is_git_commit()` tokenizes each simple command, steps over leading
+`VAR=value` assignments and the values of git's value-taking global options
+(`-C`, `-c`, `--git-dir`, `--work-tree`, ...), and requires the first bare
+subcommand token to be `commit`. It also stops `echo "git commit"` from
+blocking on prose, which the substring form did not. Covered by
+`TestCommitRecognition`, including `test_dash_c_worktree_commit_blocks_end_to_end`.
+
+This is the argument for Task 4 as a deployment-time check rather than only a
+unit test, made by Task 4 against this very plan: a guard verified only by the
+tests written alongside it inherits their blind spots.
