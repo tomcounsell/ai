@@ -207,12 +207,12 @@ No agent integration required — no new CLI entry point and no bridge changes; 
 
 ## Success Criteria
 
-- [ ] Fresh process importing `models.memory` first configures the corpus-matched provider (`get_default_provider()` is not `None`)
-- [ ] Reverse order (`import agent` first) still configures the provider
-- [ ] A genuine provider-configuration failure emits a log record instead of passing silently
-- [ ] Missing-`OPENAI_API_KEY` processes still degrade gracefully without raising
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Fresh process importing `models.memory` first configures the corpus-matched provider (`get_default_provider()` is not `None`)
+- [x] Reverse order (`import agent` first) still configures the provider
+- [x] A genuine provider-configuration failure emits a log record instead of passing silently
+- [x] Missing-`OPENAI_API_KEY` processes still degrade gracefully without raising
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
