@@ -117,11 +117,11 @@ Solo dev work is fast — the bottleneck is alignment and review. Appetite measu
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies.
+No external services or secrets required — this work has no external dependencies beyond the repo venv.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| (none) | `python scripts/check_prerequisites.py docs/plans/apply-defaults-embedding-provider-import-cycle.md` | Confirm no env or service gates before building |
+| Repo venv | `~/src/ai/.venv/bin/python --version` | Interpreter present for test runs |
 
 ## Solution
 
@@ -207,15 +207,108 @@ No agent integration required — no new CLI entry point and no bridge changes; 
 
 ## Success Criteria
 
-Filling in next.
+- [ ] Fresh process importing `models.memory` first configures the corpus-matched provider (`get_default_provider()` is not `None`)
+- [ ] Reverse order (`import agent` first) still configures the provider
+- [ ] A genuine provider-configuration failure emits a log record instead of passing silently
+- [ ] Missing-`OPENAI_API_KEY` processes still degrade gracefully without raising
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-Filling in next.
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+- **Builder (import-cycle-fix)**
+  - Name: cycle-builder
+  - Role: Apply the lazy import, the loud failure, and the regression test
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (import-cycle-fix)**
+  - Name: cycle-validator
+  - Role: Verify both import orders, the log assertion, and the memory test files
+  - Agent Type: validator
+  - Resume: true
+
+### Available Agent Types
+
+**Tier 1 — Core (default choices):**
+- `builder` - General implementation (default for most work)
+- `validator` - Read-only verification (no Write/Edit tools)
+- `code-reviewer` - Code review, security checks
+- `test-engineer` - Test implementation and strategy
+- `documentarian` - Documentation updates
+- `plan-maker` - Planning subagent
+- `frontend-tester` - Browser testing
+
+**Domain expertise (no dedicated agent — prompt a Tier 1 agent):**
+There is no standing pool of "specialist" agents. For domain-specific work
+(async/concurrency, Redis/Popoto data, security/untrusted-input, debugging,
+MCP-tool/API integration, conversational-UX/testing), assign a `builder` (or
+`code-reviewer` for review-only work), add a `Domain: <tag>` line to the task,
+and paste the matching rules from [`DOMAIN_FRAMING.md`](DOMAIN_FRAMING.md) into
+the task's assignment. For broad recon use the built-in `Explore` /
+`general-purpose` agents.
+
+**Service Agents (domain-specific task delegation):**
+- `linear`, `notion`, `sentry`, `stripe`, `render` — portable agents that wrap a
+  SaaS/MCP integration; available in any repo via the synced `~/.claude/agents/`.
 
 ## Step by Step Tasks
 
-Filling in next.
+### 1. Red-state regression test
+- **Task ID**: build-regression-test
+- **Depends On**: none
+- **Validates**: new subprocess test failing on current main (create)
+- **Informed By**: spike-1 (normal imports always execute the package init, so the test must use a real subprocess with `models.memory` imported first)
+- **Assigned To**: cycle-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Write the regression test FIRST and confirm it fails on the unfixed tree: fresh subprocess imports `models.memory` first, asserts `get_default_provider()` is not `None`
+- Assert the reverse order (`import agent` first) also yields a provider, in the same test module
+
+### 2. Break the back-edge and make failure loud
+- **Task ID**: build-cycle-fix
+- **Depends On**: build-regression-test
+- **Validates**: new subprocess test (passing), tests/unit/test_memory_model.py, tests/unit/test_memory_distill_backfill.py
+- **Informed By**: spike-1 (lazy back-edge import is the primary cut), spike-2 (keep configuring inside `apply_defaults`)
+- **Assigned To**: cycle-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Move `from models.memory import Memory` in `agent/session_health.py:43` to the top of the enclosing function at line ~6201; first verify `models/agent_session.py` has no module-level import of `models.memory`
+- Replace `except Exception: pass` in `config/memory_defaults.py:247-253` with a logged warning naming `apply_defaults` and the embedding provider
+- If the regression test still fails (second import-time edge per Risk 1), relocate `configure_embedding_provider` to a package-neutral module and update both call sites
+- Add a log-assertion test for genuine configuration failure and confirm the missing-key path still degrades gracefully
+
+### 3. Validation
+- **Task ID**: validate-cycle-fix
+- **Depends On**: build-cycle-fix
+- **Assigned To**: cycle-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the new regression test plus the full memory test files and report pass/fail
+- Manually run both import orders from the issue's controlled comparison and confirm provider output
+
+### N-1. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-cycle-fix
+- **Assigned To**: cycle-builder
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/subconscious-memory.md` configuration notes with the import-order guarantee
+- Add entry to documentation index if a new feature doc is created
+
+### N. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: cycle-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run all validation commands
+- Verify all success criteria met (including documentation)
+- Generate final report
 
 ## Verification
 
@@ -233,4 +326,8 @@ Filling in next.
 
 ## Open Questions
 
-Filling in next.
+1. Lane-4 evaluation arms (#3216, PR #3309) inherited whichever provider the parent's import order produced. After this fix lands, should those frozen evaluation inputs be re-validated, or do the recorded results stand?
+
+Key assumptions (no input needed unless challenged):
+- The lazy back-edge import is sufficient; module relocation is a build-time fallback, not a design choice for review.
+- The new warning log on provider failure is acceptable in providerless environments, matching the existing missing-key warning tone.
