@@ -404,3 +404,60 @@ class TestMainWiring:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == ""
+
+
+class TestCommitRecognition:
+    """Deciding "is this a git commit" by substring was wrong in both
+    directions, and the miss was the load-bearing one.
+
+    `git -C <worktree> commit` is the shape a lane's commit actually takes, and
+    the literal `"git commit"` never appears in it. The resolver underneath
+    could be perfect and the guard would still allow every worktree commit,
+    which is how the update self-check (#3259) found this.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git commit -m x",
+            "git -C /some/lane commit -m x",
+            "git -C /some/lane -c user.email=a@b commit -m x",
+            "git --git-dir=/r/.git --work-tree=/r commit -m x",
+            "GIT_AUTHOR_NAME=x git commit -m x",
+            "/usr/bin/git commit -m x",
+            "git status && git -C /lane commit -m x",
+            "git commit --amend --no-edit",
+        ],
+    )
+    def test_recognized_as_a_commit(self, command):
+        assert hook.is_git_commit(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "",
+            "git status",
+            "git -C /lane status",
+            "git log --oneline -1",
+            'echo "run git commit next"',
+            "grep -r 'git commit' docs/",
+            "git -C /lane push",
+        ],
+    )
+    def test_not_recognized_as_a_commit(self, command):
+        assert hook.is_git_commit(command) is False
+
+    def test_dash_c_worktree_commit_blocks_end_to_end(self, tmp_path):
+        """The regression the self-check caught, driven through the real
+        decision function against a real repo -- not through the recognizer in
+        isolation, because the two were individually correct and jointly wrong.
+        """
+        repo = make_repo(tmp_path, "popoto")
+        lane = worktree_on_main(repo, tmp_path / "lane-a")
+        (lane / "mod.py").write_text("x = 1\n")
+        git(lane, "add", "mod.py")
+
+        reason = hook.commit_block_reason(f"git -C {lane} commit -m wip", str(tmp_path))
+
+        assert reason is not None
+        assert "mod.py" in reason

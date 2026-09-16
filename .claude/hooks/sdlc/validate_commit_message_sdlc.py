@@ -8,7 +8,9 @@ Behavior:
 - If a `git commit` command targets the `main` branch AND staged files include
   code extensions (.py, .js, .ts), the commit is BLOCKED unconditionally.
 - Non-code files (docs, plans, configs) are allowed on main.
-- If not a git commit command, silently allows (fast path).
+- If not a git commit command, silently allows (fast path). "Is this a commit"
+  is decided by tokenizing, not by a substring search: `git -C <dir> commit` is
+  a commit and `echo "git commit"` is not.
 
 Every git query is scoped to the directory the command will ACTUALLY run in --
 `effective_git_dir` resolves `git -C`, a leading `cd`, then the payload `cwd`,
@@ -33,6 +35,8 @@ Claude Code hook protocol:
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +44,7 @@ from pathlib import Path
 # Standalone script — sys.path mutation is safe (never imported as library)
 # Import shared utilities from sibling module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sdlc_context import allow, block, effective_git_dir, read_stdin
+from sdlc_context import allow, block, effective_git_dir, read_stdin, split_simple_commands
 
 _GIT_TIMEOUT_S = 5
 _CODE_EXTENSIONS = (".py", ".js", ".ts")
@@ -105,6 +109,58 @@ def get_repo_name(cwd: str) -> str | None:
     return Path(common_dir).parent.name
 
 
+# Global options that take a VALUE, so the token after them is an argument and
+# never the subcommand. `git -C /x commit` must not be read as running `/x`.
+_GIT_VALUE_OPTS = (
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--exec-path",
+    "--super-prefix",
+)
+
+
+def is_git_commit(command: str) -> bool:
+    """True if `command` invokes `git commit` in any of its spellings.
+
+    A substring test for the literal `"git commit"` is what this replaces, and
+    it was wrong in both directions. It MISSES `git -C <dir> commit`, which is
+    precisely the worktree-scoped form this hook exists to catch -- resolving
+    `-C` is pointless when the fast path drops every command that uses it. And
+    it MATCHES `echo "run git commit"`, blocking on prose.
+
+    So: split on shell control operators, and in each simple command require
+    that the program is `git` and that the first non-option token (skipping the
+    values of the global options above) is `commit`.
+    """
+    for simple_cmd in split_simple_commands(command or ""):
+        try:
+            tokens = shlex.split(simple_cmd)
+        except ValueError:
+            continue
+        # Step over leading VAR=value environment assignments.
+        i = 0
+        while i < len(tokens) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[i]):
+            i += 1
+        if i >= len(tokens) or os.path.basename(tokens[i]) != "git":
+            continue
+        i += 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token in _GIT_VALUE_OPTS:
+                i += 2
+                continue
+            if token.startswith("-"):
+                i += 1
+                continue
+            if token == "commit":
+                return True
+            break  # some other git subcommand; keep scanning the rest
+    return False
+
+
 def commit_block_reason(command: str, hook_cwd: str) -> str | None:
     """Return the block reason for `command`, or None to allow.
 
@@ -112,7 +168,7 @@ def commit_block_reason(command: str, hook_cwd: str) -> str | None:
     main(), and it never raises.
     """
     try:
-        if not command or "git commit" not in command:
+        if not command or not is_git_commit(command):
             return None
 
         cwd = effective_git_dir(command, hook_cwd)

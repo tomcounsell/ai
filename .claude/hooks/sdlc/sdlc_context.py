@@ -34,7 +34,7 @@ _CONTROL_SPLIT_RE = re.compile(r"&&|\|\||;|\n|\|")
 _UNEXPANDED_MARKERS = ("$(", "`", "${")
 
 
-def _split_simple_commands(command: str) -> list:
+def split_simple_commands(command: str) -> list:
     """Split a shell command string on control operators into simple commands.
 
     Intentionally not a full shell parser: it handles the common `a && b`,
@@ -86,7 +86,7 @@ def effective_git_dir(command: str, hook_cwd: str) -> str:
         base = hook_cwd or os.getcwd()
 
         # Rung 1: `git -C <path>` in the simple command that does the commit.
-        for simple_cmd in _split_simple_commands(command or ""):
+        for simple_cmd in split_simple_commands(command or ""):
             if "commit" not in simple_cmd:
                 continue
             try:
@@ -101,7 +101,7 @@ def effective_git_dir(command: str, hook_cwd: str) -> str:
                     return _resolve_against(candidate, base)
 
         # Rung 2: a leading `cd <path>`.
-        simple_cmds = _split_simple_commands(command or "")
+        simple_cmds = split_simple_commands(command or "")
         if simple_cmds:
             try:
                 first_tokens = shlex.split(simple_cmds[0])
