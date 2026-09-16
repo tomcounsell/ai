@@ -43,12 +43,22 @@ Fires when Claude attempts to end a session.
 
 ### 2. `validate_commit_message_sdlc.py` — PreToolUse/Bash Hook
 
-Fires before any Bash tool call containing `git commit`.
+Fires before any Bash tool call that invokes `git commit`.
 
 - **Blocks code file commits on main unconditionally**: If on `main` branch and staged files include `.py`, `.js`, or `.ts` files, the commit is blocked regardless of SDLC context. Non-code files (docs, plans, configs) are allowed on main.
 - Blocks commits with `Co-Authored-By:` trailers (case-insensitive)
 - Blocks commits with empty messages
 - All other Bash commands pass through immediately
+
+**What counts as a commit** is decided by tokenizing, never by a substring search (`is_git_commit`). `git -C <worktree> commit` is a commit even though the literal string `git commit` never appears in it, and `echo "git commit"` is not one. The recognizer steps over leading `VAR=value` assignments and the values of git's value-taking global options (`-C`, `-c`, `--git-dir`, `--work-tree`), then requires the first bare subcommand token to be `commit`.
+
+**Every git query is scoped to the directory the command will actually run in.** `effective_git_dir` (in `sdlc_context.py`) resolves, in order: `git -C <path>` in the simple command that carries the commit, a leading `cd <path>`, the hook payload's `cwd`, and only as a last resort the hook process's own working directory. A path token that still contains shell syntax (`$(...)`, `` ` ``, `${...}`, a leading `$`) was never expanded and is rejected in favor of the next rung — using it as a directory would send every git call into its fail-open handler, which allows.
+
+Reading git state from the process working directory is the defect this replaced (#3259). It produced false blocks (the lane is on a feature branch, the shared checkout is on main) and, worse, false allows in the other direction.
+
+**Repository identity comes from the common git dir**, via `git rev-parse --path-format=absolute --git-common-dir` with a fallback to the bare flag for git < 2.31. The worktree-root probe (`--show-toplevel`) is not used on any path: inside `popoto/.worktrees/lane-a` it returns the *worktree* root, whose basename is the lane slug, so the commit clears the `!= "popoto"` gate and is allowed — a false-allow-always for exactly the population this guard protects. When identity cannot be determined at all, the hook takes the **restrictive** branch: a guard that cannot tell which repo it is in must not conclude "not the protected one, therefore fine."
+
+**Deployment is verified, not assumed.** `sync_user_hooks` ends in `verify_deployed_commit_guard`, which builds a throwaway `popoto` repo with a linked worktree on `main`, stages a `.py` file, and asks the *deployed* hook — through the same interpreter the generated settings command names — whether it blocks. A fixture that cannot be built warns and continues; a fixture that builds against a hook that allows is a hard error. The hardlink existing and the script importing were both green throughout the #3259 window; this is the only signal that asks the question the fleet depends on.
 
 ### 3. `sdlc_reminder.py` — PostToolUse/Write+Edit Hook
 
@@ -233,7 +243,7 @@ is swallowed rather than blocking the agent's turn-end.
 
 ### Shared Context Module
 
-All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
+All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`, plus `effective_git_dir` / `split_simple_commands` for directory resolution). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message_sdlc.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
 
 The `is_sdlc_context()` detection is two-tier:
 1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)
