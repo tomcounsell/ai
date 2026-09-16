@@ -805,7 +805,9 @@ class TestEvaluateExperiment:
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
         meter = OpenMeter()
 
-        def fake_evaluate(experiment_id, project_key, *, judges=None, store=None):
+        def fake_evaluate(
+            experiment_id, project_key, *, judges=None, store=None, meter=None, arm_run_id=None
+        ):
             assert store is not None
             row = reload_experiment(experiment_id)
             row.state = "complete"
@@ -821,6 +823,250 @@ class TestEvaluateExperiment:
         assert outcome.extra["verdict"] == "inconclusive"
         assert reload_case(case.id).state == "investigating"
         assert json.loads(reload_case(case.id).evaluation_ids) == [outcome.extra["evaluation_id"]]
+
+
+class TestAgentFreezeEvaluate:
+    """Review fixes: freeze owns the agent_task envelope (C1), evaluate
+    forwards the meter and spend id (C2), and the judge reserve sizes from
+    tasks (C3)."""
+
+    AGENT_CANDIDATE = {
+        "model": "spark-test-3311",
+        "persona": "persona-scout-3311",
+        "bounds": {"timeout_s": 30, "max_turns": 2, "spend_cap": 1.0},
+    }
+    AGENT_INCUMBENT = {
+        "model": "prior-model-3311",
+        "persona": "persona-prior-3311",
+        "bounds": {"timeout_s": 30, "max_turns": 2, "spend_cap": 1.0},
+    }
+    AGENT_ENDPOINTS = ["rubric-quality"]
+
+    def _tasks(self, n=2):
+        return [
+            {"id": f"t{i + 1}", "prompt": f"summarize the readiness snapshot {i + 1}"}
+            for i in range(n)
+        ]
+
+    def _agent_baseline_fake(self):
+        def _fake(project_key, tasks, *, incumbent=None, export=None, meter=None, arm_run_id=None):
+            _fake.seen.append({"metered": meter is not None, "arm_run_id": arm_run_id})
+            return {
+                "corpus_digest": export.digest,
+                "outcomes": {
+                    task["id"]: {"passed": True, "output": "prior work", "model": "m"}
+                    for task in tasks
+                },
+            }
+
+        _fake.seen = []
+        return _fake
+
+    def _frozen_agent(self, charter, store, n_tasks=2):
+        tasks = self._tasks(n_tasks)
+        case, experiment = propose(
+            charter,
+            envelope="agent_task",
+            candidate=dict(self.AGENT_CANDIDATE),
+            tasks=tasks,
+            incumbent=dict(self.AGENT_INCUMBENT),
+            endpoints=list(self.AGENT_ENDPOINTS),
+        )
+        baseline_fake = self._agent_baseline_fake()
+        outcome = freeze(experiment, store, meter=OpenMeter(), agent_baseline=baseline_fake)
+        assert outcome.accepted, outcome
+        move_state(case.id, "experimenting")
+        return case, reload_experiment(experiment.id), baseline_fake
+
+    def test_freeze_agent_tasks_builds_an_agent_protocol(self, charter, store):
+        tasks = self._tasks(2)
+        case, experiment = propose(
+            charter,
+            envelope="agent_task",
+            candidate=dict(self.AGENT_CANDIDATE),
+            tasks=tasks,
+            incumbent=dict(self.AGENT_INCUMBENT),
+            endpoints=list(self.AGENT_ENDPOINTS),
+        )
+        meter = OpenMeter()
+        baseline_fake = self._agent_baseline_fake()
+        outcome = freeze(experiment, store, meter=meter, agent_baseline=baseline_fake)
+        assert outcome.accepted, outcome
+        assert outcome.extra["n_tasks"] == 2
+        protocol = protocol_of(experiment, store)
+        assert protocol["mode"] == "agent"
+        assert protocol["tasks"] == tasks
+        assert protocol["endpoints"] == self.AGENT_ENDPOINTS
+        assert protocol["incumbent"] == self.AGENT_INCUMBENT
+        assert protocol["baseline"]["tolerance"] == {"kind": "pass_fail"}
+        assert "queries" not in protocol
+        assert manifest_of(experiment)["envelope"] == "agent_task"
+        assert [r["purpose"] for r in meter.reservations] == []
+        assert baseline_fake.seen == [{"metered": True, "arm_run_id": f"{experiment.id}:baseline"}]
+
+    def test_propose_agent_tasks_missing_refused(self, charter):
+        case = new_case(charter)
+        outcome = ex.propose_experiment(
+            PK,
+            case.id,
+            hypothesis="the skill reaches the right call",
+            mechanism="the checklist names the freeze call",
+            falsifier="rubric scores do not separate the arms",
+            candidate=dict(self.AGENT_CANDIDATE),
+            envelope="agent_task",
+        )
+        assert outcome.accepted is False
+        assert outcome.reason == "TASKS_MISSING"
+
+    def test_freeze_revalidates_tasks_from_notes(self, charter, store):
+        case, experiment = propose(
+            charter,
+            envelope="agent_task",
+            candidate=dict(self.AGENT_CANDIDATE),
+            tasks=self._tasks(2),
+            incumbent=dict(self.AGENT_INCUMBENT),
+            endpoints=list(self.AGENT_ENDPOINTS),
+        )
+        row = reload_experiment(experiment.id)
+        notes = json.loads(row.notes)
+        del notes["tasks"]
+        row.notes = json.dumps(notes, sort_keys=True)
+        assert row.save() is not False
+        outcome = freeze(row, store, agent_baseline=self._agent_baseline_fake())
+        assert outcome.accepted is False
+        assert outcome.reason == "TASKS_MISSING"
+        assert reload_experiment(experiment.id).state == "proposed"
+
+    def _agent_proposal_fields(self, **overrides):
+        fields = dict(
+            hypothesis="the skill reaches the right call",
+            mechanism="the checklist names the freeze call",
+            falsifier="rubric scores do not separate the arms",
+            candidate=dict(self.AGENT_CANDIDATE),
+            envelope="agent_task",
+            tasks=self._tasks(2),
+            incumbent=dict(self.AGENT_INCUMBENT),
+            endpoints=list(self.AGENT_ENDPOINTS),
+        )
+        fields.update(overrides)
+        return fields
+
+    @pytest.mark.parametrize(
+        ("drop", "reason"),
+        [
+            ("tasks", "TASKS_MISSING"),
+            ("incumbent", "INCUMBENT_INVALID"),
+            ("endpoints", "ENDPOINTS_MISSING"),
+        ],
+    )
+    def test_propose_agent_inputs_missing_refused(self, charter, drop, reason):
+        case = new_case(charter)
+        fields = self._agent_proposal_fields()
+        del fields[drop]
+        outcome = ex.propose_experiment(PK, case.id, **fields)
+        assert outcome.accepted is False
+        assert outcome.reason == reason
+
+    def test_propose_agent_candidate_without_spend_cap_refused(self, charter):
+        case = new_case(charter)
+        candidate = dict(self.AGENT_CANDIDATE)
+        candidate["bounds"] = {"timeout_s": 30, "max_turns": 2}
+        fields = self._agent_proposal_fields(candidate=candidate)
+        outcome = ex.propose_experiment(PK, case.id, **fields)
+        assert outcome.accepted is False
+        assert outcome.reason == "VALUE_OUTSIDE_RANGE"
+
+    def test_propose_agent_candidate_without_bounds_refused(self, charter):
+        """Round-3 Finding 3: a boundless candidate carries no spend_cap,
+        so propose refuses it instead of freezing a protocol the runner
+        rejects after the baseline budget is burned."""
+        case = new_case(charter)
+        candidate = {key: value for key, value in self.AGENT_CANDIDATE.items() if key != "bounds"}
+        fields = self._agent_proposal_fields(candidate=candidate)
+        outcome = ex.propose_experiment(PK, case.id, **fields)
+        assert outcome.accepted is False
+        assert outcome.reason == "VALUE_OUTSIDE_RANGE"
+
+    def test_propose_agent_incumbent_without_model_refused(self, charter):
+        case = new_case(charter)
+        outcome = ex.propose_experiment(
+            PK, case.id, **self._agent_proposal_fields(incumbent={"persona": "p"})
+        )
+        assert outcome.accepted is False
+        assert outcome.reason == "INCUMBENT_INVALID"
+
+    @pytest.mark.parametrize(
+        ("key", "reason"),
+        [
+            ("tasks", "TASKS_MISSING"),
+            ("incumbent", "INCUMBENT_INVALID"),
+            ("endpoints", "ENDPOINTS_MISSING"),
+        ],
+    )
+    def test_freeze_revalidates_agent_inputs_from_notes(self, charter, store, key, reason):
+        case, experiment = propose(
+            charter,
+            envelope="agent_task",
+            candidate=dict(self.AGENT_CANDIDATE),
+            tasks=self._tasks(2),
+            incumbent=dict(self.AGENT_INCUMBENT),
+            endpoints=list(self.AGENT_ENDPOINTS),
+        )
+        row = reload_experiment(experiment.id)
+        notes = json.loads(row.notes)
+        del notes[key]
+        row.notes = json.dumps(notes, sort_keys=True)
+        assert row.save() is not False
+        outcome = freeze(row, store, agent_baseline=self._agent_baseline_fake())
+        assert outcome.accepted is False
+        assert outcome.reason == reason
+        assert reload_experiment(experiment.id).state == "proposed"
+
+    def test_evaluate_forwards_meter_and_spend_id_to_the_runner(self, charter, store, monkeypatch):
+        case, experiment, _ = self._frozen_agent(charter, store)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        meter = OpenMeter()
+        seen = {}
+
+        def fake_evaluate(
+            experiment_id, project_key, *, judges=None, store=None, meter=None, arm_run_id=None
+        ):
+            seen["meter"] = meter
+            seen["arm_run_id"] = arm_run_id
+            row = reload_experiment(experiment_id)
+            row.state = "complete"
+            row.save()
+            return evaluation_for(row, verdict="inconclusive", trials=2, notes="agent batch")
+
+        monkeypatch.setattr(runner, "evaluate", fake_evaluate)
+        outcome = ex.evaluate_experiment(
+            PK, experiment.id, meter=meter, judges=[], store=store, arm_run_id="lane5b-3311"
+        )
+        assert outcome.accepted, outcome
+        assert seen["meter"] is meter
+        assert seen["arm_run_id"] == "lane5b-3311"
+
+    def test_judge_reserve_is_sized_from_the_task_count(self, charter, store, monkeypatch):
+        case, experiment, _ = self._frozen_agent(charter, store, n_tasks=3)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        meter = OpenMeter()
+
+        def fake_evaluate(
+            experiment_id, project_key, *, judges=None, store=None, meter=None, arm_run_id=None
+        ):
+            # C2 pins the forwarding; here only the reserve size matters.
+            row = reload_experiment(experiment_id)
+            row.state = "complete"
+            row.save()
+            return evaluation_for(row, verdict="inconclusive", trials=3, notes="agent batch")
+
+        monkeypatch.setattr(runner, "evaluate", fake_evaluate)
+        outcome = ex.evaluate_experiment(
+            PK, experiment.id, meter=meter, judges=[], store=store, arm_run_id="lane5b-3311"
+        )
+        assert outcome.accepted, outcome
+        assert meter.reservations[0]["purpose"] == "evaluation_judges"
+        assert meter.reservations[0]["usd"] == pytest.approx(3 * 2 * ex.JUDGE_PRICE_ESTIMATE_USD)
 
 
 # ---------------------------------------------------------------------------

@@ -14,12 +14,15 @@ that decides what the loop tries next:
   experiment to lane 4's runner, the single writer of ``ImprovementEvaluation``.
 - :func:`apply_verdict` moves the case per Data Flow step 6.
 
-**The envelope.** This lane's candidates vary retrieval parameters only:
+**The envelope.** Retrieval candidates vary parameters only:
 :data:`ENVELOPES` names the three keys ``handle_job`` forwards to
 ``retrieve_memories`` and the range each may take. ``retrieval_mode`` is an
 environment setting the arena pins, never a call parameter, so a candidate
-naming it is refused ``KEY_OUTSIDE_ENVELOPE`` (spike-2). The incumbent is
-exactly :data:`INCUMBENT`: ``_retrieve_job`` copies every present key into
+naming it is refused ``KEY_OUTSIDE_ENVELOPE`` (spike-2). The ``agent_task``
+envelope varies behavior instead: manifest strings name the session and
+``bounds`` carries the per-trial caps, each checked by kind rather than by
+numeric range. The incumbent is exactly :data:`INCUMBENT`:
+``_retrieve_job`` copies every present key into
 the arm job, and a present ``None`` is not "absent", so neither the incumbent
 nor a candidate ever carries a ``None`` value.
 
@@ -66,6 +69,8 @@ from tools.improvement_eval.corpus import export_corpus
 from tools.improvement_eval.errors import InfraFailure
 from tools.improvement_eval.runner import (
     CALIBRATION_NOTE_PREFIX,
+    _validate_agent_manifest,
+    capture_agent_baseline,
     capture_baseline,
     compute_contract_digest,
     freeze_protocol,
@@ -78,12 +83,23 @@ from tools.memory_eval.query_set import build_known_item_set
 logger = logging.getLogger(__name__)
 
 #: The candidate envelopes this lane admits and the range of every key.
-ENVELOPES: dict[str, dict[str, tuple[float, float]]] = {
+ENVELOPES: dict[str, dict[str, tuple]] = {
     "retrieval_parameters": {
         "limit": (1, 50),
         "rrf_k": (1, 200),
         "min_rrf_score": (0.0, 1.0),
-    }
+    },
+    #: The agent-run arm varies behavior, not numbers: manifest strings name
+    #: the session (``model``, ``skill``, ``persona``, ``prompt_hash``) and
+    #: ``bounds`` carries the per-trial caps. Entries here are kind tags, not
+    #: numeric intervals, and are checked by :func:`_validate_agent_candidate`.
+    "agent_task": {
+        "model": ("text",),
+        "skill": ("text",),
+        "persona": ("text",),
+        "prompt_hash": ("text",),
+        "bounds": ("bounds",),
+    },
 }
 
 #: The production default for the one key ``handle_job`` read before this
@@ -218,6 +234,9 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
     ``VALUE_OUTSIDE_RANGE`` (type or range; booleans are refused as values),
     ``IDENTICAL_TO_INCUMBENT``. An accepted outcome carries
     ``extra["surfaces"]``: the sorted envelope keys the candidate varies.
+    The ``agent_task`` envelope branches to :func:`_validate_agent_candidate`
+    after the ``NONE_VALUE`` check: its values are checked by kind, and the
+    retrieval incumbent comparison cannot match it.
     """
     ranges = ENVELOPES.get(envelope)
     if ranges is None:
@@ -236,6 +255,8 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
             "NONE_VALUE",
             f"{none_keys} carry None; omit a key the candidate does not vary",
         )
+    if envelope == "agent_task":
+        return _validate_agent_candidate(candidate)
     for key, value in candidate.items():
         low, high = ranges[key]
         integral = isinstance(low, int) and isinstance(high, int)
@@ -248,6 +269,113 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
     if dict(candidate) == INCUMBENT:
         return _refuse("IDENTICAL_TO_INCUMBENT", f"the candidate equals the incumbent {INCUMBENT}")
     return Outcome(True, "OK", None, "candidate admitted", {"surfaces": sorted(candidate)})
+
+
+def _validate_agent_candidate(candidate: dict) -> Outcome:
+    """Admit an ``agent_task`` candidate by kind, or refuse ``VALUE_OUTSIDE_RANGE``.
+
+    Manifest strings must be non-blank text; ``bounds`` is required and
+    must be a mapping of the worker's bound keys to numbers (``timeout_s``
+    above zero, ``max_turns`` at least one) carrying a non-negative
+    ``spend_cap``, so every metered trial reserves its frozen per-task
+    budget instead of billing with no reservation held. The retrieval
+    ``IDENTICAL_TO_INCUMBENT`` comparison cannot match a manifest candidate,
+    so it is kept as the shared tail: harmless, never a false refusal.
+    """
+    from tools.improvement_eval.arm_worker import AGENT_RUN_BOUND_KEYS
+
+    for key in ("model", "skill", "persona", "prompt_hash"):
+        if key in candidate:
+            value = candidate[key]
+            if not isinstance(value, str) or not value.strip():
+                return _refuse(
+                    "VALUE_OUTSIDE_RANGE", f"{key} must be a non-blank string, got {value!r}"
+                )
+    bounds = candidate.get("bounds")
+    if not isinstance(bounds, dict):
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            "bounds must be a mapping with a non-negative 'spend_cap' so every "
+            f"metered trial reserves its frozen per-task budget, got {bounds!r}",
+        )
+    spend_cap = bounds.get("spend_cap")
+    if isinstance(spend_cap, bool) or not isinstance(spend_cap, (int, float)) or not spend_cap >= 0:
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            "bounds needs a non-negative 'spend_cap' so every metered trial "
+            f"reserves its frozen per-task budget, got {spend_cap!r}",
+        )
+    unknown = sorted(set(bounds) - set(AGENT_RUN_BOUND_KEYS))
+    if unknown:
+        return _refuse(
+            "VALUE_OUTSIDE_RANGE",
+            f"bounds carries unknown keys {unknown}; expected {list(AGENT_RUN_BOUND_KEYS)}",
+        )
+    for key, value in bounds.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[{key}]={value!r} is not a number")
+        if key == "timeout_s" and not value > 0:
+            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[timeout_s]={value!r} must be above zero")
+        if key == "max_turns" and not value >= 1:
+            return _refuse(
+                "VALUE_OUTSIDE_RANGE", f"bounds[max_turns]={value!r} must be at least one"
+            )
+        if key == "spend_cap" and not value >= 0:
+            return _refuse(
+                "VALUE_OUTSIDE_RANGE", f"bounds[spend_cap]={value!r} must not be negative"
+            )
+    if dict(candidate) == INCUMBENT:
+        return _refuse("IDENTICAL_TO_INCUMBENT", f"the candidate equals the incumbent {INCUMBENT}")
+    return Outcome(True, "OK", None, "candidate admitted", {"surfaces": sorted(candidate)})
+
+
+def _validate_agent_tasks(tasks) -> Outcome:
+    """Check the frozen task set an ``agent_task`` proposal carries.
+
+    Refuses ``TASKS_MISSING`` for anything but a non-empty list and
+    ``TASKS_INVALID`` for entries that are not mappings with a non-blank
+    ``id`` and ``prompt`` -- the same shape
+    :func:`tools.improvement_eval.runner._load_agent_protocol` demands of a
+    frozen protocol, checked here so a bad task set never reaches the arms.
+    """
+    if not isinstance(tasks, list) or not tasks:
+        return _refuse("TASKS_MISSING", f"agent_task needs a non-empty 'tasks' list, got {tasks!r}")
+    for task in tasks:
+        if not isinstance(task, dict):
+            return _refuse(
+                "TASKS_INVALID", f"agent_task 'tasks' entries must be mappings, got {task!r}"
+            )
+        if not isinstance(task.get("id"), str) or not task["id"].strip():
+            return _refuse("TASKS_INVALID", f"agent_task tasks need a non-blank 'id', got {task!r}")
+        if not isinstance(task.get("prompt"), str) or not task["prompt"].strip():
+            return _refuse(
+                "TASKS_INVALID",
+                f"agent_task task {task.get('id')!r} needs a non-blank 'prompt'",
+            )
+    return Outcome(True, "OK", None, "tasks admitted", {"n_tasks": len(tasks)})
+
+
+def _validate_agent_endpoints(endpoints) -> Outcome:
+    """Check the rubric endpoint names an ``agent_task`` proposal carries.
+
+    Refuses ``ENDPOINTS_MISSING`` for anything but a non-empty list and
+    ``ENDPOINTS_INVALID`` for entries that are not non-blank strings. The
+    freeze re-checks: falling back to the retrieval endpoint names would
+    freeze a protocol no rubric judge can score, dying at
+    :func:`tools.improvement_eval.runner._score_agent_trials` instead of
+    producing a verdict.
+    """
+    if not isinstance(endpoints, list) or not endpoints:
+        return _refuse(
+            "ENDPOINTS_MISSING", f"agent_task needs a non-empty 'endpoints' list, got {endpoints!r}"
+        )
+    for endpoint in endpoints:
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            return _refuse(
+                "ENDPOINTS_INVALID",
+                f"agent_task endpoints must be non-blank strings, got {endpoint!r}",
+            )
+    return Outcome(True, "OK", None, "endpoints admitted", {"n_endpoints": len(endpoints)})
 
 
 def prior_answers_for(envelope: str) -> list[dict]:
@@ -363,6 +491,9 @@ def propose_experiment(
     falsifier: str,
     candidate: dict,
     envelope: str = "retrieval_parameters",
+    tasks: list[dict] | None = None,
+    incumbent: dict | None = None,
+    endpoints: list[str] | None = None,
 ) -> Outcome:
     """Create the ``proposed`` experiment and journal ``hypothesis_proposed``.
 
@@ -371,11 +502,27 @@ def propose_experiment(
     ``CASE_BUSY``, and the journal's own reason. ``candidate_surfaces`` holds
     the envelope keys the candidate varies; ``notes`` holds the prior
     answers, the candidate, and the envelope until the freeze writes the
-    manifest.
+    manifest. An ``agent_task`` proposal carries its frozen task set in
+    ``tasks`` (``TASKS_MISSING``/``TASKS_INVALID``), the prior-capability
+    manifest it compares against in ``incumbent`` (``INCUMBENT_INVALID``),
+    and the rubric endpoint names in ``endpoints``
+    (``ENDPOINTS_MISSING``/``ENDPOINTS_INVALID``); retrieval proposals
+    never read any of them.
     """
     admitted = validate_candidate(candidate, envelope=envelope)
     if not admitted.accepted:
         return admitted
+    if envelope == "agent_task":
+        checked = _validate_agent_tasks(tasks)
+        if not checked.accepted:
+            return Outcome(False, checked.reason, None, checked.message)
+        try:
+            _validate_agent_manifest("incumbent", incumbent or {})
+        except InfraFailure as exc:
+            return _refuse("INCUMBENT_INVALID", f"agent_task incumbent: {exc}")
+        checked_endpoints = _validate_agent_endpoints(endpoints)
+        if not checked_endpoints.accepted:
+            return Outcome(False, checked_endpoints.reason, None, checked_endpoints.message)
     if not all((text or "").strip() for text in (hypothesis, mechanism, falsifier)):
         return _refuse(
             "INCOMPLETE_HYPOTHESIS", "hypothesis, mechanism, and falsifier are all required"
@@ -393,6 +540,18 @@ def propose_experiment(
         "candidate": candidate,
         "envelope": envelope,
     }
+    notes = {
+        "prior_answers": prior_answers_for(envelope),
+        "candidate": candidate,
+        "envelope": envelope,
+    }
+    if envelope == "agent_task":
+        payload["tasks"] = [dict(task) for task in (tasks or [])]
+        notes["tasks"] = [dict(task) for task in (tasks or [])]
+        payload["incumbent"] = dict(incumbent)
+        notes["incumbent"] = dict(incumbent)
+        payload["endpoints"] = list(endpoints or [])
+        notes["endpoints"] = list(endpoints or [])
     key, generation = _lease(project_key, case_id)
     if generation is None:
         return _refuse("CASE_BUSY", f"case {case_id} lease is held")
@@ -417,11 +576,7 @@ def propose_experiment(
             falsifier=falsifier,
             candidate_surfaces=json.dumps(admitted.extra["surfaces"]),
             notes=json.dumps(
-                {
-                    "prior_answers": prior_answers_for(envelope),
-                    "candidate": candidate,
-                    "envelope": envelope,
-                },
+                notes,
                 sort_keys=True,
             ),
         )
@@ -518,82 +673,116 @@ def _revision_in_force(project_key: str) -> str | None:
     return rows[-1].id
 
 
-def freeze_experiment(
+def _freeze_agent_inputs(
     project_key: str,
     experiment_id: str,
     *,
-    n_queries: int = DEFAULT_N_QUERIES,
-    seed: int = DEFAULT_SEED,
-    builder=None,
-    exporter=None,
-    baseline=None,
-    store=None,
-    meter=None,
-) -> Outcome:
-    """Freeze a ``proposed`` experiment into a contract, in the plan's order.
+    seed: int,
+    exporter,
+    agent_baseline,
+    meter,
+    candidate: dict,
+    notes: dict,
+):
+    """Steps 3-6 for ``agent_task`` envelopes.
 
-    1. Novelty check against ``rejected`` cases sharing the case's
-       ``dedup_identity`` (``REJECTED_IDENTITY``).
-    2. The prior answer, unconditional for the envelope (#2082).
-    3. ``export_corpus``, then :func:`known_item_records` from its body.
-    4. ``build_known_item_set`` under the ``known_item_generation``
-       reservation (``UNIT2_UNAVAILABLE`` on a refusal); a builder failure is
-       ``BUILDER_FAILED``; fewer than :data:`MIN_QUERIES` queries is
-       ``KNOWN_ITEM_SHORTFALL`` naming produced versus requested.
-    5. ``capture_baseline`` with the incumbent exactly :data:`INCUMBENT`
-       (``BASELINE_FAILED`` on an exception).
-    6. The protocol, with ``batch_size = len(queries)`` set after generation.
-    7. ``freeze_protocol``, the manifest with ``base_revision`` and
-       ``candidate_ref``, ``contract_digest``, ``state="frozen"``,
-       ``frozen_at``, ``model_revision_id``, ``charter_version``, and the
-       ``experiment_frozen`` event under the case lease.
-
-    Every refusal before step 7 leaves the experiment ``proposed`` with no
-    protocol written. ``builder``, ``exporter``, ``baseline``, ``store``,
-    and ``meter`` are injection points for tests.
+    Returns ``(protocol, export, incumbent, frozen_note, count_key, count)``
+    or an :class:`Outcome` refusal. The frozen task set, the prior-capability
+    incumbent manifest, and the rubric endpoint names all come from the
+    proposal notes and are re-validated here (``TASKS_MISSING`` /
+    ``TASKS_INVALID``, ``INCUMBENT_INVALID``, ``ENDPOINTS_MISSING`` /
+    ``ENDPOINTS_INVALID``); the corpus still exports for the digest Gate 1
+    compares; the baseline runs through the metered agent capture under an
+    ``<experiment_id>:baseline`` spend id (``BASELINE_FAILED`` on any
+    failure, including a meter refusal). There is no known-item generation
+    and no known-item reservation: tasks are authored, not sampled. The
+    endpoints never fall back to the retrieval names: no rubric judge can
+    score those, so a fallback would freeze a protocol that dies at scoring.
     """
-    from models.improvement_charter import ImprovementCharter
-    from tools.improvement_control.journal import set_state, transition
-
-    experiment = _experiment(project_key, experiment_id)
-    if experiment is None:
-        return _refuse("EXPERIMENT_NOT_FOUND", f"no experiment {experiment_id}")
-    if experiment.state != "proposed":
+    checked = _validate_agent_tasks(notes.get("tasks"))
+    if not checked.accepted:
+        return Outcome(False, checked.reason, experiment_id, checked.message)
+    agent_tasks = [dict(task) for task in notes["tasks"]]
+    try:
+        _validate_agent_manifest("incumbent", notes.get("incumbent") or {})
+    except InfraFailure as exc:
+        return _refuse("INCUMBENT_INVALID", f"agent_task incumbent: {exc}", experiment_id)
+    incumbent = dict(notes["incumbent"])
+    checked_endpoints = _validate_agent_endpoints(notes.get("endpoints"))
+    if not checked_endpoints.accepted:
+        return Outcome(False, checked_endpoints.reason, experiment_id, checked_endpoints.message)
+    agent_endpoints = list(notes["endpoints"])
+    tolerance = notes.get("tolerance") or {"kind": "pass_fail"}
+    if not isinstance(tolerance, dict):
         return _refuse(
-            "EXPERIMENT_NOT_PROPOSED",
-            f"experiment {experiment_id} is {experiment.state!r}, not 'proposed'",
+            "TOLERANCE_INVALID",
+            f"agent_task tolerance must be a mapping, got {tolerance!r}",
             experiment_id,
         )
-    case = _case(project_key, getattr(experiment, "case_id", None))
-    if case is None:
-        return _refuse("CASE_NOT_FOUND", f"experiment {experiment_id} names no case", experiment_id)
-    notes = experiment_notes(experiment)
-    envelope = notes.get("envelope") or "retrieval_parameters"
-    candidate = notes.get("candidate")
-    admitted = validate_candidate(candidate, envelope=envelope)
-    if not admitted.accepted:
-        return Outcome(False, admitted.reason, experiment_id, admitted.message)
-    meter = meter if meter is not None else paid_inference_meter
-
-    # 1. Novelty.
-    peers = _rejected_identity_peers(project_key, case)
-    if peers:
-        return _refuse(
-            "REJECTED_IDENTITY",
-            f"rejected case(s) {peers} share dedup identity {case.dedup_identity!r}",
-            experiment_id,
+    try:
+        export = (exporter or export_corpus)(project_key)
+    except Exception as exc:  # noqa: BLE001 -- an export failure is a refusal
+        return _refuse("EXPORT_FAILED", f"export_corpus failed: {exc}", experiment_id)
+    try:
+        agent_recorded = (agent_baseline or capture_agent_baseline)(
+            project_key,
+            agent_tasks,
+            incumbent=incumbent,
+            export=export,
+            meter=meter,
+            arm_run_id=f"{experiment_id}:baseline",
         )
-    # 2. Prior answers.
-    prior_answers = prior_answers_for(envelope)
+    except Exception as exc:  # noqa: BLE001 -- an arm failure is a refusal
+        return _refuse("BASELINE_FAILED", f"capture_agent_baseline failed: {exc}", experiment_id)
+    protocol = {
+        "mode": "agent",
+        "batch_size": len(agent_tasks),
+        "endpoints": agent_endpoints,
+        "thresholds": {k: dict(v) for k, v in THRESHOLDS.items()},
+        "holdout_partition": notes.get("holdout_partition") or f"agent-task-{seed}",
+        "tasks": agent_tasks,
+        "baseline": {**dict(agent_recorded), "tolerance": tolerance},
+        "incumbent": incumbent,
+        "candidate": dict(candidate),
+        "infra_failure_cap": INFRA_FAILURE_CAP,
+    }
+    return (
+        protocol,
+        export,
+        incumbent,
+        {"n_tasks": len(agent_tasks), "seed": seed},
+        "n_tasks",
+        len(agent_tasks),
+    )
 
-    # 3. Corpus export and the records the builder samples.
+
+def _freeze_retrieval_inputs(
+    project_key: str,
+    experiment_id: str,
+    case,
+    *,
+    n_queries: int,
+    seed: int,
+    builder,
+    exporter,
+    baseline,
+    meter,
+    candidate: dict,
+):
+    """Steps 3-6 for retrieval envelopes.
+
+    Returns ``(protocol, export, incumbent, frozen_note, count_key, count)``
+    or an :class:`Outcome` refusal. Known-item generation runs under the
+    ``known_item_generation`` reservation (``UNIT2_UNAVAILABLE`` on a
+    refusal); a builder failure is ``BUILDER_FAILED``; fewer than
+    :data:`MIN_QUERIES` queries is ``KNOWN_ITEM_SHORTFALL``; the baseline
+    runs on the incumbent (``BASELINE_FAILED`` on an exception).
+    """
     try:
         export = (exporter or export_corpus)(project_key)
     except Exception as exc:  # noqa: BLE001 -- an export failure is a refusal
         return _refuse("EXPORT_FAILED", f"export_corpus failed: {exc}", experiment_id)
     records = known_item_records(export)
-
-    # 4. Known-item generation, metered.
     reservation = meter.reserve(
         project_key,
         n_queries * KNOWN_ITEM_PRICE_ESTIMATE_USD,
@@ -632,8 +821,6 @@ def freeze_experiment(
             f"the minimum is {MIN_QUERIES}",
             experiment_id,
         )
-
-    # 5. Baseline on the incumbent.
     incumbent = dict(INCUMBENT)
     try:
         recorded = (baseline or capture_baseline)(
@@ -641,8 +828,6 @@ def freeze_experiment(
         )
     except Exception as exc:  # noqa: BLE001 -- an arm failure is a refusal
         return _refuse("BASELINE_FAILED", f"capture_baseline failed: {exc}", experiment_id)
-
-    # 6. The protocol; batch_size from the queries produced, never the request.
     protocol = {
         "batch_size": len(queries),
         "endpoints": list(ENDPOINTS),
@@ -654,6 +839,130 @@ def freeze_experiment(
         "candidate": dict(candidate),
         "infra_failure_cap": INFRA_FAILURE_CAP,
     }
+    return (
+        protocol,
+        export,
+        incumbent,
+        {
+            "n_queries_requested": n_queries,
+            "n_queries_produced": len(queries),
+            "seed": seed,
+            "records_available": len(records),
+        },
+        "n_queries",
+        len(queries),
+    )
+
+
+def freeze_experiment(
+    project_key: str,
+    experiment_id: str,
+    *,
+    n_queries: int = DEFAULT_N_QUERIES,
+    seed: int = DEFAULT_SEED,
+    builder=None,
+    exporter=None,
+    baseline=None,
+    agent_baseline=None,
+    store=None,
+    meter=None,
+) -> Outcome:
+    """Freeze a ``proposed`` experiment into a contract, in the plan's order.
+
+    1. Novelty check against ``rejected`` cases sharing the case's
+       ``dedup_identity`` (``REJECTED_IDENTITY``).
+    2. The prior answer, unconditional for the envelope (#2082).
+    3. ``export_corpus``, then :func:`known_item_records` from its body.
+    4. ``build_known_item_set`` under the ``known_item_generation``
+       reservation (``UNIT2_UNAVAILABLE`` on a refusal); a builder failure is
+       ``BUILDER_FAILED``; fewer than :data:`MIN_QUERIES` queries is
+       ``KNOWN_ITEM_SHORTFALL`` naming produced versus requested.
+    5. ``capture_baseline`` with the incumbent exactly :data:`INCUMBENT`
+       (``BASELINE_FAILED`` on an exception).
+    6. The protocol, with ``batch_size = len(queries)`` set after generation.
+    7. ``freeze_protocol``, the manifest with ``base_revision`` and
+       ``candidate_ref``, ``contract_digest``, ``state="frozen"``,
+       ``frozen_at``, ``model_revision_id``, ``charter_version``, and the
+       ``experiment_frozen`` event under the case lease.
+
+    An ``agent_task`` envelope replaces steps 3-6: the frozen task set, the
+    prior-capability incumbent manifest, and the rubric endpoint names are
+    re-validated from the proposal notes (``TASKS_MISSING`` /
+    ``TASKS_INVALID``, ``INCUMBENT_INVALID``, ``ENDPOINTS_MISSING`` /
+    ``ENDPOINTS_INVALID``), the corpus still exports for the digest Gate 1
+    compares, and the baseline runs through the metered agent capture under
+    an ``<experiment_id>:baseline`` spend id. There is no known-item
+    generation and no known-item reservation: tasks are authored, not
+    sampled.
+
+    Every refusal before step 7 leaves the experiment ``proposed`` with no
+    protocol written. ``builder``, ``exporter``, ``baseline``,
+    ``agent_baseline``, ``store``, and ``meter`` are injection points for
+    tests.
+    """
+    from models.improvement_charter import ImprovementCharter
+    from tools.improvement_control.journal import set_state, transition
+
+    experiment = _experiment(project_key, experiment_id)
+    if experiment is None:
+        return _refuse("EXPERIMENT_NOT_FOUND", f"no experiment {experiment_id}")
+    if experiment.state != "proposed":
+        return _refuse(
+            "EXPERIMENT_NOT_PROPOSED",
+            f"experiment {experiment_id} is {experiment.state!r}, not 'proposed'",
+            experiment_id,
+        )
+    case = _case(project_key, getattr(experiment, "case_id", None))
+    if case is None:
+        return _refuse("CASE_NOT_FOUND", f"experiment {experiment_id} names no case", experiment_id)
+    notes = experiment_notes(experiment)
+    envelope = notes.get("envelope") or "retrieval_parameters"
+    candidate = notes.get("candidate")
+    admitted = validate_candidate(candidate, envelope=envelope)
+    if not admitted.accepted:
+        return Outcome(False, admitted.reason, experiment_id, admitted.message)
+    meter = meter if meter is not None else paid_inference_meter
+
+    # 1. Novelty.
+    peers = _rejected_identity_peers(project_key, case)
+    if peers:
+        return _refuse(
+            "REJECTED_IDENTITY",
+            f"rejected case(s) {peers} share dedup identity {case.dedup_identity!r}",
+            experiment_id,
+        )
+    # 2. Prior answers.
+    prior_answers = prior_answers_for(envelope)
+
+    # 3-6. Inputs and the protocol, per envelope; either helper returns an
+    # Outcome refusal, which leaves the experiment proposed.
+    if envelope == "agent_task":
+        built = _freeze_agent_inputs(
+            project_key,
+            experiment_id,
+            seed=seed,
+            exporter=exporter,
+            agent_baseline=agent_baseline,
+            meter=meter,
+            candidate=candidate,
+            notes=notes,
+        )
+    else:
+        built = _freeze_retrieval_inputs(
+            project_key,
+            experiment_id,
+            case,
+            n_queries=n_queries,
+            seed=seed,
+            builder=builder,
+            exporter=exporter,
+            baseline=baseline,
+            meter=meter,
+            candidate=candidate,
+        )
+    if isinstance(built, Outcome):
+        return built
+    protocol, export, incumbent, frozen_note, count_key, count = built
 
     # 7. Freeze under the case lease.
     key, generation = _lease(project_key, case.id)
@@ -694,12 +1003,7 @@ def freeze_experiment(
             int(getattr(pinned, "version", 0) or 0) if pinned is not None else None
         )
         notes["prior_answers"] = prior_answers
-        notes["frozen"] = {
-            "n_queries_requested": n_queries,
-            "n_queries_produced": len(queries),
-            "seed": seed,
-            "records_available": len(records),
-        }
+        notes["frozen"] = frozen_note
         experiment.notes = json.dumps(notes, sort_keys=True)
         if _set_experiment_state(experiment, "frozen") is False:
             return _refuse(
@@ -724,7 +1028,7 @@ def freeze_experiment(
         {
             "contract_digest": contract_digest,
             "protocol_ref": protocol_ref,
-            "n_queries": len(queries),
+            count_key: count,
             "revision": result.revision,
         },
     )
@@ -773,6 +1077,7 @@ def evaluate_experiment(
     judges=None,
     require_slot: bool = True,
     store=None,
+    arm_run_id: str | None = None,
 ) -> Outcome:
     """Reserve the judge spend, move the case to ``evaluating``, run lane 4's
     ``evaluate``, settle, and apply the verdict.
@@ -784,7 +1089,9 @@ def evaluate_experiment(
     ``running`` intent on the case names that session; an operator at a
     terminal with no session id is break-glass and admitted. Lane 4's runner
     owns every failure past that point: this function catches nothing of
-    its own and writes no ``ImprovementEvaluation``.
+    its own and writes no ``ImprovementEvaluation``. The meter and the spend
+    id forward to the runner so agent trials reserve their frozen per-task
+    budget instead of running unmetered.
     """
     from tools.improvement_eval import runner
 
@@ -813,11 +1120,13 @@ def evaluate_experiment(
         protocol = load_protocol(experiment, store=store)
     except InfraFailure as exc:
         return _refuse("PROTOCOL_UNREADABLE", str(exc), experiment_id)
-    n_queries = len(protocol.get("queries") or [])
+    # Agent protocols run tasks, never queries: size the judge reservation
+    # from whichever the protocol carries.
+    n_items = len(protocol.get("tasks") or protocol.get("queries") or [])
 
     reservation = meter.reserve(
         project_key,
-        max(n_queries, 1) * 2 * JUDGE_PRICE_ESTIMATE_USD,
+        max(n_items, 1) * 2 * JUDGE_PRICE_ESTIMATE_USD,
         purpose=RESERVATION_JUDGES,
         case_id=case.id,
     )
@@ -834,7 +1143,14 @@ def evaluate_experiment(
 
     evaluation = None
     try:
-        evaluation = runner.evaluate(experiment_id, project_key, judges=judges, store=store)
+        evaluation = runner.evaluate(
+            experiment_id,
+            project_key,
+            judges=judges,
+            store=store,
+            meter=meter,
+            arm_run_id=arm_run_id,
+        )
     finally:
         trials = 0
         if evaluation is not None:
