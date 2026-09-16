@@ -431,23 +431,31 @@ def verify_deployed_commit_guard(
             result.skipped += 1
             return
 
-        payload = json.dumps(
-            {
-                "tool_name": "Bash",
-                "tool_input": {"command": f"git -C {shlex.quote(str(worktree))} commit -m wip"},
-                # Deliberately NOT the worktree: the defect was the hook reading
-                # git state from wherever the process happened to be.
-                "cwd": str(tmp),
-            }
-        )
-        try:
-            proc = subprocess.run(
+        def run_payload(command):
+            payload = json.dumps(
+                {
+                    "tool_name": "Bash",
+                    "tool_input": {"command": command},
+                    # Deliberately NOT the worktree: the defect was the hook
+                    # reading git state from wherever the process happened to be.
+                    "cwd": str(tmp),
+                }
+            )
+            return subprocess.run(
                 [interpreter, str(script)],
                 input=payload,
                 capture_output=True,
                 text=True,
                 timeout=_SELF_CHECK_TIMEOUT,
             )
+
+        lane = shlex.quote(str(worktree))
+        try:
+            proc = run_payload(f"git -C {lane} commit -m wip")
+            # Both directions, because asserting only that something blocks
+            # certifies a deny-all guard as healthy -- a hook that blocked
+            # every Bash call would pass the check above and wedge the fleet.
+            allow_proc = run_payload(f"git -C {lane} status")
         except Exception as e:
             result.actions.append(
                 LinkAction(
@@ -455,6 +463,20 @@ def verify_deployed_commit_guard(
                     _tilde(script),
                     "error",
                     f"{SELF_CHECK_DETAIL} FAILED: the deployed hook could not be run ({e})",
+                )
+            )
+            result.errors += 1
+            return
+
+        if '"block"' in allow_proc.stdout:
+            result.actions.append(
+                LinkAction(
+                    "",
+                    _tilde(script),
+                    "error",
+                    f"{SELF_CHECK_DETAIL} FAILED: the deployed guard BLOCKED a read-only "
+                    "`git status`. It is denying commands it must allow, which wedges every "
+                    f"session on this machine. stdout={allow_proc.stdout.strip()!r}",
                 )
             )
             result.errors += 1

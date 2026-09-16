@@ -1126,6 +1126,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if result.hardlink_result.errors > 0:
         for action in result.hardlink_result.actions:
             if action.action == "error":
+                if hardlinks.SELF_CHECK_DETAIL in (action.error or ""):
+                    # The commit-guard self-check is the one hardlink action
+                    # whose failure means the fleet is unprotected rather than
+                    # that one file did not link. Routed to `result.errors` so
+                    # the run reports FAILED: as a warning it rendered as
+                    # "COMPLETED with N warning(s)" under the generic
+                    # "Hardlink step failed" text, which is the same
+                    # certified-healthy-while-broken shape #3259 exists to
+                    # close.
+                    log(f"ERROR: {action.error}", v, always=True)
+                    _append_error(result, action.error or "")
+                    continue
                 log(f"WARN: {action.error} ({action.dst})", v)
                 _append_warning(result, f"Hardlink step failed: {action.dst}")
 
