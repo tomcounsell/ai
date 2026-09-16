@@ -206,11 +206,51 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_routing.py` — UPDATE: continuation-branch cases gain forum variants (top-level topic message → fresh session; genuine in-topic reply → continuation).
-- [ ] `tests/unit/test_context_helpers.py` — UPDATE: chain-walk tests gain topic-root termination cases and root-cache namespace assertions.
-- [ ] `tests/unit/test_message_routing.py` — UPDATE: intake persistence asserts `topic_id` stored (None for non-forum fixtures, so existing cases assert the new field's default).
-- [ ] `tests/unit/test_reply_delivery.py` — UPDATE: outbound cases assert General/none omits `reply_to` and default-topic resolution applies to unsolicited sends only.
-- [ ] Recovery-scanner tests (`tests/unit/` files covering catchup/reconciler/agent_catchup enqueues) — UPDATE: assert the shared resolver is called and `topic_id` persists on recovery-path messages.
+All UPDATE paths below were verified to exist on `origin/main` at plan-revision time
+(2026-09-16). CREATE paths were verified NOT to exist. A build must not invent new suites
+that shadow these.
+
+- [ ] `tests/unit/test_config_driven_routing.py` — UPDATE: this is the real home of
+  `should_respond_async` reply-continuation coverage (its `_make_event(reply_to_msg_id=...)`
+  helper drives the `is_reply` assertions at `:103-115`, and `:227` carries the #996 case).
+  Add forum variants: top-level topic message → `is_reply is False` (fresh session); genuine
+  in-topic reply → `is_reply is True`. The `_make_event` helper gains a reply-header stub so
+  `forum_topic` / `reply_to_top_id` can be set.
+- [ ] `tests/unit/test_routing.py` — UPDATE only if the resolver lands in `bridge/routing.py`
+  rather than a new `bridge/topic.py`; this file is the general routing-predicate suite and
+  does NOT currently exercise `should_respond_async`. Do not put continuation-branch forum
+  cases here.
+- [ ] `tests/unit/test_context_helpers.py` — UPDATE: chain-walk tests gain topic-root
+  termination cases and root-cache namespace assertions. (It already constructs
+  `TelegramMessage(...)` at `:650`, so the new nullable field surfaces here.)
+- [ ] `tests/unit/test_model_relationships.py` — UPDATE (**hard break**): `:110` asserts
+  `len(TelegramMessage._meta.field_names) == 20`. Adding `topic_id` makes it 21; the count
+  must be bumped in the same commit as the model change or the suite goes red. Add a
+  `topic_id in field_names` assertion beside the existing `reply_to_msg_id` one (`:76-79`).
+- [ ] `tests/tools/test_telegram_history.py` — UPDATE: intake persistence runs through
+  `tools/telegram_history.store_message()` (`tools/telegram_history/__init__.py:346`,
+  `TelegramMessage.create(...)` at `:396`), which this suite covers directly
+  (`test_store_basic_message` at `:40` and ~22 `store_message` call sites). Assert
+  `topic_id` round-trips and defaults to `None` for non-forum callers.
+- [ ] `tools/telegram_history/tests/test_telegram_history.py` — UPDATE: a second, co-located
+  suite that also calls `store_message` (`:55`, `:70`, `:98`, `:156`, `:183`). It must move
+  with the signature change or it drifts from the `tests/tools/` copy.
+- [ ] `tests/unit/test_bridge_relay.py` — UPDATE: relay send-path cases assert the General
+  topic (id 1) and the no-config case omit `reply_to`, and that a resolved `default_topic_id`
+  reaches Telethon as `reply_to=<topic_id>`.
+- [ ] `tests/unit/test_send_message.py` — UPDATE: `tools/send_message.py` env resolution gains
+  `TELEGRAM_TOPIC_ID`; assert `TELEGRAM_REPLY_TO` still wins when both are set.
+- [ ] `tests/unit/test_agent_catchup.py`, `tests/unit/test_reconciler.py`,
+  `tests/unit/test_catchup_seed.py` — UPDATE: assert the shared resolver is invoked and the
+  topic rides into the enqueued `AgentSession` context. **Note the correction:** the three
+  scanners do NOT persist `TelegramMessage` rows — they build `tg_{project}_{chat}_{msg_id}`
+  session ids and call `enqueue_agent_session` (`bridge/catchup.py:409`,
+  `bridge/reconciler.py:316`, `bridge/agent_catchup.py:688`). The only production callers of
+  `store_message` are `bridge/telegram_bridge.py:1567` (live intake), `:3218` (outbound
+  record) and `bridge/telegram_relay.py:383`. So scanner-path topic work is
+  session-context threading, not row persistence.
+- [ ] `tests/unit/test_topic_resolver.py` — CREATE: synthetic `MessageReplyHeader` truth-table
+  cases including the #3831 quirk and the malformed-header degradation.
 
 ## Rabbit Holes
 
