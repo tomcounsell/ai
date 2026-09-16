@@ -314,6 +314,37 @@ goes *inside* the `class_set_retry_attempts()` loop, preserving #1720/#2550 beha
 `log_class_set_exhaustion` call on budget exhaustion. The retry asks "is the class set transiently
 empty?"; the ordering asks "in what order?". Collapsing them would regress the retry.
 
+**The empty-row-set fall-through contract is preserved — state it as a rule, not a site list.**
+This is the critique's blocker and it is the single easiest way to break this refactor silently.
+
+> **`newest_for_session_id(...) is None` is NOT equivalent to the old falsy-list branch. Every
+> migrated site keeps its current empty-row-set behavior: an empty row set FALLS THROUGH, it does not
+> return.**
+
+Today each of the four non-`sdlc_stage_query` sites branches on a falsy list and *continues* to a
+further resolution tier. A bare `return AgentSession.newest_for_session_id(sid, prefer_type="eng")`
+returns `None` on an empty set and converts that fall-through into an early return. At
+`tools/_sdlc_utils.py:468` that is not one lost tier but **three**: an explicit `session_id` that
+resolves no rows would stop resolving by issue number *and* stop auto-ensuring — silent capability
+loss on exactly the path #1671/#1672 exist to hold.
+
+A reviewer reading a for-loop-to-helper diff will not see the branch that disappeared, which is why
+the contract is written here in words rather than left to the diff.
+
+Verified at source; the required shape at each site:
+
+| Site | Today's fall-through | Required shape |
+|------|----------------------|----------------|
+| `tools/stage_states_helpers.py:103-110` | `if not matches: return session` — returns the **original** session object | `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")` then `return matches[0] if matches else session`. Never a bare `return newest_for_session_id(...)` — its `None` would reach the `stage_states` write loop, whose sibling `_reload_ledger` proves the intended contract at `tools/stage_states_helpers.py:203` with `return fresh if fresh is not None else ledger`. |
+| `tools/_sdlc_utils.py:464-472` (Step 1, explicit `session_id`) | `if sessions:` — empty falls through to Step 2 (issue-based) and Step 3 (env var), then auto-ensure | `found = AgentSession.newest_for_session_id(session_id, prefer_type="eng")` then `if found is not None: return found` and **fall through** otherwise. Never `return` the call directly. |
+| `tools/_sdlc_utils.py:489-497` (Step 3, `VALOR_SESSION_ID`) | `if sessions:` — empty falls through to auto-ensure | Same shape as Step 1. |
+| `tools/_sdlc_utils.py:364-371` (deterministic-id pass) | `if local: return local[0]` — empty falls through to the `message_text` regex fallback | Keep `rows_for_session_id(local_id, prefer_type="eng")`, narrow, then `if local: return local[0]` and fall through. |
+| `tools/sdlc_stage_query.py:87-95` | already guarded — the call sits inside `class_set_retry_attempts()`, which owns the empty case | Unchanged in this respect. |
+
+The Failure Path Test Strategy's existing coverage is of the resolver-**raises** branch, which is a
+different path: a zero-row return raises nothing. Each site gets its own zero-rows-no-exception case
+in Test Impact.
+
 **The two raw bridge filters are left alone, deliberately.** `bridge/telegram_bridge.py:2249` and
 `:2255` remain raw `AgentSession.query.filter(session_id=guard_session_id)`. Both feed only
 `if guard_sessions:` and neither is ever indexed, so they are not coin flips and not this defect.
@@ -356,6 +387,16 @@ Folding any of them in would change behavior, not consolidate it.
       not raise. The existing sites use `getattr(..., None)` for exactly this reason; the ordering
       must preserve it. Test with a row lacking the attribute.
 - [ ] A row set with **no** eng rows must produce the same order as `prefer_type=None`.
+- [ ] **Zero rows, no exception raised — the fall-through contract.** Distinct from the raising branch
+      above: a resolver that returns `[]` raises nothing, so the `try/except` never fires and only the
+      falsy-list branch protects the caller. One case per migrated site, asserting the *pre-existing*
+      continuation still happens:
+      - `_reload_session` → `assert result is session` (the original object, not `None`).
+      - `find_session` Step 1 with an explicit `session_id` resolving zero rows → resolution
+        **continues** to the issue-based tier and to auto-ensure; assert it does not return `None`.
+      - `find_session` Step 3 with `VALOR_SESSION_ID` resolving zero rows → continues to auto-ensure.
+      - `find_session_by_issue` deterministic pass with zero rows → continues to the `message_text`
+        regex fallback.
 
 ### Error State Rendering
 - [ ] No user-visible output changes. The failure surface is an SDLC stage read returning `None`,
