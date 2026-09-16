@@ -29,10 +29,18 @@ monorepo, so this costs real routing correctness, not polish.
    `TELEGRAM_REPLY_TO`.
 3. Session keying can collapse a topic into one session: a top-level message in a topic
    carries a reply header pointing at the topic root, `bridge/routing.py:1323` branches on
-   `if message.reply_to_msg_id:`, and `bridge/context.py:569-610`'s chain walk builds
+   `if message.reply_to_msg_id:`, and `bridge/context.py`'s chain walk builds
    `tg_{project_key}_{chat_id}_{root_msg_id}` — terminating at the topic root means every
    top-level message in that topic resolves to one unbounded session. Reasoned from code and
    Telegram API docs; not yet observed live (see Prerequisites).
+
+**Canonical `bridge/context.py` anchors (re-verified 2026-09-16 on `origin/main`, post-critique).**
+The file has moved twice during this lane's life; cite these symbol names, not line numbers:
+`_set_cached_root` (**:720**), `resolve_root_session_id` (**:742**, with the three
+`session_id = f"tg_{project_key}_{chat_id}_..."` assignments at **:783**, **:793**, **:815**),
+`_cache_walk_root` (**:839**), and the context renderer `build_context_prefix` (**:110**).
+The critique table below cites the pre-drift positions (:664/:642/:761); those are the same
+symbols. `bridge/routing.py:1310` / `:1323` are unchanged.
 
 **Desired outcome:** every inbound forum message carries its topic id (and best-effort name)
 through ingest, storage, and agent context; a top-level topic message is distinguishable from
@@ -193,7 +201,48 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 - Root cache: key the cached roots under a bumped namespace (or include a semantics version) so pre-fix cached collapses cannot serve post-fix lookups.
 - Name resolution: lazy `channels.GetForumTopics` from the bridge (never a second client), cached in Redis via ORM model or reuse of an existing cache pattern, always fail-soft to id-only.
 - Config: `projects.json` group entry gains optional `default_topic_id` (int) and optional `topics: {id: subdir}` advisory map, keyed by topic **id** (owner-ratified default: ids survive admin renames; names-as-keys was considered and rejected because it needs `GetForumTopics` resolution and breaks silently on rename). `bridge/config_validation.py` accepts-and-validates both, absent keys keep today's behavior exactly.
-- Env plumbing for agent-invoked sends: sessions created from a topic export `TELEGRAM_TOPIC_ID` beside `TELEGRAM_REPLY_TO`; `tools/send_message.py` uses it when `TELEGRAM_REPLY_TO` is unset.
+- Env plumbing for agent-invoked sends: sessions created from a topic export `TELEGRAM_TOPIC_ID` beside `TELEGRAM_REPLY_TO` (injection site: `agent/sdk_client.py:495-500`, where `TELEGRAM_REPLY_TO` is set today); `tools/send_message.py` uses it when `TELEGRAM_REPLY_TO` is unset.
+
+#### Implementation Notes from Critique (2026-09-16)
+
+These are binding on the build, not advisory.
+
+- **N1 — Named General-topic constant (critique CONCERN 1).** The relay must introduce a named
+  module-level `GENERAL_TOPIC_ID = 1` in `bridge/telegram_relay.py` and branch on it, never a
+  bare `== 1` literal. Verified 2026-09-16: `grep -c "GENERAL_TOPIC_ID" bridge/telegram_relay.py`
+  is **0** on `origin/main`, while `len(available) == 1` already appears at `:656` and `:719` —
+  which is why the old verification row was vacuously green. The replacement row below is RED on
+  current main.
+- **N2 — Resolve the topic at `ThreadMessage` construction (critique CONCERN 2).** In
+  `bridge/agent_catchup.py`, the raw Telethon message `m` and its `reply_header = m.reply_to`
+  are in scope at the construction site (**:425-445**, `ThreadMessage(...)` at **:435**); the
+  dataclass is at **:98**. Call the shared resolver there and add
+  `topic_id: int | None = None` to the `ThreadMessage` dataclass. Do **not** attempt
+  `getattr(inbound, "reply_to", None)` inside the `enqueue_agent_session` call chain
+  (`:680-700`) — `ThreadMessage` does not carry the raw header and never will.
+- **N3 — Topic line ships with an explicit keying caveat (critique CONCERN 3).**
+  **Option taken: the written caveat, owned by Task 4; the feature flag is rejected.** While
+  Task 2 is held, `build_context_prefix` renders the topic line as
+  `topic: <name-or-id> (session keying not yet topic-aware — messages from sibling topics may
+  share this session)`. Rationale for preferring the caveat over a default-OFF flag: (a) the
+  consumer of this context line is the agent itself, so the caveat lands exactly where the
+  misleading signal would otherwise be read; (b) a flag whose only job is to stay OFF until a
+  sibling task merges is a temporary bridge, which this repo's Development Principle 1 forbids,
+  and it carries dead-flag-removal debt on top of the same removal work; (c) the caveat degrades
+  the surface honestly instead of going dark, so Task 4's value (topic identity visible in
+  context) still ships during the hold. **Removal is a gating checkbox on Task 2**: the commit
+  that lands the keying correction deletes the caveat clause in the same commit, and the
+  Verification table carries a row that fails while both the caveat string and the keying fix
+  are present.
+- **N4 — Cross-topic bleed is asserted on rendered context (critique CONCERN 4).** See the new
+  Success Criterion and the `tests/unit/test_context_helpers.py` fixture in Test Impact: the
+  assertion is on the rendered context block's contents, not on `session_id` inequality.
+- **N5 — Anti-criterion is range-scoped, not single-line (critique CONCERN 5).** See the
+  rewritten Verification rows; the old `grep ... | grep -c "session_id = f"` form could only
+  match when both substrings shared a line, and the real assignments (`:783`, `:793`, `:815`)
+  sit on their own lines.
+- **N6 — Task 3 gets its own builder (critique CONCERN 6).** See Team Orchestration and the
+  Parallelism Contract under Step by Step Tasks.
 
 ## Failure Path Test Strategy
 
