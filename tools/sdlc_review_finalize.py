@@ -237,8 +237,19 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             "approved": bool,
             "trailer_matches_head": bool,
             "marker_completed": bool,
+            "head_drift": str | None,  # identical|docs_only|code|unknown
             "reason": str | None,  # one of the named errors, or None
         }
+
+    ``head_drift`` (popoto#642) is populated only on the APPROVED path, and
+    reports WHY ``trailer_matches_head`` reads as it does: ``"identical"`` when
+    the recorded SHA IS the live head, ``"docs_only"`` when the head moved but
+    every path changed since the reviewed commit is documentation (tolerated —
+    ``/do-docs`` is a mandatory post-REVIEW stage that commits), and
+    ``"code"``/``"unknown"`` when the drift is refused. It is ``None`` whenever
+    the check never got far enough to classify. The tolerance is reported
+    rather than silent so an operator reading ``ok: true`` can see that the
+    verdict's SHA and the live head are different commits.
 
     ``ok`` is the verdict of the WHOLE check, not the conjunction of the three
     booleans below it (#2548). Those booleans report which sub-checks were run
@@ -263,6 +274,7 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         "approved": False,
         "trailer_matches_head": False,
         "marker_completed": False,
+        "head_drift": None,
         "reason": None,
     }
 
@@ -323,6 +335,23 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         recorded_head = head_sha_of_record(verdict_record)
         if recorded_head and recorded_head.lower() == head_sha.lower():
             result["trailer_matches_head"] = True
+            result["head_drift"] = "identical"
+        elif recorded_head:
+            # Documentation-only drift is not staleness (popoto#642). `/do-docs`
+            # is a MANDATORY post-REVIEW stage that commits, so strict equality
+            # here failed on every lane and forced a human authorization. The
+            # classifier is fail-CLOSED: anything but a strictly-descending,
+            # all-documentation range reads as stale. See
+            # tools/sdlc_review_drift.py for why "unknown" is not leniency.
+            from tools.sdlc_review_drift import classify_head_drift
+
+            drift = classify_head_drift(recorded_head, head_sha, repo or "")
+            result["head_drift"] = drift
+            if drift == "docs_only":
+                result["trailer_matches_head"] = True
+            else:
+                result["reason"] = "REVIEW_TRAILER_MISSING"
+                return result
         else:
             result["reason"] = "REVIEW_TRAILER_MISSING"
             return result

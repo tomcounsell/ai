@@ -56,6 +56,7 @@ class TestCheckReviewPersistence:
             "approved": False,
             "trailer_matches_head": False,
             "marker_completed": False,
+            "head_drift": None,
             "reason": "REVIEW_VERDICT_MISSING",
         }
 
@@ -103,11 +104,77 @@ class TestCheckReviewPersistence:
             patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
             patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
             patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            # popoto#642: a mismatch is now classified before it is refused.
+            # Stub the classifier so this stays hermetic (it shells out to gh).
+            patch("tools.sdlc_review_drift.classify_head_drift", return_value="code"),
         ):
             result = check_review_persistence(pr=1, issue_number=42)
 
         assert result["trailer_matches_head"] is False
+        assert result["head_drift"] == "code"
         assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_docs_only_drift_after_review_is_not_staleness(self):
+        """popoto#642 acceptance criterion 2: `/do-docs` is a MANDATORY stage
+        that commits after REVIEW, so the head has always moved by the time
+        `/do-merge` self-checks. When everything it moved past is
+        documentation, the verdict is still fresh and the lane merges without a
+        human authorizing a trailer mismatch."""
+        reviewed = "b" * 40
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={reviewed}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_drift.classify_head_drift", return_value="docs_only"
+            ) as classify,
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+        assert result["head_drift"] == "docs_only"
+        # Classified against the RECORDED sha and the LIVE head, in that order.
+        assert classify.call_args.args[0] == reviewed
+        assert classify.call_args.args[1] == _HEAD_SHA
+
+    def test_unknown_drift_is_treated_exactly_like_code_drift(self):
+        """ "unknown" exists to make the operator message honest, never to make
+        the gate lenient: an unclassifiable range refuses like code drift."""
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={'b' * 40}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_review_drift.classify_head_drift", return_value="unknown"),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is False
+        assert result["trailer_matches_head"] is False
+        assert result["head_drift"] == "unknown"
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_identical_head_reports_no_drift(self):
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is True
+        assert result["head_drift"] == "identical"
 
     def test_approved_verdict_trailer_matches_but_marker_not_completed(self):
         """Failure #3 in the incident: verdict + trailer good, marker never set."""
@@ -148,6 +215,7 @@ class TestCheckReviewPersistence:
             "approved": True,
             "trailer_matches_head": True,
             "marker_completed": True,
+            "head_drift": "identical",
             "reason": None,
         }
 

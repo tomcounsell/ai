@@ -30,7 +30,12 @@ Four check groups:
   ``REVIEW_CONTEXT head_sha=`` trailer when present, else by comparing the
   verdict's ``recorded_at`` timestamp to the latest commit's committer date.
   A bare ``"APPROVED" in text`` check is explicitly insufficient (#2003
-  critique BLOCKER 2).
+  critique BLOCKER 2). A trailer mismatch is not automatically staleness: when
+  every path changed between the reviewed SHA and the live head is
+  documentation, the drift is tolerated (popoto#642) — DOCS is a mandatory
+  post-REVIEW stage that commits, so strict equality refused every
+  pipeline-native merge. See ``tools/sdlc_review_drift.py``; the classifier
+  fails closed on code drift, force-pushes, and any error.
 - **Group (d) — single-owner MERGE lease** (substrate-present, ``run_id``
   supplied only): the merge actor's ``run_id`` must hold the current per-issue
   SDLC lease. This refuses the Race 2 fork/lineage that never held the lease
@@ -656,7 +661,30 @@ def _check_verdict_freshness(
         if trailer.lower() == head_sha.lower():
             notes.append("REVIEW verdict fresh: head_sha trailer matches PR head commit")
             return
-        failed.append("REVIEW verdict predates PR head commit (head_sha trailer mismatch)")
+        # Documentation-only drift is not staleness (popoto#642). DOCS is a
+        # mandatory post-REVIEW stage that commits, so this leg refused every
+        # pipeline-native merge on a trailer the pipeline itself invalidated.
+        # classify_head_drift is fail-CLOSED: it tolerates ONLY a strictly
+        # descending, all-documentation range; a changed source file (docstring
+        # fixes included) and a force-push both stay refused here.
+        from tools.sdlc_review_drift import classify_head_drift
+
+        try:
+            repo = _gh_repo_name_with_owner(repo_root)
+        except Exception as exc:
+            failed.append(f"repo slug unavailable for verdict freshness check ({exc})")
+            return
+        drift = classify_head_drift(trailer, head_sha, repo, repo_root=str(repo_root))
+        if drift == "docs_only":
+            notes.append(
+                "REVIEW verdict fresh: head moved since review but every change "
+                "since the reviewed commit is documentation (docs-only drift)"
+            )
+            return
+        failed.append(
+            "REVIEW verdict predates PR head commit (head_sha trailer mismatch; "
+            f"post-review drift classified {drift!r} — re-run /do-pr-review)"
+        )
         return
 
     # No trailer: compare the verdict's recorded timestamp to the latest

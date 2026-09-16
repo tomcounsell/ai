@@ -572,8 +572,65 @@ def test_verdict_freshness_blocks_on_stale_head_sha_field(monkeypatch):
 
     failed: list[str] = []
     notes: list[str] = []
+    # popoto#642: a mismatch is classified before it is refused. Stub the
+    # classifier to "code" so this stays hermetic and keeps testing the refusal.
+    monkeypatch.setattr(
+        "tools.sdlc_review_drift.classify_head_drift", lambda *a, **k: "code", raising=True
+    )
     mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
-    assert "REVIEW verdict predates PR head commit (head_sha trailer mismatch)" in failed
+    assert any(
+        "REVIEW verdict predates PR head commit (head_sha trailer mismatch" in f for f in failed
+    )
+    assert notes == []
+
+
+def test_verdict_freshness_tolerates_docs_only_drift(monkeypatch):
+    """popoto#642: `/do-docs` is a MANDATORY post-REVIEW stage that commits, so
+    this leg refused every pipeline-native merge on a trailer the pipeline
+    itself invalidated. A range whose every path is documentation is fresh."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": "APPROVED",
+            "head_sha": _OLD,
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: "o/r")
+    monkeypatch.setattr(
+        "tools.sdlc_review_drift.classify_head_drift", lambda *a, **k: "docs_only", raising=True
+    )
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert failed == []
+    assert any("docs-only drift" in n for n in notes)
+
+
+def test_verdict_freshness_refuses_unknown_drift(monkeypatch):
+    """ "unknown" is never leniency: an unclassifiable range refuses like code."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": "APPROVED",
+            "head_sha": _OLD,
+            "recorded_at": _DATE,
+        },
+    )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: "o/r")
+    monkeypatch.setattr(
+        "tools.sdlc_review_drift.classify_head_drift", lambda *a, **k: "unknown", raising=True
+    )
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert any("classified 'unknown'" in f for f in failed)
     assert notes == []
 
 
