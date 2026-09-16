@@ -15,8 +15,8 @@ This module is the single implementation of the detector. It has exactly two
 consumers:
 
   1. this file's own CLI (``python scripts/scan_module_scope_env.py``), which
-     prints the repo-wide census so "72 -> 0" is a number anyone can
-     regenerate at any point in the migration;
+     prints the repo-wide census so the remaining backlog is a number
+     anyone can regenerate at any point in the migration;
   2. ``.claude/hooks/validators/validate_no_module_scope_env.py``, the
      PreToolUse regression guard, which imports
      :func:`find_module_scope_env_calls` so the guard and the census can never
@@ -45,17 +45,33 @@ The scan is **syntactic**. It cannot see an import-time env read made
 ``os.environ`` internally, so the read genuinely happens at import time and
 this scan is blind to it. A future "0 module-scope reads" result therefore
 proves the *syntactic* class is drained, NOT that no import-time env read
-remains. Do not present ``72 -> 0`` as proof the defect class is eliminated.
+remains. Do not present an empty census as proof the class is eliminated.
 
 Corpus
 ------
 Git-tracked ``*.py`` only, via ``git ls-files``. This is load-bearing: walking
 the filesystem instead sweeps ``.worktrees/`` and ``.claude/worktrees/`` and
-inflates the census from 72 modules to 4768.
+inflates the census from 71 modules to thousands.
 
-Baseline at ``22cb19025``: 72 non-test modules / 190 call sites (79 / 202
-including tests). Treat a mismatch as a bug in this script, not in the
-baseline.
+The ratchet is a site set, not a number (#3313)
+-----------------------------------------------
+``module_scope_env_baseline.txt`` next to this script lists every known
+module-scope read as ``<file>\\t<key>``, one line per site, sorted. The guard
+in ``tests/unit/test_validate_no_module_scope_env.py`` compares today's census
+against that file and names the offending sites in both directions.
+
+It used to be a pair of integer ceilings (72 modules / 190 call sites, the
+baseline at ``22cb19025``). Integers made the ratchet self-concealing: four
+reads were added over three weeks and the only thing the failure could say was
+``194 <= 190``, naming none of them, so main sat red because diagnosing it was
+more expensive than ignoring it. A site set costs the same to check and tells
+you exactly what changed.
+
+Adding a genuine new module-scope read means adding its line to the baseline in
+the same commit -- that edit is the point, it is where a reviewer sees the
+claim. Removing one (the #2866 migration's whole purpose) means dropping its
+line, which the check also enforces so the baseline cannot silently retain
+credit for a site that no longer exists.
 
 Usage::
 
@@ -63,6 +79,8 @@ Usage::
     python scripts/scan_module_scope_env.py --tests      # include test files
     python scripts/scan_module_scope_env.py --by-file    # per-file breakdown
     python scripts/scan_module_scope_env.py --json       # machine-readable
+    python scripts/scan_module_scope_env.py --check      # diff vs. baseline
+    python scripts/scan_module_scope_env.py --write-baseline
 """
 
 from __future__ import annotations
@@ -72,6 +90,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -307,6 +326,88 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+# The committed site set the ratchet compares against (#3313).
+BASELINE_PATH = Path(__file__).resolve().parent / "module_scope_env_baseline.txt"
+
+# Rendered in place of a key the detector could not read as a string literal
+# (an f-string, a variable, a computed name). Such sites are rare and stable,
+# and collapsing them all to one token per file is fine: the baseline's job is
+# to make a *change* legible, not to be a unique address.
+_UNKNOWN_KEY = "-"
+
+
+def site_key(call: EnvCall) -> str:
+    """The baseline's identity for one call site: file and env var, no line.
+
+    Line numbers are deliberately excluded. Including them would make every
+    unrelated edit above a read churn the baseline, which is how a manifest
+    stops being read and starts being regenerated blindly.
+    """
+    return f"{call.filename}\t{call.key or _UNKNOWN_KEY}"
+
+
+def render_baseline(result: ScanResult) -> str:
+    """Serialize a census as baseline text: one sorted line per site."""
+    return "".join(f"{line}\n" for line in sorted(site_key(c) for c in result.calls))
+
+
+def load_baseline(path: Path | None = None) -> Counter[str]:
+    """Read the committed baseline as a multiset of site keys."""
+    text = (path or BASELINE_PATH).read_text(encoding="utf-8")
+    return Counter(line for line in text.splitlines() if line.strip())
+
+
+def baseline_drift(result: ScanResult, baseline: Counter[str]) -> tuple[list[EnvCall], list[str]]:
+    """Return (added calls, removed site keys) for `result` against `baseline`.
+
+    Added calls come back as full :class:`EnvCall` records so the caller can
+    print ``file:line`` and the key -- the diagnostic the integer ceiling could
+    never give. Removed sites are bare keys because there is, by definition, no
+    longer any source line to point at.
+    """
+    current = Counter(site_key(c) for c in result.calls)
+    added_keys = current - baseline
+    removed_keys = baseline - current
+
+    added: list[EnvCall] = []
+    remaining = Counter(added_keys)
+    for call in result.calls:
+        key = site_key(call)
+        if remaining.get(key, 0) > 0:
+            added.append(call)
+            remaining[key] -= 1
+
+    removed = sorted(removed_keys.elements())
+    return added, removed
+
+
+def format_drift(added: list[EnvCall], removed: list[str]) -> str:
+    """Human-readable drift report naming every site in both directions."""
+    lines: list[str] = []
+    if added:
+        lines.append(f"{len(added)} module-scope env read(s) NOT in the baseline:")
+        for call in added:
+            lines.append(f"  + {call.filename}:{call.line}  {call.func}({call.key!r})")
+            if call.source_line:
+                lines.append(f"      {call.source_line}")
+        lines.append(
+            "  Migrate these onto config/settings.py, or -- if the read is"
+            " genuinely pre-config -- add its line to"
+            f" {BASELINE_PATH.name} in this same commit."
+        )
+    if removed:
+        lines.append(f"{len(removed)} baseline site(s) no longer present:")
+        for key in removed:
+            filename, _, env_key = key.partition("\t")
+            lines.append(f"  - {filename}  {env_key}")
+        lines.append(
+            "  A migration landed without shrinking the baseline. Run"
+            " `python scripts/scan_module_scope_env.py --write-baseline`"
+            " and commit the result."
+        )
+    return "\n".join(lines)
+
+
 def _format_report(result: ScanResult, by_file: bool) -> str:
     lines: list[str] = []
     allowlisted = sum(1 for c in result.calls if c.allowed)
@@ -340,9 +441,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--by-file", action="store_true", help="print a per-file breakdown")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="diff the census against the committed baseline; exit 1 on drift",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        action="store_true",
+        help="rewrite the committed baseline from the current census",
+    )
     args = parser.parse_args(argv)
 
     result = scan_repo(_repo_root(), include_tests=args.tests)
+
+    if args.write_baseline:
+        BASELINE_PATH.write_text(render_baseline(result), encoding="utf-8")
+        print(f"wrote {result.call_count} sites to {BASELINE_PATH}")
+        return 0
+
+    if args.check:
+        added, removed = baseline_drift(result, load_baseline())
+        if not added and not removed:
+            print(
+                f"module-scope env baseline is current: {result.module_count} modules"
+                f" / {result.call_count} call sites"
+            )
+            return 0
+        print(format_drift(added, removed))
+        return 1
 
     if args.json:
         print(

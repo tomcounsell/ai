@@ -14,22 +14,31 @@ One AST detector, `find_module_scope_env_calls(content, filename) -> list[EnvCal
 
 **Corpus: git-tracked `*.py` only**, via `git ls-files`. A filesystem walk instead sweeps `.worktrees/` and `.claude/worktrees/` — untracked full checkouts of this same repo — and inflates the census from 72 modules to 4768.
 
-**Baseline** (reproduced exactly by the committed script): 72 non-test modules / 190 call sites (2 allowlisted, 188 to migrate); 79 modules / 202 sites with `--tests`. By function: `os.environ.get` 155, `os.getenv` 35, `os.environ.setdefault` 0, `os.environ.pop` 0.
+**Baseline: a committed site set, not a number** (#3313). `scripts/module_scope_env_baseline.txt` lists every known module-scope read as `<file>\t<key>`, one sorted line per site — currently 71 non-test modules / 193 call sites (2 allowlisted); 79 modules / 207 sites with `--tests`. Line numbers are deliberately excluded so an unrelated edit above a read does not churn the manifest.
+
+`tests/unit/test_validate_no_module_scope_env.py::test_repo_census_matches_the_committed_baseline` asserts the census equals the baseline **in both directions**:
+
+- **A new site that is not in the baseline fails**, and the failure prints its `file:line`, function, key and source line. Adding a genuinely pre-config read means adding its baseline line in the same commit — that edit is where a reviewer sees the claim.
+- **A baseline line with no matching site also fails.** A migration that lands without shrinking the baseline leaves it claiming credit for a site that no longer exists, and the next real addition hides underneath that slack.
+
+This replaced a pair of integer ceilings (72 modules / 190 call sites, the slice-0 baseline at `22cb19025`). Integers made the ratchet self-concealing: four reads were added over roughly three weeks and the only thing the failure could say was `194 <= 190`, naming none of them, so `main` sat red because diagnosing it cost more than ignoring it.
 
 ```bash
 python scripts/scan_module_scope_env.py              # non-test census
 python scripts/scan_module_scope_env.py --tests      # include test files
 python scripts/scan_module_scope_env.py --by-file    # per-file breakdown
 python scripts/scan_module_scope_env.py --json       # machine-readable
+python scripts/scan_module_scope_env.py --check      # diff vs. the baseline, exit 1 on drift
+python scripts/scan_module_scope_env.py --write-baseline   # after a migration slice
 ```
 
 See `docs/tools-reference.md` for the full CLI writeup.
 
 ### Methodology limitation — syntactic only
 
-The census cannot see an import-time env read made *indirectly* through a function call. `config/settings.py` calls `stale_granite_env_keys()` at module scope; that function reads `os.environ` internally, so the read genuinely happens at import time and the scan is blind to it. The scan also does not descend into class bodies at all — `config/settings.py`'s `model_config.env_file` site (`__import__("os").environ.get(...)` inside the `Settings` class body) is marked with the allowlist comment for documentation purposes but is **not counted** in the 190/188 figures.
+The census cannot see an import-time env read made *indirectly* through a function call. `config/settings.py` calls `stale_granite_env_keys()` at module scope; that function reads `os.environ` internally, so the read genuinely happens at import time and the scan is blind to it. The scan also does not descend into class bodies at all — `config/settings.py`'s `model_config.env_file` site (`__import__("os").environ.get(...)` inside the `Settings` class body) is marked with the allowlist comment for documentation purposes but is **not counted** in the baseline.
 
-**Consequence: a future "72 → 0" result proves the *syntactic* class is drained, not that every import-time env read is gone.** Do not present it as proof the defect class is eliminated. This limitation is stated in the plan (`docs/plans/module-scope-env-reads-migration.md`, "Methodology limitations") and in the script's own module docstring.
+**Consequence: a future "71 → 0" result proves the *syntactic* class is drained, not that every import-time env read is gone.** Do not present it as proof the defect class is eliminated. This limitation is stated in the plan (`docs/plans/module-scope-env-reads-migration.md`, "Methodology limitations") and in the script's own module docstring.
 
 ## The Regression Guard (`.claude/hooks/validators/validate_no_module_scope_env.py`)
 
@@ -37,7 +46,7 @@ Imports the same `find_module_scope_env_calls` detector, then wraps it with two 
 
 ### Diff-scoped, not whole-file — this is load-bearing
 
-The guard only flags lines the staged `git commit` **adds or rewrites**, not every module-scope read that happens to live in a touched file. This is deliberate, not a softening: 188 unmigrated sites live across 72 modules today, and the migration's slices 1-9 must edit exactly those files. A whole-file guard would block every one of its own migration commits the moment it touched a file with more than one pre-existing site.
+The guard only flags lines the staged `git commit` **adds or rewrites**, not every module-scope read that happens to live in a touched file. This is deliberate, not a softening: 191 unmigrated sites live across 71 modules today, and the migration's slices 1-9 must edit exactly those files. A whole-file guard would block every one of its own migration commits the moment it touched a file with more than one pre-existing site.
 
 - The pure `find_violations(content, filename, changed_lines=None)` core is **whole-file** — pass `None` (or nothing) for `changed_lines` and it reports every site in the file. This is what the CLI path and all 46 unit tests exercise.
 - Diff scoping is applied only by the `git commit` caller, `find_violation_for_command()`: it resolves the staged content via `git show :path` and the changed line numbers via `git diff --cached -U0` hunk headers, then calls `find_violations(content, path, changed_lines)`.
@@ -93,7 +102,8 @@ python .claude/hooks/validators/validate_no_module_scope_env.py <file> [<file> .
 
 | File | Role |
 |------|------|
-| `scripts/scan_module_scope_env.py` | The single AST detector (`find_module_scope_env_calls`), the census CLI, `ScanResult` aggregation. |
+| `scripts/scan_module_scope_env.py` | The single AST detector (`find_module_scope_env_calls`), the census CLI, `ScanResult` aggregation, and the baseline diff (`site_key`, `load_baseline`, `baseline_drift`, `format_drift`). |
+| `scripts/module_scope_env_baseline.txt` | The committed site set the ratchet compares against. Regenerate with `--write-baseline` after a migration slice. |
 | `.claude/hooks/validators/validate_no_module_scope_env.py` | Regression guard: diff-scoped `find_violation_for_command()` for the dispatcher, whole-file `find_violations()` core, standalone CLI. |
 | `.claude/hooks/dispatch/pre_tool_use_bash.py` | Registers the guard as its 10th `_VALIDATORS` predicate. |
 | `.claude/hooks/manifest.toml` | `timeout = 20` re-confirmation comment for the dispatcher entry. |

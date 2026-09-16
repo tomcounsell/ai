@@ -31,12 +31,14 @@ It does NOT flag:
   - Reads inside a `def` / `async def` / `class` body — a function body runs
     when called, not when imported, which is the whole point of the fix.
   - Pre-existing module-scope reads on lines the commit does not touch. This
-    scoping is load-bearing, not a softening: 188 unmigrated sites live across
-    72 modules today, and slices 1-9 of #2866 must edit exactly those files.
+    scoping is load-bearing, not a softening: 191 unmigrated sites live across
+    71 modules today, and slices 1-9 of #2866 must edit exactly those files.
     A whole-file guard would block every one of its own migration commits.
     The backlog is tracked by `python scripts/scan_module_scope_env.py`, which
-    reports the full census; this guard's job is only to stop the count from
-    growing. (The pure `find_violations(content, filename)` core reports every
+    reports the full census, and pinned by the committed site set
+    `scripts/module_scope_env_baseline.txt` (`--check`); this guard's job is
+    only to stop the set from growing at commit time.
+    (The pure `find_violations(content, filename)` core reports every
     site in the file; the diff scoping is applied by the caller.)
   - Test files (tests/, test_*.py, conftest.py, fixtures/) — test setup
     legitimately pokes at the process environment at import time.

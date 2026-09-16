@@ -8,6 +8,7 @@ escape hatch, the actionable message, and both entry points.
 
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -282,20 +283,53 @@ class TestSharedDetector:
         assert len(calls) == 1
         assert calls[0].allowed is True
 
-    def test_repo_census_is_a_monotonic_ratchet(self):
-        """The census over git-tracked *.py must never exceed the #2866 baseline.
+    def test_repo_census_matches_the_committed_baseline(self):
+        """The census over git-tracked *.py must equal `module_scope_env_baseline.txt`.
 
-        Exact baseline at slice 0 (commit 22cb19025): 72 modules / 190 call
-        sites, of which 2 are allowlisted bootstrap gates. Asserted as an upper
-        bound rather than an equality because slices 1-9 exist precisely to
-        drive these numbers down — an equality assert would fail on every
-        successful migration commit. Growth in either number is the regression
-        this issue is about, and fails here.
+        This replaced a pair of integer ceilings (72 modules / 190 call sites,
+        the #2866 slice-0 baseline) in #3313. The integers were a ratchet that
+        could only ever say `194 <= 190`: four reads were added over three
+        weeks and the failure named none of them, so main stayed red because
+        diagnosing it cost more than ignoring it. Comparing site sets costs the
+        same and names every drifted site in both directions.
+
+        Both directions are asserted. Growth is the #2866 regression. Shrinkage
+        failing too is deliberate, not pedantry: a migration that lands without
+        dropping its line leaves the baseline claiming credit for a site that
+        no longer exists, and the next real addition can then hide underneath
+        that slack.
         """
         scan = import_scan()
         result = scan.scan_repo(REPO_ROOT, include_tests=False)
-        assert result.module_count <= 72, f"module-scope env reads grew: {result.module_count}"
-        assert result.call_count <= 190, f"module-scope env reads grew: {result.call_count}"
+        added, removed = scan.baseline_drift(result, scan.load_baseline())
+        assert not added and not removed, "\n" + scan.format_drift(added, removed)
+
+    def test_drift_report_names_the_offending_site(self):
+        """The failure must carry file, line and key — the thing an int cannot."""
+        scan = import_scan()
+        result = scan.ScanResult(
+            calls=scan.find_module_scope_env_calls(
+                'import os\nX = os.getenv("BRAND_NEW_KEY")\n', "some/module.py"
+            )
+        )
+        added, removed = scan.baseline_drift(result, scan.load_baseline())
+        report = scan.format_drift(added, removed)
+        assert "some/module.py:2" in report
+        assert "BRAND_NEW_KEY" in report
+        assert "os.getenv" in report
+
+    def test_baseline_is_a_multiset_not_a_set(self):
+        """Two reads of the same key in one file are two baseline lines.
+
+        Collapsing them to one would let a file silently double a read.
+        """
+        scan = import_scan()
+        content = 'import os\nA = os.getenv("K")\nB = os.getenv("K")\n'
+        result = scan.ScanResult(calls=scan.find_module_scope_env_calls(content, "m.py"))
+        one_line = Counter({"m.py\tK": 1})
+        added, removed = scan.baseline_drift(result, one_line)
+        assert len(added) == 1
+        assert not removed
 
     def test_only_bootstrap_sites_are_allowlisted(self):
         """The escape hatch stays narrow: only the pre-config launcher gates."""

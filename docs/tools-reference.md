@@ -107,11 +107,15 @@ Enforced on every suite run by `tests/unit/test_fence_census.py`, not by a CI wo
 AST census of *module-scope* environment reads — a call to `os.environ.get`/`os.getenv`/`os.environ.setdefault`/`os.environ.pop` at the top level of a `.py` file (executes at import time, not at call time). Single detector implementation shared with the regression guard `.claude/hooks/validators/validate_no_module_scope_env.py`, so the count and the guard can never disagree. Git-tracked `*.py` only, via `git ls-files` — a filesystem walk sweeps `.worktrees/` and inflates the count ~66x. See [Module-Scope Env Read Guard](features/module-scope-env-guard.md).
 
 ```bash
-python scripts/scan_module_scope_env.py              # non-test census: 72 modules / 190 sites (baseline)
-python scripts/scan_module_scope_env.py --tests      # include test files: 79 modules / 202 sites
+python scripts/scan_module_scope_env.py              # non-test census: 71 modules / 193 sites
+python scripts/scan_module_scope_env.py --tests      # include test files: 79 modules / 207 sites
 python scripts/scan_module_scope_env.py --by-file    # per-file breakdown
 python scripts/scan_module_scope_env.py --json       # machine-readable
+python scripts/scan_module_scope_env.py --check      # diff vs. scripts/module_scope_env_baseline.txt
+python scripts/scan_module_scope_env.py --write-baseline   # rewrite it after a migration slice
 ```
+
+The ratchet is the committed site set `scripts/module_scope_env_baseline.txt` (`<file>\t<key>` per site), not an integer ceiling — `--check` and the unit test name every drifted site in both directions. A new read must add its baseline line in the same commit; a migrated-away read must drop it.
 
 Syntactic only: blind to an import-time env read made indirectly through a function call, and does not descend into class bodies at all. A future "0 sites" result proves the syntactic class is drained, not that every import-time env read is gone.
 

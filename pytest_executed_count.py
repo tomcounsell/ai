@@ -70,16 +70,30 @@ full table) and each one is load-bearing:
 
 import os
 
-_COUNT_FILE = os.environ.get("PYTEST_CLEAN_COUNT_FILE")
 _executed = 0
 _in_worker = False
 
 
+def _count_file():
+    """The wrapper-minted output path, read at call time.
+
+    Read lazily rather than frozen into a module constant at import: the
+    plugin is imported the moment pytest loads its plugins, so a module-scope
+    read would bind whatever the environment happened to be at interpreter
+    start and could not be exercised from a test that sets the variable
+    itself. `scripts/pytest-clean.sh` exports the path before launching
+    pytest and xdist workers inherit it, so every call resolves the same
+    value the module constant used to hold.
+    """
+    return os.environ.get("PYTEST_CLEAN_COUNT_FILE")
+
+
 def _write(text):
-    if not _COUNT_FILE:
+    path = _count_file()
+    if not path:
         return
     try:
-        with open(_COUNT_FILE, "w") as f:
+        with open(path, "w") as f:
             f.write(text)
     except OSError:
         # Fail open: an unwritable count-file path must not take down a test
@@ -98,14 +112,14 @@ def pytest_configure(config):
 
 
 def pytest_sessionstart(session):
-    if not _COUNT_FILE or _in_worker:
+    if not _count_file() or _in_worker:
         return
     _write("started")
 
 
 def pytest_runtest_logreport(report):
     global _executed
-    if not _COUNT_FILE or _in_worker:
+    if not _count_file() or _in_worker:
         return
     if report.when == "call" and (report.outcome != "skipped" or hasattr(report, "wasxfail")):
         _executed += 1
@@ -114,7 +128,7 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if not _COUNT_FILE or _in_worker:
+    if not _count_file() or _in_worker:
         return
     # --collect-only is only one of six modes that legitimately run a
     # session while executing nothing by design. Derivation (re-run this
