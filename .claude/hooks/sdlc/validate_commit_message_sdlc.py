@@ -96,8 +96,6 @@ def get_repo_name(cwd: str) -> str | None:
     resolved against `cwd`. None means unknown, and the caller treats
     unknown as protected.
     """
-    top = _git(["rev-parse", "--show-toplevel"], cwd)
-    return Path(top).name if top else None
     common_dir = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
     if common_dir is None:
         common_dir = _git(["rev-parse", "--git-common-dir"], cwd)

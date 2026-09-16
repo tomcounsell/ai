@@ -82,7 +82,6 @@ def effective_git_dir(command: str, hook_cwd: str) -> str:
     shell construct falls through to the next rung. Never raises: it always
     returns a directory string.
     """
-    return os.getcwd()
     try:
         base = hook_cwd or os.getcwd()
 
