@@ -13,7 +13,7 @@ last_comment_id: 5695855298
 ## Problem
 
 `AgentSession.session_id` is a plain `Field()`; the primary key is the `AutoKeyField` `id`
-(`models/agent_session.py:156-157`). Two `ensure` calls for one logical session therefore leave two
+(`models/agent_session.py:163-165`). Two `ensure` calls for one logical session therefore leave two
 rows sharing a `session_id`, and SDLC lanes make that deterministic because the id is
 `f"sdlc-local-{issue_number}"` (`tools/sdlc_session_ensure.py:900`).
 
@@ -84,8 +84,19 @@ This is exactly #3091's own acceptance test: **no caller has to remember a tie-b
 **Issue filed at:** 2026-09-03T06:44:22Z
 **Disposition:** Major drift — scope revised by the lane owner, not closed. See Notes.
 
+**How these were verified (tightened after critique).** The first pass of this section carried
+`models/agent_session.py:156-157` for the identity fields and asserted it had been re-verified. It had
+not: `156-157` is inside the class docstring's lifecycle prose, and a reader skimming that range sees
+plausible-looking text about sessions, so the error reads as confirmation. A freshness check that
+passes on a stale coordinate is reporting on itself, not on the file. **Every coordinate below was
+re-verified by printing the exact line range with `awk 'NR>=A && NR<=B'` and reading the code at it,
+not by grepping for the symbol and trusting a remembered number.** A coordinate is only "still holds"
+if the printed range contains the cited construct.
+
 **File:line references re-verified:**
-- `models/agent_session.py:156-157` — `session_id = Field()`, `id = AutoKeyField()` — **still holds**.
+- `models/agent_session.py:163-165` — `# === Identity ===` block: `id = AutoKeyField()` at 163,
+  `session_id = Field()` at 164, `session_type = KeyField(null=True)` at 165 — **still holds**, at
+  corrected coordinates.
 - `models/agent_session.py:132` — `superseded` documented as "Replaced by a newer session for the
   same session_id" — **still holds**, still has no writer.
 - `models/agent_session.py:1991-1992` — cited by the issue as the docstring asserting
@@ -351,17 +362,67 @@ in Test Impact.
 Ruled by the lane owner; recorded here so it does not read as an oversight. Changing them would be
 consistency, not a fix, and would risk a later reader concluding that ordering mattered there.
 
-**Three grep matches are deliberately out of scope.** The defining sweep also matches these, which
-are a different shape — a **gate** on one already-resolved row's type, falling through when it does
-not match, never a tie-break among rows:
+**`prefer_type` is a concrete `session_type` string. No predicate argument.** A `prefer=lambda s: ...`
+was considered and rejected, and the deciding reason is not "abstraction for one use case" — that is
+the weak form of the argument. The deciding reason is that **a predicate makes the sweep
+unfalsifiable.** This plan's entire close-out mechanism is a grep returning a known count: the code
+sweep must go from 8 to 2, and the Verification row greps for the literal `prefer_type="eng"`. A
+lambda is invisible to both. An equivalent-but-lambda-shaped copy of the preference would pass every
+check while re-opening the defect class, which is precisely the failure this plan exists to prevent.
+Secondarily: all six sites test the identical literal `getattr(row, "session_type", None) == "eng"`,
+and the whole argument is deleted when #3169 lands.
 
-- `tools/sdlc_session_ensure.py:776` — gates PM stage_states so they never land on a Dev/Teammate
-  session.
-- `agent/session_executor.py:1373` — gates slug derivation on a single session.
-- `tests/integration/test_sdlc_session_ensure_integration.py:141,212,305` — test assertions, not
-  readers.
+### Two independent sweeps, two different anchors
 
-Folding any of them in would change behavior, not consolidate it.
+These are **not** one sweep over two file sets. They match different strings in different files, and
+conflating them is how the model docstring — the one that actually blesses the next hand-rolled copy
+— survives a "clean" sweep.
+
+| Sweep | Anchor | Scope | Today | After |
+|-------|--------|-------|-------|-------|
+| **CODE** — the replicated tie-break | `session_type", None) == "eng"` | `*.py`, production dirs (worktrees and `tests/` excluded) | exactly **8** | exactly **2** |
+| **DOCS/DOCSTRING** — the replicated *sanction* | `fall back to .*\[0\]` (backtick-agnostic, by regex) | `docs/features/ models/` | exactly **2** | **0** |
+
+**Why the docs anchor is regex and not literal.** The two sanctions are written in different backtick
+forms: `docs/features/agent-session-model.md:146` uses markdown single backticks (``fall back to
+`[0]` ``) while `models/agent_session.py:1297` uses RST double backticks (``fall back to ``[0]`` ``).
+A pattern anchored on the single-backtick form matches the markdown and **misses the model
+docstring**, reporting the sanction gone while the code docstring survives untouched. A bare
+`fall back to` is also unusable — `models/agent_session.py` has 6 hits for it, 5 of them unrelated.
+`fall back to .*\[0\]` is the anchor that catches both and nothing else.
+
+**Why the docs sweep is scoped to `docs/features/ models/` and not `docs/`.** Two reasons, both
+verified rather than assumed. First, **this plan document itself quotes the sanction it is deleting**
+— at four places including inside the Critique Results row that proposed the check. A `docs/`-wide
+check would be RED on a perfectly correct build, forever, and would then get "fixed" by someone
+loosening it. Second, `docs/archive/plans-completed/` holds historical plan records
+(`sdlc_issue_ownership_lock.md`, `sdlc-2140.md`, `sdlc-stall-auto-resume.md`, and others). **Standing
+rule: `docs/archive/plans-completed/` is never touched.** A sweep that proposes editing an archived
+plan is a sweep with the wrong anchor — treat that as the signal, not as work to do.
+
+**The code sweep's survivors are named, with reasons — not counted.** "2 documented gates" as a bare
+number invites a future sweeper to delete the thing the design depends on. Each survivor and why it
+stays:
+
+- `agent/session_executor.py:1373` — unrelated slug check; a gate on a single session, not a choice
+  among rows. **Tests one already-resolved row's type; does not choose among rows.**
+- `tools/sdlc_session_ensure.py:776` — gates PM `stage_states` so they never land on a Dev/Teammate
+  session. **Tests one already-resolved row's type; does not choose among rows.**
+
+**`agent/session_executor.py:330` is not a survivor — it is the sixth in-scope site and it is
+deleted.** A draft of this revision listed it among the survivors on the reasoning that it is the site
+that motivated expressing the preference as an *ordering* rather than a selection. That reasoning is
+about *why the resolver has the shape it has*, not about the comparison surviving: task 5 collapses
+the two-pass block and that `== "eng"` line goes with it. Recorded here explicitly because 8 − 6 = 2
+only if `:330` is on the deleted side of the ledger, and a survivor list of three would contradict the
+expected post-change count of two. If a post-change sweep still reports an eng comparison inside
+`_fetch_live_active_run_id`, the collapse did not happen.
+
+Folding any of the gates in would change behavior, not consolidate it.
+
+Test assertions matching the pattern (`tests/integration/test_sdlc_session_ensure_integration.py:141,212,305`)
+have their own explicit disposition in Test Impact — they are not covered by the count above, which
+excludes `tests/`.
 
 ## Failure Path Test Strategy
 
@@ -422,12 +483,15 @@ Folding any of them in would change behavior, not consolidate it.
       `find_session_by_issue`'s deterministic-id pass. Assert the `include_terminal` narrowing still
       happens *after* ordering and *before* taking the head — a terminal eng row must still lose to a
       live non-eng row when `include_terminal=False`.
-- [ ] `tests/unit/test_agent_session_newest_wins.py` (or the session_executor test module covering
-      issue-lock renewal) — UPDATE with the **named Risk 2 test**: eng row with `active_run_id=None`
-      plus an **older** non-eng row with a real `active_run_id` → `_fetch_live_active_run_id` returns
-      the older non-eng row's id. **Must be proven RED against the known-bad ordering**; a test green
-      both before and after has pinned the happy path, not the ordering. Also assert the
-      both-rows-carry-a-run-id case returns the eng row's id, which the two-pass loop provided.
+- [ ] `tests/unit/test_agent_session_newest_wins.py` — UPDATE with the **named Risk 2 test**. Its home
+      and its name are **pinned, not a choice** (an "or" here is what made the old verification row
+      false-red): the test function is
+      **`test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`** and it lives in
+      `tests/unit/test_agent_session_newest_wins.py`. Seed an eng row with `active_run_id=None` plus an
+      **older** non-eng row with a real `active_run_id` → `_fetch_live_active_run_id` returns the older
+      non-eng row's id. **Must be proven RED against the known-bad ordering**; a test green both before
+      and after has pinned the happy path, not the ordering. Also assert the both-rows-carry-a-run-id
+      case returns the eng row's id, which the two-pass loop provided.
 - [ ] `tests/unit/test_stall_detection.py`, `tests/unit/test_agent_session_queue.py`,
       `tests/unit/test_health_check.py`, `tests/unit/test_poll_gating.py`,
       `tests/unit/test_sdk_client.py`, `tests/unit/test_valor_session_kill.py`,
@@ -436,12 +500,21 @@ Folding any of them in would change behavior, not consolidate it.
       `tests/unit/test_sdlc_env_vars.py`, `tests/unit/sdlc_session_ensure/*` — UPDATE only if the
       `wire_session_lookup` change alters their behavior. Expectation is that none need editing — that
       is the point of the shared seam — but each must be **run** as evidence, not assumed.
-- [ ] `tests/unit/test_steering_writer_census.py` — VERIFY: `3c77e1eab` taught it to treat a name
-      bound to the resolver as a newest-first selection. Confirm the new keyword does not change what
-      it counts; register it if so.
-- [ ] `tests/integration/test_sdlc_session_ensure_integration.py:141,212,305` — NO CHANGE. These match
-      the sweep pattern but are assertions, not readers. Named here so a future sweep reader does not
-      mistake them for missed sites.
+- [ ] `tests/unit/test_steering_writer_census.py` — **NO CHANGE. Answered, not open.** `_is_resolver_call`
+      (`tests/unit/test_steering_writer_census.py:205-210`) matches solely on
+      `value.func.attr in RESOLVER_METHODS` and never inspects `node.value.keywords`, so adding
+      `prefer_type="eng"` to a resolver call cannot change what the census counts. Recorded here with
+      the citation so BUILD does not re-investigate a closed question.
+- [ ] `tests/integration/test_sdlc_session_ensure_integration.py:141,212,305` — **DELIBERATELY LEFT,
+      with a stated reason.** These three carry the same hand-rolled `getattr(s, "session_type", None)
+      == "eng"` text and were outside the code sweep's baseline only because the sweep excludes
+      `tests/`. They are **filter predicates the tests build themselves** to pick their own seeded row
+      out of a list — they are not readers of production resolution, so routing them through
+      `prefer_type` would couple the assertion to the thing under test and weaken it. They keep
+      passing either way, which is the hazard: left unnamed they become an encoded record of a pattern
+      that no longer exists in production. Named here and in the No-Gos so the disposition is explicit
+      rather than an artifact of the count. If a future sweep widens to `tests/`, these three are the
+      expected residue there.
 - [ ] No test is DELETEd or REPLACEd. No `xfail` markers exist for this bug — `tests/` was searched
       for `pytest.mark.xfail` and runtime `pytest.xfail(` related to session_id selection; none found,
       so there are no expected-failure markers to convert.
@@ -740,8 +813,8 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
 
 ### Domain framing for `resolver-builder`
 
-Paste the Redis/Popoto rules from `DOMAIN_FRAMING.md` into the assignment. Load-bearing points: never
-write raw Redis ops; this change adds **no** schema field and therefore needs **no** entry in
+Paste the Redis/Popoto rules from `.claude/skills-global/do-plan/DOMAIN_FRAMING.md` into the
+assignment. Load-bearing points: never write raw Redis ops; this change adds **no** schema field and therefore needs **no** entry in
 `scripts/update/migrations.py`.
 
 ## Step by Step Tasks
