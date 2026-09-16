@@ -40,7 +40,6 @@ from agent.session_state import SessionHandle, _active_events, _active_sessions,
 from analytics.collector import record_metric
 from config.settings import settings
 from models.agent_session import AgentSession, SessionType
-from models.memory import Memory
 from models.session_lifecycle import (
     ALL_STATUSES,
     NON_TERMINAL_STATUSES,
@@ -6198,6 +6197,12 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     # the class set ($Idx:AgentSession). TTL expiry removes the hash but not
     # its class-set member, causing continuous Sentry noise. clean_indexes()
     # uses SSCAN (production-safe) to remove stale class-set entries.
+    # Lazy import (#3310): importing models.memory at module top creates an
+    # import cycle when a process imports models.memory first (apply_defaults
+    # -> agent package init -> this module -> half-initialized models.memory),
+    # silently leaving the embedding provider unconfigured.
+    from models.memory import Memory
+
     for model_cls, model_label in ((AgentSession, "AgentSession"), (Memory, "Memory")):
         try:
             orphans_removed = model_cls.clean_indexes()
