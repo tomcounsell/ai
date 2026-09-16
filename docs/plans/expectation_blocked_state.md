@@ -45,7 +45,12 @@ An expectation can carry a machine-readable blocked annotation (a closed reason 
 
 **Active plans in `docs/plans/` overlapping this area:** `durability-room-job-agentrun.md` (umbrella, #2494) and `promise-gate-recorded-obligations.md` (the gate reads open inbound expectations; blocked state must not change what clears the gate). No plan addresses blocked state.
 
-**Notes:** the issue's open questions are answered in Technical Approach as proposals, each with its rationale, and the ones that remain a judgment call are in Open Questions.
+**Notes:** the issue's open questions are answered in Technical Approach as proposals, each with its rationale.
+
+**Re-verification at plan settle (baseline `23964450c`):** every symbol the plan names still exists at the shape described — `_mutable_goal_data` (`models/job.py:289`), `_write_goal_data` (`:307`), `goal_is_corrupt` (`:209`), `discharge_expectation` (`:416`), `open_expectations` (`:430`), and the reconciler loop (`reflections/expectation_reconciler.py:447-572`). Commits landed since `45d5d42d4` touch `models/job.py` (#2856 shadow-append, #3180 UTC-reattach removal) but neither touches the goal-JSON entry shape or the chokepoint. Two corrections the re-read forced, both now folded into the plan below:
+
+1. `_escalate_once` has **three** call sites (`:481`, `:523`, `:554`), not one. The plan's "the escalation seam" was ambiguous; it is now named as the `attempts >= _max_attempts()` branch at `:480` only.
+2. The fresh-snapshot re-fetch (`:499`) sits **below** the escalation branch, which `continue`s at `:494`. The plan's earlier claim that the reconciler "already re-fetches before acting" is false at that seam. Corrected in Data Flow and Race 1.
 
 ## Prior Art
 
