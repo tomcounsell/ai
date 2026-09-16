@@ -54,10 +54,10 @@ No relevant external findings — proceeding with codebase context and training 
 
 ## Data Flow
 
-1. **Entry point**: operator runs `scripts/pytest-clean.sh <args>`; wrapper resolves `PYTEST_BIN`, mints the count file, starts the stall watcher, and launches pytest in background.
-2. **Pytest controller**: runs pytest with `-n auto --dist=loadfile`; workers execute tests and report outcomes back; today the watcher samples only the controller PID's cumulative CPU via `ps -o time=`.
-3. **New progress tap**: pytest stdout is teed to a temp log the watcher can observe (line count as the progress counter). Each completed test under verbosity appends outcome lines.
-4. **Watcher decision**: every 30s sample, the watcher reads CPU delta AND log line-count delta. CPU advancing OR lines advancing resets the stall clock; only both flat accrues `stalled` time toward `PYTEST_STALL_LIMIT_S`.
+1. **Entry point**: operator runs `scripts/pytest-clean.sh <args>`; wrapper resolves `PYTEST_BIN`, mints the count file AND a progress file, starts the stall watcher, and launches pytest in background (stdout untouched — still the operator's TTY, still `$!` as the controller PID).
+2. **Pytest controller**: runs pytest with `-n auto --dist=loadfile`; workers execute tests and xdist forwards each `pytest_runtest_logreport` to the controller; today the watcher samples only the controller PID's cumulative CPU via `ps -o time=`.
+3. **New progress tap**: the existing `pytest_executed_count.py` plugin gains a heartbeat — its controller-side `pytest_runtest_logreport` (same hook, same `_in_worker` guard the #3222 count already relies on) appends one line per executed report to the wrapper-minted progress file. Line count is the progress counter; no `-v`, no tee, no stdout parsing.
+4. **Watcher decision**: every sample, the watcher reads CPU delta AND progress-file line-count delta. CPU advancing OR lines advancing resets the stall clock; only both flat accrues `stalled` time toward `PYTEST_STALL_LIMIT_S`.
 5. **Output**: on a true wedge the WEDGED banner still fires and TERMs the controller; on a slow-but-live module the run proceeds and stdout still streams to the operator unchanged.
 
 ## Appetite
@@ -104,23 +104,47 @@ Operator runs wrapper → pytest output teed to temp log → watcher samples CPU
 
 ## Failure Path Test Strategy
 
-TODO fill.
+### Exception Handling Coverage
+- [ ] No exception handlers in scope — the change is bash (`tee`, `wc -l`, `ps` sampling); the failure mode is a broken tap, which must fail OPEN to CPU-only (covered by a dedicated test asserting a live run with an unobservable log still completes).
+
+### Empty/Invalid Input Handling
+- [ ] Empty log at startup (zero tests completed yet) must not read as "no progress": the watcher marks baselines on the first sample after launch and only accrues `stalled` on consecutive flat samples.
+- [ ] Caller passing their own `-v`/`-q`/verbosity flags: wrapper must not double-append or strip; test asserts caller flags survive (mirrors the existing `-p` injection test).
+
+### Error State Rendering
+- [ ] True wedge still renders exactly one headline: the WEDGED banner stays the only headline (zero-tests guard already passes through on non-zero pytest exit; assert no ZERO TESTS diagnostic alongside WEDGED).
+- [ ] False-positive path renders nothing new: the slow-live test asserts WEDGED is absent from stderr.
 
 ## Test Impact
 
 No existing tests affected — the stall watcher currently has no dedicated regression test and the zero-tests file pins the watcher off, so the change is additive pending new tests below.
 
+New coverage (new file, e.g. `tests/unit/test_pytest_clean_stall_progress.py`, reusing the sandbox harness): slow-live module test (guard must NOT fire) and true-wedge test (guard MUST still fire), plus tap-broken fail-open and caller-verbosity-passthrough cases from the Failure Path section.
+
 ## Rabbit Holes
 
-TODO fill.
+- Parsing test outcome semantics (passed/failed counts, per-test names): the watcher needs count-delta only, not result interpretation. Do not build a TAP/JUnit parser.
+- Raising `PYTEST_STALL_LIMIT_S` instead: papers over this incident; the next ~20-test arm-spawning module hits the same wall at any ceiling.
+- Splitting more modules: per-module relief that leaves the general false positive in place.
+- Watching worker PIDs instead of the controller: workers come and go under xdist; the controller plus its consolidated output stream is the stable observation point.
 
 ## Risks
 
-TODO fill.
+### Risk 1: Tee changes operator-visible output or exit semantics
+**Impact:** buffered/lost output, wrong exit code, broken pipe behavior on Ctrl-C.
+**Mitigation:** preserve byte-identical stdout via `tee` with `pipefail` discipline; assert exit code passthrough in tests; keep the EXIT/INT/TERM trap ordering (tap cleanup inside existing `cleanup()`).
+
+### Risk 2: `-v` injection alters collection or timing for huge suites
+**Impact:** verbose output slows or perturbs full-suite runs.
+**Mitigation:** append `-v` only when no verbosity flag is present; line-count delta is O(1) per sample (`wc -l`); full-suite behavior verified by the existing zero-tests suite running green under the wrapper.
+
+### Risk 3: True wedge stops being detected (OR-branch too permissive)
+**Impact:** a wedged run that dribbles output without progress never fires.
+**Mitigation:** the true-wedge regression test pins firing; line-count must advance, not merely exist, to reset the clock.
 
 ## Race Conditions
 
-TODO fill.
+No race conditions identified — the watcher samples two monotonically increasing counters (cumulative CPU, log line count) from a single subshell; baselines are marked on first sample and both re-marked on every reset, so a torn read only delays one 30s sample and cannot invert the verdict.
 
 ## No-Gos (Out of Scope)
 
