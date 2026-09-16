@@ -1,10 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Tom Counsell
 created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3316
+revision_applied: true
+revision_applied_at: 2026-09-16T15:44:03Z
 ---
 
 # Widen the pattern-kill validator to cover ui.app, worker, and bridge processes
@@ -85,7 +87,7 @@ No prerequisites — this work has no external dependencies. It touches one hook
 
 ### Key Elements
 
-- **Service table**: a data-driven list of `(pattern, sanctioned stop path)` pairs for the long-lived services — `ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog`. Adding the next service is one table row, not a new regex. This answers the triage's arms-race concern structurally without taking on the inversion's false-positive risk.
+- **Service table**: a data-driven list of `(pattern, sanctioned stop path)` pairs for the long-lived services — `ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `reflection_worker`, `worker-watchdog`. Adding the next service is one table row, not a new regex. This answers the triage's arms-race concern structurally without taking on the inversion's false-positive risk.
 - **Reused verb shapes**: the existing four `_BLOCK_PATTERNS` shapes (`pkill`, `kill $(pgrep ...)`, `killall`, `pgrep | xargs kill`) are parameterized over the service table instead of hardcoded to the test-runner pattern. The test-runner block keeps working exactly as before.
 - **Reason router**: `find_violation` returns the existing pytest-specific reason for test-runner matches and a new service-specific reason (naming the sanctioned stop path plus kill-by-PID for throwaway instances) for service matches. The current single `_REASON` string cannot serve both audiences.
 
@@ -96,8 +98,8 @@ No prerequisites — this work has no external dependencies. It touches one hook
 ### Technical Approach
 
 - Keep `_TEST_RUNNER_PATTERN` and the `_SANCTIONED` (`reap-xdist.sh`) exemption exactly as is; keep the dispatcher wiring untouched.
-- Build the service patterns as plain substring alternatives (`ui\.app`, `telegram_bridge`, `reflection_worker`, plain `worker` bounded so it does not fire on words like `reap-xdist.sh`'s worker mentions or `homework` — match against the process-name position the kill shapes already anchor on, and cover with negative test rows). Per PR #3208's lesson, avoid clever regex; prefer literal alternatives.
-- Careful scoping point the builder must handle: bare `worker` is a substring of many innocent strings. The plan requires negative rows (e.g. `pkill -f 'node dev-server'`, `killall Dock` already exist; add e.g. a command containing "worker" in a non-service sense that must stay allowed, or scope the pattern to `python -m worker` / `reflection_worker` / `worker-watchdog` / `worker-stop`-adjacent forms). The exact scoping is the builder's call; the test rows are the contract.
+- Build the service patterns as plain substring alternatives (`ui\.app`, `telegram_bridge`, `email_bridge` / `bridge\.email_bridge`, `reflection_worker`, plain `worker` bounded so it does not fire on words like `reap-xdist.sh`'s worker mentions or `homework` — match against the process-name position the kill shapes already anchor on, and cover with negative test rows). Per PR #3208's lesson, avoid clever regex; prefer literal alternatives.
+- Careful scoping point the builder must handle: bare `worker` is a substring of many innocent strings. The plan requires negative rows (e.g. `pkill -f 'node dev-server'`, `killall Dock` already exist; add e.g. a command containing "worker" in a non-service sense that must stay allowed, or scope the pattern to `python -m worker` / `reflection_worker` / `worker-watchdog` / `worker-stop`-adjacent forms). The exact scoping is the builder's call; the test rows are the contract. Decision on Open Question 1: service-shaped forms only, never a bare `worker` substring match.
 - `find_violation` checks the test-runner patterns first (preserving the existing reason text byte-for-byte, since existing tests assert `"reap-xdist.sh" in reason`), then the service table (returning the service-specific reason).
 - Test rows per the issue's Fix shape: one BLOCKED row per service per verb shape, plus a negative row for a PID kill and rows proving the sanctioned stop commands (`scripts/valor-service.sh stop`, `worker-stop`) are not blocked.
 
@@ -115,7 +117,7 @@ No exception handlers in scope — `find_violation` is a pure predicate with no 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_validate_no_broad_process_kill.py` BLOCKED list — UPDATE: add one row per service pattern (`python -m ui.app`, `python -m worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog`) in each kill-verb shape the validator covers (`pkill -f`, `kill $(pgrep -f ...)`, `killall`, `pgrep ... | xargs kill`), plus a negative row proving a PID kill stays allowed
+- [ ] `tests/unit/test_validate_no_broad_process_kill.py` BLOCKED list — UPDATE: add one row per service pattern (`python -m ui.app`, `python -m worker`, `telegram_bridge`, `bridge.email_bridge` / `email_bridge`, `reflection_worker`, `worker-watchdog`) in each kill-verb shape the validator covers (`pkill -f`, `kill $(pgrep -f ...)`, `killall`, `pgrep ... | xargs kill`), plus a negative row proving a PID kill stays allowed. Sanctioned stop path for the email bridge rows: `email-stop` (`email-disable` to keep it down).
 - [ ] `tests/unit/test_validate_no_broad_process_kill.py` ALLOWED list — UPDATE: add rows proving the sanctioned stop paths are not blocked (`scripts/valor-service.sh stop`, `worker-stop`, `kill -9 <pid>`) and read-only inspection stays allowed
 - [ ] `tests/unit/test_pre_tool_use_dispatcher.py` — no change expected: dispatcher wiring is untouched; the existing end-to-end test keeps passing as a regression guard
 
@@ -156,7 +158,7 @@ No agent integration required — this is hook-layer protection the agent hits a
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/pattern-kill-guard.md` describing the validator: which kill shapes are blocked, the service table with per-service sanctioned stop paths, and the kill-by-PID rule for throwaway instances
+- [ ] Create `docs/features/pattern-kill-guard.md` describing the validator: which kill shapes are blocked, the service table (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `reflection_worker`, `worker-watchdog`) with per-service sanctioned stop paths, and the kill-by-PID rule for throwaway instances
 - [ ] Add entry to `docs/features/README.md` index table
 
 ### Inline Documentation
@@ -165,7 +167,7 @@ No agent integration required — this is hook-layer protection the agent hits a
 ## Success Criteria
 
 - [ ] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
-- [ ] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog`) per kill-verb shape, plus a PID-kill negative row
+- [ ] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `reflection_worker`, `worker-watchdog`) per kill-verb shape, plus a PID-kill negative row
 - [ ] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
 - [ ] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
 - [ ] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
@@ -202,7 +204,7 @@ Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `document
 - **Assigned To**: guard-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add a service table `(pattern, stop-path)` for `ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog` in `.claude/hooks/validators/validate_no_broad_process_kill.py`, parameterized over the existing four kill-verb shapes
+- Add a service table `(pattern, stop-path)` for `ui.app`, `worker`, `telegram_bridge`, `email_bridge` (sanctioned stop: `email-stop`, `email-disable` to keep it down), `reflection_worker`, `worker-watchdog` in `.claude/hooks/validators/validate_no_broad_process_kill.py`, parameterized over the existing four kill-verb shapes
 - Route reasons: keep the pytest `_REASON` byte-for-byte for test-runner matches; return a service-specific reason naming the sanctioned stop path plus kill-by-PID for service matches
 - Keep the `_SANCTIONED` (`reap-xdist.sh`) exemption and dispatcher wiring untouched
 - Extend the test's BLOCKED list (one row per service per verb shape), ALLOWED list (sanctioned stop commands, PID kills, read-only service inspection), and add a reason-content assertion for service matches mirroring the existing `reap-xdist.sh` assertion
@@ -214,8 +216,9 @@ Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `document
 - **Assigned To**: guard-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/pattern-kill-guard.md` describing the validator: blocked kill shapes, the service table with per-service sanctioned stop paths, the kill-by-PID rule
+- Create `docs/features/pattern-kill-guard.md` describing the validator: blocked kill shapes, the service table (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `reflection_worker`, `worker-watchdog`) with per-service sanctioned stop paths, the kill-by-PID rule
 - Add entry to `docs/features/README.md` index table
+- Validates: `test -f docs/features/pattern-kill-guard.md && grep -q pattern-kill-guard docs/features/README.md` exits 0
 
 ### 3. Final Validation
 - **Task ID**: validate-all
@@ -234,17 +237,13 @@ Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `document
 | Validator unit tests pass | `scripts/pytest-clean.sh tests/unit/test_validate_no_broad_process_kill.py -q` | exit code 0 |
 | Incident command now blocked | `python -c "import importlib.util; s=importlib.util.spec_from_file_location('v','.claude/hooks/validators/validate_no_broad_process_kill.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.find_violation('pkill -f \"python -m ui.app\"') is not None"` | exit code 0 |
 | PID kill still allowed | `python -c "import importlib.util; s=importlib.util.spec_from_file_location('v','.claude/hooks/validators/validate_no_broad_process_kill.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); assert m.find_violation('kill -9 88620') is None"` | exit code 0 |
+| Feature doc created and indexed | `test -f docs/features/pattern-kill-guard.md && grep -q pattern-kill-guard docs/features/README.md` | exit code 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Scope & Value | Service table omits bridge.email_bridge: pkill -f email_bridge would still kill the production email bridge (started via start_email, valor-service.sh:1132), leaving Open Question 2 unresolved against the plan's own any-long-lived-service outcome. | pending | Add an email_bridge row (bridge\.email_bridge / email_bridge alternatives) with email-stop (email-disable to keep it down) as the sanctioned stop path, plus BLOCKED test rows per verb shape. |
-| NIT | Scope & Value | Verification table has no check for the documentation success criterion and Task 2 carries no validation command. | pending | Add a Verification row: test -f docs/features/pattern-kill-guard.md with a grep for the README index entry, expecting exit 0. |
+| CONCERN | Scope & Value | Service table omits bridge.email_bridge: pkill -f email_bridge would still kill the production email bridge (started via start_email, valor-service.sh:1132), leaving Open Question 2 unresolved against the plan's own any-long-lived-service outcome. | revision-2026-09-16 | Added an email_bridge row (bridge\.email_bridge / email_bridge alternatives) with email-stop (email-disable to keep it down) as the sanctioned stop path, plus BLOCKED test rows per verb shape; service table, docs task, success criteria, and build task updated. |
+| NIT | Scope & Value | Verification table has no check for the documentation success criterion and Task 2 carries no validation command. | revision-2026-09-16 | Added a Verification row (`test -f docs/features/pattern-kill-guard.md` with a grep for the README index entry, expecting exit 0) and a matching Validates line on Task 2. |
 
 ---
-
-## Open Questions
-
-1. Bare-`worker` scoping: should the pattern match any command containing `worker`, or only service-shaped forms (`python -m worker`, `reflection_worker`, `worker-watchdog`)? The plan recommends service-shaped forms with negative test rows as the contract, but the supervisor may prefer a broader match with a larger negative list.
-2. Should `email-stop` / email worker processes join the service table in this same change, or stay out until an incident or shared-service argument earns them a row? The plan keeps the table to the five issue-named services.
