@@ -239,6 +239,8 @@ Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `document
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Scope & Value | Service table omits bridge.email_bridge: pkill -f email_bridge would still kill the production email bridge (started via start_email, valor-service.sh:1132), leaving Open Question 2 unresolved against the plan's own any-long-lived-service outcome. | pending | Add an email_bridge row (bridge\.email_bridge / email_bridge alternatives) with email-stop (email-disable to keep it down) as the sanctioned stop path, plus BLOCKED test rows per verb shape. |
+| NIT | Scope & Value | Verification table has no check for the documentation success criterion and Task 2 carries no validation command. | pending | Add a Verification row: test -f docs/features/pattern-kill-guard.md with a grep for the README index entry, expecting exit 0. |
 
 ---
 
