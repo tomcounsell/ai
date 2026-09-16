@@ -46,9 +46,9 @@ Fires when Claude attempts to end a session.
 Fires before any Bash tool call that invokes `git commit`.
 
 - **Blocks code file commits on main unconditionally**: If on `main` branch and staged files include `.py`, `.js`, or `.ts` files, the commit is blocked regardless of SDLC context. Non-code files (docs, plans, configs) are allowed on main.
-- Blocks commits with `Co-Authored-By:` trailers (case-insensitive)
-- Blocks commits with empty messages
 - All other Bash commands pass through immediately
+
+Co-author trailers and empty messages are **not** this hook's concern. That check lives in the project-scope `.claude/hooks/validators/validate_commit_message.py` (listed below), and no such logic exists anywhere in the `sdlc/` fork.
 
 **What counts as a commit** is decided by tokenizing, never by a substring search (`is_git_commit`). `git -C <worktree> commit` is a commit even though the literal string `git commit` never appears in it, and `echo "git commit"` is not one. The recognizer steps over leading `VAR=value` assignments and the values of git's value-taking global options (`-C`, `-c`, `--git-dir`, `--work-tree`), then requires the first bare subcommand token to be `commit`.
 

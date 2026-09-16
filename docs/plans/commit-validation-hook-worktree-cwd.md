@@ -419,13 +419,18 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Resolver exists in the deployed sibling | `grep -c 'def effective_git_dir' .claude/hooks/sdlc/sdlc_context.py` | output > 0 |
 | Anti-criterion: no `hook_utils` import in the global fork | `! grep -rq 'hook_utils' .claude/hooks/sdlc/` | exit code 0 |
 | Anti-criterion: the flag is gone from the hook's argv | `! grep -q '"--show-toplevel"' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | exit code 0 |
-
-> Every anti-criterion row above is written in the negated-quiet `! grep -q` form on purpose. `grep -c` exits **1** when the count is zero and **0** when there are matches, so an "Expected: match count == 0" row read by process exit status scores a correct fix as FAILURE and a broken hook as PASS. `grep -qc` does not fix it — the exit status is identical. Task 6 runs every row by exit status, so absence must map to exit 0. The `--show-toplevel` pattern is quote-anchored to the argv literal so an explanatory comment naming the flag does not trip it.
 | Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k probe_failure -q` | exit code 0 |
 | Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
 | 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
 | Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |
 | Deployed hardlink intact | `python -c "import os,pathlib,subprocess; r=pathlib.Path(subprocess.run(['git','rev-parse','--path-format=absolute','--git-common-dir'],capture_output=True,text=True).stdout.strip()).parent; a=os.stat(r/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
+
+> Both notes below sit *after* the whole table on purpose. A blockquote placed
+> between two rows terminates the markdown table, and the automated Verification
+> runner then treats everything past the break as a separate non-check table and
+> silently skips it — five rows went unrun that way in round 4.
+
+> Every anti-criterion row above is written in the negated-quiet `! grep -q` form on purpose. `grep -c` exits **1** when the count is zero and **0** when there are matches, so an "Expected: match count == 0" row read by process exit status scores a correct fix as FAILURE and a broken hook as PASS. `grep -qc` does not fix it — the exit status is identical. Task 6 runs every row by exit status, so absence must map to exit 0. The `--show-toplevel` pattern is quote-anchored to the argv literal so an explanatory comment naming the flag does not trip it.
 
 > The hardlink row is anchored to the MAIN checkout, resolved from the common
 > git dir, and not to the invoking directory. Deployment hardlinks
