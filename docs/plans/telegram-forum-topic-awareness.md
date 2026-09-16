@@ -277,6 +277,14 @@ that shadow these.
 - [ ] `tests/unit/test_context_helpers.py` — UPDATE: chain-walk tests gain topic-root
   termination cases and root-cache namespace assertions. (It already constructs
   `TelegramMessage(...)` at `:650`, so the new nullable field surfaces here.)
+- [ ] `tests/unit/test_context_helpers.py` — UPDATE (**cross-topic bleed fixture, critique
+  CONCERN 4 / Note N4**): build two synthetic `TelegramMessage` rows sharing one `chat_id` with
+  distinct `topic_id` values and distinct `content` strings, then render the context block
+  (`bridge/context.py::build_context_prefix`, `:110`) for topic B's message and assert topic A's
+  `content` string is **absent** from the rendered output. Assert on the rendered text, not on
+  `session_id` inequality — session-id inequality is already covered by the keying tests and
+  does not prove the user-visible harm (context bleed) is gone. This fixture is owned by Task 2
+  (build-keying) and is part of its held scope.
 - [ ] `tests/unit/test_model_relationships.py` — UPDATE (**hard break**): `:110` asserts
   `len(TelegramMessage._meta.field_names) == 20`. Adding `topic_id` makes it 21; the count
   must be bumped in the same commit as the model change or the suite goes red. Add a
@@ -381,6 +389,12 @@ that shadow these.
 - [ ] `TelegramMessage.topic_id` persists through live intake via `store_message` (round-trip test), and the three recovery scanners carry the topic into their enqueued session context (one test each) — they write no message rows.
 - [ ] An unsolicited send in a group with `default_topic_id` configured produces `reply_to=<topic_id>`; with General or no config, `reply_to` is omitted.
 - [ ] Agent context for a topic message names the topic (name or id) — snapshot test.
+- [ ] **No cross-topic context bleed (user-vantage criterion, critique CONCERN 4 / Note N4):**
+  given two messages in the same `chat_id` under different topics, the context block rendered
+  for one topic's message contains none of the other topic's message content. Asserted on
+  rendered context in `tests/unit/test_context_helpers.py`. Held with Task 2.
+- [ ] While Task 2 is held, the rendered topic line carries the keying caveat (Note N3); once
+  Task 2 merges, the caveat string is gone from `bridge/context.py` — one test per state.
 - [ ] Migration runs idempotently; second run is a no-op.
 - [ ] Tests pass (`/do-test`); Documentation updated (`/do-docs`).
 
@@ -465,8 +479,14 @@ that shadow these.
 | Field-count assertion updated | `grep -n "field_names) == 21" tests/unit/test_model_relationships.py` | one match |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
-| No topic in session key (anti-criterion, owner ruling) | `grep -rn "topic" bridge/context.py \| grep -c "session_id = f"` | match count == 0 |
-| General topic omit rule | `grep -rn "GENERAL_TOPIC_ID\|== 1" bridge/telegram_relay.py \| head -1` | output contains 1 |
+| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5) | `sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -ci topic` | `0` |
+| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5) | `sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -ci topic` | `0` |
+| General topic omit rule uses a named constant (Note N1) | `grep -c "GENERAL_TOPIC_ID" bridge/telegram_relay.py` | `> 0` (**RED on current main: 0 matches**) |
+| No bare General literal in the topic guard (Note N1) | `grep -n "reply_to" bridge/telegram_relay.py \| grep -c "== 1"` | `0` |
+| Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | `> 0` |
+| No header sniffing at the enqueue site (Note N2) | `grep -c 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | `0` |
+| Keying caveat removed when Task 2 lands (Note N3) | `grep -c "session keying not yet topic-aware" bridge/context.py` | `> 0` while Task 2 is held; `0` in and after the commit that merges Task 2 |
+| Cross-topic bleed fixture exists (Note N4) | `grep -c "cross_topic" tests/unit/test_context_helpers.py` | `> 0` (with Task 2) |
 | fetch_reply_chain untouched (No-Go #2732) | `git diff main -- bridge/context.py \| grep -c "def fetch_reply_chain"` | match count == 0 |
 
 ## Critique Results
