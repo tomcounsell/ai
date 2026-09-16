@@ -85,7 +85,7 @@ class TestProposeEndToEnd:
     def test_propose_under_a_seeded_research_session_shows_in_the_journal(self, tmp_path):
         case = new_case()
         session_id = f"test-cli-e2e-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -95,6 +95,14 @@ class TestProposeEndToEnd:
             working_dir=".",
             extra_context={"action_id": "e2e-a1", "research_case_id": case.id},
         )
+        # AGENT_SESSION_ID carries the row's `agent_session_id` (the AutoKeyField
+        # hex id), which is what the worker exports and what `_own_session`
+        # resolves through `AgentSession.get_by_id`. It is NOT `session_id`
+        # (#3339): an unresolvable id sends the CLI down the break-glass path,
+        # where it mints a fresh action id and every assertion below still
+        # passes -- for the wrong reason.
+        agent_id = row.agent_session_id
+        assert agent_id and agent_id != session_id
         r = transition(
             PK,
             case.id,
@@ -123,7 +131,7 @@ class TestProposeEndToEnd:
             "e2e-a1",
             expected_revision=r2.revision,
             generation=1,
-            agent_session_id=session_id,
+            agent_session_id=agent_id,
         )
         assert r3.accepted
         r4 = record_running(PK, case.id, "e2e-a1", expected_revision=r3.revision, generation=1)
@@ -134,7 +142,7 @@ class TestProposeEndToEnd:
 
         completed = run(
             ["--json", "propose", "--case", case.id, "--payload", str(payload_file)],
-            env={"AGENT_SESSION_ID": session_id},
+            env={"AGENT_SESSION_ID": agent_id},
         )
         assert completed.returncode == 0, completed.stderr
         out = json.loads(completed.stdout.strip())
@@ -145,6 +153,10 @@ class TestProposeEndToEnd:
         tail = journal_tail(PK, case.id, 1)
         assert tail[-1]["event"] == "action_proposed"
         assert tail[-1]["artifact_ref"] == out["artifact_ref"]
+        # The seeded action id, not a minted one: this is what separates a real
+        # fenced write from the break-glass path, which satisfies every other
+        # assertion here under a fresh uuid.
+        assert out["action_id"] == "e2e-a1"
         # The subprocess honored the content-root override: the artifact is
         # under this test's tmp_path, never the production retention root.
         assert list((tmp_path / "content").rglob("*.txt"))
@@ -153,7 +165,7 @@ class TestProposeEndToEnd:
         """Race 4b end to end."""
         case = new_case()
         s1 = f"test-cli-e2e-s1-{uuid.uuid4().hex[:8]}"
-        AgentSession.create(
+        row = AgentSession.create(
             project_key=PK,
             chat_id="0",
             session_type=SessionType.ENG,
@@ -163,6 +175,9 @@ class TestProposeEndToEnd:
             working_dir=".",
             extra_context={"action_id": "a1", "research_case_id": case.id},
         )
+        # The row's agent_session_id, not s1 -- see the note in the test above.
+        agent_id = row.agent_session_id
+        assert agent_id and agent_id != s1
         r = transition(
             PK,
             case.id,
@@ -191,7 +206,7 @@ class TestProposeEndToEnd:
         payload_file.write_text(json.dumps({"hypothesis": "stale"}))
         completed = run(
             ["--json", "propose", "--case", case.id, "--payload", str(payload_file)],
-            env={"AGENT_SESSION_ID": s1},
+            env={"AGENT_SESSION_ID": agent_id},
         )
         out = json.loads(completed.stdout.strip())
         assert out["accepted"] is False
