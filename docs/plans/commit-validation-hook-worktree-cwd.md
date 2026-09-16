@@ -421,7 +421,7 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Anti-criterion: the flag is gone from the hook's argv | `! grep -q '"--show-toplevel"' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | exit code 0 |
 
 > Every anti-criterion row above is written in the negated-quiet `! grep -q` form on purpose. `grep -c` exits **1** when the count is zero and **0** when there are matches, so an "Expected: match count == 0" row read by process exit status scores a correct fix as FAILURE and a broken hook as PASS. `grep -qc` does not fix it — the exit status is identical. Task 6 runs every row by exit status, so absence must map to exit 0. The `--show-toplevel` pattern is quote-anchored to the argv literal so an explanatory comment naming the flag does not trip it.
-| Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k identity_probe_failure -q` | exit code 0 |
+| Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k probe_failure -q` | exit code 0 |
 | Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
 | 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
 | Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |

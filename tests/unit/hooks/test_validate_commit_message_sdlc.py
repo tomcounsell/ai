@@ -153,10 +153,25 @@ class TestUnexpandedShellConstructsFallThrough:
             "git -C $REPO_ROOT commit -m x",
             'git -C "${REPO_ROOT}/.worktrees/lane-a" commit -m x',
             "cd `pwd`/lane && git commit -m x",
+            "cd ~/src/popoto && git commit -m x",
+            "git -C ~/src/popoto commit -m x",
         ],
     )
     def test_the_token_is_rejected_and_the_payload_cwd_wins(self, command, tmp_path):
         assert sdlc_context.effective_git_dir(command, str(tmp_path)) == str(tmp_path)
+
+    def test_tilde_prefixed_cd_does_not_resolve_to_a_nonexistent_joined_path(self, tmp_path):
+        """Regression for the PR #3342 review blocker: a `~`-prefixed token is
+        an unexpanded shell construct (tilde expansion is the shell's job,
+        not `shlex`'s), but `_is_literal_path_token` was accepting it as a
+        literal path. `_resolve_against` then joined it onto the payload cwd,
+        producing a directory that cannot exist -- every downstream `_git`
+        call then fails and the hook's fail-open handler ALLOWS.
+        """
+        command = "cd ~/src/popoto && git commit -m x"
+        resolved = sdlc_context.effective_git_dir(command, str(tmp_path))
+        assert resolved == str(tmp_path)
+        assert "~" not in resolved
 
 
 # ---------------------------------------------------------------------------

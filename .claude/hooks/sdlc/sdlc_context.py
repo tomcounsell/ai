@@ -50,7 +50,12 @@ def _is_literal_path_token(token: str) -> bool:
     """
     if not token:
         return False
-    if token.startswith("$"):
+    if token.startswith(("$", "~")):
+        # A leading `$` is an unexpanded variable/subshell reference; a
+        # leading `~` is an unexpanded home-dir reference -- tilde
+        # expansion is the shell's job, not `shlex`'s, so `~/src/x` would
+        # otherwise be joined onto the base as a literal `~` path segment
+        # that cannot exist on disk (PR #3342 review blocker).
         return False
     return not any(marker in token for marker in _UNEXPANDED_MARKERS)
 
