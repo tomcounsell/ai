@@ -1,0 +1,39 @@
+{
+  "assembly": "recovery-posthoc: meter_before unavailable (single post-hoc snapshot), wall_seconds unknown; sessions, freeze, evaluation, and case observation are live-run artifacts",
+  "blinded": false,
+  "case_id": "1ec40086ca1d422e90ef747775ff7f64",
+  "charter_leg": "serves-charter calibration floor refusal: the project partition holds 0 retained architectural corrections against a floor of 20; the serves-charter judge is uncalibrated.",
+  "confidence_interval": {
+    "readiness-verdict": {
+      "adjusted_p_value": 1.0,
+      "lower": 0.0,
+      "n": 4,
+      "raw_p_value": 1.0,
+      "upper": 0.0
+    }
+  },
+  "contract_digest": "sha256:706536b7746b076c099387b0ff4fa06ab94013daeeeb777188f8c6c058aaa7bd",
+  "corpus_digest": "00e837e05cc83ec063c93ef58d03bbf76795d7c63e08ae7e41bf88b4d747f6b8",
+  "effect": {
+    "readiness-verdict": 0.0
+  },
+  "evaluation_id": "bdad105964e14f6691b119ec76a898a7",
+  "evaluation_notes": "agent baseline (pass_fail): t1=agree, t2=agree, t3=agree, t4=agree\nblinding leak: identity tokens reached a judge: ['improve-preflight']\nendpoints not distinguished: ['readiness-verdict']",
+  "experiment_id": "4fff92cd872e4cde8b196a6bbd2b96bc",
+  "investigation_id": "3dbf7e2f7c67457bb768a03050772558",
+  "observation": "already on the case; see case summary",
+  "protocol_ref": "$CF:b961357a32f89f56130098e92d7e3f2e59b33a74c727a17c3dd09f7a7b2ce167:ImprovementProtocol/protocol-b961357a32f89f56.txt",
+  "skill": "improve-preflight",
+  "skill_hash": "sha256:45ac105757175aa60134cc17ef38d6f6e0ba085783dbfbf0e5acfea3e59de623",
+  "trials": 4,
+  "unit2_after": {
+    "day_key": "2026-09-16",
+    "reserved_usd": 0.0,
+    "settled_usd": 0.32,
+    "window_end": "2026-09-17T00:00:00+00:00",
+    "window_start": "2026-09-16T00:00:00+00:00"
+  },
+  "unit2_before": null,
+  "verdict": "inconclusive",
+  "wall_seconds": -1
+}

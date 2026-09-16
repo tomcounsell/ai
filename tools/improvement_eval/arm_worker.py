@@ -47,12 +47,17 @@ a frozen contract can skew a real arm's clock; only
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from .errors import InfraFailure
+from .judges.rubric import extract_verdict
 
 JOB_MODES = ("restore", "retrieve", "digest", "agent_run")
 
@@ -135,19 +140,150 @@ def _validate_agent_run_job(job: dict) -> tuple[list, dict, dict]:
     return tasks, manifest, coerced
 
 
-def run_agent_trial(task: dict, manifest: dict, bounds: dict, project_key: str) -> dict:
+#: The headless ``claude -p`` argv for one trial session, prompt appended
+#: last. ``--tools=`` disables every built-in tool and ``--strict-mcp-config``
+#: loads no MCP server, so the session cannot open the repo or the frozen
+#: corpus and de-blind itself; with no tools the call is a single model turn
+#: on the subscription. Each flag is one ``--flag=value`` argv element.
+SUBSCRIPTION_SESSION_ARGV = [
+    "claude",
+    "-p",
+    "--output-format",
+    "json",
+    "--tools=",
+    "--strict-mcp-config",
+]
+
+#: Wall-clock cap (seconds) on one trial session when the job names no
+#: ``timeout_s`` bound. Five minutes covers a slow turn and turns a hung
+#: subprocess into a raised error (a harness error upstream), never a stall.
+SUBSCRIPTION_SESSION_TIMEOUT_S = 300.0
+
+#: Verdict tokens a trial session may close with. The prompt instructs the
+#: session to end on exactly one of these; the rubric judges score it.
+SESSION_VERDICTS = ("FREEZE", "HOLD")
+
+
+def _checkout_root() -> Path:
+    """The checkout this worker runs from: where frozen skill files live."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_skill_text(skill: str, prompt_hash: str | None) -> str:
+    """Read the frozen skill text the manifest names, pinned by ``prompt_hash``.
+
+    A blank skill is the prior capability: no text, no pin. A named skill
+    needs its ``SKILL.md`` under ``.claude/skills`` (else
+    ``.claude/skills-global``) and a ``prompt_hash`` equal to the file's
+    sha256; anything short of that refuses with :class:`InfraFailure`
+    before any session spawns.
+    """
+    if not (skill or "").strip():
+        return ""
+    name = skill.strip()
+    if not (prompt_hash or "").strip():
+        raise InfraFailure(
+            f"agent_run manifest names skill {name!r} with no prompt_hash; "
+            "a skill session needs its frozen pin"
+        )
+    root = _checkout_root()
+    locations = [
+        root / ".claude" / "skills" / name / "SKILL.md",
+        root / ".claude" / "skills-global" / name / "SKILL.md",
+    ]
+    path = next((p for p in locations if p.is_file()), None)
+    if path is None:
+        raise InfraFailure(
+            f"agent_run manifest names skill {name!r} but no SKILL.md "
+            f"exists under .claude/skills or .claude/skills-global"
+        )
+    text = path.read_text()
+    digest = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if digest != prompt_hash.strip():
+        raise InfraFailure(
+            f"agent_run manifest prompt_hash {prompt_hash!r} does not match "
+            f"the frozen skill text {digest}; the skill moved after freezing"
+        )
+    return text
+
+
+def _compose_session_prompt(task: dict, manifest: dict, skill_text: str) -> str:
+    """The one prompt the trial session sees: persona, skill, task, verdict."""
+    parts = []
+    persona = (manifest.get("persona") or "").strip()
+    if persona:
+        parts.append(f"You are a {persona} research session.")
+    if skill_text:
+        parts.append(
+            "Follow this skill. It is the frozen capability under evaluation:\n\n" + skill_text
+        )
+    parts.append(task["prompt"])
+    parts.append(
+        "End your reply with exactly one line of the form `VERDICT: <word>` "
+        f"where <word> is one of {', '.join(SESSION_VERDICTS)}, then stop."
+    )
+    return "\n\n".join(parts)
+
+
+def _run_session_via_subscription(prompt: str, timeout_s: float) -> str:
+    """Run one headless ``claude -p`` turn; return its result text.
+
+    Runs from an empty temporary directory with every tool disabled (see
+    :data:`SUBSCRIPTION_SESSION_ARGV`): the only thing the session sees is
+    the prompt. Raises on transport failure so the worker reports an error
+    and the trial becomes a harness error, never a scored zero.
+    """
+    with tempfile.TemporaryDirectory(prefix="agent-run-trial-") as empty_cwd:
+        completed = subprocess.run(
+            [*SUBSCRIPTION_SESSION_ARGV, prompt],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=empty_cwd,
+        )
+    if completed.returncode != 0 or not (completed.stdout or "").strip():
+        tail = (completed.stderr or "").strip()[-500:]
+        raise RuntimeError(f"claude -p exited {completed.returncode}: {tail}")
+    try:
+        payload = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"claude -p returned non-JSON output: {exc}") from exc
+    if isinstance(payload, dict) and isinstance(payload.get("result"), str):
+        return payload["result"]
+    return completed.stdout
+
+
+def run_agent_trial(
+    task: dict, manifest: dict, bounds: dict, project_key: str, _complete=None
+) -> dict:
     """Run one bounded agent session for a task; return its outcome.
 
     This process already runs under the arm child env, so the session
-    sees the private Redis socket, the scratch content path, and the
-    arm project key. The default seam records the trial against the
-    arm-local scratch dir and echoes the outcome shape the judges
-    score; the provider-routed session spawn plugs in here.
+    inherits the private Redis socket, the scratch content path, and the
+    arm project key. The manifest shapes the prompt (persona preamble plus
+    the frozen skill text when it names a skill, pinned by ``prompt_hash``);
+    ``bounds["timeout_s"]`` caps the turn. The ``VERDICT:`` line parses
+    into the ``passed`` bit: a session with no decision line comes back
+    with ``passed=False`` for the rubric to score zero, while a transport
+    failure raises for the worker to report as a harness error.
+    ``_complete`` injects the session transport (tests); the default runs
+    one headless ``claude -p`` turn on the subscription.
     """
+    skill_text = _resolve_skill_text(manifest.get("skill") or "", manifest.get("prompt_hash"))
+    prompt = _compose_session_prompt(task, manifest, skill_text)
+    try:
+        timeout_s = float((bounds or {}).get("timeout_s") or SUBSCRIPTION_SESSION_TIMEOUT_S)
+    except (TypeError, ValueError) as exc:
+        raise InfraFailure(f"agent_run bounds timeout_s is not a number: {exc}") from exc
+    complete = _complete or _run_session_via_subscription
+    output = complete(prompt, timeout_s)
+    if not isinstance(output, str):
+        output = str(output)
     scratch = _arm_scratch_dir()
     return {
         "task_id": task["id"],
-        "output": "",
+        "output": output,
+        "passed": extract_verdict(output) in SESSION_VERDICTS,
         "model": manifest.get("model"),
         "scratch": scratch,
     }

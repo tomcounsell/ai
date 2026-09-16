@@ -140,13 +140,23 @@ from tools.improvement_eval.envelope import (
 )
 from tools.improvement_eval.errors import InfraFailure
 from tools.improvement_eval.retrieval import RankedBaseline, baseline_parity
-from tools.improvement_eval.statistics import EndpointThreshold, evaluate_family, winners
+from tools.improvement_eval.statistics import (
+    EndpointThreshold,
+    evaluate_family,
+    winners,
+)
 from tools.memory_eval.metrics import mrr, recall_at_k
 
 logger = logging.getLogger(__name__)
 
 #: The experiment fields whose normalized JSON is the frozen contract.
-CONTRACT_FIELDS = ("hypothesis", "mechanism", "falsifier", "candidate_surfaces", "manifest")
+CONTRACT_FIELDS = (
+    "hypothesis",
+    "mechanism",
+    "falsifier",
+    "candidate_surfaces",
+    "manifest",
+)
 
 #: ``ImprovementEvaluation.state`` values this runner writes.
 STATE_COMPLETE = "complete"
@@ -438,7 +448,14 @@ def _agent_job(export, project_key: str, task: dict, arm_params: dict) -> dict:
 
 
 def _run_agent_arm(
-    arm, export, project_key: str, task: dict, arm_params: dict, *, arm_run_id=None, meter=None
+    arm,
+    export,
+    project_key: str,
+    task: dict,
+    arm_params: dict,
+    *,
+    arm_run_id=None,
+    meter=None,
 ) -> dict:
     """Run one agent trial on an arm; return its outcome mapping.
 
@@ -480,6 +497,8 @@ def capture_agent_baseline(
     *,
     incumbent: dict | None = None,
     export=None,
+    meter=None,
+    arm_run_id: str | None = None,
 ) -> dict:
     """Record the incumbent's per-task outcomes on the frozen corpus.
 
@@ -488,23 +507,35 @@ def capture_agent_baseline(
     ``{"corpus_digest", "outcomes"}`` in the shape an agent protocol's
     ``baseline`` expects. An operator freezes this alongside the experiment;
     Gate 1 later demands the incumbent agree with it under the frozen
-    per-task tolerance.
+    per-task tolerance. With a meter and an ``arm_run_id``, each trial's
+    frozen per-task budget is reserved pre-trial and settled post-trial.
     """
     from tools.improvement_eval.arena import arm_redis_server
     from tools.improvement_eval.corpus import export_corpus
 
     export = export or export_corpus(project_key)
     outcomes: dict[str, dict] = {}
+    # Five-arg fakes keep working: spread the spend kwargs only when
+    # metering is in play, matching _run_agent_trials.
+    arm_kwargs: dict = (
+        {"arm_run_id": arm_run_id, "meter": meter}
+        if (arm_run_id is not None or meter is not None)
+        else {}
+    )
     with arm_redis_server() as arm:
         for task in tasks:
             outcomes[str(task.get("id", task.get("trial_id")))] = _run_agent_arm(
-                arm, export, project_key, task, incumbent or {}
+                arm, export, project_key, task, incumbent or {}, **arm_kwargs
             )
     return {"corpus_digest": export.digest, "outcomes": outcomes}
 
 
 def _agent_baseline_agree(
-    incumbent_outcome: dict, recorded_outcome: dict, tolerance: dict | None, *, trial_id: str = ""
+    incumbent_outcome: dict,
+    recorded_outcome: dict,
+    tolerance: dict | None,
+    *,
+    trial_id: str = "",
 ) -> bool:
     """Agree the incumbent's outcome with its recorded baseline under tolerance.
 
@@ -681,7 +712,10 @@ def _run_judges(
     experiment_id = str(experiment.id)
     identity = identity_source(experiment)
     if candidate_manifest is not None:
-        identity["manifest"] = [identity.get("manifest"), json.dumps(candidate_manifest)]
+        identity["manifest"] = [
+            identity.get("manifest"),
+            json.dumps(candidate_manifest),
+        ]
     for incumbent_result, candidate_result in trials:
         for result in (incumbent_result, candidate_result):
             blinded_arm_id = assignment.blinded_ids[result.arm]
@@ -710,7 +744,9 @@ def _run_judges(
                 outcome.leaks.extend(scan.hits)
             for judge in judges:
                 envelope = judge(
-                    candidate_output, blinded_arm_id=blinded_arm_id, trial_id=result.trial_id
+                    candidate_output,
+                    blinded_arm_id=blinded_arm_id,
+                    trial_id=result.trial_id,
                 )
                 if envelope.get("status") != "ok":
                     raise InfraFailure(
@@ -778,6 +814,10 @@ def _run_agent_trials(
     agreement: dict[str, bool] = {}
     # Existing callers patch _run_agent_arm with five-arg fakes; spread the
     # spend kwargs only when metering is in play so those fakes keep working.
+    # The candidate arm gets the same kwargs: in production it is
+    # _run_agent_arm, so candidate trials reserve and settle exactly like
+    # incumbent ones. A custom-injected candidate arm must accept them when
+    # metering is in play.
     arm_kwargs: dict = (
         {"arm_run_id": arm_run_id, "meter": meter}
         if (arm_run_id is not None or meter is not None)
@@ -825,7 +865,12 @@ def _run_agent_trials(
         for arm_name in assignment.run_order:
             if arm_name == INCUMBENT_ARM:
                 again = _run_agent_arm(
-                    incumbent_arm, export, project_key, task, incumbent_params, **arm_kwargs
+                    incumbent_arm,
+                    export,
+                    project_key,
+                    task,
+                    incumbent_params,
+                    **arm_kwargs,
                 )
                 if not _agent_baseline_agree(
                     again, incumbent_outcome, tolerance, trial_id=trial_id
@@ -837,7 +882,12 @@ def _run_agent_trials(
                 continue
             try:
                 candidate_outcome = candidate_agent_arm(
-                    candidate_arm_server, export, project_key, task, candidate_params
+                    candidate_arm_server,
+                    export,
+                    project_key,
+                    task,
+                    candidate_params,
+                    **arm_kwargs,
                 )
             except InfraFailure as exc:
                 harness_error(CANDIDATE_ARM, trial_id, exc)
@@ -888,7 +938,11 @@ def _score_agent_trials(
         if not isinstance(judge, dict):
             continue
         by_key[
-            (envelope.get("trial_id"), envelope.get("blinded_arm_id"), judge.get("judge_id"))
+            (
+                envelope.get("trial_id"),
+                envelope.get("blinded_arm_id"),
+                judge.get("judge_id"),
+            )
         ] = judge
     for incumbent_result, candidate_result in paired:
         for result in (incumbent_result, candidate_result):
@@ -930,7 +984,10 @@ def decide_verdict(outcomes, thresholds: dict[str, EndpointThreshold]) -> tuple[
     if outcomes and len(cleared) == len(outcomes):
         return VERDICT_ACCEPT, f"all endpoints cleared: {sorted(cleared)}"
     if failed:
-        return VERDICT_REJECT, f"endpoints below margin across the whole interval: {failed}"
+        return (
+            VERDICT_REJECT,
+            f"endpoints below margin across the whole interval: {failed}",
+        )
     undetermined = sorted(o.name for o in outcomes if o.name not in cleared)
     return VERDICT_INCONCLUSIVE, f"endpoints not distinguished: {undetermined}"
 
@@ -974,14 +1031,16 @@ def _write_evaluation(ctx: _RunContext, *, state: str, verdict: str | None) -> A
         "blinded": ctx.blinded,
         "arm_assignment_digest": ctx.arm_assignment_digest,
         "trials": ctx.trials,
-        "effect": json.dumps(ctx.effect, sort_keys=True) if ctx.effect is not None else None,
+        "effect": (json.dumps(ctx.effect, sort_keys=True) if ctx.effect is not None else None),
         "confidence_interval": (
             json.dumps(ctx.confidence_interval, sort_keys=True)
             if ctx.confidence_interval is not None
             else None
         ),
         "correction": ctx.correction,
-        "judge_records": json.dumps(ctx.judge_records, sort_keys=True) if ctx.judge_records else "",
+        "judge_records": (
+            json.dumps(ctx.judge_records, sort_keys=True) if ctx.judge_records else ""
+        ),
         "notes": "\n".join(ctx.notes) if ctx.notes else None,
     }
     if verdict is not None:
@@ -1015,6 +1074,8 @@ def evaluate(
     judges: list[JudgeFn] | None = None,
     judge_complete=None,
     store=None,
+    meter=None,
+    arm_run_id: str | None = None,
     _candidate_arm=_run_arm,
     _candidate_agent_arm=_run_agent_arm,
 ) -> Any:
@@ -1025,7 +1086,9 @@ def evaluate(
     ``_candidate_arm`` is the candidate arm invocation, exposed so the
     parity-gate test can prove the candidate was never called.
     ``_candidate_agent_arm`` is the agent-mode sibling: one agent trial per
-    task, returning its outcome mapping.
+    task, returning its outcome mapping. With a meter and an ``arm_run_id``,
+    every agent trial reserves its frozen per-task budget pre-trial and
+    settles post-trial; a refused reservation is a harness error.
     """
     from models.verifying_artifact_store import verifying_artifact_store
 
@@ -1040,6 +1103,8 @@ def evaluate(
             store=store,
             candidate_arm=_candidate_arm,
             candidate_agent_arm=_candidate_agent_arm,
+            meter=meter,
+            arm_run_id=arm_run_id,
         )
     except InfraFailure as exc:
         logger.warning("evaluation infra_failure for %s: %s", experiment_id, exc)
@@ -1062,7 +1127,15 @@ def evaluate(
 
 
 def _run_gates(
-    ctx: _RunContext, *, judges, judge_complete, store, candidate_arm, candidate_agent_arm
+    ctx: _RunContext,
+    *,
+    judges,
+    judge_complete,
+    store,
+    candidate_arm,
+    candidate_agent_arm,
+    meter=None,
+    arm_run_id=None,
 ) -> None:
     from models.improvement_charter import ImprovementCharter
     from tools.improvement_eval.arena import arm_redis_server
@@ -1141,11 +1214,18 @@ def _run_gates(
         roster, calibration = default_judges(project_key, charter, judge_complete=judge_complete)
         ctx.notes.append(calibration_note(calibration))
 
-    with arm_redis_server() as incumbent_arm, arm_redis_server() as candidate_arm_server:
+    with (
+        arm_redis_server() as incumbent_arm,
+        arm_redis_server() as candidate_arm_server,
+    ):
         # Arena digest comparison: each arm re-exports and hashes its own corpus.
         from tools.improvement_eval.arena import run_arm_job
 
-        digest_job = {"mode": "digest", "jsonl": export.jsonl_text, "project_key": project_key}
+        digest_job = {
+            "mode": "digest",
+            "jsonl": export.jsonl_text,
+            "project_key": project_key,
+        }
         arm_digests = [
             run_arm_job(incumbent_arm, project_key, digest_job),
             run_arm_job(candidate_arm_server, project_key, digest_job),
@@ -1205,6 +1285,8 @@ def _run_gates(
                 candidate_agent_arm=candidate_agent_arm,
                 assignment=assignment,
                 harness_error=_harness_error,
+                arm_run_id=arm_run_id,
+                meter=meter,
             )
 
         for query in queries:
@@ -1253,7 +1335,11 @@ def _run_gates(
                     continue
                 try:
                     candidate_ids = candidate_arm(
-                        candidate_arm_server, export, project_key, query, candidate_params
+                        candidate_arm_server,
+                        export,
+                        project_key,
+                        query,
+                        candidate_params,
                     )
                 except InfraFailure as exc:
                     _harness_error(CANDIDATE_ARM, trial_id, exc)
