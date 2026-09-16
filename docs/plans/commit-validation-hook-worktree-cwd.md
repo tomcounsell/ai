@@ -6,6 +6,9 @@ owner: Valor Engels
 created: 2026-09-09
 tracking: https://github.com/tomcounsell/ai/issues/3259
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-16T02:59:47Z
+revision_round: 1
 ---
 
 # Commit-Validation Hook Resolves Git State From the Invoking Worktree
@@ -113,7 +116,8 @@ No relevant external findings — proceeding with codebase context. The change i
 - **Interface changes**: `sdlc_context.py` gains exported helpers (`effective_git_dir`, and the small `_split_simple_commands` it needs). The hook gains a pure predicate seam so tests can drive a verdict without the harness.
 - **Coupling**: unchanged and deliberately so. The SDLC forks stay import-free of this repo's `hook_utils`; the resolution logic is duplicated from `validators/` on purpose, as `manifest.toml:294-296` instructs.
 - **Data ownership**: none.
-- **Reversibility**: high. One script plus one sibling module; revert is a single-commit revert followed by `/update` to re-propagate.
+- **Update system**: `scripts/update/hardlinks.py::sync_user_hooks` gains a post-sync self-check (added in revision). This is repo-internal code running under the repo venv, not a global hook, so the 3.9 floor does not apply to it — only to the fixture-driving subprocess it spawns under the resolved global interpreter.
+- **Reversibility**: high. One script, one sibling module, one update-script function; revert is a single-commit revert followed by `/update` to re-propagate.
 
 ## Appetite
 
@@ -135,7 +139,8 @@ No prerequisites — this work has no external dependencies. The two-checkout te
 
 - **`effective_git_dir(command, hook_cwd)` in `sdlc_context.py`**: resolves the directory an intercepted shell command will actually run its git in, by an explicit precedence order, stdlib-only and 3.9-clean.
 - **`-C`-scoped git calls in the hook**: all three git invocations name their directory instead of inheriting one.
-- **Worktree-correct repo identity**: repo name comes from the *common* git dir, so a lane inside `popoto/.worktrees/x` is still recognized as popoto.
+- **Worktree-correct repo identity**: repo name comes from the *common* git dir, so a lane inside `popoto/.worktrees/x` is still recognized as popoto. `--show-toplevel` is removed from the file entirely; a failed probe yields unknown identity and the restrictive branch, never a lane-slug basename.
+- **A post-sync self-check in `/update`**: every machine proves its freshly deployed guard still blocks, so a per-machine fail-open cannot hide behind a green PR.
 - **A pure verdict seam**: `commit_block_reason(command, hook_cwd) -> str | None`, which `main()` wraps. Tests call it directly.
 - **A two-checkout regression test**: a real repo plus a real linked worktree, deliberately disagreeing on branch and staged index, asserting the verdict follows the worktree in both directions.
 
@@ -206,6 +211,8 @@ Agent in `.worktrees/lane-a` runs `git commit -m ...` → harness fires the PreT
 **Impact:** The `--show-toplevel` basename of a worktree is the lane slug, never `popoto`, so a naive cwd fix converts a false-allow-sometimes into a false-allow-always for worktree commits — while looking fixed. This is the single most likely way to ship a worse guard.
 **Mitigation:** spike-3 caught it before build. Repo identity moves to `--git-common-dir` in its own task, and the regression test asserts a worktree of a repo named `popoto` is still identified as `popoto`. This assertion is non-negotiable; without it the suite cannot tell the two implementations apart.
 
+The first draft of this plan kept `--show-toplevel` as a fallback for old git, which the war-room critique correctly called a full reintroduction of the defect on any machine where the primary probe fails. The fallback is now **deleted outright**: rung 2 (bare `--git-common-dir`, available since git 2.5) covers old git, and a total probe failure yields unknown identity taking the restrictive branch. Two tests pin this — one forcing both rungs to fail, one forcing only `--path-format` to fail.
+
 ### Risk 2: A crash in a `PreToolUse` hook denies every Bash call, fleet-wide
 **Impact:** `exit_policy = "propagate"` passes a non-zero exit straight through, and exit 2 is the deny code. A hook that raises on some command shape bricks the agent everywhere, including the `/update` that would repair it.
 **Mitigation:** The outer fail-open stays. The resolver is total (always returns a string). Explicit tests for malformed stdin, unparseable shell tokens, missing directories, and non-repo directories. The change is additive to a script whose every failure path already exits 0.
@@ -256,6 +263,7 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 ### Feature Documentation
 - [ ] Update `docs/features/sdlc-enforcement.md` — document that the commit-message guard resolves its git state from the intercepted command's effective directory (payload `cwd`, overridden by `cd` / `git -C`), and that repo identity comes from the common git dir so worktrees of a protected repo stay protected.
 - [ ] Update `docs/features/hook-manifest.md` — note the `sdlc_context.py` helper addition in the global-scope section and restate the 3.9 stdlib-only floor that constrains it.
+- [ ] Update `docs/features/hook-manifest.md` (or the update-system page it points to) — document the post-sync self-check: what it asserts, that it is a hard failure, and why a silently fail-opening guard needs a per-machine probe rather than a one-time PR proof.
 - [ ] `docs/features/README.md` index — no new entry; both pages already exist. Confirm no index change is needed.
 
 ### Inline Documentation
@@ -319,8 +327,9 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 - **Parallel**: false
 - Port `_split_simple_commands` from `validators/validate_no_uv_sync_in_worktree.py:70` verbatim in behavior (split on `&& || ; |` and newlines, strip, drop empties).
 - Add `effective_git_dir(command, hook_cwd)` implementing the four-rung precedence; `shlex.split` failures fall through to the next rung; relative paths resolve against the rung below; the function never raises and always returns a string.
-- Add `from __future__ import annotations` to `sdlc_context.py` if any new annotation requires it. Stdlib imports only.
-- Docstring states the precedence order and the never-raises contract.
+- Reject path tokens containing `$(`, a backtick, `${`, or a leading `$` (unexpanded shell constructs) and fall through to the next rung.
+- **Add `from __future__ import annotations` to `sdlc_context.py` before introducing any PEP 604 annotation there** — verified at revision time that the module currently has none, and the global-interpreter floor is 3.9.
+- Docstring states the precedence order, the shell-construct rejection, and the never-raises contract.
 
 ### 2. Rewire the hook's three git calls and fix repo identity
 - **Task ID**: build-hook
@@ -333,7 +342,7 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 - Read `cwd` from the payload in `main()` and compute the effective directory once.
 - Extract `commit_block_reason(command, hook_cwd) -> str | None` as the pure verdict seam; reduce `main()` to payload parsing plus `block()` / `allow()`.
 - Convert `get_current_branch`, the repo-identity probe, and `git diff --cached --name-only` to `git -C <effective_dir> ...`.
-- Replace the repo-identity probe with `rev-parse --path-format=absolute --git-common-dir` + parent basename, falling back to `--show-toplevel`'s basename on failure. Comment the worktree reasoning inline.
+- Replace the repo-identity probe with the two-tier `--git-common-dir` scheme: `--path-format=absolute --git-common-dir`, then bare `--git-common-dir` resolved against the effective directory, then unknown-identity → restrictive branch. **Delete `--show-toplevel` from the file; it must not appear on any path.** Comment the worktree reasoning inline, citing the spike-3 probe evidence.
 - Mark the `os.getcwd()` rung as an explicit last resort in a comment.
 - Preserve every existing fail-open path unchanged.
 
@@ -350,19 +359,27 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 - Assert the false-block direction: worktree on a feature branch, main checkout on `main` with a stale staged `.py` → verdict allows.
 - Assert worktree repo identity resolves to `popoto` (this is the assertion that distinguishes a correct fix from a guard that allows everything).
 - Cover each resolution rung: `git -C` over `cd`, `cd` over payload `cwd`, payload `cwd` over process cwd.
+- **Identity-probe-failure case** (`-k identity_probe_failure`): stub `git` on `PATH` (or monkeypatch the subprocess helper) so both `--git-common-dir` rungs return non-zero, with the effective directory a linked worktree on `main` holding a staged `.py`. Assert the verdict blocks — unknown identity must not degrade to allow. This is the discriminating test for the critique blocker.
+- **Old-git case**: fail only `--path-format=absolute`, leave bare `--git-common-dir` returning a relative path; assert identity still resolves to `popoto` from the worktree.
+- **Unexpanded-construct case** (`-k unexpanded`): `cd "$(git rev-parse --show-toplevel)/.worktrees/lane-a" && git commit -m x` and `git -C "$REPO_ROOT" commit` resolve to the payload `cwd`, not the literal token.
 - Cover the failure paths enumerated in Failure Path Test Strategy: malformed stdin, unbalanced quotes, `cd`/`-C` with no argument, deleted directory, non-git directory, empty staged set.
 - One end-to-end test drives `main()` over real stdin to prove the wiring, asserting exit 0 and the JSON block payload on stdout.
 - Follow the `sys.path` pattern from `tests/unit/test_validate_sdlc_on_stop.py:12-17`.
 - **Red-state proof**: run the discriminating tests against the parent commit's hook and capture the FAIL output for the PR description. A guard test that was never red is not evidence.
 
-### 4. Validate the 3.9 floor coverage
-- **Task ID**: build-floor-check
-- **Depends On**: build-resolver
-- **Validates**: `tests/unit/test_hook_interpreter.py`
-- **Assigned To**: `hook-cwd-tester`
-- **Agent Type**: test-engineer
+### 4. Post-sync self-check in the update system
+- **Task ID**: build-update-selfcheck
+- **Depends On**: build-hook
+- **Validates**: `tests/unit/test_update_hardlinks.py`
+- **Informed By**: critique concern — a fail-open guard is indistinguishable from a working one, so the PR's one-time red-state proof says nothing about any other machine.
+- **Assigned To**: `hook-cwd-builder`
+- **Agent Type**: builder
 - **Parallel**: false
-- Confirm the AST floor test scans `sdlc_context.py`, not only the three registered scripts. If it does not, extend it to every `.py` under `.claude/hooks/sdlc/` — the helper module is imported by all three global hooks, so a violation there is exactly as fatal.
+- Add a self-check to `scripts/update/hardlinks.py::sync_user_hooks`, run after the global hooks are linked: build a throwaway `git init` repo named `popoto` plus a linked worktree on `main` with a staged `.py`, drive the **deployed** `~/.claude/hooks/sdlc/validate_commit_message_sdlc.py` end-to-end over stdin under the resolved global interpreter, and assert a block decision comes back.
+- Fail the sync loudly on a non-block, reporting the machine's git version and the hook's stdout/stderr. Clean up the fixture unconditionally (`try/finally`).
+- Add tests: sync runs the self-check; a passing self-check leaves sync green; a self-check that returns allow fails the sync rather than warning.
+
+(The previous draft's `build-floor-check` task is deleted. `tests/unit/test_hook_interpreter.py:59` already declares `_EXTRA_GLOBAL_SCRIPTS = ("sdlc/sdlc_context.py",)`, so the AST 3.9 floor covers the helper module today — the investigation it proposed was already answered. It survives as one verification line in task 6.)
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -375,11 +392,12 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 
 ### 6. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-hook, build-tests, build-floor-check, document-feature
+- **Depends On**: build-hook, build-tests, build-update-selfcheck, document-feature
 - **Assigned To**: `hook-cwd-validator`
 - **Agent Type**: validator
 - **Parallel**: false
 - Run every Verification row.
+- Re-run the parametrized 3.9-floor node `test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]` (folded in from the deleted `build-floor-check`).
 - Confirm the red-state proof is in the PR description.
 - Confirm the repo file and the `~/.claude/hooks/sdlc/` copy still share an inode.
 
@@ -397,23 +415,28 @@ No agent integration required — this is a Claude Code harness hook, not agent-
 | Payload cwd is actually read | `grep -c 'get("cwd"' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | output > 0 |
 | Resolver exists in the deployed sibling | `grep -c 'def effective_git_dir' .claude/hooks/sdlc/sdlc_context.py` | output > 0 |
 | Anti-criterion: no `hook_utils` import in the global fork | `grep -rn 'hook_utils' .claude/hooks/sdlc/` | match count == 0 |
-| Anti-criterion: `--show-toplevel` is not the identity source | `grep -c 'repo_name = os.path.basename(repo_root)' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | match count == 0 |
+| Anti-criterion: `--show-toplevel` is gone from the hook entirely | `grep -c 'show-toplevel' .claude/hooks/sdlc/validate_commit_message_sdlc.py` | match count == 0 |
+| Behavioral: probe failure does not degrade to allow | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k identity_probe_failure -q` | exit code 0 |
+| Behavioral: unexpanded `$(...)` path token falls through to payload cwd | `scripts/pytest-clean.sh tests/unit/hooks/test_validate_commit_message_sdlc.py -k unexpanded -q` | exit code 0 |
+| 3.9 floor covers the helper module | `scripts/pytest-clean.sh "tests/unit/test_hook_interpreter.py::test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]" -q` | exit code 0 |
+| Update self-check runs and can fail | `scripts/pytest-clean.sh tests/unit/test_update_hardlinks.py -k self_check -q` | exit code 0 |
 | Deployed hardlink intact | `python -c "import os,pathlib; a=os.stat('.claude/hooks/sdlc/validate_commit_message_sdlc.py'); b=os.stat(pathlib.Path.home()/'.claude/hooks/sdlc/validate_commit_message_sdlc.py'); print(a.st_ino==b.st_ino)"` | output contains True |
 
 ## Critique Results
 
 **Verdict:** NEEDS REVISION — 1 blocker must be resolved before build.
+**Revision status:** all 5 findings addressed in revision round 1 (see the `Addressed By` column). Blocker resolved by deleting the `--show-toplevel` fallback outright rather than hardening it.
 **Depth:** FULL (3 critics: Risk & Robustness, Scope & Value, History & Consistency)
 **Mode:** independent roster (3 critics)
 **Findings:** 5 total (1 blocker, 4 concerns, 0 nits)
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness, History & Consistency (independent convergence) | The `--show-toplevel` basename fallback in Technical Approach ("Repo identity (spike-3)") reintroduces the exact defect spike-3 discovered. Inside a linked worktree `--show-toplevel` returns the worktree root, whose basename is the lane slug, not `popoto`. Any machine on git < 2.31, or any transient failure of the `--git-common-dir` probe, silently restores false-allow-always for worktree commits — the outcome Risk 1 names "the single most likely way to ship a worse guard". This contradicts the unconditional Success Criterion "a worktree of a repo named `popoto` is identified as `popoto`", and no task in Step by Step Tasks asserts behavior on the fallback path. | pending | Decide the fallback's disposition explicitly, then test it. Safer default: on a failed or unsupported `--git-common-dir` probe, treat repo identity as unknown and fall through to the more restrictive outcome rather than to a `--show-toplevel` basename. If the fallback is kept, it must be worktree-aware (detect a `.worktrees/` segment and walk to the real root) AND task `build-tests` must add a case that forces `git -C <wt> rev-parse --path-format=absolute --git-common-dir` to return non-zero from inside a worktree (stub git on PATH, or monkeypatch the subprocess call) and asserts the verdict does NOT degrade to allow. `--path-format=absolute` was added in git 2.31 (March 2021); this machine runs 2.50.1, so the fallback is untested-by-default locally and only fires on older fleet machines. |
-| CONCERN | Risk & Robustness | The ported resolver does not expand shell constructs. `cd "$(git rev-parse --show-toplevel)/.worktrees/lane-a" && git commit -m x` yields the literal unexpanded string as the resolved path (the `Path(first_tokens[1])` logic at `validate_no_uv_sync_in_worktree.py:117-122` that the plan ports verbatim). The subsequent `git -C <literal>` fails, hits the existing fail-open handlers at `:80-81` / `:102-103`, and the guard allows — inverting its purpose for a commit shape agents plausibly emit. Not listed among the Failure Path Test Strategy's Empty/Invalid Input cases. | pending | In `effective_git_dir`, before accepting a `cd` or `-C` path token, reject tokens containing `$(`, a backtick, or a leading `$` and fall through to the next rung — the payload `cwd` is a real resolvable directory and is the correct signal in exactly this case. This mirrors the `shlex.split` ValueError fail-through already specified for rungs 1 and 2. Add the corresponding test to the Failure Path Test Strategy list. |
-| CONCERN | History & Consistency | The Verification row "Anti-criterion: `--show-toplevel` is not the identity source" greps for the literal string `repo_name = os.path.basename(repo_root)` and expects 0 matches. That tests a variable-naming pattern, not the behavior. Because the Technical Approach mandates a `--show-toplevel`-basename fallback, the shipped file will still compute an identity that way under a different variable name, and the grep passes vacuously. | pending | Replace or supplement the grep with a behavioral assertion in `tests/unit/hooks/test_validate_commit_message_sdlc.py` that exercises the fallback branch from inside a worktree (see the BLOCKER's note); a grep on one assignment expression cannot catch a renamed but behaviorally identical line. If the grep row is kept, rename it to state what it actually verifies: primary-path variable naming, not fallback absence. |
-| CONCERN | Risk & Robustness | The Update System rollout story distinguishes only "updated" from "not yet updated" machines. It has no signal for the third and more dangerous state this plan itself introduces: a machine that has run `/update`, deployed the new code, and is silently fail-opening on every commit (via the git-version fallback or a resolver edge case). A fail-open guard emits no error and is indistinguishable from a working one. | pending | Add a post-sync smoke assertion at `scripts/update/hardlinks.py::sync_user_hooks`: run `commit_block_reason` against a synthetic worktree fixture (worktree on `main` with a staged `.py` must return a block reason) and fail the sync loudly if it does not. This catches the per-machine degradation that a one-time red-state proof in the PR cannot. |
-| CONCERN | Scope & Value | Task 4 (`build-floor-check`, "Validate the 3.9 floor coverage") is written as an open investigation — "confirm the AST floor test scans `sdlc_context.py`... if it does not, extend it" — but the question is already answered: `tests/unit/test_hook_interpreter.py:59` declares `_EXTRA_GLOBAL_SCRIPTS = ("sdlc/sdlc_context.py",)`, so the AST floor already covers the helper module today. As written it is a no-op dressed as a build step with its own agent assignment gating `validate-all`. | pending | Delete task `build-floor-check` and fold it into task 6 (`validate-all`) as one verification line: re-run the parametrized node `test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]`. Drop `build-floor-check` from the `Depends On` list of `validate-all` when removing it. Note that `sdlc_context.py` currently has NO `from __future__ import annotations` (verified at critique time), so task 1 must add it before introducing any PEP 604 annotation there. |
+| BLOCKER | Risk & Robustness, History & Consistency (independent convergence) | The `--show-toplevel` basename fallback in Technical Approach ("Repo identity (spike-3)") reintroduces the exact defect spike-3 discovered. Inside a linked worktree `--show-toplevel` returns the worktree root, whose basename is the lane slug, not `popoto`. Any machine on git < 2.31, or any transient failure of the `--git-common-dir` probe, silently restores false-allow-always for worktree commits — the outcome Risk 1 names "the single most likely way to ship a worse guard". This contradicts the unconditional Success Criterion "a worktree of a repo named `popoto` is identified as `popoto`", and no task in Step by Step Tasks asserts behavior on the fallback path. | **Technical Approach → Repo identity** (two-tier `--git-common-dir`, `--show-toplevel` deleted); Success Criteria rows 3-4; Failure Path Test Strategy (probe-failure + old-git cases); task 2 and task 3 (`-k identity_probe_failure`); Verification anti-criterion grep now `show-toplevel` == 0. | Resolved by deletion rather than hardening, then test it. Safer default: on a failed or unsupported `--git-common-dir` probe, treat repo identity as unknown and fall through to the more restrictive outcome rather than to a `--show-toplevel` basename. If the fallback is kept, it must be worktree-aware (detect a `.worktrees/` segment and walk to the real root) AND task `build-tests` must add a case that forces `git -C <wt> rev-parse --path-format=absolute --git-common-dir` to return non-zero from inside a worktree (stub git on PATH, or monkeypatch the subprocess call) and asserts the verdict does NOT degrade to allow. `--path-format=absolute` was added in git 2.31 (March 2021); this machine runs 2.50.1, so the fallback is untested-by-default locally and only fires on older fleet machines. |
+| CONCERN | Risk & Robustness | The ported resolver does not expand shell constructs. `cd "$(git rev-parse --show-toplevel)/.worktrees/lane-a" && git commit -m x` yields the literal unexpanded string as the resolved path (the `Path(first_tokens[1])` logic at `validate_no_uv_sync_in_worktree.py:117-122` that the plan ports verbatim). The subsequent `git -C <literal>` fails, hits the existing fail-open handlers at `:80-81` / `:102-103`, and the guard allows — inverting its purpose for a commit shape agents plausibly emit. Not listed among the Failure Path Test Strategy's Empty/Invalid Input cases. | **Technical Approach → Unexpanded-shell-construct rejection**; task 1 bullet; Failure Path Test Strategy (unexpanded-constructs case); Success Criteria row 5; Verification row `-k unexpanded`. | In `effective_git_dir`, before accepting a `cd` or `-C` path token, reject tokens containing `$(`, a backtick, or a leading `$` and fall through to the next rung — the payload `cwd` is a real resolvable directory and is the correct signal in exactly this case. This mirrors the `shlex.split` ValueError fail-through already specified for rungs 1 and 2. Add the corresponding test to the Failure Path Test Strategy list. |
+| CONCERN | History & Consistency | The Verification row "Anti-criterion: `--show-toplevel` is not the identity source" greps for the literal string `repo_name = os.path.basename(repo_root)` and expects 0 matches. That tests a variable-naming pattern, not the behavior. Because the Technical Approach mandates a `--show-toplevel`-basename fallback, the shipped file will still compute an identity that way under a different variable name, and the grep passes vacuously. | Verification row renamed and re-aimed at `grep -c 'show-toplevel' == 0`, which is now non-vacuous because the string is gone from the file; plus the behavioral `identity_probe_failure` test row. | Replace or supplement the grep with a behavioral assertion in `tests/unit/hooks/test_validate_commit_message_sdlc.py` that exercises the fallback branch from inside a worktree (see the BLOCKER's note); a grep on one assignment expression cannot catch a renamed but behaviorally identical line. If the grep row is kept, rename it to state what it actually verifies: primary-path variable naming, not fallback absence. |
+| CONCERN | Risk & Robustness | The Update System rollout story distinguishes only "updated" from "not yet updated" machines. It has no signal for the third and more dangerous state this plan itself introduces: a machine that has run `/update`, deployed the new code, and is silently fail-opening on every commit (via the git-version fallback or a resolver edge case). A fail-open guard emits no error and is indistinguishable from a working one. | **Update System → Post-sync self-check**; new task 4 `build-update-selfcheck`; Test Impact row for `tests/unit/test_update_hardlinks.py`; Success Criteria row 6; Documentation bullet. | Add a post-sync smoke assertion at `scripts/update/hardlinks.py::sync_user_hooks`: run `commit_block_reason` against a synthetic worktree fixture (worktree on `main` with a staged `.py` must return a block reason) and fail the sync loudly if it does not. This catches the per-machine degradation that a one-time red-state proof in the PR cannot. |
+| CONCERN | Scope & Value | Task 4 (`build-floor-check`, "Validate the 3.9 floor coverage") is written as an open investigation — "confirm the AST floor test scans `sdlc_context.py`... if it does not, extend it" — but the question is already answered: `tests/unit/test_hook_interpreter.py:59` declares `_EXTRA_GLOBAL_SCRIPTS = ("sdlc/sdlc_context.py",)`, so the AST floor already covers the helper module today. As written it is a no-op dressed as a build step with its own agent assignment gating `validate-all`. | Task `build-floor-check` deleted; folded into task 6 as one verification line and a Verification-table row. Test Impact now records `_EXTRA_GLOBAL_SCRIPTS` at `test_hook_interpreter.py:59` as verified coverage. Task 1 now mandates `from __future__ import annotations` in `sdlc_context.py`. | Delete task `build-floor-check` and fold it into task 6 (`validate-all`) as one verification line: re-run the parametrized node `test_global_script_parses_free_of_pre310_syntax[sdlc/sdlc_context.py]`. Drop `build-floor-check` from the `Depends On` list of `validate-all` when removing it. Note that `sdlc_context.py` currently has NO `from __future__ import annotations` (verified at critique time), so task 1 must add it before introducing any PEP 604 annotation there. |
 
 ### Structural Check Results
 
