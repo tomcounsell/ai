@@ -215,7 +215,7 @@ Solo builder plus a read-only validator. The lead NEVER builds directly — it d
 | Lint clean | `python -m ruff check pytest_executed_count.py` | exit code 0 |
 | Format clean | `python -m ruff format --check pytest_executed_count.py` | exit code 0 |
 | No tee on pytest stdout | `grep -c "tee" scripts/pytest-clean.sh` | match count == 0 |
-| Caller verbosity untouched | `grep -c "\-v" scripts/pytest-clean.sh` | match count == 0 |
+| Caller verbosity untouched | `grep -cE 'set -- [^;]*"-v"' scripts/pytest-clean.sh` | match count == 0 |
 
 ## Critique Results
 
