@@ -171,9 +171,96 @@ purpose. `grep -c` exits **1** when the count is zero and **0** when there are
 matches, so a row phrased "count == 0" and judged by exit status scores a
 correct fix as FAILURE and a broken one as PASS.
 
+## Critique Results (round 1, 2026-09-16)
+
+**Verdict: NEEDS REVISION.** Three blockers, each independently re-verified
+against source by the orchestrator rather than taken from the critique.
+
+### B1 — The guard is wired to a call site the incident path never reaches
+
+`agent/session_executor.py:1435` calls `get_or_create_worktree` only when:
+
+```python
+if needs_wt and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists()):
+```
+
+In the duplicate-dispatch case the second session arrives with `working_dir`
+**already** pointing at `.worktrees/{slug}` and the directory **already**
+present, because the first owner created it. The condition is False, the block
+is skipped, and no acquisition call happens. Anything wired into
+`get_or_create_worktree` is dead code for that dispatch.
+
+The executor's own comment at `:1409-1417` names this as the *typical* shape:
+a parent eng session creating child eng sessions with `working_dir` already set
+to `.worktrees/{slug}/`. So the highest-volume duplicate-producing path is
+exactly the path that bypasses acquisition.
+
+This is confirmed by the live incident on lane `sdlc-3259` (see below): both
+sessions arrived with the lane path already set. **The plan as written would
+not have prevented the incident it was written for, and would not even have
+fired.** Q1 is therefore moot as posed — the choice is not "new function vs
+parameter", it is "wrong site vs right site".
+
+**Required revision:** the ownership check moves to **lane entry, not lane
+creation** — after `working_dir` is finally resolved and before
+`agent_session.exec_cwd = str(working_dir)` (`agent/session_executor.py:1580`),
+for *any* session whose resolved `working_dir` is under `WORKTREES_DIR`,
+regardless of whether this run created the worktree. Guarding
+`get_or_create_worktree` as well is fine as defence in depth, but it cannot be
+the primary site. This reshapes Tasks 1, 2, 4 and Success Criteria 1 and 5.
+
+### B2 — `worktree_busy_probe` does not return what Task 1 assumes
+
+Task 1 says the probe returns `(session_id, agent_session_id)`. It returns
+`(state, detail)` — `agent/worktree_manager.py:653-667` collapses the two ids
+with `a or b or "unknown"`. Task 1's owner-identity carve-out ("busy with a
+session that IS the caller") is not implementable against that signature: when
+`session_id` is non-empty the `agent_session_id` is never visible, and
+`valor-session resume --id` accepts either, so a caller holding only the
+`agent_session_id` would fail to recognize itself and refuse its own lane.
+
+**Required revision:** call `_scan_worktree_sessions` directly (it returns
+`(state, session_id, agent_session_id)` — `:503-505`) or add a
+`worktree_owner_probe` wrapper that preserves both ids.
+
+### B3 — "Busy" is status-only, with no liveness fence
+
+`_scan_worktree_sessions` marks a worktree busy for any row whose status is
+outside `TERMINAL_STATUSES`. `NON_TERMINAL_STATUSES`
+(`models/session_lifecycle.py:74-89`) includes `dormant`, `paused`,
+`paused_circuit`, `waiting_for_children`, `superseded`, `admitted` and
+`paused_budget`. None of these implies a live process.
+
+A `dormant` lane would read as occupied forever. `paused_budget` is documented
+as **human-only recovery**, so such a lane would be permanently unacquirable by
+any agent. Wiring this predicate into *acquisition* converts every paused or
+dormant lane into a permanent denial — trading a rare duplicate-owner incident
+for a routine, silent wedge. That is a worse failure than the one being fixed.
+
+**Required revision:** the acquisition predicate must be a conjunction of
+status and liveness, not status alone. It must reconcile with this repo's
+existing position that liveness is judged by worktree mtimes plus pid/turn
+rather than a probe-refreshed `updated_at`, and with the single-authoritative-
+liveness convention owned by the session runner (`AgentSession.live_fence` is
+referenced at `agent/session_executor.py:1570-1580`). Deletion may keep the
+conservative status-only predicate; acquisition may not.
+
+### Live evidence: this failure class occurred during Phase 0
+
+Hours after this plan was committed, two sessions were independently
+dispatched onto lane `sdlc-3259` and both wrote to `.worktrees/sdlc-3259` on
+branch `session/sdlc-3259`. It resolved without damage only by luck: the second
+session committed and pushed cleanly rather than force-pushing, so there was no
+divergence. Both arrived with the lane path already provisioned, which is what
+makes B1 concrete rather than theoretical.
+
 ## Questions for the owner
 
-**Q1. New function or a parameter on `get_or_create_worktree`?**
+**Q1 is superseded by critique blocker B1** — the question was "which function
+do we guard", and the answer is that neither of them is on the incident path.
+The guard belongs at lane entry in the executor. Left below for the record.
+
+**Q1 (superseded). New function or a parameter on `get_or_create_worktree`?**
 A new `acquire_worktree` leaves every existing caller's behavior untouched and
 makes the fail-closed path opt-in, which is safe but leaves the unguarded door
 open for the next caller to walk through. A `require_sole_owner=True` default on
