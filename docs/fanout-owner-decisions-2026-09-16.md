@@ -141,6 +141,53 @@ lane with B1 and B5 as its starting constraints.
 
 ---
 
+## Q6. #2652 (Lane B) — one Telegram observation only you can make
+
+Lane B's plan needs one empirical fact before its scope is settled, and the fact
+cannot be obtained from this machine by code. It is a 60-second manual action.
+
+**The question:** when a **top-level** message is posted in a non-General forum
+topic, does Telegram's reply header collapse so that `reply_to_msg_id` carries
+the **topic root's** id?
+
+**Why no code can answer it here.** `projects.cyndra.machine` is `Valor the
+Bald`, so although this host (`Valor the Cowboy`) *receives* Cyndra Devs updates
+under the live bridge, single-machine ownership means it never persists them:
+`TelegramMessage.query.filter(chat_id=-1004385743413)` returns 0 rows. History
+cannot answer it either — `models/telegram.py:47` stores only the flattened
+`reply_to_msg_id`, and Telethon 1.42.0's `MessageReplyHeader` carries
+`forum_topic` and `reply_to_top_id` as separate fields that the flattening
+discards. Reaching `GetForumTopics` live would mean adding a job type to the
+bridge's hot I/O path to answer a plan prerequisite; the lane rejected that
+trade and I agree.
+
+**The unlock:** the observation needs no Cyndra access and no code. Both values
+are already persisted today, so **any group this machine owns answers it
+identically**.
+
+- **(A) preferred, local and reversible:** in `Eng: Valor` (-1003449100931,
+  owned by this machine), enable Telegram **Topics**, create one topic, and post
+  a single **top-level** message in it — a new message, not a reply. Then say so
+  here and the lane reads back the stored `reply_to_msg_id` and `session_id`.
+- **(B)** on Valor the Bald, post one top-level message in a non-General topic
+  of Cyndra Devs and hand back the read.
+
+The verdict rule is fixed **in advance** so the reading cannot be post-hoc:
+`session_id` ending in the **topic root's** id confirms the collapse; ending in
+the **new message's own** id refutes it and shrinks the lane to items 1 and 2.
+
+**This is not blocking the lane.** I told Lane B to treat the collapse as the
+unconfirmed branch rather than a gate: proceed through critique and build
+everything that holds under either answer, isolate the branch-dependent work
+behind the resolver seam, and carry the observation as a Verification row. If
+the answer arrives late, only that row and the items-3-through-5 scope change.
+
+Recorded on the issue: https://github.com/tomcounsell/ai/issues/2652#issuecomment-5695879375
+
+**Decision:** _pending_
+
+---
+
 ## Status at the Wave 1 boundary
 
 **Phase 0 — closed.**
