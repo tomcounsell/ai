@@ -102,3 +102,70 @@ rather than a GC step. Until then the fan-out holds to the 3-concurrent-lane cap
 and never reuses an existing worktree slug.
 
 **Decision:** _pending_
+
+## Q5. #3258 (Phase 0c) — re-plan, or leave parked?
+
+Phase 0c of the brief called for fixing the duplicate-builder defect. It reached
+the plan stage and stopped there. `docs/plans/worktree-single-owner-dispatch.md`
+now carries a completed round-1 critique: **six blockers, five concerns, and the
+nits**, with Q2 (refuse, do not queue) and Q3 (the busy predicate, with
+`live_fence` as the verdict and status as the Redis index filter only) settled.
+
+The critique's conclusion is that Tasks 1-4 need a **re-plan, not an edit pass**.
+The load-bearing reason is B1: the guard as designed is wired to a call site the
+incident path never reaches, so building it as written would ship a guard that
+cannot fire on the failure it exists to prevent. B5 compounds it — a third
+lane-entry route bypasses any guard on the wrapper.
+
+I did not take this to build, and I did not re-plan it, because a re-plan is a
+full lane and Phase 0 was supposed to be the serial prelude to the fan-out, not
+a fan-out lane of its own.
+
+One correction to the record, since I got it wrong in this document's earlier
+revision and in my report: the plan's "Live evidence, incident 2" was initially
+written up as an unattributed second writer on the #3259 lane. It was not. It
+was **that lane's own review subagent**, which I dispatched, checking out a SHA
+inside the shared worktree to read files and then restoring the branch. It
+disclosed this itself. The incident is corrected in the plan doc. It is still
+real evidence of something, but of a *different* hazard than #3258's: a reader
+that needs a pinned SHA is not a duplicate builder, yet it mutates the shared ref
+anyway, and the plan's acquire/refuse framing has no disposition for it. Do not
+cite incident 2 for B1's motivating scenario.
+
+**Recommendation:** leave parked. The duplicate-builder risk is currently held
+off by process (3-concurrent-lane cap, never reuse an existing worktree slug)
+rather than by code, which is weaker but is holding. A re-plan should be its own
+lane with B1 and B5 as its starting constraints.
+
+**Decision:** _pending_
+
+---
+
+## Status at the Wave 1 boundary
+
+**Phase 0 — closed.**
+
+| Item | Issue | Outcome |
+|---|---|---|
+| 0a red main | #3313 | Closed. Ratchet re-verified green on `main @ 23964450c` (54 passed). |
+| 0b worktree GC | — | **Deviation.** Script no longer exists; the replacement reclaims 2 of 32. See Q4. |
+| 0c duplicate builders | #3258 | **Deviation.** Parked at plan stage after critique. See Q5. |
+| 0d commit-hook cwd | #3259 | **Merged** (PR #3342, squash). `/update` run; fleet-deployed guard now shares an inode with main and passes its behavioral self-check in both directions. |
+
+**Filed during Phase 0, did not exist at the start:** #3345 (the `cd` option-grammar
+defect surviving verbatim in two other validators), #3346 (rung 2 honors only a
+*leading* `cd`, so `git add -A && cd ~/src/popoto && git commit` evaluates the
+wrong repo), #3347 (the nightly detector files `gh` quota exhaustion as code
+regressions).
+
+**Triaged, not taken as lanes:** #3287 and #3288 closed as environmental after
+re-running both nodes four consecutive times green on current main with the quota
+healthy; the class went to #3347, cross-linked with #3243. #3333 and #3262
+consolidated onto #3262 (the older open one), with #3333's triage carried across
+and the finding re-verified still live at 543 lines against a 500-line cap.
+
+**Wave 1 — dispatched**, three lanes at the verified concurrency cap: A #3091
+(session_id uniqueness, the Wave 2 blocker), B #2652 (forum topics, resuming its
+existing plan doc), C #2862 (expectation blocked state, resuming its existing
+plan doc). Wave 2 (#2494, then #3282 behind it, #3256 alongside) stays shut until
+Lane A merges.
