@@ -442,3 +442,110 @@ Not applicable. This repo has no Sphinx/MkDocs site.
 - [ ] The `session_executor` refusal path comments why falling back to the main
       checkout is never correct here (#887 established this for `eng`; #3258
       extends it to every type).
+
+## Critique Results (round 1, continued): Concerns, Nits, and the two settled questions
+
+All independently re-verified against source before being recorded.
+
+### Q2 — SETTLED: refuse, do not queue
+
+A `RuntimeError` at the lane-entry site does **not** strand the session.
+`agent/agent_session_queue.py:2901` → `except Exception` → `:2966-2970` sets
+`session_failed`; the `finally` at `:2971,2990,2996` finalizes to `failed` with
+a diagnostic snapshot. `models/session_lifecycle.py:734-748` releases the issue
+lock and clears the supervised-run signal on finalize, compare-and-delete and
+exception-isolated, so **the issue lock is not stranded**. Nothing re-queues it:
+the drip handles only `paused`/`paused_circuit` (`models/session_lifecycle.py:101-108`)
+and startup recovery re-queues only rows left `running`
+(`agent/agent_session_queue.py:2895-2898`). This is the same disposition as the
+existing #887 eng-only refusal (`agent/session_executor.py:1456`, `:1487`), so
+the path is already proven in production.
+
+### Q3 — SETTLED: the busy predicate
+
+```
+busy(slug, acquirer) ⇔ ∃ row R :
+     R.status ∈ NON_TERMINAL_STATUSES                          # index filter, NOT the verdict
+  ∧  path_rooted(R.exec_cwd | R.working_dir, .worktrees/slug)  # existing matcher
+  ∧  ¬owns(acquirer, R)                                        # ownership family, not id equality
+  ∧  fence_is_live(R.live_fence["pid"], R.live_fence["create_time"])   # THE verdict
+OR   _worktree_has_live_process(dir) attributable to a non-self pid    # unregistered writer
+```
+
+Error arm unchanged: an unanswerable query means refuse.
+
+The verdict arm is the runner-owned liveness signal, not a new one:
+`agent/pid_fence.py:127`, stamped by `models/agent_session.py:1361-1363`,
+exposed as `live_fence` (`models/agent_session.py:1311`), consumed the same way
+at `models/session_lifecycle.py:525`, `agent/session_health.py:5056`,
+`agent/agent_session_queue.py:2073`. This honours the single-authoritative-liveness
+convention instead of inventing a second inference.
+
+This un-wedges **B3**: `dormant` / `paused` / `paused_budget` / crashed-`running`
+rows have no live subprocess, so the fence is dead and the lane is acquirable,
+while a live owner is still refused. The status set stays exactly as it is at
+`agent/worktree_manager.py:495` — the plan's error was treating it as the verdict.
+
+**Worktree mtimes stay out of the predicate.** They answer "is this session
+progressing", not "who owns this lane", and cannot separate a live owner from a
+stale artifact. Put the lane's newest mtime in the refusal log as operator
+context instead. `updated_at` appears nowhere (see the SDLC liveness mirage).
+
+**Residual race the re-plan must name:** `pending`/`admitted` rows have no fence
+yet, so `fence_is_live(None, …)` is False and two unspawned duplicates both read
+clear, then race at spawn. Mitigate with check-stamp-recheck around
+`agent/session_executor.py:1580`. This is optimistic, not a mutex — say so in
+the plan rather than implying exclusion.
+
+**Explicit decision required (do not default it):** an acquirable dormant lane
+means a new owner can take a lane whose dormant owner may later wake, at which
+point the woken session is refused. That is correct but it is a behavior change.
+Reserving dormant-with-uncommitted-changes is a deliberate carve-out.
+
+### Concerns
+
+- **C5 (highest).** Once the guard moves to lane entry, these tests go
+  *vacuously green* — they patch `get_or_create_worktree` by name, which is no
+  longer the guard site: `tests/unit/test_session_executor_runner_dispatch.py:167,1096,1159,1244,1309`;
+  `tests/unit/test_session_executor_lane_visibility.py:136`;
+  `tests/unit/test_valor_session_working_dir_resolution.py` (7 sites);
+  `tests/unit/test_pm_session_auto_slug.py:89,129,162,199`;
+  `tests/integration/test_runner_dispatch_e2e.py:108,183`;
+  `tests/integration/test_parent_child_round_trip.py:199`.
+  Enumerate and re-target before building. Test Impact currently lists four files.
+- **C2.** The guard sits downstream of issue-lock acquisition
+  (`models/session_lifecycle.py:734-748`), so a refused duplicate that holds the
+  lock releases it on finalize → the issue is unlocked while the first builder
+  is still working → a third dispatch sails in. Either move the occupancy check
+  ahead of lock acquisition, or skip the release when the refusal reason is
+  `WorktreeOccupiedError`. Task 2 must pick one.
+- **C3.** `:193-199` defers Q3 to "the guard's own refusal log", but no task
+  produces one. Make a structured refusal line (slug, holder ids, refusing
+  session id, lane mtime) a deliverable **and** a verification row.
+- **C4.** `:69-72` claims item 1 makes the kill-producing inference unreachable.
+  Per B1/B5 a builder can still be a second writer, so Task 3 is load-bearing,
+  not defence in depth. Reword so it cannot be dropped as redundant.
+- **C1.** `:40` "consumed by exactly one caller: `tools/disk_reclaim.py`" is
+  false — also `agent/worktree_manager.py:1197,1203` (`reap_idle_worktree`) and
+  `:2205,2230` (`remove_worktree`). Correct the caller set; any probe signature
+  change must also update
+  `tests/unit/worktree_manager/test_worktree_manager_busy_guards.py:175-234`
+  and `tests/unit/test_disk_reclaim.py:73,417`.
+
+### Nits
+
+- `:44` — the early return lives in `create_worktree`
+  (`agent/worktree_manager.py:1507`), not `get_or_create_worktree` (`:1642`, a
+  bare delegation). This is the distinction **B5** turns on.
+- `:165-166` — the grep commands use repo-relative paths with no stated cwd.
+- `:169-172` — the `! grep -q` anti-criterion row is well-formed; no blockquote
+  breaks the table and no `-k` selectors exist. No change needed.
+- `:76-83`, `:226-229` (lane Redis DB out of scope) and `:237-244` (Update
+  System) are correct as written.
+
+### Status
+
+Critique complete: six blockers, five concerns, the nits above, nothing pending.
+**This plan does not go to build.** Tasks 1-4 need a re-plan, not an edit pass.
+Q2 and Q3 are now answered and should be folded in as decisions rather than
+re-derived.
