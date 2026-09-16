@@ -164,14 +164,18 @@ class TestArmParamAllowlist:
     def test_rrf_keys_are_forwarded_and_retrieval_mode_is_refused(self):
         """Lane 5 (#3217) widens the allowlist to the retrieval-parameter
         envelope, and no further: ``retrieval_mode`` is an environment
-        setting the arena pins, never a contract input."""
+        setting the arena pins, never a contract input. Lane 5b (#3311)
+        adds the agent-manifest slice to the union; each mode's validator
+        still admits only its own keys (see TestCrossModeKeys in
+        test_improvement_eval_agent_run.py)."""
         export = mock.Mock(jsonl_text="x")
         job = runner._retrieve_job(
             export, PK, {"query_text": "q"}, {"limit": 2, "rrf_k": 30, "min_rrf_score": 0.1}
         )
         assert job["rrf_k"] == 30
         assert job["min_rrf_score"] == 0.1
-        assert runner.ARM_PARAM_KEYS == frozenset({"limit", "rrf_k", "min_rrf_score"})
+        assert runner.RETRIEVAL_PARAM_KEYS == frozenset({"limit", "rrf_k", "min_rrf_score"})
+        assert runner.ARM_PARAM_KEYS == runner.RETRIEVAL_PARAM_KEYS | runner.AGENT_PARAM_KEYS
         with pytest.raises(InfraFailure, match="retrieval_mode"):
             runner._validate_arm_params("candidate", {"limit": 2, "retrieval_mode": "hybrid"})
         with pytest.raises(InfraFailure, match="retrieval_mode"):

@@ -14,12 +14,15 @@ that decides what the loop tries next:
   experiment to lane 4's runner, the single writer of ``ImprovementEvaluation``.
 - :func:`apply_verdict` moves the case per Data Flow step 6.
 
-**The envelope.** This lane's candidates vary retrieval parameters only:
+**The envelope.** Retrieval candidates vary parameters only:
 :data:`ENVELOPES` names the three keys ``handle_job`` forwards to
 ``retrieve_memories`` and the range each may take. ``retrieval_mode`` is an
 environment setting the arena pins, never a call parameter, so a candidate
-naming it is refused ``KEY_OUTSIDE_ENVELOPE`` (spike-2). The incumbent is
-exactly :data:`INCUMBENT`: ``_retrieve_job`` copies every present key into
+naming it is refused ``KEY_OUTSIDE_ENVELOPE`` (spike-2). The ``agent_task``
+envelope varies behavior instead: manifest strings name the session and
+``bounds`` carries the per-trial caps, each checked by kind rather than by
+numeric range. The incumbent is exactly :data:`INCUMBENT`:
+``_retrieve_job`` copies every present key into
 the arm job, and a present ``None`` is not "absent", so neither the incumbent
 nor a candidate ever carries a ``None`` value.
 
@@ -78,12 +81,23 @@ from tools.memory_eval.query_set import build_known_item_set
 logger = logging.getLogger(__name__)
 
 #: The candidate envelopes this lane admits and the range of every key.
-ENVELOPES: dict[str, dict[str, tuple[float, float]]] = {
+ENVELOPES: dict[str, dict[str, tuple]] = {
     "retrieval_parameters": {
         "limit": (1, 50),
         "rrf_k": (1, 200),
         "min_rrf_score": (0.0, 1.0),
-    }
+    },
+    #: The agent-run arm varies behavior, not numbers: manifest strings name
+    #: the session (``model``, ``skill``, ``persona``, ``prompt_hash``) and
+    #: ``bounds`` carries the per-trial caps. Entries here are kind tags, not
+    #: numeric intervals, and are checked by :func:`_validate_agent_candidate`.
+    "agent_task": {
+        "model": ("text",),
+        "skill": ("text",),
+        "persona": ("text",),
+        "prompt_hash": ("text",),
+        "bounds": ("bounds",),
+    },
 }
 
 #: The production default for the one key ``handle_job`` read before this
@@ -218,6 +232,9 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
     ``VALUE_OUTSIDE_RANGE`` (type or range; booleans are refused as values),
     ``IDENTICAL_TO_INCUMBENT``. An accepted outcome carries
     ``extra["surfaces"]``: the sorted envelope keys the candidate varies.
+    The ``agent_task`` envelope branches to :func:`_validate_agent_candidate`
+    after the ``NONE_VALUE`` check: its values are checked by kind, and the
+    retrieval incumbent comparison cannot match it.
     """
     ranges = ENVELOPES.get(envelope)
     if ranges is None:
@@ -236,6 +253,8 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
             "NONE_VALUE",
             f"{none_keys} carry None; omit a key the candidate does not vary",
         )
+    if envelope == "agent_task":
+        return _validate_agent_candidate(candidate)
     for key, value in candidate.items():
         low, high = ranges[key]
         integral = isinstance(low, int) and isinstance(high, int)
@@ -245,6 +264,54 @@ def validate_candidate(candidate, *, envelope: str = "retrieval_parameters") -> 
                 "VALUE_OUTSIDE_RANGE",
                 f"{key}={value!r} is outside [{low}, {high}]" + (" (integer)" if integral else ""),
             )
+    if dict(candidate) == INCUMBENT:
+        return _refuse("IDENTICAL_TO_INCUMBENT", f"the candidate equals the incumbent {INCUMBENT}")
+    return Outcome(True, "OK", None, "candidate admitted", {"surfaces": sorted(candidate)})
+
+
+def _validate_agent_candidate(candidate: dict) -> Outcome:
+    """Admit an ``agent_task`` candidate by kind, or refuse ``VALUE_OUTSIDE_RANGE``.
+
+    Manifest strings must be non-blank text; ``bounds`` must be a mapping of
+    the worker's bound keys to numbers (``timeout_s`` above zero,
+    ``max_turns`` at least one, ``spend_cap`` at least zero). The retrieval
+    ``IDENTICAL_TO_INCUMBENT`` comparison cannot match a manifest candidate,
+    so it is kept as the shared tail: harmless, never a false refusal.
+    """
+    from tools.improvement_eval.arm_worker import AGENT_RUN_BOUND_KEYS
+
+    for key in ("model", "skill", "persona", "prompt_hash"):
+        if key in candidate:
+            value = candidate[key]
+            if not isinstance(value, str) or not value.strip():
+                return _refuse(
+                    "VALUE_OUTSIDE_RANGE", f"{key} must be a non-blank string, got {value!r}"
+                )
+    if "bounds" in candidate:
+        bounds = candidate["bounds"]
+        if not isinstance(bounds, dict):
+            return _refuse("VALUE_OUTSIDE_RANGE", f"bounds must be a mapping, got {bounds!r}")
+        unknown = sorted(set(bounds) - set(AGENT_RUN_BOUND_KEYS))
+        if unknown:
+            return _refuse(
+                "VALUE_OUTSIDE_RANGE",
+                f"bounds carries unknown keys {unknown}; expected {list(AGENT_RUN_BOUND_KEYS)}",
+            )
+        for key, value in bounds.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return _refuse("VALUE_OUTSIDE_RANGE", f"bounds[{key}]={value!r} is not a number")
+            if key == "timeout_s" and not value > 0:
+                return _refuse(
+                    "VALUE_OUTSIDE_RANGE", f"bounds[timeout_s]={value!r} must be above zero"
+                )
+            if key == "max_turns" and not value >= 1:
+                return _refuse(
+                    "VALUE_OUTSIDE_RANGE", f"bounds[max_turns]={value!r} must be at least one"
+                )
+            if key == "spend_cap" and not value >= 0:
+                return _refuse(
+                    "VALUE_OUTSIDE_RANGE", f"bounds[spend_cap]={value!r} must not be negative"
+                )
     if dict(candidate) == INCUMBENT:
         return _refuse("IDENTICAL_TO_INCUMBENT", f"the candidate equals the incumbent {INCUMBENT}")
     return Outcome(True, "OK", None, "candidate admitted", {"surfaces": sorted(candidate)})
