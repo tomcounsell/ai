@@ -123,27 +123,35 @@ No other existing tests affected — the change is confined to one validator pre
 
 ## Rabbit Holes
 
-Placeholder.
+- Inverting the guard to block all `pkill -f` / `killall` with an allowlist for sanctioned reapers. Tempting because it deletes the whole pattern-enumeration class, but it newly blocks currently-allowed commands (`pkill -f 'node dev-server'`, `killall Dock`) and the allowlist design needs its own investigation. Deferred per the issue's Recon Summary; the service table built here becomes its seed data.
+- Trying to distinguish "my throwaway ui.app on port 8517" from "production ui.app on 8500" inside the hook (e.g. parsing port numbers out of the command). The hook sees the kill command, not the victim's port — `pkill -f "python -m ui.app"` carries no port. The correct guidance is kill-by-PID, which the reason text already teaches.
+- Extending coverage to every conceivable process name on the machine (editors, browsers, node dev servers). The table covers long-lived shared services only; per-PR #3208, broad process-name matching has platform edge cases, and each new row must earn its place with an incident or a shared-service argument.
 
 ## Risks
 
-Placeholder.
+### Risk 1: Bare `worker` over-matches and blocks legitimate commands
+**Impact:** Agents doing innocent process management (e.g. commands mentioning "worker" in another context) get blocked with a confusing service message, eroding trust in the hook.
+**Mitigation:** Scope the pattern to service-shaped forms (`python -m worker`, `reflection_worker`, `worker-watchdog`, `telegram_bridge`, `ui.app`) and require negative test rows proving near-miss strings stay allowed. The builder picks the exact scoping; the test rows are the contract.
+
+### Risk 2: Reason-text change breaks the existing reason assertion
+**Impact:** Existing tests assert `"reap-xdist.sh" in reason` for pytest matches; a careless refactor of the reason path turns the current green suite red.
+**Mitigation:** The plan requires keeping the pytest reason byte-for-byte and routing (test-runner check first). The existing suite runs unchanged as the regression guard — see Test Impact.
 
 ## Race Conditions
 
-Placeholder.
+No race conditions identified — `find_violation` is a synchronous pure-string predicate with no shared state, no I/O, and no concurrency. The hook runs once per Bash command before execution; there is nothing to interleave.
 
 ## No-Gos (Out of Scope)
 
-Placeholder.
+Nothing deferred — every relevant item is in scope for this plan. The two tempting wider scopes (full guard inversion, per-port victim disambiguation) are documented as Rabbit Holes rather than deferred work because neither is a concrete deliverable with an owner: the inversion needs its own investigation and issue before it can be scoped, and port disambiguation is technically infeasible from the hook's vantage point.
 
 ## Update System
 
-Placeholder.
+No update system changes required — this feature is purely internal. The validator ships inside the repo (`.claude/hooks/`, synced via the normal pull/update flow); no new dependencies, config files, service definitions, or migration steps are involved.
 
 ## Agent Integration
 
-Placeholder.
+No agent integration required — this is hook-layer protection the agent hits automatically. No new CLI entry point in `pyproject.toml [project.scripts]`, no bridge import. The agent-facing surface is the block reason text itself, which is covered by the reason-content assertions in Failure Path Test Strategy. The existing dispatcher end-to-end tests (`test_dispatcher_blocks_the_transcript_command`) verify the agent's command path stays wired.
 
 ## Documentation
 
@@ -156,15 +164,68 @@ Placeholder.
 
 ## Success Criteria
 
-Placeholder.
+- [ ] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
+- [ ] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog`) per kill-verb shape, plus a PID-kill negative row
+- [ ] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
+- [ ] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
+- [ ] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
 
 ## Team Orchestration
 
-Placeholder.
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+- **Builder (validator)**
+  - Name: guard-builder
+  - Role: Widen the validator predicate and extend its unit test
+  - Agent Type: builder
+  - Resume: true
+
+- **Documentarian (guard doc)**
+  - Name: guard-documentarian
+  - Role: Create the pattern-kill-guard feature doc and index entry
+  - Agent Type: documentarian
+  - Resume: true
+
+### Available Agent Types
+
+Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `documentarian`, `plan-maker`, `frontend-tester`) per the skill catalogue. No domain specialists needed — this is a synchronous string-predicate change with no async, Redis, or untrusted-input surface.
 
 ## Step by Step Tasks
 
-Placeholder.
+### 1. Widen validator and tests
+- **Task ID**: build-guard
+- **Depends On**: none
+- **Validates**: `tests/unit/test_validate_no_broad_process_kill.py` (extended), `tests/unit/test_pre_tool_use_dispatcher.py` (unchanged, regression)
+- **Informed By**: none (no spikes; recon verified all premises by code read)
+- **Assigned To**: guard-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add a service table `(pattern, stop-path)` for `ui.app`, `worker`, `telegram_bridge`, `reflection_worker`, `worker-watchdog` in `.claude/hooks/validators/validate_no_broad_process_kill.py`, parameterized over the existing four kill-verb shapes
+- Route reasons: keep the pytest `_REASON` byte-for-byte for test-runner matches; return a service-specific reason naming the sanctioned stop path plus kill-by-PID for service matches
+- Keep the `_SANCTIONED` (`reap-xdist.sh`) exemption and dispatcher wiring untouched
+- Extend the test's BLOCKED list (one row per service per verb shape), ALLOWED list (sanctioned stop commands, PID kills, read-only service inspection), and add a reason-content assertion for service matches mirroring the existing `reap-xdist.sh` assertion
+- Run `scripts/pytest-clean.sh tests/unit/test_validate_no_broad_process_kill.py -q` green
+
+### 2. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-guard
+- **Assigned To**: guard-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/pattern-kill-guard.md` describing the validator: blocked kill shapes, the service table with per-service sanctioned stop paths, the kill-by-PID rule
+- Add entry to `docs/features/README.md` index table
+
+### 3. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: build-guard, document-feature
+- **Assigned To**: guard-builder
+- **Agent Type**: validator
+- **Parallel**: false
+- Run all Verification commands
+- Verify all success criteria met (including documentation)
+- Generate final report
 
 ## Verification
 
@@ -183,4 +244,5 @@ Placeholder.
 
 ## Open Questions
 
-Placeholder.
+1. Bare-`worker` scoping: should the pattern match any command containing `worker`, or only service-shaped forms (`python -m worker`, `reflection_worker`, `worker-watchdog`)? The plan recommends service-shaped forms with negative test rows as the contract, but the supervisor may prefer a broader match with a larger negative list.
+2. Should `email-stop` / email worker processes join the service table in this same change, or stay out until an incident or shared-service argument earns them a row? The plan keeps the table to the five issue-named services.
