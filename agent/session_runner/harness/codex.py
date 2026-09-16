@@ -56,6 +56,27 @@ logger = logging.getLogger(__name__)
 CODEX_MIN_VERSION = (0, 144, 3)
 CODEX_VERSION_FLOOR = "0.144.3"
 
+# Provisioning failures the version floor structurally cannot catch (#3285).
+#
+# The model pin lives in ``~/.codex/config.toml``, outside this repo, so a CLI
+# that clears CODEX_MIN_VERSION can still be too old to serve the configured
+# model. The API rejects that turn with an HTTP 400 mid-stream, long after
+# preflight passed. Raising the floor does not close this: the floor is the
+# lane's JSONL/resume contract, and the model pin is a different axis entirely.
+#
+# Each pattern is matched case-insensitively against the native error text and
+# maps to a reason in preflight's voice, so the PM reads "not provisioned, here
+# is the fix" instead of a raw upstream 400.
+_UNPROVISIONED_NATIVE_ERRORS: tuple[tuple[str, str], ...] = (
+    (
+        "requires a newer version of codex",
+        "The model pinned in ~/.codex/config.toml needs a newer Codex CLI than "
+        "the one installed. Upgrade (`npm install -g @openai/codex`) or repin "
+        "the model. The version floor cannot catch this: the pin lives outside "
+        "the repo.",
+    ),
+)
+
 # Sandbox policy. ``workspace-write`` is the deliberate default (codex exec
 # defaults to read-only; the dev lane needs to write code).
 # ``danger-full-access`` remains an explicit provisional setting and is never
@@ -156,6 +177,26 @@ def _saved_login_present() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def unprovisioned_reason(error_text: str | None) -> str | None:
+    """The preflight-style reason behind a mid-turn failure, or None.
+
+    ``preflight_codex`` runs before the spawn and so cannot see a condition
+    that only the API reports, such as a model pin the installed CLI cannot
+    serve (#3285). This classifier reads a native failure after the fact and
+    returns the same kind of actionable reason preflight would have, so the
+    machine reads as unprovisioned rather than the lane as broken.
+
+    Returns None for a genuine turn failure, which is the common case.
+    """
+    if not error_text:
+        return None
+    haystack = error_text.lower()
+    for needle, reason in _UNPROVISIONED_NATIVE_ERRORS:
+        if needle in haystack:
+            return reason
+    return None
 
 
 def preflight_codex(
@@ -625,7 +666,13 @@ class CodexHarnessAdapter:
 
             error_detail: str | None = None
             if native_error is not None:
-                error_detail = f"Codex-native failure: {scrub_secret_text(native_error)}"
+                scrubbed = scrub_secret_text(native_error)
+                reason = unprovisioned_reason(scrubbed)
+                error_detail = (
+                    f"Codex not provisioned: {reason} (native error: {scrubbed})"
+                    if reason is not None
+                    else f"Codex-native failure: {scrubbed}"
+                )
             elif returncode not in (0, None):
                 tail = scrub_secret_text(stderr_text)[-_ERROR_DETAIL_MAX_CHARS:]
                 error_detail = (

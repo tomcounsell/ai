@@ -25,6 +25,7 @@ from agent.session_runner.harness.codex import (
     codex_spawn_env,
     parse_codex_version,
     preflight_codex,
+    unprovisioned_reason,
 )
 
 THREAD_A = "01a08c06-6d38-7611-9144-c64562b4e27c"
@@ -403,3 +404,37 @@ def test_preflight_rejects_old_version_and_bad_sandbox(tmp_path):
 
 def test_preflight_min_version_gate_matches_plan_floor():
     assert CODEX_MIN_VERSION == (0, 144, 3)
+
+
+def test_unprovisioned_reason_reads_the_model_pin_400_as_a_provisioning_failure():
+    """The exact payload #3285 reported, verbatim from the nightly run.
+
+    Preflight passed on that machine -- the CLI cleared CODEX_VERSION_FLOOR --
+    and the turn still died on an HTTP 400 because the model pinned in
+    ~/.codex/config.toml needed a newer CLI. The floor cannot see that pin, so
+    this classifier is the only thing standing between an unprovisioned
+    machine and a hard red.
+    """
+    native = (
+        'Codex-native failure: {"message": "{\\"type\\":\\"error\\",'
+        '\\"status\\":400,\\"error\\":{\\"type\\":\\"invalid_request_error\\",'
+        '\\"message\\":\\"The \'gpt-6-astra\' model requires a newer version of '
+        'Codex. Please upgrade to the latest app or CLI and try again.\\"}}"}'
+    )
+    reason = unprovisioned_reason(native)
+    assert reason is not None
+    assert "~/.codex/config.toml" in reason
+    assert "npm install -g @openai/codex" in reason
+
+
+def test_unprovisioned_reason_leaves_a_genuine_turn_failure_alone():
+    """A real lane defect must stay a hard failure, never become a skip."""
+    assert unprovisioned_reason(None) is None
+    assert unprovisioned_reason("") is None
+    assert unprovisioned_reason("Codex reported turn.failed with no error payload.") is None
+    assert unprovisioned_reason('{"status": 500, "message": "internal error"}') is None
+
+
+def test_unprovisioned_reason_is_case_insensitive():
+    """Upstream wording is not ours to depend on character by character."""
+    assert unprovisioned_reason("REQUIRES A NEWER VERSION OF CODEX") is not None

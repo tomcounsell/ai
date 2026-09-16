@@ -1,7 +1,8 @@
 """Live lifecycle probes for the Codex dev lane (plan #2001 Task 5).
 
 Runs REAL ``codex exec`` turns on this provisioned machine (codex-cli
-0.154.0, ChatGPT login) through the REAL MCP handler
+>= the ``CODEX_VERSION_FLOOR`` preflight enforces, ChatGPT login)
+through the REAL MCP handler
 (``codex_dev_run``) with a REAL session row: first turn opens a thread,
 second turn resumes it. Asserts stable thread id, count 1→2, the
 PM-visible harness/model/turns/usage attribution, and one Task 3
@@ -14,9 +15,11 @@ Safety: every turn runs with its working_dir in a scratch git repo under
 forbids file actions — stray files can only land in tmp. The session row
 uses the ``test-2001`` project prefix and is deleted afterward.
 
-When the machine is not provisioned (preflight fails) the probe SKIPS
-with the preflight reason — the negative evidence the plan's
-probe-failure disposition records on #2001.
+When the machine is not provisioned the probe SKIPS with the reason,
+never asserts — the negative evidence the plan's probe-failure
+disposition records on #2001. Two gates cover that: ``preflight_codex``
+before the spawn, and ``unprovisioned_reason`` on the first turn's error
+for the conditions only the API reports (#3285).
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ def _scratch_repo(tmp_path: Path) -> str:
 def test_codex_dev_lane_live_lifecycle(tmp_path, monkeypatch):
     import agent.codex_turn_log as log_mod
     import mcp_servers.codex_dev_server as server
-    from agent.session_runner.harness.codex import preflight_codex
+    from agent.session_runner.harness.codex import preflight_codex, unprovisioned_reason
     from models.agent_session import AgentSession
 
     worktree = _scratch_repo(tmp_path)
@@ -90,6 +93,14 @@ def test_codex_dev_lane_live_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_SESSION_ID", str(session.id))
     try:
         first = server.codex_dev_run(PROBE_INSTRUCTION)
+        if not first["ok"]:
+            # Some provisioning conditions only the API can report, so they
+            # arrive mid-turn and preflight's skip above cannot see them
+            # (#3285: a model pin the installed CLI is too old to serve).
+            # Those are unprovisioned machines, not lane regressions.
+            reason = unprovisioned_reason(first["error"])
+            if reason is not None:
+                pytest.skip(f"codex not provisioned on this machine: {reason}")
         assert first["ok"] is True, f"first live turn failed: {first['error']}"
         assert "PROBE-OK" in (first["report"] or "")
         assert "[dev harness=codex" in (first["report"] or "")
