@@ -166,11 +166,11 @@ No agent integration required — this is hook-layer protection the agent hits a
 
 ## Success Criteria
 
-- [ ] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
-- [ ] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` with `worker-watchdog` alias row, `python -m reflections` with `reflection_worker` alias row) per kill-verb shape, plus a PID-kill negative row
-- [ ] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
-- [ ] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
-- [ ] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
+- [x] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
+- [x] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` with `worker-watchdog` alias row, `python -m reflections` with `reflection_worker` alias row) per kill-verb shape, plus a PID-kill negative row
+- [x] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
+- [x] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
+- [x] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
 
 ## Team Orchestration
 
