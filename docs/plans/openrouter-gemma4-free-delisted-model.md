@@ -6,6 +6,8 @@ owner: Eng session
 created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3338
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-09-17T03:29:50Z
 ---
 
 # OPENROUTER_GEMMA4_FREE delisted-model fix
@@ -93,14 +95,14 @@ Delisted default 400s on every call → repoint constant at listed id → judge.
 
 - `config/models.py:139`: repoint to `"google/gemma-4-26b-a4b-it:free"` (the closer capability match for a cheap-inference default; build re-confirms 262144 context and multimodal flags in the live listing before finalizing the choice between the two candidates). Update the `:138` comment, which currently claims 128K context.
 - `tests/ai_judge/judge.py`: extend the existing `:17` import (`from config.models import OPENROUTER_URL`) to include `OPENROUTER_GEMMA4_FREE` and use it at `:140`. Zero import risk: `config.models` is stdlib-only, and the import already exists. This also restores compliance with that module's own "import from here" rule.
-- Probe is test-time, not startup: a new test fetches `GET https://openrouter.ai/api/v1/models` (public endpoint, no key) and asserts each configured `OPENROUTER_*` id is listed. A delisting fails the test naming the expected id and the listing URL; a pure network error fails with a message that distinguishes "endpoint unreachable" from "id not listed" so CI flakes are diagnosable. Default: fail-closed on network error (a silent skip would re-create exactly the silent-drift class this fix removes); build may soften to skip-with-warning only with reviewer sign-off recorded in the PR.
+- Probe is test-time, not startup: a new test in `tests/unit/test_models.py` fetches `GET https://openrouter.ai/api/v1/models` (public endpoint, no key) and checks each configured `OPENROUTER_*` id against the listing with partitioned severity. Only `OPENROUTER_GEMMA4_FREE` hard-fails when unlisted: it is the verified delisted default on a hot path, while the other `OPENROUTER_*` ids (Kimi, Qwen) were never verified against the live listing, so a stale paid-model id must not red the build. Any other unlisted id emits a warning naming the expected id and the listing URL. An `OPENROUTER_GEMMA4_FREE` delisting fails the test naming the expected id and the listing URL; a pure network error fails with a message that distinguishes "endpoint unreachable" from "id not listed" so CI flakes are diagnosable. Default: fail-closed on network error (a silent skip would re-create exactly the silent-drift class this fix removes); build may soften to skip-with-warning only with reviewer sign-off recorded in the PR.
 - No migration: `cheap_inference_model` defaults to `""` (fallback path), and explicit overrides are operator choice that this fix must not rewrite.
 - No change: `reflections/improvement_collect.py` (already imports the constant) and `config/settings.py` (name-only reference).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tests/ai_judge/judge.py::_call_openrouter` has a broad `except Exception: return None`. That swallow-and-None behavior is existing design (callers treat None as "judge unavailable") and out of scope to redesign; the new probe test covers the delisting case instead, asserting it surfaces by name at test time. No exception handlers in the new probe code go untested: both the delisted-id and unreachable-endpoint paths get a test each.
+- [ ] `tests/ai_judge/judge.py::_call_openrouter` has a broad `except Exception: return None`. That swallow-and-None behavior is existing design (callers treat None as "judge unavailable") and out of scope to redesign; the new probe test covers the delisting case instead, asserting it surfaces by name at test time. No exception handlers in the new probe code go untested: the delisted-id (hard-fail on `OPENROUTER_GEMMA4_FREE`), unreachable-endpoint, and warn-only-for-other-ids paths get a test each.
 
 ### Empty/Invalid Input Handling
 - [ ] `_judge_model()` with an empty/whitespace override falls back to the constant — already covered by `test_the_default_model_falls_back_to_the_free_gemma`; builder confirms it still passes under the repoint.
@@ -118,7 +120,7 @@ Checked, no disposition change:
 - `tests/ai_judge/test_ai_judge.py` (full file) — KEEP: asserts `gemma4:31b-cloud` / `llama3:8b` Ollama-path ids only; untouched by this fix.
 
 New coverage (CREATE):
-- [ ] Probe test asserting each configured `OPENROUTER_*` id appears in the live `GET /api/v1/models` listing (new file or alongside existing model-config tests, builder's choice; Verification pins the behavior, not the path).
+- [ ] Probe test in `tests/unit/test_models.py` checking each configured `OPENROUTER_*` id against the live `GET /api/v1/models` listing: hard-fail only on `OPENROUTER_GEMMA4_FREE`, warn-only for any other unlisted id.
 
 ## Rabbit Holes
 
@@ -131,7 +133,7 @@ New coverage (CREATE):
 
 ### Risk 1: Replacement id is delisted again later
 **Impact:** Default cheap-inference path 400s again.
-**Mitigation:** The probe test fails loudly naming the id; the constant remains the single edit point.
+**Mitigation:** The probe test fails loudly naming the id (hard-fail on `OPENROUTER_GEMMA4_FREE`, warn-only for other ids); the constant remains the single edit point.
 
 ### Risk 2: Live listing contradicts the ground truth (context length, flags, availability)
 **Impact:** 26b choice wrong; plan bakes in a bad default.
@@ -161,14 +163,15 @@ No agent integration required — no new CLI entry point and no bridge changes. 
 ## Documentation
 
 - [ ] Update the `google/gemma-4-e2b:free` reference in `docs/plans/recursive-self-improvement.md:372` to the new id so the parent epic's prose matches the constant.
-- [ ] Confirm no other docs name the old id: `grep -rn "gemma-4-e2b:free" docs/ README.md 2>/dev/null` must come back empty (local-Ollama `gemma4:e2b` mentions in `docs/features/local-model-policy.md` are a different namespace and stay).
+- [ ] Confirm the parent-epic prose is clean: `grep -c "gemma-4-e2b:free" docs/plans/recursive-self-improvement.md` must be 0 (local-Ollama `gemma4:e2b` mentions in `docs/features/local-model-policy.md` are a different namespace and stay).
+- KEEP (historical record, not edited): `docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245` and `docs/features/improvement-research-cycle.md:730` name the old id as evidence of the delisting finding at the time; they stay as written.
 
 ## Success Criteria
 
 - [ ] `OPENROUTER_GEMMA4_FREE` resolves to a listed id; no `gemma-4-e2b:free` literal remains in any `*.py` under `config/ tests/ reflections/ tools/ bridge/ worker/ agent/`
 - [ ] `tests/ai_judge/judge.py` imports the constant (grep confirms reference)
 - [ ] New probe test passes against the live listing; existing fallback and ai-judge tests pass
-- [ ] Parent-epic prose reference updated; docs grep clean
+- [ ] Parent-epic prose reference updated and scoped grep clean (`grep -c "gemma-4-e2b:free" docs/plans/recursive-self-improvement.md` == 0); the two historical-record mentions stay
 - [ ] Verification checks below all green
 
 ## Team Orchestration
@@ -204,7 +207,7 @@ Tier 1 default choices apply (`builder`, `validator`); no domain framing needed 
 - **Parallel**: false
 - Repoint `OPENROUTER_GEMMA4_FREE` at the verified listed id in `config/models.py:139` and correct the `:138` context comment
 - Extend the `config.models` import in `tests/ai_judge/judge.py:17` and use the constant at `:140`
-- Add the live-listing probe test (fail-closed, named-id failures, unreachable-vs-delisted distinction)
+- Add the live-listing probe test in `tests/unit/test_models.py` (fail-closed, hard-fail only on `OPENROUTER_GEMMA4_FREE` with warn-only for other unlisted ids, named-id failures, unreachable-vs-delisted distinction)
 - Update the old-id prose reference in `docs/plans/recursive-self-improvement.md:372`
 
 ### 2. Validate everything
@@ -234,9 +237,9 @@ Lint (`ruff check`) is intentionally excluded from this table per the operator's
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Consolidated Critic (Failure Modes) | Probe asserts each configured OPENROUTER_* id is listed, but only the Gemma 4 candidates were verified against the live listing; Kimi/Qwen exact ids were not. | pending | Partition probe failures by id: hard-fail only on OPENROUTER_GEMMA4_FREE, warn-only for other unlisted ids so a stale paid-model id never reds the build. |
-| CONCERN | Consolidated Critic (Scope and Value) | Test Impact leaves the probe location to builder's choice and says Verification pins behavior not path, but Verification hard-codes tests/unit/test_models.py, which does not exist. | pending | Pin tests/unit/test_models.py in all Verification rows naming it and delete the builder's-choice clause in Test Impact. |
-| CONCERN | Consolidated Critic (Internal Consistency) | The docs-grep check cannot pass as written: two further docs files name the old id and get no disposition, so the mandated empty grep stays red after all listed tasks are done. | pending | Scope the docs-grep check to the parent-epic prose path and add KEEP dispositions for docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245 and docs/features/improvement-research-cycle.md:730 as historical records. |
+| CONCERN | Consolidated Critic (Failure Modes) | Probe asserts each configured OPENROUTER_* id is listed, but only the Gemma 4 candidates were verified against the live listing; Kimi/Qwen exact ids were not. | Technical Approach, Failure Path Test Strategy, Test Impact, Step by Step | Partition probe failures by id: hard-fail only on OPENROUTER_GEMMA4_FREE, warn-only for other unlisted ids so a stale paid-model id never reds the build. |
+| CONCERN | Consolidated Critic (Scope and Value) | Test Impact leaves the probe location to builder's choice and says Verification pins behavior not path, but Verification hard-codes tests/unit/test_models.py, which does not exist. | Test Impact, Technical Approach, Step by Step | Pin tests/unit/test_models.py in all Verification rows naming it and delete the builder's-choice clause in Test Impact. |
+| CONCERN | Consolidated Critic (Internal Consistency) | The docs-grep check cannot pass as written: two further docs files name the old id and get no disposition, so the mandated empty grep stays red after all listed tasks are done. | Documentation, Success Criteria | Scope the docs-grep check to the parent-epic prose path and add KEEP dispositions for docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245 and docs/features/improvement-research-cycle.md:730 as historical records. |
 
 ---
 
