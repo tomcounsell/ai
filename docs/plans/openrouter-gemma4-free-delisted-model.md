@@ -241,6 +241,14 @@ Lint (`ruff check`) is intentionally excluded from this table per the operator's
 | CONCERN | Consolidated Critic (Scope and Value) | Test Impact leaves the probe location to builder's choice and says Verification pins behavior not path, but Verification hard-codes tests/unit/test_models.py, which does not exist. | Test Impact, Technical Approach, Step by Step | Pin tests/unit/test_models.py in all Verification rows naming it and delete the builder's-choice clause in Test Impact. |
 | CONCERN | Consolidated Critic (Internal Consistency) | The docs-grep check cannot pass as written: two further docs files name the old id and get no disposition, so the mandated empty grep stays red after all listed tasks are done. | Documentation, Success Criteria | Scope the docs-grep check to the parent-epic prose path and add KEEP dispositions for docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245 and docs/features/improvement-research-cycle.md:730 as historical records. |
 
+### Re-critique round 1 (2026-09-17, LITE depth, sequential lenses as the Agent tool is unavailable in this stage-runner context)
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| NIT | Consolidated Critic (Internal Consistency) | Probe spec says "each configured OPENROUTER_* id" but config/models.py also carries OPENROUTER_URL, an endpoint URL rather than a model id. | pending (builder note, non-blocking) | Probe iterates OPENROUTER_* model-id constants excluding the OPENROUTER_URL endpoint. |
+
+Round verdict: READY TO BUILD (no concerns). 1 nit, 0 concerns, 0 blockers.
+
 ---
 
 ## Open Questions
