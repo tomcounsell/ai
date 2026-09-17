@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from config.models import OPENROUTER_URL
+from config.models import OPENROUTER_GEMMA4_FREE, OPENROUTER_URL
 
 
 def _default_judge_model() -> str:
@@ -137,7 +137,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "google/gemma-4-e2b:free",
+                "model": OPENROUTER_GEMMA4_FREE,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": config.temperature,
             },
