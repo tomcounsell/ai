@@ -234,6 +234,9 @@ Lint (`ruff check`) is intentionally excluded from this table per the operator's
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Consolidated Critic (Failure Modes) | Probe asserts each configured OPENROUTER_* id is listed, but only the Gemma 4 candidates were verified against the live listing; Kimi/Qwen exact ids were not. | pending | Partition probe failures by id: hard-fail only on OPENROUTER_GEMMA4_FREE, warn-only for other unlisted ids so a stale paid-model id never reds the build. |
+| CONCERN | Consolidated Critic (Scope and Value) | Test Impact leaves the probe location to builder's choice and says Verification pins behavior not path, but Verification hard-codes tests/unit/test_models.py, which does not exist. | pending | Pin tests/unit/test_models.py in all Verification rows naming it and delete the builder's-choice clause in Test Impact. |
+| CONCERN | Consolidated Critic (Internal Consistency) | The docs-grep check cannot pass as written: two further docs files name the old id and get no disposition, so the mandated empty grep stays red after all listed tasks are done. | pending | Scope the docs-grep check to the parent-epic prose path and add KEEP dispositions for docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245 and docs/features/improvement-research-cycle.md:730 as historical records. |
 
 ---
 
