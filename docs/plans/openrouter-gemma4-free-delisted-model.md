@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: bug
 appetite: Small
 owner: Eng session
@@ -160,16 +160,17 @@ No agent integration required — no new CLI entry point and no bridge changes. 
 
 ## Documentation
 
-- [ ] Update the `google/gemma-4-e2b:free` reference in `docs/plans/recursive-self-improvement.md:372` to the new id so the parent epic's prose matches the constant.
-- [ ] Confirm no other docs name the old id: `grep -rn "gemma-4-e2b:free" docs/ README.md 2>/dev/null` must come back empty (local-Ollama `gemma4:e2b` mentions in `docs/features/local-model-policy.md` are a different namespace and stay).
+- [x] Update the `google/gemma-4-e2b:free` reference in `docs/plans/recursive-self-improvement.md:372` to the new id so the parent epic's prose matches the constant. Done in the build commit; `grep -c "gemma-4-e2b:free" docs/plans/recursive-self-improvement.md` == 0.
+- [x] Confirm the parent-epic prose is clean: `grep -c "gemma-4-e2b:free" docs/plans/recursive-self-improvement.md` == 0 (local-Ollama `gemma4:e2b` mentions in `docs/features/local-model-policy.md` are a different namespace and stay).
+- KEEP (historical record, not edited): `docs/plans/critiques/recursive-self-improvement-capability-matrix.md:245` and `docs/features/improvement-research-cycle.md:730` name the old id as evidence of the delisting finding at the time; they stay as written.
 
 ## Success Criteria
 
-- [ ] `OPENROUTER_GEMMA4_FREE` resolves to a listed id; no `gemma-4-e2b:free` literal remains in any `*.py` under `config/ tests/ reflections/ tools/ bridge/ worker/ agent/`
-- [ ] `tests/ai_judge/judge.py` imports the constant (grep confirms reference)
-- [ ] New probe test passes against the live listing; existing fallback and ai-judge tests pass
-- [ ] Parent-epic prose reference updated; docs grep clean
-- [ ] Verification checks below all green
+- [x] `OPENROUTER_GEMMA4_FREE` resolves to a listed id; no `gemma-4-e2b:free` literal remains in any `*.py` under `config/ tests/ reflections/ tools/ bridge/ worker/ agent/`
+- [x] `tests/ai_judge/judge.py` imports the constant (grep confirms reference)
+- [x] New probe test passes against the live listing; existing fallback and ai-judge tests pass
+- [x] Parent-epic prose reference updated; docs grep clean
+- [x] Verification checks below all green
 
 ## Team Orchestration
 
