@@ -165,11 +165,11 @@ No agent integration required — no new CLI entry point and no bridge changes. 
 
 ## Success Criteria
 
-- [ ] `OPENROUTER_GEMMA4_FREE` resolves to a listed id; no `gemma-4-e2b:free` literal remains in any `*.py` under `config/ tests/ reflections/ tools/ bridge/ worker/ agent/`
-- [ ] `tests/ai_judge/judge.py` imports the constant (grep confirms reference)
-- [ ] New probe test passes against the live listing; existing fallback and ai-judge tests pass
-- [ ] Parent-epic prose reference updated; docs grep clean
-- [ ] Verification checks below all green
+- [x] `OPENROUTER_GEMMA4_FREE` resolves to a listed id; no `gemma-4-e2b:free` literal remains in any `*.py` under `config/ tests/ reflections/ tools/ bridge/ worker/ agent/`
+- [x] `tests/ai_judge/judge.py` imports the constant (grep confirms reference)
+- [x] New probe test passes against the live listing; existing fallback and ai-judge tests pass
+- [x] Parent-epic prose reference updated; docs grep clean
+- [x] Verification checks below all green
 
 ## Team Orchestration
 
