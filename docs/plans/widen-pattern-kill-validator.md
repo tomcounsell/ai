@@ -87,7 +87,7 @@ No prerequisites — this work has no external dependencies. It touches one hook
 
 ### Key Elements
 
-- **Service table**: a data-driven list of `(pattern, sanctioned stop path)` pairs for the long-lived services — `ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` (plus the `worker-watchdog` hyphen alias from the launchd label), `python -m reflections` (plus the `reflection_worker` alias). Adding the next service is one table row, not a new regex. This answers the triage's arms-race concern structurally without taking on the inversion's false-positive risk. Production ground truth: the watchdog runs as `monitoring/worker_watchdog.py` (underscore, per `com.valor.worker-watchdog.plist` ProgramArguments) and the reflection worker runs as `python -m reflections` (per `com.valor.reflection-worker.plist` ProgramArguments and `scripts/install_reflection_worker.sh:140`); the hyphen/underscore aliases catch patterns naming the launchd labels instead of the command line.
+- **Service table**: a data-driven list of `(pattern, sanctioned stop path)` pairs for the long-lived services — `ui.app`, `python -m worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` (plus the `worker-watchdog` hyphen alias from the launchd label), `python -m reflections` (plus the `reflection_worker` alias). Adding the next service is one table row, not a new regex. This answers the triage's arms-race concern structurally without taking on the inversion's false-positive risk. Production ground truth: the watchdog runs as `monitoring/worker_watchdog.py` (underscore, per `com.valor.worker-watchdog.plist` ProgramArguments) and the reflection worker runs as `python -m reflections` (per `com.valor.reflection-worker.plist` ProgramArguments and `scripts/install_reflection_worker.sh:140`); the hyphen/underscore aliases catch patterns naming the launchd labels instead of the command line.
 - **Reused verb shapes**: the existing four `_BLOCK_PATTERNS` shapes (`pkill`, `kill $(pgrep ...)`, `killall`, `pgrep | xargs kill`) are parameterized over the service table instead of hardcoded to the test-runner pattern. The test-runner block keeps working exactly as before.
 - **Reason router**: `find_violation` returns the existing pytest-specific reason for test-runner matches and a new service-specific reason (naming the sanctioned stop path plus kill-by-PID for throwaway instances) for service matches. The current single `_REASON` string cannot serve both audiences.
 
@@ -166,11 +166,11 @@ No agent integration required — this is hook-layer protection the agent hits a
 
 ## Success Criteria
 
-- [ ] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
-- [ ] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` with `worker-watchdog` alias row, `python -m reflections` with `reflection_worker` alias row) per kill-verb shape, plus a PID-kill negative row
-- [ ] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
-- [ ] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
-- [ ] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
+- [x] `pkill -f "python -m ui.app"` (the incident command shape) is blocked with a reason naming the sanctioned stop path
+- [x] One BLOCKED test row per service (`ui.app`, `worker`, `telegram_bridge`, `email_bridge`, `monitoring/worker_watchdog.py` with `worker-watchdog` alias row, `python -m reflections` with `reflection_worker` alias row) per kill-verb shape, plus a PID-kill negative row
+- [x] All pre-existing test rows pass unchanged (pytest block and ALLOWED list intact)
+- [x] Tests pass (`/do-test` scope: `tests/unit/test_validate_no_broad_process_kill.py` green via `scripts/pytest-clean.sh`)
+- [x] Documentation updated (`/do-docs` scope: `docs/features/pattern-kill-guard.md` created, README index entry added)
 
 ## Team Orchestration
 
@@ -243,7 +243,7 @@ Tier 1 core (`builder`, `validator`, `code-reviewer`, `test-engineer`, `document
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| NIT | History & Consistency | Key Elements still names a bare `worker` table entry while the Technical Approach decision requires service-shaped forms only, never a bare worker substring match. | pending | Rephrase the Key Elements entry to `python -m worker`. |
-| NIT | Risk & Robustness | The ALLOWED rows prove `scripts/valor-service.sh stop`, `worker-stop`, and PID kills stay unblocked, but omit the `email-stop` / `email-disable` stop path the plan names as sanctioned for the email bridge. | pending | Add `email-stop` and `email-disable` ALLOWED rows. |
+| NIT | History & Consistency | Key Elements still names a bare `worker` table entry while the Technical Approach decision requires service-shaped forms only, never a bare worker substring match. | addressed | Rephrased the Key Elements entry to `python -m worker`. |
+| NIT | Risk & Robustness | The ALLOWED rows prove `scripts/valor-service.sh stop`, `worker-stop`, and PID kills stay unblocked, but omit the `email-stop` / `email-disable` stop path the plan names as sanctioned for the email bridge. | addressed | `email-stop` and `email-disable` ALLOWED rows are present in the PR's test file. |
 
 ---
