@@ -6,6 +6,8 @@ owner: Dev (lane session/sdlc-3317-stall-progress)
 created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3317
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-17T03:33:00Z
 ---
 
 # pytest-clean stall guard progress signal
@@ -56,7 +58,7 @@ No relevant external findings — proceeding with codebase context and training 
 
 1. **Entry point**: operator runs `scripts/pytest-clean.sh <args>`; wrapper resolves `PYTEST_BIN`, mints the count file AND a progress file, starts the stall watcher, and launches pytest in background (stdout untouched — still the operator's TTY, still `$!` as the controller PID).
 2. **Pytest controller**: runs pytest with `-n auto --dist=loadfile`; workers execute tests and xdist forwards each `pytest_runtest_logreport` to the controller; today the watcher samples only the controller PID's cumulative CPU via `ps -o time=`.
-3. **New progress tap**: the existing `pytest_executed_count.py` plugin gains a heartbeat — its controller-side `pytest_runtest_logreport` (same hook, same `_in_worker` guard the #3222 count already relies on) appends one line per executed report to the wrapper-minted progress file. Line count is the progress counter; no `-v`, no tee, no stdout parsing.
+3. **New progress tap**: the existing `pytest_executed_count.py` plugin gains a heartbeat — its controller-side `pytest_runtest_logreport` (same hook, same `_in_worker` guard the #3222 count already relies on) appends one newline-terminated line per controller-side report arrival (any `when`/outcome, explicitly not the executed-counting rule — an all-skip module must still emit progress) to the wrapper-minted progress file. Line count is the progress counter; no `-v`, no tee, no stdout parsing.
 4. **Watcher decision**: every sample, the watcher reads CPU delta AND progress-file line-count delta. CPU advancing OR lines advancing resets the stall clock; only both flat accrues `stalled` time toward `PYTEST_STALL_LIMIT_S`.
 5. **Output**: on a true wedge the WEDGED banner still fires and TERMs the controller; on a slow-but-live module the run proceeds and stdout still streams to the operator unchanged.
 
@@ -96,10 +98,10 @@ Operator runs wrapper → wrapper mints progress file, exports path, starts watc
 ### Technical Approach
 
 - Mint `PYTEST_CLEAN_PROGRESS_FILE` via `mktemp` next to the count-file mint; export it; remove it in `cleanup()` (tracked with its own `*_MINTED` variable so an inherited env value from an enclosing wrapper is never deleted — same discipline as `COUNT_FILE_MINTED`).
-- Plugin: in `pytest_runtest_logreport`, after the existing `_count_file() or _in_worker` early return, append one line to the progress path when set. Progress counts every controller-side report arrival (any `when`/outcome — even a skip proves the worker is delivering), not just the executed-counting rule; liveness and executed-tally are separate questions. Swallow `OSError` (fail open, same as `_write`). No-op entirely when the env var is unset, so bare `pytest` is untouched.
+- Plugin: in `pytest_runtest_logreport`, after the existing `_count_file() or _in_worker` early return, append one newline-terminated line to the progress path when set (`open(path, "a").write(".\n")` — the newline is load-bearing: `wc -l` counts newlines, so a payload without one leaves the sampled count flat and silently degrades to the CPU-only behavior being fixed). Progress counts every controller-side report arrival (any `when`/outcome — even a skip proves the worker is delivering), not just the executed-counting rule; liveness and executed-tally are separate questions. Settled (revision): separate `PYTEST_CLEAN_PROGRESS_FILE` (no truncation race with the verdict write), every-report granularity, plugin heartbeat over the issue's `-v` shape (no stdout coupling, no TTY risk, no caller-visible `-v`). Swallow `OSError` (fail open, same as `_write`). No-op entirely when the env var is unset, so bare `pytest` is untouched.
 - Extend `watch_for_stall` to take the progress path: track `mark_cpu` and `mark_lines` (via `wc -l`); each sample computes CPU delta against the 1s epsilon and line-count delta > 0. Either delta resets `stalled` to 0 and re-marks both; else `stalled += STALL_SAMPLE_S`. Missing/unreadable file at a sample means lines unobservable for that sample — decide on CPU alone.
 - Keep `PYTEST_STALL_LIMIT_S=0` disable path intact. Keep the WEDGED banner text and its investigation guidance; append one line noting both CPU and outcome lines were flat.
-- Tests extend the `test_pytest_clean_zero_tests.py` sandbox pattern (own rootdir, symlinked `.venv`, no `.python-version`, `PYTEST_CLEAN_COUNT_FILE`/`PYTHONPATH` scrubbed env, plus the new progress var): (a) synthetic module of 3+ tests each sleeping 30s+ on `-n 1` under a short `PYTEST_STALL_LIMIT_S` asserts exit 0 and no WEDGED; (b) synthetic wedge (controller blocked producing no reports and no CPU) asserts WEDGED fires. Time-box the sleeps so the suite stays cheap: total live-test wall time under ~120s.
+- Tests extend the `test_pytest_clean_zero_tests.py` sandbox pattern (own rootdir, symlinked `.venv`, no `.python-version`, `PYTEST_CLEAN_COUNT_FILE`/`PYTHONPATH` scrubbed env, plus the new progress var): (a) synthetic slow-live module of 3 tests each sleeping 15s on `-n 1` under `PYTEST_STALL_LIMIT_S=30` asserts exit 0 and no WEDGED — old CPU-only code fires at the first 30s sample (controller flat while one worker sleeps) while per-report heartbeats land every ~15s and keep resetting the OR clock — and the test additionally asserts `wc -l` on the progress file strictly increases across one sleep window so a missing newline cannot pass vacuously; (b) synthetic wedge (controller blocked producing no reports and no CPU) asserts WEDGED fires including the new flat-CPU-and-no-outcomes banner line; (c) negative control through the existing mutation seam (`PYTEST_CLEAN_SCRIPT` pointing at a wrapper copy with the OR-branch reverted, or progress path at `/dev/null` so `wc -l` reads 0 every sample): asserts WEDGED fires there while the real run stays clean, mirroring the TestNegativeControl pattern — without this the slow-live case can pass with the watcher off entirely. Wall-time budget for the new file: under ~300s (slow-live ~60s of sleeps plus sandbox startup, true-wedge ~30s limit plus the 10s TERM wait, fallback cases share sandbox runs where possible). Also pop `PYTEST_CLEAN_PROGRESS_FILE` in the pre-existing zero-tests `_base_env` wherever `PYTEST_CLEAN_COUNT_FILE` is removed, so an outer wrapped run's exported progress path cannot leak into that file's sandbox sessions.
 - Sliceable-function discipline: keep any new shell predicate in the same multi-line `name() {` / bare-`}` form as `verdict_passes_through` so tests can slice and drive the real body.
 
 ## Failure Path Test Strategy
@@ -171,12 +173,13 @@ No agent integration required — this is a test-runner-internal change. No new 
 
 ## Success Criteria
 
-- [ ] Slow-but-live synthetic module (outcomes arriving within each window) completes with exit 0 and no WEDGED in stderr
-- [ ] Synthetic true wedge (blocked `pytest_sessionfinish`, no reports, no CPU) still prints the WEDGED banner and exits non-zero
+- [ ] Slow-but-live synthetic module (3 tests at 15s sleeps, `-n 1`, `PYTEST_STALL_LIMIT_S=30`) completes with exit 0 and no WEDGED in stderr, and `wc -l` on the progress file strictly increases across one sleep window
+- [ ] Negative control (OR-branch reverted wrapper copy, or progress path at `/dev/null`) fires WEDGED on the same slow-live module, proving the passing case exercises the new branch
+- [ ] Synthetic true wedge (blocked `pytest_sessionfinish`, no reports, no CPU) still prints the WEDGED banner including the new flat-CPU-and-no-outcomes line, and exits non-zero with no ZERO TESTS headline
 - [ ] Tap-broken run (unwritable progress path) completes live via the CPU-only fallback
 - [ ] `tests/unit/test_pytest_clean_zero_tests.py` still green (no interference with the count verdict)
 - [ ] Documentation updated (`/do-docs`): `docs/features/pytest-clean-stall-guard.md` created and indexed
-- [ ] New tests add under ~120s wall time to the unit suite
+- [ ] New tests add under ~300s wall time to the unit suite (fallback cases share sandbox runs where possible)
 
 ## Team Orchestration
 
@@ -201,7 +204,7 @@ Solo builder plus a read-only validator. The lead NEVER builds directly — it d
 - [ ] TC1 (builder): mint/export/clean up `PYTEST_CLEAN_PROGRESS_FILE` in `scripts/pytest-clean.sh` (own `*_MINTED` tracker, `cleanup()` removal, never honor inherited value)
 - [ ] TC2 (builder): add the controller-side heartbeat append in `pytest_executed_count.py` (`pytest_runtest_logreport`, after the existing early return, `OSError`-swallowed, no-op when unset)
 - [ ] TC3 (builder): extend `watch_for_stall` with the progress path — `mark_cpu`/`mark_lines`, either-delta-resets logic, per-sample CPU-only fallback, one-line banner addition
-- [ ] TC4 (builder): write `tests/unit/test_pytest_clean_stall_progress.py` (slow-live, true-wedge, tap-broken fail-open, plugin-absent fallback, nested-invocation isolation) reusing the zero-tests sandbox pattern
+- [ ] TC4 (builder): write `tests/unit/test_pytest_clean_stall_progress.py` (slow-live with `wc -l` increase assertion, negative control via the `PYTEST_CLEAN_SCRIPT` mutation seam, true-wedge with banner-line assertion, tap-broken fail-open, plugin-absent fallback, nested-invocation isolation) reusing the zero-tests sandbox pattern; pop `PYTEST_CLEAN_PROGRESS_FILE` in the pre-existing zero-tests `_base_env`
 - [ ] TC5 (builder): docs — create `docs/features/pytest-clean-stall-guard.md`, index it in `docs/features/README.md`, comment the watcher OR-condition and the `PYTEST_STALL_LIMIT_S=0` hatch
 - [ ] TC6 (validator): run the Verification table end to end and confirm every Success Criterion
 
@@ -210,7 +213,7 @@ Solo builder plus a read-only validator. The lead NEVER builds directly — it d
 | Check | Command | Expected |
 |-------|---------|----------|
 | Slow-live module not flagged | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_stall_progress.py -k slow_live` (under short `PYTEST_STALL_LIMIT_S`) | exit 0, stderr contains no WEDGED |
-| True wedge still caught | same harness, `-k true_wedge` | non-zero exit, stderr contains WEDGED, no ZERO TESTS headline |
+| True wedge still caught | same harness, `-k true_wedge` | non-zero exit, stderr contains WEDGED plus the new flat-CPU-and-no-outcomes line, no ZERO TESTS headline |
 | Zero-tests suite unaffected | `scripts/pytest-clean.sh tests/unit/test_pytest_clean_zero_tests.py` | exit 0 |
 | Lint clean | `python -m ruff check pytest_executed_count.py` | exit code 0 |
 | Format clean | `python -m ruff format --check pytest_executed_count.py` | exit code 0 |
@@ -221,19 +224,21 @@ Solo builder plus a read-only validator. The lead NEVER builds directly — it d
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Heartbeat line must be newline-terminated or wc -l never advances: wc -l counts newlines, so a payload without a trailing newline leaves the sampled count flat and the OR-branch silently degrades to the CPU-only behavior being fixed. | pending | Write with an explicit newline (open(path, "a").write(".\n")) inside the existing OSError-swallowed helper; assert in the slow-live test that wc -l before vs after one sleep window strictly increases. |
-| CONCERN | Risk & Robustness | Slow-live test needs a negative control or it can pass vacuously: the reused sandbox harness pins PYTEST_STALL_LIMIT_S=0 in every subprocess env (tests/unit/test_pytest_clean_zero_tests.py:162), so a TC4 copy inheriting that pin passes with the watcher off and never exercises the OR-branch. | pending | Negative control through the existing mutation seam (PYTEST_CLEAN_SCRIPT pointing at a wrapper copy with TC3 reverted, or progress path at /dev/null so wc -l reads 0 on every sample): assert WEDGED fires there while the real run stays clean, mirroring the TestNegativeControl pattern. |
-| CONCERN | Scope & Value | The ~120s wall-time budget does not fit five sandbox scenarios: slow-live alone needs about 90s of sleeps plus startup, and true-wedge needs a short limit above sandbox startup plus the watcher's 10s TERM wait (roughly 70s or more). | pending | Raise the budget (e.g. under ~300s) or shrink the sleeps with numbers that keep both regression directions testable (3 tests at 15s under PYTEST_STALL_LIMIT_S=30: old code fires at the first sample, new code resets on each report burst); state which scenarios share a sandbox run. |
-| CONCERN | History & Consistency | Data Flow step 3 says one line per executed report while the Technical Approach states every controller-side report arrival of any when/outcome, explicitly not the executed-counting rule. A builder following Data Flow gates heartbeats on the executed rule, under which an all-skip module emits zero progress and reintroduces the false positive for the pool-exhaustion shape #3195 documents. | pending | Reword Data Flow step 3 to one line per controller-side report arrival (any when/outcome); the normative rule stays in the Technical Approach after the _count_file() or _in_worker early return, and Open Question 2's every-report default already agrees. |
-| NIT | Risk & Robustness | The plan appends a line to the WEDGED banner but no Verification row asserts it, so a builder could drop the line and every listed check would still pass. | pending | Extend the true-wedge Verification row to assert stderr contains the new flat-CPU-and-no-outcomes line in addition to the WEDGED headline. |
-| NIT | Scope & Value | Open Questions carry silent-accept defaults but remain open in the plan body, so a builder cannot tell settled decisions from live ones without re-reading the issue thread. | pending | Fold the accepted defaults into the Technical Approach wording at revision time and delete or mark-answered the Open Questions section. |
-| NIT | History & Consistency | TC4 scrubs the new progress variable in the new file's sandbox env, but the pre-existing zero-tests file builds its subprocess envs from a scrub list written before the variable existed, so an outer wrapped run's exported progress path leaks into the old file's bare-pytest sandbox sessions. | pending | Pop PYTEST_CLEAN_PROGRESS_FILE in the zero-tests _base_env wherever PYTEST_CLEAN_COUNT_FILE is already removed; the stray-append direction is fail-open so this is hygiene, not a behavior fix. |
+| CONCERN | Risk & Robustness | Heartbeat line must be newline-terminated or wc -l never advances: wc -l counts newlines, so a payload without a trailing newline leaves the sampled count flat and the OR-branch silently degrades to the CPU-only behavior being fixed. | revision 2026-09-17 | Write with an explicit newline (open(path, "a").write(".\n")) inside the existing OSError-swallowed helper; assert in the slow-live test that wc -l before vs after one sleep window strictly increases. |
+| CONCERN | Risk & Robustness | Slow-live test needs a negative control or it can pass vacuously: the reused sandbox harness pins PYTEST_STALL_LIMIT_S=0 in every subprocess env (tests/unit/test_pytest_clean_zero_tests.py:162), so a TC4 copy inheriting that pin passes with the watcher off and never exercises the OR-branch. | revision 2026-09-17 | Negative control through the existing mutation seam (PYTEST_CLEAN_SCRIPT pointing at a wrapper copy with TC3 reverted, or progress path at /dev/null so wc -l reads 0 on every sample): assert WEDGED fires there while the real run stays clean, mirroring the TestNegativeControl pattern. |
+| CONCERN | Scope & Value | The ~120s wall-time budget does not fit five sandbox scenarios: slow-live alone needs about 90s of sleeps plus startup, and true-wedge needs a short limit above sandbox startup plus the watcher's 10s TERM wait (roughly 70s or more). | revision 2026-09-17 | Raise the budget (e.g. under ~300s) or shrink the sleeps with numbers that keep both regression directions testable (3 tests at 15s under PYTEST_STALL_LIMIT_S=30: old code fires at the first sample, new code resets on each report burst); state which scenarios share a sandbox run. |
+| CONCERN | History & Consistency | Data Flow step 3 says one line per executed report while the Technical Approach states every controller-side report arrival of any when/outcome, explicitly not the executed-counting rule. A builder following Data Flow gates heartbeats on the executed rule, under which an all-skip module emits zero progress and reintroduces the false positive for the pool-exhaustion shape #3195 documents. | revision 2026-09-17 | Reword Data Flow step 3 to one line per controller-side report arrival (any when/outcome); the normative rule stays in the Technical Approach after the _count_file() or _in_worker early return, and Open Question 2's every-report default already agrees. |
+| NIT | Risk & Robustness | The plan appends a line to the WEDGED banner but no Verification row asserts it, so a builder could drop the line and every listed check would still pass. | revision 2026-09-17 | Extend the true-wedge Verification row to assert stderr contains the new flat-CPU-and-no-outcomes line in addition to the WEDGED headline. |
+| NIT | Scope & Value | Open Questions carry silent-accept defaults but remain open in the plan body, so a builder cannot tell settled decisions from live ones without re-reading the issue thread. | revision 2026-09-17 | Fold the accepted defaults into the Technical Approach wording at revision time and delete or mark-answered the Open Questions section. |
+| NIT | History & Consistency | TC4 scrubs the new progress variable in the new file's sandbox env, but the pre-existing zero-tests file builds its subprocess envs from a scrub list written before the variable existed, so an outer wrapped run's exported progress path leaks into the old file's bare-pytest sandbox sessions. | revision 2026-09-17 | Pop PYTEST_CLEAN_PROGRESS_FILE in the zero-tests _base_env wherever PYTEST_CLEAN_COUNT_FILE is already removed; the stray-append direction is fail-open so this is hygiene, not a behavior fix. |
 
 ---
 
 ## Open Questions
 
-1. Progress-file env var name (`PYTEST_CLEAN_PROGRESS_FILE`): acceptable, or prefer folding into the existing count file as a second line? Default: separate file (no truncation race with the verdict write). Say nothing to accept.
-2. Heartbeat granularity (every controller-side report vs. executed-only per the counting rule)? Default: every report — any arrival proves liveness, including skips. Say nothing to accept.
-3. The issue's fix shape suggested `-v` line counting; this plan uses plugin heartbeats instead (no stdout coupling, no TTY risk, no caller-visible `-v`). Confirm the deviation is welcome.
-4. Two agents filled this plan concurrently on main (see commit history). Before critique, confirm no section carries a stale tee/`-v` reference the other author intended differently.
+Resolved at revision time (defaults folded into the Technical Approach above):
+
+1. Separate `PYTEST_CLEAN_PROGRESS_FILE` — settled, no truncation race with the verdict write.
+2. Every controller-side report — settled, any arrival proves liveness including skips.
+3. Plugin heartbeat over the issue's `-v` shape — settled (no stdout coupling, no TTY risk, no caller-visible `-v`).
+4. Concurrent co-fill — resolved by this single coherent revision pass; no stale tee/`-v` references remain.
