@@ -238,12 +238,13 @@ lane subagent dying mid-flight rather than of the work:
 Ruff check, ruff format, and `uv lock --locked` all passed in the worktree. No
 merge-authorization override file was created at any point.
 
-**Plan migration did NOT run.** `migrate_completed_plan.py --issue 2862 --apply`
-returned `Verdict: dirty-tree-skip` (report-only) because another session is
-actively editing `docs/plans/lane-branch-identity-cleanup.md` in the shared main
-checkout. `expectation_blocked_state.md` is still in `docs/plans/`; the daily
-`merged-branch-cleanup` reflection is now the only thing that will migrate it,
-on its next cycle, not immediately.
+**Plan migrated.** `expectation_blocked_state.md` now lives in
+`docs/archive/plans-completed/` (commit `acd8575d8`). The first attempt returned
+`Verdict: dirty-tree-skip` because another session held uncommitted edits in the
+shared main checkout; it succeeded on retry once that session landed its work.
+Worth the owner's attention as a sharp edge: a concurrent dirty tree silently
+downgrades this deterministic step to the daily reflection backstop, and nothing
+re-runs it automatically within the merge.
 
 **Worktree removed; branch `session/sdlc-2862` preserved.** The preservation is
 correct, not a defect: `merged_via_tree` resolves `base` to the *local* `main`
