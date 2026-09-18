@@ -216,3 +216,75 @@ and the finding re-verified still live at 543 lines against a 500-line cap.
 existing plan doc), C #2862 (expectation blocked state, resuming its existing
 plan doc). Wave 2 (#2494, then #3282 behind it, #3256 alongside) stays shut until
 Lane A merges.
+
+## Wave 1 outcome (recorded 2026-09-18)
+
+**Lane C #2862 — MERGED.** PR #3407 squash-merged as `fcb3d1ed8`; issue #2862
+closed. Two predicate legs had to be cleared first, both consequences of the
+lane subagent dying mid-flight rather than of the work:
+
+- **DOCS marker backfilled by the orchestrator.** `stages.DOCS` read `ready`,
+  never `completed` — lane C died before Step 5. The deliverable itself was
+  verified present before the marker was written: `durability-model.md` (321
+  lines) and `expectation-reconciler.md` (129 lines) on the branch, both already
+  indexed in `docs/features/README.md` on main, the new `job_tool` subcommands
+  documented in `docs/tools-reference.md`, and no plan files in the PR. The
+  REVIEW verdict's `head_sha` matches the merged head, so the approval covered
+  the docs and no re-review was owed.
+- **Issue lease re-acquired, not minted.** `session-ensure --reuse-run-id
+  5bee760e54084b21918891d2b28bdb40` re-acquired under lane C's own run identity
+  on a free lock. No second run_id was created, so no `ISSUE_LOCKED` contest.
+
+Ruff check, ruff format, and `uv lock --locked` all passed in the worktree. No
+merge-authorization override file was created at any point.
+
+**Plan migration did NOT run.** `migrate_completed_plan.py --issue 2862 --apply`
+returned `Verdict: dirty-tree-skip` (report-only) because another session is
+actively editing `docs/plans/lane-branch-identity-cleanup.md` in the shared main
+checkout. `expectation_blocked_state.md` is still in `docs/plans/`; the daily
+`merged-branch-cleanup` reflection is now the only thing that will migrate it,
+on its next cycle, not immediately.
+
+**Worktree removed; branch `session/sdlc-2862` preserved.** The preservation is
+correct, not a defect: `merged_via_tree` resolves `base` to the *local* `main`
+ref, which is behind the merge commit because the same dirty file blocked the
+rebase. The guard failed safe. Worth the owner's attention as a sharp edge —
+post-merge cleanup run from a checkout whose local `main` lags the merge will
+always preserve the branch — but verified on this one branch only, not claimed
+as the explanation for the 113 live `session/*` branches.
+
+### Deviations, named rather than reported as routine
+
+1. **No service restart after the merge.** The merged diff touched `models/`,
+   `tools/`, and `reflections/`, which the addendum says warrants
+   `./scripts/valor-service.sh restart` plus
+   `scripts/install_reflection_worker.sh`. Neither was run: the #3080 standing
+   hold forbids deploying until the owner rules revert-vs-deploy-gate. Running
+   services are therefore on pre-#3407 code. **This is the owner's call to
+   release.**
+2. **The #3080 hold was already breached before this session began.** `/update`
+   ran at session start (skill context showed `HEAD: 2eaa4c73d`, worker
+   self-healed onto new code). The pre-merge service pin the hold was protecting
+   is already gone. Surfacing it rather than treating it as settled.
+3. **`main` has an unpushed commit that is not mine.** `b9bd3649e` ("Plan
+   revision 3 (#3411)") is committed locally and unpushed, and a live session is
+   still editing that plan. I did not rebase or push over its in-flight work, so
+   local `main` stays diverged (ahead 1, behind 1) until that session lands it.
+
+### Lanes A and B did not survive
+
+- **Lane A #3091:** branch `session/sdlc-3091` at `671270efb`, task 8 done, work
+  unpushed, **no PR opened**. Lane dead.
+- **Lane B #2652:** branch `session/sdlc-2652` at `161f03ce4`, unpushed, **no PR
+  opened**; round 6 of critique was ordered and never ran. Lane dead.
+
+Both branches and worktrees survived intact, so either lane can be resumed
+rather than restarted. **Wave 2 (#2494, #3282, #3256) was never opened** — it
+gates on Lane A merging, which did not happen.
+
+### Filed during Wave 1, did not exist at the start
+
+#3348, #3349, #3408, #3409, #3414 (bare-bool information loss originating in
+`models/job.py:462`, explicitly not to be fixed in `job_tool`), #3415
+(`pytest-clean.sh` guards zero collection but not *partial* collection — a
+pool-starved run collecting 114 of 144 exits green and silent).
