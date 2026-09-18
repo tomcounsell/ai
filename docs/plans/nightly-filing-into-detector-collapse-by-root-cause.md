@@ -1351,6 +1351,33 @@ Per-critic verdicts: Risk & Robustness **NEEDS REVISION**; Scope & Value **READY
 concerns)**; History & Consistency **READY TO BUILD (with concerns)**. Aggregate: **NEEDS REVISION**,
 carried by the Risk & Robustness blockers.
 
+### Round 6 — 2026-09-18, verdict NEEDS REVISION (1 blocker, 2 concerns, 0 nits)
+
+FULL roster, independent: Risk & Robustness, Scope & Value, History & Consistency. Roster gate 3/3
+complete, 0 ungrounded. Run against revision 5 (`8c83878a9`). Every round-5 "FIXED" claim was
+re-checked against the source and all held: the line anchors (`:2019-2062`, `:3198-3241`,
+`:2922-2970`, `:2852-2865`, `:462-482`, `:3332-3346`) land exactly on the code the plan describes,
+and `resolve_int_knob` is confirmed to have no bool sibling. The vacuous-verification blocker is
+closed for real — every row in `## Verification` was executed against the unmodified worktree and
+every one is RED, including the replaced `grep -c "^def create_issue"` row. Scope & Value returned
+its first clean sheet in six rounds, having independently confirmed both that Task 3's in-run
+registry is unreachable-but-minimal as disclosed and that the seed-umbrella conversion is forced
+scope, not added scope. The single blocker is a consequence of revision 5's own new text: the seed
+conversion inherits the module's generic dedup and silently drops the stricter rule the prompt it
+deletes was carrying.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|----------------------|
+| BLOCKER | Risk & Robustness (Skeptic) | The seed-umbrella conversion drops the seed's stricter closed-issue dedup rule. Task 4 step 1 says `main()` creates the umbrella "exactly as `dispatch_findings()` does", and step 3 deletes `_build_seed_prompt()` — whose docstring (`scripts/nightly_regression_tests.py:2035-2038`) records a rule "deliberately stricter than the per-node one": a closed umbrella is commented on and **never re-filed, whatever the close reason**, because a re-baseline retry at the same commit must not mint a twin. The generic path implements the opposite: `partition_closed_matches()` (`:2219-2243`) puts a `COMPLETED` closure back in `to_file`, and `dispatch_findings()`'s pre-create refresh reads `open_issues()` only, so a closed seed umbrella is invisible to it. Nothing in Task 4, Task 5, `## Test Impact` or `## Success Criteria` preserves the rule; `TestSeedUmbrellaIsCreatedByTheDetector` covers only create-success and create-returns-`None`. A re-baseline retry against a seed umbrella closed as COMPLETED mints a duplicate — the exact failure class this plan exists to eliminate. | pending | Either (a) add a `seed=True` / `strict=True` parameter to `partition_closed_matches()` that forces the closed branch regardless of `state_reason`, or (b) put a seed-only check inline in `main()`'s seed branch — `if closed_map and closed_map.get(seed_title) is not None: comment and return` — **before** `create_issue()` is ever called. Note the seed branch must read the closed map at all, which `dispatch_findings()`'s open-only refresh does not do. `TestSeedUmbrellaIsCreatedByTheDetector` (Task 5) must gain a case where the seed title matches an issue closed as COMPLETED and assert zero `create_issue` calls. |
+| CONCERN | Risk & Robustness (Skeptic) | The seed umbrella has no specified fingerprint derivation. `## Key Elements` defines the filing fingerprint for two shapes only — the node id for a per-node issue, the cascade state key for an umbrella — while Task 3 and Key Elements both say every body the detector creates carries one. A builder implementing Task 4 has nothing to copy for the seed case and must invent a third derivation, risking either an omitted fingerprint (the seed body silently falls outside the detection mechanism `## Decisions` #2 leans on) or an ad hoc key that collides across re-baselines at different commits. | pending | `seed_title` already embeds `current['head_commit']` (`scripts/nightly_regression_tests.py:3209-3211`); key the seed fingerprint on that same head-commit string so no new state has to be threaded into the body builder, and state the derivation in one sentence under `## Key Elements` → Filing fingerprint. |
+| CONCERN | History & Consistency (Consistency Auditor) | `### Flow` still restates the branch set it claims not to. `## Data Flow` step 4 asserts "this list is canonical; `### Flow` points at it rather than restating it", and round 5's own NIT disposition claims the restatement was removed — but the live `### Flow` text (plan lines 369-378) still carries a dash gloss, "comment-on-refresh-hit, skip-on-collision, defer-on-exhausted-budget, or `create_issue()`", naming 4 of the 5 branches. The one it omits is (b) **Refresh degraded**, which `## Failure Path Test Strategy` and Race 2 both treat as a separately-logged outcome. A reader who trusts the "canonical, not restated" framing and reads only `### Flow` concludes there are four outcomes and misses the fail-open-on-unreadable-refresh case. | pending | In `### Flow` (plan line ~372-375) either delete the enumeration entirely so the cross-reference is genuine ("one of the five outcomes enumerated in `## Data Flow` step 4"), or name all five including refresh-degraded-falls-through-to-create. Grep the plan for `comment-on-refresh-hit` to find the exact line; afterwards verify `### Flow` and `## Data Flow` step 4 state the same branch count. |
+
+Per-critic verdicts: Risk & Robustness **NEEDS REVISION**; Scope & Value **READY TO BUILD (no
+concerns)**; History & Consistency **READY TO BUILD (with concerns)**. Aggregate: **NEEDS REVISION**,
+carried by the single Risk & Robustness blocker. Structural checks all PASS: 8 tasks, no numbering
+gaps, every `Depends On` resolves to a real task id, no cycles, every task carries a `Validates`
+command, all referenced repo paths exist, and every `## Success Criteria` row maps to a task.
+
 ---
 
 ## Decisions
