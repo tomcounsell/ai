@@ -1087,6 +1087,22 @@ converged against was the one net-new subsystem, and it is now out of scope with
 bar for reopening it. What remains is a relocation of an existing mechanism, which is what the
 Medium appetite was sized for.
 
+### Round 3 — 2026-09-18, verdict READY TO BUILD (with concerns) (0 blockers, 4 concerns, 0 nits)
+
+FULL roster, independent: Risk & Robustness, Scope & Value, History & Consistency. Roster gate 3/3
+complete, 0 ungrounded. Run against revision 2 (`604c82eb1`). **No blockers.** No critic re-raised a
+round-2 row, and Scope & Value explicitly re-verified that the sweep deferral is applied
+consistently across `## Decisions` #2, Race 3 and `## No-Gos` with no drift. The four concerns are
+two behavioral gaps and two stale cross-references left by revision 2's deletions.
+
+| Severity | Critics | Finding | Addressed By | Implementation Note |
+|----------|---------|---------|--------------|----------------------|
+| CONCERN | Risk & Robustness (Adversary) | The pre-create re-read (Race 2 / Key Elements) is specified as a duplicate-prevention check but never says what happens **on a hit**. The initial-read path handles that case by commenting instead of filing (`partition_already_open`, `scripts/nightly_regression_tests.py:2397-2425`, per-node caller `:2881-2889`), preserving the recurrence signal; `## Failure Path Test Strategy` enumerates only three non-filing outcomes and has no fourth for "refresh found a same-title issue mid-loop". If the implementation skips-and-leaves-unrecorded on a refresh hit, a legitimate recurrence comment is silently dropped — the "silent hole" class Risk 1 calls worse than a duplicate, relocated to a narrower window rather than eliminated. | pending | Add an explicit fourth branch to the create loop: a refresh hit routes through `comment_on_issue` against the number the refresh just returned, not a skip-and-log like a fingerprint collision. Reuse `partition_already_open` (`:2397`) and its call site (`:2881-2889`) per-create inside the loop replacing `:2941-2970`; the refresh call is `open_issues()` (`:2065-2125`), and the fresh dict must be re-keyed against the same `f"Nightly regression: {node}"` / `cascade["title"]` strings the original read used or it silently never matches. Own log line, own test. |
+| CONCERN | Scope & Value (User) | `## Success Criteria` mixes mechanically-verifiable rows with the human-readable outcome check, which cannot be evaluated until a real nightly run happens in production and a human triager reads its output — yet Task 9 (`validate-all`) is defined as confirming **every** `## Success Criteria` row, with no carve-out. As written the plan's own completion gate cannot be closed at merge time. | pending | Split Task 9's `**Validates**` line to cover every *mechanically-checkable* row, and move the human-readable read to a named post-deploy observation with an owner and a trigger (the first real nightly run after `/update` reaches the runner machine), so the row is neither silently rubber-stamped by the validator nor silently dropped. |
+| CONCERN | History & Consistency (Consistency Auditor) | `## Agent Integration` still reads "remains the dispatch mechanism **if the investigation session survives** (`## Open Questions`)" — a stale cross-reference to a section that now says "None open", and conditional phrasing that re-opens a question `## Decisions` #1 and Task 4 ("Decided, no gate") both close. | pending | Replace the conditional clause with "(kept per `## Decisions` #1)", matching the wording already used in Task 4 and Risk 4's mitigation. |
+| CONCERN | History & Consistency (Consistency Auditor) | Race 3's data prerequisite cites `resolve_cascade_issue`, line 1165. That function is defined at `scripts/nightly_regression_tests.py:2366`; line 1165 of that file is `@dataclass(frozen=True)` preceding the unrelated `GateCaps` class. Line 1165 of the **test** file is `class TestResolveCascadeIssue`, so the citation was copied from the wrong file. The claim itself is correct (`:2391-2394`), but every other citation in the plan (`:2280`, `:2450`, `:2518`, `:2696`, `:3265`, test-file `672`) verifies exactly, so the one wrong pointer is the outlier. | pending | Change `line 1165` to `line 2366` in the Race 3 "Data prerequisite" sentence. |
+
+
 ---
 
 ## Decisions
