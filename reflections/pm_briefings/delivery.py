@@ -71,12 +71,11 @@ def _resolve_chat_id(project: dict, group_name: str) -> int | None:
     return None
 
 
-def _get_redis_connection():  # noqa: ANN202 - matches valor_telegram convention
-    """Lazy import of redis client (mirrors tools/valor_telegram.py)."""
-    import redis
+def _get_redis_connection():
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.from_url(url, decode_responses=True)
+    return text_redis()
 
 
 def _voice_note_payload(*, chat_id: int, audio_path: str, session_id: str, duration: float) -> dict:

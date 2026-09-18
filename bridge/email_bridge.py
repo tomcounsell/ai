@@ -141,11 +141,10 @@ def _get_smtp_config() -> dict | None:
 
 
 def _get_redis():
-    """Return a Redis connection (lazy, cached module-level)."""
-    import redis
+    """The shared text Redis client (see utils/redis_client.py)."""
+    from utils.redis_client import text_redis
 
-    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url, decode_responses=True)
+    return text_redis()
 
 
 # =============================================================================
@@ -887,21 +886,17 @@ class EmailOutputHandler:
     email:dead_letter:{session_id}.
     """
 
-    def __init__(
-        self,
-        smtp_config: dict | None = None,
-        redis_url: str | None = None,
-    ):
+    def __init__(self, smtp_config: dict | None = None):
         self._smtp_config = smtp_config or _get_smtp_config()
-        self._redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        # Test-injection seam. Production never writes this; tests assign a
+        # fake here instead of passing a URL the constructor no longer takes.
+        # An explicitly assigned client wins; otherwise the shared accessor.
         self._redis = None
 
     def _get_redis(self):
-        if self._redis is None:
-            import redis
-
-            self._redis = redis.Redis.from_url(self._redis_url, decode_responses=True)
-        return self._redis
+        if self._redis is not None:
+            return self._redis
+        return _get_redis()
 
     def _build_reply(
         self,
@@ -1400,7 +1395,19 @@ async def _process_inbound_email(
             )
             if imap_uid is not None and imap_config is not None:
                 await _unmark_seen(imap_config, imap_uid)
-            _arm_resolver_unavailable_alert_if_persistent(project_key, message_id)
+            # Off the loop in one piece. Exactly one of the helper's four
+            # Redis round trips is the blocking-pool hazard:
+            # bridge/routing.py::get_resolver_failure_count reaches popoto's
+            # BlockingConnectionPool, where a checkout blocks rather than
+            # raising and is not covered by socket_timeout. The other three go
+            # through text_redis(), a bounded pool that raises on exhaustion
+            # and carries socket_timeout. Wrapping all four anyway is not
+            # over-wrapping: splitting the wrap to that one leg would leave
+            # three synchronous Redis round trips on the event loop for no
+            # benefit.
+            await asyncio.to_thread(
+                _arm_resolver_unavailable_alert_if_persistent, project_key, message_id
+            )
             return
         if customer_id is None:
             # Resolver ran successfully and definitively found no match —
