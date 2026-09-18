@@ -147,19 +147,92 @@ No prior fix targeted this defect, so strictly there is nothing to post-mortem. 
 
 ## Architectural Impact
 
-_placeholder_
+- **New dependencies**: none. No new packages, services, or config. Everything is `git` and code already in the repo.
+- **Interface changes**:
+  - `models/agent_session.py::AgentSession.derived_branch_name` — precedence inverted (recorded value wins over the slug seed). Behavior change visible to any reader; there are exactly two (`tests/e2e/test_context_propagation.py`, and `docs/features/eng-session-architecture.md:248`).
+  - `agent/worktree_manager.py::safe_delete_branch` — return dict gains a `skipped_checked_out: bool` key. Additive; existing `deleted` / `skipped_unmerged` / `branch` / `error` keys unchanged.
+  - `tools/lane_identity.py` — three new public functions (`read_worktree_branch`, `lane_branch`, `refresh_lane_branch`) plus a `sweep` CLI subcommand.
+  - `agent/agent_session_queue.py::checkpoint_branch_state` — no signature change; gains detached-`HEAD` normalisation.
+- **Coupling**: **decreases.** Today three modules each independently know how to spell a lane's branch. After this, `tools/lane_identity.py` is the only module that does, and it is already the designated home of lane identity (PR #2792). The executor loses a hand-rolled git read; the model's accessor stops encoding policy.
+- **Data ownership**: `AgentSession.branch_name` is promoted from an incidental checkpoint artifact to the lane's **recorded branch**, with `checkpoint_branch_state` as its sole writer. No schema change — the field already exists and is already populated, so no Popoto migration is required.
+- **Reversibility**: high. The change is four small edits plus one new module surface; reverting restores derivation. No data is destroyed and no stored shape changes, so a revert needs no migration.
+
+**The core invariant this change establishes, stated once:**
+
+> At the end of every turn, `AgentSession.branch_name` equals the worktree's live `HEAD` branch (or is empty if the worktree is detached). Everything that needs to know a lane's branch reads that record. Nothing re-derives it from the slug except to seed a worktree that has never been checkpointed.
 
 ## Appetite
 
-_placeholder_
+**Size:** Medium
+
+**Team:** Solo dev, code reviewer
+
+**Interactions:**
+- PM check-ins: 1 (one decision to confirm — see Open Questions #1, whether the record belongs on `AgentSession` or `PipelineLedger`)
+- Review rounds: 2 (this touches three guards that exist because of prior incidents; the reviewer's job is to confirm none of them got weaker)
+
+Medium rather than Small because the change is small in lines but wide in blast radius: four files, three historical guards, and a cross-turn invariant that only shows up in integration-shaped tests. The coding is an afternoon; the alignment on which record is authoritative, and the proof that #887/#1377/#1646 are all still RED-on-removal, is the real cost.
 
 ## Prerequisites
 
-_placeholder_
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `git` >= 2.38 | `git --version` | `git worktree list --porcelain` and `merge-tree --write-tree` semantics relied on by the checked-out-branch pre-check and the existing `merged_via_tree` oracle |
+| Repo venv on the committed pin | `python -m tools.doctor` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+
+No secrets, no external services, no network. The work is entirely local git + Popoto.
 
 ## Solution
 
-_placeholder_
+### The decision: what is authoritative
+
+The issue asks the planner to settle this before implementing. **Settled:**
+
+> **`AgentSession.branch_name` is the lane's recorded branch and the single source of truth. It is kept equal to the worktree's live `HEAD` by exactly one writer, `checkpoint_branch_state`. `session/{slug}` is a *seed*, used only to name a branch at worktree creation and as the fallback for a lane that has never been checkpointed. The live `HEAD` is not a competing source — it is the input the record is refreshed from.**
+
+Why this one, and not the other two candidates:
+
+- **Not the slug-derived name.** A slug names a *lane*; it cannot name a branch the agent chose at runtime. Deriving the branch from the slug is what PR #2792 called "derivation wearing adoption's clothes", and it is the defect here.
+- **Not the live `HEAD` read at point of use.** A guard whose expectation is the live `HEAD` is tautological — it can never fail, so #1377's protection evaporates. The guard needs a *recorded* expectation to compare against. The live `HEAD` is the truth about *now*; the record is the truth about *what this lane is*.
+- **Yes, the recorded field.** It already exists, is already populated, needs no Popoto migration, and has exactly one writer already. The only change is to stop throwing it away.
+
+This makes the invariant checkable in one sentence: **at turn end, record == live `HEAD`** (empty when detached).
+
+### Key Elements
+
+- **`tools/lane_identity.py` (extended)**: the single home for branch identity, alongside the slug identity it already owns.
+  - `read_worktree_branch(worktree_path) -> str | None` — the **only** place `git rev-parse --abbrev-ref HEAD` is spelled for a lane. Normalises the literal `"HEAD"` (detached, spike-2) to `None`. Returns `None` on a missing path or a git failure rather than raising.
+  - `lane_branch(session) -> str | None` — **the accessor**. Returns the recorded `branch_name`; falls back to the `session/{slug}` seed; falls back to `_session_branch_name(session_id)` for slug-less sessions; `None` if nothing applies. Never returns `"HEAD"`.
+  - `refresh_lane_branch(session, worktree_path) -> str | None` — reads the live `HEAD` and delegates the write to `checkpoint_branch_state`, returning the value now on record.
+  - `sweep()` + a `python -m tools.lane_identity sweep` CLI — walks `git worktree list --porcelain`, reports every lane whose live `HEAD` diverges from its recorded branch, and exits non-zero if any lane is in a state whose next turn would be refused. This is AC 6, made executable and repeatable rather than a one-off measurement.
+
+- **`checkpoint_branch_state` (`agent/agent_session_queue.py:593`)**: promoted to sole writer of the record. Gains one behavior: when the branch read yields `"HEAD"`, clear `branch_name` instead of storing the literal (spike-2). `commit_sha` continues to be written in both cases — a detached lane still has a SHA.
+
+- **`derived_branch_name` (`models/agent_session.py:1840-1844`)**: precedence inverted to `self.branch_name or (f"session/{s}" if s else None)`. Without this, a fix confined to the executor is masked at the model layer — the recon called this out explicitly.
+
+- **`safe_delete_branch` (`agent/worktree_manager.py:126`)**: gains an explicit checked-out-branch pre-check ahead of the `merged_via_ancestor` predicate. git already refuses such a delete (spike-1), but an incidental error string is not a testable guarantee; the pre-check turns it into a named, logged, asserted decision returning `skipped_checked_out: True`.
+
+- **The executor cleanup block (`agent/session_executor.py:2781-2790`)**: stops using the turn-start `branch_name`. Refreshes the record from the live `HEAD`, then acts on it.
+
+### Flow
+
+Turn end, after the fix:
+
+**Harness exits** → `refresh_lane_branch(session, working_dir)` reads live `HEAD` and records it → **branch known** → detached? → *yes*: log and skip cleanup entirely → **done** / *no*: `mark_work_done(working_dir, work_branch)` (archives plan, commits, returns worktree to `main`) → `safe_delete_branch(work_branch, predicate=merged_via_ancestor)` → checked out anywhere? *yes* → preserve + log → unmerged? *yes* → preserve + log (#1646, now about the right branch) → else delete → **`finally:` `checkpoint_branch_state`** re-reads live `HEAD` (now `main`) and updates the record → **next turn**: guard compares live `HEAD` (`main`) against record (`main`) → match → **harness launches**.
+
+### Technical Approach
+
+- **Refresh-act-refresh is the ordering fix.** Today the only component that learns the truth (`checkpoint_branch_state`) runs *after* the destructive act. Adding a refresh *before* cleanup — and keeping the existing one in `finally` *after* it — closes both halves. The trailing refresh is what stops the fix from re-creating the bug under a new name: after cleanup deletes the work branch and `mark_work_done` returns the worktree to `main`, the record must follow the worktree to `main`, or the next turn's guard would demand the branch this turn just deleted. **This trailing refresh is load-bearing; a reviewer who sees it removed as redundant should treat that as a blocker.**
+
+- **The launch guard's logic is unchanged; only its input changes.** `verify_worktree_branch(working_dir, lane_branch(session))` instead of `verify_worktree_branch(working_dir, branch_name)`. Match passes, clean mismatch auto-checks-out, dirty mismatch raises — all identical. #1377's scenario (a new session reusing a worktree left on a prior stage's branch) still fails, because a new session has no record and falls back to the seed, exactly as today. **The guard is not relaxed. It is handed a true expectation instead of a guessed one.** Answering the issue's open question 3: no, the guard should not learn to accept divergence — the divergence should stop being a surprise to it.
+
+- **`branch_name` at `:1430`/`:1466` keeps its job, which is worktree *provisioning*.** It is the seed that names a branch being created. It must simply stop being reused 1300 lines later as an identity. The build should leave the two assignment sites alone and rename the local to `seed_branch_name` so the next reader cannot make this mistake again.
+
+- **Detached lanes skip cleanup rather than guessing.** Five of the seven divergent lanes are detached. There is no branch name to hand `merged_via_ancestor`, and inventing one is how this bug started. Skip, log at INFO with the lane slug, leave the lane resumable.
+
+- **No partial migration.** The four consumers — launch guard, cleanup, checkpoint, and the model accessor — change in one PR. A sweep (`grep -rn "abbrev-ref HEAD" --include=*.py agent/ tools/ models/`) must show `read_worktree_branch` as the only lane-scoped spelling afterwards; this is a Verification row, not a checklist item, per the repo's replicated-defect rule.
+
+- **Integration points**: `agent/session_executor.py` (guard input + cleanup block), `agent/agent_session_queue.py` (`checkpoint_branch_state`), `agent/worktree_manager.py` (`safe_delete_branch`), `models/agent_session.py` (`derived_branch_name`), `tools/lane_identity.py` (new surface). `agent/session_revival.py::_session_branch_name` stays as the slug-less seed generator and is called only through `lane_branch`.
 
 ## Failure Path Test Strategy
 
