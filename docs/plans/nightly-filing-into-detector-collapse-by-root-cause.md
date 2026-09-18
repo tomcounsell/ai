@@ -259,3 +259,334 @@ about the residue instead of claiming it away.
   `## Update System`. Reverting the *commit* is a clean revert; nothing persists a schema. The one
   irreversible artifact is the historical duplicate closures in Task 5, which are GitHub state, not
   code, and are reopenable by hand.
+
+## Appetite
+
+**Size:** Medium
+
+**Team:** Solo dev, PM, code reviewer
+
+**Interactions:**
+- PM check-ins: 1-2 (scope alignment — the scope already split once, at #3419; the residual
+  judgement call is whether the investigation session survives at all, see `## Open Questions`)
+- Review rounds: 1-2 (this touches the module's most safety-critical function and deletes two
+  public helpers; `TestDispatchFindings` / `TestDispositionHandoff` rewrites want a real read)
+
+Medium rather than Small because the change deletes a mechanism (the ledger + disposition handoff)
+rather than adding beside it, and the test file's four near-identical fake-`gh` harnesses each need
+a new seam. Medium rather than Large because the code lives in one module, has no schema, no
+migration, and no cross-machine coordination.
+
+## Prerequisites
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| `gh` authenticated | `gh auth status` | The detector creates, comments, and reconciles issues through `gh`; the new create path fails closed without it |
+| Repo resolves for `gh` | `gh repo view --json nameWithOwner -q .nameWithOwner` | `create_issue` inherits `cwd=PROJECT_DIR` targeting the same way `comment_on_issue` does |
+| Test suite runnable | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py --collect-only -q` | The whole change is gated on this file; a collection failure means the venv is off-pin |
+
+## Solution
+
+### Scope
+
+This plan is **one** change, not two. The critique's Scope & Value blocker is resolved by an actual
+split rather than a justification: on 2026-09-18 the owner narrowed #3418 to filing ownership and
+filed the collapsing-algorithm work as **#3419**. The two are genuinely independent — #3418 changes
+*who creates* an issue, #3419 changes *how many* issues a given night's findings should become — and
+they touch disjoint functions (`dispatch_findings`'s filing branch vs.
+`group_body_failure_cascades`). Nothing in this plan blocks #3419; the collapsing rule operates
+upstream and feeds whatever filing path exists.
+
+In scope, each with its own acceptance check:
+
+| # | Sub-change | Acceptance check |
+|---|-----------|------------------|
+| (a) | **Filing moves into `scripts/nightly_regression_tests.py`.** A `create_issue()` function creates issues via `gh issue create`; `dispatch_findings()` calls it for every survivor and every cascade umbrella; the triage session never creates anything. | `grep -c "gh\", \"issue\", \"create\"` in the script is non-zero, and no prompt builder's output contains a create instruction (asserted by an updated `TestPromptsNeverNameTheSearchIndex` sibling). |
+| (b) | **Duplicate filing is structurally prevented, then convergently reconciled.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and a post-filing reconciliation sweep that closes any twin. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node. |
+| (c) | **The budget is enforced against issues GitHub confirms exist.** `issues_filed` is the count of real numbers returned; `NIGHTLY_MAX_ISSUES_PER_RUN` is decremented per confirmed create and the cap check fails closed on an unreadable verification. | A test with the cap set to a low value and a `create_issue` stub that succeeds asserts exactly that many issues are created and the rest are deferred with a log line; a second test makes the verification read fail and asserts zero further creates. |
+| (d) | **The historical duplicates are closed.** #3382-#3397 and the enumerated 09-16 pairs are closed as duplicates pointing at their survivor. | `gh issue view` on each enumerated number reports `CLOSED` / `NOT_PLANNED`. |
+
+Out of scope and tracked elsewhere: per-file/root-cause collapsing (#3419), hostname/session_id
+stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
+
+### Key Elements
+
+- **`create_issue(title, body) -> int | None`**: the sibling `comment_on_issue` never had. Shells
+  `gh issue create --title ... --body-file -` (body on stdin for the same reason the comment path
+  does: a cascade body carries a collapsed node list that has been 278 entries long), parses the
+  issue URL `gh` prints on stdout into an integer, and returns `None` on any failure. **Never
+  retries** — a retried non-idempotent create is a second issue (see `## Research`). A `None`
+  return leaves the node out of `recorded`, so the next run retries it against fresh GitHub state,
+  matching `comment_on_issue`'s existing contract exactly.
+- **Filing fingerprint**: every body the detector creates carries a hidden
+  `<!-- nightly-fingerprint: {sha256} -->` line derived from the finding's stable identity (the
+  node id for a per-node issue, the cascade state key for an umbrella). Titles can be edited by
+  humans; the fingerprint cannot drift. It is the key the reconciliation sweep and the cap
+  verification both query on, and it is what makes "is this a twin?" an exact-match question rather
+  than a string-similarity one.
+- **Pre-create re-read**: the open-issue map is refreshed immediately before each create rather
+  than once per run, shrinking the check-then-act window from the whole filing loop to one call.
+- **Reconciliation sweep**: after the filing loop, one read of issues created during this run's
+  window; any fingerprint appearing more than once converges to its lowest number and the rest are
+  closed as `NOT_PLANNED` with a pointer comment. This is the substitute for the compare-and-swap
+  GitHub does not offer.
+- **Comment-only investigation session**: `maybe_dispatch_triage_session()` is dispatched *after*
+  filing, with real issue numbers, and its prompts instruct investigation and commenting only. The
+  three filing prompts become one investigation prompt shape.
+- **Deletions**: `write_triage_ledger()`, `NodeDisposition`, the ledger paragraph in
+  `_build_triage_prompt`, and the filing halves of `ISSUE_LOOKUP_INSTRUCTION`. Per this repo's
+  no-legacy-code rule these are removed outright, not left behind a flag.
+
+### Flow
+
+Nightly run completes → serial re-confirm → `dispatch_findings()` → collapse (environmental,
+setup cascades, body cascades) → **comment branch** (existing, unchanged: open-issue and
+closed-not-planned recurrences) → **file branch (new)**: for each survivor → refresh open map →
+compute fingerprint → `create_issue()` → record real number → decrement budget →
+**reconciliation sweep** → converge twins → verified `issues_filed` → **dispatch investigation
+session** with the real numbers and a comment-only instruction → log `Tracker: N issue(s) filed`
+where N is verified.
+
+### Technical Approach
+
+- **`create_issue` mirrors `comment_on_issue` deliberately.** Same `subprocess.run` shape, same
+  `cwd=PROJECT_DIR`, same `--body-file -` stdin discipline, same "log and return falsy, never
+  raise" error posture, same `dry_run` short-circuit. A reviewer should be able to diff the two
+  functions and see only the verb change. This is also why the four fake-`gh` harnesses in the test
+  file can stub it the same way they already stub `comment_on_issue`.
+- **Where the create loop goes.** Replacing the block at `:2941-2970`. The comment at `:2954-2965`
+  explaining why `dispositions` is withheld on a degraded read disappears with the mechanism it
+  documents; the *reasoning* it encodes does not, and it moves to the budget contract below.
+- **Two failure postures, deliberately asymmetric** (this is the answer to the critique's first
+  CONCERN, and it must be stated in code comments as well as here):
+  - The **dedup reads** (`open_issues`, `closed_issue_dispositions`) keep failing *open*. An
+    unreadable GitHub on the night of a real regression must not produce a silent night; a possible
+    duplicate is the smaller harm. Unchanged from today.
+  - The **budget verification** fails *closed*. If the post-filing read cannot be answered, the
+    remaining budget is treated as zero, the unfiled survivors are deferred to the next run with an
+    explicit log line, and `issues_filed` reports only creates whose numbers were observed. The
+    asymmetry is the point: silently assuming "0 filed so far" on a failed verification is exactly
+    how #3382-#3405 happened, and this is the one place where over-filing, not silence, is the
+    tracked harm. A deferred node is not added to `recorded`, so tomorrow's run picks it up.
+- **Budget accounting is per-confirmed-create.** `issue_budget` decrements only when
+  `create_issue()` returns a number. A failed create spends nothing. This alone removes the
+  `:2966` class of bug regardless of whether the reconciliation sweep ever fires.
+- **`DispatchOutcome`** gains `filed_issues: dict[str, int]` (finding key → real issue number),
+  and `issues_filed` becomes a derived length rather than an independently-mutated counter — the
+  two can then never disagree. `cascade_issues` stops needing its `None` "pending, the session will
+  open it" sentinel, because the number is known at creation time; `carry_cascade_issues()`'s
+  upgrade-on-a-later-run path becomes dead and is removed with it.
+- **Prompt consolidation.** The per-node, cascade-umbrella, and re-baseline-seed prompts exist as
+  three shapes because each had to teach an agent a different filing contract. With filing gone
+  they collapse toward one investigation prompt that takes a list of `(number, subject)` pairs.
+  `ISSUE_LOOKUP_INSTRUCTION`'s dedup-before-filing framing is removed; if any lookup guidance
+  survives at all it keeps the search-index prohibition, so the two existing wording gates stay
+  meaningful rather than being deleted along with the text they guard.
+- **Tunables carry no new invented numbers.** The reconciliation window and any new threshold are
+  named constants with `_DEFAULT` suffixes and `NIGHTLY_*` env overrides, following the module's
+  established convention, each with a comment stating the value is provisional and what evidence
+  would move it. `MAX_ISSUES_PER_RUN_DEFAULT` keeps its existing value — this plan changes what the
+  budget is measured against, not how large it is.
+
+## Failure Path Test Strategy
+
+### Exception Handling Coverage
+- [ ] `create_issue()` has one broad `except Exception` (matching `comment_on_issue` and
+  `open_issues`, which catch `TimeoutExpired` / `FileNotFoundError` / parse errors alike). It must
+  not be a bare `pass`: assert it logs a `WARNING` naming the title and returns `None`, and assert
+  the caller leaves the node out of `recorded`. Test: `create_issue` with a subprocess raising
+  `FileNotFoundError`, and separately with a non-zero return code, and separately with stdout that
+  is not a parseable issue URL.
+- [ ] The reconciliation sweep's own read must not raise into the filing path. A failing sweep logs
+  a warning, leaves every created issue in place (the issues are real and must not be lost), and
+  reports the creates it observed directly — assert this rather than allowing a silent swallow.
+- [ ] No other exception handlers are introduced in scope.
+
+### Empty/Invalid Input Handling
+- [ ] `create_issue("", body)` and `create_issue(title, "")` — a create with an empty title must be
+  refused before shelling out, not passed to `gh`. Test asserts no subprocess call and a `None`
+  return.
+- [ ] Empty survivor list: `dispatch_findings()` with nothing to file must still shell out to `gh`
+  zero times. `TestDispatchFindings::test_a_clean_night_never_shells_out_to_gh` (line 1377) already
+  pins this and must keep passing against the new create path.
+- [ ] `gh issue create` stdout that is whitespace-only or a URL with no trailing integer → `None`,
+  not a crash and not a bogus issue number.
+- [ ] Not applicable: agent output processing. The detector no longer depends on anything the agent
+  produces, which is itself part of the fix.
+
+### Error State Rendering
+- [ ] The run's log line is the only user-visible surface (this module deliberately has no notifier
+  — `TestNothingNotifies`, line 629). Assert that a night where some creates failed logs both the
+  verified filed count and the deferred count, so a partial failure is legible rather than reading
+  as a quiet success.
+- [ ] Assert the budget-exhausted and verification-failed paths each emit their own distinct log
+  line naming the deferred nodes, so the two are distinguishable in `logs/` the morning after.
+
+## Test Impact
+
+`tests/unit/test_nightly_regression_tests.py` (3355 lines). Per-function dispositions:
+
+**Shared harness (do these first — everything else depends on them):**
+- [ ] `_assert_per_node_dispatch` (line 29) — REPLACE: today it asserts the dispatch call carries
+  one `NodeDisposition(disposition="file")` per node. With `NodeDisposition` deleted it becomes an
+  assertion over the *created issue numbers* handed to the investigation dispatch. This single
+  helper is the highest-leverage edit in the file.
+- [ ] `_disposition` (line 818) — DELETE: constructs the removed `NodeDisposition`.
+- [ ] `TestDispatchFindings._dispatch` (1241), `TestDispositionHandoff._run` (1406),
+  `TestClosedIssueDedup._dispatch` (2580), `TestReviewFindings3142._dispatch` (2800) — UPDATE all
+  four: each monkeypatches `open_issues`, `closed_issue_dispositions`, `comment_on_issue`,
+  `maybe_dispatch_triage_session` and none patches a create. Each must stub `create_issue`, or a
+  real `gh issue create` escapes into a subprocess during unit tests. Prefer extracting the four
+  near-identical copies into one shared fake-GitHub fixture while touching them.
+- [ ] `TestMainDispatchPersistence._run_main` (1832) / `._dry_run_main` (1952),
+  `TestPersistedStateKeyInvariance._run` (2464), `TestFatalPathIntegration._base_patches` (2316) —
+  UPDATE: add `create_issue` to each `patch.object` block.
+- [ ] `_ledger_dir` (1742 and 3271, duplicated) — DELETE both.
+
+**`TestWriteTriageLedger` (3266) — DELETE the entire class** (`test_happy_path_shape_and_absolute_return` 3276, `test_empty_entries_writes_nothing_and_returns_none` 3289, `test_an_unwritable_target_logs_a_warning_and_returns_none` 3297, `test_a_live_sessions_appends_are_never_re_seeded_away` 3310, `test_an_untouched_ledger_with_no_filings_is_re_seeded` 3331, `test_the_write_is_atomic_and_leaves_no_temp_file` 3341, `test_a_corrupt_existing_ledger_is_overwritten_rather_than_raising` 3347): the ledger exists only to let an agent remember what it filed. No agent files.
+
+**`TestDispositionHandoff` (1388) — REPLACE the entire class.** Its subject (what `dispositions=` reaches the agent) ceases to exist. Its four tests map onto new assertions about what reaches `create_issue`:
+- [ ] `test_dispositions_cover_the_survivors_and_nothing_already_tracked` (1427) — REPLACE: assert `create_issue` is called exactly once, for the survivor, with the exact `Nightly regression: {node}` title and a body carrying the fingerprint.
+- [ ] `test_no_dispositions_when_open_read_fails` (1459) — REPLACE: assert the degraded-read posture *for creates* — unreadable open map still files (fail-open preserved), and the log says so.
+- [ ] `test_no_dispositions_when_closed_read_fails` (1487) — REPLACE: same, for the closed read.
+- [ ] `test_cascade_dispatch_is_handed_no_dispositions` (1514) — REPLACE: assert the cascade umbrella is created by `create_issue`, not dispatched.
+
+**`TestDispatchFindings` (1219) — UPDATE every test; the class keeps its subject.**
+- [ ] `test_night_one_files_one_issue_and_records_the_signature_as_pending` (1268) — UPDATE + RENAME: `cascade_issues` maps to a real number now, not `None`. "as_pending" leaves the name.
+- [ ] `test_night_two_comments_instead_of_filing_a_second_issue` (1279) — UPDATE: assert `create_issue` not called.
+- [ ] `test_a_comment_that_failed_to_post_leaves_the_finding_unrecorded` (1297) — UPDATE: unchanged in intent; add the sibling assertion that a failed *create* also leaves the finding unrecorded.
+- [ ] `test_per_node_recurrence_is_commented_not_suppressed` (1313) — UPDATE: the "other node" is now created, not dispatched.
+- [ ] `test_comments_do_not_spend_the_issue_budget` (1329) — UPDATE: budget now decrements per confirmed create.
+- [ ] `test_cascades_only_suppresses_per_node_filing` (1344) — UPDATE: `cascades_only` now suppresses per-node *creates*; the `cascade:` pseudo-node assertion goes away with the dispatch.
+- [ ] `test_a_clean_night_never_shells_out_to_gh` (1377) — UPDATE: extend to assert `create_issue` is also never reached.
+
+**`TestMaybeDispatchTriage` (1633) — UPDATE the class, DELETE its ledger tests.**
+- [ ] `test_real_per_node_dispatch_seeds_a_ledger_and_names_it_in_the_message` (1747),
+  `test_dry_run_writes_no_ledger` (1764), `test_prompt_override_dispatch_writes_no_ledger` (1782),
+  `test_a_failed_ledger_write_does_not_stop_the_dispatch` (1801) — DELETE all four.
+- [ ] `test_dispatch_once` (1661), `test_literal_titles_in_prompt` (1679),
+  `test_prompt_override_replaces_default` (1693), `test_slug_suffix_override` (1703) — UPDATE: the
+  dispatch now carries issue numbers; `test_literal_titles_in_prompt` becomes
+  `test_literal_issue_numbers_in_prompt`.
+- [ ] `test_dry_run_spawns_no_session` (1646), `test_subprocess_failure_safe` (1712),
+  `test_session_id_parsed_from_json_stdout` (1718), `test_malformed_stdout_returns_none_not_crash`
+  (1724), `test_empty_stdout_returns_none_not_crash` (1730), `test_empty_dispatch_set_no_dispatch`
+  (1736) — KEEP unchanged: subprocess plumbing, orthogonal to who files.
+
+**`TestBuildTriagePrompt` (828) — REPLACE as the investigation-prompt class.**
+- [ ] `test_literal_titles_present` (831) — REPLACE: assert real issue numbers, and assert the
+  prompt contains no create instruction.
+- [ ] `test_dispositions_render_the_detectors_own_finding_per_node` (846) — DELETE.
+- [ ] `test_empty_disposition_list_degrades_to_the_plain_prompt` (855) — DELETE.
+- [ ] `test_wrong_length_disposition_list_raises` (866) — DELETE.
+- [ ] `test_ledger_paragraph_is_emitted_only_for_a_non_none_path` (873) — DELETE.
+
+**`TestPromptsNeverNameTheSearchIndex` (3139) — UPDATE, do not delete.**
+- [ ] `_prompts` helper (3154) and the five tests (3169, 3176, 3182, 3188, 3191) — UPDATE to the
+  surviving prompt shape(s). The search-index prohibition stays meaningful for any lookup the
+  investigation session still performs. Add one new sibling assertion: **no surviving prompt
+  contains an issue-creation instruction.** That is the anti-criterion that keeps filing from
+  drifting back into the agent.
+
+**`TestPreFileDedup` (1024) — UPDATE.**
+- [ ] `test_already_open_titles_are_paired_with_their_issue_number` (1031),
+  `test_unreadable_open_set_fails_open` (1038),
+  `test_open_issues_uses_the_rest_list_not_the_lagging_search` (1043),
+  `test_open_issues_returns_none_on_any_failure` (1065) — KEEP; `open_issues` is unchanged. ADD a
+  sibling `TestCreateIssue` class covering argv shape, URL parsing, dry-run, empty title, and each
+  failure mode — mirroring these tests one-for-one.
+
+**Unchanged classes** (no filing coupling): `TestLoadLastRun`, `TestSaveLastRun`,
+`TestExtractFailingNodeIds`, `TestSpawnPytest`, `TestRunTests`, `TestValidateRunIntegrity`,
+`TestReconfirmSerial`, `TestNothingNotifies`, `TestFatal`, `TestRunLock`, `TestComputeDispatchSet`,
+`TestComputeNewFailures`, `TestCarryDispatchedNodes`, `TestGroupSetupErrorCascades`,
+`TestResolveIntKnob`, `TestRecurrenceComments`, `TestResolveCascadeIssue`, `TestRunTtftGate`,
+`TestLoadEnvOrDie`, `TestSpawnPytestCwdSeam`, `TestEnvironmentalClassification`,
+`TestBuildSeedPrompt` (3197), `TestBodyFailureGrouping` (2495 — this is #3419's territory, untouched
+here).
+
+**Classes needing targeted updates:**
+- [ ] `TestCarryCascadeIssues` (1199) — UPDATE: the `None`-sentinel upgrade path is removed.
+- [ ] `TestHandleIntegrityTrip` (1531) — UPDATE: the integrity trip still files the cascade, now via
+  `create_issue`.
+- [ ] `TestClosedIssueDedup` (2577) — UPDATE: `issues_filed` assertions at 2618 and 2634 now count
+  confirmed creates.
+- [ ] `TestReviewFindings3142` (2797) — UPDATE: `test_end_to_end_replay_dispatch_shapes` (3073) and
+  the `issues_filed` assertions at 3071/3129 are the closest existing thing to a replay test;
+  rewrite against the create path rather than the dispatch path.
+
+**New tests (the ones no prior pass could write):**
+- [ ] `TestFilingIdempotence` — NEW: run `dispatch_findings()` twice against one in-memory fake
+  GitHub whose create mutates the open-issue map. Assert pass two creates zero issues and comments
+  once per node. This is the regression test for #3382-#3405 and for the whole #3170 class.
+- [ ] `TestIssueBudgetIsVerified` — NEW: cap set low, assert exactly the cap is created and the
+  remainder is deferred and left out of `recorded`; and a second test where the verification read
+  fails, asserting the fail-closed posture.
+- [ ] `TestReconciliationSweep` — NEW: a fake GitHub seeded with two issues sharing one fingerprint;
+  assert the lower number survives, the higher is closed `NOT_PLANNED`, and a pointer comment is
+  posted.
+
+**Test-run discipline:** per this repo's rules, run only
+`scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py`, never the full `tests/unit/`
+tree (about 20 minutes, and parallel lanes collide on Redis state).
+
+## Rabbit Holes
+
+- **Making the create genuinely atomic.** It cannot be. GitHub offers no idempotency key and no
+  conditional POST (`## Research`). Any design that reaches for a distributed lock, a mutex issue,
+  or a "claim" label written before the create is spending real time to buy a smaller window, not a
+  closed one. Refresh-then-create plus a convergent sweep is the ceiling; take it and move on.
+- **Rewriting the cascade/collapsing logic.** `group_body_failure_cascades` and its threshold are
+  #3419. Touching them here re-merges the scope the owner just split.
+- **Generalizing `create_issue` into a repo-wide GitHub client.** Several modules shell out to `gh`.
+  A shared client is a reasonable idea and a different project; here it is one function modelled on
+  the `comment_on_issue` two hundred lines above it.
+- **Landing #3243's hostname/session_id stamp "while we're in there."** The body builder this plan
+  creates is where that stamp belongs, which makes it tempting. It is a separate issue with its own
+  acceptance criteria and it will be a five-line change afterwards.
+- **Perfecting the investigation prompt.** The session's value after this change is root-cause
+  narrative, not correctness. A merely adequate comment-only prompt is fine; iterating on its
+  wording is unbounded and unmeasured.
+- **Auditing every historical duplicate ever filed.** Task 5 closes the enumerated set from the
+  issue body. A general sweep of the tracker's whole duplicate history is a different job.
+
+## Risks
+
+### Risk 1: Over-suppression — a real regression is never filed
+**Impact:** The failure mode this change could introduce is the mirror of the one it fixes. If the
+fingerprint or the pre-create re-read matches too eagerly, a genuinely new finding is silently
+treated as already-filed and nothing reaches the tracker. That is strictly worse than a duplicate:
+a duplicate is noise, a missed regression is a silent hole.
+**Mitigation:** The fingerprint is derived from the finding's exact stable identity (node id /
+cascade state key), so it cannot match across distinct findings by construction. The dedup reads
+keep their existing fail-open posture — an unreadable GitHub files rather than stays silent. Nodes
+whose create fails stay out of `recorded` and are retried by the next run rather than suppressed.
+`TestFilingIdempotence`'s second pass asserts comments are still posted, so "suppressed" is always
+distinguishable from "silent" in the log.
+
+### Risk 2: `gh issue create` stdout parsing is brittle
+**Impact:** The real issue number is now load-bearing for the budget, for `cascade_issues`, and for
+the investigation dispatch. If the URL-to-integer parse is wrong or `gh` changes its output, every
+create reports `None`, every night reports zero filed, and nothing is ever recorded — an outage
+that looks like a quiet success.
+**Mitigation:** `gh issue create` accepts `--json number` on current versions; prefer that over
+scraping the URL, and fall back to a strict trailing-integer parse of the printed URL. Cover
+whitespace-only stdout, a URL with no trailing integer, and a valid URL in `TestCreateIssue`. The
+"some creates failed" log line from `## Failure Path Test Strategy` makes a total parse failure
+loud on the first night rather than silent.
+
+### Risk 3: The test rewrite is large enough to hide a behavior change
+**Impact:** Roughly 25 test functions are deleted or replaced. A rewrite that quietly drops an
+assertion — particularly the closed-state dedup or the environmental-exclusion coupling — removes a
+guard that five prior issues paid for.
+**Mitigation:** Every deletion in `## Test Impact` is justified by the disappearance of its subject
+(the ledger, `NodeDisposition`), never by inconvenience. The unchanged-class list is explicit so a
+reviewer can check that nothing outside it moved. The `cruft-auditor` agent runs over the diff
+during review specifically for dropped assertions.
+
+### Risk 4: The investigation session, stripped of filing, has no remaining value
+**Impact:** Dispatching an LLM session per night that only comments may be pure cost — a
+possibility worth naming rather than discovering in three months.
+**Mitigation:** This is an explicit `## Open Questions` item for the PM. The plan is structured so
+that deleting the dispatch entirely is a strictly smaller change than keeping it: if the answer is
+"drop it", Task 4 shrinks rather than growing.
