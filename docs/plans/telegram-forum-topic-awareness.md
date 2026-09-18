@@ -7,7 +7,7 @@ created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
 last_comment_id: 5695879375
 revision_applied: true
-revision_applied_at: 2026-09-16T10:55:41Z
+revision_applied_at: 2026-09-18T00:00:00Z
 ---
 
 # Telegram Forum-Topic Awareness
@@ -78,8 +78,8 @@ rebased onto current main before editing `bridge/context.py` — the file no lon
 `c99cb231d` baseline. This plan's walk-termination change touches the session-root walk
 (`_cache_walk_root`), a different function in the same file — no design conflict.
 
-**Notes:** recovery scanners (`bridge/catchup.py:405`, `bridge/reconciler.py:321`,
-`bridge/agent_catchup.py:693`) key sessions per-message and never walk the reply chain, so
+**Notes:** recovery scanners (`bridge/catchup.py:409`, `bridge/reconciler.py:333`,
+`bridge/agent_catchup.py:699`) key sessions per-message and never walk the reply chain, so
 they do not share defect 3 — but they also capture no topic, so recovery-dispatched messages
 lose topic identity like everything else.
 
@@ -123,7 +123,7 @@ lose topic identity like everything else.
 ### spike-3: Do recovery scanners need the same fix?
 - **Assumption**: "Catchup/reconciler re-enqueues share the keying defect."
 - **Method**: code-read
-- **Finding**: They key `tg_{project}_{chat}_{message.id}` directly (catchup.py:409, reconciler.py:316, agent_catchup.py:688) — immune to collapse, but topic-blind. Re-verified 2026-09-16: they do **not** write `TelegramMessage` rows at all. The only production callers of `tools/telegram_history.store_message()` are `bridge/telegram_bridge.py:1567` (live intake), `bridge/telegram_bridge.py:3218` (outbound record) and `bridge/telegram_relay.py:383`. The scanners call `enqueue_agent_session`.
+- **Finding**: They key `tg_{project}_{chat}_{message.id}` directly (catchup.py:409, reconciler.py:333, agent_catchup.py:699) — immune to collapse, but topic-blind. Re-verified 2026-09-16: they do **not** write `TelegramMessage` rows at all. The only production callers of `tools/telegram_history.store_message()` are `bridge/telegram_bridge.py:1567` (live intake), `bridge/telegram_bridge.py:3218` (outbound record) and `bridge/telegram_relay.py:383`. The scanners call `enqueue_agent_session`.
 - **Confidence**: high
 - **Impact on plan**: topic capture must be a shared helper, not inline bridge code — but it lands in two distinct shapes: (a) row persistence via one new `store_message` kwarg threaded from live intake, and (b) session-context threading at the three scanners' `enqueue_agent_session` sites. Do not look for a scanner-side `TelegramMessage` write; there isn't one.
 
@@ -241,9 +241,21 @@ These are binding on the build, not advisory.
   that lands the keying correction deletes the caveat clause in the same commit, and the
   Verification table carries a row that fails while both the caveat string and the keying fix
   are present.
-- **N4 — Cross-topic bleed is asserted on rendered context (critique CONCERN 4).** See the new
-  Success Criterion and the `tests/unit/test_context_helpers.py` fixture in Test Impact: the
-  assertion is on the rendered context block's contents, not on `session_id` inequality.
+- **N4 — Cross-topic bleed is asserted on the surface that actually carries message content
+  (critique CONCERN 4; re-pointed 2026-09-18 per round-2 BLOCKER).** The round-1 closure aimed
+  the fixture at `build_context_prefix` (`bridge/context.py:110`), whose verified signature is
+  `(project, session_type, sender_id=None, persona=None, email_from=None, sender_name=None)
+  -> str` — it ingests no `TelegramMessage`, no chat history and no `content`, so "assert topic
+  A's content is absent from the rendered prefix" passes identically with and without the
+  defect. That closure was vacuous and is withdrawn.
+  **The real bleed surface is `build_conversation_history` (`bridge/context.py:319`)**, which
+  calls `get_recent_messages(str(chat_id), limit=limit)`
+  (`tools/telegram_history/__init__.py:544`). That query is `TelegramMessage.query.filter(
+  chat_id=str(chat_id))` — chat-scoped and topic-blind — so in a forum every topic's messages
+  land in one `RECENT CONVERSATION:` block. The fix and the fixture both move there:
+  `get_recent_messages` gains `topic_id: int | None = None` narrowing the query, and
+  `build_conversation_history(chat_id, limit=5, topic_id=None)` threads it. The fixture is then
+  **RED on current main**, which the `build_context_prefix` version can never be.
 - **N5 — Anti-criterion is range-scoped, not single-line (critique CONCERN 5).** See the
   rewritten Verification rows; the old `grep ... | grep -c "session_id = f"` form could only
   match when both substrings shared a line, and the real assignments (`:783`, `:793`, `:815`)
@@ -286,12 +298,32 @@ that shadow these.
   `TelegramMessage(...)` at `:650`, so the new nullable field surfaces here.)
 - [ ] `tests/unit/test_context_helpers.py` — UPDATE (**cross-topic bleed fixture, critique
   CONCERN 4 / Note N4**): build two synthetic `TelegramMessage` rows sharing one `chat_id` with
-  distinct `topic_id` values and distinct `content` strings, then render the context block
-  (`bridge/context.py::build_context_prefix`, `:110`) for topic B's message and assert topic A's
-  `content` string is **absent** from the rendered output. Assert on the rendered text, not on
+  distinct `topic_id` values and distinct `content` strings, then call
+  `build_conversation_history(chat_id, topic_id=<B>)` (`bridge/context.py:319`) and assert
+  topic A's `content` string is **absent** from the returned history block. Name the test
+  `test_cross_topic_history_does_not_bleed`. Assert on the rendered history text, not on
   `session_id` inequality — session-id inequality is already covered by the keying tests and
-  does not prove the user-visible harm (context bleed) is gone. This fixture is owned by Task 2
-  (build-keying) and is part of its held scope.
+  does not prove the user-visible harm (context bleed) is gone.
+  **RED-on-main requirement:** before the filter lands, this test must be demonstrated failing
+  against `main` (topic A's content IS present, because `get_recent_messages` filters on
+  `chat_id` only). A build that cannot show it red has not built the criterion this Note
+  exists for. This fixture is owned by **Task 4** (build-context), which owns the history
+  filter; Task 2 is not a prerequisite for it, because the bleed is a query-scope defect, not
+  a keying defect.
+- [ ] `tools/telegram_history/tests/test_telegram_history.py` and
+  `tests/tools/test_telegram_history.py` — UPDATE (**history filter, Note N4**): assert
+  `get_recent_messages(chat_id, topic_id=N)` returns only rows whose `topic_id == N`, that
+  `topic_id=None` (the default) returns every row in the chat unchanged, and that rows stored
+  before the field existed (`topic_id=None`) are not dropped by an unfiltered call.
+- [ ] `tests/unit/test_bridge_logic.py` — UPDATE (**stale mirror, critique CONCERN**): `:87`
+  defines a **local mirror** of `build_context_prefix` (its own docstring at `:97` says "Local
+  mirror of bridge.context.build_context_prefix for unit tests") exercised at `:398-421`.
+  Task 4 changes the real function's signature and output; the mirror would not change and the
+  suite would keep passing against a stale copy. **Preferred resolution: delete the mirror and
+  import `bridge.context.build_context_prefix` directly.** The docstring's stated reason for
+  the mirror (import-time side effects requiring a live bridge) must be re-tested before the
+  mirror is kept; if a direct import genuinely cannot work, the mirror's update lands in the
+  **same commit** as the real signature change. Owned by Task 4.
 - [ ] `tests/unit/test_model_relationships.py` — UPDATE (**hard break**): `:110` asserts
   `len(TelegramMessage._meta.field_names) == 20`. Adding `topic_id` makes it 21; the count
   must be bumped in the same commit as the model change or the suite goes red. Add a
@@ -314,7 +346,7 @@ that shadow these.
   topic rides into the enqueued `AgentSession` context. **Note the correction:** the three
   scanners do NOT persist `TelegramMessage` rows — they build `tg_{project}_{chat}_{msg_id}`
   session ids and call `enqueue_agent_session` (`bridge/catchup.py:409`,
-  `bridge/reconciler.py:316`, `bridge/agent_catchup.py:688`). The only production callers of
+  `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`). The only production callers of
   `store_message` are `bridge/telegram_bridge.py:1567` (live intake), `:3218` (outbound
   record) and `bridge/telegram_relay.py:383`. So scanner-path topic work is
   session-context threading, not row persistence.
@@ -397,9 +429,15 @@ that shadow these.
 - [ ] An unsolicited send in a group with `default_topic_id` configured produces `reply_to=<topic_id>`; with General or no config, `reply_to` is omitted.
 - [ ] Agent context for a topic message names the topic (name or id) — snapshot test.
 - [ ] **No cross-topic context bleed (user-vantage criterion, critique CONCERN 4 / Note N4):**
-  given two messages in the same `chat_id` under different topics, the context block rendered
-  for one topic's message contains none of the other topic's message content. Asserted on
-  rendered context in `tests/unit/test_context_helpers.py`. Held with Task 2.
+  given two `TelegramMessage` rows in the same `chat_id` under different topics,
+  `build_conversation_history(chat_id, topic_id=B)` returns a history block containing none of
+  topic A's `content`. Asserted in `tests/unit/test_context_helpers.py::
+  test_cross_topic_history_does_not_bleed`, which **must be shown RED on `main`** before the
+  filter lands. Owned by Task 4; NOT held behind Task 2.
+- [ ] `build_context_prefix` gains `topic_id: int | None = None` and
+  `topic_name: str | None = None` parameters (nothing in its current arg list can carry a
+  topic), and `tests/unit/test_bridge_logic.py` no longer covers a mirror that has drifted
+  from it.
 - [ ] While Task 2 is held, the rendered topic line carries the keying caveat (Note N3); once
   Task 2 merges, the caveat string is gone from `bridge/context.py` — one test per state.
 - [ ] Migration runs idempotently; second run is a no-op.
@@ -457,15 +495,23 @@ itself.
 
 ### 2. Keying correction + cache hygiene
 - **Task ID**: build-keying
-- **Depends On**: build-capture, build-context (shares `bridge/context.py` with Task 4 — see the Parallelism Contract)
+- **Depends On**: build-capture, build-context (shares `bridge/context.py` with Task 4 — see the Parallelism Contract), **verify-live** (the owner-action hold is in the graph, not only in prose — `do-build` must not dispatch this task before Task 7 resolves)
 - **Validates**: tests/unit/test_config_driven_routing.py, tests/unit/test_context_helpers.py
-- **Informed By**: spike-1 (two sites only), Risk 2, critique CONCERNs 3/4/5
+- **Informed By**: spike-1 (two sites only), Risk 2, critique CONCERNs 3/5
 - **Assigned To**: topic-routing-builder — **Agent Type**: builder — **Parallel**: false (wave 3, alone)
-- Continuation branch (`bridge/routing.py:1310`/`:1323`) + walk termination (`resolve_root_session_id` `:742`, `_cache_walk_root` `:839`) + root-cache namespace bump (`_set_cached_root` `:720`).
+- Continuation branch (`bridge/routing.py:1310`/`:1323`) + walk termination (`resolve_root_session_id` `:742`, `_cache_walk_root` `:839`) + root-cache namespace bump.
+- **Root-cache bump covers the READER too (critique CONCERN, 2026-09-18).** `_get_cached_root`
+  (`:697`) and `_set_cached_root` (`:720`) each build the key literal `session_root:{chat_id}:{msg_id}`
+  independently (`:710` and `:733`), and `resolve_root_session_id` calls the **reader first**
+  at `:781` to short-circuit the walk. Bumping only the writer leaves every pre-fix poisoned
+  entry served as authoritative at that short-circuit — reproducing the exact collapse Risk 2
+  claims to close — while post-fix writes are never read back. Introduce one module-level
+  `SESSION_ROOT_KEY_VERSION = "v2"` and a single shared key-builder used by **both** functions;
+  remove both key literals in the same commit.
 - **Gating checkboxes on this task (all in the same commit as the keying change):**
   - [ ] Delete the `(session keying not yet topic-aware — ...)` caveat clause Task 4 landed in `build_context_prefix` (Note N3). The plan is not done while both the caveat and the fix exist.
-  - [ ] Add the cross-topic-bleed fixture to `tests/unit/test_context_helpers.py` asserting on rendered context (Note N4).
-  - [ ] Both range-scoped anti-criterion Verification rows return `0` (Note N5).
+  - [ ] `_get_cached_root` and `_set_cached_root` both route through the shared versioned key-builder; no bare `session_root:{` literal remains in `bridge/context.py`.
+  - [ ] Both range-scoped anti-criterion Verification rows pass (Note N5).
 
 ### 3. Outbound default topic + env plumbing
 - **Task ID**: build-outbound
@@ -480,9 +526,27 @@ itself.
 ### 4. Context rendering + name resolution
 - **Task ID**: build-context
 - **Depends On**: build-capture
-- **Validates**: context snapshot test
+- **Validates**: context snapshot test, tests/unit/test_context_helpers.py (cross-topic bleed), tests/unit/test_bridge_logic.py
 - **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true (wave 2, with build-outbound)
 - Topic line in agent context (`bridge/context.py::build_context_prefix`, `:110`); lazy GetForumTopics cache, fail-soft; advisory subdir hint when configured.
+- **Explicit signature change (critique CONCERN 4 / round-2 BLOCKER).** `build_context_prefix`'s
+  current arg list carries nothing that can express a topic, so it MUST gain
+  `topic_id: int | None = None` and `topic_name: str | None = None`. Every call site updates in
+  the same commit. A topic line that renders without these params is rendering a constant.
+- **History topic filter (Note N4) — this task owns it.** `get_recent_messages`
+  (`tools/telegram_history/__init__.py:544`) gains `topic_id: int | None = None` narrowing the
+  `TelegramMessage.query.filter(...)`; `build_conversation_history` (`bridge/context.py:319`)
+  gains `topic_id: int | None = None` and threads it into that call. Default `None` preserves
+  today's chat-wide behavior byte-for-byte for non-forum callers. Land
+  `test_cross_topic_history_does_not_bleed` with it and record its RED-on-`main` run in the PR.
+- **Mirror resolution (critique CONCERN).** Delete the `build_context_prefix` mirror at
+  `tests/unit/test_bridge_logic.py:87` and import the real function, or update it in this same
+  commit. See Test Impact.
+- **Wave-2 file set additions** (disjoint from `build-outbound`, which owns
+  `bridge/telegram_relay.py`, `tools/send_message.py`, `agent/sdk_client.py`):
+  `tools/telegram_history/__init__.py`, `tests/unit/test_bridge_logic.py`,
+  `tests/unit/test_context_helpers.py`, `tools/telegram_history/tests/test_telegram_history.py`,
+  `tests/tools/test_telegram_history.py`.
 - **Note N3 applies — this is the mitigation for the split-merge window, not a comment about it.** While Task 2 is held, the topic line MUST render as `topic: <name-or-id> (session keying not yet topic-aware — messages from sibling topics may share this session)`. This task owns writing the caveat; Task 2 owns deleting it. Shipping the bare topic line before Task 2 merges is a blocker for this task's review.
 
 ### 5. Test suites
@@ -507,10 +571,22 @@ itself.
   the resulting session id and applies the pre-fixed verdict rule. Record results in the PR.
 - Gating: **only Task 2 (build-keying) is held behind this.** Tasks 1, 3, 4 proceed and merge.
 
-### 8. Final validation
+### 8. Final validation (unheld scope)
 - **Task ID**: validate-all
-- **Depends On**: all previous
+- **Depends On**: build-capture, build-outbound, build-context, test-suites, document-feature
 - **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: false
+- **Deliberately excludes `build-keying`** (critique CONCERN, 2026-09-18). Task 8 previously
+  declared `Depends On: all previous`, which blocked final validation of Tasks 1/3/4 on the
+  same indefinite owner action the split was designed to escape — the PR carrying the unheld
+  work would have had no validator able to complete. Runs every Verification row except the
+  four Task-2-scoped ones listed in Task 9.
+
+### 9. Keying validation (held scope)
+- **Task ID**: validate-keying
+- **Depends On**: build-keying
+- **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: false
+- Runs only the Task-2-scoped Verification rows: the two N5 anti-criterion rows, the
+  caveat-removal row, and the versioned-root-cache row. Confirms the Task 2 gating checkboxes.
 
 ## Verification
 
@@ -523,15 +599,22 @@ itself.
 | Field-count assertion updated | `grep -n "field_names) == 21" tests/unit/test_model_relationships.py` | one match |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
-| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5) | `sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -ci topic` | `0` |
-| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5) | `sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -ci topic` | `0` |
+| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5) | `! sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -qi topic` | exit code 0 |
+| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5) | `! sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -qi topic` | exit code 0 |
 | General topic omit rule uses a named constant (Note N1) | `grep -c "GENERAL_TOPIC_ID" bridge/telegram_relay.py` | `> 0` (**RED on current main: 0 matches**) |
-| No bare General literal in the topic guard (Note N1) | `grep -n "reply_to" bridge/telegram_relay.py \| grep -c "== 1"` | `0` |
+| No bare General literal in the topic guard (Note N1) | `! grep -n "reply_to" bridge/telegram_relay.py \| grep -q "== 1"` | exit code 0 |
 | Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | `> 0` |
-| No header sniffing at the enqueue site (Note N2) | `grep -c 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | `0` |
-| Keying caveat removed when Task 2 lands (Note N3) | `grep -c "session keying not yet topic-aware" bridge/context.py` | `> 0` while Task 2 is held; `0` in and after the commit that merges Task 2 |
-| Cross-topic bleed fixture exists (Note N4) | `grep -c "cross_topic" tests/unit/test_context_helpers.py` | `> 0` (with Task 2) |
-| fetch_reply_chain untouched (No-Go #2732) | `git diff main -- bridge/context.py \| grep -c "def fetch_reply_chain"` | match count == 0 |
+| No header sniffing at the enqueue site (Note N2) | `! grep -q 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | exit code 0 |
+| Keying caveat present while Task 2 is held (Note N3) | `grep -q "session keying not yet topic-aware" bridge/context.py` | exit code 0 — **run only before Task 2 merges** |
+| Keying caveat removed once Task 2 lands (Note N3; Task 9 scope) | `! grep -q "session keying not yet topic-aware" bridge/context.py` | exit code 0 — **run only in and after the Task 2 commit** |
+| History query is topic-aware (Note N4, round-2 BLOCKER) | `grep -q "topic_id" tools/telegram_history/__init__.py && grep -A6 -E "^def get_recent_messages" tools/telegram_history/__init__.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
+| `build_conversation_history` threads the topic (Note N4) | `grep -A2 -E "^def build_conversation_history" bridge/context.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
+| Cross-topic bleed fixture exists and targets history (Note N4) | `grep -q "test_cross_topic_history_does_not_bleed" tests/unit/test_context_helpers.py && grep -q "build_conversation_history" tests/unit/test_context_helpers.py` | exit code 0 — **RED on current main** |
+| Cross-topic bleed fixture is genuinely RED pre-fix (Note N4) | run `test_cross_topic_history_does_not_bleed` on `main` via `scripts/pytest-clean.sh` | test FAILS on `main`, passes on the branch; transcript recorded in the PR |
+| `build_context_prefix` can carry a topic (round-2 BLOCKER) | `grep -A8 -E "^def build_context_prefix" bridge/context.py \| grep -q "topic_name"` | exit code 0 — **RED on current main** |
+| Stale context-prefix mirror resolved (critique CONCERN) | `! grep -q "Local mirror of bridge.context.build_context_prefix" tests/unit/test_bridge_logic.py` | exit code 0 (deletion path); if the mirror is kept, its params must match — `grep -A8 -E "^def build_context_prefix" tests/unit/test_bridge_logic.py \| grep -q "topic_name"` |
+| Root cache is versioned on BOTH sides (critique CONCERN) | `! grep -q 'f"session_root:{chat_id}' bridge/context.py && grep -q "SESSION_ROOT_KEY_VERSION" bridge/context.py` | exit code 0 — **RED on current main** (two bare literals at `:710`, `:733`) |
+| fetch_reply_chain untouched (No-Go #2732) | `! git diff main -- bridge/context.py \| grep -q "def fetch_reply_chain"` | exit code 0 |
 
 ## Critique Results
 
@@ -543,13 +626,23 @@ anchors :110/:526/:720/:742/:839 are exact). **N3 is closed in form** — the ca
 required Task 4 behavior with a Task 2 deletion checkbox. **N4 is NOT closed** — see the BLOCKER
 below. The table is the round-2 findings.
 
+**Round-2 revision applied 2026-09-18.** All five round-2 findings are addressed; every
+coordinate the round-2 critique cited was independently re-verified against `origin/main`
+(`2eaa4c73d`, 15 commits past the SHA the critique used) before editing — `_get_cached_root:697`
+/ `:710`, `_set_cached_root:720` / `:733`, the `test_bridge_logic.py:87` mirror, and the three
+scanner assignments at `catchup.py:409` / `reconciler.py:333` / `agent_catchup.py:699` all still
+hold. The six new positive Verification rows were **executed on `main` and confirmed RED**; the
+five anti-criterion rows were rewritten from `grep -c ... | 0` to `! grep -q` exit-status form,
+because `grep -c` exits 1 on a zero count and so fails on exit status before its output is ever
+compared — the old rows could not distinguish "absent" from "command errored".
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Scope & Value + structural check | Note N4's cross-topic-bleed fixture and its Success Criterion both target `bridge/context.py::build_context_prefix` (`:110`), whose verified signature is `(project, session_type, sender_id=None, persona=None, email_from=None, sender_name=None) -> str`. It ingests **no** `TelegramMessage`, chat history, or `content` — so "render the context block for topic B's message and assert topic A's `content` is absent" is vacuously true with or without the defect, and would ship green while certifying a harm it cannot detect. The real bleed surface is `build_conversation_history(chat_id, limit)` (`bridge/context.py:319`), which calls `get_recent_messages(str(chat_id), ...)` — **chat-scoped and topic-blind**, so in a forum it mixes every topic's messages into one `RECENT CONVERSATION:` block. Neither `build_conversation_history` nor `get_recent_messages` appears anywhere in the plan, so Task 2's keying fix would not stop the bleed the Problem section costs. Task 4's topic line has the same target problem: `build_context_prefix` has no topic or message parameter to render from. | pending | Two edits, both required. (1) Re-point the N4 fixture and Success Criterion at `build_conversation_history` (`bridge/context.py:319`) and give it a topic filter: `get_recent_messages` must gain a `topic_id: int \| None = None` kwarg that narrows the `TelegramMessage` query, and `build_conversation_history(chat_id, limit, topic_id=None)` must thread it. The fixture is then RED on current main (two rows, one `chat_id`, distinct `topic_id` and `content`; assert topic A's `content` is absent from `build_conversation_history(chat_id, topic_id=B)`), which the `build_context_prefix` version can never be. Add the history-filter work to Task 4's scope and to the wave-2 file set. (2) State Task 4's `build_context_prefix` signature change explicitly — it must gain `topic_id: int \| None = None` and `topic_name: str \| None = None` params, since nothing in its current arg list can carry a topic. |
-| CONCERN | Risk & Robustness | Risk 2's cache-poisoning mitigation and Task 2's scope name only `_set_cached_root` (`bridge/context.py:720`) for the namespace bump. The **reader**, `_get_cached_root` (`:697`), builds the same key `session_root:{chat_id}:{msg_id}` (`:710`) and is called first by `resolve_root_session_id` at `:781` to short-circuit the walk. Bumping only the writer leaves every pre-fix poisoned entry still served as authoritative at that short-circuit — reproducing the exact collapse Risk 2 claims to close — while post-fix writes are never read back. | pending | Both functions build the key literal independently (`:710` and `:733`); the bump must change both in the same commit. Prefer a single module-level `SESSION_ROOT_KEY_VERSION = "v2"` with one shared key-builder used by `_get_cached_root` and `_set_cached_root`, and add a Verification row `grep -c "session_root:v2:" bridge/context.py` expecting `2` (or `1` for a shared builder) so a writer-only bump cannot ship green. Name `_get_cached_root` in Task 2's scope line beside `_set_cached_root`. |
-| CONCERN | Risk & Robustness + structural check | The Task 2 hold — the plan's central constraint — exists only in prose (`Prerequisites`, Task 7's "Gating" line). The machine-readable graph contradicts it in both directions: Task 2's `Depends On: build-capture, build-context` omits `verify-live` entirely, so `do-build` may dispatch the held task; and Task 8's `Depends On: all previous` includes the held `build-keying`, so final validation blocks on the same indefinite owner action the Tasks 1/3/4 split was designed to escape. | pending | Add `verify-live` to Task 2's `Depends On` so the hold is in the graph, not just the prose. Then split Task 8: `validate-all` gets `Depends On: build-capture, build-outbound, build-context, test-suites, document-feature` (drop `build-keying`), and a new Task 9 `validate-keying` gets `Depends On: build-keying` and runs only the Task-2-scoped rows (the two N5 anti-criterion rows, the caveat-removal row, the cross-topic-bleed row). Without this the PR carrying Tasks 1/3/4 has no validator that can complete before the owner acts. |
-| CONCERN | Structural check | `tests/unit/test_bridge_logic.py:87` defines a **local mirror** of `build_context_prefix` (its own docstring at `:97` says "Local mirror of bridge.context.build_context_prefix for unit tests") and exercises it at `:398-421`. Task 4 changes the real function's output and signature; the mirror will not change, so that suite keeps passing against a stale copy and silently stops covering the shipped behavior. Test Impact lists neither this file nor the mirror. | pending | Add `tests/unit/test_bridge_logic.py` to Test Impact as UPDATE and make Task 4 own it: either update the mirror at `:87` in the same commit as the real signature change, or delete the mirror and import `bridge.context.build_context_prefix` directly. A mirror that drifts from its original is the failure mode here, so prefer deletion + direct import; if the mirror exists to avoid an import cost, the update must land in the same commit or the suite is green-but-blind. |
-| CONCERN | History & Consistency | The three recovery-scanner session-id sites are cited with two mutually inconsistent, partly stale line sets: `Freshness Check / Notes` gives `catchup.py:405, reconciler.py:321, agent_catchup.py:693`; spike-3 and the Test Impact scanner bullet give `catchup.py:409, reconciler.py:316, agent_catchup.py:688`. Verified on `origin/main` @ `3b30830f6`: `catchup.py:409` is correct, `reconciler.py:316` is stale (actual `:333`), and `agent_catchup.py:688` is a docstring line, not the assignment (actual `:699`). The revision built a canonical anchor block for `bridge/context.py` but never ran the same pass over the scanner citations. | pending | Reconcile all three sections to the re-verified values `bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`, and delete the older `:405/:321/:693` set rather than leaving two sets in the doc. The load-bearing one is `agent_catchup.py:699` — `session_id = f"tg_{project_key}_{chat.chat_id}_{inbound.message_id}"` — which is where the scanner-path topic threading assertion belongs; `:688` is inside the docstring that starts near `:685`, and a builder navigating by it would misplace the test. Note this is a different site from Note N2's `ThreadMessage(...)` construction at `:435`, which stays as written. |
+| BLOCKER | Scope & Value + structural check | Note N4's cross-topic-bleed fixture and its Success Criterion both target `bridge/context.py::build_context_prefix` (`:110`), whose verified signature is `(project, session_type, sender_id=None, persona=None, email_from=None, sender_name=None) -> str`. It ingests **no** `TelegramMessage`, chat history, or `content` — so "render the context block for topic B's message and assert topic A's `content` is absent" is vacuously true with or without the defect, and would ship green while certifying a harm it cannot detect. The real bleed surface is `build_conversation_history(chat_id, limit)` (`bridge/context.py:319`), which calls `get_recent_messages(str(chat_id), ...)` — **chat-scoped and topic-blind**, so in a forum it mixes every topic's messages into one `RECENT CONVERSATION:` block. Neither `build_conversation_history` nor `get_recent_messages` appears anywhere in the plan, so Task 2's keying fix would not stop the bleed the Problem section costs. Task 4's topic line has the same target problem: `build_context_prefix` has no topic or message parameter to render from. | **ADDRESSED 2026-09-18.** Note N4 rewritten: the `build_context_prefix` closure is explicitly withdrawn as vacuous. Fixture and Success Criterion now target `build_conversation_history` (`:319`) / `get_recent_messages` (`tools/telegram_history/__init__.py:544`), both gaining `topic_id: int \| None = None`. History-filter work added to Task 4's scope and wave-2 file set. `build_context_prefix`'s `topic_id`/`topic_name` params are an explicit Task 4 deliverable and a Success Criterion. Six Verification rows added, all executed and confirmed RED on `main`, plus a row requiring the fixture's RED-on-`main` transcript in the PR. | Two edits, both required. (1) Re-point the N4 fixture and Success Criterion at `build_conversation_history` (`bridge/context.py:319`) and give it a topic filter: `get_recent_messages` must gain a `topic_id: int \| None = None` kwarg that narrows the `TelegramMessage` query, and `build_conversation_history(chat_id, limit, topic_id=None)` must thread it. The fixture is then RED on current main (two rows, one `chat_id`, distinct `topic_id` and `content`; assert topic A's `content` is absent from `build_conversation_history(chat_id, topic_id=B)`), which the `build_context_prefix` version can never be. Add the history-filter work to Task 4's scope and to the wave-2 file set. (2) State Task 4's `build_context_prefix` signature change explicitly — it must gain `topic_id: int \| None = None` and `topic_name: str \| None = None` params, since nothing in its current arg list can carry a topic. |
+| CONCERN | Risk & Robustness | Risk 2's cache-poisoning mitigation and Task 2's scope name only `_set_cached_root` (`bridge/context.py:720`) for the namespace bump. The **reader**, `_get_cached_root` (`:697`), builds the same key `session_root:{chat_id}:{msg_id}` (`:710`) and is called first by `resolve_root_session_id` at `:781` to short-circuit the walk. Bumping only the writer leaves every pre-fix poisoned entry still served as authoritative at that short-circuit — reproducing the exact collapse Risk 2 claims to close — while post-fix writes are never read back. | **ADDRESSED 2026-09-18.** Task 2 now names `_get_cached_root` (`:697`) beside `_set_cached_root` and mandates one `SESSION_ROOT_KEY_VERSION` with a shared key-builder used by both, removing both literals (`:710`, `:733`) in the same commit. Gating checkbox + Verification row added; row confirmed RED on `main`. | Both functions build the key literal independently (`:710` and `:733`); the bump must change both in the same commit. Prefer a single module-level `SESSION_ROOT_KEY_VERSION = "v2"` with one shared key-builder used by `_get_cached_root` and `_set_cached_root`, and add a Verification row `grep -c "session_root:v2:" bridge/context.py` expecting `2` (or `1` for a shared builder) so a writer-only bump cannot ship green. Name `_get_cached_root` in Task 2's scope line beside `_set_cached_root`. |
+| CONCERN | Risk & Robustness + structural check | The Task 2 hold — the plan's central constraint — exists only in prose (`Prerequisites`, Task 7's "Gating" line). The machine-readable graph contradicts it in both directions: Task 2's `Depends On: build-capture, build-context` omits `verify-live` entirely, so `do-build` may dispatch the held task; and Task 8's `Depends On: all previous` includes the held `build-keying`, so final validation blocks on the same indefinite owner action the Tasks 1/3/4 split was designed to escape. | **ADDRESSED 2026-09-18.** `verify-live` added to Task 2's `Depends On`. Task 8 (`validate-all`) re-scoped to `build-capture, build-outbound, build-context, test-suites, document-feature` — `build-keying` dropped — and new Task 9 (`validate-keying`, `Depends On: build-keying`) runs the four Task-2-scoped rows. | Add `verify-live` to Task 2's `Depends On` so the hold is in the graph, not just the prose. Then split Task 8: `validate-all` gets `Depends On: build-capture, build-outbound, build-context, test-suites, document-feature` (drop `build-keying`), and a new Task 9 `validate-keying` gets `Depends On: build-keying` and runs only the Task-2-scoped rows (the two N5 anti-criterion rows, the caveat-removal row, the cross-topic-bleed row). Without this the PR carrying Tasks 1/3/4 has no validator that can complete before the owner acts. |
+| CONCERN | Structural check | `tests/unit/test_bridge_logic.py:87` defines a **local mirror** of `build_context_prefix` (its own docstring at `:97` says "Local mirror of bridge.context.build_context_prefix for unit tests") and exercises it at `:398-421`. Task 4 changes the real function's output and signature; the mirror will not change, so that suite keeps passing against a stale copy and silently stops covering the shipped behavior. Test Impact lists neither this file nor the mirror. | **ADDRESSED 2026-09-18.** `tests/unit/test_bridge_logic.py` added to Test Impact as UPDATE, owned by Task 4, with deletion-plus-direct-import preferred and same-commit update as fallback. Verification row asserts the mirror docstring is gone (or the mirror's params match). | Add `tests/unit/test_bridge_logic.py` to Test Impact as UPDATE and make Task 4 own it: either update the mirror at `:87` in the same commit as the real signature change, or delete the mirror and import `bridge.context.build_context_prefix` directly. A mirror that drifts from its original is the failure mode here, so prefer deletion + direct import; if the mirror exists to avoid an import cost, the update must land in the same commit or the suite is green-but-blind. |
+| CONCERN | History & Consistency | The three recovery-scanner session-id sites are cited with two mutually inconsistent, partly stale line sets: `Freshness Check / Notes` gives `catchup.py:405, reconciler.py:321, agent_catchup.py:693`; spike-3 and the Test Impact scanner bullet give `catchup.py:409, reconciler.py:316, agent_catchup.py:688`. Verified on `origin/main` @ `3b30830f6`: `catchup.py:409` is correct, `reconciler.py:316` is stale (actual `:333`), and `agent_catchup.py:688` is a docstring line, not the assignment (actual `:699`). The revision built a canonical anchor block for `bridge/context.py` but never ran the same pass over the scanner citations. | **ADDRESSED 2026-09-18.** All three sections reconciled to the re-verified `bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`; the stale `:405/:321/:693` and `:316/:688` sets deleted. Re-confirmed on `2eaa4c73d`. Note N2's `ThreadMessage(...)` site at `:435` untouched. | Reconcile all three sections to the re-verified values `bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`, and delete the older `:405/:321/:693` set rather than leaving two sets in the doc. The load-bearing one is `agent_catchup.py:699` — `session_id = f"tg_{project_key}_{chat.chat_id}_{inbound.message_id}"` — which is where the scanner-path topic threading assertion belongs; `:688` is inside the docstring that starts near `:685`, and a builder navigating by it would misplace the test. Note this is a different site from Note N2's `ThreadMessage(...)` construction at `:435`, which stays as written. |
 
 ---
 
