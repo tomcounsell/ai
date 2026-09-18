@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -178,7 +178,7 @@ Medium rather than Small because the change is small in lines but wide in blast 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `git` >= 2.38 | `git --version` | `git worktree list --porcelain` and `merge-tree --write-tree` semantics relied on by the checked-out-branch pre-check and the existing `merged_via_tree` oracle |
-| Repo venv on the committed pin | `python -m tools.doctor` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
+| Repo venv on the committed pin | `.venv/bin/python -c "import pathlib,sys; pin=pathlib.Path('.python-version').read_text().strip(); assert sys.version.startswith(pin), f'venv {sys.version.split()[0]} != pin {pin}'"` | `scripts/pytest-clean.sh` aborts on an off-pin venv |
 
 No secrets, no external services, no network. The work is entirely local git + Popoto.
 
