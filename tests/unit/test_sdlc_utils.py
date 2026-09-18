@@ -1138,3 +1138,151 @@ class TestRevalidateLedgerLeaseRefreshesSignal:
             assert revalidate_ledger_lease(0, "run-mine", None) is False
             assert revalidate_ledger_lease(2659, "", None) is False
         write_signal.assert_not_called()
+
+
+class TestDeterministicPassOrdersThenNarrows:
+    """Risk 3 (#3091): order FIRST, narrow SECOND, take the head LAST.
+
+    ``find_session_by_issue``'s deterministic-id pass narrows by identity
+    re-check and by ``include_terminal`` — a NEGATIVE status filter Popoto's
+    equality filter cannot express, so it stays a Python-side list
+    comprehension over the ordered list. Taking the head before narrowing would
+    resurrect a dead lane's session as the live one (the #1915 shape).
+    """
+
+    def test_terminal_eng_row_loses_to_live_non_eng_row(self):
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead_eng = MagicMock(name="dead_eng")
+        dead_eng.session_id = "sdlc-local-3091"
+        dead_eng.session_type = "eng"
+        dead_eng.status = "failed"
+        dead_eng.issue_url = None
+        dead_eng.message_text = None
+
+        live_non_eng = MagicMock(name="live_non_eng")
+        live_non_eng.session_id = "sdlc-local-3091"
+        live_non_eng.session_type = "teammate"
+        live_non_eng.status = "running"
+        live_non_eng.issue_url = None
+        live_non_eng.message_text = None
+
+        def _filter(**kwargs):
+            if kwargs.get("session_type") == "eng":
+                return [dead_eng]
+            if kwargs.get("session_id") == "sdlc-local-3091":
+                return [dead_eng, live_non_eng]
+            return []
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = _filter
+        wire_session_lookup(mock_as)
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(3091)
+
+        # The ordering puts dead_eng first; the narrowing removes it; the head
+        # of what survives is the live row. A head-before-narrow implementation
+        # returns dead_eng here.
+        assert result is live_non_eng
+
+        # include_terminal=True keeps the eng preference visible, proving the
+        # ordering really did run first rather than the eng row being absent.
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            assert find_session_by_issue(3091, include_terminal=True) is dead_eng
+
+    def test_zero_rows_falls_through_to_the_message_text_fallback(self):
+        """FALL-THROUGH case — the deterministic pass resolves zero rows and
+        raises nothing, so resolution must CONTINUE to the ``message_text``
+        regex fallback rather than returning ``None``."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        bridge = MagicMock(name="bridge_session")
+        bridge.session_id = "tg_valor_-100_7"
+        bridge.session_type = "eng"
+        bridge.status = "running"
+        bridge.issue_url = None
+        bridge.message_text = "please pick up issue 3091"
+
+        def _filter(**kwargs):
+            if kwargs.get("session_type") == "eng":
+                return [bridge]
+            # The deterministic sdlc-local-3091 lookup finds NOTHING.
+            return []
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = _filter
+        wire_session_lookup(mock_as)
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(3091)
+
+        assert result is bridge
+
+
+class TestFindSessionZeroRowFallThrough:
+    """FALL-THROUGH cases for ``find_session`` (#3091): zero rows, no exception.
+
+    Distinct from the resolver-raises branch: a zero-row return never enters
+    the ``try/except``, so only the ``if found is not None`` guard keeps the
+    later tiers reachable. A bare ``return AgentSession.newest_for_session_id(
+    ...)`` at Step 1 loses THREE tiers at once — the issue-based pass, the
+    env-var pass, and auto-ensure — on exactly the path #1671/#1672 exist to
+    hold.
+    """
+
+    @staticmethod
+    def _empty_agent_session():
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
+        return mock_as
+
+    def test_step1_zero_rows_continues_to_the_issue_tier(self, monkeypatch):
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        issue_session = MagicMock(name="issue_session")
+        mock_as = self._empty_agent_session()
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", return_value=issue_session):
+                result = _sdlc_utils.find_session("explicit-id-with-no-rows", 3091)
+
+        # Not None, and not an early return: Step 2 ran and answered.
+        assert result is issue_session
+
+    def test_step1_zero_rows_continues_all_the_way_to_auto_ensure(self, monkeypatch):
+        from tools import _sdlc_utils
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        mock_as = self._empty_agent_session()
+        ensure_mock = MagicMock(return_value={"session_id": "sdlc-local-3091", "created": True})
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+                with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                    _sdlc_utils.find_session("explicit-id-with-no-rows", 3091, ensure=True)
+
+        # The observable proof the third tier was reached at all.
+        ensure_mock.assert_called_once_with(3091)
+
+    def test_step3_env_var_zero_rows_continues_to_auto_ensure(self, monkeypatch):
+        from tools import _sdlc_utils
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "env-id-with-no-rows")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        mock_as = self._empty_agent_session()
+        ensure_mock = MagicMock(return_value={"session_id": "sdlc-local-3091", "created": True})
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            with patch.object(_sdlc_utils, "find_session_by_issue", return_value=None):
+                with patch("tools.sdlc_session_ensure.ensure_session", ensure_mock):
+                    _sdlc_utils.find_session(None, 3091, ensure=True)
+
+        ensure_mock.assert_called_once_with(3091)

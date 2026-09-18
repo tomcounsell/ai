@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from tools.stage_states_helpers import update_stage_states
 
@@ -155,3 +155,65 @@ def test_handles_malformed_stage_states():
     assert ok is True
     data = json.loads(session.stage_states)
     assert data == {"_new": 1}
+
+
+class TestReloadSessionFallbacks:
+    """``_reload_session`` never hands ``None`` to the ``stage_states`` write loop (#3091).
+
+    Two DISTINCT branches, and conflating them is how this refactor breaks
+    silently. The resolver RAISING is caught by the ``try/except``. The resolver
+    returning ZERO ROWS raises nothing, so the ``except`` never fires and only
+    the falsy-list branch (``matches[0] if matches else session``) protects the
+    caller. A bare ``return newest_for_session_id(...)`` passes the raising test
+    and fails the fall-through one.
+    """
+
+    def test_returns_the_original_session_when_the_resolver_raises(self):
+        from tools.stage_states_helpers import _reload_session
+
+        session = _FakeSession(session_id="reload-raises-1")
+
+        mock_as = MagicMock()
+        mock_as.rows_for_session_id.side_effect = ConnectionError("Redis down")
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _reload_session(session)
+
+        assert result is session
+
+    def test_zero_rows_no_exception_returns_the_original_session(self):
+        """FALL-THROUGH case — zero rows, nothing raised.
+
+        ``assert result is session`` (identity, not truthiness): the write loop
+        proceeds against the caller's own object, exactly as before the
+        migration. ``None`` here would reach the ``stage_states`` write.
+        """
+        from tools.stage_states_helpers import _reload_session
+
+        session = _FakeSession(session_id="reload-empty-1")
+
+        mock_as = MagicMock()
+        mock_as.rows_for_session_id.return_value = []
+        mock_as.newest_for_session_id.return_value = None
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _reload_session(session)
+
+        mock_as.rows_for_session_id.assert_called_once_with("reload-empty-1", prefer_type="eng")
+        assert result is session
+
+    def test_resolved_row_replaces_the_snapshot_when_rows_exist(self):
+        """The non-degenerate path, so the two cases above cannot pass
+        vacuously against a resolver that always returns the argument."""
+        from tools.stage_states_helpers import _reload_session
+
+        session = _FakeSession(session_id="reload-hit-1")
+        fresh = _FakeSession(session_id="reload-hit-1")
+
+        mock_as = MagicMock()
+        mock_as.rows_for_session_id.return_value = [fresh]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _reload_session(session)
+
+        assert result is fresh

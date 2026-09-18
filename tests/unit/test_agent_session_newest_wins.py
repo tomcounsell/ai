@@ -173,6 +173,172 @@ class TestPreferTypeOrdering:
         assert [names[r.id] for r in rows] == ["eng_new", "eng_old", "pm_new", "pm_old"]
 
 
+class TestPreferTypeGrouping:
+    """Real-Redis grouping cases for ``prefer_type`` (#3091 task 6).
+
+    Proofs C and D above pin the two shapes a regression can take. These pin
+    the everyday contract the five ``[0]``-taking selection sites depend on:
+    preference beats recency, recency breaks ties inside a group, and every
+    degenerate input (no rows, no matching rows, no preference, no attribute)
+    degrades to the pre-``prefer_type`` behavior rather than to nothing.
+    """
+
+    def test_older_eng_row_leads_newer_non_eng_row(self, session_id):
+        """Preference beats recency — the reason the argument exists.
+
+        Seeded so the two rules DISAGREE: the eng row is the older of the two.
+        A resolver that ignored ``prefer_type`` returns the teammate row here
+        and every selection site takes the wrong ``[0]``.
+        """
+        newer_non_eng = _seed(session_id, _T0 + timedelta(hours=1), session_type="teammate")
+        older_eng = _seed(session_id, _T0, session_type="eng")
+
+        rows = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+        assert [r.id for r in rows] == [older_eng.id, newer_non_eng.id]
+        assert AgentSession.newest_for_session_id(session_id, prefer_type="eng").id == older_eng.id
+
+        # Without the preference, recency wins — the contract the ~74 other
+        # callers rely on is untouched.
+        assert AgentSession.newest_for_session_id(session_id).id == newer_non_eng.id
+
+    def test_newest_eng_leads_among_two_eng_rows(self, session_id):
+        """Inside the preferred group the ordering is still newest-first."""
+        newer_eng = _seed(session_id, _T0 + timedelta(hours=2), session_type="eng")
+        older_eng = _seed(session_id, _T0 + timedelta(hours=1), session_type="eng")
+        non_eng = _seed(session_id, _T0 + timedelta(hours=3), session_type="teammate")
+
+        rows = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+        assert [r.id for r in rows] == [newer_eng.id, older_eng.id, non_eng.id]
+        assert AgentSession.newest_for_session_id(session_id, prefer_type="eng").id == newer_eng.id
+
+    def test_no_eng_rows_yields_exactly_the_prefer_type_none_order(self, session_id):
+        """With nothing to prefer, the partition must be a no-op.
+
+        Asserted against the ``prefer_type=None`` list itself rather than a
+        hand-written expectation, so the two paths cannot drift apart.
+        """
+        _seed(session_id, _T0 + timedelta(hours=2), session_type="teammate")
+        _seed(session_id, _T0, session_type="teammate")
+        _seed(session_id, _T0 + timedelta(hours=1), session_type="teammate")
+
+        plain = [r.id for r in AgentSession.rows_for_session_id(session_id)]
+        preferred = [r.id for r in AgentSession.rows_for_session_id(session_id, prefer_type="eng")]
+        assert preferred == plain
+        assert len(plain) == 3
+
+    def test_group_internal_newest_first_holds_for_both_groups(self, session_id):
+        """Three rows per group, interleaved in time.
+
+        Interleaving is what makes this falsifiable: with the groups already
+        time-separated a composite sort key produces the same list. Here a
+        composite key orders each group oldest-first (or inverts the groups),
+        so both halves of the contract are exercised at once.
+        """
+        eng_a = _seed(session_id, _T0 + timedelta(hours=6), session_type="eng")
+        pm_a = _seed(session_id, _T0 + timedelta(hours=5), session_type="teammate")
+        eng_b = _seed(session_id, _T0 + timedelta(hours=4), session_type="eng")
+        pm_b = _seed(session_id, _T0 + timedelta(hours=3), session_type="teammate")
+        eng_c = _seed(session_id, _T0 + timedelta(hours=2), session_type="eng")
+        pm_c = _seed(session_id, _T0 + timedelta(hours=1), session_type="teammate")
+
+        rows = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+        assert [getattr(r, "session_type", None) for r in rows] == [
+            "eng",
+            "eng",
+            "eng",
+            "teammate",
+            "teammate",
+            "teammate",
+        ]
+        assert [r.id for r in rows] == [
+            eng_a.id,
+            eng_b.id,
+            eng_c.id,
+            pm_a.id,
+            pm_b.id,
+            pm_c.id,
+        ]
+
+    def test_empty_row_set_with_prefer_type_returns_empty_list_and_none(self):
+        """No rows is an empty list and a ``None`` — never a raise, never a
+        partial ``MagicMock``-ish sentinel. Every migrated call site's
+        fall-through branch is built on exactly these two values."""
+        sid = f"test-newest-wins-absent-{uuid.uuid4().hex[:8]}"
+        assert AgentSession.rows_for_session_id(sid, prefer_type="eng") == []
+        assert AgentSession.newest_for_session_id(sid, prefer_type="eng") is None
+
+    def test_prefer_type_none_and_empty_string_both_degrade_to_newest_first(self, session_id):
+        """The most likely silent-wrong-answer bug: a falsy ``prefer_type``
+        treated as "match nothing" instead of "no preference".
+
+        ``""`` is tested alongside ``None`` because the model's short-circuit is
+        ``if not prefer_type``, not ``if prefer_type is None`` — the two must
+        take the same exit.
+        """
+        newest = _seed(session_id, _T0 + timedelta(hours=2), session_type="teammate")
+        middle = _seed(session_id, _T0 + timedelta(hours=1), session_type="eng")
+        oldest = _seed(session_id, _T0, session_type="teammate")
+
+        expected = [newest.id, middle.id, oldest.id]
+        assert [r.id for r in AgentSession.rows_for_session_id(session_id)] == expected
+        assert [
+            r.id for r in AgentSession.rows_for_session_id(session_id, prefer_type=None)
+        ] == expected
+        assert [
+            r.id for r in AgentSession.rows_for_session_id(session_id, prefer_type="")
+        ] == expected
+
+        assert AgentSession.newest_for_session_id(session_id, prefer_type=None).id == newest.id
+        assert AgentSession.newest_for_session_id(session_id, prefer_type="").id == newest.id
+
+    def test_row_missing_session_type_attribute_neither_matches_nor_raises(self, session_id):
+        """A row with NO ``session_type`` attribute at all.
+
+        Every migrated site reads the type through ``getattr(..., None)``
+        precisely so an attribute-less row is a non-match rather than an
+        ``AttributeError``. A Popoto row always carries the field, so the
+        attribute-less row is constructed and the class set is stood in for
+        just this case — the object shape under test is the input to the
+        partition, not Redis. The real rows alongside it are seeded normally so
+        the ordering around the odd row is asserted too.
+        """
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        eng = _seed(session_id, _T0 + timedelta(hours=1), session_type="eng")
+        attrless = SimpleNamespace(id="zz-attrless", created_at=_T0 + timedelta(hours=2))
+        assert not hasattr(attrless, "session_type")
+
+        fake_query = MagicMock()
+        fake_query.filter.return_value = [attrless, eng]
+
+        with patch.object(AgentSession, "query", fake_query):
+            rows = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+
+        # No raise, and the attribute-less row lands in the NON-matching group
+        # despite being the newer of the two.
+        assert [r.id for r in rows] == [eng.id, "zz-attrless"]
+
+    def test_repeated_prefer_type_calls_return_the_identical_row(self, session_id):
+        """Race 1 stability: the same unchanged row set resolves the same way
+        every time. A set-order-dependent resolver flaps here."""
+        _seed(session_id, _T0 + timedelta(hours=3), session_type="teammate")
+        _seed(session_id, _T0 + timedelta(hours=2), session_type="eng")
+        _seed(session_id, _T0 + timedelta(hours=1), session_type="eng")
+        _seed(session_id, _T0, session_type="teammate")
+
+        picks = {
+            AgentSession.newest_for_session_id(session_id, prefer_type="eng").id for _ in range(10)
+        }
+        assert len(picks) == 1
+
+        orders = {
+            tuple(r.id for r in AgentSession.rows_for_session_id(session_id, prefer_type="eng"))
+            for _ in range(10)
+        }
+        assert len(orders) == 1
+
+
 class TestFetchLiveActiveRunId:
     """Proof A — the Risk 2 ordering proof for ``_fetch_live_active_run_id``.
 
@@ -239,3 +405,28 @@ class TestFetchLiveActiveRunId:
 
         assert _fetch_live_active_run_id(newer_non_eng) == "run-older-eng"
         assert _fetch_live_active_run_id(older_eng) == "run-older-eng"
+
+    def test_raising_resolver_skips_the_tick_instead_of_crashing(self, session_id):
+        """A resolver that RAISES must skip this renewal tick, not propagate.
+
+        ``_fetch_live_active_run_id`` runs on the tier-1 (60s) heartbeat tick.
+        An exception escaping it would take down the heartbeat; the contract is
+        a ``debug`` line and ``None``, with the next tick retrying. This is a
+        different branch from the zero-row fall-through cases: a zero-row return
+        never enters the ``except``.
+        """
+        from unittest.mock import patch
+
+        import agent.session_executor as session_executor
+
+        live = _seed(session_id, _T0, session_type="eng", active_run_id="run-live")
+
+        with patch.object(
+            session_executor.AgentSession,
+            "rows_for_session_id",
+            side_effect=ConnectionError("Redis down"),
+        ):
+            assert session_executor._fetch_live_active_run_id(live) is None
+
+        # The tick is skipped, not poisoned: the next call resolves normally.
+        assert session_executor._fetch_live_active_run_id(live) == "run-live"

@@ -1956,3 +1956,61 @@ class TestPrStateAndLedgerLessResolution:
             "cache must self-bound to issues polled within one TTL window, "
             f"found {len(q._ledgerless_pr_cache)} entries"
         )
+
+
+class TestFindSessionByIdExhaustionSignal:
+    """The class-set retry survives the ``prefer_type`` migration (#1720/#2550).
+
+    Routing the read through ``newest_for_session_id(..., prefer_type="eng")``
+    moved the ORDERING into the model; it must not have moved the RETRY. A
+    budget-exhausted read and a genuinely absent session both return ``None``,
+    so ``log_class_set_exhaustion`` is the only thing that distinguishes them —
+    collapsing the loop into the resolver, or returning the resolver's ``None``
+    from inside the loop, silently deletes that signal.
+    """
+
+    def test_logs_exhaustion_when_the_budget_runs_out(self):
+        from tools.sdlc_stage_query import _find_session_by_id
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        wire_session_lookup(mock_as)
+
+        exhaustion = MagicMock()
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("tools.sdlc_stage_query.class_set_retry_attempts", return_value=iter([1, 2, 3])),
+            patch("tools.sdlc_stage_query.log_class_set_exhaustion", exhaustion),
+        ):
+            result = _find_session_by_id("never-resolves")
+
+        assert result is None
+        exhaustion.assert_called_once()
+        # The final attempt number is reported, not a hard-coded cap.
+        assert exhaustion.call_args.args[1] == "_find_session_by_id"
+        assert exhaustion.call_args.args[2] == "never-resolves"
+        assert exhaustion.call_args.args[3] == 3
+        # Every attempt really re-read through the resolver, with the preference.
+        assert mock_as.newest_for_session_id.call_count == 3
+        mock_as.newest_for_session_id.assert_called_with("never-resolves", prefer_type="eng")
+
+    def test_does_not_log_exhaustion_when_a_row_resolves(self):
+        """The signal must stay specific: a hit on the first attempt is silent."""
+        from tools.sdlc_stage_query import _find_session_by_id
+
+        eng = MagicMock()
+        eng.session_type = "eng"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [eng]
+        wire_session_lookup(mock_as)
+
+        exhaustion = MagicMock()
+        with (
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("tools.sdlc_stage_query.class_set_retry_attempts", return_value=iter([1, 2, 3])),
+            patch("tools.sdlc_stage_query.log_class_set_exhaustion", exhaustion),
+        ):
+            assert _find_session_by_id("resolves-first-try") is eng
+
+        exhaustion.assert_not_called()
