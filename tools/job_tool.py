@@ -27,8 +27,18 @@ Usage (CLI; session resolved from ``VALOR_SESSION_ID``):
     python -m tools.job_tool expectation-add --job-id ID --direction outbound \
         --owner session/my-lane --text "lane delivers the fix PR"
     python -m tools.job_tool expectation-remove --job-id ID --expectation-id EID
+    python -m tools.job_tool expectation-block --job-id ID --expectation-id EID \
+        --code needs_human --by lane --detail "waiting on a human decision"
+    python -m tools.job_tool expectation-unblock --job-id ID --expectation-id EID
     python -m tools.job_tool show --job-id ID
     python -m tools.job_tool list
+
+A lane that cannot deliver an outbound expectation self-reports why with
+``expectation-block`` (#2862) rather than leaving the row silently stuck —
+the row stays open and the Job stays ``active``, so blocking is visibility,
+not an escape hatch. The PM clears it with ``expectation-unblock`` once
+whatever was missing (a human decision, a credential, an unmergeable PR) is
+resolved, which lets the reconciler resume acting on the row.
 """
 
 from __future__ import annotations
@@ -176,6 +186,42 @@ def remove_expectation(session_id: str, job_id: str, expectation_id: str) -> boo
     return removed
 
 
+def block_expectation(
+    session_id: str,
+    job_id: str,
+    expectation_id: str,
+    *,
+    code: str,
+    by: str,
+    detail: str = "",
+) -> bool:
+    """Annotate an open expectation as blocked (lane self-report or PM).
+
+    Returns ``False`` (never raises) for the Race 3 precedence refusal — an
+    incoming ``pm``/``lane`` write against an existing ``by="reconciler"``
+    annotation — so the caller can render the explicit refusal message
+    rather than a silent success.
+    """
+    from models.job import CorruptGoalError
+
+    job = _own_room_job(session_id, job_id)
+    try:
+        return job.block_expectation(expectation_id, code=code, by=by, detail=detail)
+    except (ValueError, CorruptGoalError) as e:
+        raise JobToolError(str(e)) from e
+
+
+def unblock_expectation(session_id: str, job_id: str, expectation_id: str) -> bool:
+    """Clear a blocked annotation (any caller; not restricted by precedence)."""
+    from models.job import CorruptGoalError
+
+    job = _own_room_job(session_id, job_id)
+    try:
+        return job.unblock_expectation(expectation_id)
+    except CorruptGoalError as e:
+        raise JobToolError(str(e)) from e
+
+
 def _job_summary(job) -> dict:
     return {
         "job_id": job.job_id,
@@ -216,6 +262,32 @@ def main() -> None:
     p_erem.add_argument("--job-id", required=True)
     p_erem.add_argument("--expectation-id", required=True)
 
+    p_eblock = sub.add_parser(
+        "expectation-block", help="Annotate an open expectation as blocked (lane or PM)"
+    )
+    p_eblock.add_argument("--job-id", required=True)
+    p_eblock.add_argument("--expectation-id", required=True)
+    p_eblock.add_argument(
+        "--code",
+        required=True,
+        choices=["needs_human", "missing_credential", "upstream_unmergeable"],
+        help="Why the row cannot progress. 'attempts_exhausted' is reconciler-only "
+        "and is never written through this CLI.",
+    )
+    p_eblock.add_argument(
+        "--by",
+        required=True,
+        choices=["pm", "lane"],
+        help="Who is reporting the block: the owning lane, or the PM on its behalf",
+    )
+    p_eblock.add_argument("--detail", default="", help="Free-text detail (may be empty)")
+
+    p_eunblock = sub.add_parser(
+        "expectation-unblock", help="Clear a blocked annotation so the reconciler resumes"
+    )
+    p_eunblock.add_argument("--job-id", required=True)
+    p_eunblock.add_argument("--expectation-id", required=True)
+
     p_show = sub.add_parser("show", help="Show one Job in your Room")
     p_show.add_argument("--job-id", required=True)
 
@@ -253,6 +325,51 @@ def main() -> None:
                 )
                 sys.exit(1)
             print(json.dumps({"removed": True, "expectation_id": args.expectation_id}, indent=2))
+        elif args.command == "expectation-block":
+            blocked = block_expectation(
+                session_id,
+                args.job_id,
+                args.expectation_id,
+                code=args.code,
+                by=args.by,
+                detail=args.detail,
+            )
+            if not blocked:
+                job = _own_room_job(session_id, args.job_id)
+                existing = None
+                for entry in job.all_expectations():
+                    if entry.get("id") == args.expectation_id:
+                        existing = entry.get("blocked")
+                        break
+                if existing and existing.get("by") == "reconciler":
+                    print(
+                        f"Error: expectation {args.expectation_id} is blocked by the "
+                        f"reconciler as {existing.get('code')}; unblock it first.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"Error: no open expectation {args.expectation_id!r} on "
+                        f"job {args.job_id!r}.",
+                        file=sys.stderr,
+                    )
+                sys.exit(1)
+            print(
+                json.dumps(
+                    {"blocked": True, "expectation_id": args.expectation_id, "code": args.code},
+                    indent=2,
+                )
+            )
+        elif args.command == "expectation-unblock":
+            unblocked = unblock_expectation(session_id, args.job_id, args.expectation_id)
+            if not unblocked:
+                print(
+                    f"Error: no blocked open expectation {args.expectation_id!r} on "
+                    f"job {args.job_id!r}.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            print(json.dumps({"unblocked": True, "expectation_id": args.expectation_id}, indent=2))
         elif args.command == "show":
             job = _own_room_job(session_id, args.job_id)
             print(json.dumps(_job_summary(job), indent=2))

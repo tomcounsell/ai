@@ -18,8 +18,10 @@ from tools.job_tool import (
     JobToolError,
     add_expectation,
     author_goal,
+    block_expectation,
     create_job,
     remove_expectation,
+    unblock_expectation,
 )
 
 
@@ -160,3 +162,77 @@ class TestExpectations:
 
         fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
         assert fresh.open_expectations() == []
+
+
+class TestBlockedExpectations:
+    """PM-facing end to end: block, see it in `show`-style reads, unblock."""
+
+    def test_lane_blocks_and_pm_sees_it_then_unblocks(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id,
+            job.job_id,
+            "deliver the migration PR",
+            direction="outbound",
+            owner="session/job-expectations",
+        )
+
+        assert (
+            block_expectation(
+                session.session_id,
+                job.job_id,
+                eid,
+                code="needs_human",
+                by="lane",
+                detail="ambiguous request, nobody answered",
+            )
+            is True
+        )
+
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        entry = fresh.open_expectations()[0]
+        assert entry["blocked"]["code"] == "needs_human"
+        assert entry["blocked"]["by"] == "lane"
+        assert entry["blocked"]["detail"] == "ambiguous request, nobody answered"
+
+        assert unblock_expectation(session.session_id, job.job_id, eid) is True
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        assert fresh.open_expectations()[0]["blocked"] is None
+
+    def test_room_scope_enforced_on_block(self, scratch_session):
+        session, _rid = scratch_session
+        other_rid = f"test-jobtool-other-{uuid.uuid4().hex[:8]}|telegram:9"
+        foreign = Job.mint(other_rid, "someone else's work")
+        eid = foreign.add_expectation("deliver", direction="outbound", owner="lane-1")
+        try:
+            with pytest.raises(JobToolError, match="not found in your Room"):
+                block_expectation(
+                    session.session_id, foreign.job_id, eid, code="needs_human", by="lane"
+                )
+        finally:
+            foreign.delete()
+
+    def test_unknown_code_converts_to_job_tool_error(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "deliver", direction="outbound", owner="lane-1"
+        )
+
+        with pytest.raises(JobToolError, match="code"):
+            block_expectation(session.session_id, job.job_id, eid, code="bogus", by="lane")
+
+    def test_corrupt_goal_converts_to_job_tool_error(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "deliver", direction="outbound", owner="lane-1"
+        )
+        job.goal = "{not json"
+        job.save()
+
+        with pytest.raises(JobToolError):
+            block_expectation(session.session_id, job.job_id, eid, code="needs_human", by="lane")
+        with pytest.raises(JobToolError):
+            unblock_expectation(session.session_id, job.job_id, eid)
