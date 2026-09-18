@@ -18,6 +18,8 @@ import uuid
 import pytest
 
 from models.job import (
+    BLOCKED_BY,
+    BLOCKED_REASONS,
     GOAL_PLACEHOLDER_PREFIX,
     JOB_AT_REST_AGE_SECONDS,
     JOB_RECENT_OVERFETCH,
@@ -160,6 +162,173 @@ class TestExpectations:
             job.add_expectation(**kwargs)
 
         assert job.open_expectations() == []
+
+
+class TestBlockedExpectations:
+    """Blocked is an annotation on an open entry, not a third state (#2862)."""
+
+    def test_block_and_unblock_round_trip(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        assert job.block_expectation(eid, code="needs_human", by="lane", detail="ambiguous") is True
+
+        entry = job.open_expectations()[0]
+        assert entry["blocked"]["code"] == "needs_human"
+        assert entry["blocked"]["detail"] == "ambiguous"
+        assert entry["blocked"]["by"] == "lane"
+        assert entry["blocked"]["ts"]
+        assert job.blocked_expectations() == [entry]
+
+        assert job.unblock_expectation(eid) is True
+        assert job.open_expectations()[0]["blocked"] is None
+        assert job.blocked_expectations() == []
+
+    def test_discharge_preserves_the_last_blocked_annotation(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.block_expectation(eid, code="missing_credential", by="pm")
+
+        assert job.discharge_expectation(eid) is True
+
+        history = job.all_expectations()[0]
+        assert history["removed_ts"] is not None
+        assert history["blocked"]["code"] == "missing_credential"
+
+    def test_absent_key_reads_as_not_blocked(self, scratch_room_id):
+        """A hand-written legacy entry with no `blocked` key at all — the
+        shape every pre-existing entry has, since add_expectation never
+        writes the key."""
+        job = Job.mint(scratch_room_id, "ship the lane")
+        job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        entry = job.open_expectations()[0]
+        assert "blocked" not in entry
+        assert entry.get("blocked") is None
+        assert job.blocked_expectations() == []
+
+    def test_unknown_code_is_rejected(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        with pytest.raises(ValueError, match="code"):
+            job.block_expectation(eid, code="something_else", by="lane")
+
+    def test_empty_code_raises_before_any_write(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        before = job.goal
+
+        with pytest.raises(ValueError, match="code"):
+            job.block_expectation(eid, code="", by="lane", detail="")
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal == before
+
+    def test_unknown_by_is_rejected(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        with pytest.raises(ValueError, match="by"):
+            job.block_expectation(eid, code="needs_human", by="robot")
+
+    def test_attempts_exhausted_requires_reconciler(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        with pytest.raises(ValueError, match="reconciler"):
+            job.block_expectation(eid, code="attempts_exhausted", by="lane")
+        with pytest.raises(ValueError, match="reconciler"):
+            job.block_expectation(eid, code="attempts_exhausted", by="pm")
+
+        assert job.block_expectation(eid, code="attempts_exhausted", by="reconciler") is True
+
+    def test_reconciler_may_write_no_other_code(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+
+        with pytest.raises(ValueError, match="attempts_exhausted"):
+            job.block_expectation(eid, code="needs_human", by="reconciler")
+
+    def test_frozen_vocabulary_is_exactly_four_members(self):
+        assert BLOCKED_REASONS == {
+            "attempts_exhausted",
+            "needs_human",
+            "missing_credential",
+            "upstream_unmergeable",
+        }
+        assert BLOCKED_BY == {"reconciler", "pm", "lane"}
+
+    def test_unknown_or_discharged_id_returns_false_and_writes_nothing(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.discharge_expectation(eid)
+        before = Job.query.get(id=job.id, room_id=scratch_room_id).goal
+
+        assert job.block_expectation("nonexistent-eid", code="needs_human", by="lane") is False
+        assert job.block_expectation(eid, code="needs_human", by="lane") is False
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal == before
+
+    def test_corrupt_goal_refuses_block_and_unblock(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.goal = CORRUPT_GOAL
+        job.save()
+        job = Job.query.get(id=job.id, room_id=scratch_room_id)
+
+        with pytest.raises(CorruptGoalError):
+            job.block_expectation(eid, code="needs_human", by="lane")
+        with pytest.raises(CorruptGoalError):
+            job.unblock_expectation(eid)
+
+    def test_has_open_expectations_and_status_unchanged_by_block(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.block_expectation(eid, code="needs_human", by="lane")
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.has_open_expectations is True
+        assert reloaded.status == "active"
+
+    def test_blocked_inbound_expectation_still_counts_as_open(self, scratch_room_id):
+        """The promise gate clears on `open_expectations(direction="inbound")`
+        being non-empty; a blocked inbound entry must not disappear from it."""
+        job = Job.mint(scratch_room_id, "check the deploy")
+        eid = job.add_expectation("I'll report back")
+        job.block_expectation(eid, code="needs_human", by="pm")
+
+        assert len(job.open_expectations(direction="inbound")) == 1
+
+    def test_race_3_reconciler_annotation_is_not_overwritten_by_pm_or_lane(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.block_expectation(eid, code="attempts_exhausted", by="reconciler")
+        before = Job.query.get(id=job.id, room_id=scratch_room_id).goal
+
+        assert job.block_expectation(eid, code="needs_human", by="pm") is False
+        assert job.block_expectation(eid, code="needs_human", by="lane") is False
+
+        reloaded = Job.query.get(id=job.id, room_id=scratch_room_id)
+        assert reloaded.goal == before
+        assert reloaded.open_expectations()[0]["blocked"]["by"] == "reconciler"
+
+    def test_race_3_reconciler_may_overwrite_a_lane_annotation(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.block_expectation(eid, code="needs_human", by="lane")
+
+        assert job.block_expectation(eid, code="attempts_exhausted", by="reconciler") is True
+        assert job.open_expectations()[0]["blocked"]["by"] == "reconciler"
+
+    def test_unblock_clears_a_reconciler_annotation_regardless_of_caller(self, scratch_room_id):
+        job = Job.mint(scratch_room_id, "ship the lane")
+        eid = job.add_expectation("deliver the PR", direction="outbound", owner="lane-1")
+        job.block_expectation(eid, code="attempts_exhausted", by="reconciler")
+
+        assert job.unblock_expectation(eid) is True
+        assert job.open_expectations()[0]["blocked"] is None
 
 
 class TestStatusProjection:

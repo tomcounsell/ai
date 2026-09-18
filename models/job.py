@@ -74,6 +74,22 @@ JOB_AT_REST_AGE_SECONDS = int(os.environ.get("JOB_AT_REST_AGE_SECONDS", str(72 *
 # rate, which is near zero outside the repair window.
 JOB_RECENT_OVERFETCH = int(os.environ.get("JOB_RECENT_OVERFETCH", "5"))
 
+# Closed vocabulary for `entry["blocked"]["code"]` (issue #2862). Exactly the
+# four codes that have a day-one writer: `attempts_exhausted` (reconciler
+# only — its own "recovery budget spent" verdict), and `needs_human` /
+# `missing_credential` / `upstream_unmergeable` (lane or PM via
+# `job_tool expectation-block`). `owner_gone` is deliberately absent — it has
+# no writer until the session-health drift-advisory lands one, and shipping
+# an unemittable member would be speculative widening of a supposedly closed
+# set. Widening this set is a deliberate two-file edit (here + the frozen-set
+# test in tests/unit/test_job_model.py), never a silent one.
+BLOCKED_REASONS = frozenset(
+    {"attempts_exhausted", "needs_human", "missing_credential", "upstream_unmergeable"}
+)
+
+# Closed vocabulary for `entry["blocked"]["by"]` (issue #2862).
+BLOCKED_BY = frozenset({"reconciler", "pm", "lane"})
+
 
 def _now() -> datetime:
     return datetime.now(tz=UTC)
@@ -130,7 +146,13 @@ class Job(Model):
     # Append-only-versioned goal + expectations, JSON (schema v2):
     #   {"versions": [{"ts", "author", "text"}, ...],
     #    "expectations": [{"id", "ts", "direction", "holder", "owner",
-    #                      "what", "removed_ts", "placeholder"}, ...]}
+    #                      "what", "removed_ts", "placeholder",
+    #                      "blocked": {"code", "detail", "ts", "by"} | None},
+    #                     ...]}
+    # `blocked` is an annotation on an OPEN entry, not a third state
+    # (issue #2862): orthogonal to `removed_ts`, absence reads as not
+    # blocked. See Job.block_expectation / unblock_expectation /
+    # blocked_expectations.
     goal = Field(null=True)
     # Derived projection of `goal`, maintained at the _write_goal_data
     # chokepoint so it cannot be bypassed. Bounds the reconciler's scan to
@@ -436,6 +458,100 @@ class Job(Model):
 
     def all_expectations(self) -> list[dict]:
         return list(self._goal_data()["expectations"])
+
+    def block_expectation(
+        self,
+        expectation_id: str,
+        *,
+        code: str,
+        by: str,
+        detail: str = "",
+    ) -> bool:
+        """Annotate an open expectation as blocked. An annotation, not a state.
+
+        The row stays open (``removed_ts`` untouched), ``has_open_expectations``
+        stays ``True``, and ``status`` stays forced ``active`` at
+        ``_write_goal_data`` — blocked means unfinished work awaiting a human,
+        which is exactly what ``active`` already means (issue #2862).
+
+        ``code`` must be a member of :data:`BLOCKED_REASONS` and ``by`` a
+        member of :data:`BLOCKED_BY`; either violation raises ``ValueError``
+        before any write. ``code="attempts_exhausted"`` is reconciler-only —
+        the reconciler's own "recovery budget spent" verdict — and is
+        rejected with any ``by`` other than ``"reconciler"``; conversely
+        ``by="reconciler"`` may write no other code. This is a biconditional,
+        checked both directions, so a lane cannot forge the reconciler's
+        judgment (Settled Decision 2).
+
+        Returns ``False`` and writes nothing for an unknown or
+        already-discharged ``expectation_id`` (mirrors
+        :meth:`discharge_expectation`), and also for the Race 3 precedence
+        rule: an incoming ``by`` of ``"pm"`` or ``"lane"`` may never overwrite
+        an existing ``by="reconciler"`` annotation on the same entry — the
+        reconciler's verdict is authoritative until a human clears it via
+        :meth:`unblock_expectation`. Every other combination (no existing
+        annotation; an existing ``pm``/``lane`` annotation superseded by
+        anyone; the reconciler repeating its own write) writes normally.
+
+        Raises :class:`CorruptGoalError` (via ``_mutable_goal_data``) rather
+        than silently accepting a block/unblock on a corrupt goal.
+        """
+        if code not in BLOCKED_REASONS:
+            raise ValueError(f"blocked code must be one of {sorted(BLOCKED_REASONS)}, got {code!r}")
+        if by not in BLOCKED_BY:
+            raise ValueError(f"blocked by must be one of {sorted(BLOCKED_BY)}, got {by!r}")
+        if code == "attempts_exhausted" and by != "reconciler":
+            raise ValueError("code='attempts_exhausted' may only be written with by='reconciler'")
+        if by == "reconciler" and code != "attempts_exhausted":
+            raise ValueError("by='reconciler' may only write code='attempts_exhausted'")
+        data = self._mutable_goal_data()
+        for entry in data["expectations"]:
+            if entry.get("id") == expectation_id and entry.get("removed_ts") is None:
+                existing = entry.get("blocked")
+                if (
+                    isinstance(existing, dict)
+                    and existing.get("by") == "reconciler"
+                    and by in ("pm", "lane")
+                ):
+                    return False
+                entry["blocked"] = {
+                    "code": code,
+                    "detail": str(detail or ""),
+                    "ts": _now().isoformat(),
+                    "by": by,
+                }
+                self._write_goal_data(data)
+                return True
+        return False
+
+    def unblock_expectation(self, expectation_id: str) -> bool:
+        """Clear a blocked annotation. Not restricted by the Race 3 precedence rule.
+
+        A PM (or lane) can always clear any annotation, including one written
+        by the reconciler, and then re-block with their own code — the human
+        stays the final authority without letting a lane forge past the
+        reconciler (issue #2862). Returns ``False`` and writes nothing for an
+        unknown/discharged id, or for an open entry that carries no
+        annotation.
+        """
+        data = self._mutable_goal_data()
+        for entry in data["expectations"]:
+            if entry.get("id") == expectation_id and entry.get("removed_ts") is None:
+                if entry.get("blocked") is None:
+                    return False
+                entry["blocked"] = None
+                self._write_goal_data(data)
+                return True
+        return False
+
+    def blocked_expectations(self, *, direction: str | None = None) -> list[dict]:
+        """Open expectations carrying a blocked annotation, without parsing free text.
+
+        A filter over :meth:`open_expectations` — ``blocked`` rows are always
+        a subset of open rows, so no separate index is needed (issue #2862).
+        """
+        entries = [e for e in self.open_expectations(direction=direction) if e.get("blocked")]
+        return entries
 
     # -- Lifecycle (rest by age, revived by any steer; never hard-closed) ---
 
