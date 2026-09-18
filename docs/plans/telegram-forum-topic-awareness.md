@@ -742,6 +742,58 @@ reached it a third time. Two distinct mechanisms, two distinct fixes.
 | CONCERN | Risk & Robustness | Task 8's row set is "every Verification row except the four Task-2-scoped ones", which leaves it running the Note N3 row "Keying caveat present while Task 2 is held" (`:608`, expected exit 0). That row's precondition — "run only before Task 2 merges" — exists only in prose. Nothing in the graph orders Task 8 against Task 9, so if the owner resolves `verify-live` quickly and Task 2 lands first, Task 2's gating checkbox (`:512`) will have deleted the caveat string before Task 8 evaluates the row, and Task 8 fails on a correctly-shipped, fully-merged feature. A false negative produced purely by task-completion order, with no defect in the code. | **ADDRESSED 2026-09-18.** The "Keying caveat present while Task 2 is held" row is **deleted from the Verification table** and re-homed as a Task 4 review check, where Task 2 does not yet exist. Only the "caveat removed" row survives, scoped to Task 9. Rationale recorded in Task 4: the table is run by validators whose dependency sets permit running after Task 2 merged, and a row whose precondition lives only in prose is not a row. | The two N3 rows are mutually exclusive by construction, so they must never both be live. Drop "Keying caveat present while Task 2 is held" from Task 8's automatic set entirely — it is not one of the four rows named as Task-2-scoped, so as written Task 8 runs it unconditionally. Enforce "caveat present pre-hold" in Task 4's own review instead (before Task 2 exists at all), and leave the "caveat removed" row to Task 9. A validator whose dependency set permits running after Task 2 has merged must not assert pre-merge state. |
 
 
+### Round 4 (2026-09-18, FULL roster, independent) — scoped re-critique
+
+Roster: Risk & Robustness, Scope & Value, History & Consistency. Mode: independent roster
+(3 critics), dispatched concurrently with no shared context. Roster gate `complete: true`,
+3/3, `ungrounded: []`.
+
+**Why this round exists.** The ledger carried `latest_critique_verdict: "NEEDS REVISION"`
+(recorded `06:17:45Z`) with `revision_applied_at: 2026-09-18T06:22:07Z` on top of it and no
+re-judgement. A `/do-build` dispatch at `06:24:36Z` proceeded over that standing verdict by
+coordinator fiat, leaving no trace in the substrate. The `/do-build` orchestrator itself
+pulled `stage-query`, saw the contradiction, and halted rather than proceeding on the
+dispatch alone. The coordinator reversed: **a dispatch is not a warrant for a state the
+ledger contradicts.** This is the asserted-versus-read gap tracked on #3065.
+
+**Scope.** Round 3 restructured the task graph — it split Task 5, created Task 10, re-homed
+the N3 caveat row, and rewrote Task 8's closure — and no critic had ever read that
+restructure; it was verified only by two mechanical checks run by the lane itself. Round 4
+was therefore scoped to Tasks 5, 6, 8, 10, their closure, and one seeded question. Tasks 1,
+3 and 4 predate the restructure and were out of scope, which is why their commits stand.
+
+**The seeded question, and why it was seeded.** Task 4's brief directed the builder to
+resolve the topic name via `resolve_topic_name` inside `agent/session_executor.py`. The
+builder refused and was upheld: the instruction was unsatisfiable for two independent
+reasons — `grep -c "telethon\|TelegramClient" agent/session_executor.py` returns 0 and every
+`bridge.*` import in that file is a pure function, and the signature is `async def
+resolve_topic_name(client: TelegramClient, chat_id: int, topic_id: int) -> str | None`, so
+the seam would also need an `await` it cannot have. The plan had the right producer (Tasks 1
+and 3 write `topic_id` bridge-side at intake, where the client lives) and pointed the
+consumer at the wrong process. Ruled a **plan defect, not a builder shortfall**. The critics
+were asked: does any other task cross the bridge/worker boundary the same way?
+
+**The answer was no — and that is what exposed the blocker.** All three critics independently
+confirmed Tasks 5, 6, 8 and 10 direct no cross-process work. Scope & Value then drew the
+consequence nobody had: if no task in the region wires a bridge-side caller, and Task 4's
+consumer correctly cannot, then **no task in the plan owns wiring one at all**, and the
+naming half of the feature is permanently unreachable. Verified independently:
+`grep -rn "resolve_topic_name(" --include='*.py' bridge/ agent/ tools/`, excluding the
+definition and tests, returns **zero** production callers on the branch.
+
+**Independent convergence.** Risk & Robustness and History & Consistency each reached the
+same structural shape from different lenses — an item or row whose owning task is fixed only
+in prose, not in the graph or the table — landing on three different sites (Test Impact
+`:296`, Verification `:681`, Task 5's exception list). The round-3 split closed that shape
+for the items it named and left it open for the ones it did not.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Scope & Value (elevated from CONCERN by the lane; corroborated negatively by Risk & Robustness and History & Consistency, which each confirmed no task in the region wires the caller) | **No task owns a bridge-side caller for `resolve_topic_name`, so the naming half of the feature is dead code.** `resolve_topic_name` (`bridge/context.py:217`) requires a live `TelegramClient`; the only production path into `build_context_prefix` is worker-side (`agent/session_runner/harness/claude.py:1701-1711` via `agent/session_executor.py:2302`), which correctly renders id-only and says so in a comment at `:2296-2299`. A tree-wide sweep finds the symbol only in its own definition and in unit tests — **zero production callers**. Tasks 1, 3, 4, 5, 6, 8, 9 and 10 all decline to wire it, and none is assigned to. The failure is silent in both directions: Success Criterion `:455` is hedged to "names the topic (name or id)", so Task 8 `validate-all` goes **green** while certifying nothing about whether naming ever fires, and Task 6 would document a best-effort naming behavior that cannot occur in production. This is the same defect family the lane has hit three times: a criterion that passes whether or not the work was done. | pending | The resolved shape is already known from the Task 4 ruling: resolve bridge-side where the client lives, carry the result on `extra_context["topic_name"]` beside the `topic_id` the scanners already write (`bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`), and the `session_executor.py` consumer becomes a one-line read. This needs an **owning task with an explicit file set**, not a note — the producer side is a new edit to the three scanners plus live intake, which is Task 1/3 territory and therefore rework of committed work (`23eb0a6f6`, `39e51bc0f`). The anti-criterion that closes it must be a **zero-production-caller** check that is RED today: `[ "$(grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l \| tr -d ' ')" != "0" ]`. Do NOT close this by deleting `resolve_topic_name` and committing to id-only unless the owner rules that way explicitly — that is a scope decision, not a build decision. |
+| CONCERN | Risk & Robustness | The Test Impact bullet at `:296` (`tests/unit/test_context_helpers.py` — topic-root termination cases and root-cache namespace assertions) carries **no ownership tag**, unlike its sibling bullets which are individually marked. Task 10 claims it in prose only. A test-engineer executing Task 5 off the Test Impact checklist would implement it, referencing Task 2 code that does not exist yet, and fail Task 8's `tests pass` row for reasons entirely outside Task 8's dependency closure — reintroducing the stall the round-3 split removed, by a different route. | pending | Add the inline ownership tag to the `:296` bullet in the same form the neighbouring bullets already use — `(**Task 10 scope, held behind Task 2**)`. The guard is that Task 5's brief says "every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10", so an item whose Task-2 scoping is stated only inside Task 10's own body is not excluded by Task 5's rule as a reader applies it. Every Task-2-scoped Test Impact item must be tagged at the item, not only enumerated in Task 10. |
+| CONCERN | Risk & Robustness | The Verification row "Root cache is versioned on BOTH sides" (`:681`) lacks the inline scope tag that its sibling row `:673` carries (`Task 9 scope`), even though Task 9's body claims it as one of its four rows. Task 8 runs "every Verification row except the four Task-2-scoped ones listed in Task 9" — a validator applying that rule against the table's own tags will run `:681`, which is documented RED on current main and stays RED until Task 2 lands. Task 8 then fails on legitimately pending work that its dependency closure deliberately excludes. | pending | Add `— **Task 9 scope**` to the Expected cell of the `:681` row, matching the form already used at `:673`. The underlying rule: Task 8's exclusion set is resolved by reading the table, so a row's scope must be legible **in the table**. This is the same "a row whose precondition lives only in prose is not a row" principle round 3 applied to the N3 caveat row; it was applied to one row and not to the other three. |
+| CONCERN | History & Consistency | Task 5's exception list (`:593`) names the Task-10 items and the Task-4-owned cross-topic-bleed fixture, but omits the two mirror-deletion items at `tests/unit/test_bridge_logic.py` and `tests/integration/test_message_routing.py`, which Test Impact independently marks "Owned by Task 4." (`:339`, `:345`). Those items are therefore claimed by **both** Task 4 and Task 5 — the "claimed by both" shape the round-3 split existed to close. Currently harmless because Task 4 already deleted both mirrors on the branch, so Task 5 would find nothing to do; it is a live inconsistency in the partition, not a live defect in the code. | pending | Extend Task 5's exception clause to read "EXCEPT the Task-2-scoped ones listed in Task 10 **and the items Test Impact marks as owned by Task 4**". The check that this is complete is a partition test, not a spot fix: every Test Impact item must be claimed by exactly one of Task 4, Task 5 or Task 10 — none orphaned, none claimed twice. Walk the full list rather than patching the two items named here. |
+
 ---
 
 ## Owner Rulings (2026-09-05, via /ask-me)
