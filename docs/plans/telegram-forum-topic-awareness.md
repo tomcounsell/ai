@@ -830,31 +830,64 @@ branch is unpushed and there is no PR, which is the cheapest place to absorb it.
 | Tests pass | `scripts/pytest-clean.sh tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Resolver exists with truth table | `grep -rc "reply_to_top_id" bridge/ \| grep -v ":0"` | at least one file with a non-zero count |
-| Field-count assertion updated | `grep -n "field_names) == 21" tests/unit/test_model_relationships.py` | one match |
+| Resolver exists with truth table | `grep -rc "reply_to_top_id" bridge/ \| grep -v ":0" \| wc -l` | output > 0 |
+| Field-count assertion updated (Task 1 → Task 11 takes it to 22) | `grep -c "field_names) == 22" tests/unit/test_model_relationships.py` | output > 0 — **RED on the current branch** (measured 2026-09-18: `== 22` count 0, `== 21` count 1, at `tests/unit/test_model_relationships.py:117`) |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
-| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `! sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -qi topic` | exit code 0 |
-| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `! sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -qi topic` | exit code 0 |
+| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| tr 'A-Z' 'a-z' \| grep -o 'topic\|def resolve_root_session_id'` | output does not contain topic — the anchor term makes stdout non-empty whenever the window exists, so a moved file or a renamed function empties stdout and the gate **rejects** instead of passing. Measured 2026-09-18 on the branch: one line, `def resolve_root_session_id` (GREEN); missing-path control emits nothing (correctly rejected). |
+| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| tr 'A-Z' 'a-z' \| grep -o 'topic\|def _cache_walk_root'` | output does not contain topic — same anchor construction. Measured 2026-09-18 on the branch: one line, `def _cache_walk_root` (GREEN). |
 | General omit rule uses a single named constant, defined once tree-wide (Note N1, rebound round 4) | `[ "$(grep -rn 'GENERAL_TOPIC_ID *=' --include='*.py' . \| grep -v '/.venv/\|/.worktrees/' \| wc -l \| tr -d ' ')" = "1" ] && grep -q "GENERAL_TOPIC_ID" bridge/telegram_relay.py` | exit code 0 — **RED on current main** (0 definitions). Tests the property (one definition, imported by every consumer), not the file it lives in. |
-| No bare General literal in the topic guard (Note N1) | `! grep -n "reply_to" bridge/telegram_relay.py \| grep -q "== 1"` | exit code 0 |
-| Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | `> 0` |
-| No header sniffing at the enqueue site (Note N2) | `! grep -q 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | exit code 0 |
-| Keying caveat removed once Task 2 lands (Note N3; Task 9 scope) | `! grep -q "session keying not yet topic-aware" bridge/context.py` | exit code 0 — **run only in and after the Task 2 commit** |
+| No bare General literal in the topic guard (Note N1) | `grep -n "reply_to\|GENERAL_TOPIC_ID" bridge/telegram_relay.py \| grep -o "== 1\|GENERAL_TOPIC_ID"` | output does not contain == 1 — `GENERAL_TOPIC_ID` is the anchor (Note N1 requires it in this file anyway), so its absence empties stdout and the gate rejects. Measured 2026-09-18 on the branch: two `GENERAL_TOPIC_ID`, zero `== 1` (GREEN). |
+| Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | output > 0 — measured 5 on the branch (GREEN) |
+| No header sniffing at the enqueue site (Note N2) | `grep -c 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | match count == 0 — measured `0` on the branch (GREEN); a moved file yields empty stdout and is rejected |
+| Keying caveat removed once Task 2 lands (Note N3; Task 9 scope) | `grep -c "session keying not yet topic-aware" bridge/context.py` | match count == 0 — **run only in and after the Task 2 commit**. Measured `1` on the branch (correctly RED today). |
 | History query is topic-aware (Note N4, round-2 BLOCKER) | `grep -q "topic_id" tools/telegram_history/__init__.py && grep -A6 -E "^def get_recent_messages" tools/telegram_history/__init__.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
 | `build_conversation_history` threads the topic (Note N4) | `grep -A2 -E "^def build_conversation_history" bridge/context.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
 | Cross-topic bleed fixture exists and targets history (Note N4) | `grep -q "test_cross_topic_history_does_not_bleed" tests/unit/test_context_helpers.py && grep -q "build_conversation_history" tests/unit/test_context_helpers.py` | exit code 0 — **RED on current main** |
-| Cross-topic bleed fixture is genuinely RED pre-fix (Note N4) | run `test_cross_topic_history_does_not_bleed` on `main` via `scripts/pytest-clean.sh` | test FAILS on `main`, passes on the branch; transcript recorded in the PR |
+| Cross-topic bleed fixture is genuinely RED pre-fix (Note N4) | `grep -c "ALPHA-ONLY-IN-TOPIC-A" docs/evidence/task4-cross-topic-bleed-RED.txt` | output > 0 — **Task 4 must commit the RED-on-`main` transcript to that path.** The transcript must be the substance RED (topic A's content rendering inside topic B's history block), not the signature RED (`unexpected keyword argument 'topic_id'`), which a build that accepts the parameter and drops it would also satisfy. Prose Expected cells are not one of the six forms `agent/verification_parser.py::evaluate_expectation` implements and fail 100% of the time, so this row was unrunnable as written. |
 | `build_context_prefix` can carry a topic (round-2 BLOCKER) | `grep -A8 -E "^def build_context_prefix" bridge/context.py \| grep -q "topic_name"` | exit code 0 — **RED on current main** |
 | Exactly one `build_context_prefix` definition tree-wide (round-3 sweep) | `[ "$(grep -rn 'def build_context_prefix' --include='*.py' . \| grep -v '/.venv/\|/.worktrees/' \| wc -l \| tr -d ' ')" = "1" ]` | exit code 0 — **RED on current main** (3 definitions). A docstring-keyed check would miss mirror #2, which has no "Local mirror" docstring. |
 | Production call site updated (round-3 sweep) | `grep -A8 "build_context_prefix(" agent/session_runner/harness/claude.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
-| Root cache is versioned on BOTH sides (critique CONCERN; **Task 9 scope**) | `! grep -q 'f"session_root:{chat_id}' bridge/context.py && grep -q "SESSION_ROOT_KEY_VERSION" bridge/context.py` | exit code 0 — **RED on current main** (two bare literals at `:710`, `:733`) |
-| **Name resolution has a production caller (round-4 BLOCKER, anti-vacuity)** | `[ "$(grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ worker/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l \| tr -d ' ')" != "0" ]` | exit code 0 — **RED on the current branch** (0 production callers). This row cannot be satisfied by correct-but-uncalled implementation, which is exactly how the defect shipped. |
+| Root cache carries no bare literal (critique CONCERN; **Task 9 scope**) | `grep -c 'f"session_root:{chat_id}' bridge/context.py` | match count == 0 — **RED on the branch** (measured `2`; the two bare literals at `:710`, `:733`) |
+| Root cache is versioned (critique CONCERN; **Task 9 scope**) | `grep -c "SESSION_ROOT_KEY_VERSION" bridge/context.py` | output > 0 — **RED on the branch** (measured `0`). Split from the row above because a single `!A && B` cell reports one exit code for two independent facts and cannot say which half failed. |
+| **Name resolution has a production caller (round-4 BLOCKER, anti-vacuity)** | `grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ worker/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l` | output > 0 — **RED on the current branch** (measured `0` production callers). This row cannot be satisfied by correct-but-uncalled implementation, which is exactly how the defect shipped. |
 | Resolved name reaches the worker via extra_context (Task 11) | `grep -rq 'topic_name' bridge/catchup.py && grep -rq 'topic_name' bridge/reconciler.py && grep -rq 'topic_name' bridge/agent_catchup.py && grep -rq 'topic_name' bridge/telegram_bridge.py` | exit code 0 — **RED on the current branch** (all four producers write `topic_id` only) |
-| Worker never resolves, only reads (Task 11 anti-criterion) | `! grep -q 'resolve_topic_name' agent/session_executor.py` | exit code 0 — the worker has no client and no await; a resolution call here is the round-4 defect returning |
+| Worker never resolves, only reads (Task 11 anti-criterion) | `grep -c 'resolve_topic_name' agent/session_executor.py` | match count == 0 — the worker has no client and no await; a resolution call here is the round-4 defect returning. Measured `0` on the branch (GREEN); a moved file yields empty stdout and is rejected. |
 | Rendered name is asserted, never just "did not raise" (round-4 BLOCKER) | `grep -q 'topic: behring\|assert.*topic_name ==' tests/unit/test_context_helpers.py` | exit code 0 — **RED on the current branch**. An `except Exception` around an import makes an unresolvable symbol look like a network failure, so the criterion must assert the resolved value. |
-| Docstring coordinate matches the import (round-4 BLOCKER) | `! grep -q 'channels.GetForumTopics' bridge/context.py` | exit code 0 — **RED on the current branch** (`:220` still says `channels`, `:248` imports `messages`) |
-| fetch_reply_chain untouched (No-Go #2732) | `! git diff main -- bridge/context.py \| grep -q "def fetch_reply_chain"` | exit code 0 |
+| Docstring coordinate matches the import (round-4 BLOCKER) | `grep -c "channels.GetForumTopics" bridge/context.py` | match count == 0 — **RED on the current branch, measured 2026-09-18: stdout `1`** (`:220` still says `channels`, `:248` imports `messages`). Missing-path control also measured: `grep -c … bridge/context_MOVED.py` exits 2 with **empty stdout**, which the `match count == 0` empty-stdout gate rejects. |
+| fetch_reply_chain untouched (No-Go #2732) | `git diff main -- bridge/context.py \| grep -o "def fetch_reply_chain\|+++ b/bridge/context.py"` | output does not contain fetch_reply_chain — the diff header is the anchor, so a `git` error or an unmodified file empties stdout and the gate rejects rather than certifying absence against a diff it never read. Measured 2026-09-18 on the branch: one line, `+++ b/bridge/context.py` (GREEN). |
+
+### Anti-criterion idiom (binding on every future edit to this table)
+
+`agent/verification_parser.py::evaluate_expectation` implements exactly six Expected
+forms — `exit code N`, `exit code != N`, `output > N`, `output contains X`,
+`output does not contain X`, `match count == 0`. Anything else falls through every
+branch and returns `False` unconditionally, so a row written in prose fails 100% of
+the time no matter what the code does. Three rows in this table were written that way
+(`at least one file with a non-zero count`, `one match`, `` `> 0` ``) plus one fully
+prose row, and all four were unrunnable until the 2026-09-18 sweep.
+
+An anti-criterion — a row that certifies something is **absent** — must be written so
+that a command which never read its subject **fails**, not passes. Two shapes qualify:
+
+1. **Direct-file count.** `grep -c PATTERN path` with `match count == 0`. A missing or
+   moved path makes `grep` exit 2 with **empty stdout**, and the form's empty-stdout
+   gate rejects it. Exit code is ignored for this form, so `grep -c`'s exit 1 on a
+   zero count is harmless.
+2. **Anchored output.** For any command with a **pipe**, shape (1) is unsafe: `grep -c`
+   emits `0` even when its input is empty, so a broken producer upstream reads as a
+   clean zero. Instead emit a term that is present whenever the subject was genuinely
+   read (the enclosing `def` line, the diff header) alongside the forbidden term, and
+   use `output does not contain X`. An unread subject empties stdout and that form's
+   gate rejects it.
+
+**Never `! grep -q …`.** A wrong path makes `grep` exit 2, `!` inverts it to 0, and the
+row goes GREEN against a tree it never opened; `-q` also writes nothing, so the row
+carries no evidence of having run. Nine rows used that shape before the sweep. **Every
+converted row above was executed on the branch on 2026-09-18 and its measured stdout
+recorded in the Expected cell**, including a deliberate missing-path control on the
+docstring row — an anti-criterion nobody has watched go RED has twice now turned out
+to certify nothing.
 
 ## Critique Results
 
@@ -877,6 +910,16 @@ hold. The six new positive Verification rows were **executed on `main` and confi
 five anti-criterion rows were rewritten from `grep -c ... | 0` to `! grep -q` exit-status form,
 because `grep -c` exits 1 on a zero count and so fails on exit status before its output is ever
 compared — the old rows could not distinguish "absent" from "command errored".
+
+> **Correction, 2026-09-18 (recorded rather than silently reversed).** The reasoning in the
+> paragraph above is wrong and the round-2 rewrite moved these rows in the wrong direction.
+> `agent/verification_parser.py:374-383` **ignores the exit code** for the `match count == 0`
+> form — the Expected cell is the only gate — so `grep -c`'s exit 1 on a zero count was never
+> the problem. The `! grep -q` form it was rewritten into is the one that cannot distinguish
+> "absent" from "command errored": a wrong path exits 2, `!` inverts it to 0, and the row
+> certifies absence against a file it never opened. All nine such rows were converted back on
+> 2026-09-18 under the idiom rule stated beneath the Verification table, and each converted row
+> was executed on the branch with its measured stdout recorded.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
