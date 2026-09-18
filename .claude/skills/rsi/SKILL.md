@@ -47,9 +47,19 @@ Build a private guess list. For each provisional assumption, ranking factor, and
 claim in the brief, ask: did the loop have to infer this from public research when
 Tom likely knows it cold? Model quality, real pricing, which providers he trusts,
 what he has already tried and rejected, what is actually annoying him about SDLC
-work right now. Those go on the list. Order it by what the loop is about to spend
-on: an `evaluating` case, an open experiment, or a budget reservation outranks a
-draft. Keep the list private; it is your working set, never a questionnaire.
+work right now. Those go on the list. Keep it private; it is your working set,
+never a questionnaire.
+
+Then rank by leverage, merge, and cut:
+
+- Drop anything the loop can research or this session can probe itself.
+- Collapse questions that are one decision wearing three hats. "Is gemma4 good
+  enough for review?" and "should the review lane route to gemma4?" are one
+  question about quality.
+- Order what remains so the most decision-shaping question comes first. A
+  directional answer often deletes two detail questions further down. Among
+  equals, what the loop is about to spend on wins: an `evaluating` case, an open
+  experiment, or a budget reservation outranks a draft.
 
 ## Step 2: open the floor
 
@@ -66,24 +76,66 @@ he has nothing more.
 
 Now work the guess list through `AskUserQuestion`, one question per call. Wait for
 each answer before composing the next, because an answer often deletes the next two
-questions.
+questions. Two questions may share a call only when neither answer can change the
+other's framing or make it moot. If one could, you have a sequence, not a pair.
 
-Each question:
+Tom's stated preference for how he is asked, in order: a directional steer beats
+detail, and when the decision genuinely turns on a specific, that specific must be
+in the question. Judging which case each question is in is the skill.
+
+**Run the altitude test on every question.** Would a one-line steer from a trusted
+advisor unblock the loop here?
+
+- Yes: ask high. Strip the implementation detail and ask for the direction. "Is
+  cheap inference worth pursuing for review lanes at all, or only for research
+  sessions?"
+- No, the paths diverge on a specific: ask low, with the specific in the question
+  text. The actual price, the actual model name, the real tradeoff. "Under
+  investigation fc57eacd, the loop assumed the RRF fallback fires often enough to
+  measure. If it fires under one percent of retrievals, the experiment measures
+  dead code. Does it fire?"
+- The detail that matters is the detail that changes the answer. Include exactly
+  that and nothing else.
+
+Each question also:
 
 - **Anchors to a case and its evidence.** Name the case and the assumption or
-  evidence row the answer would change. "Under investigation fc57eacd, the loop
-  assumed the RRF fallback fires often enough to measure. Does it?"
-- **States the assumption it rests on** in one clause, so a wrong premise gets
-  corrected instead of answered.
+  evidence row the answer would change.
+- **States the assumption it rests on** in one "under X" clause, so a wrong premise
+  gets corrected instead of answered. You did work Tom did not see; your framing
+  can be off, and this lets him catch it in one reply.
 - **Maps to a ranking factor.** If you cannot say which of the five factors the
   answer moves, it is not a question for this session.
 - **Offers two to four options** as illustrations of the space, your recommendation
   first and labeled, with "Other" left to catch the answer you did not anticipate.
+  You are seeking his direction, never railroading him into a menu.
 - **Asks for the fact or the principle, never the rule.** The loop is a capable
-  actor; ask what is true and what matters, and let it derive the heuristic.
+  actor. Asking Tom to author a tie-break heuristic is a mis-altituded question; ask
+  what the surface is fundamentally for and let the loop derive the heuristic.
 
-After about five questions, ask whether he wants to keep going. Stop the moment he
-says so. There is nothing to wrap up, because Step 4 already ran after every answer.
+**Adapt after every answer.** Re-check the remaining list. A directional answer
+usually makes two detail questions moot: drop them. An answer that opens a fork you
+had not seen: add it, ranked by leverage like the rest.
+
+**Stop when the loop is unblocked, not when the list is empty.** The moment the
+answers so far would change what the loop does next, say so in one line and ask
+whether he wants the rest. Stop the instant he says so. There is nothing to wrap
+up, because Step 4 already ran after every answer.
+
+### Anti-patterns
+
+- **Context dump in the question.** Pasting the brief instead of the one fact that
+  changes the answer. Ask, do not brief.
+- **False altitude.** A vague directional question when the decision hinges on a
+  specific Tom cannot see. He answers the wrong question.
+- **False precision.** Dragging him into an implementation choice when a one-line
+  steer would do.
+- **Unstated assumption.** Building the question on your own model of a cost or a
+  constraint without naming it, so a wrong premise gets answered rather than fixed.
+- **Questionnaire mode.** Firing the list at once, or asking the next question
+  without letting the last answer reshape it.
+- **Asking what you could find.** Any question the loop could answer by research or
+  a bounded probe is a defect in your prep.
 
 ### What never gets asked
 
