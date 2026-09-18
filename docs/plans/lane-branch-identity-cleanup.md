@@ -328,21 +328,47 @@ New tests (not existing-test impact, listed here so the build has one place to l
 
 ## No-Gos (Out of Scope)
 
-_placeholder_
+- [SEPARATE-SLUG #3413] **Why `checkpoint_branch_state` recorded `branch=main` for a lane never on `main`.** Filed during this planning pass, as the issue's recon asked. This plan explains part of the incoherence (the second writer at `:1566`) but not a recorded value of `main`, which implicates what `session.working_dir` resolves to at checkpoint time. It matters *because* this plan promotes the record to source of truth, so it is a fast-follow, not a nice-to-have.
+- [SEPARATE-SLUG #3301] **`post_merge_cleanup` reporting success for a branch it never looked for.** Same slug/branch divergence, merge path instead of turn path, non-destructive instead of destructive. Coordinate with whoever picks it up; do not bundle.
+- [SEPARATE-SLUG #3306] **`checkpoint_branch_state` blocking the worker event loop on the raise path.** This plan adds a call to that function's family and deliberately does not change its concurrency shape.
+- [EXTERNAL] **Repairing the 7 divergent lanes currently live on this machine.** The AC-6 sweep reports; it does not mutate. Five of the seven are detached review worktrees with real uncommitted state, and deciding what each should be checked out to is an operator judgement with data at stake. The sweep's output is the handoff.
+- [ORDERED] **Deploying the fix to other bridge machines.** Gated on the merge landing and `/update` running per machine; nothing in the code change can perform it.
+
+Everything else the issue asks for — the guard, the cleanup, the checkpoint, the model accessor, the nudge and snapshot paths, the regression test, the three RED-on-removal proofs, the sweep tool, and the doc — is in scope for this plan.
 
 ## Update System
 
-_placeholder_
+- **No update-script or update-skill changes required.** The change adds no dependency, no config file, no env key, and no `[project.scripts]` entry that the update path must propagate.
+- **No Popoto migration required.** `AgentSession.branch_name` already exists and is already populated; only the read precedence and the write discipline change. Nothing in `scripts/update/migrations.py` needs a new entry. A row carrying a stale or empty `branch_name` heals itself on its next turn, because the trailing `checkpoint_branch_state` rewrites it from the live `HEAD` — the nullable-field backcompat pattern this repo already relies on.
+- **Services must be restarted after merge.** This is worker and executor code, so `/update` followed by `./scripts/valor-service.sh restart` is required on each bridge machine; verify with `tail -5 logs/bridge.log` showing "Connected to Telegram". Until a machine restarts, it keeps the old derivation and keeps stranding lanes.
+- **Post-deploy verification per machine:** run `python -m tools.lane_identity sweep` and confirm it exits 0 (no lane whose next turn would be refused). That is the same command AC 6 uses, which is the point of shipping it as a CLI rather than a one-off snippet.
 
 ## Agent Integration
 
-_placeholder_
+**No new agent-facing capability is required — this is bridge/worker-internal plumbing.** The agent does not call `lane_branch()`; the executor does, on the agent's behalf, before and after the harness runs.
+
+Two deliberate exceptions, both operator-facing rather than agent-facing:
+
+- **`python -m tools.lane_identity sweep`** is a module CLI, not a `[project.scripts]` entry point. It is reachable from the agent's Bash tool without any wiring, which is all AC 6 and the post-deploy check need. Adding a `valor-*` console script would be gold-plating for a diagnostic run a handful of times per deploy.
+- **No `.mcp.json` / `mcp_servers/` change.** Nothing here belongs in an MCP surface.
+
+Integration test that matters: the Task 1 regression test exercises the real executor path end to end (two turns on one lane, worktree moved off the slug branch between them), so it proves the wiring rather than asserting on a mock. That is the integration coverage for this change.
 
 ## Documentation
 
-- [ ] Create `docs/features/lane-branch-identity.md` naming the single source of truth for a lane's branch and the three consumers that read it.
+### Feature Documentation
+- [ ] Create `docs/features/lane-branch-identity.md`. This is AC 4's deliverable — the plan names the source of truth, the doc is where it becomes durable. It must state: the invariant (record == live `HEAD` at turn end), the one writer (`checkpoint_branch_state`), the one accessor (`lane_branch`), the seed-vs-identity distinction, the detached-`HEAD` rule, and the three guards (#887, #1377, #1646) and what each does and does not protect.
 - [ ] Add the entry to the `docs/features/README.md` index table.
-- [ ] Update `docs/features/sdlc-lane-identity.md` with a cross-link (slug identity vs. branch identity are now explicitly distinct).
+- [ ] Update `docs/features/sdlc-lane-identity.md` with a cross-link: it owns *slug* identity (PR #2792), the new doc owns *branch* identity, and the relationship is "the slug seeds the branch once and is never consulted for it again".
+- [ ] Update `docs/features/eng-session-architecture.md:248` — it currently documents `derived_branch_name` as "`session/{slug}` if slug exists", which the inversion makes false. A doc that contradicts the code is worse than no doc.
+
+### External Documentation Site
+- [ ] Not applicable — this repo has no Sphinx/MkDocs site.
+
+### Inline Documentation
+- [ ] Module docstring on the new `tools/lane_identity.py` branch-identity functions, in the register the existing slug docstring uses (it is the best example in the repo of a docstring that explains *why a rung exists*, not just what it does).
+- [ ] A comment at `agent/session_executor.py:1566` explaining why the write is seed-if-empty, naming #3411 — this is the line most likely to be "simplified" back into the bug.
+- [ ] A comment on the trailing `checkpoint_branch_state` marking it load-bearing, per Risk 1.
 
 ## Success Criteria
 
