@@ -172,6 +172,33 @@ def _escalation_exists(job_id: str, eid: str) -> bool | None:
         return None
 
 
+def _annotate_attempts_exhausted(job_id: str, room_id: str, job_row_id: str, eid: str) -> None:
+    """Re-fetch the Job and write the reconciler's own blocked annotation.
+
+    Shared by Site A (crash-window repair) and Site B (fresh escalation) —
+    both need an up-to-date snapshot before writing, and both write the same
+    ``attempts_exhausted``/``reconciler`` pair. Fail-soft: an annotation
+    failure must never interrupt the pass over other expectations (the
+    caller's own ``try`` already covers this, but the write itself is best
+    effort by construction — a missed annotation just means the row surfaces
+    unannotated next tick, not a lost escalation).
+    """
+    from models.job import Job
+
+    try:
+        fresh = Job.query.get(id=job_row_id, room_id=room_id)
+        if fresh is None:
+            return
+        fresh.block_expectation(eid, code="attempts_exhausted", by="reconciler")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "expectation_reconciler: attempts-exhausted annotation failed for %s/%s: %s",
+            job_id,
+            eid,
+            exc,
+        )
+
+
 def _escalate_once(project: dict, job_id: str, eid: str, message: str) -> tuple[bool, str | None]:
     """Page the project's operator at most once per (job, expectation).
 
@@ -458,8 +485,26 @@ def _reconcile_project(project: dict) -> dict:
                 owner = str(entry.get("owner") or "")
                 if not eid or not owner:
                     continue
+                if entry.get("blocked") is not None:
+                    findings.append(f"blocked: {eid} {entry['blocked'].get('code')}")
+                    continue
                 age = _entry_age_seconds(entry, now)
                 if age is None or age < min_age:
+                    continue
+
+                # Site A — crash-window repair: a prior tick escalated (the
+                # recovery budget was already spent) but crashed before it
+                # could write the annotation. This closes that window on the
+                # very next tick, unconditionally on owner liveness — the
+                # verdict was already earned, it just never got recorded.
+                if (
+                    entry.get("blocked") is None
+                    and _escalation_exists(job.job_id, eid) is True
+                    and (attempts_so_far := _attempts_count(job.job_id, eid)) is not None
+                    and attempts_so_far >= _max_attempts()
+                ):
+                    _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
+                    findings.append(f"blocked: {eid} attempts_exhausted")
                     continue
 
                 gone = _owner_is_gone(owner)
@@ -491,6 +536,7 @@ def _reconcile_project(project: dict) -> dict:
                         findings.append(f"escalated: {eid}")
                     elif sup:
                         findings.append(sup)
+                    _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
                     continue
                 if not _cooldown_claim(job.job_id, eid):
                     continue
