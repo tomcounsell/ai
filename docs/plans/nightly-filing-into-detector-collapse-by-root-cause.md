@@ -4,6 +4,8 @@ type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
+revision_applied: true
+revision_applied_at: 2026-09-18T14:37:09Z
 tracking: https://github.com/tomcounsell/ai/issues/3418
 last_comment_id: 5729821863
 ---
@@ -44,7 +46,7 @@ issues for 8 nodes was measured, budgeted, and logged as 8.
 **Desired outcome:**
 
 The deterministic detector creates the issues itself, at a Python call site, with the check and the
-create adjacent and a convergent reconciliation behind them. The LLM session, if dispatched at all,
+create adjacent. The LLM session, if dispatched at all,
 receives issue numbers that already exist and is permitted to comment and nothing else. The
 per-run budget is enforced against issues GitHub confirms exist, not against a number the script
 hoped was true. A run that finds K genuinely new root causes leaves exactly K issues behind, and a
@@ -161,9 +163,11 @@ Two open issues to coordinate with:
   create function — it reports failure and leaves the node unrecorded for the next *run*, and never
   retries within a run.
 - Where duplicates cannot be prevented, the recommended posture is post-hoc convergence: detect on
-  the next pass and close one with a pointer to the other. That is the reconciliation sweep in
-  Task 3, and it is also what makes the historical #3382-#3397 cleanup a natural first exercise of
-  the same code path.
+  the next pass and close one with a pointer to the other. That posture was drafted here as a
+  reconciliation sweep and is **deferred** by owner decision (`## Decisions` #2, `## No-Gos`): the
+  detector does not gain issue-closing privilege, and the residue after Race 1 and Race 2 is
+  unobserved. What ships from this finding is only its *detection* half — the fingerprint, which
+  makes a duplicate pair findable with an exact key by a human or by a future follow-up.
 
 Sources: [GitHub community discussion #192764](https://github.com/orgs/community/discussions/192764),
 [Implementing Idempotency Keys in REST APIs (Zuplo)](https://zuplo.com/learning-center/implementing-idempotency-keys-in-rest-apis-a-complete-guide).
@@ -195,11 +199,12 @@ After this plan, steps 4-6 become:
 
 4. **File branch (Python, deterministic)**: for each survivor, re-read the open-issue map, compute
    the fingerprint, call `create_issue()`, capture the real number GitHub returns.
-5. **Reconcile**: a single post-filing sweep reads back the issues created during this run's
-   window, converges any duplicate fingerprint to its lowest-numbered issue, and yields the
-   verified count.
-6. **Output**: `issues_filed` is the verified count; the budget was enforced against it; the
-   session, if dispatched, is handed the real numbers and a comment-only instruction.
+5. **Report collisions**: the run keeps an in-process registry of every fingerprint it filed. A
+   second finding resolving to a fingerprint already filed this run is skipped and logged. Nothing
+   is read back and nothing is closed.
+6. **Output**: `issues_filed` is a derived length over the confirmed numbers; the budget was spent
+   only on confirmed creates; the session is handed the real numbers and a comment-only
+   instruction.
 
 ## Why Previous Fixes Failed
 
@@ -257,8 +262,9 @@ about the residue instead of claiming it away.
   privilege level the detector's recurrence path already has.
 - **Reversibility**: high for the mechanism, via a kill switch rather than a second code path — see
   `## Update System`. Reverting the *commit* is a clean revert; nothing persists a schema. The one
-  irreversible artifact is the historical duplicate closures in Task 5, which are GitHub state, not
-  code, and are reopenable by hand.
+  irreversible artifact is the historical duplicate closures in Task 6, which are GitHub state,
+  not code, are performed once by an operator with the closure list enumerated in the PR body for
+  review, and are reopenable by hand. The detector itself never closes an issue.
 
 ## Appetite
 
@@ -267,8 +273,8 @@ about the residue instead of claiming it away.
 **Team:** Solo dev, PM, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (scope alignment — the scope already split once, at #3419; the residual
-  judgement call is whether the investigation session survives at all, see `## Open Questions`)
+- PM check-ins: 1-2, both spent (scope split to #3419 on 2026-09-18; the three residual judgement
+  calls were answered by the owner on 2026-09-18, see `## Decisions`)
 - Review rounds: 1-2 (this touches the module's most safety-critical function and deletes two
   public helpers; `TestDispatchFindings` / `TestDispositionHandoff` rewrites want a real read)
 
@@ -281,7 +287,7 @@ migration, and no cross-machine coordination.
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `gh` authenticated | `gh auth status` | The detector creates, comments, and reconciles issues through `gh`; the new create path fails closed without it |
+| `gh` authenticated | `gh auth status` | The detector creates and comments through `gh`; the new create path fails closed without it |
 | Repo resolves for `gh` | `gh repo view --json nameWithOwner -q .nameWithOwner` | `create_issue` inherits `cwd=PROJECT_DIR` targeting the same way `comment_on_issue` does |
 | Repo venv has pytest | `test -x .venv/bin/pytest` | `scripts/pytest-clean.sh` aborts on a worktree `.venv` lacking `bin/pytest`; the whole change is gated on one test file, so a missing runner blocks everything |
 
@@ -302,8 +308,8 @@ In scope, each with its own acceptance check:
 | # | Sub-change | Acceptance check |
 |---|-----------|------------------|
 | (a) | **Filing moves into `scripts/nightly_regression_tests.py`.** A `create_issue()` function creates issues via `gh issue create`; `dispatch_findings()` calls it for every survivor and every cascade umbrella; the triage session never creates anything. | `grep -c "gh\", \"issue\", \"create\"` in the script is non-zero, and no prompt builder's output contains a create instruction (asserted by an updated `TestPromptsNeverNameTheSearchIndex` sibling). |
-| (b) | **Duplicate filing is structurally prevented, then convergently reconciled.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and a post-filing reconciliation sweep that closes any twin. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node. |
-| (c) | **The budget is enforced against issues GitHub confirms exist.** `issues_filed` is the count of real numbers returned; `NIGHTLY_MAX_ISSUES_PER_RUN` is decremented per confirmed create and the cap check fails closed on an unreadable verification. | A test with the cap set to a low value and a `create_issue` stub that succeeds asserts exactly that many issues are created and the rest are deferred with a log line; a second test makes the verification read fail and asserts zero further creates. |
+| (b) | **Duplicate filing is structurally prevented; the residue is reported, never converged.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and an in-process fingerprint registry that skips-and-logs a same-run collision. No read-back, no close. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node; a second test asserts a same-run fingerprint collision is skipped with a named log line. |
+| (c) | **The budget is spent only on issues GitHub confirms exist.** `issues_filed` is a derived length over the real numbers returned; `NIGHTLY_MAX_ISSUES_PER_RUN` is decremented per confirmed create and keeps its current default. | A test with the cap set to a low value and a succeeding `create_issue` stub asserts exactly that many issues are created and the rest are deferred with a log line; a second test asserts a create returning `None` spends no budget and leaves its node out of `recorded`. |
 | (d) | **The historical duplicates are closed.** #3382-#3397 and the enumerated 09-16 pairs are closed as duplicates pointing at their survivor. | `gh issue view` on each enumerated number reports `CLOSED` / `NOT_PLANNED`. |
 
 Out of scope and tracked elsewhere: per-file/root-cause collapsing (#3419), hostname/session_id
@@ -321,16 +327,18 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
 - **Filing fingerprint**: every body the detector creates carries a hidden
   `<!-- nightly-fingerprint: {sha256} -->` line derived from the finding's stable identity (the
   node id for a per-node issue, the cascade state key for an umbrella). Titles can be edited by
-  humans; the fingerprint cannot drift. It is the key the reconciliation sweep and the cap
-  verification both query on, and it is what makes "is this a twin?" an exact-match question rather
-  than a string-similarity one.
+  humans; the fingerprint cannot drift. It is what makes "is this a twin?" an exact-match question rather
+  than a string-similarity one — for the in-run registry today, for a human grepping the tracker
+  the morning after, and for the deferred sweep if evidence ever reopens it.
 - **Pre-create re-read**: the open-issue map is refreshed immediately before each create rather
   than once per run, shrinking the check-then-act window from the whole filing loop to one call.
-- **Reconciliation sweep**: after the filing loop, one read of issues created during this run's
-  window; any fingerprint appearing more than once converges to its lowest number and the rest are
-  closed as `NOT_PLANNED` with a pointer comment. This is the substitute for the compare-and-swap
-  GitHub does not offer.
-- **Comment-only investigation session**: `maybe_dispatch_triage_session()` is dispatched *after*
+- **Fingerprint-collision report**: the filing loop keeps an in-process `dict[fingerprint, int]` of
+  what it created. A second finding resolving to a fingerprint already filed this run is skipped
+  and logged by name. That is the whole of it — no GitHub read-back, no `gh issue close`, no
+  pointer comment. The detector's privilege set stays exactly what it is today: create and comment.
+  The convergent sweep that would close a twin is deferred (`## Decisions` #2, `## No-Gos`).
+- **Comment-only investigation session** (kept — owner decision, `## Decisions` #1):
+  `maybe_dispatch_triage_session()` is dispatched *after*
   filing, with real issue numbers, and its prompts instruct investigation and commenting only. The
   three filing prompts become one investigation prompt shape.
 - **Deletions**: `write_triage_ledger()`, `NodeDisposition`, the ledger paragraph in
@@ -342,10 +350,10 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
 Nightly run completes → serial re-confirm → `dispatch_findings()` → collapse (environmental,
 setup cascades, body cascades) → **comment branch** (existing, unchanged: open-issue and
 closed-not-planned recurrences) → **file branch (new)**: for each survivor → refresh open map →
-compute fingerprint → `create_issue()` → record real number → decrement budget →
-**reconciliation sweep** → converge twins → verified `issues_filed` → **dispatch investigation
-session** with the real numbers and a comment-only instruction → log `Tracker: N issue(s) filed`
-where N is verified.
+compute fingerprint → skip-and-log if that fingerprint was already filed this run →
+`create_issue()` → record real number → decrement budget → derived `issues_filed` →
+**dispatch investigation session** with the real numbers and a comment-only instruction →
+log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
 
 ### Technical Approach
 
@@ -357,23 +365,26 @@ where N is verified.
 - **Where the create loop goes.** Replacing the block at `:2941-2970`. The comment at `:2954-2965`
   explaining why `dispositions` is withheld on a degraded read disappears with the mechanism it
   documents; the *reasoning* it encodes does not, and it moves to the budget contract below.
-- **Two failure postures, deliberately asymmetric** (this is the answer to the critique's first
-  CONCERN, and it must be stated in code comments as well as here):
+- **One failure posture, and no second read to disagree with it** (this must be stated in code
+  comments as well as here):
   - The **dedup reads** (`open_issues`, `closed_issue_dispositions`) keep failing *open*. An
     unreadable GitHub on the night of a real regression must not produce a silent night; a possible
     duplicate is the smaller harm. Unchanged from today.
-  - The **budget verification** fails *closed*. If the post-filing read cannot be answered, the
-    remaining budget is treated as zero, the unfiled survivors are deferred to the next run with an
-    explicit log line, and `issues_filed` reports only creates whose numbers were observed. The
-    asymmetry is the point: silently assuming "0 filed so far" on a failed verification is exactly
-    how #3382-#3405 happened, and this is the one place where over-filing, not silence, is the
-    tracked harm. A deferred node is not added to `recorded`, so tomorrow's run picks it up.
+  - There is **no post-filing verification read**. An earlier draft placed one inside the
+    reconciliation sweep with a fail-closed posture; with the sweep deferred (`## Decisions` #2) the
+    count is already exact at the moment of each create, and a second read could only introduce a
+    way for the exact number to be second-guessed by a laggy list endpoint. What replaces the
+    fail-closed posture is stronger and simpler: an unconfirmed create is never counted, never
+    spends budget, and never enters `recorded`, so tomorrow's run picks the node up. Silently
+    assuming "0 filed so far" — exactly how #3382-#3405 happened — is unrepresentable when the
+    count is a derived length over observed numbers.
 - **Budget accounting is per-confirmed-create.** `issue_budget` decrements only when
   `create_issue()` returns a number. A failed create spends nothing. This alone removes the
-  `:2966` class of bug regardless of whether the reconciliation sweep ever fires.
+  `:2966` class of bug on its own.
 - **`DispatchOutcome`** gains `filed_issues: dict[str, int]` (finding key → real issue number),
   and `issues_filed` becomes a derived length rather than an independently-mutated counter — the
-  two can then never disagree. `cascade_issues` stops needing its `None` "pending, the session will
+  two can then never disagree. This single change is what retires the `:2966` defect; everything
+  else in this plan protects it. `cascade_issues` stops needing its `None` "pending, the session will
   open it" sentinel, because the number is known at creation time; `carry_cascade_issues()`'s
   upgrade-on-a-later-run path becomes dead and is removed with it.
 - **Prompt consolidation.** The per-node, cascade-umbrella, and re-baseline-seed prompts exist as
@@ -382,10 +393,15 @@ where N is verified.
   `ISSUE_LOOKUP_INSTRUCTION`'s dedup-before-filing framing is removed; if any lookup guidance
   survives at all it keeps the search-index prohibition, so the two existing wording gates stay
   meaningful rather than being deleted along with the text they guard.
-- **Tunables carry no new invented numbers.** The reconciliation window and any new threshold are
-  named constants with `_DEFAULT` suffixes and `NIGHTLY_*` env overrides, following the module's
-  established convention, each with a comment stating the value is provisional and what evidence
-  would move it. `MAX_ISSUES_PER_RUN_DEFAULT` keeps its existing value — this plan changes what the
+- **Tunables carry no new invented numbers.** With the sweep deferred there is no reconciliation
+  window and no new threshold to invent. The only new knob is the `NIGHTLY_AUTO_FILE` boolean kill
+  switch, which defaults to on. Any constant that does appear follows the module's established
+  convention — `_DEFAULT` suffix, `NIGHTLY_*` env override, and a comment stating the value is
+  provisional and what evidence would move it.
+- **`NIGHTLY_MAX_ISSUES_PER_RUN` keeps its current default** (owner decision, `## Decisions` #3).
+  The issue's proposed cull asked to lower it; the 09-17 overrun was a broken measurement, not a
+  too-generous cap, and lowering the cap while the measurement was wrong would only have deferred
+  real regressions behind a number that was never being honoured anyway. This plan changes what the
   budget is measured against, not how large it is.
 
 ## Failure Path Test Strategy
@@ -397,9 +413,9 @@ where N is verified.
   the caller leaves the node out of `recorded`. Test: `create_issue` with a subprocess raising
   `FileNotFoundError`, and separately with a non-zero return code, and separately with stdout that
   is not a parseable issue URL.
-- [ ] The reconciliation sweep's own read must not raise into the filing path. A failing sweep logs
-  a warning, leaves every created issue in place (the issues are real and must not be lost), and
-  reports the creates it observed directly — assert this rather than allowing a silent swallow.
+- [ ] The fingerprint-collision check introduces no new exception surface: it is a dict lookup over
+  in-process state, with no I/O and nothing to fail. Assert that a collision produces a skip plus a
+  `WARNING`, and that the run continues to the next survivor rather than aborting the loop.
 - [ ] No other exception handlers are introduced in scope.
 
 ### Empty/Invalid Input Handling
@@ -419,8 +435,11 @@ where N is verified.
   — `TestNothingNotifies`, line 629). Assert that a night where some creates failed logs both the
   verified filed count and the deferred count, so a partial failure is legible rather than reading
   as a quiet success.
-- [ ] Assert the budget-exhausted and verification-failed paths each emit their own distinct log
-  line naming the deferred nodes, so the two are distinguishable in `logs/` the morning after.
+- [ ] Assert that each of the three non-filing outcomes emits its own distinct log line naming the
+  nodes it concerns — **budget exhausted**, **create failed**, and **fingerprint collision** — so
+  they are distinguishable from each other, and from a genuinely quiet night, in `logs/` the
+  morning after. A single shared "not filed" line would collapse three different operator responses
+  (raise the cap / check `gh` auth / investigate a collapsing bug) into one.
 
 ## Test Impact
 
@@ -519,12 +538,14 @@ here).
 - [ ] `TestFilingIdempotence` — NEW: run `dispatch_findings()` twice against one in-memory fake
   GitHub whose create mutates the open-issue map. Assert pass two creates zero issues and comments
   once per node. This is the regression test for #3382-#3405 and for the whole #3170 class.
-- [ ] `TestIssueBudgetIsVerified` — NEW: cap set low, assert exactly the cap is created and the
-  remainder is deferred and left out of `recorded`; and a second test where the verification read
-  fails, asserting the fail-closed posture.
-- [ ] `TestReconciliationSweep` — NEW: a fake GitHub seeded with two issues sharing one fingerprint;
-  assert the lower number survives, the higher is closed `NOT_PLANNED`, and a pointer comment is
-  posted.
+- [ ] `TestIssueBudgetSpendsOnlyConfirmedCreates` — NEW: cap set low, assert exactly the cap is
+  created and the remainder is deferred, logged, and left out of `recorded`; and a second test where
+  `create_issue` returns `None`, asserting that create spends no budget and its node stays out of
+  `recorded` so the next run retries it.
+- [ ] `TestFingerprintCollisionIsLogged` — NEW: two survivors in one run resolving to the same
+  fingerprint; assert exactly one `create_issue` call, a `WARNING` naming the fingerprint and the
+  skipped node, and — the anti-assertion that pins the owner's report-only decision — that no
+  `gh issue close` is ever shelled out and no close helper exists to call.
 
 **Test-run discipline:** per this repo's rules, run only
 `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py`, never the full `tests/unit/`
@@ -535,7 +556,9 @@ tree (about 20 minutes, and parallel lanes collide on Redis state).
 - **Making the create genuinely atomic.** It cannot be. GitHub offers no idempotency key and no
   conditional POST (`## Research`). Any design that reaches for a distributed lock, a mutex issue,
   or a "claim" label written before the create is spending real time to buy a smaller window, not a
-  closed one. Refresh-then-create plus a convergent sweep is the ceiling; take it and move on.
+  closed one. Refresh-then-create is the ceiling this plan buys; take it and move on. The
+  convergent sweep that would clean up behind it is deferred on evidence, not on difficulty
+  (`## No-Gos`).
 - **Rewriting the cascade/collapsing logic.** `group_body_failure_cascades` and its threshold are
   #3419. Touching them here re-merges the scope the owner just split.
 - **Generalizing `create_issue` into a repo-wide GitHub client.** Several modules shell out to `gh`.
@@ -547,7 +570,7 @@ tree (about 20 minutes, and parallel lanes collide on Redis state).
 - **Perfecting the investigation prompt.** The session's value after this change is root-cause
   narrative, not correctness. A merely adequate comment-only prompt is fine; iterating on its
   wording is unbounded and unmeasured.
-- **Auditing every historical duplicate ever filed.** Task 5 closes the enumerated set from the
+- **Auditing every historical duplicate ever filed.** Task 6 closes the enumerated set from the
   issue body. A general sweep of the tracker's whole duplicate history is a different job.
 
 ## Risks
@@ -587,9 +610,13 @@ during review specifically for dropped assertions.
 ### Risk 4: The investigation session, stripped of filing, has no remaining value
 **Impact:** Dispatching an LLM session per night that only comments may be pure cost — a
 possibility worth naming rather than discovering in three months.
-**Mitigation:** This is an explicit `## Open Questions` item for the PM. The plan is structured so
-that deleting the dispatch entirely is a strictly smaller change than keeping it: if the answer is
-"drop it", Task 4 shrinks rather than growing.
+**Mitigation:** Raised as an explicit question and **answered**: the owner ruled on 2026-09-18 that
+the comment-only session stays, as the issue's own proposed cull describes (`## Decisions` #1). The
+value it is kept for is root-cause narrative on a fresh issue, not correctness — correctness is now
+entirely the detector's. That makes the session's worth measurable after the fact rather than
+argued in advance: if a quarter's worth of nightly investigation comments turn out to be read by
+nobody, deleting `maybe_dispatch_triage_session` is a strictly smaller follow-up change than
+keeping it, because filing no longer depends on it.
 
 ## Race Conditions
 
@@ -631,11 +658,11 @@ the moment the run started.
 **Mitigation:** the open-issue map is refreshed immediately before each create rather than once per
 run. The window shrinks from "duration of the entire filing loop" (minutes, with N `gh` round-trips
 inside it) to "one `gh` round-trip". This is a genuine reduction and not a closure; the residue is
-handled by Race 3's sweep. Cost is one extra `gh` read per created issue, which is bounded by
+reported rather than converged (Race 3). Cost is one extra `gh` read per created issue, which is bounded by
 `NIGHTLY_MAX_ISSUES_PER_RUN` and therefore small.
 
-### Race 3: Two hosts, or a create whose response was lost — CONVERGED, NOT PREVENTED
-**Location:** the new `create_issue()` call site and the reconciliation sweep after the loop.
+### Race 3: Two hosts, or a create whose response was lost — REPORTED, CONVERGENCE DEFERRED
+**Location:** the new `create_issue()` call site.
 **Trigger:** Two machines run the nightly against the same repo and both pass the pre-create
 re-read before either create lands; or one `gh issue create` succeeds server-side but its response
 is lost, so the client cannot tell whether an issue exists.
@@ -643,42 +670,52 @@ is lost, so the client cannot tell whether an issue exists.
 not that key — humans edit titles, and the cascade path already deliberately keys on a signature
 rather than a title (`resolve_cascade_issue`, line 1165, for exactly this reason).
 **State prerequisite:** eventually, exactly one live issue per finding.
-**Mitigation — convergence.** This is the standard client-side substitute for the idempotency key
-GitHub does not offer:
+**Disposition — detect and report; do not converge.** The owner ruled on 2026-09-18
+(`## Decisions` #2) that the detector does not gain issue-closing privilege and that the convergent
+sweep is deferred until concurrent multi-host nightly runs are actually observed. Three things ship:
 1. **Deterministic fingerprint.** Every body the detector creates carries
    `<!-- nightly-fingerprint: {sha256 of the finding's stable identity} -->`. Two hosts filing the
-   same finding produce byte-identical fingerprints without coordinating.
-2. **Reconciliation sweep.** After the filing loop, one read of issues created in this run's
-   window. Any fingerprint appearing more than once converges to its lowest-numbered issue; the
-   others are closed `NOT_PLANNED` with a comment pointing at the survivor. Closing as
-   `NOT_PLANNED` rather than `COMPLETED` is deliberate and interlocks with existing behavior: the
-   closed-state dedup at `:2128` treats `NOT_PLANNED` as "already on record, comment don't re-file"
-   and `COMPLETED` as "fixed, a recurrence deserves a fresh issue". Closing a twin as completed
-   would license tomorrow's run to re-file it.
+   same finding produce byte-identical fingerprints without coordinating. This is the *detection*
+   half of the convergence pattern, and it is the half with lasting value: it is what makes a
+   duplicate pair findable with an exact key, by a human grepping the tracker or by the deferred
+   sweep if it is ever built.
+2. **In-run collision report.** The filing loop keeps a `dict[fingerprint, int]` of what it created
+   this run. A second finding resolving to an already-filed fingerprint is skipped and logged by
+   name. This is a dict lookup over in-process state — no GitHub read-back, no `gh issue close`, no
+   pointer comment, and no new failure surface.
 3. **Never retry a create.** A create whose response was lost is left alone within the run; the
-   sweep or the next night's dedup read resolves it. Retrying a non-idempotent POST is how a lost
-   response becomes a second issue (`## Research`).
-**Residual risk, stated:** between a duplicate create and the sweep, two issues exist — seconds,
-not the ten-minute waves of #3382-#3405. If the sweep itself fails, the duplicates persist until
-the next night's `open_issues` read sees them, which is a two-issue outcome rather than the 24-issue
-outcome this plan exists to end. That degradation is acceptable and is why the sweep is allowed to
-fail without failing the run.
+   *next night's* existing `open_issues` dedup read resolves it into a recurrence comment rather
+   than a twin. Retrying a non-idempotent POST is how a lost response becomes a second issue
+   (`## Research`).
+**Residual risk, stated plainly.** A genuine cross-host duplicate survives as two open issues until
+a human closes one; the next night's dedup read will comment on the lower-numbered one rather than
+file a third. That is a two-issue outcome against the 24-issue outcome this plan exists to end, for
+a trigger — two hosts running this nightly concurrently — that has never been observed in this
+system's operational record. Both motivating incidents (09-17's three waves, 09-16's ten pairs) were
+single-run LLM replays, which Race 1 eliminates outright. Buying convergence for the unobserved
+residue would mean building the detector's first autonomous issue-closing path; the evidence bar
+that would justify that is written down in `## No-Gos`.
 
-### Race 4: Budget verification read races the creates it is counting — FAILS CLOSED
-**Location:** the post-filing verification read.
-**Trigger:** GitHub's list endpoint is read immediately after creates land; a create that has not
-yet propagated is undercounted, or the read times out entirely.
-**Data prerequisite:** the verified count must never *under*-report in a way that licenses more
-filing.
-**State prerequisite:** `issues_filed` must be ≤ the number of issues that exist.
-**Mitigation:** the budget is decremented **per confirmed create** during the loop, from the number
-`create_issue()` returned — it does not wait on the verification read, so a lagging read cannot
-license an extra create. The verification read is a *reconciliation and reporting* step, not the
-gate. If it fails or disagrees, the remaining budget is treated as zero, unfiled survivors are
-deferred to the next run with a named log line, and they stay out of `recorded`. This is
-deliberately the opposite posture from `open_issues`' fail-open (see `## Solution` → Technical
-Approach): the dedup reads fail open because silence during a real regression is the larger harm,
-and the budget check fails closed because over-filing is the specific harm on record here.
+### Race 4: The budget spends against a count nothing confirmed — CLOSED BY CONSTRUCTION
+**Location:** `scripts/nightly_regression_tests.py:2966` and `:2860` today; the new create loop
+after this change.
+**Trigger:** `issues_filed` is incremented by `len(single_nodes)` the instant the dispatch
+subprocess returns a session id, and by 1 per cascade umbrella — before any issue exists. The cap
+is then enforced against that hoped-for number. A run that created 24 issues was budgeted as 8.
+**Data prerequisite:** the number the budget spends must come from GitHub, not from the caller's
+intention.
+**State prerequisite:** `issues_filed` ≤ the number of issues that exist.
+**Mitigation — the counter stops existing.** `issue_budget` decrements only when `create_issue()`
+returns a real number, and `issues_filed` becomes a derived length over
+`DispatchOutcome.filed_issues` rather than an independently mutated integer. There is no second
+number that could disagree with the first, which is why this is a closure rather than a mitigation.
+There is also **no post-filing verification read**: an earlier draft placed one inside the
+reconciliation sweep with a fail-closed posture, and with the sweep deferred (Race 3) the count is
+already exact at the moment of each create — a laggy list endpoint could only add a way to
+second-guess an exact number. A create whose response is lost returns `None`, spends no budget, and
+leaves its node out of `recorded`, so the next run retries it against fresh GitHub state. The one
+posture that remains asymmetric is the dedup reads' fail-open (see `## Solution` → Technical
+Approach): silence during a real regression is the larger harm there.
 
 ## No-Gos (Out of Scope)
 
@@ -693,9 +730,33 @@ and the budget check fails closed because over-filing is the specific harm on re
   in the environmental-classification path, and orthogonal to who creates the issue.
 - [EXTERNAL] **Deploying the change to the machines that run the nightly.** Merging moves the ref;
   propagating it to the launchd-scheduled runner is an operator `/update` on each bridge machine.
-- [DESTRUCTIVE] **A general sweep of the tracker's historical duplicates.** Task 5 closes the
-  enumerated set from the issue body (#3382-#3397 and the named 09-16 pairs) and nothing else.
-  Closing issues is one-shot and review-before-execute is the safety mechanism.
+- [DESTRUCTIVE] **A general sweep of the tracker's historical duplicates.** Task 6 closes the
+  enumerated set from the issue body (#3382-#3397 and the named 09-16 pairs) and nothing else, as a
+  one-shot operator action with the closure list enumerated in the PR body. Closing issues is
+  one-shot and review-before-execute is the safety mechanism. This is a person closing a known list
+  once; it is not the detector acquiring a closing privilege, and no `gh issue close` call enters
+  `scripts/nightly_regression_tests.py` (pinned as an anti-criterion in `## Verification`).
+- [DEFERRED] **The reconciliation sweep, and any issue-closing privilege for the detector.** The
+  drafted design — read back the issues created in the run's window, group by fingerprint, converge
+  each duplicate to its lowest number, close the rest `NOT_PLANNED` with a pointer comment — is
+  deferred by owner decision on 2026-09-18 (`## Decisions` #2), adopting the Simplifier's finding
+  in critique round 2. The reasoning: both motivating incidents (09-17's three waves, 09-16's ten
+  pairs) were single-run LLM replays that Race 1's Python-loop fix eliminates outright; nothing in
+  the source or this system's operational record establishes that the nightly has ever run on more
+  than one host; and the sweep is a net-new autonomous subsystem (GitHub read-back, fingerprint
+  grouping, and the module's first-ever `gh issue close` path) carried by a Medium appetite for an
+  unobserved failure. What ships instead is the detection half — the fingerprint in every body, and
+  an in-run collision log line.
+  **Evidence bar that reopens this.** Either of the following is sufficient, and either should be
+  filed as a follow-up issue citing this deferral:
+  1. Two `scripts/nightly_regression_tests.py` runs observed against the same repo within one night
+     from different hosts — directly legible once #3243 stamps hostname and session_id into filed
+     bodies, which is why #3243 is the natural predecessor of any sweep work.
+  2. A filed issue pair sharing one `<!-- nightly-fingerprint: ... -->` value that the following
+     night's `open_issues()` dedup read did *not* collapse into a recurrence comment — i.e. evidence
+     that the existing cross-run dedup does not in fact converge the residue on its own.
+  Absent either, the residue is two open issues resolved by a human, against the 24-issue morning
+  this plan exists to end.
 
 ## Update System
 
@@ -718,7 +779,7 @@ and the budget check fails closed because over-filing is the specific harm on re
   no-legacy-code rule forbids, and it would mean the duplicate-filing bug stays one env var away
   forever. If detector-side filing misbehaves, the kill switch stops the bleeding within one night
   and `git revert` of a single commit is the real remedy.
-- **On rollback, the duplicates closed in Task 5 stay closed.** They are genuine duplicates of
+- **On rollback, the duplicates closed in Task 6 stay closed.** They are genuine duplicates of
   issues that remain open; their closure is independent of which code path files future issues.
 
 ## Agent Integration
@@ -742,13 +803,14 @@ and the budget check fails closed because over-filing is the specific harm on re
 ### Feature Documentation
 - [ ] Update `docs/features/nightly-triage-dispatch.md` — this is the primary target. It documents
   the dispatch-and-file architecture this plan inverts: rewrite the filing section to describe the
-  detector as the sole issue creator, describe the fingerprint and the reconciliation sweep, and
-  remove the session-ledger description entirely (no "formerly" paragraph — describe the new status
+  detector as the sole issue creator, describe the fingerprint and the in-run collision report,
+  state that the detector creates and comments but never closes, and remove the session-ledger
+  description entirely (no "formerly" paragraph — describe the new status
   quo only, per this repo's no-legacy-code rule).
 - [ ] Update `docs/features/nightly-regression-tests.md` — correct the `Tracker: N issue(s) filed`
-  semantics (verified count, not self-reported tally) and document the fail-open/fail-closed
-  asymmetry between the dedup reads and the budget check, since that asymmetry is surprising and a
-  future maintainer will otherwise "fix" it into consistency.
+  semantics (a derived count over issue numbers GitHub returned, not a self-reported tally) and
+  document that the dedup reads deliberately fail *open* while an unconfirmed create is never
+  counted and never recorded, since a future maintainer will otherwise "fix" that into consistency.
 - [ ] Update `docs/features/README.md` index rows for both files if their one-line summaries name
   the session as the filer.
 
@@ -758,8 +820,12 @@ and the budget check fails closed because over-filing is the specific harm on re
 ### Inline Documentation
 - [ ] `create_issue()` docstring states the no-retry contract and cites the absence of a GitHub
   idempotency key, so the next maintainer does not add retry logic.
-- [ ] The fail-closed comment on the budget verification explicitly contrasts itself with
-  `open_issues`' fail-open, naming #3418, so the asymmetry reads as deliberate.
+- [ ] The budget comment states that `issues_filed` is derived from confirmed numbers and
+  explicitly contrasts itself with `open_issues`' fail-open, naming #3418, so the asymmetry reads as
+  deliberate rather than as an oversight.
+- [ ] The collision-report comment states that the detector deliberately reports and does not close,
+  naming `## Decisions` #2 and the deferral, so the next maintainer does not "finish" it into an
+  auto-close.
 - [ ] The fingerprint constant's comment states what it is derived from and why a title is not a
   usable key.
 - [ ] Any new tunable carries the module's established provisional-value comment form: what the
@@ -773,8 +839,10 @@ and the budget check fails closed because over-filing is the specific harm on re
   pass and comments once per node (`TestFilingIdempotence`).
 - [ ] `issues_filed` equals the number of issue numbers actually returned by `create_issue()`; a
   failed create spends no budget and leaves its node out of `recorded`.
-- [ ] The budget verification fails closed: an unreadable verification read defers the remainder
-  and files nothing further.
+- [ ] A second finding in one run resolving to an already-filed fingerprint is skipped and logged,
+  not filed (`TestFingerprintCollisionIsLogged`).
+- [ ] The detector never closes an issue: `scripts/nightly_regression_tests.py` contains no
+  `gh issue close` invocation and no close helper.
 - [ ] `write_triage_ledger`, `NodeDisposition`, and the ledger prompt paragraph are gone from the
   module — deleted, not flagged off.
 - [ ] `NIGHTLY_AUTO_FILE=false` produces a run that comments, logs every would-be filing, and
@@ -797,8 +865,8 @@ and the budget check fails closed because over-filing is the specific harm on re
 
 - **Builder (filing path)**
   - Name: `filing-builder`
-  - Role: `create_issue`, the fingerprint, the create loop, budget accounting, the reconciliation
-    sweep — all inside `scripts/nightly_regression_tests.py`
+  - Role: `create_issue`, the fingerprint, the create loop, budget accounting, the in-run collision
+    report — all inside `scripts/nightly_regression_tests.py`
   - Agent Type: builder
   - Resume: true
 
@@ -858,7 +926,7 @@ path existing.
 ### 2. Move the filing loop into `dispatch_findings()`
 - **Task ID**: build-filing-loop
 - **Depends On**: build-create-issue
-- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestDispatchFindings`, `::TestDispositionHandoff` (replace), `::TestIssueBudgetIsVerified` (create)
+- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestDispatchFindings`, `::TestDispositionHandoff` (replace)
 - **Assigned To**: filing-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -872,23 +940,27 @@ path existing.
 - Add the `NIGHTLY_AUTO_FILE` kill switch: when false, log every would-be filing in full and create
   nothing.
 
-### 3. Reconciliation sweep and verified budget
-- **Task ID**: build-reconcile
+### 3. Fingerprint-collision reporting (report only, no close)
+- **Task ID**: build-collision-report
 - **Depends On**: build-filing-loop
-- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestReconciliationSweep` (create), `::TestIssueBudgetIsVerified`
+- **Validates**: `tests/unit/test_nightly_regression_tests.py::TestFingerprintCollisionIsLogged` (create), `::TestIssueBudgetSpendsOnlyConfirmedCreates` (create)
 - **Assigned To**: filing-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- After the filing loop, read back issues created in this run's window and group by fingerprint.
-- Converge any duplicated fingerprint to its lowest number; close the others `NOT_PLANNED` with a
-  pointer comment.
-- The sweep may fail without failing the run — log a warning, keep every created issue, report the
-  creates that were observed directly.
-- Distinct log lines for budget-exhausted vs. verification-failed deferral, each naming the nodes.
+- Keep an in-process `dict[fingerprint, int]` of every fingerprint this run filed, populated as
+  each `create_issue()` returns a number.
+- Before each create, look the computed fingerprint up in that dict. On a hit, skip the create and
+  emit one `WARNING` naming the fingerprint, the issue it was already filed as, and the skipped
+  node. The node is left out of `recorded` so a genuine distinct finding is not suppressed forever.
+- **Report only.** No GitHub read-back, no `gh issue close`, no pointer comment, no close helper.
+  The detector's privilege set stays create-and-comment. This is the owner's ruling on Open
+  Question 2 (`## Decisions` #2); the convergent sweep and its evidence bar live in `## No-Gos`.
+- Emit three distinct, separately-named log lines for the three non-filing outcomes — budget
+  exhausted, create failed, fingerprint collision — each naming the nodes it concerns.
 
 ### 4. Retire the ledger, the dispositions, and the filing prompts
 - **Task ID**: build-retire-agent-filing
-- **Depends On**: build-reconcile
+- **Depends On**: build-collision-report
 - **Validates**: `tests/unit/test_nightly_regression_tests.py::TestBuildTriagePrompt` (replace), `::TestMaybeDispatchTriage`, `::TestPromptsNeverNameTheSearchIndex`
 - **Assigned To**: prompt-builder
 - **Agent Type**: builder
@@ -900,8 +972,9 @@ path existing.
 - Strip the dedup-before-filing framing from `ISSUE_LOOKUP_INSTRUCTION`; keep the search-index
   prohibition for whatever lookup the investigation session still performs.
 - Leave no commented-out code and no "formerly" comments.
-- **Gate:** if the PM answers Open Question 1 with "drop the session", this task instead deletes
-  `maybe_dispatch_triage_session` and all three prompt builders, and becomes smaller.
+- **Decided, no gate:** the owner ruled on 2026-09-18 that the comment-only investigation session
+  **stays** (`## Decisions` #1). Build it as written above; do not delete
+  `maybe_dispatch_triage_session`.
 
 ### 5. Test suite
 - **Task ID**: build-tests
@@ -913,25 +986,29 @@ path existing.
 - Execute every disposition in `## Test Impact`, in the order given (shared harness first).
 - Extract the four duplicated fake-`gh` harnesses (1241, 1406, 2580, 2800) into one fixture that
   stubs `create_issue` alongside `comment_on_issue`.
-- Write `TestCreateIssue`, `TestFilingIdempotence`, `TestReconciliationSweep`,
-  `TestIssueBudgetIsVerified`.
+- Write `TestCreateIssue`, `TestFilingIdempotence`, `TestFingerprintCollisionIsLogged`,
+  `TestIssueBudgetSpendsOnlyConfirmedCreates`.
 - Run only this file. Never the full `tests/unit/` tree.
 
 ### 6. Close the historical duplicates
 - **Task ID**: cleanup-duplicates
 - **Depends On**: build-tests
+- **Validates**: `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]|@tsv'; done` — every line must read `CLOSED` / `NOT_PLANNED`; repeat the same loop over the enumerated 09-16 duplicate numbers. Mirrored as a `## Verification` row so it is checked mechanically rather than by the builder's assertion.
 - **Assigned To**: filing-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Close #3382-#3397 as `NOT_PLANNED`, each with a comment naming its surviving twin
   (#3398-#3405 are the survivors for the 09-17 set; keep the lowest-numbered issue per node and
-  close the rest, matching the sweep's own rule).
+  close the rest — lowest-numbered issue per node survives, the same rule the deferred sweep would
+  have applied automatically).
 - Close the 09-16 duplicate pairs listed in the issue body, keeping the lower number in each pair.
-- Enumerate the closures in the PR body so the one-shot is reviewable before it runs.
+- Enumerate the closures in the PR body so the one-shot is reviewable before it runs. This is an
+  operator action on a fixed, enumerated list; it does not add a closing path to the detector.
 
 ### 7. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-tests
+- **Validates**: `git diff --name-only origin/main -- docs/` lists every path in the `## Documentation` checklist. A docs task's output *is* its validation — there is no test to run, so the file list is the check.
 - **Assigned To**: nightly-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: true
@@ -940,6 +1017,7 @@ path existing.
 ### 8. Cruft review
 - **Task ID**: review-cruft
 - **Depends On**: build-tests, document-feature
+- **Validates**: the auditor's own report, plus the three anti-criterion rows in `## Verification` (no create instruction in any prompt, no ledger/disposition references, no `gh issue close` in the detector). A review step's finding list is its own validation; the anti-criteria make the two claims it is most likely to get wrong mechanically checkable.
 - **Assigned To**: filing-reviewer
 - **Agent Type**: cruft-auditor
 - **Parallel**: false
@@ -948,7 +1026,8 @@ path existing.
 
 ### 9. Final validation
 - **Task ID**: validate-all
-- **Depends On**: build-create-issue, build-filing-loop, build-reconcile, build-retire-agent-filing, build-tests, cleanup-duplicates, document-feature, review-cruft
+- **Depends On**: build-create-issue, build-filing-loop, build-collision-report, build-retire-agent-filing, build-tests, cleanup-duplicates, document-feature, review-cruft
+- **Validates**: every row of the `## Verification` table, run in order, plus every `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
 - **Assigned To**: filing-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -963,9 +1042,12 @@ path existing.
 | Format clean | `python -m ruff format --check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
 | Detector creates issues itself | `grep -c '"create"' scripts/nightly_regression_tests.py` | output > 0 |
 | Idempotence regression test exists | `grep -c "class TestFilingIdempotence" tests/unit/test_nightly_regression_tests.py` | output > 0 |
-| Budget verification test exists | `grep -c "class TestIssueBudgetIsVerified" tests/unit/test_nightly_regression_tests.py` | output > 0 |
+| Budget test exists | `grep -c "class TestIssueBudgetSpendsOnlyConfirmedCreates" tests/unit/test_nightly_regression_tests.py` | output > 0 |
+| Collision-report test exists | `grep -c "class TestFingerprintCollisionIsLogged" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Kill switch wired | `grep -c "NIGHTLY_AUTO_FILE" scripts/nightly_regression_tests.py` | output > 0 |
 | Anti-criterion: no prompt tells an agent to create an issue | `grep -c "gh issue create" scripts/nightly_regression_tests.py` | match count == 0 |
+| Anti-criterion: the detector never closes an issue | `grep -c 'issue", "close\|gh issue close' scripts/nightly_regression_tests.py` | match count == 0 |
+| Task 6 closures landed | `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]\|@tsv'; done` | every line `CLOSED` `NOT_PLANNED` |
 | Anti-criterion: ledger and dispositions are gone | `grep -c "write_triage_ledger\|NodeDisposition" scripts/nightly_regression_tests.py` | match count == 0 |
 | Anti-criterion: #3419's collapsing logic untouched | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "group_body_failure_cascades\|BODY_CASCADE_MIN_GROUP_SIZE"` | match count == 0 |
 | Anti-criterion: #3243's hostname stamp not landed here | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "gethostname\|hostname"` | match count == 0 |
@@ -989,31 +1071,51 @@ that is a net-new subsystem rather than a relocation of an existing one.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
-| BLOCKER | Risk & Robustness (Skeptic) | The reconciliation sweep is specified as "one read of issues created during this run's window", but the fingerprint it must compare on lives only in the issue **body**, and no body-reading primitive is specified anywhere in `## Solution` or Task 3. The module's only precedent, `open_issues()` (`scripts/nightly_regression_tests.py:2060-2135`), fetches `--json number,title` and carries no body; `--search` is explicitly rejected elsewhere in this same plan for index lag. As written, Task 3 cannot be built from the primitives the plan names. | pending | `open_issues()` returns `dict[str, int]` keyed on title with no body field and cannot be reused for fingerprint lookups. Task 3 needs an explicit read spec — either `gh issue list --json number,title,body,createdAt` scoped by a time window with its own timeout/limit constants following the `OPEN_ISSUE_LIST_TIMEOUT_SECONDS` pattern, or N per-issue `gh issue view --json body` calls bounded by `NIGHTLY_MAX_ISSUES_PER_RUN` — plus the cost and timeout contract for whichever is chosen. |
-| BLOCKER | Scope & Value (User) + History & Consistency (Consistency Auditor) — elevated on two-critic convergence | Task 3 commits to auto-closing duplicate issues as settled, ungated behavior ("Converge any duplicated fingerprint to its lowest number; close the others `NOT_PLANNED` with a pointer comment"), while `## Open Questions` #2 treats that exact behavior as unresolved and requiring PM sign-off on a privilege the detector has never held. Task 4 carries an explicit `**Gate:**` clause tied to Open Question 1; Task 3 has no equivalent, so unattended review-free issue-closing ships regardless of how the PM answers. | pending | Copy Task 4's gate sentence verbatim in shape: if Open Question 2 is answered "report only", Task 3 builds a fingerprint-collision log plus a pointer comment instead of a `gh issue close` call, and no unattended close ships. `TestReconciliationSweep`'s described assertion ("the lower number survives, the higher is closed `NOT_PLANNED`") must branch on that answer rather than hard-coding auto-close as the only tested behavior. |
-| CONCERN | Risk & Robustness (Adversary) | When the sweep converges a duplicate that this run itself created to a lower survivor number, nothing in the plan updates `DispatchOutcome.filed_issues` / `cascade_issues` to the survivor before `main()` persists them. The night's own state would then point at an issue the same run just closed `NOT_PLANNED`, corrupting what the next night's `resolve_cascade_issue` reads. | pending | `cascade_issues: dict[str, int \| None]` is mutated in place during the create loop; the sweep must mutate the same dict a second time for every key it converges, before `issues_filed` is finalized. Add a test asserting the persisted map names the survivor, not the closed twin. |
-| CONCERN | Risk & Robustness (Operator) | `## Failure Path Test Strategy` pins distinct log lines for budget-exhausted and verification-failed deferral but not for a **partial** sweep failure — a close that succeeds while its pointer comment fails leaves an issue closed `NOT_PLANNED` with no explanation, which is precisely the illegible-morning-triage outcome `## Success Criteria` exists to prevent, relocated from the filing loop to the sweep. | pending | Model on `comment_on_issue`'s existing "log and return bool" contract (`scripts/nightly_regression_tests.py:2278-2330`): log each half of the close-and-comment pair independently rather than treating "sweep ran" as one pass/fail unit, and add a named log line for each partial outcome. |
-| CONCERN | Scope & Value (Simplifier) | The sweep is a net-new autonomous subsystem — read-back, fingerprint grouping, and a `gh issue close` call path that exists nowhere in the module today — built to converge a race whose trigger is two hosts running the nightly concurrently. Nothing in the plan or the source establishes that this system has ever run on more than one host, and both motivating incidents (09-17's three waves, 09-16's ten pairs) were single-run replays that Race 1's Python-loop fix eliminates on its own. | pending | Consider shipping Race 1 (create loop in Python) and Race 2 (pre-create re-read) alone, which close every observed incident, and deferring the sweep to a follow-up gated on real evidence of concurrent multi-host nightly runs. If the sweep stays, the plan should say what evidence justifies it beyond theoretical completeness — an appetite-Medium change is carrying a second subsystem for an unobserved failure. |
-| CONCERN | Structural Check | Four of nine tasks carry no `**Validates**` line: `cleanup-duplicates` (6), `document-feature` (7), `review-cruft` (8), `validate-all` (9). Task 6 is the one that matters — it closes roughly twenty GitHub issues as a one-shot `[DESTRUCTIVE]`-class action and has a `## Success Criteria` row, but no validation command a builder or validator can run to confirm it did what it claimed. | pending | Give Task 6 a `**Validates**` line with a concrete command, e.g. a loop over the enumerated numbers asserting `gh issue view N --json state,stateReason` reports `CLOSED` / `NOT_PLANNED`, and add the same command as a `## Verification` table row so it is checked mechanically rather than by assertion. Tasks 7-9 are docs/review/validation steps whose output is their own validation; a one-line note saying so would close the gap. |
+| BLOCKER | Risk & Robustness (Skeptic) | The reconciliation sweep is specified as "one read of issues created during this run's window", but the fingerprint it must compare on lives only in the issue **body**, and no body-reading primitive is specified anywhere in `## Solution` or Task 3. The module's only precedent, `open_issues()` (`scripts/nightly_regression_tests.py:2060-2135`), fetches `--json number,title` and carries no body; `--search` is explicitly rejected elsewhere in this same plan for index lag. As written, Task 3 cannot be built from the primitives the plan names. | **MOOTED** — revision 2: the sweep is deferred (`## Race Conditions` Race 3, `## No-Gos` [DEFERRED]). No body-reading primitive is introduced, because nothing reads an issue body back. The fingerprint still ships, as a write-only forensic key. | `open_issues()` returns `dict[str, int]` keyed on title with no body field and cannot be reused for fingerprint lookups. Task 3 needs an explicit read spec — either `gh issue list --json number,title,body,createdAt` scoped by a time window with its own timeout/limit constants following the `OPEN_ISSUE_LIST_TIMEOUT_SECONDS` pattern, or N per-issue `gh issue view --json body` calls bounded by `NIGHTLY_MAX_ISSUES_PER_RUN` — plus the cost and timeout contract for whichever is chosen. |
+| BLOCKER | Scope & Value (User) + History & Consistency (Consistency Auditor) — elevated on two-critic convergence | Task 3 commits to auto-closing duplicate issues as settled, ungated behavior ("Converge any duplicated fingerprint to its lowest number; close the others `NOT_PLANNED` with a pointer comment"), while `## Open Questions` #2 treats that exact behavior as unresolved and requiring PM sign-off on a privilege the detector has never held. Task 4 carries an explicit `**Gate:**` clause tied to Open Question 1; Task 3 has no equivalent, so unattended review-free issue-closing ships regardless of how the PM answers. | **RESOLVED** — revision 2: the owner answered Open Question 2 "report only" (`## Decisions` #2). Task 3 is now `build-collision-report` and ships no close path at all, so there is no gate to write — the branch the gate would have guarded does not exist. A `## Verification` anti-criterion row and a `## Success Criteria` row both pin that the detector contains no `gh issue close`. | Copy Task 4's gate sentence verbatim in shape: if Open Question 2 is answered "report only", Task 3 builds a fingerprint-collision log plus a pointer comment instead of a `gh issue close` call, and no unattended close ships. `TestReconciliationSweep`'s described assertion ("the lower number survives, the higher is closed `NOT_PLANNED`") must branch on that answer rather than hard-coding auto-close as the only tested behavior. |
+| CONCERN | Risk & Robustness (Adversary) | When the sweep converges a duplicate that this run itself created to a lower survivor number, nothing in the plan updates `DispatchOutcome.filed_issues` / `cascade_issues` to the survivor before `main()` persists them. The night's own state would then point at an issue the same run just closed `NOT_PLANNED`, corrupting what the next night's `resolve_cascade_issue` reads. | **MOOTED** — revision 2: no convergence step exists, so no second mutation of `cascade_issues` is possible. The map is written exactly once, at create time, from the number GitHub returned (Task 2). | `cascade_issues: dict[str, int \| None]` is mutated in place during the create loop; the sweep must mutate the same dict a second time for every key it converges, before `issues_filed` is finalized. Add a test asserting the persisted map names the survivor, not the closed twin. |
+| CONCERN | Risk & Robustness (Operator) | `## Failure Path Test Strategy` pins distinct log lines for budget-exhausted and verification-failed deferral but not for a **partial** sweep failure — a close that succeeds while its pointer comment fails leaves an issue closed `NOT_PLANNED` with no explanation, which is precisely the illegible-morning-triage outcome `## Success Criteria` exists to prevent, relocated from the filing loop to the sweep. | **MOOTED as stated, narrowed and kept** — revision 2: there is no close-and-comment pair to half-fail. The legibility requirement the finding is really about survives and was strengthened: `## Failure Path Test Strategy` now pins three separately-named log lines for the three non-filing outcomes (budget exhausted, create failed, fingerprint collision), on the argument that one shared "not filed" line would collapse three different operator responses into one. Task 3 carries the same requirement. | Model on `comment_on_issue`'s existing "log and return bool" contract (`scripts/nightly_regression_tests.py:2278-2330`): log each half of the close-and-comment pair independently rather than treating "sweep ran" as one pass/fail unit, and add a named log line for each partial outcome. |
+| CONCERN | Scope & Value (Simplifier) | The sweep is a net-new autonomous subsystem — read-back, fingerprint grouping, and a `gh issue close` call path that exists nowhere in the module today — built to converge a race whose trigger is two hosts running the nightly concurrently. Nothing in the plan or the source establishes that this system has ever run on more than one host, and both motivating incidents (09-17's three waves, 09-16's ten pairs) were single-run replays that Race 1's Python-loop fix eliminates on its own. | **ACCEPTED IN FULL** — revision 2: the owner adopted this recommendation verbatim (`## Decisions` #2). Race 1 and Race 2 ship; the sweep is deferred. `## No-Gos` carries the deferral with a two-clause evidence bar that reopens it (an observed same-night multi-host run, or a fingerprint-sharing pair the next night's `open_issues()` dedup fails to collapse). | Consider shipping Race 1 (create loop in Python) and Race 2 (pre-create re-read) alone, which close every observed incident, and deferring the sweep to a follow-up gated on real evidence of concurrent multi-host nightly runs. If the sweep stays, the plan should say what evidence justifies it beyond theoretical completeness — an appetite-Medium change is carrying a second subsystem for an unobserved failure. |
+| CONCERN | Structural Check | Four of nine tasks carry no `**Validates**` line: `cleanup-duplicates` (6), `document-feature` (7), `review-cruft` (8), `validate-all` (9). Task 6 is the one that matters — it closes roughly twenty GitHub issues as a one-shot `[DESTRUCTIVE]`-class action and has a `## Success Criteria` row, but no validation command a builder or validator can run to confirm it did what it claimed. | **FIXED** — revision 2: Tasks 6-9 each carry a `**Validates**` line. Task 6 gets the concrete `gh issue view $n --json state,stateReason` loop asserting `CLOSED` / `NOT_PLANNED` over #3382-#3397 and the 09-16 numbers, mirrored as a `## Verification` table row. Tasks 7-9 state explicitly that a docs/review/validation step's own output is its validation, and name the mechanical checks that back them. | Give Task 6 a `**Validates**` line with a concrete command, e.g. a loop over the enumerated numbers asserting `gh issue view N --json state,stateReason` reports `CLOSED` / `NOT_PLANNED`, and add the same command as a `## Verification` table row so it is checked mechanically rather than by assertion. Tasks 7-9 are docs/review/validation steps whose output is their own validation; a one-line note saying so would close the gap. |
 
+
+**Revision 2 disposition (2026-09-18).** All six rows above are closed: two FIXED/RESOLVED by
+edits, three MOOTED by deferring the sweep, one narrowed and kept. The round's own observation —
+that every finding landed on the sweep and none on the filing move, the budget accounting, the
+prior-art analysis or the test-impact audit — is what the owner acted on: the piece the critics
+converged against was the one net-new subsystem, and it is now out of scope with a written evidence
+bar for reopening it. What remains is a relocation of an existing mechanism, which is what the
+Medium appetite was sized for.
 
 ---
 
+## Decisions
+
+Answered by the owner on 2026-09-18. These were `## Open Questions` 1-3; they are recorded here
+because the plan text above now depends on them.
+
+1. **The comment-only investigation session stays.** With filing moved into the detector, the
+   nightly LLM session is dispatched *after* filing, handed real issue numbers, and permitted to
+   investigate and comment only. This is what the issue's own proposed cull describes, and
+   root-cause narrative on a fresh issue has triage value that the deterministic path cannot
+   produce. Task 4 builds it as written and carries no gate. If the comments turn out to go unread,
+   deleting `maybe_dispatch_triage_session` afterwards is a strictly smaller change, because
+   correctness no longer depends on it.
+2. **Report only — the detector does not gain issue-closing privilege, and the reconciliation sweep
+   is deferred.** Adopting the Simplifier's round-2 recommendation in full: ship Race 1 (the create
+   loop in Python) and Race 2 (the pre-create re-read), which between them close every incident on
+   record, and defer the convergent sweep to a follow-up gated on real evidence of concurrent
+   multi-host nightly runs. Task 3 becomes a fingerprint-collision log line — no close, no pointer
+   comment, no read-back subsystem. The deferral and the evidence bar that reopens it are recorded
+   under `## No-Gos`.
+3. **`NIGHTLY_MAX_ISSUES_PER_RUN` stays at its current default.** The issue's proposed cull asked to
+   lower it. The 09-17 overrun was a broken measurement, not a too-generous cap: a run that created
+   24 issues was budgeted as 8, so the cap was never the thing being enforced. Fix the measurement,
+   leave the number alone. Lowering it while the count was wrong would only have deferred real
+   regressions behind a budget nothing was honouring.
+
 ## Open Questions
 
-1. **Does the investigation session survive at all?** With filing gone, a nightly LLM session that
-   only comments may be pure cost. The plan keeps it (dispatched after filing, handed real issue
-   numbers, comment-only) because that is what the issue's proposed cull describes, and because
-   root-cause narrative on a fresh issue has real triage value. But "drop it entirely" is a
-   strictly *smaller* change — Task 4 shrinks to a deletion — and would remove the last path by
-   which an agent touches the tracker unsupervised. Which way?
-2. **Should the reconciliation sweep close duplicates automatically, or only report them?**
-   Auto-closing is what makes the convergence guarantee real, but it means the detector closes
-   GitHub issues without a human in the loop — a new privilege it has never held. The conservative
-   alternative is to log the duplicate fingerprints and let the next morning's triage close them.
-   Auto-close is planned; confirm that the new privilege is acceptable.
-3. **`NIGHTLY_MAX_ISSUES_PER_RUN` stays at its current default.** The issue's proposed cull asked
-   to "lower the per-run issue budget default". This plan deliberately does not: the 09-17 overrun
-   was a broken measurement, not a too-generous cap, and lowering the cap while the measurement was
-   wrong would only have deferred real regressions. Confirm that leaving the default alone and
-   fixing the measurement is the intended reading, or name the value you want.
+None open. All three questions this plan raised were answered by the owner on 2026-09-18 and are
+recorded under `## Decisions`; the plan text above reflects those answers rather than deferring to
+them.
