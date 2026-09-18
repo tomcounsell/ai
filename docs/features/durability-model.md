@@ -207,6 +207,29 @@ Rules, in flow order:
    reports it as a `corrupt-goal: <job_id>` finding, the at-rest alarm
    names the corruption, and `job_tool show` exposes `goal_corrupt: true`.
 
+9. **Blocked is an annotation, not a third lifecycle state** (#2862). An
+   open expectation can carry `entry["blocked"] = {"code", "detail", "ts",
+   "by"}`, orthogonal to `removed_ts` — a blocked row is still open, still
+   counted by `has_open_expectations`, and still returned by
+   `open_expectations()`; only `removed_ts` discharges. `code` is drawn from
+   the closed vocabulary `BLOCKED_REASONS`: `attempts_exhausted`,
+   `needs_human`, `missing_credential`, `upstream_unmergeable` — no
+   `owner_gone` member, because owner liveness is a reconciler *input*, not
+   a reason a human or a lane would cite. `by` is drawn from `BLOCKED_BY`:
+   `reconciler`, `pm`, `lane`. Three writers, one fence: `code=
+   "attempts_exhausted"` if and only if `by="reconciler"` — a lane or PM
+   cannot forge the reconciler's own "recovery budget spent" verdict, and
+   the reconciler never writes any other code. `block_expectation` and
+   `unblock_expectation` are the only mutators; `Job._write_goal_data`
+   remains the single write chokepoint, so `has_open_expectations` and
+   `status` derive exactly as before rule 4 — nothing about rest, the
+   invariant alarm, or discharge changes. Race 3 gets one extra
+   precedence rule: a `pm`/`lane` `block_expectation` call refuses (returns
+   `False`, no write) against a row already annotated `by="reconciler"` —
+   unblock is exempt, since a human can always clear anything. No schema
+   migration is registered for existing rows: an absent `blocked` key reads
+   as not-blocked, which is already correct.
+
 `tools/job_tool.py` enforces **Room scope at the tool layer**: every Job
 lookup filters on the calling session's own `room_id`, so cross-Room Jobs
 are structurally unaddressable (prompt-level constraints drift; tool-level
