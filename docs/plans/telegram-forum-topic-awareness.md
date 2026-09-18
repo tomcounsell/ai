@@ -7,7 +7,7 @@ created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
 last_comment_id: 5695879375
 revision_applied: true
-revision_applied_at: 2026-09-18T06:22:07Z
+revision_applied_at: 2026-09-18T08:05:00Z
 ---
 
 # Telegram Forum-Topic Awareness
@@ -100,7 +100,7 @@ lose topic identity like everything else.
 - Known quirk: `reply_to_top_id` can be `None` on a plain comment but set when quoting (https://github.com/LonamiWebs/Telethon/issues/3831) — resolution must treat `reply_to_top_id or (reply_to_msg_id if forum_topic else None)` as the topic id, never require `reply_to_top_id`.
 - Outbound: `client.send_message(chat, text, reply_to=topic_id)` posts into a topic (Telethon converts to `InputReplyToMessage(reply_to_msg_id=topic_id, top_msg_id=topic_id)`); replying to a message inside a topic uses the raw `InputReplyToMessage(reply_to_msg_id=msg, top_msg_id=topic)`. Sources: https://tl.telethon.dev/methods/messages/send_message.html, https://tl.telethon.dev/constructors/input_reply_to_message.html
 - The General topic (id=1) must be sent as a plain send — Telegram rejects thread id 1; omit `reply_to` for General.
-- Topic name→id resolution requires `channels.GetForumTopics`; nothing in the codebase calls it today.
+- Topic name→id resolution requires `messages.GetForumTopicsRequest`; nothing in the codebase calls it today.
 
 (Memory-store save attempted per the addendum; the store filtered it — findings preserved here.)
 
@@ -138,7 +138,7 @@ lose topic identity like everything else.
 
 ## Architectural Impact
 
-- **New dependencies**: none (Telethon already present; `channels.GetForumTopics` is an existing-API call).
+- **New dependencies**: none (Telethon already present; `messages.GetForumTopicsRequest` is an existing-API call).
 - **Interface changes**: `TelegramMessage` +1 nullable field (Popoto migration required); relay payload optionally +`topic_id`; `projects.json` group entries optionally +`default_topic_id` (absent = today's behavior).
 - **Coupling**: topic resolution becomes a shared bridge helper used by live intake and all three recovery scanners — reduces per-site drift.
 - **Data ownership**: bridge owns topic capture; agent receives it read-only via context.
@@ -166,7 +166,7 @@ No other prerequisites — all remaining work is code + unit tests with syntheti
 
 **Corrects an earlier premise.** This plan previously recorded that the planning host "runs no bridge" and that Cyndra Devs was "not configured on this machine at all". Re-verified on **Valor the Cowboy** (2026-09-16): `com.valor.bridge` **is** live here, `projects.cyndra.telegram.groups` **does** contain `"Cyndra Devs" (-1004385743413)`, and `logs/bridge.log` shows this client receiving that channel's updates. The real blocker is narrower: `projects.cyndra.machine` is **"Valor the Bald"**, so under single-machine ownership this host receives those updates but never persists them — `TelegramMessage.query.filter(chat_id=-1004385743413)` returns **0 rows**.
 
-No live read can substitute. The bridge's only externally-driven consumer is the relay, whose payload `type` is a closed `Literal["reaction", "custom_emoji_message", "poll"] | None` (`bridge/wire_schemas.py:52`) dispatching four **send** branches (`bridge/telegram_relay.py:1377-1412`); `bridge/history_fetch.py:24` does reuse the bridge's own client but only from internally-scheduled call sites (`telegram_bridge.py:3362`, `:3402`) with fixed arguments. Reaching `channels.GetForumTopics` would mean adding a new job type to the hot I/O path purely to answer a prerequisite — rejected. `tools/valor_telegram.py:247-266` builds a second client on `data/valor_bridge` and is unsafe while the bridge runs (#726). Historical records cannot answer it either: `models/telegram.py:47` stores only the flattened `reply_to_msg_id`, and Telethon's property discards `forum_topic` and `reply_to_top_id` (`telethon/tl/custom/message.py:715-722`).
+No live read can substitute. The bridge's only externally-driven consumer is the relay, whose payload `type` is a closed `Literal["reaction", "custom_emoji_message", "poll"] | None` (`bridge/wire_schemas.py:52`) dispatching four **send** branches (`bridge/telegram_relay.py:1377-1412`); `bridge/history_fetch.py:24` does reuse the bridge's own client but only from internally-scheduled call sites (`telegram_bridge.py:3362`, `:3402`) with fixed arguments. Reaching `messages.GetForumTopicsRequest` would mean adding a new job type to the hot I/O path purely to answer a prerequisite — rejected. `tools/valor_telegram.py:247-266` builds a second client on `data/valor_bridge` and is unsafe while the bridge runs (#726). Historical records cannot answer it either: `models/telegram.py:47` stores only the flattened `reply_to_msg_id`, and Telethon's property discards `forum_topic` and `reply_to_top_id` (`telethon/tl/custom/message.py:715-722`).
 
 **But the observation needs no code and no Cyndra access.** Both values the acceptance criterion asks for are already persisted today (`TelegramMessage.reply_to_msg_id`, `AgentSession.session_id`), so *any* owned forum group answers it identically.
 
@@ -194,7 +194,7 @@ Recorded on the issue: https://github.com/tomcounsell/ai/issues/2652#issuecommen
 - **Topic resolver helper** (`bridge/topic.py` or inside `bridge/routing.py`): one function from a Telethon message to `(topic_id | None, is_top_level_topic_message)` implementing the header rules and the #3831 quirk defensively.
 - **Capture + storage**: `TelegramMessage.topic_id`; `tools/telegram_history.store_message()` gains a `topic_id` kwarg populated by live intake (`bridge/telegram_bridge.py:1567`) through the shared helper; the three recovery scanners carry the topic into the enqueued session context instead (they write no rows — see spike-3); Popoto migration registered in `MIGRATIONS`.
 - **Keying correction**: continuation branch and chain walk treat top-level topic messages as fresh sessions; walk never crosses a topic root; root-cache hygiene for the semantics change.
-- **Context rendering**: topic id + best-effort name (GetForumTopics, cached, fail-soft to id-only) in the agent's context; optional advisory subdirectory hint from config.
+- **Context rendering**: topic id + best-effort name (GetForumTopicsRequest, cached, fail-soft to id-only) in the agent's context; optional advisory subdirectory hint from config.
 - **Outbound default topic**: `default_topic_id` per group in `projects.json`; ALL producers of unsolicited sends resolve it — PM briefings, `tools/send_message.py`, and poll sends (#3080 surface, included per owner ruling: same one-line producer resolution); relay guard maps General/none to a plain send; reply-inside-topic uses raw `InputReplyToMessage` where both ids are known.
 
 ### Flow
@@ -206,8 +206,8 @@ Inbound topic message → resolver tags `topic_id`, flags top-level → fresh se
 - Topic id resolution: `header = message.reply_to; topic_id = header.reply_to_top_id or (header.reply_to_msg_id if header.forum_topic else None)`; `is_top_level = header.forum_topic and header.reply_to_top_id is None`. Non-forum and General yield `topic_id=None`.
 - Session granularity stays per-conversation (owner ruling, 2026-09-05): topic id is context + storage, NOT part of the session key. The keying fix is purely "stop mistaking topic roots for replies".
 - Root cache: key the cached roots under a bumped namespace (or include a semantics version) so pre-fix cached collapses cannot serve post-fix lookups.
-- Name resolution: lazy `channels.GetForumTopics` from the bridge (never a second client), cached in Redis via ORM model or reuse of an existing cache pattern, always fail-soft to id-only.
-- Config: `projects.json` group entry gains optional `default_topic_id` (int) and optional `topics: {id: subdir}` advisory map, keyed by topic **id** (owner-ratified default: ids survive admin renames; names-as-keys was considered and rejected because it needs `GetForumTopics` resolution and breaks silently on rename). `bridge/config_validation.py` accepts-and-validates both, absent keys keep today's behavior exactly.
+- Name resolution: lazy `messages.GetForumTopicsRequest` from the bridge (never a second client), cached in Redis via ORM model or reuse of an existing cache pattern, always fail-soft to id-only.
+- Config: `projects.json` group entry gains optional `default_topic_id` (int) and optional `topics: {id: subdir}` advisory map, keyed by topic **id** (owner-ratified default: ids survive admin renames; names-as-keys was considered and rejected because it needs `GetForumTopicsRequest` resolution and breaks silently on rename). `bridge/config_validation.py` accepts-and-validates both, absent keys keep today's behavior exactly.
 - Env plumbing for agent-invoked sends: sessions created from a topic export `TELEGRAM_TOPIC_ID` beside `TELEGRAM_REPLY_TO` (injection site: `agent/sdk_client.py:495-500`, where `TELEGRAM_REPLY_TO` is set today); `tools/send_message.py` uses it when `TELEGRAM_REPLY_TO` is unset.
 
 #### Implementation Notes from Critique (2026-09-16)
@@ -267,7 +267,7 @@ These are binding on the build, not advisory.
 
 ### Exception Handling Coverage
 - [ ] The resolver and name-resolution paths are fail-soft by design: each `except` must log at WARNING with chat/msg ids and degrade to `topic_id=None` / id-only naming — one test per handler asserting the log + degraded value.
-- [ ] GetForumTopics failure (network, permissions, non-forum group) → id-only context, no crash, no retry storm (single attempt per cache TTL).
+- [ ] GetForumTopicsRequest failure (network, permissions, non-forum group) → id-only context, no crash, no retry storm (single attempt per cache TTL).
 
 ### Empty/Invalid Input Handling
 - [ ] Messages with no reply header, DM messages, and non-forum group replies → `topic_id=None`, `is_top_level=False`, byte-identical behavior to today (regression tests on existing fixtures).
@@ -282,6 +282,46 @@ These are binding on the build, not advisory.
 All UPDATE paths below were verified to exist on `origin/main` at plan-revision time
 (2026-09-16). CREATE paths were verified NOT to exist. A build must not invent new suites
 that shadow these.
+
+### Ownership partition (round-4 CONCERNs, 2026-09-18) — authoritative
+
+Two round-4 CONCERNs found Test Impact items whose owning task was fixed **only in prose**:
+the chain-walk item was claimed by Task 10 inside Task 10's own body, and the two mirror items
+were claimed by both Task 4 and Task 5. Both Implementation Notes said to close this by walking
+the full list rather than patching the named sites, because an enumerated fix closes the named
+sites and leaves the class open — the same lesson as the coordinate sweep.
+
+So the partition is written out here, once, and **this table is authoritative**: where a task
+body and this table disagree, this table wins. Every item below is claimed by **exactly one**
+task — none orphaned, none claimed twice. Any future edit that adds a Test Impact item must add
+a row here in the same commit.
+
+| Test Impact item | Owner | Held? |
+|---|---|---|
+| `tests/unit/test_config_driven_routing.py` — forum continuation-branch variants | **Task 10** | held behind Task 2 |
+| `tests/unit/test_context_helpers.py` — topic-root termination + root-cache namespace | **Task 10** | held behind Task 2 |
+| `tests/unit/test_context_helpers.py` — `test_cross_topic_history_does_not_bleed` | **Task 4** | no |
+| `tests/unit/test_context_helpers.py` — resolved-name render assertion (round-4) | **Task 11** | no |
+| `tools/telegram_history/tests/test_telegram_history.py` — history topic filter (N4) | **Task 4** | no |
+| `tests/tools/test_telegram_history.py` — history topic filter (N4) | **Task 4** | no |
+| `tests/unit/test_bridge_logic.py` — delete mirror #1, import the real function | **Task 4** | no |
+| `tests/integration/test_message_routing.py` — delete mirror #2, import the real function | **Task 4** | no |
+| `tests/e2e/test_message_pipeline.py` — VERIFY only (not a mirror) | **Task 4** | no |
+| `tests/unit/test_model_relationships.py` — field-count 20 → 21 → **22** (Task 11 adds `topic_name`) | **Task 1**, then **Task 11** | no |
+| `tests/tools/test_telegram_history.py` — `store_message` `topic_id` round-trip | **Task 1** | no |
+| `tools/telegram_history/tests/test_telegram_history.py` — `store_message` `topic_id` round-trip | **Task 1** | no |
+| `tests/unit/test_topic_resolver.py` — CREATE, resolver truth table | **Task 1** | no |
+| `tests/unit/test_agent_catchup.py`, `test_reconciler.py`, `test_catchup_seed.py` — topic rides into session context | **Task 1** (id), **Task 11** (name) | no |
+| `tests/unit/test_bridge_relay.py` — General omit rule, `default_topic_id` → `reply_to` | **Task 3** | no |
+| `tests/unit/test_send_message.py` — `TELEGRAM_TOPIC_ID` env resolution | **Task 3** | no |
+| `tests/unit/test_routing.py` — conditional, no action unless the resolver lands in `bridge/routing.py` | — | n/a |
+| The six `patch(..., return_value=...)` sites, no `autospec` — no action | — | n/a |
+
+**Task 5 `test-suites-unheld` owns every item this table assigns to Task 5 — which is none of
+them individually.** Task 5's role is the integration sweep across the unheld items above
+(Tasks 1, 3, 4, 11), not ownership of any single item. That is the correction to its old rule
+"every Test Impact item EXCEPT the Task-2-scoped ones listed in Task 10", which silently
+re-claimed items Tasks 4 and 11 already own.
 
 - [ ] `tests/unit/test_config_driven_routing.py` — UPDATE: this is the real home of
   `should_respond_async` reply-continuation coverage (its `_make_event(reply_to_msg_id=...)`
@@ -335,8 +375,16 @@ writing the disposition; do not trust this list to still be complete.
 
 - [ ] `tests/unit/test_bridge_logic.py` — UPDATE (**stale mirror #1**): `:87`, docstring at
   `:97` says "Local mirror of bridge.context.build_context_prefix for unit tests". Delete it and
-  import the real function; the docstring's stated reason (import-time side effects requiring a
-  live bridge) must be re-tested before the mirror is kept. Owned by Task 4.
+  import the real function. Owned by Task 4.
+  **The docstring's stated reason was tested and is FALSE (round-4 CONCERN, 2026-09-18).** It
+  claimed the real module "has import-time side effects that require a live bridge";
+  `python -c "import bridge.context"` completes cleanly with no bridge running. The claim was
+  false when it was written, and that false belief is *why* the mirror survived long enough to go
+  stale and to be joined by mirror #2. The refutation is recorded here, in the inventory a future
+  reader consults, rather than only in a deleted file: a mirror is a local copy that must be
+  justified, and the justification outlives the copy. Deleting the code while leaving the belief
+  standing is how mirror #3 gets written next year by someone re-deriving the same wrong
+  conclusion from the old docstring.
 - [ ] `tests/integration/test_message_routing.py` — UPDATE (**stale mirror #2, found only by the
   sweep**): `:92` is a second, *divergent* mirror with a shorter signature
   `(project: dict | None, session_type: str | None = None)` and, unlike mirror #1, **no "Local
@@ -409,7 +457,7 @@ writing the disposition; do not trust this list to still be complete.
 **Mitigation:** post-fix, top-level messages never enter the walk, so the cache is only written for genuine replies; the bump prevents mixed-semantics reads.
 
 ### Race 2: Name-resolution cache stampede
-**Location:** new GetForumTopics cache
+**Location:** new GetForumTopicsRequest cache
 **Trigger:** Burst of messages in a freshly-seen forum.
 **Data prerequisite:** cache entry absent.
 **State prerequisite:** bridge event loop must not block on the RPC.
@@ -450,9 +498,22 @@ writing the disposition; do not trust this list to still be complete.
 - [ ] A synthetic top-level topic message (forum_topic=True, reply_to_top_id absent) creates a session keyed by its OWN message id, never the topic root's.
 - [ ] A synthetic in-topic reply continues its conversation session and stores the correct `topic_id`.
 - [ ] Non-forum and DM behavior is byte-identical to today (existing routing/context suites green without semantic edits beyond the new-field assertions).
+- [ ] `TelegramMessage.topic_name` persists through live intake beside `topic_id`, written by the bridge at ingest where the Telethon client lives (Task 11).
 - [ ] `TelegramMessage.topic_id` persists through live intake via `store_message` (round-trip test), and the three recovery scanners carry the topic into their enqueued session context (one test each) — they write no message rows.
 - [ ] An unsolicited send in a group with `default_topic_id` configured produces `reply_to=<topic_id>`; with General or no config, `reply_to` is omitted.
-- [ ] Agent context for a topic message names the topic (name or id) — snapshot test.
+- [ ] **Agent context for a topic message renders the resolved topic NAME whenever a name is
+  resolvable; the id-only form is the stated fallback for genuine resolution failure, never the
+  normal path** (round-4 BLOCKER, revised 2026-09-18). The prior wording — "names the topic
+  (name or id)" — was **satisfied by its own failure mode**: with zero production callers of
+  `resolve_topic_name`, `topic_name` could only ever be `None`, so every render took the id-only
+  branch and this criterion still passed. Two tests, not one: (a) a forum whose topic name
+  resolves renders `topic: behring`, asserted on the resolved **name** string, not on "the call
+  did not raise"; (b) a forum whose resolution genuinely fails renders `topic id 4242` and logs
+  once. A criterion that cannot distinguish (a) from (b) does not belong in this list.
+- [ ] **Name resolution has at least one reachable production caller** (round-4 BLOCKER).
+  `resolve_topic_name` is resolved bridge-side at ingest by Task 11 and the resolved string is
+  carried to the worker, which reads it and never resolves. Anti-vacuity: this criterion is
+  RED today and cannot be satisfied by any amount of correct-but-uncalled implementation.
 - [ ] **No cross-topic context bleed (user-vantage criterion, critique CONCERN 4 / Note N4):**
   given two `TelegramMessage` rows in the same `chat_id` under different topics,
   `build_conversation_history(chat_id, topic_id=B)` returns a history block containing none of
@@ -490,7 +551,16 @@ builders must write **disjoint file sets**. The waves and their file sets:
 |------|-------|---------|---------------|
 | 1 | Task 1 (build-capture) | `topic-capture-builder` | `bridge/topic.py` (new), `models/telegram.py`, `tools/telegram_history/__init__.py`, `scripts/update/migrations.py`, `bridge/telegram_bridge.py` (intake), `bridge/catchup.py`, `bridge/reconciler.py`, `bridge/agent_catchup.py`, `tests/unit/test_model_relationships.py` |
 | 2 | Task 3 (build-outbound) **‖** Task 4 (build-context) | `topic-outbound-builder` **‖** `topic-capture-builder` | Task 3: `bridge/telegram_relay.py`, `bridge/config_validation.py`, `reflections/pm_briefings/delivery.py`, `tools/send_message.py`, `agent/sdk_client.py` — Task 4: `bridge/context.py`, `bridge/topic.py` |
-| 3 | Task 2 (build-keying) — **held** behind Task 7 | `topic-routing-builder` | `bridge/routing.py`, `bridge/context.py`, `tests/unit/test_context_helpers.py`, `tests/unit/test_config_driven_routing.py` |
+| 3 | Task 11 (build-topic-name) | `topic-capture-builder` | `bridge/context.py` (docstring), `models/telegram.py`, `scripts/update/migrations.py`, `tools/telegram_history/__init__.py`, `bridge/telegram_bridge.py`, `bridge/catchup.py`, `bridge/reconciler.py`, `bridge/agent_catchup.py`, `agent/session_executor.py`, `tests/unit/test_model_relationships.py`, `tests/unit/test_topic_resolver.py` |
+| 4 | Task 2 (build-keying) — **held** behind Task 7 | `topic-routing-builder` | `bridge/routing.py`, `bridge/context.py`, `tests/unit/test_context_helpers.py`, `tests/unit/test_config_driven_routing.py` |
+
+3. **Task 11 gets a wave to itself (round-4 revision, 2026-09-18).** It is producer-side work and
+   its file set collides with Task 1's on six files (`models/telegram.py`,
+   `scripts/update/migrations.py`, `tools/telegram_history/__init__.py`, and all three scanners),
+   with Task 4's on `bridge/context.py`, and with Task 2's on `bridge/context.py` as well. It
+   therefore runs alone, after wave 2 and before the held Task 2. `Parallel: false`. Task 2 moves
+   to wave 4 with no change to its `Depends On` — it already declares `build-context`, and
+   `build-topic-name` does not gate it.
 
 Two collisions the critique surfaced, and how this resolves them:
 
@@ -545,7 +615,17 @@ itself.
 - **Informed By**: spike-2 (reply_to suffices; General omit rule)
 - **Assigned To**: topic-outbound-builder — **Agent Type**: builder — **Parallel**: true (wave 2, with build-context; file sets are disjoint — see the Parallelism Contract)
 - Config keys + validation posture, producer resolution (PM briefings, send_message, poll sends), relay General-guard, `TELEGRAM_TOPIC_ID` (inject beside `TELEGRAM_REPLY_TO` at `agent/sdk_client.py:495-500`).
-- **Note N1 applies**: introduce a named `GENERAL_TOPIC_ID = 1` in `bridge/telegram_relay.py` and branch on it; no bare `== 1` in the topic guard.
+- **Note N1 applies (REBOUND round 4, 2026-09-18).** The binding property is: **a single named
+  `GENERAL_TOPIC_ID = 1` constant, defined exactly once tree-wide and imported by every
+  consumer; no bare `== 1` in any topic guard.** N1 previously bound the constant to
+  `bridge/telegram_relay.py`. The build defined it at `bridge/config_validation.py:36` — a
+  module with **0** Telethon references — and imports it into `bridge/telegram_relay.py:50`
+  (reasoning at `:46`), with `tools/send_message.py` consuming the same constant. **The
+  deviation is accepted and the note is amended to match**, because inverting it would make
+  the Telethon-free module that the update script imports depend on a Telethon module.
+  A note that names a *location* tests placement; a note that names a *property* tests the
+  defect. A binding note that contradicts working code is how someone later "fixes" it back
+  into a circular import, in good faith, citing the note as authority.
 - This task is **not** held behind Task 7 and merges independently of Task 2.
 
 ### 4. Context rendering + name resolution
@@ -553,7 +633,7 @@ itself.
 - **Depends On**: build-capture
 - **Validates**: context snapshot test, tests/unit/test_context_helpers.py (cross-topic bleed), tests/unit/test_bridge_logic.py
 - **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: true (wave 2, with build-outbound)
-- Topic line in agent context (`bridge/context.py::build_context_prefix`, `:110`); lazy GetForumTopics cache, fail-soft; advisory subdir hint when configured.
+- Topic line in agent context (`bridge/context.py::build_context_prefix`, `:110`); lazy GetForumTopicsRequest cache, fail-soft; advisory subdir hint when configured.
 - **Explicit signature change (critique CONCERN 4 / round-2 BLOCKER).** `build_context_prefix`'s
   current arg list carries nothing that can express a topic, so it MUST gain
   `topic_id: int | None = None` and `topic_name: str | None = None`. Every call site updates in
@@ -588,10 +668,16 @@ itself.
 
 ### 5. Test suites (unheld scope)
 - **Task ID**: test-suites-unheld
-- **Depends On**: build-outbound, build-context
+- **Depends On**: build-outbound, build-context, build-topic-name
 - **Assigned To**: topic-test-engineer — **Agent Type**: test-engineer — **Parallel**: false
-- Every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10;
-  synthetic MessageReplyHeader fixtures; the cross-topic-bleed fixture (Task 4 owns the filter).
+- **Scope is set by the Test Impact ownership partition table, which is authoritative**
+  (round-4 CONCERNs, 2026-09-18). Task 5 owns the **integration sweep** across the unheld
+  items — those the partition assigns to Tasks 1, 3, 4 and 11 — plus the synthetic
+  `MessageReplyHeader` fixtures. It owns **no individually-listed item**. The old rule
+  ("every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10")
+  is withdrawn: it silently re-claimed the two mirror items and the cross-topic-bleed fixture
+  that Task 4 already owns, and it excluded Task-2-scoped items only by pointing at a list
+  inside another task's body.
 - **Split from the old single `test-suites` (round-3 BLOCKER, 2026-09-18).** This task must not
   declare `build-keying` in its `Depends On`, directly or by adding any dependency that reaches
   it. It is the node Tasks 6 and 9 consume, and the whole point of the Task 2 hold is that those
@@ -615,24 +701,37 @@ itself.
 
 ### 8. Final validation (unheld scope)
 - **Task ID**: validate-all
-- **Depends On**: build-capture, build-outbound, build-context, test-suites-unheld, document-feature
+- **Depends On**: build-capture, build-outbound, build-context, build-topic-name, test-suites-unheld, document-feature
 - **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: false
 - **Deliberately excludes `build-keying`** (critique CONCERN 2026-09-16; corrected 2026-09-18).
   Task 8 originally declared `Depends On: all previous`, which blocked final validation of
   Tasks 1/3/4 on the indefinite owner action the split was designed to escape. Round 2 dropped
   the direct edge — and that was not enough, because the edge returned transitively through
   `test-suites`. Round 3 split Task 5 to remove it for real.
-- **Transitive closure of Task 8 (round-3 BLOCKER — verify by walking this, not by reading the
-  one line above).** Every path, fully expanded:
-  - `validate-all -> build-capture -> (none)`
-  - `validate-all -> build-outbound -> build-capture -> (none)`
-  - `validate-all -> build-context -> build-capture -> (none)`
-  - `validate-all -> test-suites-unheld -> {build-outbound, build-context} -> build-capture -> (none)`
-  - `validate-all -> document-feature -> test-suites-unheld -> {build-outbound, build-context} -> build-capture -> (none)`
-  **No path reaches `build-keying`, and therefore none reaches `verify-live`.** `build-keying`
-  and `verify-live` appear in the closure of Tasks 9 and 10 only. Any future edit that adds a
-  dependency to Task 5, 6 or 8 must re-walk this list; checking only the edge you changed is
-  what produced the round-3 blocker.
+- **Transitive closure — RE-WALKED for all eleven tasks (round-4 revision, 2026-09-18).** Task 11
+  (`build-topic-name`) added edges into Tasks 5 and 8, so the closure was recomputed for **every**
+  node rather than for the two edges that changed. That discipline is the round-3 lesson: checking
+  only the edge you changed is what produced the round-3 blocker.
+
+  | Task | Full transitive closure | Reaches the hold? |
+  |------|-------------------------|-------------------|
+  | `build-capture` | (none) | no |
+  | `build-outbound` | build-capture | no |
+  | `build-context` | build-capture | no |
+  | `build-topic-name` | build-capture, build-context | no |
+  | `verify-live` | build-capture | no |
+  | `test-suites-unheld` | build-capture, build-context, build-outbound, build-topic-name | no |
+  | `document-feature` | + test-suites-unheld | no |
+  | `validate-all` | build-capture, build-context, build-outbound, build-topic-name, test-suites-unheld, document-feature | **no** |
+  | `build-keying` | build-capture, build-context, verify-live | yes (by design) |
+  | `test-suites-keying` | build-capture, build-context, build-keying, verify-live | yes (by design) |
+  | `validate-keying` | build-capture, build-context, build-keying, test-suites-keying, verify-live | yes (by design) |
+
+  **No path from `validate-all` reaches `build-keying`, and therefore none reaches `verify-live`.**
+  `build-topic-name` is safe to consume because it depends only on `build-capture` and
+  `build-context`, neither of which reaches the hold. Exactly three nodes reach it —
+  `build-keying`, `test-suites-keying`, `validate-keying` — which is the intended partition.
+  Any future edit that adds a dependency to Task 5, 6, 8 or 11 must re-walk this whole table.
 - Runs every Verification row except the four Task-2-scoped ones listed in Task 9.
 
 ### 9. Keying validation (held scope)
@@ -653,6 +752,77 @@ itself.
   lands, which is precisely why they must not sit in the same node as the tests that can. Task 9
   consumes this; Tasks 6 and 8 must never depend on it.
 
+### 11. Bridge-side name resolution at ingest + persistence
+- **Task ID**: build-topic-name
+- **Depends On**: build-capture, build-context
+- **Validates**: tests/unit/test_topic_resolver.py, tests/unit/test_model_relationships.py, tests/unit/test_bridge_logic.py
+- **Informed By**: round-4 BLOCKER (no reachable caller); owner ruling 2026-09-18
+- **Assigned To**: topic-capture-builder — **Agent Type**: builder — **Parallel**: false (wave 3, alone)
+
+**Why this task exists.** Round 4 established that `bridge/context.py::resolve_topic_name` has
+**zero production callers** — `resolve_topic_name(` across `bridge/`, `agent/`, `tools/`,
+`worker/`, excluding the definition and tests, returns nothing. `topic_name` threads correctly
+into `build_context_prefix`, but the only value that can ever arrive is `None`, so production
+renders the id-only line *always* — not as the degraded path but as the only path. The plan
+specified the call inside `agent/session_executor.py`, where two independent preconditions are
+unsatisfiable: that module has **0** Telethon references (no client to pass) and
+`resolve_topic_name` is `async` (no await in that sync seam).
+
+**The preconditions are unsatisfiable where the plan put the call, not in general.** Both
+dissolve by moving resolution to **ingest**: the bridge resolves the name once, when the forum
+message arrives, on the process that owns the `client` and is already `async`. The resolved name
+is persisted beside the topic id and travels the same path the id already travels. The worker
+reads a stored string. This is also why the name cache and the per-chat single-flight lock at
+`bridge/context.py:127-130` were built — they only make sense on the process that owns the
+client. The existing implementation is correct and correctly placed; **the caller was specified
+in the wrong process.**
+
+**This reworks committed work. Accept it.** Task 1's storage shape and Task 3/4's threading were
+committed at `23eb0a6f6` and `39e51bc0f`; this task re-opens the producer side of both. The
+branch is unpushed and there is no PR, which is the cheapest place to absorb it.
+
+**Deliverables:**
+- `TelegramMessage.topic_name = Field(type=str, null=True)` in `models/telegram.py` (beside
+  `topic_id` at `:51`), a migration appended to `MIGRATIONS` in `scripts/update/migrations.py`,
+  and the field-count assertion in `tests/unit/test_model_relationships.py:110` bumped
+  **21 → 22** in the same commit (Task 1 took it 20 → 21).
+- `store_message(..., topic_name: str | None = None)` in `tools/telegram_history/__init__.py:346`,
+  persisting the column. Its three production callers (`bridge/telegram_relay.py:396`,
+  `bridge/telegram_bridge.py:1568`, `:3223`) pass it where a name is resolvable.
+- **Resolve at all four producer sites**, each of which already has a `client` in scope and sits
+  on an async path (verified 2026-09-18):
+  | Site | Where the id is produced | Client in scope |
+  |------|--------------------------|-----------------|
+  | `bridge/telegram_bridge.py:1584` | `topic_id=resolve_topic(message)[0]` into `store_message`, inside `async def handler(event)` (`:1379`) | yes, module client |
+  | `bridge/catchup.py:415` / `:488` | `{"topic_id": topic_id} if topic_id is not None else None` | passed at `:287` / `:385` |
+  | `bridge/reconciler.py:339` / `:420` | same shape | received as a parameter at `:271` / `:319` — **0 Telethon imports; it is duck-typed**, so pass the client through, do not import Telethon here |
+  | `bridge/agent_catchup.py:118` / `:429` / `:438` / `:455` / `:777` | `ThreadMessage.topic_id` | `:391` / `:402` |
+- Carry the resolved name on **`extra_context["topic_name"]`**, written beside the
+  `extra_context["topic_id"]` the scanners already write. Same dict, same write site, same
+  nullability contract.
+- `agent/session_executor.py` becomes a **one-line read** of the persisted value, symmetric with
+  `_topic_id_from_extra_context`. It must not import Telethon, must not call
+  `resolve_topic_name`, and must not `await`. Replace the standing comment at `:2296-2299`
+  ("The name cannot be resolved here") with the read — the comment is correct about *that
+  process* and becomes obsolete once the producer supplies the value.
+- **Fix the false coordinate in the docstring.** `bridge/context.py:220` says the function issues
+  ``channels.GetForumTopics``; the import at `:248` correctly uses
+  `from telethon.tl.functions.messages import GetForumTopicsRequest`. Correct the docstring in
+  this commit. The wrong coordinate raises `ImportError` **inside** the fail-soft
+  `except Exception` at `:248-269`, so a build carrying it degrades every forum to id-only
+  permanently while logging a plausible warning and reporting healthy.
+- **Fail-soft stays, and the test must not assert on it.** Resolution failure persists `None` and
+  the render falls back to the id form. The test asserts the **resolved name**, never "the call
+  did not raise" — that phrasing passes against the permanently-broken build above.
+
+**Anti-vacuity gate for this task (all must be true at review):**
+  - [ ] At least one production call site of `resolve_topic_name(` exists outside `bridge/context.py`.
+  - [ ] `agent/session_executor.py` contains no reference to `resolve_topic_name`.
+  - [ ] A test renders the agent context block for a message in a **named** topic and asserts the
+        name appears; the id-only form is exercised by a separate failure-injection test.
+  - [ ] `grep -q 'channels.GetForumTopics' bridge/context.py` returns non-zero.
+
+
 ## Verification
 
 | Check | Command | Expected |
@@ -664,9 +834,9 @@ itself.
 | Field-count assertion updated | `grep -n "field_names) == 21" tests/unit/test_model_relationships.py` | one match |
 | Topic field stored | `grep -c "topic_id" models/telegram.py` | output > 0 |
 | Migration registered | `grep -c "topic_id" scripts/update/migrations.py` | output > 0 |
-| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5) | `! sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -qi topic` | exit code 0 |
-| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5) | `! sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -qi topic` | exit code 0 |
-| General topic omit rule uses a named constant (Note N1) | `grep -c "GENERAL_TOPIC_ID" bridge/telegram_relay.py` | `> 0` (**RED on current main: 0 matches**) |
+| No topic in session key — `resolve_root_session_id` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `! sed -n '/^async def resolve_root_session_id/,/^async def _cache_walk_root/p' bridge/context.py \| grep -qi topic` | exit code 0 |
+| No topic in session key — `_cache_walk_root` (anti-criterion, owner ruling 1; Note N5; **Task 9 scope**) | `! sed -n -E '/^async def _cache_walk_root/,/^(async def\|def) [a-z_]+\(/p' bridge/context.py \| grep -qi topic` | exit code 0 |
+| General omit rule uses a single named constant, defined once tree-wide (Note N1, rebound round 4) | `[ "$(grep -rn 'GENERAL_TOPIC_ID *=' --include='*.py' . \| grep -v '/.venv/\|/.worktrees/' \| wc -l \| tr -d ' ')" = "1" ] && grep -q "GENERAL_TOPIC_ID" bridge/telegram_relay.py` | exit code 0 — **RED on current main** (0 definitions). Tests the property (one definition, imported by every consumer), not the file it lives in. |
 | No bare General literal in the topic guard (Note N1) | `! grep -n "reply_to" bridge/telegram_relay.py \| grep -q "== 1"` | exit code 0 |
 | Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | `> 0` |
 | No header sniffing at the enqueue site (Note N2) | `! grep -q 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | exit code 0 |
@@ -678,7 +848,12 @@ itself.
 | `build_context_prefix` can carry a topic (round-2 BLOCKER) | `grep -A8 -E "^def build_context_prefix" bridge/context.py \| grep -q "topic_name"` | exit code 0 — **RED on current main** |
 | Exactly one `build_context_prefix` definition tree-wide (round-3 sweep) | `[ "$(grep -rn 'def build_context_prefix' --include='*.py' . \| grep -v '/.venv/\|/.worktrees/' \| wc -l \| tr -d ' ')" = "1" ]` | exit code 0 — **RED on current main** (3 definitions). A docstring-keyed check would miss mirror #2, which has no "Local mirror" docstring. |
 | Production call site updated (round-3 sweep) | `grep -A8 "build_context_prefix(" agent/session_runner/harness/claude.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
-| Root cache is versioned on BOTH sides (critique CONCERN) | `! grep -q 'f"session_root:{chat_id}' bridge/context.py && grep -q "SESSION_ROOT_KEY_VERSION" bridge/context.py` | exit code 0 — **RED on current main** (two bare literals at `:710`, `:733`) |
+| Root cache is versioned on BOTH sides (critique CONCERN; **Task 9 scope**) | `! grep -q 'f"session_root:{chat_id}' bridge/context.py && grep -q "SESSION_ROOT_KEY_VERSION" bridge/context.py` | exit code 0 — **RED on current main** (two bare literals at `:710`, `:733`) |
+| **Name resolution has a production caller (round-4 BLOCKER, anti-vacuity)** | `[ "$(grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ worker/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l \| tr -d ' ')" != "0" ]` | exit code 0 — **RED on the current branch** (0 production callers). This row cannot be satisfied by correct-but-uncalled implementation, which is exactly how the defect shipped. |
+| Resolved name reaches the worker via extra_context (Task 11) | `grep -rq 'topic_name' bridge/catchup.py && grep -rq 'topic_name' bridge/reconciler.py && grep -rq 'topic_name' bridge/agent_catchup.py && grep -rq 'topic_name' bridge/telegram_bridge.py` | exit code 0 — **RED on the current branch** (all four producers write `topic_id` only) |
+| Worker never resolves, only reads (Task 11 anti-criterion) | `! grep -q 'resolve_topic_name' agent/session_executor.py` | exit code 0 — the worker has no client and no await; a resolution call here is the round-4 defect returning |
+| Rendered name is asserted, never just "did not raise" (round-4 BLOCKER) | `grep -q 'topic: behring\|assert.*topic_name ==' tests/unit/test_context_helpers.py` | exit code 0 — **RED on the current branch**. An `except Exception` around an import makes an unresolvable symbol look like a network failure, so the criterion must assert the resolved value. |
+| Docstring coordinate matches the import (round-4 BLOCKER) | `! grep -q 'channels.GetForumTopics' bridge/context.py` | exit code 0 — **RED on the current branch** (`:220` still says `channels`, `:248` imports `messages`) |
 | fetch_reply_chain untouched (No-Go #2732) | `! git diff main -- bridge/context.py \| grep -q "def fetch_reply_chain"` | exit code 0 |
 
 ## Critique Results
@@ -789,14 +964,14 @@ for the items it named and left it open for the ones it did not.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Scope & Value (elevated from CONCERN by the lane; corroborated negatively by Risk & Robustness and History & Consistency, which each confirmed no task in the region wires the caller) | **No task owns a bridge-side caller for `resolve_topic_name`, so the naming half of the feature is dead code.** `resolve_topic_name` (`bridge/context.py:217`) requires a live `TelegramClient`; the only production path into `build_context_prefix` is worker-side (`agent/session_runner/harness/claude.py:1701-1711` via `agent/session_executor.py:2302`), which correctly renders id-only and says so in a comment at `:2296-2299`. A tree-wide sweep finds the symbol only in its own definition and in unit tests — **zero production callers**. Tasks 1, 3, 4, 5, 6, 8, 9 and 10 all decline to wire it, and none is assigned to. The failure is silent in both directions: Success Criterion `:455` is hedged to "names the topic (name or id)", so Task 8 `validate-all` goes **green** while certifying nothing about whether naming ever fires, and Task 6 would document a best-effort naming behavior that cannot occur in production. This is the same defect family the lane has hit three times: a criterion that passes whether or not the work was done. | pending | The resolved shape is already known from the Task 4 ruling: resolve bridge-side where the client lives, carry the result on `extra_context["topic_name"]` beside the `topic_id` the scanners already write (`bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`), and the `session_executor.py` consumer becomes a one-line read. This needs an **owning task with an explicit file set**, not a note — the producer side is a new edit to the three scanners plus live intake, which is Task 1/3 territory and therefore rework of committed work (`23eb0a6f6`, `39e51bc0f`). The anti-criterion that closes it must be a **zero-production-caller** check that is RED today: `[ "$(grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l \| tr -d ' ')" != "0" ]`. Do NOT close this by deleting `resolve_topic_name` and committing to id-only unless the owner rules that way explicitly — that is a scope decision, not a build decision. |
-| CONCERN | Risk & Robustness | The Test Impact bullet at `:296` (`tests/unit/test_context_helpers.py` — topic-root termination cases and root-cache namespace assertions) carries **no ownership tag**, unlike its sibling bullets which are individually marked. Task 10 claims it in prose only. A test-engineer executing Task 5 off the Test Impact checklist would implement it, referencing Task 2 code that does not exist yet, and fail Task 8's `tests pass` row for reasons entirely outside Task 8's dependency closure — reintroducing the stall the round-3 split removed, by a different route. | pending | Add the inline ownership tag to the `:296` bullet in the same form the neighbouring bullets already use — `(**Task 10 scope, held behind Task 2**)`. The guard is that Task 5's brief says "every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10", so an item whose Task-2 scoping is stated only inside Task 10's own body is not excluded by Task 5's rule as a reader applies it. Every Task-2-scoped Test Impact item must be tagged at the item, not only enumerated in Task 10. |
-| CONCERN | Risk & Robustness | The Verification row "Root cache is versioned on BOTH sides" (`:681`) lacks the inline scope tag that its sibling row `:673` carries (`Task 9 scope`), even though Task 9's body claims it as one of its four rows. Task 8 runs "every Verification row except the four Task-2-scoped ones listed in Task 9" — a validator applying that rule against the table's own tags will run `:681`, which is documented RED on current main and stays RED until Task 2 lands. Task 8 then fails on legitimately pending work that its dependency closure deliberately excludes. | pending | Add `— **Task 9 scope**` to the Expected cell of the `:681` row, matching the form already used at `:673`. The underlying rule: Task 8's exclusion set is resolved by reading the table, so a row's scope must be legible **in the table**. This is the same "a row whose precondition lives only in prose is not a row" principle round 3 applied to the N3 caveat row; it was applied to one row and not to the other three. |
-| CONCERN | History & Consistency | Task 5's exception list (`:593`) names the Task-10 items and the Task-4-owned cross-topic-bleed fixture, but omits the two mirror-deletion items at `tests/unit/test_bridge_logic.py` and `tests/integration/test_message_routing.py`, which Test Impact independently marks "Owned by Task 4." (`:339`, `:345`). Those items are therefore claimed by **both** Task 4 and Task 5 — the "claimed by both" shape the round-3 split existed to close. Currently harmless because Task 4 already deleted both mirrors on the branch, so Task 5 would find nothing to do; it is a live inconsistency in the partition, not a live defect in the code. | pending | Extend Task 5's exception clause to read "EXCEPT the Task-2-scoped ones listed in Task 10 **and the items Test Impact marks as owned by Task 4**". The check that this is complete is a partition test, not a spot fix: every Test Impact item must be claimed by exactly one of Task 4, Task 5 or Task 10 — none orphaned, none claimed twice. Walk the full list rather than patching the two items named here. |
-| BLOCKER | Coordinator (verified independently by the lane) | **The plan's Telethon coordinate is wrong, and the wrong one survived into the shipped docstring.** Research `:103`, Architectural Impact `:141`, Technical Approach `:197`/`:209`/`:210`, Failure Path `:270`, Race 2 `:412`, Task 4 `:556` and Owner Ruling `:804` all cite `channels.GetForumTopics` — which is what Telegram's own API docs call it. Telethon 1.42.0 does not generate it there. Measured on this machine: `telethon.tl.functions.channels` `GetForumTopicsRequest` → **False**; `telethon.tl.functions.messages` `GetForumTopicsRequest` → **True**, parameters `['self', 'peer', 'offset_date', 'offset_id', 'offset_topic', 'limit', 'q']`. The import path is `messages` and the parameter is `peer=`, not `channel=`. **The failure mode is why this is a blocker and not a typo:** the wrong import raises `ImportError` *inside* the fail-soft `except Exception` at `bridge/context.py:248-269`, so every forum degrades to id-only **permanently** while logging a plausible warning and reporting healthy. An assertion of the form "the call does not raise" passes against the permanently-broken build; this was caught only because the test asserted on the resolved **name**. The build used the correct `messages` coordinate at `bridge/context.py:248`, but the docstring at `bridge/context.py:220` still reads "Issues ``channels.GetForumTopics``" — so a later reader reconciling code to docstring reintroduces the defect in good faith. | pending | Correct all eight plan citations to `telethon.tl.functions.messages.GetForumTopicsRequest` with `peer=`, and fix the docstring at `bridge/context.py:220` in the same commit — that one is code, so it rides the branch, not main. The guard for any future fail-soft resolver: an `except Exception` around an import makes an unresolvable symbol indistinguishable from a network failure, so the criterion must assert the **resolved value**, never the absence of a raise. Do not close this with "the code is already right" — the plan is the artifact a rebuild reads. |
-| BLOCKER | Coordinator (framing) + Scope & Value (instance) | **Plan-quality finding: this build produced three deliverables that are fully implemented, genuinely tested, and structurally unreachable.** `resolve_topic_name` (zero production callers), the `topic_name` parameter (threads correctly to `build_context_prefix`, but `None` is the only value that can ever arrive), and the name-resolution cache (warmed by a function nothing calls). Each was built to spec and each has passing tests. No test catches any of them because Success Criterion `:455` says the context "names the topic (name **or** id)" and the id satisfies that literally — **a criterion written loosely enough to be met by the failure.** Treat this as one plan-quality defect, not three code notes: the plan specified a deliverable whose preconditions the architecture cannot meet, and tests that pass against code that cannot run are the expensive version of this class. | pending | Round 4 decides exactly one thing: **does name resolution have a reachable seam in the worker architecture at all?** The function needs a live `TelegramClient` the worker does not have, and it is `async` in a sync seam — two unsatisfiable preconditions the plan noticed neither of. Either name a real seam (bridge-side producer writing `extra_context["topic_name"]`, per the Task 4 ruling) or drop name resolution and commit the plan to id-only rendering. Whichever is chosen, rewrite Success Criterion `:455` so the "or id" escape hatch cannot absorb the failure: if naming ships, the criterion asserts a resolved name for a known forum; if it is dropped, the criterion says id-only explicitly. Do not leave a deliverable specified whose preconditions the architecture cannot meet. |
-| CONCERN | Coordinator (verified independently by the lane) | **A false justification lives in a docstring and is the reason the defect survived.** Mirror #1 of `build_context_prefix` (`tests/unit/test_bridge_logic.py:97`) defended its own existence by claiming the real module "has import-time side effects that require a live bridge." Re-tested: `python -c "import bridge.context"` completes cleanly with no live bridge. The claim is false and was false; that false belief is *why* the mirror survived long enough to go stale and to be joined by mirror #2. Task 4 deleted the mirror, but the plan's Test Impact entry at `:336-339` still records the docstring's reason without marking it refuted. | pending | Amend the Test Impact bullet at `:336-339` to state that the stated reason was **tested and found false**, not merely that the mirror was deleted. The mechanism this closes: a mirror is a local copy that must be justified, and the justification outlives the copy. Deleting the code while leaving the belief standing is how mirror #3 gets written next year by someone who reads the old docstring and re-derives the same wrong conclusion. Record the refutation where a future reader looks, which is the plan's inventory, not the deleted file. |
-| CONCERN | Coordinator (deviation accepted; note must be amended) | **Note N1's placement instruction contradicts the shipped code, and the code is right.** N1 (`:548`) binds `GENERAL_TOPIC_ID = 1` to `bridge/telegram_relay.py`. The build defined it at `bridge/config_validation.py:36` (a module with **0** Telethon references) and imports it into `bridge/telegram_relay.py:50` with the reasoning recorded at `:46`; `tools/send_message.py` consumes the same constant, so there is one definition tree-wide. The deviation is accepted on the merits — inverting it would make the Telethon-free module that the update script imports depend on a Telethon module — but the note as written still says otherwise. | pending | Rewrite N1 to bind the **property**, not the location: "a single named `GENERAL_TOPIC_ID` constant defined once and imported by every consumer; no bare `== 1` in any topic guard." Both existing Verification rows already test that property and both pass. The hazard being closed: a binding note that contradicts working code is how someone later "fixes" the code back into a circular import, in good faith, citing the note as authority. A note that names a location tests placement; a note that names a property tests the defect. |
+| BLOCKER | Scope & Value (elevated from CONCERN by the lane; corroborated negatively by Risk & Robustness and History & Consistency, which each confirmed no task in the region wires the caller) | **No task owns a bridge-side caller for `resolve_topic_name`, so the naming half of the feature is dead code.** `resolve_topic_name` (`bridge/context.py:217`) requires a live `TelegramClient`; the only production path into `build_context_prefix` is worker-side (`agent/session_runner/harness/claude.py:1701-1711` via `agent/session_executor.py:2302`), which correctly renders id-only and says so in a comment at `:2296-2299`. A tree-wide sweep finds the symbol only in its own definition and in unit tests — **zero production callers**. Tasks 1, 3, 4, 5, 6, 8, 9 and 10 all decline to wire it, and none is assigned to. The failure is silent in both directions: Success Criterion `:455` is hedged to "names the topic (name or id)", so Task 8 `validate-all` goes **green** while certifying nothing about whether naming ever fires, and Task 6 would document a best-effort naming behavior that cannot occur in production. This is the same defect family the lane has hit three times: a criterion that passes whether or not the work was done. | **ADDRESSED 2026-09-18 (owner ruling).** New **Task 11 `build-topic-name`** owns bridge-side resolution at ingest and persistence of the name, with the render path reading the persisted value; `resolve_topic_name` is NOT deleted and the plan is NOT committed to id-only — the name is in #2652's Desired Outcome, and a critique round is not where scope gets dropped. Success Criterion `:455` rewritten to require the resolved name with the id as the stated fallback. Anti-vacuity Verification row added: zero-production-caller check, RED on the branch today. Reworks `23eb0a6f6` / `39e51bc0f`; accepted, the branch is unpushed. | The resolved shape is already known from the Task 4 ruling: resolve bridge-side where the client lives, carry the result on `extra_context["topic_name"]` beside the `topic_id` the scanners already write (`bridge/catchup.py:409`, `bridge/reconciler.py:333`, `bridge/agent_catchup.py:699`), and the `session_executor.py` consumer becomes a one-line read. This needs an **owning task with an explicit file set**, not a note — the producer side is a new edit to the three scanners plus live intake, which is Task 1/3 territory and therefore rework of committed work (`23eb0a6f6`, `39e51bc0f`). The anti-criterion that closes it must be a **zero-production-caller** check that is RED today: `[ "$(grep -rn 'resolve_topic_name(' --include='*.py' bridge/ agent/ tools/ \| grep -v 'def resolve_topic_name\|/tests/\|test_' \| wc -l \| tr -d ' ')" != "0" ]`. Do NOT close this by deleting `resolve_topic_name` and committing to id-only unless the owner rules that way explicitly — that is a scope decision, not a build decision. |
+| CONCERN | Risk & Robustness | The Test Impact bullet at `:296` (`tests/unit/test_context_helpers.py` — topic-root termination cases and root-cache namespace assertions) carries **no ownership tag**, unlike its sibling bullets which are individually marked. Task 10 claims it in prose only. A test-engineer executing Task 5 off the Test Impact checklist would implement it, referencing Task 2 code that does not exist yet, and fail Task 8's `tests pass` row for reasons entirely outside Task 8's dependency closure — reintroducing the stall the round-3 split removed, by a different route. | **ADDRESSED 2026-09-18.** Closed as a **partition**, not as three spot fixes: the new authoritative *Ownership partition* table under Test Impact assigns every Test Impact item to exactly one owning task and declares itself authoritative over task bodies. | Add the inline ownership tag to the `:296` bullet in the same form the neighbouring bullets already use — `(**Task 10 scope, held behind Task 2**)`. The guard is that Task 5's brief says "every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10", so an item whose Task-2 scoping is stated only inside Task 10's own body is not excluded by Task 5's rule as a reader applies it. Every Task-2-scoped Test Impact item must be tagged at the item, not only enumerated in Task 10. |
+| CONCERN | Risk & Robustness | The Verification row "Root cache is versioned on BOTH sides" (`:681`) lacks the inline scope tag that its sibling row `:673` carries (`Task 9 scope`), even though Task 9's body claims it as one of its four rows. Task 8 runs "every Verification row except the four Task-2-scoped ones listed in Task 9" — a validator applying that rule against the table's own tags will run `:681`, which is documented RED on current main and stays RED until Task 2 lands. Task 8 then fails on legitimately pending work that its dependency closure deliberately excludes. | **ADDRESSED 2026-09-18.** All four Task-9-scoped Verification rows tagged `**Task 9 scope**` — the full set was walked, not only the two rows the critics named. | Add `— **Task 9 scope**` to the Expected cell of the `:681` row, matching the form already used at `:673`. The underlying rule: Task 8's exclusion set is resolved by reading the table, so a row's scope must be legible **in the table**. This is the same "a row whose precondition lives only in prose is not a row" principle round 3 applied to the N3 caveat row; it was applied to one row and not to the other three. |
+| CONCERN | History & Consistency | Task 5's exception list (`:593`) names the Task-10 items and the Task-4-owned cross-topic-bleed fixture, but omits the two mirror-deletion items at `tests/unit/test_bridge_logic.py` and `tests/integration/test_message_routing.py`, which Test Impact independently marks "Owned by Task 4." (`:339`, `:345`). Those items are therefore claimed by **both** Task 4 and Task 5 — the "claimed by both" shape the round-3 split existed to close. Currently harmless because Task 4 already deleted both mirrors on the branch, so Task 5 would find nothing to do; it is a live inconsistency in the partition, not a live defect in the code. | **ADDRESSED 2026-09-18.** Task 5's exception list is withdrawn entirely and replaced by a reference to the authoritative ownership partition table. Task 5 owns the integration sweep, not any individually-listed item; an enumerated exception list closes named sites and leaves the class open. | Extend Task 5's exception clause to read "EXCEPT the Task-2-scoped ones listed in Task 10 **and the items Test Impact marks as owned by Task 4**". The check that this is complete is a partition test, not a spot fix: every Test Impact item must be claimed by exactly one of Task 4, Task 5 or Task 10 — none orphaned, none claimed twice. Walk the full list rather than patching the two items named here. |
+| BLOCKER | Coordinator (verified independently by the lane) | **The plan's Telethon coordinate is wrong, and the wrong one survived into the shipped docstring.** Research `:103`, Architectural Impact `:141`, Technical Approach `:197`/`:209`/`:210`, Failure Path `:270`, Race 2 `:412`, Task 4 `:556` and Owner Ruling `:804` all cited `channels.GetForumTopics` — which is what Telegram's own API docs call it, and which the **issue body itself carries** in its Solution Sketch ("name-based config needs resolution via `channels.GetForumTopics`"), so the plan inherited the error rather than inventing it. Telethon 1.42.0 does not generate it there. Measured on this machine: `telethon.tl.functions.channels` `GetForumTopicsRequest` → **False**; `telethon.tl.functions.messages` `GetForumTopicsRequest` → **True**, parameters `['self', 'peer', 'offset_date', 'offset_id', 'offset_topic', 'limit', 'q']`. The import path is `messages` and the parameter is `peer=`, not `channel=`. **The failure mode is why this is a blocker and not a typo:** the wrong import raises `ImportError` *inside* the fail-soft `except Exception` at `bridge/context.py:248-269`, so every forum degrades to id-only **permanently** while logging a plausible warning and reporting healthy. An assertion of the form "the call does not raise" passes against the permanently-broken build; this was caught only because the test asserted on the resolved **name**. The build used the correct `messages` coordinate at `bridge/context.py:248`, but the docstring at `bridge/context.py:220` still reads "Issues ``channels.GetForumTopics``" — so a later reader reconciling code to docstring reintroduces the defect in good faith. | **ADDRESSED 2026-09-18 (plan side).** All plan citations corrected by sweep, not by an enumerated list; residual `grep -n "channels\.GetForumTopics"` on the plan returns 0. The correction and its measurement are recorded on the issue as comment 5726521660 so the next reader of #2652 meets the right coordinate. The `bridge/context.py:220` docstring fix is code and is assigned to Task 11, which rides the branch. | Correct all eight plan citations to `telethon.tl.functions.messages.GetForumTopicsRequest` with `peer=`, and fix the docstring at `bridge/context.py:220` in the same commit — that one is code, so it rides the branch, not main. The guard for any future fail-soft resolver: an `except Exception` around an import makes an unresolvable symbol indistinguishable from a network failure, so the criterion must assert the **resolved value**, never the absence of a raise. Do not close this with "the code is already right" — the plan is the artifact a rebuild reads. |
+| BLOCKER | Coordinator (framing) + Scope & Value (instance) | **Plan-quality finding: this build produced three deliverables that are fully implemented, genuinely tested, and structurally unreachable.** `resolve_topic_name` (zero production callers), the `topic_name` parameter (threads correctly to `build_context_prefix`, but `None` is the only value that can ever arrive), and the name-resolution cache (warmed by a function nothing calls). Each was built to spec and each has passing tests. No test catches any of them because Success Criterion `:455` says the context "names the topic (name **or** id)" and the id satisfies that literally — **a criterion written loosely enough to be met by the failure.** Treat this as one plan-quality defect, not three code notes: the plan specified a deliverable whose preconditions the architecture cannot meet, and tests that pass against code that cannot run are the expensive version of this class. | **ADDRESSED 2026-09-18.** Treated as a class: five anti-vacuity Verification rows added, each RED on the current branch, asserting the **resolved value** rather than the absence of a raise. Success Criterion `:455` — the fourth instance of a criterion satisfied by its own failure mode — was rewritten rather than patched. | Round 4 decides exactly one thing: **does name resolution have a reachable seam in the worker architecture at all?** The function needs a live `TelegramClient` the worker does not have, and it is `async` in a sync seam — two unsatisfiable preconditions the plan noticed neither of. Either name a real seam (bridge-side producer writing `extra_context["topic_name"]`, per the Task 4 ruling) or drop name resolution and commit the plan to id-only rendering. Whichever is chosen, rewrite Success Criterion `:455` so the "or id" escape hatch cannot absorb the failure: if naming ships, the criterion asserts a resolved name for a known forum; if it is dropped, the criterion says id-only explicitly. Do not leave a deliverable specified whose preconditions the architecture cannot meet. |
+| CONCERN | Coordinator (verified independently by the lane) | **A false justification lives in a docstring and is the reason the defect survived.** Mirror #1 of `build_context_prefix` (`tests/unit/test_bridge_logic.py:97`) defended its own existence by claiming the real module "has import-time side effects that require a live bridge." Re-tested: `python -c "import bridge.context"` completes cleanly with no live bridge. The claim is false and was false; that false belief is *why* the mirror survived long enough to go stale and to be joined by mirror #2. Task 4 deleted the mirror, but the plan's Test Impact entry at `:336-339` still records the docstring's reason without marking it refuted. | **ADDRESSED 2026-09-18.** The Test Impact mirror-#1 bullet now records that the "import-time side effects" claim was **tested and found false**, with the refutation stored where a future reader looks (the inventory), not only in the deleted file. | Amend the Test Impact bullet at `:336-339` to state that the stated reason was **tested and found false**, not merely that the mirror was deleted. The mechanism this closes: a mirror is a local copy that must be justified, and the justification outlives the copy. Deleting the code while leaving the belief standing is how mirror #3 gets written next year by someone who reads the old docstring and re-derives the same wrong conclusion. Record the refutation where a future reader looks, which is the plan's inventory, not the deleted file. |
+| CONCERN | Coordinator (deviation accepted; note must be amended) | **Note N1's placement instruction contradicts the shipped code, and the code is right.** N1 (`:548`) binds `GENERAL_TOPIC_ID = 1` to `bridge/telegram_relay.py`. The build defined it at `bridge/config_validation.py:36` (a module with **0** Telethon references) and imports it into `bridge/telegram_relay.py:50` with the reasoning recorded at `:46`; `tools/send_message.py` consumes the same constant, so there is one definition tree-wide. The deviation is accepted on the merits — inverting it would make the Telethon-free module that the update script imports depend on a Telethon module — but the note as written still says otherwise. | **ADDRESSED 2026-09-18.** Note N1 rebound from a *location* to a *property*: one `GENERAL_TOPIC_ID` definition tree-wide, imported by every consumer, no bare `== 1`. The deviation to `bridge/config_validation.py:36` is accepted and the reasoning recorded; the Verification row now tests the property. | Rewrite N1 to bind the **property**, not the location: "a single named `GENERAL_TOPIC_ID` constant defined once and imported by every consumer; no bare `== 1` in any topic guard." Both existing Verification rows already test that property and both pass. The hazard being closed: a binding note that contradicts working code is how someone later "fixes" the code back into a circular import, in good faith, citing the note as authority. A note that names a location tests placement; a note that names a property tests the defect. |
 
 **On the three-unreachable-deliverables finding.** The two rows above it are instances of the
 same class reaching the plan by different routes — a coordinate that is wrong in the plan and
@@ -811,7 +986,7 @@ same asserted-versus-read gap (#3065) that caused this round to be run at all.
 All five plan questions are settled; the sections above already incorporate them.
 
 1. **Session granularity**: topic as context only. Sessions stay per-conversation; topic id is captured, stored, rendered, and used for outbound targeting, never folded into the session key.
-2. **Config shape**: `default_topic_id: int` plus optional advisory `topics: {id: subdir}` map, keyed by topic **id**. Ids survive admin renames; names-as-keys was rejected for the rename hazard and the extra `GetForumTopics` resolution it would require.
+2. **Config shape**: `default_topic_id: int` plus optional advisory `topics: {id: subdir}` map, keyed by topic **id**. Ids survive admin renames; names-as-keys was rejected for the rename hazard and the extra `GetForumTopicsRequest` resolution it would require.
 3. **Mapping semantics**: advisory context only. Enforcement (topic mapping constraining a session's writable scope) is out of scope and would start as its own issue.
 4. **Poll sends**: included. The #3080 poll surface resolves `default_topic_id` like every other unsolicited-send producer.
 5. **Live verification**: during build, before the keying change merges. Task 7 executes from a machine that **owns** a Topics-enabled group. Re-scoped 2026-09-16 (see the OPEN QUESTION under Prerequisites): it needs no code and no Cyndra access, because `TelegramMessage.reply_to_msg_id` and `AgentSession.session_id` are already persisted — any owned forum group answers it. It is now an owner action, and only Task 2 is gated on it.
