@@ -316,7 +316,7 @@ def _fetch_live_active_run_id(agent_session: AgentSession | None) -> str | None:
     if not sid:
         return None
     try:
-        rows = AgentSession.rows_for_session_id(sid)
+        rows = AgentSession.rows_for_session_id(sid, prefer_type="eng")
     except Exception as exc:
         logger.debug(
             "[%s] issue-lock renewal: active_run_id re-fetch failed (%s: %s) -- skipping this tick",
@@ -325,12 +325,19 @@ def _fetch_live_active_run_id(agent_session: AgentSession | None) -> str | None:
             exc,
         )
         return None
-    # Prefer the eng-typed record (mirrors the resolution the SDLC tools use).
-    for row in rows:
-        if getattr(row, "session_type", None) == "eng":
-            rid = getattr(row, "active_run_id", None)
-            if rid:
-                return rid
+    # ONE pass, ONE predicate (``rid`` non-empty). This RELIES ON the stable
+    # partition the eng preference above guarantees: every eng row first, then
+    # every other row, each group newest-first. Because the list is already in
+    # preference order, the first row carrying a run id is by construction the
+    # one the old two-pass scan returned.
+    #
+    # Do NOT "restore" a second pass, and do NOT switch the resolver to a
+    # composite sort key. Either reintroduces the #1915 lock-wedge failure this
+    # function's docstring describes: a preference-then-fallback shape returns
+    # ``None`` when the preferred row carries no run id (renewal skips forever,
+    # the lock lapses mid-stage), and a non-partition ordering returns the
+    # WRONG id (a lapsed lock SET-NX re-acquired under a dead identity and
+    # renewed every tick, wedging the live run behind ISSUE_LOCKED).
     for row in rows:
         rid = getattr(row, "active_run_id", None)
         if rid:
@@ -1370,6 +1377,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # synthesis exists for is provided by stamping ``exec_cwd`` instead
         # (see the session-phase save block below), which is a plain field.
         is_synthetic_slug = False
+        # Sweep gate (#3091): this ``session_type == "eng"`` test is NOT the
+        # tie-break the resolver replaced. The shape differs because the job
+        # differs: it tests one already-resolved row's type;
+        # does not choose among rows. ``session`` here is the single hydrated
+        # record this executor is running, so there is no candidate list to
+        # order and ``prefer_type=`` has nothing to apply to.
         if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
             if _aid_for_slug:
