@@ -393,6 +393,8 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 
 ## Verification
 
+Every `Expected` cell below is one of the six forms `agent/verification_parser.py::evaluate_expectation` actually implements — `exit code N`, `exit code != N`, `output > N`, `output contains X`, `output does not contain X`, `match count == 0`. Anything else falls through every branch and returns `False` unconditionally, so a row written in prose fails 100% of the time no matter what the code does. Exact-count assertions are expressed as `<count command> \| grep -vc "^N$"` with `match count == 0`, which is RED for any count other than N.
+
 | Check | Command | Expected |
 |-------|---------|----------|
 | Model, reconciler, tool tests pass | `scripts/pytest-clean.sh tests/unit/test_job_model.py tests/unit/reflections/test_reflections_expectation_reconciler.py tests/unit/test_job_tool.py -n 2 -q` | exit code 0 |
@@ -401,16 +403,20 @@ The PM and lanes reach this through `tools/job_tool.py` (a CLI invoked with `VAL
 | No new index (anti-criterion, #2494 No-Go) | `grep -c "IndexedField(" models/job.py` | output contains 2 |
 | Reconciler never discharges (anti-criterion) | `grep -c "discharge_expectation" reflections/expectation_reconciler.py` | match count == 0 |
 | Vocabulary is closed | `grep -c "BLOCKED_REASONS" models/job.py` | output > 1 |
-| Crash window closes on the next tick regardless of owner liveness (behavioral) | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "crash_window_repair" -q` | exit 0, **2 tests collected and passed** (`..._owner_gone`, `..._owner_alive`). The `ZERO TESTS EXECUTED` guard makes a mistyped `-k` fail loudly rather than pass vacuously. |
-| Annotation is reconciler-attributed and only the budget-spent seam annotates (behavioral anti-criterion) | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "annotation_attributed or no_annotation_from" -q` | exit 0, **3 tests collected and passed** (`test_annotation_attributed_to_reconciler`, `test_no_annotation_from_evidence_escalation`, `test_no_annotation_from_no_pm_escalation`) |
-| No migration registered — MIGRATIONS dict clean (anti-criterion, Settled Decision 4) | `awk '/^MIGRATIONS/,0' scripts/update/migrations.py \| grep -ci blocked` | output == 0 |
-| No migration registered — whole file at baseline (anti-criterion) | `grep -ci "blocked" scripts/update/migrations.py` | output == 1 |
+| Crash window closes on the next tick regardless of owner liveness (behavioral) — selector is non-vacuous and green | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "crash_window_repair" -q` | exit code 0 |
+| Crash window — exactly the two named tests ran (`..._owner_gone`, `..._owner_alive`) | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "crash_window_repair" -q` | output contains 2 passed |
+| Annotation is reconciler-attributed and only the budget-spent seam annotates (behavioral anti-criterion) | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "annotation_attributed or no_annotation_from" -q` | exit code 0 |
+| Annotation — exactly the three named tests ran (`test_annotation_attributed_to_reconciler`, `test_no_annotation_from_evidence_escalation`, `test_no_annotation_from_no_pm_escalation`) | `scripts/pytest-clean.sh tests/unit/reflections/test_reflections_expectation_reconciler.py -k "annotation_attributed or no_annotation_from" -q` | output contains 3 passed |
+| No migration registered — MIGRATIONS dict clean (anti-criterion, Settled Decision 4) | `awk '/^MIGRATIONS/,0' scripts/update/migrations.py \| grep -ci blocked` | match count == 0 |
+| No migration registered — whole file at baseline of exactly 1 (anti-criterion) | `grep -ci "blocked" scripts/update/migrations.py \| grep -vc "^1$"` | match count == 0 |
 | Rule 9 documented — vocabulary named | `grep -c "BLOCKED_REASONS" docs/features/durability-model.md` | output > 0 |
-| Rule 9 documented — rule exists | `grep -c "^9\. \*\*" docs/features/durability-model.md` | output == 1 |
+| Rule 9 documented — rule exists, exactly once | `grep -c "^9\. \*\*" docs/features/durability-model.md \| grep -vc "^1$"` | match count == 0 |
 
 **Baseline measurements (taken on `761cf7b58`, the revision-pass baseline — every anti-criterion above is stated relative to a measured number, never an assumed zero):**
 
-| Command | Baseline output | Reads |
+*(This table is documentation, not a check table. Its first header cell is deliberately **not** `Command`: `agent/verification_parser.py::_is_check_table_header` admits any pipe-block under `## Verification` whose first three columns contain a cell equal to `command` case-insensitively, so a header of `Command` here would have contributed six phantom checks whose "Expected" column is the `Reads` prose. With the header below it is reported as a skipped table instead.)*
+
+| Measured command | Baseline output | Reads |
 |---|---|---|
 | `grep -ci "blocked" scripts/update/migrations.py` | `1` (line 1559, an unrelated `blocked_by` docstring on `ImprovementModelRevision`) | GREEN at baseline, GREEN on a correct build, RED the moment a `blocked` migration is registered anywhere in the file. The previously written `== 0` was RED at baseline and would have failed the validator on a correct build. |
 | `awk '/^MIGRATIONS/,0' scripts/update/migrations.py \| grep -ci blocked` | `0` | Scopes the assertion to the registration block, so the unrelated docstring cannot mask a real registration. |
