@@ -1279,7 +1279,9 @@ class AgentSession(Model):
         return (ts if ts is not None else float("-inf"), str(getattr(row, "id", "") or ""))
 
     @classmethod
-    def rows_for_session_id(cls, session_id: str, **filters) -> list["AgentSession"]:
+    def rows_for_session_id(
+        cls, session_id: str, *, prefer_type: str | None = None, **filters
+    ) -> list["AgentSession"]:
         """Every row sharing ``session_id``, newest first.
 
         ``session_id`` is a plain ``Field()``; the primary key is the
@@ -1292,19 +1294,60 @@ class AgentSession(Model):
         :meth:`_newest_first_key`). Extra ``filters`` narrow the query
         (``status="pending"``) before ordering.
 
-        Callers that need one row use :meth:`newest_for_session_id`; callers
-        with domain preferences (an eng-typed row first) iterate this list
-        and fall back to ``[0]``, which is then the newest rather than a
-        coin flip.
+        Callers that need one row use :meth:`newest_for_session_id`.
+
+        **Callers with a domain preference pass ``prefer_type=``** — an
+        eng-typed row owns ``stage_states`` and ``active_run_id``, so those
+        callers want ``prefer_type="eng"``. The preference is a *stable
+        partition*, not a new comparison: rows whose ``session_type`` equals
+        ``prefer_type`` come first, then every other row, and each group is
+        ordered internally by the same newest-first key the default path uses
+        (:meth:`_newest_first_key`). Nothing is dropped and no ordering rule
+        is invented, so a caller can take the head for a selection or scan the
+        whole list for the first row satisfying its own predicate, in one pass.
+
+        **The residue, stated plainly:** omitting ``prefer_type`` yields plain
+        newest-first. That degradation is *silent* and **no sweep catches it**
+        — the code sweep anchors on the old literal ``session_type == "eng"``
+        comparison, not on a missing keyword argument. A caller that needs the
+        eng preference must pass it here; nothing else will notice that it did
+        not. ``prefer_type`` becomes a no-op once ``session_id`` is unique per
+        row (#3169), and is deleted in that lane.
         """
         rows = list(cls.query.filter(session_id=session_id, **filters))
-        rows.sort(key=cls._newest_first_key, reverse=True)
-        return rows
+        if not prefer_type:
+            # Default path: pre-``prefer_type`` body verbatim. This must
+            # short-circuit before any partition — ``session_type`` is
+            # ``KeyField(null=True)``, so an unconditional
+            # ``session_type == prefer_type`` test matches null-typed rows on
+            # the ``None`` default and would float them to the head, silently
+            # reordering every caller that does not pass a preference.
+            rows.sort(key=cls._newest_first_key, reverse=True)
+            return rows
+
+        matching: list[AgentSession] = []
+        others: list[AgentSession] = []
+        for row in rows:
+            if getattr(row, "session_type", None) == prefer_type:
+                matching.append(row)
+            else:
+                others.append(row)
+        matching.sort(key=cls._newest_first_key, reverse=True)
+        others.sort(key=cls._newest_first_key, reverse=True)
+        return matching + others
 
     @classmethod
-    def newest_for_session_id(cls, session_id: str, **filters) -> "AgentSession | None":
-        """The newest row for ``session_id`` (see :meth:`rows_for_session_id`), or None."""
-        rows = cls.rows_for_session_id(session_id, **filters)
+    def newest_for_session_id(
+        cls, session_id: str, *, prefer_type: str | None = None, **filters
+    ) -> "AgentSession | None":
+        """The newest row for ``session_id`` (see :meth:`rows_for_session_id`), or None.
+
+        ``prefer_type`` has the same meaning as on :meth:`rows_for_session_id`:
+        with ``prefer_type="eng"`` this returns the newest eng-typed row when
+        one exists, and the newest row overall otherwise. Omitting it is plain
+        newest-first, silently — see that method's docstring for the residue.
+        """
+        rows = cls.rows_for_session_id(session_id, prefer_type=prefer_type, **filters)
         return rows[0] if rows else None
 
     @property
