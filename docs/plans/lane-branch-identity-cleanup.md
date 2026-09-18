@@ -240,25 +240,91 @@ Turn end, after the fix:
 
 ## Failure Path Test Strategy
 
-_placeholder_
+### Exception Handling Coverage
+- [ ] `agent/session_executor.py:2811` — `except Exception as e: logger.warning("Failed to auto-mark session done: %s")` wraps the whole cleanup block. It already logs, but nothing asserts it. Add a test that forces `refresh_lane_branch` to raise and asserts (a) the warning is emitted with the session's `project_key`, and (b) **the turn still completes** — cleanup failure must never fail the session.
+- [ ] `agent/agent_session_queue.py:632` — `checkpoint_branch_state`'s `except Exception` logs a warning and returns. Add a test that a git failure leaves `branch_name` **unchanged** (not cleared), so a transient git error cannot erase a good record and strand the next turn.
+- [ ] `agent/worktree_manager.py:171` — `safe_delete_branch`'s predicate-error handler already fails safe to `skipped_unmerged`. Extend the existing test to cover the new `skipped_checked_out` path raising inside the worktree scan: a scan failure must also fail safe (preserve), never delete.
+- [ ] `read_worktree_branch` is new and must not raise: a missing path, a non-repo path, and a `git` subprocess timeout each return `None`. Three tests.
+
+### Empty/Invalid Input Handling
+- [ ] `lane_branch(session)` with: no slug and no record; empty-string `branch_name` (Popoto stores unset strings as `""`, not `None` — assert falsy handling, not `is None`); whitespace-only `branch_name`; `branch_name == "HEAD"`. Each must yield the seed or `None`, never a bogus branch name.
+- [ ] `verify_worktree_branch` already raises `ValueError` on an empty `expected_branch`. Assert `lane_branch` never hands it one — this is the interface contract between the accessor and the guard.
+- [ ] `safe_delete_branch` with a branch that does not exist: `merged_via_ancestor` returns `False` (spike-4), so the call preserves. Assert the *log* distinguishes "preserved because unmerged" from "preserved because nonexistent" — the incident's reassuring-but-meaningless log line is the thing to stop reproducing.
+- [ ] Detached worktree end-to-end: cleanup skipped, record cleared, next turn launches.
+
+### Error State Rendering
+- [ ] The user-visible symptom of this bug was **silence** — a reaction emoji and no message. Add a test asserting that when the launch guard does refuse, `last_error` is populated on the `AgentSession` row so the failure is attributable rather than silent. (The guard already raises; this asserts the raise reaches the row.)
+- [ ] Assert the `[lane-branch]` skip log names the lane slug and the worktree path, so an operator reading `logs/worker.log` can identify which lane skipped cleanup and why.
 
 ## Test Impact
 
-- [ ] `tests/e2e/test_context_propagation.py:152` — UPDATE: asserts `derived_branch_name == "session/my-cool-feature"` when a slug is set; the accessor's precedence is being inverted.
-- [ ] `tests/unit/test_session_branch_guard.py` — UPDATE: the #887 main-checkout cases must stay RED-on-removal under the new resolver.
-- [ ] `tests/unit/test_safe_delete_branch.py` — UPDATE: add the checked-out-in-a-worktree refusal case.
+- [ ] `tests/e2e/test_context_propagation.py:152` — **UPDATE**: currently asserts `child.derived_branch_name == "session/my-cool-feature"` for a row that has a slug. Under the inverted precedence the recorded `branch_name` wins, so the fixture must either clear `branch_name` (to keep asserting the seed) or the assertion must move to the record. Decide by reading what the test is actually about — it is a *context propagation* test, so the seed is probably the point; clear the field in the fixture and add a sibling case asserting the record wins when set.
+- [ ] `tests/e2e/test_context_propagation.py:169` — **KEEP, verify**: asserts `derived_branch_name == "feature/manual-branch"` for a row with a manual branch. This case already expects record-wins and should pass unchanged — it is a free regression check that the inversion works.
+- [ ] `tests/unit/test_session_branch_guard.py` — **UPDATE**: six existing cases covering the #887 main-checkout predicate and the detached-HEAD path. They must stay green, and `test_detached_head_does_not_trigger_guard` must be re-read carefully against the new `"HEAD"` → `None` normalisation, which changes what the resolver hands the guard on that path.
+- [ ] `tests/unit/test_safe_delete_branch.py` — **UPDATE**: add the `skipped_checked_out` case and a case asserting the new key is present-and-`False` on every existing path, so callers can branch on it unconditionally.
+- [ ] `tests/unit/worktree_manager/test_worktree_manager_cleanup.py` — **UPDATE**: cleanup assertions that assume the slug-derived branch is the deletion target.
+- [ ] `tests/unit/test_branch_manager.py` — **REVIEW**: `mark_work_done` now receives the live branch rather than the seed; check whether any case asserts the commit message text `"Mark work as done: {branch_name}"`.
+- [ ] **No xfail markers found** related to this bug — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/` filtered for branch/worktree/lane returns nothing, so there are no expected-failure markers to convert. Re-run the grep at build time in case one lands in the interim.
+
+New tests (not existing-test impact, listed here so the build has one place to look): the RED-first regression test (Task 1), the three guard RED-on-removal proofs (Task 6), and the failure-path tests enumerated above.
 
 ## Rabbit Holes
 
-_placeholder_
+- **Moving the branch record to `PipelineLedger`.** Architecturally tidier — the lane owns the slug there, so arguably it should own the branch too. But it needs a Popoto field, a registered idempotent migration, and a story for lanes that have no ledger (ad-hoc dev sessions with a slug). `AgentSession.branch_name` already exists, is already written, and needs no migration. Take the free fix; raise the move as Open Question #1 and let the decider rule.
+- **Making `verify_worktree_branch` "smarter" about acceptable divergence.** The issue's open question 3 floats this and answers itself: the guard is the only thing between an agent and the wrong branch. Any work that makes the guard more permissive is out of scope and should be treated as a design regression.
+- **Fixing `checkpoint_branch_state`'s `working_dir` resolution.** The issue's recon dropped the observation that the checkpoint recorded `branch=main` three times for a lane never on `main`. This plan explains part of it (the second writer at `:1566`), but whether `session.working_dir` ever points at the main checkout is a separate question. Do not chase it here.
+- **Unifying with #3301's `post_merge_cleanup`.** Same root cause, adjacent code, and the temptation to fix both in one PR is strong. Resist: #3301 is a merge-path no-op, this is a turn-path destructive act, and bundling them doubles the review surface for three guards that each exist because of a prior incident. Coordinate, do not merge.
+- **Retroactively repairing the 7 divergent lanes on this machine.** The sweep (AC 6) *reports*; it should not mutate. Repairing live lanes is a manual operator action with real data at stake, and an auto-repair that guesses wrong strands exactly the sessions it meant to save.
+- **Rewriting `branch_name` threading through the whole executor function.** The function is ~1350 lines and the temptation is to refactor it. The fix is to stop reusing one local as two different concepts; renaming it to `seed_branch_name` and routing identity reads through `lane_branch()` achieves that without a restructuring nobody asked for.
 
 ## Risks
 
-_placeholder_
+### Risk 1: The fix re-creates the bug under a new name
+**Impact:** Cleanup now deletes the *work* branch (correctly, once merged). If the record is not refreshed afterwards, the next turn's guard demands the branch this turn just deleted — identical failure, different string, and harder to diagnose because the name now looks plausible.
+**Mitigation:** The trailing `checkpoint_branch_state` in the `finally` block is load-bearing and is called out as such in the Technical Approach. The regression test in Task 1 runs **two** turns, not one, and the second turn's successful launch is the assertion. A one-turn test would pass while the bug survives.
+
+### Risk 2: The second writer at `:1566` is missed or reverted
+**Impact:** Total silent failure of the fix. Every turn clobbers the record with the derived seed moments before the guard reads it, so the system behaves exactly as it does today while all the new code appears to be running.
+**Mitigation:** Seed-if-empty is its own task (Task 4) with its own test asserting a pre-existing `branch_name` survives a turn start. A Verification row greps for an unconditional assignment to `agent_session.branch_name` outside `checkpoint_branch_state`.
+
+### Risk 3: A guard gets quietly weakened
+**Impact:** #887, #1377, or #1646 stops refusing its original bad input. These guards exist because of three separate production incidents; a regression here costs more than the bug being fixed.
+**Mitigation:** AC 5 is proven by *mutation*, not by the guards' tests passing: Task 6 removes each guard in a scratch working copy and asserts its test goes RED. A guard certifying absence is worthless until proven RED against the known-bad state. Paste the three RED outputs into the PR body.
+
+### Risk 4: Popoto empty-string semantics defeat the falsy check
+**Impact:** Popoto stores unset string fields as `""`, and booleans as the strings `"True"`/`"False"`. If `lane_branch` tests `is None` instead of truthiness, an unset record reads as a *set* record holding an empty branch name, which `verify_worktree_branch` rejects with `ValueError`. Every lane fails to launch.
+**Mitigation:** Explicit test cases for `""` and whitespace-only in the Failure Path Test Strategy. `lane_branch` normalises with `.strip()` and truthiness, never identity comparison.
+
+### Risk 5: Interaction with #3306 (checkpoint blocks the worker event loop)
+**Impact:** This plan adds a second synchronous `checkpoint_branch_state`-family call per turn in the cleanup path. If #3306 lands concurrently and changes the function to async or moves it off-thread, the two changes conflict textually and semantically.
+**Mitigation:** The added call sits inside the existing synchronous cleanup block, which already runs several blocking `git` subprocesses, so it introduces no new *class* of blocking. Flag #3306 as a coordination dependency in the PR body; if #3306 lands first, rebase and adopt its call shape rather than re-introducing a sync call. A clean textual merge is not a safe merge — rebuild the test set after merging either way.
+
+### Risk 6: The change is scoped to the two sites the issue names
+**Impact:** A partial migration. The nudge path and the snapshot paths keep re-deriving, so a nudged turn re-seeds the staleness and the diagnostics keep recording the wrong branch — which is how this stayed invisible for a day.
+**Mitigation:** The Verification table closes this with a grep sweep over `abbrev-ref HEAD` and `session/{` construction sites, not with an enumerated checklist. Per the repo rule, replicated-value defects close on a clean sweep.
 
 ## Race Conditions
 
-_placeholder_
+### Race 1: Two turns of the same lane overlap across the cleanup/launch boundary
+**Location:** `agent/session_executor.py:2781-2812` (cleanup) vs. `:1494-1515` (next turn's guard)
+**Trigger:** The incident itself. `mark_work_done` deleted the branch at 15:48:33.115 and the next turn's guard read for it at 15:48:33.761 — **646 ms apart**. The worker transitioned the session `pending→running` at 15:48:33.490, *between* the two. The turns are not serialized by anything that knows about branch state.
+**Data prerequisite:** the record must equal the worktree's live `HEAD` before the next turn's guard reads it.
+**State prerequisite:** the branch the guard will demand must still exist.
+**Mitigation:** The refresh-act-refresh ordering makes the record and the worktree agree *before* the turn's cleanup block returns, and the guard reads the record rather than re-deriving. The 646 ms window still exists, but both endpoints now read the same value, so the window is no longer a correctness gap. This plan does **not** add a lock: per the repo's preference, ownership is made observable rather than serialized, and a lock across a turn boundary here would be a much larger change.
+
+### Race 2: The trailing checkpoint is skipped on the raise path
+**Location:** `agent/agent_session_queue.py` `finally` block calling `checkpoint_branch_state`
+**Trigger:** the turn raises after cleanup deleted the work branch but before the `finally` runs to completion (process kill, lease lapse, worker restart).
+**Data prerequisite:** the record must not be left naming a deleted branch.
+**State prerequisite:** none.
+**Mitigation:** The leading refresh (before cleanup) records the *work* branch, and the trailing one records `main`. A crash between them leaves the record naming a branch that may have been deleted — the next turn's guard would then refuse. Make this recoverable rather than fatal: when the guard's expected branch does not exist *at all* (as opposed to existing-but-mismatched), clear the record and fall back to the seed with a WARNING naming the lane, instead of raising. This is not a weakening — a nonexistent branch carries no risk of running on the *wrong* branch, which is the only thing #1377 protects against. Cover it with an explicit test.
+
+### Race 3: Concurrent sessions sharing one worktree
+**Location:** any lane where two `AgentSession` rows resolve to the same `.worktrees/{slug}/`
+**Trigger:** a new session reusing a lane whose previous session still holds a record.
+**Data prerequisite:** the two rows must not fight over the record.
+**State prerequisite:** one worktree, one live `HEAD`.
+**Mitigation:** Out of scope and explicitly not solved here — the record is per-`AgentSession`, so two rows can disagree. Today's behavior (each session falls back to its own seed) is preserved exactly. This is the strongest argument for moving the record to `PipelineLedger`; it is Open Question #1 rather than a silent choice. `worktree-single-owner-dispatch` is the plan that owns this concern.
 
 ## No-Gos (Out of Scope)
 
