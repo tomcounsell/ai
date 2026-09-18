@@ -91,3 +91,151 @@ class TestNewestWins:
         sid = f"test-newest-wins-absent-{uuid.uuid4().hex[:8]}"
         assert AgentSession.newest_for_session_id(sid) is None
         assert AgentSession.rows_for_session_id(sid) == []
+
+
+class TestPreferTypeOrdering:
+    """``prefer_type`` is a STABLE PARTITION, not a composite sort key (#3091 Risk 2).
+
+    The two proofs in this class are the plan's non-waivable behavioral gates.
+    Neither can be replaced by a grep: a genuine regression is written in the
+    same vocabulary a correct build uses, so only the returned ORDER
+    distinguishes them.
+    """
+
+    def test_default_order_unchanged_by_null_session_type_row(self, session_id):
+        """Proof C — ``prefer_type`` omitted must stay plain newest-first even
+        when a row carries ``session_type=None``.
+
+        ``session_type`` is ``KeyField(null=True)`` (``models/agent_session.py:165``),
+        so a null-typed row is legal. A partition applied UNCONDITIONALLY tests
+        ``getattr(row, "session_type", None) == prefer_type``, which MATCHES the
+        null row when ``prefer_type`` takes its ``None`` default — floating it to
+        the head and silently reordering every one of the ~74 callers that pass
+        no preference. That failure returns every row, so the "no match, return
+        nothing" bullet never fires; only the order betrays it.
+
+        The null row is CONSTRUCTED here on purpose. The live table has 165 rows
+        and zero null-ish ``session_type``, so a production-shaped or
+        fixture-derived row set is GREEN against the broken build and proves
+        nothing (#3348). It is seeded OLDEST so the broken order (null first)
+        and the correct order (null last) cannot coincide.
+        """
+        eng = _seed(session_id, _T0 + timedelta(hours=2), session_type="eng")
+        teammate = _seed(session_id, _T0 + timedelta(hours=1), session_type="teammate")
+        untyped = _seed(session_id, _T0, session_type=None)
+
+        assert getattr(untyped, "session_type", "sentinel") is None
+
+        rows = AgentSession.rows_for_session_id(session_id)
+
+        # Asserted on session_type first so a RED run names the defect ("the
+        # null row floated to the head") rather than printing opaque uuids.
+        assert [getattr(r, "session_type", None) for r in rows] == ["eng", "teammate", None]
+        assert [r.id for r in rows] == [eng.id, teammate.id, untyped.id]
+        assert AgentSession.newest_for_session_id(session_id).id == eng.id
+
+    def test_prefer_type_partitions_all_matching_first_then_newest_within_groups(self, session_id):
+        """Proof D — the partition-shape proof.
+
+        The groups are INTERLEAVED by ``created_at``. That is what makes this
+        test capable of going RED: with the groups already time-separated, the
+        deliberately-wrong composite key
+        ``sorted(rows, key=lambda r: (session_type != prefer_type, _newest_first_key(r)))``
+        yields the same list as a correct partition and the test pins nothing.
+        Interleaved, the composite key sorts each group OLDEST-first (it has no
+        ``reverse=True``, and adding one would invert the group order instead),
+        so both halves of the contract are exercised at once:
+        all-matching-then-all-non-matching AND newest-first within each group.
+        """
+        eng_new = _seed(session_id, _T0 + timedelta(hours=4), session_type="eng")
+        pm_new = _seed(session_id, _T0 + timedelta(hours=3), session_type="teammate")
+        eng_old = _seed(session_id, _T0 + timedelta(hours=2), session_type="eng")
+        pm_old = _seed(session_id, _T0 + timedelta(hours=1), session_type="teammate")
+
+        names = {
+            eng_new.id: "eng_new",
+            pm_new.id: "pm_new",
+            eng_old.id: "eng_old",
+            pm_old.id: "pm_old",
+        }
+
+        rows = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+
+        # All matching rows precede every non-matching row.
+        assert [getattr(r, "session_type", None) for r in rows] == [
+            "eng",
+            "eng",
+            "teammate",
+            "teammate",
+        ]
+        # Newest-first WITHIN each group. Named rather than compared by uuid so
+        # a RED run names the defect instead of printing opaque ids.
+        assert [names[r.id] for r in rows] == ["eng_new", "eng_old", "pm_new", "pm_old"]
+
+
+class TestFetchLiveActiveRunId:
+    """Proof A — the Risk 2 ordering proof for ``_fetch_live_active_run_id``.
+
+    ``agent/session_executor.py:298`` (called at ``:384``) scans rows for the
+    first non-empty ``active_run_id``, eng-first. Collapsing its two passes into
+    one pass over ``rows_for_session_id(sid, prefer_type="eng")`` is
+    behavior-preserving ONLY if the ordering is a stable partition. The two
+    cases below pin the two halves that a naive collapse breaks in opposite
+    directions:
+
+    * dropping the eng preference (one pass, no ``prefer_type``) breaks
+      ``test_..._both_rows_carry_run_id_prefers_eng``;
+    * collapsing to preference-then-return (return the eng row's id even when it
+      is empty) breaks ``test_..._prefers_older_non_eng_with_run_id`` by
+      returning ``None`` — and the docstring at
+      ``agent/session_executor.py:307-309`` records what a ``None`` costs:
+      renewal skips forever and the lock lapses mid-stage (#1915).
+    """
+
+    def test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id(self, session_id):
+        """An eng row with no run id must NOT shadow an older non-eng row that has one."""
+        from agent.session_executor import _fetch_live_active_run_id
+
+        eng = _seed(
+            session_id,
+            _T0 + timedelta(hours=1),
+            session_type="eng",
+            active_run_id=None,
+        )
+        older_non_eng = _seed(
+            session_id,
+            _T0,
+            session_type="teammate",
+            active_run_id="run-older-non-eng",
+        )
+
+        assert not getattr(eng, "active_run_id", None)
+
+        assert _fetch_live_active_run_id(eng) == "run-older-non-eng"
+        assert _fetch_live_active_run_id(older_non_eng) == "run-older-non-eng"
+
+    def test_fetch_live_active_run_id_both_rows_carry_run_id_prefers_eng(self, session_id):
+        """When both rows carry a run id the ENG row wins, even though it is OLDER.
+
+        This is the half a one-pass collapse that forgets ``prefer_type="eng"``
+        loses: plain newest-first hands back the non-eng row's id, which is the
+        "wrong id" branch of Risk 2 — a lapsed lock re-acquired under a dead
+        identity and renewed every tick.
+        """
+        from agent.session_executor import _fetch_live_active_run_id
+
+        newer_non_eng = _seed(
+            session_id,
+            _T0 + timedelta(hours=1),
+            session_type="teammate",
+            active_run_id="run-newer-non-eng",
+        )
+        older_eng = _seed(
+            session_id,
+            _T0,
+            session_type="eng",
+            active_run_id="run-older-eng",
+        )
+
+        assert _fetch_live_active_run_id(newer_non_eng) == "run-older-eng"
+        assert _fetch_live_active_run_id(older_eng) == "run-older-eng"
