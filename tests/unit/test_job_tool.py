@@ -18,8 +18,11 @@ from tools.job_tool import (
     JobToolError,
     add_expectation,
     author_goal,
+    block_expectation,
     create_job,
+    main,
     remove_expectation,
+    unblock_expectation,
 )
 
 
@@ -160,3 +163,152 @@ class TestExpectations:
 
         fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
         assert fresh.open_expectations() == []
+
+
+class TestBlockedExpectations:
+    """PM-facing end to end: block, see it in `show`-style reads, unblock."""
+
+    def test_lane_blocks_and_pm_sees_it_then_unblocks(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id,
+            job.job_id,
+            "deliver the migration PR",
+            direction="outbound",
+            owner="session/job-expectations",
+        )
+
+        assert (
+            block_expectation(
+                session.session_id,
+                job.job_id,
+                eid,
+                code="needs_human",
+                by="lane",
+                detail="ambiguous request, nobody answered",
+            )
+            is True
+        )
+
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        entry = fresh.open_expectations()[0]
+        assert entry["blocked"]["code"] == "needs_human"
+        assert entry["blocked"]["by"] == "lane"
+        assert entry["blocked"]["detail"] == "ambiguous request, nobody answered"
+
+        assert unblock_expectation(session.session_id, job.job_id, eid) is True
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        assert fresh.open_expectations()[0]["blocked"] is None
+
+    def test_room_scope_enforced_on_block(self, scratch_session):
+        session, _rid = scratch_session
+        other_rid = f"test-jobtool-other-{uuid.uuid4().hex[:8]}|telegram:9"
+        foreign = Job.mint(other_rid, "someone else's work")
+        eid = foreign.add_expectation("deliver", direction="outbound", owner="lane-1")
+        try:
+            with pytest.raises(JobToolError, match="not found in your Room"):
+                block_expectation(
+                    session.session_id, foreign.job_id, eid, code="needs_human", by="lane"
+                )
+        finally:
+            foreign.delete()
+
+    def test_unknown_code_converts_to_job_tool_error(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "deliver", direction="outbound", owner="lane-1"
+        )
+
+        with pytest.raises(JobToolError, match="code"):
+            block_expectation(session.session_id, job.job_id, eid, code="bogus", by="lane")
+
+    def test_corrupt_goal_converts_to_job_tool_error(self, scratch_session):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "deliver", direction="outbound", owner="lane-1"
+        )
+        job.goal = "{not json"
+        job.save()
+
+        with pytest.raises(JobToolError):
+            block_expectation(session.session_id, job.job_id, eid, code="needs_human", by="lane")
+        with pytest.raises(JobToolError):
+            unblock_expectation(session.session_id, job.job_id, eid)
+
+
+class TestExpectationBlockCliRefusal:
+    """Plan line 262: the CLI refusal on a re-block must be a specific,
+    branch-discriminated message ('blocked by the reconciler as {code};
+    unblock it first'), never a silent success and never indistinguishable
+    from the generic 'no open expectation' refusal (Race 3, #2862)."""
+
+    def test_reconciler_annotated_entry_names_the_reconciler_and_code(
+        self, scratch_session, monkeypatch, capsys
+    ):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        eid = add_expectation(
+            session.session_id, job.job_id, "deliver", direction="outbound", owner="lane-1"
+        )
+        fresh = Job.query.filter(room_id=job.room_id, id=job.job_id)[0]
+        assert fresh.block_expectation(eid, code="attempts_exhausted", by="reconciler") is True
+
+        monkeypatch.setenv("VALOR_SESSION_ID", session.session_id)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "job_tool.py",
+                "expectation-block",
+                "--job-id",
+                job.job_id,
+                "--expectation-id",
+                eid,
+                "--code",
+                "needs_human",
+                "--by",
+                "lane",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "blocked by the reconciler" in stderr
+        assert "attempts_exhausted" in stderr
+        assert "no open expectation" not in stderr
+
+    def test_genuinely_absent_expectation_reports_no_open_expectation(
+        self, scratch_session, monkeypatch, capsys
+    ):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+
+        monkeypatch.setenv("VALOR_SESSION_ID", session.session_id)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "job_tool.py",
+                "expectation-block",
+                "--job-id",
+                job.job_id,
+                "--expectation-id",
+                "no-such-expectation",
+                "--code",
+                "needs_human",
+                "--by",
+                "lane",
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+
+        assert exc_info.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "no open expectation" in stderr
+        assert "blocked by the reconciler" not in stderr

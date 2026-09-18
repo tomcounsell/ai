@@ -587,6 +587,43 @@ Default `--window` is the watchdog's own `SESSION_PROGRESS_DEADLINE_S`, so the C
 
 Resolution goes through `tools.valor_session._find_session`, the same Popoto-ORM resolver every other verb uses. No raw Redis access on this path.
 
+### Job Tool (`tools.job_tool`)
+
+PM-facing CLI for a Job's goal and expectations (the obligation primitive —
+see `docs/features/durability-model.md`), Room-scoped at the tool layer:
+every lookup filters on `VALOR_SESSION_ID`'s own `room_id`, so a Job in
+another Room is structurally unreachable and the tool refuses loudly.
+
+```bash
+# VALOR_SESSION_ID must be set in the environment for every subcommand.
+
+# Mint a Job / author its goal
+python -m tools.job_tool create --goal "Ship the durability milestone"
+python -m tools.job_tool author-goal --job-id <JOB_ID> --text "v2 goal, sharper"
+
+# Record / discharge an expectation
+python -m tools.job_tool expectation-add --job-id <JOB_ID> \
+    --text "deliver the migration PR" --direction outbound --owner session/some-lane
+python -m tools.job_tool expectation-remove --job-id <JOB_ID> --expectation-id <EID>
+
+# Block / unblock (#2862) — an annotation on an open expectation, not a
+# discharge and not a third lifecycle state; `--code` is restricted to the
+# human-writable subset of BLOCKED_REASONS (attempts_exhausted is
+# reconciler-only, written only by the reconciler itself) and `--by` to pm/lane
+python -m tools.job_tool expectation-block --job-id <JOB_ID> --expectation-id <EID> \
+    --code needs_human --by pm --detail "ambiguous request, nobody answered"
+python -m tools.job_tool expectation-unblock --job-id <JOB_ID> --expectation-id <EID>
+
+# Inspect
+python -m tools.job_tool show --job-id <JOB_ID>
+python -m tools.job_tool list
+```
+
+A `pm`/`lane` `expectation-block` call refuses (non-zero exit, actionable
+message) against an expectation already blocked `by="reconciler"` — unblock
+first. See rule 9 in `docs/features/durability-model.md` for the full
+vocabulary and the Race 3 precedence rule.
+
 ### Disk Reclaim (`tools.disk_reclaim`)
 
 Ages out three categories of on-disk state whose teardown code previously had no

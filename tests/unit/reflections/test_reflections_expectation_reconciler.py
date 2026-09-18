@@ -278,6 +278,159 @@ class TestLadderBookkeeping:
         assert any("gate-unknown: owner-liveness" in f for f in result["findings"])
 
 
+class TestBlockedAnnotation:
+    """#2862: the reconciler's own ``blocked`` annotation — Site A (crash-window
+    repair) and Site B (fresh escalation). Never a third lifecycle state, never
+    a discharge; ``open_expectations()`` still returns the row."""
+
+    def test_blocked_row_is_skipped_with_finding_and_no_action(self, owned_project, monkeypatch):
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/blocked-lane")
+        job.block_expectation(eid, code="needs_human", by="pm")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("acted on a blocked row"))
+        monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
+        result = er._reconcile_project(_project(owned_project))
+        assert f"blocked: {eid} needs_human" in result["findings"]
+
+    def test_crash_window_repair_owner_gone(self, owned_project, monkeypatch):
+        """Site A fires above the liveness gate: owner-gone is not required."""
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/crashed-lane")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
+        result = er._reconcile_project(_project(owned_project))
+        assert f"blocked: {eid} attempts_exhausted" in result["findings"]
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry["blocked"]["code"] == "attempts_exhausted"
+        assert entry["blocked"]["by"] == "reconciler"
+
+    def test_crash_window_repair_owner_alive(self, owned_project, monkeypatch):
+        """Site A fires even when the owner is still alive — this is what
+        distinguishes it from the liveness gate below it: the recovery
+        budget was already spent regardless of whether the lane is up."""
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/still-alive-lane")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("liveness gate reached"))
+        monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
+        result = er._reconcile_project(_project(owned_project))
+        assert f"blocked: {eid} attempts_exhausted" in result["findings"]
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry["blocked"]["code"] == "attempts_exhausted"
+        assert entry["blocked"]["by"] == "reconciler"
+
+    def test_site_a_does_not_fire_when_escalation_exists_is_none(self, owned_project, monkeypatch):
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/unknown-escalation-lane")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: None)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        result = er._reconcile_project(_project(owned_project))
+        assert not any("blocked:" in f for f in result["findings"])
+        assert not any("gate-unknown" in f for f in result["findings"])
+
+    def test_site_a_does_not_fire_below_max_attempts(self, owned_project, monkeypatch):
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/under-budget-lane")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: 0)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        result = er._reconcile_project(_project(owned_project))
+        assert not any("blocked:" in f for f in result["findings"])
+
+    def test_site_a_does_not_fire_when_attempts_count_is_none(self, owned_project, monkeypatch):
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/unreadable-attempts-lane")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: None)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        result = er._reconcile_project(_project(owned_project))
+        assert not any("blocked:" in f for f in result["findings"])
+        assert not any("gate-unknown" in f for f in result["findings"])
+
+    def test_site_a_does_not_rewrite_an_already_annotated_row(self, owned_project, monkeypatch):
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/already-blocked-lane")
+        job.block_expectation(eid, code="attempts_exhausted", by="reconciler")
+        monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("acted on a blocked row"))
+        result = er._reconcile_project(_project(owned_project))
+        # The already-annotated row is caught by the earlier skip-with-finding
+        # branch, not re-processed by Site A.
+        assert f"blocked: {eid} attempts_exhausted" in result["findings"]
+        assert result["findings"].count(f"blocked: {eid} attempts_exhausted") == 1
+
+    def test_annotation_attributed_to_reconciler(self, owned_project, monkeypatch):
+        """Site B: a fresh escalation on the attempts-cap branch writes the
+        annotation, and it is attributed to the reconciler itself."""
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        pages: list[str] = []
+        monkeypatch.setattr(
+            er, "_escalate_once", lambda p, j, e, m: (pages.append(m), (True, None))[1]
+        )
+        result = er._reconcile_project(_project(owned_project))
+        assert any("escalated" in f for f in result["findings"])
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry["blocked"]["code"] == "attempts_exhausted"
+        assert entry["blocked"]["by"] == "reconciler"
+
+    def test_refused_annotation_write_still_escalates(self, owned_project, monkeypatch):
+        """Escalate-first is load-bearing: even if the annotation write fails,
+        the page must already have gone out."""
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/capped-lane-2")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
+        monkeypatch.setattr(
+            er,
+            "_annotate_attempts_exhausted",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("annotation write exploded")),
+        )
+        result = er._reconcile_project(_project(owned_project))
+        assert any("escalated" in f for f in result["findings"])
+
+    def test_no_annotation_from_evidence_escalation(self, owned_project, monkeypatch):
+        """The `:523`-style evidence-escalation site never annotates: attempts
+        remain and the row is still re-steerable."""
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "session/shipped-capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: "PR #7 (merged)")
+        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: None)
+        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
+        result = er._reconcile_project(_project(owned_project))
+        assert any("escalated-evidence" in f for f in result["findings"])
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry.get("blocked") is None
+
+    def test_no_annotation_from_no_pm_escalation(self, owned_project, monkeypatch):
+        """The `:554`-style no-PM/no-slug escalation site never annotates."""
+        rid = f"{owned_project}|telegram:1"
+        job, eid = _mint_job_with_outbound(rid, "not-a-lane-slug")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: None)
+        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: None)
+        monkeypatch.setattr(er, "_lane_slug", lambda _o: None)
+        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
+        result = er._reconcile_project(_project(owned_project))
+        assert any(f.startswith("escalated:") for f in result["findings"])
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry.get("blocked") is None
+
+
 class TestDriftAdvisory:
     """#2708 Risks 1 & 4 backstop in agent/session_health.py: advisory only."""
 

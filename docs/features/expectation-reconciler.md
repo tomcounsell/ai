@@ -48,6 +48,39 @@ is what looks.
 Immediately before acting it re-fetches the Job by KeyFields and re-checks
 the expectation is still open — a PM discharge racing the tick always wins.
 
+## Blocked-row skip and the `attempts_exhausted` annotation (#2862)
+
+A row already carrying a `blocked` annotation (any writer — reconciler, PM,
+or lane) is skipped before the age/liveness checks, surfaced as a
+`blocked: <eid> <code>` finding, and never re-processed. See rule 9 in
+[`durability-model.md`](durability-model.md) for the annotation shape and
+vocabulary.
+
+The reconciler is the **only** writer of `code="attempts_exhausted"`, and it
+writes that one code from exactly two sites, both firing only once the
+recovery budget is spent (the ladder's `attempts >= max` verdict) — a lane
+still under budget is still re-steerable, so nothing annotates while
+attempts remain:
+
+- **Fresh escalation** (the `attempts >= max` rung itself): escalate first,
+  then re-fetch the Job and annotate the fresh snapshot.
+  Escalate-then-annotate is load-bearing, not incidental — a page that
+  never sent must not be masked by a written annotation, so the order is
+  never reversed.
+- **Crash-window repair**, checked *above* the owner-liveness gate rather
+  than beside it: if the escalation key already exists and attempts are
+  already at the cap but no annotation was written, a prior tick escalated
+  and then crashed before it could record that verdict. The repair fires
+  regardless of whether the owner is alive or gone — the verdict was
+  earned by the attempts ladder, not by the current liveness read, so
+  placing it below the gate would leave a live-owner row correctly
+  unannotated forever even though the page already went out.
+
+The evidence-based escalation (the shipped-work steer failure) and the
+no-PM/no-slug escalation never annotate: both fire with attempts still
+below the cap, so the row must stay re-steerable rather than being fenced
+off by a `blocked` skip.
+
 ## Invariants
 
 - **Attempts TTL is floored at the escalation TTL** —
@@ -55,9 +88,13 @@ the expectation is still open — a PM discharge racing the tick always wins.
   `reflections/sdlc_progress.py::_attempts_ttl_seconds()`. An attempts key
   that expires while the escalation key still suppresses paging turns
   "escalate once and stop" into "act forever, silently".
-- **No writes outside its own bookkeeping keys**: it never discharges an
-  expectation, takes no locks, and adds no lock semantics — expectations
-  are readable ownership records; a second PM reads and decides (#2704).
+- **No writes outside its own bookkeeping keys, plus one narrow annotation
+  seam**: it never discharges an expectation, takes no locks, and adds no
+  lock semantics — expectations are readable ownership records; a second PM
+  reads and decides (#2704). The sole exception is the `attempts_exhausted`
+  annotation above, which records a verdict the ladder already reached; it
+  is not a discharge and does not change what `open_expectations()`
+  returns.
 - **Never raises**: every boundary (ORM scan, per-expectation pass, git/gh
   subprocess, steer/create) logs a warning and continues.
 - **A corrupt goal is a finding, never an empty loop** (#2862):
