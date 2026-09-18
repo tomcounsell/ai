@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
 revision_applied: true
-revision_applied_at: 2026-09-18T14:56:53Z
+revision_applied_at: 2026-09-18T15:17:59Z
 tracking: https://github.com/tomcounsell/ai/issues/3418
 last_comment_id: 5729821863
 ---
@@ -197,12 +197,20 @@ Today, tracing one newly-confirmed failing node from pytest to GitHub:
 
 After this plan, steps 4-6 become:
 
-4. **File branch (Python, deterministic)**: for each survivor, re-read the open-issue map, then
-   take one of four branches — (a) the refresh shows the title already open: post a recurrence
-   comment via `comment_on_issue()` against the number the refresh returned and record the node;
-   (b) the fingerprint was already filed by this same run: skip and log the collision; (c) the
-   budget is exhausted: defer the node with its own log line and leave it unrecorded; (d) otherwise
-   call `create_issue()` and capture the real number GitHub returns. Only (d) spends budget.
+4. **File branch (Python, deterministic)** — this list is canonical; `### Flow` points at it rather
+   than restating it. For each survivor, re-read the open-issue map, then take exactly one branch:
+   - **(a) Refresh hit** — the title is already open. Post a recurrence comment via
+     `comment_on_issue()` against the number the refresh returned and record the node on a
+     successful comment.
+   - **(b) Refresh degraded** — `open_issues()` returned `None` (`:2065`). Unknown is treated as
+     "not open": fall through to (d) and create, with its own log line. Fail open, matching the
+     run's opening read.
+   - **(c) Fingerprint collision** — this run already filed that fingerprint. Skip, log by name,
+     leave the node out of `recorded`.
+   - **(d) Budget exhausted** — defer the node with its own log line, unrecorded.
+   - **(e) Otherwise** — call `create_issue()` and capture the real number GitHub returns.
+
+   Only (e) spends budget. Each branch emits a distinct log line (`## Failure Path Test Strategy`).
 5. **Report collisions**: the run keeps an in-process registry of every fingerprint it filed. A
    second finding resolving to a fingerprint already filed this run is skipped and logged. Nothing
    is read back and nothing is closed.
@@ -362,10 +370,10 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
 
 Nightly run completes → serial re-confirm → `dispatch_findings()` → collapse (environmental,
 setup cascades, body cascades) → **comment branch** (existing, unchanged: open-issue and
-closed-not-planned recurrences) → **file branch (new)**: for each survivor → refresh open map →
-**on a hit, comment via `comment_on_issue()` and record; on a miss** → compute fingerprint →
-skip-and-log if that fingerprint was already filed this run → skip-and-log if the budget is spent →
-otherwise `create_issue()` → record real number → decrement budget → derived `issues_filed` →
+closed-not-planned recurrences) → **file branch (new)**: for each survivor, one of the outcomes
+enumerated in `## Data Flow` step 4, which is the canonical list — comment-on-refresh-hit,
+skip-on-collision, defer-on-exhausted-budget, or `create_issue()` → record real number → decrement
+budget → derived `issues_filed` →
 **dispatch investigation session** with the real numbers and a comment-only instruction →
 log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
 
@@ -449,12 +457,15 @@ log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
   — `TestNothingNotifies`, line 629). Assert that a night where some creates failed logs both the
   verified filed count and the deferred count, so a partial failure is legible rather than reading
   as a quiet success.
-- [ ] Assert that each of the four non-filing outcomes emits its own distinct log line naming the
-  nodes it concerns — **budget exhausted**, **create failed**, **fingerprint collision**, and
-  **pre-create refresh hit (commented instead)** — so they are distinguishable from each other, and
-  from a genuinely quiet night, in `logs/` the morning after. A single shared "not filed" line would
-  collapse four different operator responses (raise the cap / check `gh` auth / investigate a
-  collapsing bug / nothing, this one is working as designed) into one.
+- [ ] Assert that each of the five non-create outcomes emits its own distinct log line naming the
+  nodes it concerns — **budget exhausted**, **create failed**, **fingerprint collision**,
+  **pre-create refresh hit (commented instead)**, and **degraded refresh (created anyway)** — so
+  they are distinguishable from each other, and from a genuinely quiet night, in `logs/` the morning
+  after. A single shared "not filed" line would collapse five different operator responses (raise
+  the cap / check `gh` auth / investigate a collapsing bug / nothing, this one is working as
+  designed / check `gh` auth *and* expect duplicates from this night) into one. The degraded-refresh
+  line is the one most easily forgotten, because its run still files everything it should — it is
+  the only signal that a night's dedup was running blind.
 - [ ] The refresh-hit branch must not be able to fail silently: if the refresh returns a number but
   the recurrence comment fails to post, the node stays out of `recorded` — the existing
   `comment_on_issue` contract — and the failure is logged as a comment failure, not swallowed into
@@ -540,8 +551,16 @@ log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
 `TestComputeNewFailures`, `TestCarryDispatchedNodes`, `TestGroupSetupErrorCascades`,
 `TestResolveIntKnob`, `TestRecurrenceComments`, `TestResolveCascadeIssue`, `TestRunTtftGate`,
 `TestLoadEnvOrDie`, `TestSpawnPytestCwdSeam`, `TestEnvironmentalClassification`,
-`TestBuildSeedPrompt` (3197), `TestBodyFailureGrouping` (2495 — this is #3419's territory, untouched
-here).
+`TestBodyFailureGrouping` (2495 — this is #3419's territory, untouched here).
+
+**`TestBuildSeedPrompt` (3197) — REPLACE.** `_build_seed_prompt()` is deleted (`## Decisions` #5,
+Task 4): its "Only if neither exists, open ONE umbrella issue with EXACTLY that title" text is the
+last issue-creation instruction any prompt in this module emits, and `main()`'s seed branch now
+creates the umbrella itself via `create_issue()`. Replace the class with
+`TestSeedUmbrellaIsCreatedByTheDetector`, which asserts the create call, the `(number, seed_title)`
+dispatch, and — the load-bearing half — that a seed run whose create returns `None` writes no
+baseline and `_fatal`s, preserving the sticky-`seeded_nodes` invariant the old session-id guard at
+`:3222-3235` carried.
 
 **Classes needing targeted updates:**
 - [ ] `TestCarryCascadeIssues` (1199) — UPDATE: the `None`-sentinel upgrade path is removed.
@@ -683,8 +702,12 @@ the moment the run started.
 **Mitigation:** the open-issue map is refreshed immediately before each create rather than once per
 run. The window shrinks from "duration of the entire filing loop" (minutes, with N `gh` round-trips
 inside it) to "one `gh` round-trip". This is a genuine reduction and not a closure; the residue is
-reported rather than converged (Race 3). Cost is one extra `gh` read per created issue, which is bounded by
-`NIGHTLY_MAX_ISSUES_PER_RUN` and therefore small.
+reported rather than converged (Race 3). Cost is one extra `gh` read **per survivor considered**, not per issue created — the refresh runs
+before the budget check, because checking the budget first would suppress legitimate recurrence
+comments on a night that has already spent it, and `MAX_DISPATCH_NODES` survives only in comments
+(`:421`, `:1229`) and no longer bounds the set. The real bound is the survivor count, which is the
+number of distinct failing nodes a night produces; on the worst night on record that is 24. A
+refresh that fails returns `None` and the create proceeds (fail open, Task 2).
 **What a hit does — comment, never a bare skip.** A refresh that finds the title already open means
 an external actor filed it during this loop, so the finding is a *recurrence*, not a duplicate of
 something this run created. It routes through `comment_on_issue()` against the number the refresh
@@ -692,8 +715,9 @@ returned, reusing the shape `partition_already_open()` (`scripts/nightly_regress
 per-node caller `:2881-2889`) already applies to the run's opening read, and the node is recorded on
 a successful comment exactly as the existing recurrence path records it. A bare skip would leave the
 night with neither an issue nor a comment for a real finding — the silent hole `## Risks` Risk 1
-calls worse than a duplicate, merely relocated into the smaller window. This is the fourth non-filing
-outcome and it carries its own log line (`## Failure Path Test Strategy`).
+calls worse than a duplicate, merely relocated into the smaller window. It is branch (a) of the five
+enumerated in `## Data Flow` step 4 and carries its own log line
+(`## Failure Path Test Strategy`).
 
 ### Race 3: Two hosts, or a create whose response was lost — REPORTED, CONVERGENCE DEFERRED
 **Location:** the new `create_issue()` call site.
@@ -820,6 +844,12 @@ Approach): silence during a real regression is the larger harm there.
 
 ### Post-merge operator step: close the historical duplicates
 
+**Owner:** whoever merges the PR (Tom by default), the same default the `[POST-DEPLOY]` row under
+`## Success Criteria` uses. **Trigger:** the merge itself. **If it is never run:** the 26 duplicates
+stay open and a morning's triage list stays noisy, but nothing in the shipped code depends on their
+state — `open_issues()` collapses same-title rows, so the detector behaves identically either way.
+That bounded cost is exactly why this is safe to take out of the pipeline.
+
 Run **after merge**, by a human, once. This is not a pipeline task and not a merge gate
 (`## Decisions` #4): it has no code dependency on the PR, and it is one-shot and irreversible, so
 review-before-execute is made structural by keeping it out of the task graph rather than by a gate
@@ -831,10 +861,13 @@ the plan.
    edited one already:
 
    ```bash
-   for n in $(seq 3382 3405); do
+   for n in $(seq 3355 3405); do
      printf '%s\t' "$n"; gh issue view "$n" --json state,stateReason,title -q '[.state,.stateReason,.title]|@tsv'
    done
    ```
+
+   The range spans every number this runbook touches — both sets of closures and both sets of
+   survivors — so nothing is closed in step 2 or 3 that step 1 did not read.
 
 2. **Close the 09-17 duplicates: #3382-#3397** (waves 1 and 2), as `NOT_PLANNED`, each with a
    comment naming its surviving twin. **The survivors are #3398-#3405** (wave 3) — the same 8 node
@@ -845,8 +878,8 @@ the plan.
    the byte-identical title, not by arithmetic offset.
 3. **Close the 09-16 duplicates**, keeping the **lower** number in each pair: #3365, #3366, #3367,
    #3368, #3369, #3370, #3371, #3372, #3373, #3374 are closed; #3355-#3364 survive.
-4. **Verify**, with the same loop as step 1: every closed number must report `CLOSED` /
-   `NOT_PLANNED`, and every survivor must still be `OPEN`.
+4. **Verify**, with the same `seq 3355 3405` loop as step 1: #3365-#3374 and #3382-#3397 must
+   report `CLOSED` / `NOT_PLANNED`, and #3355-#3364 and #3398-#3405 must still be `OPEN`.
 
 A failure or a surprise at any step is a stop-and-ask, not a retry — these are live issues on a
 tracker a human reads every morning.
@@ -900,6 +933,17 @@ tracker a human reads every morning.
   auto-close.
 - [ ] The fingerprint constant's comment states what it is derived from and why a title is not a
   usable key.
+- [ ] The module docstring at `:107-109` is rewritten. It currently asserts "the triage session, not
+  this script, is what actually opens the issue, so its number is only discoverable on a later run",
+  which this plan makes false at the top of the file a maintainer reads first.
+- [ ] `resolve_cascade_issue()`'s docstring at `:2381-2384` is rewritten. It asserts "This script
+  does not open issues itself — a triage session does", and its whole lookup-order rationale ("The
+  title match, which is the bootstrap") is predicated on the number being unknowable at filing time.
+  After Task 2 the number is known at creation, so rule 2 bootstraps nothing; describe the new
+  status quo rather than leaving a stale rationale (no-legacy-code rule).
+- [ ] `partition_already_open()`'s docstring (`:2405-2407`) cites `_build_triage_prompt` as the
+  source of the title contract; Task 4 rewrites that prompt, so the citation must move to whatever
+  now owns the title format.
 - [ ] Any new tunable carries the module's established provisional-value comment form: what the
   default is, that it is provisional, and what evidence would move it.
 
@@ -1001,6 +1045,12 @@ path existing.
 - Prefer `gh issue create --json number` for the return value; fall back to a strict trailing-integer
   parse of the printed URL. Refuse an empty title before shelling out.
 - No retries, ever. Docstring states why, citing the absence of a GitHub idempotency key.
+- Docstring also states the argv contract, following the precedent `provision_baseline_worktree`
+  (`scripts/nightly_regression_tests.py:955-961`) sets for the same concern: list-form argv, never
+  `shell=True`, body on stdin via `--body-file -`, and every title arriving pre-prefixed
+  (`f"Nightly regression: {node}"` / `cascade_title`) so a report-derived string can never lead with
+  a `-`. Titles reach a prompt string today and `gh` argv after this change; say so once rather than
+  leaving the next reader to re-derive it.
 - Add the `<!-- nightly-fingerprint: ... -->` body-builder helper and its derivation (node id for
   per-node, cascade state key for umbrellas).
 
@@ -1011,8 +1061,13 @@ path existing.
 - **Assigned To**: filing-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Replace the per-node dispatch block at `:2941-2970` and the cascade dispatch at `:2856-2866`
-  with calls to `create_issue()`.
+- Replace the per-node dispatch block at `:2922-2970` and the cascade dispatch at `:2852-2865`
+  with calls to `create_issue()`. **Both ranges start earlier than they look.** The per-node block
+  opens at `:2922` (`# Everything still in single_nodes survived…`) and includes the `read_shape`
+  assignment at `:2927-2931`, which exists *only* to feed the deleted disposition path — cutting
+  from `:2941` instead leaves `read_shape` assigned and unused, which is ruff F841 and fails the
+  lint row in `## Verification`. The cascade dispatch call opens at `:2852`
+  (`session_id = maybe_dispatch_triage_session(`); `:2856` is `dry_run=dry_run,` mid-call.
 - Refresh the open-issue map immediately before each create (Race 2). **On a hit, comment via
   `comment_on_issue()` against the number the refresh returned and record the node on success** —
   reuse `partition_already_open()`'s shape (`:2397-2425`, per-node caller `:2881-2889`) and key the
@@ -1024,6 +1079,27 @@ path existing.
   `carry_cascade_issues()`.
 - Add the `NIGHTLY_AUTO_FILE` kill switch: when false, log every would-be filing in full and create
   nothing.
+- **Read the kill switch at call time, not at import.** Add a `resolve_bool_knob` sibling to
+  `resolve_int_knob` (`:462-482`) and use it. That helper exists precisely because "`.env` only
+  reaches `os.environ` through `load_env_or_die()` inside `main()`, so an import-time read would
+  freeze the in-code default and make the vault setting inert on the one surface that matters"
+  (`:276-280`, restated at `:411-416`). There is no bool sibling today, so a builder copying the
+  nearest neighbour — `MIN_ENV_KEYS` at `:446`, which reads at import — ships an operator lever that
+  silently does nothing when set in the vault `.env`.
+- **A kill-switched node is not a recorded node.** `main()` skips `save_last_run` only under
+  `--dry-run` (`:3332-3346`), so a kill-switched night persists state like any other. If a skipped
+  node lands in `outcome.recorded` it enters `dispatched_nodes` and `compute_dispatch_set`
+  suppresses it on every future run — the break-glass would reach the same permanent-suppression
+  hazard the seed branch's comment at `:3222-3229` was written to prevent. The skip leaves the node
+  out of `recorded`, with a test.
+- **A degraded refresh fails open.** `open_issues()` returns `None` on any failure (`:2065`,
+  pinned by `TestPreFileDedup::test_open_issues_returns_none_on_any_failure`). A `None` from the
+  per-create refresh means "unknown", and unknown creates — the same fail-open posture the run's
+  opening read already takes, and the posture `## Risks` Risk 1 argues for (a duplicate is
+  recoverable, a silent hole is not). It carries its own log line so a night of degraded refreshes
+  is legible rather than reading as a clean run. A builder who reads "refresh before create" as
+  skip-on-unknown reintroduces Risk 1's hole inside the window Race 2 exists to shrink, which is why
+  this is stated rather than left to judgement.
 
 ### 3. Fingerprint-collision reporting (report only, no close)
 - **Task ID**: build-collision-report
@@ -1032,16 +1108,32 @@ path existing.
 - **Assigned To**: filing-builder
 - **Agent Type**: builder
 - **Parallel**: false
+- Put the `<!-- nightly-fingerprint: {sha256} -->` line in every created body. **This is the half
+  that carries the value** — it makes a cross-host or lost-response duplicate identifiable after the
+  fact, by a human or by the deferred sweep, with no read-back subsystem.
 - Keep an in-process `dict[fingerprint, int]` of every fingerprint this run filed, populated as
-  each `create_issue()` returns a number.
-- Before each create, look the computed fingerprint up in that dict. On a hit, skip the create and
-  emit one `WARNING` naming the fingerprint, the issue it was already filed as, and the skipped
-  node. The node is left out of `recorded` so a genuine distinct finding is not suppressed forever.
+  each `create_issue()` returns a number, and check it before each create. On a hit, skip the create
+  and emit one `WARNING` naming the fingerprint, the issue it was already filed as, and the skipped
+  node; the node is left out of `recorded` so a genuine distinct finding is not suppressed forever.
+- **Scope note: the in-run registry is a defensive assertion, not a live defence.** No path in
+  today's code can produce a same-run collision — `single_nodes` derives from a deduplicated sorted
+  set (`:2757`, `:2881`, `:2896`) and cascade fingerprints key on `cascade_state_key(cascade)`
+  (`:2855`, `:2865`), the grouping key itself, so the property `## Risks` Risk 1 relies on ("cannot
+  match across distinct findings by construction") is exactly what makes this branch unreachable
+  today. It is kept, deliberately and at one dict's cost, because #3419's root-cause collapsing is
+  expected to map several findings onto one key, which is the first change that makes it reachable —
+  and because a defence that only exists after the collision it guards is a defence written under
+  incident pressure. Build it as a cheap guard with one test; do not grow it into a subsystem, and
+  do not let its unreachability today justify a read-back.
 - **Report only.** No GitHub read-back, no `gh issue close`, no pointer comment, no close helper.
   The detector's privilege set stays create-and-comment. This is the owner's ruling on Open
   Question 2 (`## Decisions` #2); the convergent sweep and its evidence bar live in `## No-Gos`.
-- Emit three distinct, separately-named log lines for the three non-filing outcomes — budget
-  exhausted, create failed, fingerprint collision — each naming the nodes it concerns.
+- Emit distinct, separately-named log lines for every non-filing outcome — **budget exhausted**,
+  **create failed**, **fingerprint collision**, **pre-create refresh hit (commented instead)**, and
+  **degraded refresh (created anyway)** — each naming the nodes it concerns. The refresh-hit and
+  degraded-refresh lines are emitted by the loop Task 2 builds; they are listed here because this
+  task owns the log-line contract as a whole and `## Failure Path Test Strategy` tests them
+  together. A single shared "not filed" line would collapse distinct operator responses into one.
 
 ### 4. Retire the ledger, the dispositions, and the filing prompts
 - **Task ID**: build-retire-agent-filing
@@ -1054,6 +1146,24 @@ path existing.
   `_build_triage_prompt`.
 - Narrow `maybe_dispatch_triage_session()` to take `(number, subject)` pairs and dispatch after
   filing; collapse the three filing prompts into one comment-only investigation prompt.
+- **Convert the re-baseline seed branch — the third filing path (`## Decisions` #5).** The seed
+  dispatch lives in `main()` at `:3198-3241`, *outside* `dispatch_findings()`, and today calls
+  `maybe_dispatch_triage_session([f"seed:{len(confirmed_failing)}"], prompt=seed_prompt,
+  slug_suffix="baseline", …)`. Narrowing the signature without touching it breaks that caller.
+  Three changes, in order:
+  1. `main()`'s seed branch calls `create_issue(seed_title, seed_body)` itself and captures the
+     number, exactly as `dispatch_findings()` does. The seed umbrella is created by the detector.
+  2. The `_fatal` guard at `:3222-3235` keys on **that number being `None`**, not on a returned
+     session id. Its invariant — "A failed seed dispatch must NOT write a baseline", because
+     `seeded_nodes` (`:3240`) is sticky and a false green suppresses a whole night-one population
+     against an issue that was never filed — is correct and must survive; only its evidence changes.
+     After this change a session id proves nothing about issue existence, so keying on it would turn
+     a load-bearing guard into a rubber stamp.
+  3. `_build_seed_prompt()` (`:2019-2062`) collapses into the one investigation prompt and is
+     deleted. Its "Only if neither exists, open ONE umbrella issue with EXACTLY that title" text is
+     the last issue-creation instruction in any prompt this module emits — the thing
+     `## Success Criteria` row 1 asserts is gone. The seed dispatch then passes
+     `[(number, seed_title)]` like every other caller.
 - Strip the dedup-before-filing framing from `ISSUE_LOOKUP_INSTRUCTION`; keep the search-index
   prohibition for whatever lookup the investigation session still performs.
 - Leave no commented-out code and no "formerly" comments.
@@ -1072,7 +1182,15 @@ path existing.
 - Extract the four duplicated fake-`gh` harnesses (1241, 1406, 2580, 2800) into one fixture that
   stubs `create_issue` alongside `comment_on_issue`.
 - Write `TestCreateIssue`, `TestFilingIdempotence`, `TestPreCreateRefreshComments`,
-  `TestFingerprintCollisionIsLogged`, `TestIssueBudgetSpendsOnlyConfirmedCreates`.
+  `TestFingerprintCollisionIsLogged`, `TestIssueBudgetSpendsOnlyConfirmedCreates`,
+  `TestKillSwitchSuppressesCreates`, `TestSeedUmbrellaIsCreatedByTheDetector`.
+- `TestKillSwitchSuppressesCreates` is behavioural, not a grep: set `NIGHTLY_AUTO_FILE=false` in
+  `os.environ` **after import** (the call-time-read regression) and assert zero `create_issue` calls,
+  recurrence comments still posted, one would-be-filing log line per survivor, and `recorded`
+  unchanged so nothing enters `dispatched_nodes`.
+- `TestSeedUmbrellaIsCreatedByTheDetector` covers `## Decisions` #5: a seed run creates the umbrella
+  via `create_issue` and writes a baseline; a seed run whose create returns `None` writes **no**
+  baseline and `_fatal`s, so the next run re-seeds.
 - Run only this file. Never the full `tests/unit/` tree.
 
 ### 6. Documentation
@@ -1081,7 +1199,7 @@ path existing.
 - **Validates**: `git diff --name-only origin/main -- docs/` lists every path in the `## Documentation` checklist. A docs task's output *is* its validation — there is no test to run, so the file list is the check.
 - **Assigned To**: nightly-documentarian
 - **Agent Type**: documentarian
-- **Parallel**: true
+- **Parallel**: false
 - Execute the `## Documentation` checklist.
 
 ### 7. Cruft review
@@ -1097,12 +1215,15 @@ path existing.
 ### 8. Final validation
 - **Task ID**: validate-all
 - **Depends On**: build-create-issue, build-filing-loop, build-collision-report, build-retire-agent-filing, build-tests, document-feature, review-cruft
-- **Validates**: every row of the `## Verification` table, run in order, plus every *mechanically-checkable* `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
+- **Validates**: every row of the `## Verification` table except the `[POST-MERGE]` closures row, run in order, plus every *mechanically-checkable* `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
 - Two `## Success Criteria` rows Task 8 does **not** confirm: the `[POST-DEPLOY, NOT A MERGE GATE]` human-readable outcome check, which needs a real nightly run and is owned by the morning triager; and the `[POST-MERGE, NOT A MERGE GATE]` historical-duplicate closures, owned by the operator running the runbook in `## Update System` (`## Decisions` #4). Record both as deferred in the validation report rather than passing or failing them — a validator that silently rubber-stamps one, or silently drops it, is the failure mode these carve-outs exist to prevent.
 - **Assigned To**: filing-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the `## Verification` table; confirm every `## Success Criteria` row.
+- Run every `## Verification` row **except** the `[POST-MERGE, NOT A MERGE GATE]` closures row,
+  which by construction cannot pass before merge; confirm every mechanically-checkable
+  `## Success Criteria` row; and record the two deferred rows (`[POST-MERGE]`, `[POST-DEPLOY]`) as
+  deferred, naming their owners, rather than passing or failing them.
 
 ## Verification
 
@@ -1111,15 +1232,18 @@ path existing.
 | Nightly tests pass | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
 | Format clean | `python -m ruff format --check scripts/nightly_regression_tests.py tests/unit/test_nightly_regression_tests.py` | exit code 0 |
-| Detector creates issues itself | `grep -c '"create"' scripts/nightly_regression_tests.py` | output > 0 |
+| Detector creates issues itself | `grep -c "^def create_issue" scripts/nightly_regression_tests.py` | output > 0 — **proven RED (`0`) against `origin/main` on 2026-09-18**; the earlier `grep -c '"create"'` form returned `1` on the unmodified file (the `tools.valor_session create` argv at `:2602`) and would have passed on the known-bad baseline |
 | Idempotence regression test exists | `grep -c "class TestFilingIdempotence" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Budget test exists | `grep -c "class TestIssueBudgetSpendsOnlyConfirmedCreates" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Collision-report test exists | `grep -c "class TestFingerprintCollisionIsLogged" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Refresh-hit comments test exists | `grep -c "class TestPreCreateRefreshComments" tests/unit/test_nightly_regression_tests.py` | output > 0 |
-| Kill switch wired | `grep -c "NIGHTLY_AUTO_FILE" scripts/nightly_regression_tests.py` | output > 0 |
-| Anti-criterion: no prompt tells an agent to create an issue | `grep -c "gh issue create" scripts/nightly_regression_tests.py` | match count == 0 |
+| Kill switch suppresses creates (behavioural, not a grep) | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py::TestKillSwitchSuppressesCreates -q` | exit code 0 |
+| Kill switch is read at call time | `grep -c "resolve_bool_knob" scripts/nightly_regression_tests.py` | output > 0 |
+| Seed umbrella is created by the detector | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py::TestSeedUmbrellaIsCreatedByTheDetector -q` | exit code 0 |
+| Anti-criterion: the seed prompt is gone | `grep -c "_build_seed_prompt" scripts/nightly_regression_tests.py` | match count == 0 |
+| Anti-criterion: no prompt tells an agent to create an issue | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py::TestPromptsNeverNameTheSearchIndex -q` (the rendered-prompt assertion; see `## Test Impact`) | exit code 0 |
 | Anti-criterion: the detector never closes an issue | `grep -c 'issue", "close\|gh issue close' scripts/nightly_regression_tests.py` | match count == 0 |
-| **[POST-MERGE, NOT A MERGE GATE]** historical duplicate closures landed (operator, after merge — `## Update System` runbook, `## Decisions` #4) | `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]\|@tsv'; done`, then the same loop over #3365-#3374 | every line `CLOSED` `NOT_PLANNED`; #3398-#3405 and #3355-#3364 still `OPEN` |
+| **[POST-MERGE, NOT A MERGE GATE]** historical duplicate closures landed (operator, after merge — `## Update System` runbook, `## Decisions` #4) | `for n in $(seq 3355 3405); do printf '%s\t' "$n"; gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]\|@tsv'; done` — one loop over the whole range, so every number the runbook closes *and* every number it preserves is read by the command that judges it | #3365-#3374 and #3382-#3397 report `CLOSED` `NOT_PLANNED`; #3355-#3364 and #3398-#3405 report `OPEN` |
 | Anti-criterion: ledger and dispositions are gone | `grep -c "write_triage_ledger\|NodeDisposition" scripts/nightly_regression_tests.py` | match count == 0 |
 | Anti-criterion: #3419's collapsing logic untouched | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "group_body_failure_cascades\|BODY_CASCADE_MIN_GROUP_SIZE"` | match count == 0 |
 | Anti-criterion: #3243's hostname stamp not landed here | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "gethostname\|hostname"` | match count == 0 |
@@ -1170,7 +1294,7 @@ two behavioral gaps and two stale cross-references left by revision 2's deletion
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
 | CONCERN | Risk & Robustness (Adversary) | The pre-create re-read (Race 2 / Key Elements) is specified as a duplicate-prevention check but never says what happens **on a hit**. The initial-read path handles that case by commenting instead of filing (`partition_already_open`, `scripts/nightly_regression_tests.py:2397-2425`, per-node caller `:2881-2889`), preserving the recurrence signal; `## Failure Path Test Strategy` enumerates only three non-filing outcomes and has no fourth for "refresh found a same-title issue mid-loop". If the implementation skips-and-leaves-unrecorded on a refresh hit, a legitimate recurrence comment is silently dropped — the "silent hole" class Risk 1 calls worse than a duplicate, relocated to a narrower window rather than eliminated. | **FIXED** — revision 3: the refresh-hit branch is now specified everywhere it has to be. `## Solution` Key Elements and Race 2 both state that a hit routes through `comment_on_issue()` against the number the refresh returned, reusing `partition_already_open()`'s shape, and record the node on a successful comment. Task 2 carries the same instruction with the re-keying gotcha. `## Failure Path Test Strategy` now names **four** non-filing outcomes and pins that a failed recurrence comment leaves the node out of `recorded`. New `TestPreCreateRefreshComments` plus a `## Verification` row and a `## Success Criteria` row. | Add an explicit fourth branch to the create loop: a refresh hit routes through `comment_on_issue` against the number the refresh just returned, not a skip-and-log like a fingerprint collision. Reuse `partition_already_open` (`:2397`) and its call site (`:2881-2889`) per-create inside the loop replacing `:2941-2970`; the refresh call is `open_issues()` (`:2065-2125`), and the fresh dict must be re-keyed against the same `f"Nightly regression: {node}"` / `cascade["title"]` strings the original read used or it silently never matches. Own log line, own test. |
-| CONCERN | Scope & Value (User) | `## Success Criteria` mixes mechanically-verifiable rows with the human-readable outcome check, which cannot be evaluated until a real nightly run happens in production and a human triager reads its output — yet Task 9 (`validate-all`) is defined as confirming **every** `## Success Criteria` row, with no carve-out. As written the plan's own completion gate cannot be closed at merge time. | **FIXED** — revision 3: the row is relabelled `[POST-DEPLOY, NOT A MERGE GATE]` and carries an owner (the morning triager), a trigger (the first real nightly run after `/update` reaches the scheduling machine), and an explicit disposition — a failure there is a follow-up issue against the body builder, not a revert. Task 9's `**Validates**` line is split to *mechanically-checkable* rows and instructs the validator to record this one as deferred-to-post-deploy rather than passing or failing it. | Split Task 9's `**Validates**` line to cover every *mechanically-checkable* row, and move the human-readable read to a named post-deploy observation with an owner and a trigger (the first real nightly run after `/update` reaches the runner machine), so the row is neither silently rubber-stamped by the validator nor silently dropped. |
+| CONCERN | Scope & Value (User) | `## Success Criteria` mixes mechanically-verifiable rows with the human-readable outcome check, which cannot be evaluated until a real nightly run happens in production and a human triager reads its output — yet Task 9 (`validate-all`) is defined as confirming **every** `## Success Criteria` row, with no carve-out. As written the plan's own completion gate cannot be closed at merge time. | **FIXED** — revision 3: the row is relabelled `[POST-DEPLOY, NOT A MERGE GATE]` and carries an owner (the morning triager), a trigger (the first real nightly run after `/update` reaches the scheduling machine), and an explicit disposition — a failure there is a follow-up issue against the body builder, not a revert. Task 9's `**Validates**` line (Task 8 after revision 4's renumber) is split to *mechanically-checkable* rows and instructs the validator to record this one as deferred-to-post-deploy rather than passing or failing it. | Split Task 9's `**Validates**` line to cover every *mechanically-checkable* row, and move the human-readable read to a named post-deploy observation with an owner and a trigger (the first real nightly run after `/update` reaches the runner machine), so the row is neither silently rubber-stamped by the validator nor silently dropped. |
 | CONCERN | History & Consistency (Consistency Auditor) | `## Agent Integration` still reads "remains the dispatch mechanism **if the investigation session survives** (`## Open Questions`)" — a stale cross-reference to a section that now says "None open", and conditional phrasing that re-opens a question `## Decisions` #1 and Task 4 ("Decided, no gate") both close. | **FIXED** — revision 3: `## Agent Integration` now reads "remains the dispatch mechanism for the investigation session, which is kept (`## Decisions` #1)". No conditional clause and no pointer at `## Open Questions`. | Replace the conditional clause with "(kept per `## Decisions` #1)", matching the wording already used in Task 4 and Risk 4's mitigation. |
 | CONCERN | History & Consistency (Consistency Auditor) | Race 3's data prerequisite cites `resolve_cascade_issue`, line 1165. That function is defined at `scripts/nightly_regression_tests.py:2366`; line 1165 of that file is `@dataclass(frozen=True)` preceding the unrelated `GateCaps` class. Line 1165 of the **test** file is `class TestResolveCascadeIssue`, so the citation was copied from the wrong file. The claim itself is correct (`:2391-2394`), but every other citation in the plan (`:2280`, `:2450`, `:2518`, `:2696`, `:3265`, test-file `672`) verifies exactly, so the one wrong pointer is the outlier. | **FIXED** — revision 3: the Race 3 data prerequisite now cites `resolve_cascade_issue`, `scripts/nightly_regression_tests.py:2366`. Verified against the source at revision time. | Change `line 1165` to `line 2366` in the Race 3 "Data prerequisite" sentence. |
 
@@ -1204,24 +1328,24 @@ known-bad baseline. Both were re-verified against the source before being accept
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
-| BLOCKER | Risk & Robustness (Skeptic) | The re-baseline seed path is a third agent-filing path the plan declares unchanged while its own success criteria and Task 4 both require it to change. `_build_seed_prompt` (`scripts/nightly_regression_tests.py:2019-2062`) emits "Only if neither exists, open ONE umbrella issue with EXACTLY that title" — a creation instruction, which falsifies `## Success Criteria` row 1 ("no surviving prompt contains a creation instruction"), yet `## Test Impact` lists `TestBuildSeedPrompt` (3197) under **unchanged classes**. Worse, the seed dispatch lives in `main()` at `:3198-3241`, outside `dispatch_findings()`, and calls `maybe_dispatch_triage_session([f"seed:{len(confirmed_failing)}"], …)`; Task 4 narrows that function "to take `(number, subject)` pairs and dispatch after filing", silently breaking the caller. And the seed branch's `_fatal` guard at `:3222-3235` uses a returned session id as its proxy for "an umbrella issue exists" — after this change a session id proves nothing about issue existence, and `seeded_nodes` is sticky, so a false green there suppresses a whole night-one population forever. | **ESCALATED to the PM** — the fix direction is forced but it is a scope call: either the detector creates the seed umbrella itself via `create_issue()` (a fifth code change, the consistent choice) or the seed path is carved out as explicitly untouched, which means accepting a standing exception to Success Criteria row 1. Not resolved in-lane. | **Verified independently.** `sed -n 2019,2062p` confirms the "open ONE umbrella issue" text; `sed -n 3198,3241p` confirms the out-of-`dispatch_findings` caller and the session-id-as-proxy `_fatal`; plan line 543 confirms `TestBuildSeedPrompt` is listed unchanged; plan line 404-406 already says the three prompts "collapse toward one investigation prompt", so the plan's own prose contradicts its Test Impact table. |
-| BLOCKER | Risk & Robustness (Operator), Scope & Value (Simplifier) | The `## Verification` row that proves the plan's central deliverable is already green on unmodified `main`. The row reads `` grep -c '"create"' scripts/nightly_regression_tests.py `` / `output > 0`, and line 2602 today is `"create",` — the `tools.valor_session create` argv. `validate-all` could rubber-stamp a build in which `create_issue` was never written. | **PENDING revision 5** — purely mechanical: replace with `grep -c "^def create_issue"` (or the Scope table's already-correct `grep -c "gh\", \"issue\", \"create\""`) and prove it RED against `origin/main` before trusting it. | **Verified independently.** `grep -c '"create"' scripts/nightly_regression_tests.py` returns `1` on unmodified main; the single hit is line 2602. This is the known-bad-baseline guard failure the memory entry *Prove guards red against known-bad* names. |
-| CONCERN | Risk & Robustness, Scope & Value | `NIGHTLY_AUTO_FILE` is both likely-inert and untested. `.env` reaches `os.environ` only through `load_env_or_die()` inside `main()`, which is why `resolve_int_knob` (`:462-482`) exists; there is no bool sibling, so a builder copying the nearest neighbour gets an import-time read and the vault setting does nothing. Its `## Verification` row asserts only that the string appears in the file. | **PENDING revision 5** — Task 2 specifies a call-time `resolve_bool_knob` read; Task 5 gains a behavioural test (kill switch on → zero `create_issue` calls, comments still posted, one log line per would-be filing); the Verification row asserts behaviour, not string presence. |  |
-| CONCERN | Risk & Robustness | A kill-switched run is not a dry run, so `save_last_run` still fires (`:3332-3346`). If skipped nodes land in `outcome.recorded` they enter `dispatched_nodes` and `compute_dispatch_set` suppresses them permanently — the break-glass reaches the same permanent-suppression hazard the seed branch's comment at `:3222-3229` exists to prevent. | **PENDING revision 5** — Task 2 states the invariant explicitly (kill-switch skip leaves the node out of `recorded`) with a test. |  |
-| CONCERN | Risk & Robustness | The four-outcome narrative has no branch for an unreadable pre-create refresh. `open_issues()` returns `None` on any failure (`:2065`); nothing in Race 2, `## Failure Path Test Strategy`, or Task 2 says what a `None` refresh does per-create, and a builder could reasonably read "refresh before create" as skip-on-unknown, which is Risk 1's silent hole at the exact spot Race 2 claims to shrink. | **PENDING revision 5** — name the degraded-refresh case as fail-open (create) with its own log line, as a fifth row in the outcome enumeration. |  |
-| CONCERN | Risk & Robustness, Scope & Value | Task 3's in-run fingerprint registry has no reachable trigger. Risk 1's own mitigation says the fingerprint "cannot match across distinct findings by construction"; `single_nodes` comes from a deduplicated sorted set and cascade fingerprints key on the unique `cascade_state_key`, so a same-run collision cannot be produced. Task 3's stated motivation is Race 3, which is cross-host and invisible to an in-process dict. It costs a task, a test class, and one of the four named outcomes. | **PENDING revision 5** — keep the fingerprint in the body (the real detection half) and collapse the registry to a defensive log line with one small test, unless a reachable producer is named (the honest candidate is #3419's future root-cause collapsing, which could map two findings onto one key). |  |
-| CONCERN | History & Consistency | Task 3 still says "three distinct, separately-named log lines for the three non-filing outcomes" while `## Failure Path Test Strategy` and Race 2 say four, including the pre-create refresh hit. Revision 4 rewrote the narratives for four outcomes but did not sweep the task bodies — no task owns the refresh-hit log line. | **PENDING revision 5** — Task 3 says four, or Task 2 gains an explicit refresh-hit log-line bullet. |  |
-| CONCERN | History & Consistency | Task 8's last bullet ("Run the `## Verification` table; confirm every `## Success Criteria` row") contradicts its own carve-out paragraph one line above, re-opening the round-3 defect. The carve-out also covers only `## Success Criteria` rows, not the `[POST-MERGE]` `## Verification` row, which by construction cannot pass before merge. | **PENDING revision 5** — rewrite the last bullet to except the `[POST-MERGE]` Verification row and to record both deferred rows as deferred. |  |
-| CONCERN | History & Consistency, Scope & Value | The "no prompt tells an agent to create an issue" anti-criterion greps the whole module for `gh issue create`, but Task 1 requires a `create_issue()` docstring stating the no-retry contract and Key Elements says the function "Shells `gh issue create --title … --body-file -`". An accurate docstring turns a correct build red, and a builder will "fix" it by degrading the docstring. The module already documents this exact trap at `:338-347`. | **PENDING revision 5** — scope the anti-criterion to rendered prompt output (the `TestPromptsNeverNameTheSearchIndex` sibling assertion already does this properly). |  |
-| CONCERN | History & Consistency | Race 2's cost bound disagrees with the ordering `### Flow` and `## Data Flow` now specify. Race 2 says "one extra `gh` read per created issue, which is bounded by `NIGHTLY_MAX_ISSUES_PER_RUN`", but the refresh runs per *survivor*, before the budget check, and revision 4's per-node in-loop deferral replaced the pre-loop truncation at `:2912-2920`. | **PENDING revision 5** — keep the ordering (budget-before-refresh would suppress legitimate recurrence comments) and correct the sentence to "one extra `gh` read per survivor considered". |  |
-| CONCERN | Risk & Robustness | Line-anchor drift in the two ranges a builder is told to delete. Task 2 cites `:2941-2970` and `:2856-2866`; the per-node block actually starts at `:2922` and includes `read_shape` at `:2927-2931`, which exists only to feed the deleted disposition path — deleting the literal range leaves it assigned and unused (ruff F841, so the lint row fails). The cascade dispatch call starts at `:2852`. | **PENDING revision 5** — cite `:2922-2970` and `:2852-2865`. |  |
-| CONCERN | Risk & Robustness | Two in-module narratives this change falsifies are absent from the `## Documentation` checklist: the module docstring at `:107-109` ("the triage session, not this script, is what actually opens the issue") and `resolve_cascade_issue`'s at `:2381-2384` ("This script does not open issues itself"). `resolve_cascade_issue`'s whole lookup-order rationale is predicated on the number being unknowable at filing time. | **PENDING revision 5** — both added to the Documentation checklist. |  |
-| NIT | Risk & Robustness, History & Consistency | The post-merge runbook's pre-check (step 1, `seq 3382 3405`) and verify (step 4, "the same loop as step 1") never touch the ten 09-16 numbers step 3 closes, and the `[POST-MERGE]` `## Verification` row's Expected column asserts state for numbers its command never queries. | **PENDING revision 5** — widen both loops to `seq 3355 3405` and align the Expected column. |  |
-| NIT | Risk & Robustness | The post-merge runbook has no named default owner and no carrier outside the plan document, unlike the `[POST-DEPLOY]` row which names "Tom by default" and a trigger. | **PENDING revision 5** — name a default human; the Documentation checklist item already carries the runbook into `docs/features/nightly-triage-dispatch.md`. |  |
-| NIT | History & Consistency | Task 6 (`document-feature`) is marked `**Parallel**: true` with nothing to run in parallel with; every other task is `false`. | **PENDING revision 5** — set to false or name the overlap. |  |
-| NIT | Risk & Robustness | A stale post-renumber reference survives in the Round 3 "Addressed By" cell ("Task 9's `**Validates**` line is split"). | **PENDING revision 5** — say Task 8. |  |
-| NIT | Scope & Value | `### Flow` is now a seven-line single-arrow sentence carrying four branches, while `## Data Flow` step 4 expresses the same thing as a clean (a)-(d) list. | **PENDING revision 5** — mirror the lettered list, or point `### Flow` at Data Flow step 4 as canonical. |  |
-| NIT | Risk & Robustness | `create_issue` is a new argv exposure for report-derived strings and the plan says nothing about argv hygiene; the module has precedent for stating it (`:955-961`). | **PENDING revision 5** — one docstring line: list-form argv, never `shell=True`, body on stdin, title always prefixed. |  |
+| BLOCKER | Risk & Robustness (Skeptic) | The re-baseline seed path is a third agent-filing path the plan declares unchanged while its own success criteria and Task 4 both require it to change. `_build_seed_prompt` (`scripts/nightly_regression_tests.py:2019-2062`) emits "Only if neither exists, open ONE umbrella issue with EXACTLY that title" — a creation instruction, which falsifies `## Success Criteria` row 1 ("no surviving prompt contains a creation instruction"), yet `## Test Impact` lists `TestBuildSeedPrompt` (3197) under **unchanged classes**. Worse, the seed dispatch lives in `main()` at `:3198-3241`, outside `dispatch_findings()`, and calls `maybe_dispatch_triage_session([f"seed:{len(confirmed_failing)}"], …)`; Task 4 narrows that function "to take `(number, subject)` pairs and dispatch after filing", silently breaking the caller. And the seed branch's `_fatal` guard at `:3222-3235` uses a returned session id as its proxy for "an umbrella issue exists" — after this change a session id proves nothing about issue existence, and `seeded_nodes` is sticky, so a false green there suppresses a whole night-one population forever. | **FIXED** — revision 5, option (a), ruled by the owner and recorded as `## Decisions` #5. Task 4 gains a three-step seed-branch conversion: `main()` creates the umbrella via `create_issue()`, `_fatal` keys on the returned number instead of a session id, and `_build_seed_prompt()` is deleted into the one investigation prompt. `## Test Impact` moves `TestBuildSeedPrompt` from unchanged to REPLACE (`TestSeedUmbrellaIsCreatedByTheDetector`), Task 5 writes it, and `## Verification` gains a `grep -c "_build_seed_prompt"` == 0 anti-criterion. | **Verified independently.** `sed -n 2019,2062p` confirms the "open ONE umbrella issue" text; `sed -n 3198,3241p` confirms the out-of-`dispatch_findings` caller and the session-id-as-proxy `_fatal`; plan line 543 confirms `TestBuildSeedPrompt` is listed unchanged; plan line 404-406 already says the three prompts "collapse toward one investigation prompt", so the plan's own prose contradicts its Test Impact table. |
+| BLOCKER | Risk & Robustness (Operator), Scope & Value (Simplifier) | The `## Verification` row that proves the plan's central deliverable is already green on unmodified `main`. The row reads `` grep -c '"create"' scripts/nightly_regression_tests.py `` / `output > 0`, and line 2602 today is `"create",` — the `tools.valor_session create` argv. `validate-all` could rubber-stamp a build in which `create_issue` was never written. | **FIXED** — revision 5: the row is now `grep -c "^def create_issue"`, **proven RED (`0`) against `origin/main`** before being written in, and the row itself records the proof and names the old form's failure so the next reader cannot re-introduce it. | **Verified independently.** `grep -c '"create"' scripts/nightly_regression_tests.py` returns `1` on unmodified main; the single hit is line 2602. This is the known-bad-baseline guard failure the memory entry *Prove guards red against known-bad* names. |
+| CONCERN | Risk & Robustness, Scope & Value | `NIGHTLY_AUTO_FILE` is both likely-inert and untested. `.env` reaches `os.environ` only through `load_env_or_die()` inside `main()`, which is why `resolve_int_knob` (`:462-482`) exists; there is no bool sibling, so a builder copying the nearest neighbour gets an import-time read and the vault setting does nothing. Its `## Verification` row asserts only that the string appears in the file. | **FIXED** — revision 5: Task 2 requires a `resolve_bool_knob` sibling read at call time, with the `:276-280` rationale quoted and `MIN_ENV_KEYS` named as the wrong neighbour to copy. Task 5 adds `TestKillSwitchSuppressesCreates`, which sets the env var *after import*. The grep row is replaced by a behavioural pytest row plus a `resolve_bool_knob` presence row. |  |
+| CONCERN | Risk & Robustness | A kill-switched run is not a dry run, so `save_last_run` still fires (`:3332-3346`). If skipped nodes land in `outcome.recorded` they enter `dispatched_nodes` and `compute_dispatch_set` suppresses them permanently — the break-glass reaches the same permanent-suppression hazard the seed branch's comment at `:3222-3229` exists to prevent. | **FIXED** — revision 5: Task 2 states the invariant explicitly ("A kill-switched node is not a recorded node"), cites `:3332-3346` and the `:3222-3229` precedent, and `TestKillSwitchSuppressesCreates` asserts `recorded` is unchanged. |  |
+| CONCERN | Risk & Robustness | The four-outcome narrative has no branch for an unreadable pre-create refresh. `open_issues()` returns `None` on any failure (`:2065`); nothing in Race 2, `## Failure Path Test Strategy`, or Task 2 says what a `None` refresh does per-create, and a builder could reasonably read "refresh before create" as skip-on-unknown, which is Risk 1's silent hole at the exact spot Race 2 claims to shrink. | **FIXED** — revision 5: `## Data Flow` step 4 is now the canonical five-branch list with **(b) Refresh degraded** as an explicit fail-open, Task 2 states it as a required behaviour with the reasoning, and `## Failure Path Test Strategy` requires its own log line — called out as the one most easily forgotten, since a degraded-refresh night still files everything it should. |  |
+| CONCERN | Risk & Robustness, Scope & Value | Task 3's in-run fingerprint registry has no reachable trigger. Risk 1's own mitigation says the fingerprint "cannot match across distinct findings by construction"; `single_nodes` comes from a deduplicated sorted set and cascade fingerprints key on the unique `cascade_state_key`, so a same-run collision cannot be produced. Task 3's stated motivation is Race 3, which is cross-host and invisible to an in-process dict. It costs a task, a test class, and one of the four named outcomes. | **FIXED** — revision 5: Task 3 now separates the two halves. The fingerprint *in the body* is named as the half carrying the value. The in-run registry is explicitly labelled a defensive assertion rather than a live defence, with the unreachability stated in the plan, the reachable producer named (#3419's collapsing maps several findings onto one key), and an instruction not to grow it into a subsystem or let it justify a read-back. |  |
+| CONCERN | History & Consistency | Task 3 still says "three distinct, separately-named log lines for the three non-filing outcomes" while `## Failure Path Test Strategy` and Race 2 say four, including the pre-create refresh hit. Revision 4 rewrote the narratives for four outcomes but did not sweep the task bodies — no task owns the refresh-hit log line. | **FIXED** — revision 5: Task 3 now enumerates all five non-create outcomes and states that the refresh-hit and degraded-refresh lines are emitted by Task 2's loop while this task owns the log-line contract, so the line has an owner. |  |
+| CONCERN | History & Consistency | Task 8's last bullet ("Run the `## Verification` table; confirm every `## Success Criteria` row") contradicts its own carve-out paragraph one line above, re-opening the round-3 defect. The carve-out also covers only `## Success Criteria` rows, not the `[POST-MERGE]` `## Verification` row, which by construction cannot pass before merge. | **FIXED** — revision 5: both Task 8's `**Validates**` line and its last bullet now except the `[POST-MERGE]` Verification row and require the two deferred rows to be recorded as deferred with their owners, rather than passed or failed. |  |
+| CONCERN | History & Consistency, Scope & Value | The "no prompt tells an agent to create an issue" anti-criterion greps the whole module for `gh issue create`, but Task 1 requires a `create_issue()` docstring stating the no-retry contract and Key Elements says the function "Shells `gh issue create --title … --body-file -`". An accurate docstring turns a correct build red, and a builder will "fix" it by degrading the docstring. The module already documents this exact trap at `:338-347`. | **FIXED** — revision 5: the row no longer greps the module. It runs `TestPromptsNeverNameTheSearchIndex`, the rendered-prompt assertion, so an honest `create_issue()` docstring naming `gh issue create` can no longer turn a correct build red. |  |
+| CONCERN | History & Consistency | Race 2's cost bound disagrees with the ordering `### Flow` and `## Data Flow` now specify. Race 2 says "one extra `gh` read per created issue, which is bounded by `NIGHTLY_MAX_ISSUES_PER_RUN`", but the refresh runs per *survivor*, before the budget check, and revision 4's per-node in-loop deferral replaced the pre-loop truncation at `:2912-2920`. | **FIXED** — revision 5: Race 2 now says "one extra `gh` read **per survivor considered**", states why the refresh precedes the budget check, notes `MAX_DISPATCH_NODES` survives only in comments, gives the real bound (the survivor count; 24 on the worst night on record), and points at the fail-open behaviour. |  |
+| CONCERN | Risk & Robustness | Line-anchor drift in the two ranges a builder is told to delete. Task 2 cites `:2941-2970` and `:2856-2866`; the per-node block actually starts at `:2922` and includes `read_shape` at `:2927-2931`, which exists only to feed the deleted disposition path — deleting the literal range leaves it assigned and unused (ruff F841, so the lint row fails). The cascade dispatch call starts at `:2852`. | **FIXED** — revision 5: Task 2 cites `:2922-2970` and `:2852-2865`, and spells out why both start earlier than they look — including that cutting from `:2941` strands `read_shape` (`:2927-2931`) as ruff F841 and fails the lint row. |  |
+| CONCERN | Risk & Robustness | Two in-module narratives this change falsifies are absent from the `## Documentation` checklist: the module docstring at `:107-109` ("the triage session, not this script, is what actually opens the issue") and `resolve_cascade_issue`'s at `:2381-2384` ("This script does not open issues itself"). `resolve_cascade_issue`'s whole lookup-order rationale is predicated on the number being unknowable at filing time. | **FIXED** — revision 5: the `## Documentation` Inline checklist gains the module docstring (`:107-109`), `resolve_cascade_issue()` (`:2381-2384`, including that its bootstrap rationale is now moot), and `partition_already_open()` (`:2405-2407`, whose title-contract citation moves with the prompt). |  |
+| NIT | Risk & Robustness, History & Consistency | The post-merge runbook's pre-check (step 1, `seq 3382 3405`) and verify (step 4, "the same loop as step 1") never touch the ten 09-16 numbers step 3 closes, and the `[POST-MERGE]` `## Verification` row's Expected column asserts state for numbers its command never queries. | **FIXED** — revision 5: both runbook loops and the `## Verification` row use one `seq 3355 3405` loop covering every number the runbook closes *and* every number it preserves, with the Expected column aligned to what the command actually reads. |  |
+| NIT | Risk & Robustness | The post-merge runbook has no named default owner and no carrier outside the plan document, unlike the `[POST-DEPLOY]` row which names "Tom by default" and a trigger. | **FIXED** — revision 5: the runbook now opens with Owner (whoever merges, Tom by default), Trigger (the merge), and an explicit bounded cost if it is never run — which is also the argument for why it was safe to take out of the pipeline. |  |
+| NIT | History & Consistency | Task 6 (`document-feature`) is marked `**Parallel**: true` with nothing to run in parallel with; every other task is `false`. | **FIXED** — revision 5: set to `false`. |  |
+| NIT | Risk & Robustness | A stale post-renumber reference survives in the Round 3 "Addressed By" cell ("Task 9's `**Validates**` line is split"). | **FIXED** — revision 5: the cell now reads "Task 9's `**Validates**` line (Task 8 after revision 4's renumber)", keeping the archival record readable while naming current state. |  |
+| NIT | Scope & Value | `### Flow` is now a seven-line single-arrow sentence carrying four branches, while `## Data Flow` step 4 expresses the same thing as a clean (a)-(d) list. | **FIXED** — revision 5: `### Flow` no longer restates the branches; it names `## Data Flow` step 4 as the canonical list, which is now a lettered (a)-(e) enumeration. One place to change when the branch set changes. |  |
+| NIT | Risk & Robustness | `create_issue` is a new argv exposure for report-derived strings and the plan says nothing about argv hygiene; the module has precedent for stating it (`:955-961`). | **FIXED** — revision 5: Task 1 requires the docstring to state the argv contract, following the `provision_baseline_worktree` precedent at `:955-961` — list-form argv, never `shell=True`, body on stdin, titles always pre-prefixed so a report-derived string cannot lead with a `-`. |  |
 
 Per-critic verdicts: Risk & Robustness **NEEDS REVISION**; Scope & Value **READY TO BUILD (with
 concerns)**; History & Consistency **READY TO BUILD (with concerns)**. Aggregate: **NEEDS REVISION**,
@@ -1265,6 +1389,23 @@ because the plan text above now depends on them.
    operator, the same shape already used for the `[POST-DEPLOY]` outcome check. Keeping the rows
    rather than deleting them is deliberate: the work is still owed, it is simply not owed by the
    pipeline.
+5. **The re-baseline seed umbrella is created by the detector too — option (a).** Round 5 found a
+   third agent-filing path no earlier round had read: `_build_seed_prompt()`
+   (`scripts/nightly_regression_tests.py:2019-2062`) tells an agent "Only if neither exists, open
+   ONE umbrella issue with EXACTLY that title", and its dispatch lives in `main()` at `:3198-3241`,
+   outside `dispatch_findings()`. The choice was to convert it or to carve it out as explicitly
+   untouched. Converting it, for three reasons: the plan had already half-committed to it
+   (`## Architectural Impact` names the re-baseline-seed prompt among the three that "collapse
+   toward one investigation prompt", and that line stands as written now that this is decided);
+   carving it out would mean accepting a standing exception to `## Success Criteria` row 1, so the
+   plan's headline anti-criterion — no surviving prompt tells an agent to open an issue — would ship
+   false; and Task 4's narrowing of `maybe_dispatch_triage_session()` to `(number, subject)` pairs
+   breaks the seed caller either way, so "untouched" was never actually on the table. The conversion
+   also repairs a guard: `_fatal` at `:3222-3235` currently uses a returned session id as its proxy
+   for "an umbrella issue exists", which after this change proves nothing, and `seeded_nodes`
+   (`:3240`) is sticky — a false green there suppresses a whole night-one population against an
+   issue that was never filed. It now keys on the issue number `create_issue()` returns. Built in
+   Task 4; `TestBuildSeedPrompt` moves from unchanged to REPLACE in `## Test Impact`.
 
 ## Open Questions
 
