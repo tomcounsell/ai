@@ -7,7 +7,7 @@ created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3091
 last_comment_id: 5696048394
 revision_applied: true
-revision_applied_at: 2026-09-16T10:58:52Z
+revision_applied_at: 2026-09-18T06:25:52Z
 ---
 
 # One ordering owns the eng preference for every session_id read
@@ -78,7 +78,14 @@ and fall back to `[0]`". The replication spread with the model's blessing.
 owns. All six sites iterate one correctly-ordered list. A grep sweep proves nothing re-implements
 it, and the docstring stops recommending that they do.
 
-This is exactly #3091's own acceptance test: **no caller has to remember a tie-break to be correct.**
+This moves #3091's acceptance test as far as an ordering can move it: **the tie-break rule lives in
+one place instead of six.** State the residue honestly rather than claiming more than ships — a
+caller that wants the eng preference must still pass `prefer_type="eng"`, and a seventh caller that
+omits it degrades silently to plain newest-first. **Neither sweep catches that**: the code sweep
+anchors on the old literal comparison, not on a missing keyword argument. What the change buys is
+that the rule can no longer be *miscopied*, only *not asked for* — a strictly smaller failure
+surface, and one the rewritten docstring names at the point of use (see Documentation). Eliminating
+the residue entirely requires uniqueness on `session_id`, which is #3169.
 
 ## Freshness Check
 
@@ -86,14 +93,32 @@ This is exactly #3091's own acceptance test: **no caller has to remember a tie-b
 **Issue filed at:** 2026-09-03T06:44:22Z
 **Disposition:** Major drift — scope revised by the lane owner, not closed. See Notes.
 
-**How these were verified (tightened after critique).** The first pass of this section carried
-`models/agent_session.py:156-157` for the identity fields and asserted it had been re-verified. It had
-not: `156-157` is inside the class docstring's lifecycle prose, and a reader skimming that range sees
-plausible-looking text about sessions, so the error reads as confirmation. A freshness check that
-passes on a stale coordinate is reporting on itself, not on the file. **Every coordinate below was
-re-verified by printing the exact line range with `awk 'NR>=A && NR<=B'` and reading the code at it,
-not by grepping for the symbol and trusting a remembered number.** A coordinate is only "still holds"
-if the printed range contains the cited construct.
+**How these were verified — the method, not the assertion (tightened twice).** This section has now
+falsified its own re-verification claim twice, which is why the method is written out as a procedure
+rather than as a promise:
+
+- Round 1 caught `models/agent_session.py:156-157`, cited for the identity fields. `156-157` is
+  inside the class docstring's lifecycle prose, and a reader skimming that range sees plausible-looking
+  text about sessions, so the error reads as confirmation.
+- Round 2 caught `tools/stage_states_helpers.py:203`, cited twice (Technical Approach's fall-through
+  table and a round-1 Critique Results row marked *applied*) as the place `_reload_ledger` proves the
+  fall-through contract. `:203` is `reload_fn = _reload_session if field == "stage_states" else
+  _reload_ledger`. The construct is at `:131`.
+
+Both survived a section that asserted every coordinate had been re-verified. **An assertion that a
+check ran is not the check.** So the obligation is mechanical and has a visible artifact:
+
+> **For every `path:line` this document cites, print that exact range (`awk 'NR>=A && NR<=B
+> {printf "%d: %s\n", NR, $0}' path`) and read the cited construct in the printed output. A
+> coordinate is "still holds" only if the construct is visible in that output. Never grep for the
+> symbol and pair it with a remembered number — that is what produced both defects above: the grep
+> confirms the construct exists somewhere, and the number is never re-checked against it.**
+
+The rule applies to **every** cited coordinate, not only the ones in the bulleted list below. A
+citation that appears inside prose, a task bullet, a Verification row, or a Critique Results cell is
+under the same obligation; round 2's defect was in a table cell and a Critique row, not in this
+section's list, and the list-scoped reading is exactly how it survived. When a coordinate is
+corrected, re-print the corrected range and confirm the construct before writing the new number down.
 
 **File:line references re-verified:**
 - `models/agent_session.py:163-165` — `# === Identity ===` block: `id = AutoKeyField()` at 163,
@@ -305,6 +330,41 @@ by the existing `_newest_first_key` (`created_at` desc as UTC epoch, then `id` d
 guarantee for the `prefer_type=None` path remains untouched, and
 `tests/unit/test_agent_session_newest_wins.py` remains its pin.
 
+**The default path must short-circuit BEFORE the partition — this is not an optimization, it is the
+correctness condition.** `session_type = KeyField(null=True)` (`models/agent_session.py:165`,
+range re-printed during this revision), so a row may legitimately carry `session_type = None`. A
+partition written as the obvious `getattr(row, "session_type", None) == prefer_type` and applied
+**unconditionally** therefore *matches* every null-typed row when `prefer_type` takes its `None`
+default — floating those rows to the head and silently reordering the ~74 callers this plan promises
+are byte-for-byte unchanged. The required shape:
+
+```python
+rows = list(cls.query.filter(session_id=session_id, **filters))
+if not prefer_type:                                    # default path, pre-change body verbatim
+    rows.sort(key=cls._newest_first_key, reverse=True)
+    return rows
+# ... partition only below this line
+```
+
+`not prefer_type` rather than `prefer_type is None`, so `prefer_type=""` takes the same exit — the
+case the Empty/Invalid Input bullet already names. Written this way the default path cannot diverge
+*by construction* rather than by a test that has to remember to look.
+
+**The existing Empty/Invalid Input bullet does not close this.** It forbids "no match, return
+nothing"; this failure returns *every* row, in a different order. It passes that bullet while the
+defect is live, which is why the condition is stated here as a shape and pinned by its own RED proof
+in task 2b rather than left to a bullet's coverage.
+
+**Do not downgrade this on the grounds that no such row exists today.** The live table was queried
+through the ORM during this revision: **165 rows, 137 `eng`, 28 `teammate`, zero null-ish
+`session_type`.** That is evidence about today's rows, not about the field. Nothing enforces non-null
+on `session_type`, one null row is enough to reorder every default-argument caller, and reading the
+count as a guarantee is the absence-of-evidence-as-evidence-of-absence inference that **#3348** was
+filed out of this same fan-out to name. The consequence for BUILD is concrete and appears in task 2b:
+**the RED proof must explicitly construct a `session_type=None` row.** Production-shaped data — and
+any fixture that mirrors it — contains no null-typed row, so a test that does not seed one passes
+against the broken partition and proves nothing.
+
 The shape to **avoid**:
 
 ```python
@@ -315,6 +375,22 @@ A composite key can interleave the groups or let a group's internal order stop b
 Either silently changes behavior at the site that depends on a clean partition —
 `_fetch_live_active_run_id`. See Risk 2, which this plan treats as a named acceptance item rather
 than a footnote.
+
+**The gate on this is behavioral, and it cannot be a grep.** An earlier Verification row greped for
+`is_eng(r), _newest_first_key` and expected 0 hits. `is_eng` is a name this plan invented for the
+illustrative snippet above; no implementation defines it. A *genuine* composite-key regression is
+written in the vocabulary the real code already uses —
+
+```python
+sorted(rows, key=lambda r: (getattr(r, "session_type", None) != prefer_type, cls._newest_first_key(r)))
+```
+
+— and returns 0 hits for that pattern too. The row was therefore 0 against a correct build and 0
+against a broken one: unfalsifiable, and exactly the failure Risk 4 names ("Do not harden a check
+that has not been run"). It is deleted. The real gate is **task 6's partition-shape test,
+`test_prefer_type_partitions_all_matching_first_then_newest_within_groups`**, proven RED in task 2b
+against a deliberately composite-key implementation on a scratch copy. Verification carries that
+test's existence as a named smoke check only, on the same footing as the Risk 2 row.
 
 **Pre-narrowed sites stay pre-narrowed.** `find_session_by_issue`'s deterministic-id pass narrows by
 identity re-check and by `include_terminal` (a *negative* status filter over
@@ -348,7 +424,7 @@ Verified at source; the required shape at each site:
 
 | Site | Today's fall-through | Required shape |
 |------|----------------------|----------------|
-| `tools/stage_states_helpers.py:103-110` | `if not matches: return session` — returns the **original** session object | `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")` then `return matches[0] if matches else session`. Never a bare `return newest_for_session_id(...)` — its `None` would reach the `stage_states` write loop, whose sibling `_reload_ledger` proves the intended contract at `tools/stage_states_helpers.py:203` with `return fresh if fresh is not None else ledger`. |
+| `tools/stage_states_helpers.py:103-110` | `if not matches: return session` — returns the **original** session object | `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")` then `return matches[0] if matches else session`. Never a bare `return newest_for_session_id(...)` — its `None` would reach the `stage_states` write loop, whose sibling `_reload_ledger` proves the intended contract at `tools/stage_states_helpers.py:131` with `return fresh if fresh is not None else ledger` (`_reload_ledger` is defined at `:116`; range re-printed during this revision). |
 | `tools/_sdlc_utils.py:464-472` (Step 1, explicit `session_id`) | `if sessions:` — empty falls through to Step 2 (issue-based) and Step 3 (env var), then auto-ensure | `found = AgentSession.newest_for_session_id(session_id, prefer_type="eng")` then `if found is not None: return found` and **fall through** otherwise. Never `return` the call directly. |
 | `tools/_sdlc_utils.py:489-497` (Step 3, `VALOR_SESSION_ID`) | `if sessions:` — empty falls through to auto-ensure | Same shape as Step 1. |
 | `tools/_sdlc_utils.py:364-371` (deterministic-id pass) | `if local: return local[0]` — empty falls through to the `message_text` regex fallback | Keep `rows_for_session_id(local_id, prefer_type="eng")`, narrow, then `if local: return local[0]` and fall through. |
@@ -446,6 +522,15 @@ excludes `tests/`.
       `newest_for_session_id` returns `None`.
 - [ ] `prefer_type=None` (and `prefer_type=""`) must degrade to plain newest-first, never to "no
       match, return nothing". Test explicitly — this is the most likely silent-wrong-answer bug.
+- [ ] **`prefer_type=None` against a row set containing a `session_type=None` row.** The failure this
+      guards is *not* covered by the bullet above: an unconditional partition returns every row, so
+      "no match, return nothing" never happens — the rows come back **reordered**, null-typed rows
+      floated to the head. Seed a `session_type=None` row explicitly alongside an eng row and a
+      non-eng row, call with **no** `prefer_type` argument, and assert the order equals plain
+      newest-first exactly. Production-shaped data has no null-typed row (165 live rows, zero
+      null-ish), so a fixture that mirrors production passes against the broken partition and proves
+      nothing — the row must be constructed. See Technical Approach for the short-circuit that makes
+      this correct by construction, and #3348 for why the zero live count is not a reason to skip it.
 - [ ] Rows missing the `session_type` attribute entirely must not match the preferred group and must
       not raise. The existing sites use `getattr(..., None)` for exactly this reason; the ordering
       must preserve it. Test with a row lacking the attribute.
@@ -766,6 +851,14 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
       `[0]`". That sanction is part of the defect — it is why the replication spread. Replace it with
       a pointer to `prefer_type=`. Leaving it would actively re-teach the bug, with the model's
       blessing, to the seventh caller.
+- [ ] **The rewritten docstring must state the residue, not only the mechanism.** In the same
+      paragraph: omitting `prefer_type` yields plain newest-first, that degradation is **silent**,
+      and **no sweep catches it** — the code sweep anchors on the old literal comparison, not on a
+      missing keyword argument. So a caller that needs the eng preference must pass it. This is the
+      one place the seventh caller is actually reading at the moment they could get it wrong, which
+      is why the honest limit belongs here rather than only in the Problem section. Do **not** resolve
+      the residue with a predicate argument or an auto-detect default — that reopens ruling 1 and
+      makes the close-out sweep unfalsifiable.
 - [ ] Docstring for `prefer_type` on both methods: the grouping rule, that group-internal order is
       the existing newest-first key, that it never invents a comparison, and that it becomes a no-op
       once #3169 lands.
@@ -800,7 +893,17 @@ existing tests in `tests/unit/test_sdlc_stage_query.py`.
 - [ ] The `docs/features/agent-session-model.md` sanction paragraph is **deleted**, not appended to.
       The documentation was part of the defect; both copies are in the diff.
 - [ ] **`prefer_type` is implemented as a stable partition, not a composite sort key** — all matching
-      rows first, then the rest, each group independently newest-first. No interleaving.
+      rows first, then the rest, each group independently newest-first. No interleaving. Proven by
+      Proof D, RED against a deliberately composite-key implementation with `created_at`-interleaved
+      rows. No grep is accepted as the gate here: the regression is invisible to every text pattern.
+- [ ] **The `prefer_type=None` default path short-circuits before the partition and is provably
+      unchanged in the presence of a null-typed row.** `if not prefer_type:` precedes any partition
+      (so `prefer_type=""` also exits there), and Proof C — a test that **constructs** a
+      `session_type=None` row and calls with no `prefer_type` argument — is RED against an
+      unconditionally-partitioning build. The zero live null rows are not grounds to skip it (#3348).
+- [ ] **The rewritten docstring states the residue.** It says that omitting `prefer_type` yields
+      plain newest-first, that the degradation is silent, and that no sweep catches it — and it does
+      not introduce a predicate or auto-detect default to paper over that.
 - [ ] **The named Risk 2 test exists and was proven RED against the known-bad ordering:** an eng row
       with `active_run_id=None` plus an **older** non-eng row with a real `active_run_id` →
       `_fetch_live_active_run_id` returns the **older non-eng row's** id. The RED output is pasted
@@ -890,8 +993,15 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Assigned To**: `resolver-builder`
 - **Agent Type**: builder
 - **Parallel**: true
-- Add keyword-only `prefer_type=None` to `rows_for_session_id`. Implement as an explicit **partition**
-  on `getattr(row, "session_type", None)` — matching group first, then the rest, each sorted
+- Add keyword-only `prefer_type=None` to `rows_for_session_id`. **First statement after the
+  `query.filter` call is the default-path short-circuit** — `if not prefer_type:` → sort by
+  `_newest_first_key` and return, the pre-change body verbatim. Not an optimization: `session_type`
+  is `KeyField(null=True)`, so an unconditional `getattr(row, "session_type", None) == prefer_type`
+  partition matches null-typed rows on the `None` default and reorders the ~74 existing callers.
+  `not prefer_type` (not `is None`) so `prefer_type=""` takes the same exit. See Technical Approach
+  for the exact shape.
+- Below the short-circuit, implement an explicit **partition** on
+  `getattr(row, "session_type", None)` — matching group first, then the rest, each sorted
   independently by the existing `_newest_first_key`. **Do not** use a composite sort key
   (`sorted(rows, key=lambda r: (is_eng(r), _newest_first_key(r)), reverse=True)` is the shape to
   avoid); it can interleave groups or break group-internal order. `prefer_type=None` path
@@ -922,8 +1032,29 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
   it against the **unextended** `wire_session_lookup` and capture the RED output. A test that only
   proves the kwarg is forwarded does not count — the unextended helper already forwards it and then
   ignores it.
-- Both RED outputs go verbatim into the PR description. They are the real gate; the Verification greps
-  are only smoke checks.
+- **Proof C — the null-`session_type` default-order proof.** Write
+  `test_default_order_unchanged_by_null_session_type_row` in
+  `tests/unit/test_agent_session_newest_wins.py`: seed three rows sharing one `session_id` — one
+  `session_type="eng"`, one `session_type="teammate"`, and one **explicitly** `session_type=None` —
+  then call `rows_for_session_id(sid)` with **no** `prefer_type` argument and assert the returned
+  order is plain newest-first. Prove it RED against an implementation that partitions
+  unconditionally (partition first, no `if not prefer_type` short-circuit), where the null-typed row
+  floats to the head. **The null row must be constructed by the test.** The live table has 165 rows
+  and zero null-ish `session_type`, so a fixture that mirrors production is green against the broken
+  build — see #3348. Do not substitute a fixture-derived row set for the explicit seed.
+- **Proof D — the partition-shape proof (replaces the deleted composite-key grep).** Write
+  `test_prefer_type_partitions_all_matching_first_then_newest_within_groups` in
+  `tests/unit/test_agent_session_newest_wins.py`: eng and non-eng rows **interleaved by
+  `created_at`**, asserting the result is all-matching-then-all-non-matching *and* newest-first
+  within each group. Prove it RED against a deliberately composite-key implementation on a scratch
+  copy —
+  `sorted(rows, key=lambda r: (getattr(r, "session_type", None) != prefer_type, cls._newest_first_key(r)))`
+  — which is the vocabulary a real regression would use and which **no grep distinguishes from a
+  correct build**. Interleaving is what makes it RED: with the groups already time-separated a
+  composite key produces the same list and the test pins nothing. If it will not go RED, the test is
+  wrong, not the implementation.
+- All four RED outputs go verbatim into the PR description. They are the real gate; the Verification
+  greps are only smoke checks.
 
 ### 3. Extend the mocked-test seam
 - **Task ID**: build-mock-seam
@@ -964,7 +1095,7 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - `tools/stage_states_helpers.py:103-110` →
   `matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")` then
   `return matches[0] if matches else session` — the **original** session object on empty, matching the
-  contract `_reload_ledger` states at `tools/stage_states_helpers.py:203`.
+  contract `_reload_ledger` states at `tools/stage_states_helpers.py:131`.
 - Delete every hand-rolled block. No commented-out remnants.
 - Add the gate-marking comment at `tools/sdlc_session_ensure.py:776` with the mandated wording: *tests
   one already-resolved row's type; does not choose among rows.* **Comment-only** — no behavior change,
@@ -992,7 +1123,7 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 
 ### 6. Resolver and failure-path tests
 - **Task ID**: build-tests
-- **Depends On**: build-resolver
+- **Depends On**: build-resolver, build-mock-seam, build-executor-scan
 - **Validates**: tests/unit/test_agent_session_newest_wins.py
 - **Assigned To**: `resolver-tests`
 - **Agent Type**: test-engineer
@@ -1001,13 +1132,19 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
   rows; no eng row yields the `prefer_type=None` order exactly; group-internal newest-first holds for
   both groups; empty set → `[]` / `None`; `prefer_type=None` degrades to newest; a row missing
   `session_type` neither matches nor raises; repeated calls are stable.
-- The **named Risk 2 test** (`test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`, in
-  `tests/unit/test_agent_session_newest_wins.py`) and the mocked-seam ordering test are both written
-  and proven RED in **task 2b**, not here. This task confirms they are GREEN after the collapse and
-  adds the remaining cases below.
-- Partition-shape test: with eng and non-eng rows interleaved by `created_at`, assert the returned
-  list is all-eng-then-all-non-eng and newest-first *within* each group — the property the single-pass
-  scan depends on.
+- **Why `Depends On` names all three collapses.** All four of task 2b's proofs are written and proven
+  RED there, and this task's job is to confirm they are GREEN — Proof A only goes green once
+  `build-executor-scan` lands, Proof B only once `build-mock-seam` lands. Listing `build-resolver`
+  alone let a builder honoring the graph run this task while Proof A is still correctly RED by design
+  and read that as a failure. Task 2b's own rule applies verbatim: an ordering enforced by a sentence
+  with no `Depends On` edge is not an ordering, it is a wish. The independent cases below need only
+  `build-resolver`; the serialization is accepted as the cost of the graph saying what the prose says.
+- Written and proven RED in **task 2b**, not here — this task only confirms each is GREEN:
+  Proof A `test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id`, Proof B the mocked-seam
+  ordering test, Proof C `test_default_order_unchanged_by_null_session_type_row`, and Proof D
+  `test_prefer_type_partitions_all_matching_first_then_newest_within_groups` (the partition-shape
+  property the single-pass scan depends on, and the real gate that replaced the deleted composite-key
+  grep). All four live in `tests/unit/test_agent_session_newest_wins.py` except Proof B.
 - Risk 3 case: terminal eng row loses to live non-eng row when `include_terminal=False`.
 - `_reload_session` returns the original session when the resolver raises; the renewal tick returns
   `None` rather than crashing.
@@ -1057,7 +1194,9 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 | Mocked seam covers prefer_type | `grep -c 'prefer_type' tests/unit/session_lookup_mock.py` | output > 0 |
 | session_executor scan is single-pass | `python -c "import ast,sys;f=[n for n in ast.walk(ast.parse(open('agent/session_executor.py').read())) if isinstance(n,ast.FunctionDef) and n.name=='_fetch_live_active_run_id'][0];print(sum(1 for n in ast.walk(f) if isinstance(n,ast.For)))"` | output contains 1 (baseline today: 2). Coordinate-free — resolves the function by name, so it survives any edit above it |
 | Named Risk 2 test exists, by exact name | `grep -c 'def test_fetch_live_active_run_id_prefers_older_non_eng_with_run_id' tests/unit/test_agent_session_newest_wins.py` | output contains 1 (baseline today: 0). Anchored on a string that cannot pre-exist; the module is pinned, not "or". The pasted RED output in the PR description is the real gate — this row is only a smoke check |
-| prefer_type is a partition, not a composite sort key | `grep -n 'prefer_type' -A12 models/agent_session.py \| grep -c 'is_eng(r), _newest_first_key'` | match count == 0 |
+| **Partition-shape proof exists, by exact name** (replaces the deleted composite-key grep) | `grep -c 'def test_prefer_type_partitions_all_matching_first_then_newest_within_groups' tests/unit/test_agent_session_newest_wins.py` | output contains 1 (baseline today: 0). Anchored on a string that cannot pre-exist. **Smoke check only** — the real gate is task 2b's Proof D RED output, pasted in the PR description, captured against a deliberately composite-key implementation. The old row here greped for `is_eng(r), _newest_first_key` expecting 0: `is_eng` is a name this plan invented for its own WRONG-shape snippet, so the row returned 0 against a correct build *and* against a genuine composite-key regression written in the real code's vocabulary. Unfalsifiable, deleted, not loosened |
+| **Default path short-circuits before the partition** | `grep -n 'if not prefer_type' models/agent_session.py` | at least 1 hit, and it sits **above** the partition in `rows_for_session_id` — read the function, do not just count. Smoke check only; the behavioral gate is task 2b's Proof C |
+| **Null-`session_type` default-order proof exists, by exact name** | `grep -c 'def test_default_order_unchanged_by_null_session_type_row' tests/unit/test_agent_session_newest_wins.py` | output contains 1 (baseline today: 0). Smoke check only — the real gate is Proof C's RED output against an unconditionally-partitioning implementation. The test must **construct** a `session_type=None` row; production has zero (165 live rows, 137 eng, 28 teammate), so a production-shaped fixture is green against the broken build. See #3348 |
 | Class-set retry preserved | `grep -c 'log_class_set_exhaustion' tools/sdlc_stage_query.py` | output > 0 |
 | Bridge presence checks untouched | `grep -c 'query.filter(session_id=guard_session_id)' bridge/telegram_bridge.py` | output contains 2 |
 | No Popoto migration added | `git diff --name-only main -- scripts/update/migrations.py \| wc -l` | output contains 0 |
@@ -1077,13 +1216,21 @@ Round 2: FULL roster (3 critics), independent roster. Verdict: **READY TO BUILD 
 three critics and hold; none were re-raised. Three of the five findings below were reached
 independently by a critic and by the aggregator's own structural pass.
 
+**Round 2's revision is applied** (`revision_applied_at: 2026-09-18T06:25:52Z`). All five concerns
+are folded into the plan body; the `Addressed By` cells below name where. Two of the five changed a
+gate rather than prose: concern 1 added a correctness condition to the resolver's required shape plus
+Proof C, and concern 2 **deleted** a Verification row and replaced it with a behavioral gate
+(Proof D). Nothing a round-1 or round-2 critic ruled on was reversed, and no settled ruling was
+reopened — in particular the no-predicate ruling is restated as a prohibition in the two places
+concern 5's fix could otherwise have drifted into reopening it.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | An unconditional partition breaks the `prefer_type=None` byte-for-byte guarantee. `session_type = KeyField(null=True)` (`models/agent_session.py:165`), so rows legitimately carry a null `session_type`. A partition written as `getattr(row, "session_type", None) == prefer_type` applied unconditionally MATCHES those null rows when `prefer_type` is its `None` default, floating them to the head and silently reordering the ~74 existing callers the plan promises are unchanged. The existing Empty/Invalid Input bullet does not close this: it forbids "no match, return nothing", and this failure returns every row in a different order rather than returning nothing, so it passes that bullet while the defect is live. | pending | Short-circuit BEFORE partitioning, in `rows_for_session_id`: `if not prefer_type: rows.sort(key=cls._newest_first_key, reverse=True); return rows` — the pre-change body verbatim, so the default path cannot diverge by construction. `not prefer_type` (not `prefer_type is None`) also covers the `prefer_type=""` case the same bullet names. Add a test seeding a row with `session_type=None` alongside an eng row and a non-eng row, called with NO `prefer_type` argument, asserting the returned order equals the pre-change newest-first order exactly. |
-| CONCERN | Risk & Robustness + aggregator (independent convergence) | The Verification row `grep -n 'prefer_type' -A12 models/agent_session.py \| grep -c 'is_eng(r), _newest_first_key'` expecting 0 is unfalsifiable. `is_eng` is a name invented by this plan's own illustrative WRONG-shape snippet; no real implementation defines it. A genuine composite-key regression — `sorted(rows, key=lambda r: (getattr(r, "session_type", None) != prefer_type, cls._newest_first_key(r)))` — yields 0 hits too, so the row returns 0 against both a correct and a broken build. This is the exact failure Risk 4 names: "Do not harden a check that has not been run." | pending | Either delete the row, or relabel it a smoke check and name task 6's partition-shape behavioral test as the real gate, the same way the Risk 2 row already says "the pasted RED output in the PR description is the real gate — this row is only a smoke check". If it is kept, it must be proven RED first: write a deliberately composite-key implementation on a scratch copy, run the grep against it, and confirm it goes non-zero. If it cannot be made to go RED, it certifies nothing and should be deleted rather than shipped. |
-| CONCERN | History & Consistency + aggregator (independent convergence) | A falsified coordinate survived the revision — the same defect class as round 1's `156-157` blocker. The plan cites `tools/stage_states_helpers.py:203` as the place `_reload_ledger` proves the intended fall-through contract with `return fresh if fresh is not None else ledger`, in the Technical Approach fall-through table AND inside the round-1 Critique Results row marked applied. Verified by printing the range: `:203` is `reload_fn = _reload_session if field == "stage_states" else _reload_ledger`. The cited return is at `:131`, inside `_reload_ledger`, which is defined at `:116`. | pending | Replace both occurrences of `tools/stage_states_helpers.py:203` with `tools/stage_states_helpers.py:131`. The contract the citation supports is correct and the build instruction derived from it is correct — only the coordinate is wrong — so this changes no behavior, but the Freshness Check asserts every coordinate was re-verified by printing its range, and this one falsifies that claim. While correcting it, re-print `:116-131` to confirm the construct is there. |
-| CONCERN | History & Consistency + aggregator (independent convergence) | Task 6's `Depends On` contradicts its own prose, the residue of the defect class round 1 flagged and task 2b fixed only for tasks 3 and 5. Task 6 states "This task confirms they are GREEN after the collapse", but lists `Depends On: build-resolver` alone — no edge to `build-mock-seam` (task 3) or `build-executor-scan` (task 5, the collapse itself). A builder honoring the graph can run task 6 before either collapse exists, where Proof A is RED by design, and read a correctly-RED test as a failure. Task 2b's own rationale applies verbatim: "a non-waivable item enforced by a sentence with no `Depends On` edge is not non-waivable — it is a wish." | pending | Change task 6's `Depends On` to `build-resolver, build-mock-seam, build-executor-scan`. This does not delay task 6's independent cases (the grouping, partition-shape, Risk 3 and fall-through tests only need `build-resolver`); if that serialization is unwanted, split task 6 instead into a `build-tests` that keeps `Depends On: build-resolver` and a `confirm-proofs-green` depending on `build-mock-seam, build-executor-scan`. Do not leave the ordering to the prose sentence. |
-| CONCERN | Scope & Value | The Problem section claims this satisfies #3091's acceptance test verbatim — "no caller has to remember a tie-break to be correct" — but the delivered mechanism still requires every caller wanting the eng preference to remember `prefer_type="eng"`. A seventh caller that omits the kwarg degrades silently to plain newest-first, and neither sweep catches it: the code sweep anchors on the old literal comparison, not on a missing keyword argument. The claim as written overstates what ships. | pending | Cheapest honest fix, no scope change: in the mandated `rows_for_session_id` docstring rewrite (`models/agent_session.py:1295-1298`), state explicitly that omitting `prefer_type` yields plain newest-first and that this degradation is silent and not caught by any sweep, so a caller that needs the eng preference must pass it. Optionally soften the Problem section's claim from "no caller has to remember a tie-break" to "the tie-break rule lives in one place instead of six". Do NOT add a predicate or an auto-detect default — that reopens ruling 1. |
+| CONCERN | Risk & Robustness | An unconditional partition breaks the `prefer_type=None` byte-for-byte guarantee. `session_type = KeyField(null=True)` (`models/agent_session.py:165`), so rows legitimately carry a null `session_type`. A partition written as `getattr(row, "session_type", None) == prefer_type` applied unconditionally MATCHES those null rows when `prefer_type` is its `None` default, floating them to the head and silently reordering the ~74 existing callers the plan promises are unchanged. The existing Empty/Invalid Input bullet does not close this: it forbids "no match, return nothing", and this failure returns every row in a different order rather than returning nothing, so it passes that bullet while the defect is live. | **applied** — Technical Approach gained "The default path must short-circuit BEFORE the partition", with the required `if not prefer_type:` shape, the reason it is a correctness condition rather than an optimization, and an explicit anti-downgrade note citing the live count (165 rows, 0 null-ish) and #3348. Task 2 now makes the short-circuit its first instruction. Task 2b gained **Proof C** (`test_default_order_unchanged_by_null_session_type_row`), which must construct the `session_type=None` row and be proven RED against an unconditionally-partitioning build. New Empty/Invalid Input bullet states why the existing bullet does not cover it. Verification carries two smoke rows | Short-circuit BEFORE partitioning, in `rows_for_session_id`: `if not prefer_type: rows.sort(key=cls._newest_first_key, reverse=True); return rows` — the pre-change body verbatim, so the default path cannot diverge by construction. `not prefer_type` (not `prefer_type is None`) also covers the `prefer_type=""` case the same bullet names. Add a test seeding a row with `session_type=None` alongside an eng row and a non-eng row, called with NO `prefer_type` argument, asserting the returned order equals the pre-change newest-first order exactly. |
+| CONCERN | Risk & Robustness + aggregator (independent convergence) | The Verification row `grep -n 'prefer_type' -A12 models/agent_session.py \| grep -c 'is_eng(r), _newest_first_key'` expecting 0 is unfalsifiable. `is_eng` is a name invented by this plan's own illustrative WRONG-shape snippet; no real implementation defines it. A genuine composite-key regression — `sorted(rows, key=lambda r: (getattr(r, "session_type", None) != prefer_type, cls._newest_first_key(r)))` — yields 0 hits too, so the row returns 0 against both a correct and a broken build. This is the exact failure Risk 4 names: "Do not harden a check that has not been run." | **applied, by deletion** — the row is gone, not loosened. Technical Approach now records why (the `is_eng` name is this plan's own invention; a real composite-key regression written as `getattr(r, "session_type", None) != prefer_type` returns 0 for that pattern too) and names task 6's partition-shape test as the real gate. Task 2b gained **Proof D** (`test_prefer_type_partitions_all_matching_first_then_newest_within_groups`), required RED against a deliberately composite-key implementation on a scratch copy, with interleaved `created_at` as the condition that makes it capable of going RED. Verification replaces the deleted row with a by-exact-name existence check explicitly labelled a smoke check | Either delete the row, or relabel it a smoke check and name task 6's partition-shape behavioral test as the real gate, the same way the Risk 2 row already says "the pasted RED output in the PR description is the real gate — this row is only a smoke check". If it is kept, it must be proven RED first: write a deliberately composite-key implementation on a scratch copy, run the grep against it, and confirm it goes non-zero. If it cannot be made to go RED, it certifies nothing and should be deleted rather than shipped. |
+| CONCERN | History & Consistency + aggregator (independent convergence) | A falsified coordinate survived the revision — the same defect class as round 1's `156-157` blocker. The plan cites `tools/stage_states_helpers.py:203` as the place `_reload_ledger` proves the intended fall-through contract with `return fresh if fresh is not None else ledger`, in the Technical Approach fall-through table AND inside the round-1 Critique Results row marked applied. Verified by printing the range: `:203` is `reload_fn = _reload_session if field == "stage_states" else _reload_ledger`. The cited return is at `:131`, inside `_reload_ledger`, which is defined at `:116`. | **applied** — both occurrences now read `tools/stage_states_helpers.py:131` (Technical Approach's fall-through table, which also records `_reload_ledger`'s `:116` definition, and task 4's bullet). `:116-131` was re-printed with `awk` during this revision and `return fresh if fresh is not None else ledger` is visible at `:131`. The Freshness Check's methodology paragraph was rewritten: it now records **both** falsified coordinates (round 1's `156-157`, round 2's `:203`), states the re-derivation as a mechanical obligation with the `awk` range-print as its artifact, and extends the obligation to coordinates in prose, task bullets, Verification rows and Critique cells — the list-scoped reading is exactly how a table-cell coordinate survived round 1 | Replace both occurrences of `tools/stage_states_helpers.py:203` with `tools/stage_states_helpers.py:131`. The contract the citation supports is correct and the build instruction derived from it is correct — only the coordinate is wrong — so this changes no behavior, but the Freshness Check asserts every coordinate was re-verified by printing its range, and this one falsifies that claim. While correcting it, re-print `:116-131` to confirm the construct is there. |
+| CONCERN | History & Consistency + aggregator (independent convergence) | Task 6's `Depends On` contradicts its own prose, the residue of the defect class round 1 flagged and task 2b fixed only for tasks 3 and 5. Task 6 states "This task confirms they are GREEN after the collapse", but lists `Depends On: build-resolver` alone — no edge to `build-mock-seam` (task 3) or `build-executor-scan` (task 5, the collapse itself). A builder honoring the graph can run task 6 before either collapse exists, where Proof A is RED by design, and read a correctly-RED test as a failure. Task 2b's own rationale applies verbatim: "a non-waivable item enforced by a sentence with no `Depends On` edge is not non-waivable — it is a wish." | **applied** — task 6's `Depends On` is now `build-resolver, build-mock-seam, build-executor-scan`. Not split: the serialization is accepted as the cost of the graph saying what the prose says. Task 6 gained a leading bullet stating why all three edges exist (Proof A goes green only after `build-executor-scan`, Proof B only after `build-mock-seam`) so a later reader does not "simplify" it back | Change task 6's `Depends On` to `build-resolver, build-mock-seam, build-executor-scan`. This does not delay task 6's independent cases (the grouping, partition-shape, Risk 3 and fall-through tests only need `build-resolver`); if that serialization is unwanted, split task 6 instead into a `build-tests` that keeps `Depends On: build-resolver` and a `confirm-proofs-green` depending on `build-mock-seam, build-executor-scan`. Do not leave the ordering to the prose sentence. |
+| CONCERN | Scope & Value | The Problem section claims this satisfies #3091's acceptance test verbatim — "no caller has to remember a tie-break to be correct" — but the delivered mechanism still requires every caller wanting the eng preference to remember `prefer_type="eng"`. A seventh caller that omits the kwarg degrades silently to plain newest-first, and neither sweep catches it: the code sweep anchors on the old literal comparison, not on a missing keyword argument. The claim as written overstates what ships. | **applied** — the Problem section's closing claim is replaced: the plan now says "the tie-break rule lives in one place instead of six", names the residue (a caller must still pass `prefer_type="eng"`; an omission degrades silently and neither sweep catches it), and states what the change actually buys — the rule can no longer be *miscopied*, only *not asked for* — pointing at #3169 as what removes the residue. A new Inline Documentation bullet requires the same limit in the rewritten `rows_for_session_id` docstring, where the seventh caller is reading at the moment they could get it wrong, with an explicit no-predicate / no-auto-detect prohibition so the fix cannot drift into reopening ruling 1 | Cheapest honest fix, no scope change: in the mandated `rows_for_session_id` docstring rewrite (`models/agent_session.py:1295-1298`), state explicitly that omitting `prefer_type` yields plain newest-first and that this degradation is silent and not caught by any sweep, so a caller that needs the eng preference must pass it. Optionally soften the Problem section's claim from "no caller has to remember a tie-break" to "the tie-break rule lives in one place instead of six". Do NOT add a predicate or an auto-detect default — that reopens ruling 1. |
 ---
 
 ## Open Questions
