@@ -7,7 +7,7 @@ created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
 last_comment_id: 5695879375
 revision_applied: true
-revision_applied_at: 2026-09-18T00:00:00Z
+revision_applied_at: 2026-09-18T06:22:07Z
 ---
 
 # Telegram Forum-Topic Awareness
@@ -315,15 +315,40 @@ that shadow these.
   `get_recent_messages(chat_id, topic_id=N)` returns only rows whose `topic_id == N`, that
   `topic_id=None` (the default) returns every row in the chat unchanged, and that rows stored
   before the field existed (`topic_id=None`) are not dropped by an unfiltered call.
-- [ ] `tests/unit/test_bridge_logic.py` — UPDATE (**stale mirror, critique CONCERN**): `:87`
-  defines a **local mirror** of `build_context_prefix` (its own docstring at `:97` says "Local
-  mirror of bridge.context.build_context_prefix for unit tests") exercised at `:398-421`.
-  Task 4 changes the real function's signature and output; the mirror would not change and the
-  suite would keep passing against a stale copy. **Preferred resolution: delete the mirror and
-  import `bridge.context.build_context_prefix` directly.** The docstring's stated reason for
-  the mirror (import-time side effects requiring a live bridge) must be re-tested before the
-  mirror is kept; if a direct import genuinely cannot work, the mirror's update lands in the
-  **same commit** as the real signature change. Owned by Task 4.
+#### `build_context_prefix` — full swept inventory (round-3, 2026-09-18)
+
+This is a **replicated-value defect**, so it closes on a sweep, never on an enumerated list.
+Round 2 named one mirror; the round-3 sweep
+(`grep -rn "def build_context_prefix" --include="*.py" .`, excluding `.venv`/`.worktrees`)
+found **three definitions** and one consumer nobody had listed. Re-run the sweep before
+writing the disposition; do not trust this list to still be complete.
+
+| Site | Kind | Effect of the Task 4 signature change |
+|------|------|----------------------------------------|
+| `bridge/context.py:110` | the real implementation | changes |
+| `agent/session_runner/harness/claude.py:1696` (import at `:1694`) | **the only production call site** | must be updated |
+| `bridge/telegram_bridge.py:114` | re-export, `noqa: F401` | no change |
+| `tests/unit/test_bridge_logic.py:87` | mirror #1, 6-param, used `:398-620` | goes stale silently |
+| `tests/integration/test_message_routing.py:92` | mirror #2, **2-param** `(project, session_type=None)`, used `:174`, `:367`, `:368` | goes stale silently |
+| `tests/e2e/test_message_pipeline.py:10` | imports the **real** function, calls at `:214`, `:218`, `:222`, `:226` | real coverage; new params must default |
+| `tests/unit/test_cross_repo_gh_resolution.py:51`, `tests/unit/test_sdk_client.py:46`/`:73`, `tests/unit/test_pm_channels.py:88`/`:115`/`:150` | `patch(..., return_value=...)`, **no `autospec`** | neither breaks nor covers |
+
+- [ ] `tests/unit/test_bridge_logic.py` — UPDATE (**stale mirror #1**): `:87`, docstring at
+  `:97` says "Local mirror of bridge.context.build_context_prefix for unit tests". Delete it and
+  import the real function; the docstring's stated reason (import-time side effects requiring a
+  live bridge) must be re-tested before the mirror is kept. Owned by Task 4.
+- [ ] `tests/integration/test_message_routing.py` — UPDATE (**stale mirror #2, found only by the
+  sweep**): `:92` is a second, *divergent* mirror with a shorter signature
+  `(project: dict | None, session_type: str | None = None)` and, unlike mirror #1, **no "Local
+  mirror" docstring** — so any check keyed on that docstring string would miss it. This is why
+  the Verification row is a tree-wide definition count, not a docstring grep. Delete and import.
+  Owned by Task 4.
+- [ ] `tests/e2e/test_message_pipeline.py` — VERIFY (not a mirror): imports the real function at
+  `:10`. It is genuine coverage and will exercise the new signature, so `topic_id` and
+  `topic_name` MUST be keyword params with `None` defaults or these four call sites break.
+- [ ] The six `patch("bridge.context.build_context_prefix", return_value=...)` sites use no
+  `autospec`, so a signature change neither breaks nor is caught by them. No action required;
+  listed so the next reader does not re-derive it.
 - [ ] `tests/unit/test_model_relationships.py` — UPDATE (**hard break**): `:110` asserts
   `len(TelegramMessage._meta.field_names) == 20`. Adding `topic_id` makes it 21; the count
   must be bumped in the same commit as the model change or the suite goes red. Add a
@@ -539,9 +564,21 @@ itself.
   gains `topic_id: int | None = None` and threads it into that call. Default `None` preserves
   today's chat-wide behavior byte-for-byte for non-forum callers. Land
   `test_cross_topic_history_does_not_bleed` with it and record its RED-on-`main` run in the PR.
-- **Mirror resolution (critique CONCERN).** Delete the `build_context_prefix` mirror at
-  `tests/unit/test_bridge_logic.py:87` and import the real function, or update it in this same
-  commit. See Test Impact.
+- **Caveat presence is a Task 4 REVIEW check, not a Verification row (round-3 CONCERN,
+  2026-09-18).** Task 4's reviewer confirms the rendered topic line carries the Note N3 caveat
+  before approving this task. It is deliberately NOT a row in the Verification table: the table
+  is run by validators (Tasks 8/9) whose dependency sets permit running after Task 2 has
+  merged and deleted the caveat, at which point a "caveat present" row fails on a correctly
+  shipped feature. The two N3 states are mutually exclusive by construction, so only the
+  "caveat removed" row survives in the table, scoped to Task 9. A row whose precondition lives
+  only in prose is not a row.
+- **Mirror resolution — THREE definitions exist, not two (round-3 sweep, 2026-09-18).** See
+  Test Impact for the full swept inventory. Task 4 must reduce
+  `grep -rn "def build_context_prefix" --include="*.py"` to exactly ONE definition
+  (`bridge/context.py:110`) in the same commit as the signature change, deleting both test
+  mirrors and importing the real function. The production call site is
+  `agent/session_runner/harness/claude.py:1696` (imported at `:1694`) — **not** in `bridge/`;
+  `bridge/telegram_bridge.py:114` is only a re-export carrying `noqa: F401`.
 - **Wave-2 file set additions** (disjoint from `build-outbound`, which owns
   `bridge/telegram_relay.py`, `tools/send_message.py`, `agent/sdk_client.py`):
   `tools/telegram_history/__init__.py`, `tests/unit/test_bridge_logic.py`,
@@ -549,15 +586,20 @@ itself.
   `tests/tools/test_telegram_history.py`.
 - **Note N3 applies — this is the mitigation for the split-merge window, not a comment about it.** While Task 2 is held, the topic line MUST render as `topic: <name-or-id> (session keying not yet topic-aware — messages from sibling topics may share this session)`. This task owns writing the caveat; Task 2 owns deleting it. Shipping the bare topic line before Task 2 merges is a blocker for this task's review.
 
-### 5. Test suites
-- **Task ID**: test-suites
-- **Depends On**: build-keying, build-outbound, build-context
+### 5. Test suites (unheld scope)
+- **Task ID**: test-suites-unheld
+- **Depends On**: build-outbound, build-context
 - **Assigned To**: topic-test-engineer — **Agent Type**: test-engineer — **Parallel**: false
-- All Test Impact + Failure Path items; synthetic MessageReplyHeader fixtures.
+- Every Test Impact + Failure Path item EXCEPT the Task-2-scoped ones listed in Task 10;
+  synthetic MessageReplyHeader fixtures; the cross-topic-bleed fixture (Task 4 owns the filter).
+- **Split from the old single `test-suites` (round-3 BLOCKER, 2026-09-18).** This task must not
+  declare `build-keying` in its `Depends On`, directly or by adding any dependency that reaches
+  it. It is the node Tasks 6 and 9 consume, and the whole point of the Task 2 hold is that those
+  three can complete while Task 2 waits on the owner.
 
 ### 6. Documentation
 - **Task ID**: document-feature
-- **Depends On**: test-suites
+- **Depends On**: test-suites-unheld
 - **Assigned To**: topic-documentarian — **Agent Type**: documentarian — **Parallel**: false
 
 ### 7. Live verification on a bridge host [EXTERNAL constraint]
@@ -573,20 +615,43 @@ itself.
 
 ### 8. Final validation (unheld scope)
 - **Task ID**: validate-all
-- **Depends On**: build-capture, build-outbound, build-context, test-suites, document-feature
+- **Depends On**: build-capture, build-outbound, build-context, test-suites-unheld, document-feature
 - **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: false
-- **Deliberately excludes `build-keying`** (critique CONCERN, 2026-09-18). Task 8 previously
-  declared `Depends On: all previous`, which blocked final validation of Tasks 1/3/4 on the
-  same indefinite owner action the split was designed to escape — the PR carrying the unheld
-  work would have had no validator able to complete. Runs every Verification row except the
-  four Task-2-scoped ones listed in Task 9.
+- **Deliberately excludes `build-keying`** (critique CONCERN 2026-09-16; corrected 2026-09-18).
+  Task 8 originally declared `Depends On: all previous`, which blocked final validation of
+  Tasks 1/3/4 on the indefinite owner action the split was designed to escape. Round 2 dropped
+  the direct edge — and that was not enough, because the edge returned transitively through
+  `test-suites`. Round 3 split Task 5 to remove it for real.
+- **Transitive closure of Task 8 (round-3 BLOCKER — verify by walking this, not by reading the
+  one line above).** Every path, fully expanded:
+  - `validate-all -> build-capture -> (none)`
+  - `validate-all -> build-outbound -> build-capture -> (none)`
+  - `validate-all -> build-context -> build-capture -> (none)`
+  - `validate-all -> test-suites-unheld -> {build-outbound, build-context} -> build-capture -> (none)`
+  - `validate-all -> document-feature -> test-suites-unheld -> {build-outbound, build-context} -> build-capture -> (none)`
+  **No path reaches `build-keying`, and therefore none reaches `verify-live`.** `build-keying`
+  and `verify-live` appear in the closure of Tasks 9 and 10 only. Any future edit that adds a
+  dependency to Task 5, 6 or 8 must re-walk this list; checking only the edge you changed is
+  what produced the round-3 blocker.
+- Runs every Verification row except the four Task-2-scoped ones listed in Task 9.
 
 ### 9. Keying validation (held scope)
 - **Task ID**: validate-keying
-- **Depends On**: build-keying
+- **Depends On**: build-keying, test-suites-keying
 - **Assigned To**: topic-validator — **Agent Type**: validator — **Parallel**: false
 - Runs only the Task-2-scoped Verification rows: the two N5 anti-criterion rows, the
   caveat-removal row, and the versioned-root-cache row. Confirms the Task 2 gating checkboxes.
+
+### 10. Keying test suite (held scope)
+- **Task ID**: test-suites-keying
+- **Depends On**: build-keying
+- **Assigned To**: topic-test-engineer — **Agent Type**: test-engineer — **Parallel**: false
+- The Task-2-scoped test items only: the continuation-branch forum cases in
+  `tests/unit/test_config_driven_routing.py`, the walk-termination and root-cache-namespace
+  assertions in `tests/unit/test_context_helpers.py`, and the caveat-removal assertion.
+- **Created by the round-3 BLOCKER split (2026-09-18).** These tests cannot exist before Task 2
+  lands, which is precisely why they must not sit in the same node as the tests that can. Task 9
+  consumes this; Tasks 6 and 8 must never depend on it.
 
 ## Verification
 
@@ -605,14 +670,14 @@ itself.
 | No bare General literal in the topic guard (Note N1) | `! grep -n "reply_to" bridge/telegram_relay.py \| grep -q "== 1"` | exit code 0 |
 | Topic resolved at ThreadMessage construction (Note N2) | `grep -c "topic_id" bridge/agent_catchup.py` | `> 0` |
 | No header sniffing at the enqueue site (Note N2) | `! grep -q 'getattr(inbound, "reply_to"' bridge/agent_catchup.py` | exit code 0 |
-| Keying caveat present while Task 2 is held (Note N3) | `grep -q "session keying not yet topic-aware" bridge/context.py` | exit code 0 — **run only before Task 2 merges** |
 | Keying caveat removed once Task 2 lands (Note N3; Task 9 scope) | `! grep -q "session keying not yet topic-aware" bridge/context.py` | exit code 0 — **run only in and after the Task 2 commit** |
 | History query is topic-aware (Note N4, round-2 BLOCKER) | `grep -q "topic_id" tools/telegram_history/__init__.py && grep -A6 -E "^def get_recent_messages" tools/telegram_history/__init__.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
 | `build_conversation_history` threads the topic (Note N4) | `grep -A2 -E "^def build_conversation_history" bridge/context.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
 | Cross-topic bleed fixture exists and targets history (Note N4) | `grep -q "test_cross_topic_history_does_not_bleed" tests/unit/test_context_helpers.py && grep -q "build_conversation_history" tests/unit/test_context_helpers.py` | exit code 0 — **RED on current main** |
 | Cross-topic bleed fixture is genuinely RED pre-fix (Note N4) | run `test_cross_topic_history_does_not_bleed` on `main` via `scripts/pytest-clean.sh` | test FAILS on `main`, passes on the branch; transcript recorded in the PR |
 | `build_context_prefix` can carry a topic (round-2 BLOCKER) | `grep -A8 -E "^def build_context_prefix" bridge/context.py \| grep -q "topic_name"` | exit code 0 — **RED on current main** |
-| Stale context-prefix mirror resolved (critique CONCERN) | `! grep -q "Local mirror of bridge.context.build_context_prefix" tests/unit/test_bridge_logic.py` | exit code 0 (deletion path); if the mirror is kept, its params must match — `grep -A8 -E "^def build_context_prefix" tests/unit/test_bridge_logic.py \| grep -q "topic_name"` |
+| Exactly one `build_context_prefix` definition tree-wide (round-3 sweep) | `[ "$(grep -rn 'def build_context_prefix' --include='*.py' . \| grep -v '/.venv/\|/.worktrees/' \| wc -l \| tr -d ' ')" = "1" ]` | exit code 0 — **RED on current main** (3 definitions). A docstring-keyed check would miss mirror #2, which has no "Local mirror" docstring. |
+| Production call site updated (round-3 sweep) | `grep -A8 "build_context_prefix(" agent/session_runner/harness/claude.py \| grep -q "topic_id"` | exit code 0 — **RED on current main** |
 | Root cache is versioned on BOTH sides (critique CONCERN) | `! grep -q 'f"session_root:{chat_id}' bridge/context.py && grep -q "SESSION_ROOT_KEY_VERSION" bridge/context.py` | exit code 0 — **RED on current main** (two bare literals at `:710`, `:733`) |
 | fetch_reply_chain untouched (No-Go #2732) | `! git diff main -- bridge/context.py \| grep -q "def fetch_reply_chain"` | exit code 0 |
 
@@ -655,6 +720,17 @@ and finding none that reproduce it. Risk & Robustness returned no Skeptic or Adv
 findings — Risk 1's header assumption is gated on the owner action rather than asserted, and
 Races 1/2 already carry concrete mitigations.
 
+**Revision applied 2026-09-18.** Both findings are addressed; the Task 8 closure was re-walked
+mechanically across all ten tasks rather than by re-reading the edges that changed. A third
+item surfaced during the revision that no critic could have cited, because it lay outside the
+bridge-scoped source bundle the critics were given: a tree-wide sweep for
+`def build_context_prefix` found **three** definitions, not the two on record, plus the only
+production call site at `agent/session_runner/harness/claude.py:1696` — outside `bridge/`
+entirely. Mirror #2 (`tests/integration/test_message_routing.py:92`) has a *different, shorter*
+signature and no "Local mirror" docstring, so the docstring-keyed Verification row written in
+round 2 would have missed it. That row is replaced by a tree-wide definition count. Full
+inventory in Test Impact.
+
 **Independent convergence on Task 8.** History & Consistency (transitive dependency closure)
 and Risk & Robustness (validator row-set ordering) reached the same region from different
 lenses without seeing each other's work, and the skill's own automated dependency check
@@ -662,8 +738,8 @@ reached it a third time. Two distinct mechanisms, two distinct fixes.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | History & Consistency (+ automated dependency check) | The round-2 fix to Task 8 removed the **direct** `build-keying` edge but the edge returns transitively: Task 8 `Depends On: ... test-suites, document-feature` (`:576`); Task 6 `document-feature` `Depends On: test-suites` (`:560`); Task 5 `test-suites` `Depends On: build-keying, build-outbound, build-context` (`:554`); Task 2 `build-keying` `Depends On: ... verify-live`. The closure `validate-all -> document-feature -> test-suites -> build-keying -> verify-live` means Task 8 still cannot complete until the owner acts — the exact indefinite block the round-2 CONCERN existed to remove. The edit satisfied the letter of that fix and not its purpose, because the edge was re-introduced one and two hops away. | pending | The guard a builder needs is "Task 8's **transitive** closure resolves without passing through `build-keying`", and as written it does not. Split Task 5 the way Tasks 8/9 were split: a `test-suites-unheld` (`Depends On: build-outbound, build-context`) covering the Task 1/3/4 test items, which Task 6 and Task 8 consume, and a `test-suites-keying` (`Depends On: build-keying`) feeding Task 9. Verify the fix by walking the closure, not the direct edges — a dispatcher that walks only direct edges will avoid dispatching Task 8 early but then stall on Task 5, which relocates the stall rather than removing it. |
-| CONCERN | Risk & Robustness | Task 8's row set is "every Verification row except the four Task-2-scoped ones", which leaves it running the Note N3 row "Keying caveat present while Task 2 is held" (`:608`, expected exit 0). That row's precondition — "run only before Task 2 merges" — exists only in prose. Nothing in the graph orders Task 8 against Task 9, so if the owner resolves `verify-live` quickly and Task 2 lands first, Task 2's gating checkbox (`:512`) will have deleted the caveat string before Task 8 evaluates the row, and Task 8 fails on a correctly-shipped, fully-merged feature. A false negative produced purely by task-completion order, with no defect in the code. | pending | The two N3 rows are mutually exclusive by construction, so they must never both be live. Drop "Keying caveat present while Task 2 is held" from Task 8's automatic set entirely — it is not one of the four rows named as Task-2-scoped, so as written Task 8 runs it unconditionally. Enforce "caveat present pre-hold" in Task 4's own review instead (before Task 2 exists at all), and leave the "caveat removed" row to Task 9. A validator whose dependency set permits running after Task 2 has merged must not assert pre-merge state. |
+| BLOCKER | History & Consistency (+ automated dependency check) | The round-2 fix to Task 8 removed the **direct** `build-keying` edge but the edge returns transitively: Task 8 `Depends On: ... test-suites, document-feature` (`:576`); Task 6 `document-feature` `Depends On: test-suites` (`:560`); Task 5 `test-suites` `Depends On: build-keying, build-outbound, build-context` (`:554`); Task 2 `build-keying` `Depends On: ... verify-live`. The closure `validate-all -> document-feature -> test-suites -> build-keying -> verify-live` means Task 8 still cannot complete until the owner acts — the exact indefinite block the round-2 CONCERN existed to remove. The edit satisfied the letter of that fix and not its purpose, because the edge was re-introduced one and two hops away. | **ADDRESSED 2026-09-18.** Task 5 split: `test-suites` becomes `test-suites-unheld` (`Depends On: build-outbound, build-context`), consumed by Tasks 6 and 8; new Task 10 `test-suites-keying` (`Depends On: build-keying`) feeds Task 9, which now declares `Depends On: build-keying, test-suites-keying`. Task 8 fully expanded under "Transitive closure of Task 8" — **no path reaches `build-keying` or `verify-live`**. Verified by walking the closure of all ten tasks mechanically, not by re-reading the edited edges: only `build-keying`, `test-suites-keying` and `validate-keying` reach the hold, which is correct. | The guard a builder needs is "Task 8's **transitive** closure resolves without passing through `build-keying`", and as written it does not. Split Task 5 the way Tasks 8/9 were split: a `test-suites-unheld` (`Depends On: build-outbound, build-context`) covering the Task 1/3/4 test items, which Task 6 and Task 8 consume, and a `test-suites-keying` (`Depends On: build-keying`) feeding Task 9. Verify the fix by walking the closure, not the direct edges — a dispatcher that walks only direct edges will avoid dispatching Task 8 early but then stall on Task 5, which relocates the stall rather than removing it. |
+| CONCERN | Risk & Robustness | Task 8's row set is "every Verification row except the four Task-2-scoped ones", which leaves it running the Note N3 row "Keying caveat present while Task 2 is held" (`:608`, expected exit 0). That row's precondition — "run only before Task 2 merges" — exists only in prose. Nothing in the graph orders Task 8 against Task 9, so if the owner resolves `verify-live` quickly and Task 2 lands first, Task 2's gating checkbox (`:512`) will have deleted the caveat string before Task 8 evaluates the row, and Task 8 fails on a correctly-shipped, fully-merged feature. A false negative produced purely by task-completion order, with no defect in the code. | **ADDRESSED 2026-09-18.** The "Keying caveat present while Task 2 is held" row is **deleted from the Verification table** and re-homed as a Task 4 review check, where Task 2 does not yet exist. Only the "caveat removed" row survives, scoped to Task 9. Rationale recorded in Task 4: the table is run by validators whose dependency sets permit running after Task 2 merged, and a row whose precondition lives only in prose is not a row. | The two N3 rows are mutually exclusive by construction, so they must never both be live. Drop "Keying caveat present while Task 2 is held" from Task 8's automatic set entirely — it is not one of the four rows named as Task-2-scoped, so as written Task 8 runs it unconditionally. Enforce "caveat present pre-hold" in Task 4's own review instead (before Task 2 exists at all), and leave the "caveat removed" row to Task 9. A validator whose dependency set permits running after Task 2 has merged must not assert pre-merge state. |
 
 
 ---
