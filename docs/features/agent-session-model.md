@@ -142,10 +142,18 @@ one resolver (#3091):
 - `AgentSession.newest_for_session_id(session_id, **filters)` returns the first
   of those rows or `None`.
 
-Callers with a domain preference (an eng-typed row owns `stage_states`)
-iterate `rows_for_session_id` and fall back to `[0]`, which is then the newest
-row rather than a coin flip. Moving session identity into the key, so the
-duplicate shape cannot arise, is #3169.
+Both methods take a `prefer_type=` keyword. It is the single owner of the eng
+preference (an eng-typed row owns `stage_states` and `active_run_id`, so
+callers that need that row pass `prefer_type="eng"`). The ordering it produces
+is a **stable partition**, not a composite sort key: every row whose
+`session_type` matches `prefer_type` comes first (newest-first within that
+group), followed by every other row (also newest-first within that group).
+Omitting `prefer_type` is plain newest-first, and that degradation is
+**silent** — no sweep catches a caller that needed the eng preference and
+forgot to ask for it. The rule now lives in one place instead of six, so it
+can no longer be miscopied — a caller still has to remember to pass it.
+Moving session identity into the key, so the duplicate shape cannot arise, is
+#3169; `prefer_type` becomes a no-op at that point.
 
 ### Session Lookup Chain
 
