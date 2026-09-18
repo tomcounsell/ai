@@ -7,7 +7,7 @@ created: 2026-09-16
 tracking: https://github.com/tomcounsell/ai/issues/3091
 last_comment_id: 5696048394
 revision_applied: true
-revision_applied_at: 2026-09-18T06:25:52Z
+revision_applied_at: 2026-09-18T07:50:32Z
 ---
 
 # One ordering owns the eng preference for every session_id read
@@ -186,9 +186,13 @@ issue's `:1991-1992` citation: `models/agent_session.py:1282-1302`.
   deliberate carve-out is this plan's scope. Directly relevant: this plan is its second half and must
   not disturb its ordering contract.
 - **Commit `083c961ab`** (`Refs #3091`): wired six more mocked test classes through
-  `wire_session_lookup`. **Succeeded**. Relevant as a warning: a new resolver argument must be added
-  to `wire_session_lookup` in the same commit, or every mocked test silently receives rows in the
-  **wrong order** — the kwarg is forwarded and ignored, not rejected. See Risk 1.
+  `wire_session_lookup`. **Succeeded**. Relevant as a warning: while a new resolver argument is not
+  yet honored by `wire_session_lookup`, every mocked test silently receives rows in the **wrong
+  order** — the kwarg is forwarded and ignored, not rejected. This is the origin of the "land it in
+  the same commit" instinct, and that instinct is wrong here: Proof B must be captured RED against
+  the unextended seam, so the window cannot be closed to zero. Close it fast instead — seam extension
+  in its own commit immediately after task 2b, before any migrated site relies on the preference.
+  See Risk 1 and task 3.
 - **Issue #3065** (open): makes the `session-ensure` *write* path correct in the presence of
   duplicates. Complementary — it hardens a writer, this plan consolidates readers.
 - **Issue #3169** (open): stage two, prevention via `KeyField`. Deferred; this plan ticks its AC
@@ -249,8 +253,20 @@ from six to one.
 - **Data ownership**: unchanged. No schema change, no new `Field`, no stored data touched — so **no
   Popoto migration is required**. The repo's migration rule (`docs/sdlc/do-plan.md`) triggers on model
   *schema* changes; adding a keyword argument to a classmethod is not one.
-- **Reversibility**: high. Additive on the model, mechanical at the call sites; a clean `git revert`
-  with no data implications.
+- **Reversibility**: high *in isolation*. Additive on the model, mechanical at the call sites; a clean
+  `git revert` with no data implications. The qualifier is load-bearing — see the collision surface
+  below, which is the one thing that can make the revert less clean than the diff suggests.
+- **Cross-lane collision surface**: `agent/session_executor.py` has a **second live writer**. This
+  lane edits near `:298-338` and `:1377-1383`; lane #2652 (`session/sdlc-2652`) independently edits
+  the same file near `~460` and `~2293`. The hunks are disjoint, so `git merge` exits clean — and
+  that is precisely the trap, because a clean merge is not a safe merge. Textual cleanliness says
+  nothing about whether this lane's new single-pass `_fetch_live_active_run_id` still holds against
+  whatever #2652 lands around it. **The gate is not `git merge` exiting 0.** It is:
+  `git diff <other-lane-merge-base> <other-lane-tip> -- agent/session_executor.py` compared against
+  this lane's own diff over the same file; if both touch functions on one call path (anything feeding
+  `_tick_issue_lock_renewal` or `_fetch_live_active_run_id`), whichever lane merges **second** re-reads
+  the merged file by hand and re-runs the other lane's test set before its PR is treated as mergeable.
+  Merge sequencing between the two lanes is the PM's call, not either lane's.
 
 ## Appetite
 
@@ -558,8 +574,9 @@ excludes `tests/`.
       in the plan**: if missed, the mock accepts and forwards `prefer_type` and then **ignores** it,
       so mocked tests get a plausible list with no preference applied and the five `[0]` sites take
       the wrong row while appearing green. Tests asserting on call args go RED; tests asserting on
-      returned rows stay green and wrong. Must land in the same commit as the model change. See
-      Risk 1 for the reproduction and the required RED proof.
+      returned rows stay green and wrong. Lands in its own commit in the same PR, immediately after
+      task 2b — never collapsed into the model change's commit, which would destroy Proof B's RED
+      capture. See Risk 1 for the reproduction and the required RED proof.
 - [ ] `tests/unit/test_agent_session_newest_wins.py` — UPDATE: add real-Redis cases for
       `prefer_type`. Seed an eng row *older* than a non-eng row so preference and recency disagree;
       two eng rows to prove newest-eng leads; zero eng rows to prove the order equals the
@@ -658,7 +675,11 @@ break silently.* A reviewer needs to know which existing tests protect them and 
 This is the exact failure mode `083c961ab` was written to prevent, which is evidence it is live
 rather than theoretical.
 
-**Mitigation:** the seam update lands in the **same commit** as the model change.
+**Mitigation:** the seam update lands in its **own commit in the same PR**, immediately after task 2b
+captures Proof B RED against the unextended seam. It must NOT be collapsed into the model change's
+commit: Proof B's RED can only be captured while the seam still lags the model, so a single commit
+carrying both destroys the proof. The window in which the seam lags is therefore deliberate and
+bounded by task 3's `Depends On` edge, not by a sentence — see task 3.
 
 **The RED proof must be on the ordering, not the wiring.** A test proving `wire_session_lookup`
 forwards a kwarg proves nothing — it already forwards it, as the call args above show. The RED proof
@@ -1065,8 +1086,14 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Parallel**: false
 - Extend `wire_session_lookup` so both methods honor `prefer_type` with the real grouping rule,
   derived from the mock's own `query.filter`.
-- Land in the same commit as task 2 — a seam that lags the model forwards `prefer_type` and ignores
-  it, handing the `[0]` sites the wrong row with no signal.
+- Land in this task's **own commit**, immediately after task 2b, and do NOT collapse it into task 2's
+  commit. The hazard the ordering protects against is real — a seam that lags the model forwards
+  `prefer_type` and ignores it, handing the `[0]` sites the wrong row with no signal — but the remedy
+  is to close the window fast, not to eliminate it. It cannot be eliminated: Proof B must be captured
+  RED **against the unextended seam**, so the seam has to lag the model by at least one commit for the
+  proof to exist at all. A builder who squashes tasks 2 and 3 together destroys Proof B's RED capture,
+  and nothing catches the loss, because a test that is green only after is indistinguishable from a
+  genuine RED-then-GREEN.
 - Task 2b's Proof B must already be RED before this lands — enforced by the `Depends On` edge above,
   not by this sentence. Turning it GREEN is this task's completion signal.
 
@@ -1237,8 +1264,12 @@ Round 3: FULL roster (3 critics), independent roster. Verdict: **READY TO BUILD 
 0 blockers, 2 concerns. This round was ordered because round 2's concern-closing revision
 (`871b82fcf`) was never seen by a critic and tasks 1-6 were then built on top of it
 (`871b82fcf..0dfa3e5ff`, 12 files, +832/−55). The critics judged the plan **and** the built branch,
-so each finding below carries a disposition: `/do-patch` for a defect in shipped code, plan revision
-for a defect in the plan text. Both findings are plan revisions; nothing on the branch was faulted.
+so each finding below carries a disposition. The two available dispositions are **another BUILD commit
+on `session/sdlc-3091`** for a defect in shipped code, and a **plan revision on main** for a defect in
+the plan text. Note what is *not* available: `/do-patch` addresses review findings, and no PR and no
+review verdict exist — BUILD is honestly `in_progress` on the ledger, so a code finding here is simply
+remaining BUILD work. Routing one to a patch cycle would manufacture a stage transition the ledger has
+no basis for. Both findings below are plan revisions; nothing on the branch was faulted.
 
 **What round 3 independently cleared** (each re-derived from the tree, not accepted from the brief):
 concern 1's short-circuit is real code — `if not prefer_type:` sits above the partition at
@@ -1252,8 +1283,8 @@ unanimous judgment; the "No Popoto migration added" position holds — the diff 
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness + Scope & Value + History & Consistency (3/3 independent convergence) — disposition: **plan revision** | The plan instructs the mock-seam extension to land in the same commit as the model change in three places (`:561` Test Impact, `:661` Risk 1 mitigation, `:1068` task 3), while task 2b's Proof B requires its RED capture "against the **unextended** `wire_session_lookup`" (`:1032`) and task 3's own `Depends On: build-red-proofs` (`:1061`) puts the seam after the proofs. The two cannot both be satisfied: capturing that RED requires the seam to lag the model by at least one commit. `:1068` and `:1070` are adjacent lines that contradict each other. The builder resolved it correctly by following the graph — `8ce2ac109` (model), `f3dcf54d8` (proofs), `1bb4e9084` (seam) — but that resolution exists only as an unratified deviation, and a future reader following the prose literally would squash task 2 and task 3 together and destroy Proof B's RED capture with no test catching the loss, because a green-only-after run is indistinguishable from a genuine RED-then-GREEN run. This is the same failure class task 2b itself names ("an ordering enforced by a sentence with no `Depends On` edge is not an ordering, it is a wish") — here the sentence is not merely unenforced by the graph, it is contradicted by it. | pending | Textual only; no code change. The `Depends On: build-resolver, build-red-proofs` edge at `:1061` is already correct and must not be touched. Edit all three "same commit" statements (`:561`, `:661`, `:1068-1069`) to state inter-commit sequencing instead of intra-commit collapsing: the seam lands in its own commit in the same PR, immediately after task 2b captures Proof B RED against the unextended seam. Keep the reason the "same commit" language was trying to protect — a seam that lags the model forwards `prefer_type` and ignores it, handing the `[0]` sites the wrong row with no signal — and note that task 3's `Depends On` edge, not the prose, is what enforces the ordering. |
-| CONCERN | Risk & Robustness — disposition: **plan revision** | `agent/session_executor.py` is a cross-lane collision surface and the plan nowhere says so. This lane's hunks land near `:298-338` and `:1377-1383`; sibling live lane #2652 (`session/sdlc-2652`) independently edits the same file near `~460` and `~2293`. The hunks are disjoint, so the merge is textually clean — which is exactly the trap, because Architectural Impact claims "Reversibility: high… a clean `git revert`" (`:252-253`) and neither lane's plan records that the other exists. Nothing therefore forces a semantic re-read of `_fetch_live_active_run_id`'s new single-pass behavior against whatever #2652 lands around it. | pending | Add a Rabbit Holes or Race Conditions entry naming `agent/session_executor.py` as shared with #2652, and state the gate: textual merge cleanliness is not the check. The check is `git diff <other-lane-merge-base> <other-lane-tip> -- agent/session_executor.py` against this lane's own diff; if both touch functions on the same call path (anything feeding `_tick_issue_lock_renewal` or `_fetch_live_active_run_id`), the lane that merges second re-reads the merged file and re-runs the other lane's test set rather than relying on `git merge` exiting clean. |
+| CONCERN | Risk & Robustness + Scope & Value + History & Consistency (3/3 independent convergence) — disposition: **plan revision** | The plan instructs the mock-seam extension to land in the same commit as the model change in three places (`:561` Test Impact, `:661` Risk 1 mitigation, `:1068` task 3), while task 2b's Proof B requires its RED capture "against the **unextended** `wire_session_lookup`" (`:1032`) and task 3's own `Depends On: build-red-proofs` (`:1061`) puts the seam after the proofs. The two cannot both be satisfied: capturing that RED requires the seam to lag the model by at least one commit. `:1068` and `:1070` are adjacent lines that contradict each other. The builder resolved it correctly by following the graph — `8ce2ac109` (model), `f3dcf54d8` (proofs), `1bb4e9084` (seam) — but that resolution exists only as an unratified deviation, and a future reader following the prose literally would squash task 2 and task 3 together and destroy Proof B's RED capture with no test catching the loss, because a green-only-after run is indistinguishable from a genuine RED-then-GREEN run. This is the same failure class task 2b itself names ("an ordering enforced by a sentence with no `Depends On` edge is not an ordering, it is a wish") — here the sentence is not merely unenforced by the graph, it is contradicted by it. | **applied** — all three "same commit" statements now read "own commit in the same PR, immediately after task 2b" — plus a **fourth** site no critic named, the Prior Art note on `083c961ab` (`:190`) that all three downstream statements propagated from; fixing only the enumerated three would have left the source intact, which is the checklist-not-sweep defect this plan closes elsewhere. Risk 1's mitigation states why the lagging window cannot be eliminated (Proof B must be captured against the unextended seam) and that the remedy is to close it fast, not remove it. Task 3 spells out the consequence of squashing — Proof B's RED capture is destroyed and nothing catches the loss, because a test green only after is indistinguishable from a genuine RED-then-GREEN. The `Depends On` edge at task 3 was not touched | Textual only; no code change. The `Depends On: build-resolver, build-red-proofs` edge at `:1061` is already correct and must not be touched. Edit all three "same commit" statements (`:561`, `:661`, `:1068-1069`) to state inter-commit sequencing instead of intra-commit collapsing: the seam lands in its own commit in the same PR, immediately after task 2b captures Proof B RED against the unextended seam. Keep the reason the "same commit" language was trying to protect — a seam that lags the model forwards `prefer_type` and ignores it, handing the `[0]` sites the wrong row with no signal — and note that task 3's `Depends On` edge, not the prose, is what enforces the ordering. |
+| CONCERN | Risk & Robustness — disposition: **plan revision** | `agent/session_executor.py` is a cross-lane collision surface and the plan nowhere says so. This lane's hunks land near `:298-338` and `:1377-1383`; sibling live lane #2652 (`session/sdlc-2652`) independently edits the same file near `~460` and `~2293`. The hunks are disjoint, so the merge is textually clean — which is exactly the trap, because Architectural Impact claims "Reversibility: high… a clean `git revert`" (`:252-253`) and neither lane's plan records that the other exists. Nothing therefore forces a semantic re-read of `_fetch_live_active_run_id`'s new single-pass behavior against whatever #2652 lands around it. | **applied** — Architectural Impact gained a **Cross-lane collision surface** bullet naming `agent/session_executor.py`, both lanes' hunk ranges, and the gate: not `git merge` exiting 0, but a diff-vs-diff comparison plus a hand re-read of the merged file and a re-run of the other lane's test set by whichever lane merges second. The Reversibility claim above it is now qualified "high *in isolation*" and points at that bullet, so the clean-revert line can no longer be read as covering the merge. Merge sequencing is recorded as the PM's call | Add a Rabbit Holes or Race Conditions entry naming `agent/session_executor.py` as shared with #2652, and state the gate: textual merge cleanliness is not the check. The check is `git diff <other-lane-merge-base> <other-lane-tip> -- agent/session_executor.py` against this lane's own diff; if both touch functions on the same call path (anything feeding `_tick_issue_lock_renewal` or `_fetch_live_active_run_id`), the lane that merges second re-reads the merged file and re-runs the other lane's test set rather than relying on `git merge` exiting clean. |
 ---
 
 ## Open Questions
