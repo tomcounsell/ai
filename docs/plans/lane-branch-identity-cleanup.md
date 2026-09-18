@@ -372,21 +372,188 @@ Integration test that matters: the Task 1 regression test exercises the real exe
 
 ## Success Criteria
 
-_placeholder_
+Mapped one-to-one onto the issue's acceptance criteria, with the AC number in brackets.
+
+- [ ] **[AC 1]** A regression test proves the defect RED before the fix: a lane whose worktree is checked out to a branch other than `session/{slug}` completes a turn, and a **subsequent** turn on the same lane launches successfully. The RED run is executed against baseline `bbe5dc7a1` and its failure output is pasted into the PR body. A guard that has never been seen RED against the known-bad SHA certifies nothing.
+- [ ] **[AC 2]** End-of-turn cleanup never deletes a branch the lane's worktree currently has checked out — asserted via `safe_delete_branch` returning `skipped_checked_out: True` with a named log line, not via git's incidental error string (spike-1 showed git already refuses, so a test that only observes "nothing was deleted" would pass on unfixed code too).
+- [ ] **[AC 3]** The #1646 predicate is invoked **with** the branch holding the turn's commits. Asserted on the call argument, not on the outcome — spike-4 showed the predicate fails safe on a bogus name, so outcome-only assertions are satisfied by the bug.
+- [ ] **[AC 4]** One documented source of truth, named in this plan (`AgentSession.branch_name`, sole writer `checkpoint_branch_state`, sole accessor `lane_branch`) and recorded in `docs/features/lane-branch-identity.md`.
+- [ ] **[AC 5]** #887 and #1377 both still refuse their original bad inputs, proven by mutation: each guard removed in a scratch copy, its test observed RED, output pasted into the PR. #1646 gets the same treatment.
+- [ ] **[AC 6]** `python -m tools.lane_identity sweep` exits 0 on this machine after the fix — no live lane left in a state whose next turn would be refused.
+- [ ] All four branch-identity consumers changed in one PR; the grep sweep in Verification shows no surviving re-derivation site.
+- [ ] Tests pass (`scripts/pytest-clean.sh`, never bare `pytest`).
+- [ ] Lint and format clean (`python -m ruff check`, `python -m ruff format`).
+- [ ] Documentation updated (`/do-docs`).
+- [ ] No xfail conversions needed — confirmed none exist for this bug; re-check at build time.
 
 ## Team Orchestration
 
-_placeholder_
+The lead agent orchestrates and never builds directly.
+
+### Team Members
+
+- **Builder (lane-identity surface)**
+  - Name: `identity-builder`
+  - Role: owns `tools/lane_identity.py` (the three new functions + sweep CLI) and `models/agent_session.py::derived_branch_name`. Nothing else.
+  - Agent Type: `builder`
+  - Domain: Redis/Popoto — Popoto stores unset strings as `""` and booleans as `"True"`/`"False"` strings; use truthiness, never `is None`. Reads and writes go through the ORM, never raw Redis.
+  - Resume: true
+
+- **Builder (executor + cleanup)**
+  - Name: `executor-builder`
+  - Role: owns `agent/session_executor.py` (guard input, seed-if-empty at `:1566`, nudge/snapshot sweep, cleanup block), `agent/agent_session_queue.py::checkpoint_branch_state`, and `agent/worktree_manager.py::safe_delete_branch`.
+  - Agent Type: `builder`
+  - Domain: async/concurrency — the cleanup block is synchronous inside an async function; do not introduce a new blocking shape (see Risk 5 and #3306).
+  - Resume: true
+
+- **Test engineer (regression + guard mutation)**
+  - Name: `guard-tester`
+  - Role: the two-turn RED-first regression test, the failure-path tests, and the three RED-on-removal mutation proofs.
+  - Agent Type: `test-engineer`
+  - Resume: true
+
+- **Validator**
+  - Name: `identity-validator`
+  - Role: verifies the invariant holds, the sweep is clean, and no guard weakened.
+  - Agent Type: `validator`
+  - Resume: true
+
+- **Documentarian**
+  - Name: `identity-documentarian`
+  - Role: the Documentation section's four doc tasks.
+  - Agent Type: `documentarian`
+  - Resume: true
 
 ## Step by Step Tasks
 
-_placeholder_
+### 1. RED-first regression test
+- **Task ID**: `test-red-regression`
+- **Depends On**: none
+- **Validates**: `tests/unit/test_lane_branch_identity.py` (create)
+- **Informed By**: spike-1 (git already refuses deleting a checked-out branch, so the test must assert on the *target name*, not on "nothing was deleted"); spike-3 (divergence is 23% of live lanes)
+- **Assigned To**: `guard-tester`
+- **Agent Type**: `test-engineer`
+- **Parallel**: true
+- Write a test that stages a lane whose worktree is moved off `session/{slug}` mid-turn, runs the end-of-turn cleanup, then runs the next turn's launch guard.
+- Assert the second turn **launches**. This is the whole test; a single-turn assertion would pass while the bug survives (Risk 1).
+- Run it against baseline `bbe5dc7a1` with `scripts/pytest-clean.sh` and capture the failure output verbatim for the PR body. **Do not proceed until it is observed RED.**
+- Run only this test file; a full `tests/unit/` run takes ~20 minutes and leaks xdist workers.
+
+### 2. Lane branch-identity surface
+- **Task ID**: `build-lane-identity`
+- **Depends On**: none
+- **Validates**: `tests/unit/test_lane_branch_identity.py`
+- **Informed By**: spike-2 (`rev-parse --abbrev-ref HEAD` returns the literal `"HEAD"` when detached); PR #2792 (the module's existing docstring register)
+- **Assigned To**: `identity-builder`
+- **Agent Type**: `builder`
+- **Parallel**: true
+- Add `read_worktree_branch`, `lane_branch`, `refresh_lane_branch`, and a `sweep()` + `python -m tools.lane_identity sweep` CLI to `tools/lane_identity.py`.
+- `read_worktree_branch` is the **only** lane-scoped spelling of `rev-parse --abbrev-ref HEAD`; it normalises `"HEAD"` to `None` and returns `None` (never raises) on a missing path, a non-repo path, or a subprocess timeout.
+- `lane_branch` uses truthiness with `.strip()`, never `is None` (Risk 4), and never returns `"HEAD"` or an empty string.
+- `sweep()` reports divergence and exits non-zero if any lane's next turn would be refused. It **reports only** — no mutation (see Rabbit Holes).
+
+### 3. Invert `derived_branch_name`
+- **Task ID**: `build-model-accessor`
+- **Depends On**: `build-lane-identity`
+- **Validates**: `tests/e2e/test_context_propagation.py`
+- **Assigned To**: `identity-builder`
+- **Agent Type**: `builder`
+- **Parallel**: false
+- `models/agent_session.py:1840-1844` → `self.branch_name or (f"session/{s}" if s else None)`, with the same `"HEAD"`/empty normalisation.
+- Update the two affected cases in `tests/e2e/test_context_propagation.py` per the Test Impact dispositions; the `:169` case should pass unchanged and is a free check that the inversion works.
+
+### 4. Seed-if-empty, and the executor sweep
+- **Task ID**: `build-executor-identity`
+- **Depends On**: `build-lane-identity`
+- **Validates**: `tests/unit/test_lane_branch_identity.py`, `tests/unit/test_session_branch_guard.py`
+- **Informed By**: the second-writer finding at `:1566` (not in the issue's recon — read the Solution's dedicated bullet before touching this line)
+- **Assigned To**: `executor-builder`
+- **Agent Type**: `builder`
+- **Parallel**: false
+- Rename the local `branch_name` (`:1430`, `:1466`) to `seed_branch_name` so it can only read as a provisioning seed.
+- `:1566` — write the seed only when `agent_session.branch_name` is falsy. Comment it, naming #3411 (Risk 2).
+- `:1509` — the guard's expected branch becomes `lane_branch(session)`.
+- Sweep the remaining consumers to read through `lane_branch(session)`: `:1536`, `:1544`, `:1824`/`:1841`/`:1858` (`_enqueue_nudge`), `:2700`/`:2819` (`save_session_snapshot`), and `agent_session_queue.py:3007`.
+- Add the Race-2 recovery: when the guard's expected branch does not exist at all, clear the record, fall back to the seed, and log a WARNING naming the lane — instead of raising.
+
+### 5. Cleanup path and `safe_delete_branch`
+- **Task ID**: `build-cleanup`
+- **Depends On**: `build-executor-identity`
+- **Validates**: `tests/unit/test_safe_delete_branch.py`, `tests/unit/worktree_manager/test_worktree_manager_cleanup.py`
+- **Informed By**: spike-1 (the pre-check makes an existing git refusal testable); spike-4 (`merged_via_ancestor` fails safe on a nonexistent branch, so the log must distinguish "unmerged" from "nonexistent")
+- **Assigned To**: `executor-builder`
+- **Agent Type**: `builder`
+- **Parallel**: false
+- `session_executor.py:2781` — call `refresh_lane_branch(session, working_dir)` first and act on its return. Detached (`None`) → log at INFO with slug and path, skip cleanup entirely.
+- Pass the refreshed branch to `mark_work_done` and `safe_delete_branch`.
+- `worktree_manager.py::safe_delete_branch` — add a checked-out-in-any-worktree pre-check ahead of the predicate, returning `skipped_checked_out: True`; the key is present-and-`False` on every other path. A scan failure fails safe (preserve).
+- `checkpoint_branch_state` — clear `branch_name` rather than storing the literal `"HEAD"`; leave the record unchanged on a git error (never clear on failure).
+- Add the load-bearing comment on the trailing `checkpoint_branch_state` (Risk 1).
+
+### 6. Guard mutation proofs and failure-path tests
+- **Task ID**: `test-guards`
+- **Depends On**: `build-cleanup`, `build-model-accessor`
+- **Validates**: `tests/unit/test_session_branch_guard.py`, `tests/unit/test_safe_delete_branch.py`, `tests/unit/test_lane_branch_identity.py`
+- **Assigned To**: `guard-tester`
+- **Agent Type**: `test-engineer`
+- **Parallel**: false
+- Prove AC 5 by mutation: remove the #887 guard, then the #1377 guard, then the #1646 predicate, each in a scratch working copy, and observe the covering test go RED. Capture all three outputs for the PR body.
+- Implement the Failure Path Test Strategy items: the four exception-handler assertions, the four empty/invalid-input cases, and the two error-state assertions (`last_error` populated on refusal; `[lane-branch]` skip log names slug and path).
+- Confirm the RED test from Task 1 is now GREEN.
+
+### 7. Documentation
+- **Task ID**: `document-feature`
+- **Depends On**: `test-guards`
+- **Assigned To**: `identity-documentarian`
+- **Agent Type**: `documentarian`
+- **Parallel**: false
+- Execute the four tasks in the Documentation section, including correcting `docs/features/eng-session-architecture.md:248`.
+- Note: a docs commit triggers a re-review row in this repo's gate. Audit the docs in one pass and pay that cost knowingly rather than dribbling commits.
+
+### 8. Final validation
+- **Task ID**: `validate-all`
+- **Depends On**: `test-guards`, `document-feature`
+- **Assigned To**: `identity-validator`
+- **Agent Type**: `validator`
+- **Parallel**: false
+- Run every row of the Verification table.
+- Confirm all six ACs, with the RED evidence for AC 1 and AC 5 present in the PR body.
+- Run `python -m tools.lane_identity sweep` on this machine (AC 6) and report the output.
 
 ## Verification
 
+Run each row from the repo root on the build branch. Test rows use `scripts/pytest-clean.sh`, never bare `pytest`, and name specific files — a full `tests/unit/` run takes ~20 minutes and leaks xdist workers.
+
 | Check | Command | Expected |
 |-------|---------|----------|
+| Regression test green (AC 1) | `scripts/pytest-clean.sh tests/unit/test_lane_branch_identity.py -q` | exit code 0 |
+| Guard tests green (AC 2, AC 5) | `scripts/pytest-clean.sh tests/unit/test_session_branch_guard.py tests/unit/test_safe_delete_branch.py tests/unit/test_branch_manager.py -q` | exit code 0 |
+| Worktree manager tests green | `scripts/pytest-clean.sh tests/unit/worktree_manager/ -q` | exit code 0 |
+| Context propagation green (accessor inversion) | `scripts/pytest-clean.sh tests/e2e/test_context_propagation.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Lane sweep clean (AC 6) | `python -m tools.lane_identity sweep` | exit code 0 |
+| Accessor inverted (AC 4) | `grep -A4 "def derived_branch_name" models/agent_session.py` | output contains `self.branch_name or` |
+| `skipped_checked_out` exists (AC 2) | `grep -c "skipped_checked_out" agent/worktree_manager.py` | output > 1 |
+| Seed-if-empty guard present (Risk 2) | `grep -c "if not agent_session.branch_name" agent/session_executor.py` | output > 0 |
+| Source-of-truth doc exists (AC 4) | `test -f docs/features/lane-branch-identity.md && grep -c "checkpoint_branch_state" docs/features/lane-branch-identity.md` | output > 0 |
+| Docs index updated | `grep -c "lane-branch-identity" docs/features/README.md` | output > 0 |
+| **Anti-criterion** — no surviving stale local named `branch_name` in the executor (Risk 6) | `grep -cE "^ *branch_name = " agent/session_executor.py` | match count == 0 |
+| **Anti-criterion** — no lane-scoped HEAD read outside the single spelling (Risk 6) | `grep -rc -- "--abbrev-ref" agent/session_executor.py agent/agent_session_queue.py` | match count == 0 |
+| **Anti-criterion** — the sweep reports, never mutates ([EXTERNAL] No-Go) | `grep -cE '"(checkout\|reset\|push\|prune\|remove)"' tools/lane_identity.py` | match count == 0 |
+| **Anti-criterion** — checkpoint concurrency shape unchanged ([SEPARATE-SLUG #3306] No-Go) | `grep -c "async def checkpoint_branch_state" agent/agent_session_queue.py` | match count == 0 |
+| **Anti-criterion** — `post_merge_cleanup` untouched ([SEPARATE-SLUG #3301] No-Go) | `git diff origin/main -- agent/ \| grep -c "post_merge_cleanup"` | match count == 0 |
+
+Baseline measurements taken on `bbe5dc7a1` so the anti-criteria are known to be meaningful rather than vacuously true: `^ *branch_name = ` in the executor currently matches **2**; `--abbrev-ref` currently matches **2** in `agent_session_queue.py` and **0** in `session_executor.py`; `async def checkpoint_branch_state` currently matches **0** (this row is a guard against regression, not a change to make). Each anti-criterion must be demonstrated FAIL against a deliberately-violating input before the PR, with the FAIL output pasted into the PR description.
+
+### Evidence required in the PR body (not a check table)
+
+| Evidence | Why |
+|---|---|
+| Task 1 test output, RED, run against `bbe5dc7a1` | AC 1. A regression test never seen RED on the known-bad SHA certifies nothing. |
+| Three mutation outputs, RED, one per guard (#887, #1377, #1646) | AC 5. Proves each guard still refuses its original bad input. |
+| `python -m tools.lane_identity sweep` output, before and after | AC 6, and it makes the 23% divergence figure reproducible. |
+| Anti-criterion FAIL outputs against violating inputs | Proves the inverse rows can actually detect a violation. |
 
 ## Critique Results
 
@@ -396,4 +563,8 @@ _placeholder_
 
 ## Open Questions
 
-_placeholder_
+1. **Should the lane's branch record live on `AgentSession.branch_name` or on `PipelineLedger` next to the slug?** This plan chooses `AgentSession.branch_name` because it exists, is already written, and needs no Popoto migration — and the fix is urgent, since 23% of live lanes are one turn away from this failure. But the *lane* owns the slug on `PipelineLedger` (PR #2792), and branch identity is arguably lane-scoped too. The cost of choosing wrong is Race 3: two sessions sharing one worktree can hold disagreeing records. Today's behavior is preserved either way, so this is "take the free fix now, move it later" vs. "do it once, properly, with a migration". **I recommend the former** and would take a ruling rather than assume.
+
+2. **Is the Race-2 recovery (a nonexistent expected branch clears the record and falls back to the seed, with a WARNING, instead of raising) acceptable?** I argue it is not a weakening of #1377: a branch that does not exist carries no risk of running on the *wrong* branch, which is the only thing that guard protects against. But #1377 exists because of a production incident, and I would rather hear "yes, that reading is right" than discover later that the raise was load-bearing for a reason not written down.
+
+3. **Should #3413 (the `branch=main` checkpoint anomaly, filed during this planning pass) block this work, or follow it?** This plan promotes `AgentSession.branch_name` to source of truth while #3413 describes a way that field can be written from the wrong directory's `HEAD`. Sequencing #3413 first is the conservative call; shipping this first fixes 23% of lanes sooner. I lean toward shipping this first and treating #3413 as a fast-follow, because the failure #3413 describes predates this change and is not made worse by it — but that is a judgement about acceptable exposure, not a technical fact.
