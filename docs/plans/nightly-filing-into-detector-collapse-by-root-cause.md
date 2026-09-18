@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
 revision_applied: true
-revision_applied_at: 2026-09-18T14:47:19Z
+revision_applied_at: 2026-09-18T14:56:53Z
 tracking: https://github.com/tomcounsell/ai/issues/3418
 last_comment_id: 5729821863
 ---
@@ -197,8 +197,12 @@ Today, tracing one newly-confirmed failing node from pytest to GitHub:
 
 After this plan, steps 4-6 become:
 
-4. **File branch (Python, deterministic)**: for each survivor, re-read the open-issue map, compute
-   the fingerprint, call `create_issue()`, capture the real number GitHub returns.
+4. **File branch (Python, deterministic)**: for each survivor, re-read the open-issue map, then
+   take one of four branches — (a) the refresh shows the title already open: post a recurrence
+   comment via `comment_on_issue()` against the number the refresh returned and record the node;
+   (b) the fingerprint was already filed by this same run: skip and log the collision; (c) the
+   budget is exhausted: defer the node with its own log line and leave it unrecorded; (d) otherwise
+   call `create_issue()` and capture the real number GitHub returns. Only (d) spends budget.
 5. **Report collisions**: the run keeps an in-process registry of every fingerprint it filed. A
    second finding resolving to a fingerprint already filed this run is skipped and logged. Nothing
    is read back and nothing is closed.
@@ -262,9 +266,10 @@ about the residue instead of claiming it away.
   privilege level the detector's recurrence path already has.
 - **Reversibility**: high for the mechanism, via a kill switch rather than a second code path — see
   `## Update System`. Reverting the *commit* is a clean revert; nothing persists a schema. The one
-  irreversible artifact is the historical duplicate closures in Task 6, which are GitHub state,
-  not code, are performed once by an operator with the closure list enumerated in the PR body for
-  review, and are reopenable by hand. The detector itself never closes an issue.
+  irreversible artifact is the historical duplicate closures, which are GitHub state rather than
+  code, are performed once by a human after merge from the enumerated runbook in `## Update System`,
+  and are reopenable by hand. They are deliberately outside the task graph (`## Decisions` #4). The
+  detector itself never closes an issue.
 
 ## Appetite
 
@@ -310,7 +315,7 @@ In scope, each with its own acceptance check:
 | (a) | **Filing moves into `scripts/nightly_regression_tests.py`.** A `create_issue()` function creates issues via `gh issue create`; `dispatch_findings()` calls it for every survivor and every cascade umbrella; the triage session never creates anything. | `grep -c "gh\", \"issue\", \"create\"` in the script is non-zero, and no prompt builder's output contains a create instruction (asserted by an updated `TestPromptsNeverNameTheSearchIndex` sibling). |
 | (b) | **Duplicate filing is structurally prevented; the residue is reported, never converged.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and an in-process fingerprint registry that skips-and-logs a same-run collision. No read-back, no close. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node; a second test asserts a same-run fingerprint collision is skipped with a named log line; a third asserts a mid-loop external file is **commented on**, not silently skipped. |
 | (c) | **The budget is spent only on issues GitHub confirms exist.** `issues_filed` is a derived length over the real numbers returned; `NIGHTLY_MAX_ISSUES_PER_RUN` is decremented per confirmed create and keeps its current default. | A test with the cap set to a low value and a succeeding `create_issue` stub asserts exactly that many issues are created and the rest are deferred with a log line; a second test asserts a create returning `None` spends no budget and leaves its node out of `recorded`. |
-| (d) | **The historical duplicates are closed.** #3382-#3397 and the enumerated 09-16 pairs are closed as duplicates pointing at their survivor. | `gh issue view` on each enumerated number reports `CLOSED` / `NOT_PLANNED`. |
+| (d) | **[POST-MERGE OPERATOR STEP] The historical duplicates are closed.** #3382-#3397 and the enumerated 09-16 pairs are closed as duplicates pointing at their survivor. Not a pipeline task and not a merge gate — see `## Update System` → the post-merge runbook, and `## Decisions` #4. | `gh issue view` on each enumerated number reports `CLOSED` / `NOT_PLANNED`, run by the operator after merge. |
 
 Out of scope and tracked elsewhere: per-file/root-cause collapsing (#3419), hostname/session_id
 stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
@@ -358,8 +363,9 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
 Nightly run completes → serial re-confirm → `dispatch_findings()` → collapse (environmental,
 setup cascades, body cascades) → **comment branch** (existing, unchanged: open-issue and
 closed-not-planned recurrences) → **file branch (new)**: for each survivor → refresh open map →
-compute fingerprint → skip-and-log if that fingerprint was already filed this run →
-`create_issue()` → record real number → decrement budget → derived `issues_filed` →
+**on a hit, comment via `comment_on_issue()` and record; on a miss** → compute fingerprint →
+skip-and-log if that fingerprint was already filed this run → skip-and-log if the budget is spent →
+otherwise `create_issue()` → record real number → decrement budget → derived `issues_filed` →
 **dispatch investigation session** with the real numbers and a comment-only instruction →
 log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
 
@@ -588,8 +594,9 @@ tree (about 20 minutes, and parallel lanes collide on Redis state).
 - **Perfecting the investigation prompt.** The session's value after this change is root-cause
   narrative, not correctness. A merely adequate comment-only prompt is fine; iterating on its
   wording is unbounded and unmeasured.
-- **Auditing every historical duplicate ever filed.** Task 6 closes the enumerated set from the
-  issue body. A general sweep of the tracker's whole duplicate history is a different job.
+- **Auditing every historical duplicate ever filed.** The post-merge runbook in `## Update System`
+  closes the enumerated set from the issue body and nothing else. A general sweep of the tracker's
+  whole duplicate history is a different job.
 
 ## Risks
 
@@ -758,12 +765,13 @@ Approach): silence during a real regression is the larger harm there.
   in the environmental-classification path, and orthogonal to who creates the issue.
 - [EXTERNAL] **Deploying the change to the machines that run the nightly.** Merging moves the ref;
   propagating it to the launchd-scheduled runner is an operator `/update` on each bridge machine.
-- [DESTRUCTIVE] **A general sweep of the tracker's historical duplicates.** Task 6 closes the
-  enumerated set from the issue body (#3382-#3397 and the named 09-16 pairs) and nothing else, as a
-  one-shot operator action with the closure list enumerated in the PR body. Closing issues is
-  one-shot and review-before-execute is the safety mechanism. This is a person closing a known list
-  once; it is not the detector acquiring a closing privilege, and no `gh issue close` call enters
-  `scripts/nightly_regression_tests.py` (pinned as an anti-criterion in `## Verification`).
+- [DESTRUCTIVE] **A general sweep of the tracker's historical duplicates.** The post-merge runbook
+  in `## Update System` closes the enumerated set from the issue body (#3382-#3397 and the named
+  09-16 pairs) and nothing else. Closing issues is one-shot, so review-before-execute is the safety
+  mechanism, and `## Decisions` #4 makes that structural by taking the step out of the task graph
+  entirely: a human runs it after merge, reading a fixed list. It is not the detector acquiring a
+  closing privilege, and no `gh issue close` call enters `scripts/nightly_regression_tests.py`
+  (pinned as an anti-criterion in `## Verification`).
 - [DEFERRED] **The reconciliation sweep, and any issue-closing privilege for the detector.** The
   drafted design — read back the issues created in the run's window, group by fingerprint, converge
   each duplicate to its lowest number, close the rest `NOT_PLANNED` with a pointer comment — is
@@ -807,8 +815,41 @@ Approach): silence during a real regression is the larger harm there.
   no-legacy-code rule forbids, and it would mean the duplicate-filing bug stays one env var away
   forever. If detector-side filing misbehaves, the kill switch stops the bleeding within one night
   and `git revert` of a single commit is the real remedy.
-- **On rollback, the duplicates closed in Task 6 stay closed.** They are genuine duplicates of
-  issues that remain open; their closure is independent of which code path files future issues.
+- **On rollback, the historical duplicates stay closed.** They are genuine duplicates of issues
+  that remain open; their closure is independent of which code path files future issues.
+
+### Post-merge operator step: close the historical duplicates
+
+Run **after merge**, by a human, once. This is not a pipeline task and not a merge gate
+(`## Decisions` #4): it has no code dependency on the PR, and it is one-shot and irreversible, so
+review-before-execute is made structural by keeping it out of the task graph rather than by a gate
+clause inside it. Carry this runbook into `docs/features/nightly-triage-dispatch.md` so it survives
+the plan.
+
+1. **Confirm the list is still accurate before touching anything.** Nothing here is derived at run
+   time; the numbers come from issue #3418's body and from this plan. Someone may have closed or
+   edited one already:
+
+   ```bash
+   for n in $(seq 3382 3405); do
+     printf '%s\t' "$n"; gh issue view "$n" --json state,stateReason,title -q '[.state,.stateReason,.title]|@tsv'
+   done
+   ```
+
+2. **Close the 09-17 duplicates: #3382-#3397** (waves 1 and 2), as `NOT_PLANNED`, each with a
+   comment naming its surviving twin. **The survivors are #3398-#3405** (wave 3) — the same 8 node
+   titles, filed a third time at 21:08. Note this is *not* the lowest-number-survives rule the
+   deferred sweep would apply: wave 3 is the set the session's own ledger
+   (`data/nightly-triage-ledger/nightly-triage-4b33f93e.json`) and its final report record, so it is
+   the set anything downstream already points at. Pair each closure with its wave-3 twin by matching
+   the byte-identical title, not by arithmetic offset.
+3. **Close the 09-16 duplicates**, keeping the **lower** number in each pair: #3365, #3366, #3367,
+   #3368, #3369, #3370, #3371, #3372, #3373, #3374 are closed; #3355-#3364 survive.
+4. **Verify**, with the same loop as step 1: every closed number must report `CLOSED` /
+   `NOT_PLANNED`, and every survivor must still be `OPEN`.
+
+A failure or a surprise at any step is a stop-and-ask, not a retry — these are live issues on a
+tracker a human reads every morning.
 
 ## Agent Integration
 
@@ -839,6 +880,9 @@ Approach): silence during a real regression is the larger harm there.
   semantics (a derived count over issue numbers GitHub returned, not a self-reported tally) and
   document that the dedup reads deliberately fail *open* while an unconfirmed create is never
   counted and never recorded, since a future maintainer will otherwise "fix" that into consistency.
+- [ ] Carry the post-merge duplicate-closure runbook (`## Update System`) into
+  `docs/features/nightly-triage-dispatch.md` as an operator subsection, with the enumerated numbers
+  and the `gh issue view` verification loop, so the one-shot survives this plan document.
 - [ ] Update `docs/features/README.md` index rows for both files if their one-line summaries name
   the session as the filer.
 
@@ -877,8 +921,10 @@ Approach): silence during a real regression is the larger harm there.
   module — deleted, not flagged off.
 - [ ] `NIGHTLY_AUTO_FILE=false` produces a run that comments, logs every would-be filing, and
   creates nothing.
-- [ ] #3382-#3397 and the enumerated 09-16 pairs are CLOSED as `NOT_PLANNED` with a pointer to
-  their survivor.
+- [ ] **[POST-MERGE, NOT A MERGE GATE]** #3382-#3397 and the enumerated 09-16 pairs are CLOSED as
+  `NOT_PLANNED` with a pointer to their survivor. Owned by the operator running the post-merge
+  runbook in `## Update System`; the final-validation task does not confirm this row
+  (`## Decisions` #4).
 - [ ] **[POST-DEPLOY, NOT A MERGE GATE] Human-readable outcome check** (not a count): every other
   row above is mechanically checkable at merge time; this one is not, because it needs a real
   nightly run to have happened. **Owner:** whoever triages the tracker that morning (Tom by default).
@@ -889,7 +935,7 @@ Approach): silence during a real regression is the larger harm there.
   defect even if the counts are perfect; the whole point of the change is that a morning's triage is
   legible, not merely short. A failure here is a follow-up issue against the body builder, not a
   revert: the counts and the duplicate-prevention this plan exists for are already proven by the
-  rows above. Task 9 does **not** block on this row.
+  rows above. Task 8 (`validate-all`) does **not** block on this row.
 - [ ] Tests pass (`/do-test`, scoped to `tests/unit/test_nightly_regression_tests.py`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/test_nightly_regression_tests.py` returns nothing.
@@ -1029,22 +1075,7 @@ path existing.
   `TestFingerprintCollisionIsLogged`, `TestIssueBudgetSpendsOnlyConfirmedCreates`.
 - Run only this file. Never the full `tests/unit/` tree.
 
-### 6. Close the historical duplicates
-- **Task ID**: cleanup-duplicates
-- **Depends On**: build-tests
-- **Validates**: `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]|@tsv'; done` — every line must read `CLOSED` / `NOT_PLANNED`; repeat the same loop over the enumerated 09-16 duplicate numbers. Mirrored as a `## Verification` row so it is checked mechanically rather than by the builder's assertion.
-- **Assigned To**: filing-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Close #3382-#3397 as `NOT_PLANNED`, each with a comment naming its surviving twin
-  (#3398-#3405 are the survivors for the 09-17 set; keep the lowest-numbered issue per node and
-  close the rest — lowest-numbered issue per node survives, the same rule the deferred sweep would
-  have applied automatically).
-- Close the 09-16 duplicate pairs listed in the issue body, keeping the lower number in each pair.
-- Enumerate the closures in the PR body so the one-shot is reviewable before it runs. This is an
-  operator action on a fixed, enumerated list; it does not add a closing path to the detector.
-
-### 7. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
 - **Depends On**: build-tests
 - **Validates**: `git diff --name-only origin/main -- docs/` lists every path in the `## Documentation` checklist. A docs task's output *is* its validation — there is no test to run, so the file list is the check.
@@ -1053,7 +1084,7 @@ path existing.
 - **Parallel**: true
 - Execute the `## Documentation` checklist.
 
-### 8. Cruft review
+### 7. Cruft review
 - **Task ID**: review-cruft
 - **Depends On**: build-tests, document-feature
 - **Validates**: the auditor's own report, plus the three anti-criterion rows in `## Verification` (no create instruction in any prompt, no ledger/disposition references, no `gh issue close` in the detector). A review step's finding list is its own validation; the anti-criteria make the two claims it is most likely to get wrong mechanically checkable.
@@ -1063,11 +1094,11 @@ path existing.
 - Scan the diff for dropped test assertions, for any surviving path by which an agent could create
   an issue, and for leftover ledger/disposition references.
 
-### 9. Final validation
+### 8. Final validation
 - **Task ID**: validate-all
-- **Depends On**: build-create-issue, build-filing-loop, build-collision-report, build-retire-agent-filing, build-tests, cleanup-duplicates, document-feature, review-cruft
+- **Depends On**: build-create-issue, build-filing-loop, build-collision-report, build-retire-agent-filing, build-tests, document-feature, review-cruft
 - **Validates**: every row of the `## Verification` table, run in order, plus every *mechanically-checkable* `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
-- The one `## Success Criteria` row Task 9 does **not** confirm is the `[POST-DEPLOY, NOT A MERGE GATE]` human-readable outcome check, which needs a real nightly run and is owned by the morning triager. Record it as deferred-to-post-deploy in the validation report rather than passing or failing it — a validator that silently rubber-stamps it, or silently drops it, is the failure mode this carve-out exists to prevent.
+- Two `## Success Criteria` rows Task 8 does **not** confirm: the `[POST-DEPLOY, NOT A MERGE GATE]` human-readable outcome check, which needs a real nightly run and is owned by the morning triager; and the `[POST-MERGE, NOT A MERGE GATE]` historical-duplicate closures, owned by the operator running the runbook in `## Update System` (`## Decisions` #4). Record both as deferred in the validation report rather than passing or failing them — a validator that silently rubber-stamps one, or silently drops it, is the failure mode these carve-outs exist to prevent.
 - **Assigned To**: filing-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -1088,7 +1119,7 @@ path existing.
 | Kill switch wired | `grep -c "NIGHTLY_AUTO_FILE" scripts/nightly_regression_tests.py` | output > 0 |
 | Anti-criterion: no prompt tells an agent to create an issue | `grep -c "gh issue create" scripts/nightly_regression_tests.py` | match count == 0 |
 | Anti-criterion: the detector never closes an issue | `grep -c 'issue", "close\|gh issue close' scripts/nightly_regression_tests.py` | match count == 0 |
-| Task 6 closures landed | `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]\|@tsv'; done` | every line `CLOSED` `NOT_PLANNED` |
+| **[POST-MERGE, NOT A MERGE GATE]** historical duplicate closures landed (operator, after merge — `## Update System` runbook, `## Decisions` #4) | `for n in $(seq 3382 3397); do gh issue view "$n" --json state,stateReason -q '[.state,.stateReason]\|@tsv'; done`, then the same loop over #3365-#3374 | every line `CLOSED` `NOT_PLANNED`; #3398-#3405 and #3355-#3364 still `OPEN` |
 | Anti-criterion: ledger and dispositions are gone | `grep -c "write_triage_ledger\|NodeDisposition" scripts/nightly_regression_tests.py` | match count == 0 |
 | Anti-criterion: #3419's collapsing logic untouched | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "group_body_failure_cascades\|BODY_CASCADE_MIN_GROUP_SIZE"` | match count == 0 |
 | Anti-criterion: #3243's hostname stamp not landed here | `git diff origin/main -- scripts/nightly_regression_tests.py \| grep -c "gethostname\|hostname"` | match count == 0 |
@@ -1155,8 +1186,8 @@ reach — neither touches the filing mechanism itself.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
-| BLOCKER | Risk & Robustness (Operator) | Task 6 contradicts the plan's own stated safety design for the one irreversible action in scope. `## Architectural Impact` says the closures are "performed once by an operator with the closure list enumerated in the PR body for review" and `## No-Gos` [DESTRUCTIVE] says "review-before-execute is the safety mechanism" — but Task 6 is assigned to the autonomous `filing-builder`, depends only on `build-tests`, and runs **before** `document-feature` (7), `review-cruft` (8) and `validate-all` (9), i.e. before a PR exists to carry the enumerated list and before any reviewer sees the diff. As scheduled, an agent shells `gh issue close` against roughly 26 live production issues as an unattended mid-pipeline build step, with no gate clause — unlike Task 4, which states "Decided, no gate" precisely so that an ungated action is a deliberate, recorded choice. | **ESCALATED to the PM** — this decides who may authorize closing ~26 live issues (agent reviewer vs. human) and is the same class of destructive-privilege question the owner ruled on for Open Question 2. Not resolved in-lane. | Two candidate fixes, both mechanical once the policy is set: (1) change Task 6's `Depends On` from `build-tests` to `review-cruft` so the dependency graph enforces review-before-execute, and add a `**Gate:**` clause requiring the enumerated list to be confirmed against the PR body before any `gh issue close` is shelled; or (2) move Task 6 out of the build pipeline entirely into a post-merge operator step. Task 6's existing `**Validates**` loop (`gh issue view "$n" --json state,stateReason`) is the post-hoc half and already works for either. |
-| CONCERN | History & Consistency (Consistency Auditor) | Revision 3 added the refresh-hit → comment branch to seven places but left two earlier narrative summaries describing only three outcomes. `## Solution` → `### Flow` reads "refresh open map → compute fingerprint → skip-and-log … → `create_issue()`" with no refresh-hit branch, and `## Data Flow` step 4 reads "re-read the open-issue map, compute the fingerprint, call `create_issue()`" with the same omission. Both sit earlier in the document than Key Elements and Race 2 and read like the canonical step list, so a reader consulting either concludes the refresh only feeds the create call. | pending | Insert the fourth branch into both summaries mirroring Task 2's wording — "refresh open map → **on a hit, comment via `comment_on_issue()` and record** → on a miss, compute fingerprint → skip-and-log if already filed this run → `create_issue()`" — and split `## Data Flow`'s numbered item 4 into a hit/miss pair. |
+| BLOCKER | Risk & Robustness (Operator) | Task 6 contradicts the plan's own stated safety design for the one irreversible action in scope. `## Architectural Impact` says the closures are "performed once by an operator with the closure list enumerated in the PR body for review" and `## No-Gos` [DESTRUCTIVE] says "review-before-execute is the safety mechanism" — but Task 6 is assigned to the autonomous `filing-builder`, depends only on `build-tests`, and runs **before** `document-feature` (7), `review-cruft` (8) and `validate-all` (9), i.e. before a PR exists to carry the enumerated list and before any reviewer sees the diff. As scheduled, an agent shells `gh issue close` against roughly 26 live production issues as an unattended mid-pipeline build step, with no gate clause — unlike Task 4, which states "Decided, no gate" precisely so that an ungated action is a deliberate, recorded choice. | **FIXED** — revision 4, via the suggestion's option (2), ruled by the owner: Task 6 is removed from the task graph (7-9 renumber to 6-8, `cleanup-duplicates` drops out of `validate-all`'s `Depends On`) and becomes a post-merge operator runbook under `## Update System`, recorded as `## Decisions` #4. The `## Verification` and `## Success Criteria` rows survive, relabelled `[POST-MERGE, NOT A MERGE GATE]` with the operator as owner. The runbook also corrects a latent error the old Task 6 carried: it said "keep the lowest-numbered issue per node" while naming #3398-#3405 (the *highest*) as survivors — the runbook enumerates wave 3 as the survivor set and says why (it is the set the session ledger and final report recorded). | Two candidate fixes, both mechanical once the policy is set: (1) change Task 6's `Depends On` from `build-tests` to `review-cruft` so the dependency graph enforces review-before-execute, and add a `**Gate:**` clause requiring the enumerated list to be confirmed against the PR body before any `gh issue close` is shelled; or (2) move Task 6 out of the build pipeline entirely into a post-merge operator step. Task 6's existing `**Validates**` loop (`gh issue view "$n" --json state,stateReason`) is the post-hoc half and already works for either. |
+| CONCERN | History & Consistency (Consistency Auditor) | Revision 3 added the refresh-hit → comment branch to seven places but left two earlier narrative summaries describing only three outcomes. `## Solution` → `### Flow` reads "refresh open map → compute fingerprint → skip-and-log … → `create_issue()`" with no refresh-hit branch, and `## Data Flow` step 4 reads "re-read the open-issue map, compute the fingerprint, call `create_issue()`" with the same omission. Both sit earlier in the document than Key Elements and Race 2 and read like the canonical step list, so a reader consulting either concludes the refresh only feeds the create call. | **FIXED** — revision 4: `### Flow`'s arrow chain now branches explicitly (refresh hit → `comment_on_issue()` + record; miss → fingerprint → skip-and-log collision → skip-and-log exhausted budget → `create_issue()`), and `## Data Flow` step 4 enumerates the same four outcomes (a)-(d) with the note that only the create branch spends budget. | Insert the fourth branch into both summaries mirroring Task 2's wording — "refresh open map → **on a hit, comment via `comment_on_issue()` and record** → on a miss, compute fingerprint → skip-and-log if already filed this run → `create_issue()`" — and split `## Data Flow`'s numbered item 4 into a hit/miss pair. |
 
 
 ---
@@ -1185,6 +1216,18 @@ because the plan text above now depends on them.
    24 issues was budgeted as 8, so the cap was never the thing being enforced. Fix the measurement,
    leave the number alone. Lowering it while the count was wrong would only have deferred real
    regressions behind a budget nothing was honouring.
+4. **Closing the ~26 historical duplicates leaves the build pipeline and becomes a post-merge
+   operator step.** Round 4 surfaced that scheduling it as an autonomous build task contradicted the
+   plan's own safety claim for its one irreversible action. Rather than repair the dependency edge
+   and bolt on a gate clause, the step comes out of the task graph entirely: it has **no code
+   dependency on this PR** — nothing built here reads, writes, or tests those issues' state — and it
+   is **one-shot and irreversible against live production issues**, so it belongs to a human running
+   it after merge. The enumerated closure list and the `gh issue view --json state,stateReason`
+   validation loop are carried into the runbook under `## Update System`; the `## Verification` and
+   `## Success Criteria` rows survive, relabelled `[POST-MERGE, NOT A MERGE GATE]` and owned by the
+   operator, the same shape already used for the `[POST-DEPLOY]` outcome check. Keeping the rows
+   rather than deleting them is deliberate: the work is still owed, it is simply not owed by the
+   pipeline.
 
 ## Open Questions
 
