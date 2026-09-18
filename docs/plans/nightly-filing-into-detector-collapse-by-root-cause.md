@@ -283,7 +283,7 @@ migration, and no cross-machine coordination.
 |-------------|---------------|---------|
 | `gh` authenticated | `gh auth status` | The detector creates, comments, and reconciles issues through `gh`; the new create path fails closed without it |
 | Repo resolves for `gh` | `gh repo view --json nameWithOwner -q .nameWithOwner` | `create_issue` inherits `cwd=PROJECT_DIR` targeting the same way `comment_on_issue` does |
-| Test suite runnable | `scripts/pytest-clean.sh tests/unit/test_nightly_regression_tests.py --collect-only -q` | The whole change is gated on this file; a collection failure means the venv is off-pin |
+| Repo venv has pytest | `test -x .venv/bin/pytest` | `scripts/pytest-clean.sh` aborts on a worktree `.venv` lacking `bin/pytest`; the whole change is gated on one test file, so a missing runner blocks everything |
 
 ## Solution
 
