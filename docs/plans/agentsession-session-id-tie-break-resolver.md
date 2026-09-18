@@ -614,7 +614,7 @@ excludes `tests/`.
 - **Giving `superseded` a writer.** Tempting — the model documents the status and nothing writes it,
   and "reconcile" was option 2 of the issue's own menu. It belongs to #3169's reconciliation step,
   where the winner rule is applied once rather than on every read.
-- **Folding in the two gate sites** (`sdlc_session_ensure.py:776`, `session_executor.py:1373`). They
+- **Folding in the two gate sites** (`tools/sdlc_session_ensure.py:776`, `agent/session_executor.py:1373`). They
   match the sweep and look like the same smell. They are gates on a single resolved row, and folding
   them in changes behavior rather than consolidating it. See Technical Approach.
 - **Rewriting `find_session_by_issue`'s eng-session `issue_url` scan** (`tools/_sdlc_utils.py:339`).
@@ -726,8 +726,8 @@ terminal eng row loses to a live non-eng row when `include_terminal=False`.
 gets disabled as noisy. Too tight and a reformatted copy of the preference slips past, reopening the
 defect class silently.
 **Mitigation:** The code sweep uses the defining pattern (`session_type", None) == "eng"`), scoped to
-production directories, baseline **8**, expected residue **exactly 2** — `sdlc_session_ensure.py:776`
-and `session_executor.py:1373`, **named** rather than counted, in this plan and in the check row, and
+production directories, baseline **8**, expected residue **exactly 2** — `tools/sdlc_session_ensure.py:776`
+and `agent/session_executor.py:1373`, **named** rather than counted, in this plan and in the check row, and
 marked by a site-local comment at each so the next reader does not re-open the question. Prove the
 pattern RED by reintroducing one deleted block on a scratch copy before landing, and paste that RED
 output into the PR. A guard certifying absence is worthless until proven red against the known-bad
@@ -1080,7 +1080,7 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Read the fall-through contract in Technical Approach before touching any of these.** A bare
   `return AgentSession.newest_for_session_id(sid, prefer_type="eng")` is wrong at four of the five
   sites: its `None` on an empty row set converts a fall-through into an early return, and at
-  `_sdlc_utils.py:468` that silently drops three live resolution tiers. The contract: **an empty row
+  `tools/_sdlc_utils.py:468` that silently drops three live resolution tiers. The contract: **an empty row
   set falls through, it does not return.**
 - `tools/sdlc_stage_query.py:87-95` → `newest_for_session_id(session_id, prefer_type="eng")`, kept
   **inside** `class_set_retry_attempts()`, `log_class_set_exhaustion` preserved. This is the one site
@@ -1164,8 +1164,8 @@ assignment. Load-bearing points: never write raw Redis ops; this change adds **n
 - **Assigned To**: `resolver-validator`
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run **both** sweeps. Code sweep: 8 → exactly 2, and those 2 are `sdlc_session_ensure.py:776` and
-  `session_executor.py:1373` by name, not by count. Docs sweep (`fall back to .*\[0\]` over
+- Re-run **both** sweeps. Code sweep: 8 → exactly 2, and those 2 are `tools/sdlc_session_ensure.py:776` and
+  `agent/session_executor.py:1373` by name, not by count. Docs sweep (`fall back to .*\[0\]` over
   `docs/features/ models/`): 2 → 0.
 - Run every test file named in Test Impact via `scripts/pytest-clean.sh`, recording counts as
   evidence rather than assumption.
