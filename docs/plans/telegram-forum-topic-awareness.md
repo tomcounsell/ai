@@ -981,6 +981,47 @@ same asserted-versus-read gap (#3065) that caused this round to be run at all.
 
 ---
 
+### Round 5 (2026-09-18, FULL roster, independent) — re-critique of the round-4 revision
+
+Ordinary re-critique of the revision that answered round 4's NEEDS REVISION, run at the owner's
+direction under the existing run. Roster gate: `complete: true`, 3/3, all grounded.
+
+**The owner ordered two mechanical verifications, and both were performed first-hand by the
+critics rather than read off the plan.**
+
+1. **The closure was recomputed independently from the `Depends On:` edges.** History &
+   Consistency parsed all eleven tasks' edges without reading Task 8's table, built the graph and
+   computed every closure. The result is identical to the plan's table. `validate-all` closes over
+   `{build-capture, build-outbound, build-context, build-topic-name, test-suites-unheld,
+   document-feature}` — neither `build-keying` nor `verify-live`. Exactly three nodes reach the
+   hold: `build-keying`, `test-suites-keying`, `validate-keying`. `build-topic-name` is admissible
+   only because its own closure bottoms out at `{build-capture, build-context}`. No cycles, no
+   dangling task-ID references. **This is the check round 3 existed to force**, and it was run
+   against a revision that added an edge into exactly that region.
+
+2. **The fail-soft criterion asserts the resolved value, not the absence of a raise.** Risk &
+   Robustness read `bridge/context.py:217-280` on the branch and confirmed no row added this
+   revision is phrased as "the call does not raise"; the rendered-name row greps for the resolved
+   string, and Task 11's anti-vacuity checkbox requires a named-topic render with the id-only form
+   exercised by a separate failure-injection test. The `except Exception` at `:267` is unchanged
+   and still swallows an `ImportError` — which is precisely why the assertion shape matters.
+
+**Independently re-verified on the branch:** all four producer sites have a `client` in scope on
+an async path (`bridge/reconciler.py` has zero Telethon imports and is duck-typed, as claimed);
+`GENERAL_TOPIC_ID` has exactly one definition tree-wide at `bridge/config_validation.py:36`,
+imported by `bridge/telegram_relay.py:50` and `tools/send_message.py:117`; `build_context_prefix`
+has exactly one definition at `bridge/context.py:287`; `resolve_topic_name` still has zero
+production callers and `agent/session_executor.py` no `topic_name` reference — the RED-on-branch
+precondition Task 11 is written to close. The Success Criteria were swept for a fifth instance of
+the "criterion satisfied by its own failure mode" family; none was found.
+
+**No BLOCKERs.** Both concerns are additive-scope gaps, not defects in what the revision did.
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Scope & Value | **The ownership partition closed the class for Test Impact and left it open for Failure Path.** The partition table and Task 5's rewritten scope line cover only `## Test Impact` items. Task 5's withdrawn rule read "every Test Impact **+ Failure Path** item EXCEPT…", so withdrawing it dropped the six `## Failure Path Test Strategy` bullets (`:269`, `:272-274`, `:277-278`) — fail-soft logging, `GetForumTopicsRequest`-failure degradation, malformed-header and no-reply-header regression, the `topic id 123` fallback render, and the deleted-topic relay error. No task body claims them individually either. This is the same "owned only in prose" shape round 4 flagged at Test Impact `:296`, reproduced one section over by the fix itself. | pending | Add the six Failure Path bullets as rows in the partition table, one owner each, and change Task 5's reference to "Test Impact **and Failure Path** ownership partition". Suggested assignment: resolver / malformed-header / no-reply-header fail-soft → Task 1 (the `test_topic_resolver.py` truth table already covers header shapes); `GetForumTopicsRequest` failure and the `topic id 123` fallback → Task 11, citing its existing anti-vacuity gate item ("the id-only form is exercised by a separate failure-injection test", `:821-822`) explicitly so it is not a second unlinked obligation; deleted-topic `default_topic_id` relay error → Task 3 (`test_bridge_relay.py`). |
+| CONCERN | Risk & Robustness | **Persisted `topic_name` is a point-in-time snapshot with no stated staleness policy.** Task 11 resolves the name once at ingest and stores it per message, so a topic renamed afterwards leaves older rows carrying the old label. The plan reasons this through explicitly for `topic_id` ("old rows remain None and the field is nullable precisely so absence is honest", `:435`) and keys the `topics:` config map by id specifically "because ids survive admin renames" (`:210`) — so the design knows renames happen; that awareness just never reaches the persisted name. Neither Risk Assessment nor Race Conditions nor Task 11 says what the accepted behavior is. | pending | One sentence in Task 11, no new code. The cache TTL bounds how fast a rename reaches *new* ingests; the gap is *already-persisted* rows, which never re-resolve because the worker only reads the stored string. State the accepted behavior: `topic_name` is not re-resolved for stored rows, so a renamed topic shows the old label on historical messages and the new label on new ones within one `RECENT CONVERSATION` block — acceptable, mirroring the `topic_id`-nullable-on-old-rows precedent at `:435`. If that is not acceptable, specify a refresh policy instead; do not leave it unstated. |
+
 ## Owner Rulings (2026-09-05, via /ask-me)
 
 All five plan questions are settled; the sections above already incorporate them.
