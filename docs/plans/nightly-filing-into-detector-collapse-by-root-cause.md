@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
 revision_applied: true
-revision_applied_at: 2026-09-18T14:37:09Z
+revision_applied_at: 2026-09-18T14:47:19Z
 tracking: https://github.com/tomcounsell/ai/issues/3418
 last_comment_id: 5729821863
 ---
@@ -308,7 +308,7 @@ In scope, each with its own acceptance check:
 | # | Sub-change | Acceptance check |
 |---|-----------|------------------|
 | (a) | **Filing moves into `scripts/nightly_regression_tests.py`.** A `create_issue()` function creates issues via `gh issue create`; `dispatch_findings()` calls it for every survivor and every cascade umbrella; the triage session never creates anything. | `grep -c "gh\", \"issue\", \"create\"` in the script is non-zero, and no prompt builder's output contains a create instruction (asserted by an updated `TestPromptsNeverNameTheSearchIndex` sibling). |
-| (b) | **Duplicate filing is structurally prevented; the residue is reported, never converged.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and an in-process fingerprint registry that skips-and-logs a same-run collision. No read-back, no close. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node; a second test asserts a same-run fingerprint collision is skipped with a named log line. |
+| (b) | **Duplicate filing is structurally prevented; the residue is reported, never converged.** Per-node re-read immediately before create, a deterministic fingerprint in every created body, and an in-process fingerprint registry that skips-and-logs a same-run collision. No read-back, no close. | A test calls `dispatch_findings()` twice against one in-memory fake GitHub and asserts the second pass creates zero issues and comments once per node; a second test asserts a same-run fingerprint collision is skipped with a named log line; a third asserts a mid-loop external file is **commented on**, not silently skipped. |
 | (c) | **The budget is spent only on issues GitHub confirms exist.** `issues_filed` is a derived length over the real numbers returned; `NIGHTLY_MAX_ISSUES_PER_RUN` is decremented per confirmed create and keeps its current default. | A test with the cap set to a low value and a succeeding `create_issue` stub asserts exactly that many issues are created and the rest are deferred with a log line; a second test asserts a create returning `None` spends no budget and leaves its node out of `recorded`. |
 | (d) | **The historical duplicates are closed.** #3382-#3397 and the enumerated 09-16 pairs are closed as duplicates pointing at their survivor. | `gh issue view` on each enumerated number reports `CLOSED` / `NOT_PLANNED`. |
 
@@ -332,6 +332,14 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
   the morning after, and for the deferred sweep if evidence ever reopens it.
 - **Pre-create re-read**: the open-issue map is refreshed immediately before each create rather
   than once per run, shrinking the check-then-act window from the whole filing loop to one call.
+  **A hit on that refresh comments, it does not merely skip.** The refresh is not a suppression
+  check — it is the same question the run's opening `open_issues()` read asked, asked later, so it
+  gets the same answer: route the finding through `comment_on_issue()` against the number the
+  refresh just returned, exactly as `partition_already_open()` already does for the opening read.
+  Skipping silently here would drop a legitimate recurrence comment, which `## Risks` Risk 1 names
+  as strictly worse than a duplicate. This is the one place the refresh differs from the
+  fingerprint-collision check, which *is* a pure skip because the issue it collides with was
+  created by this very run and has already been counted.
 - **Fingerprint-collision report**: the filing loop keeps an in-process `dict[fingerprint, int]` of
   what it created. A second finding resolving to a fingerprint already filed this run is skipped
   and logged by name. That is the whole of it — no GitHub read-back, no `gh issue close`, no
@@ -435,11 +443,16 @@ log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
   — `TestNothingNotifies`, line 629). Assert that a night where some creates failed logs both the
   verified filed count and the deferred count, so a partial failure is legible rather than reading
   as a quiet success.
-- [ ] Assert that each of the three non-filing outcomes emits its own distinct log line naming the
-  nodes it concerns — **budget exhausted**, **create failed**, and **fingerprint collision** — so
-  they are distinguishable from each other, and from a genuinely quiet night, in `logs/` the
-  morning after. A single shared "not filed" line would collapse three different operator responses
-  (raise the cap / check `gh` auth / investigate a collapsing bug) into one.
+- [ ] Assert that each of the four non-filing outcomes emits its own distinct log line naming the
+  nodes it concerns — **budget exhausted**, **create failed**, **fingerprint collision**, and
+  **pre-create refresh hit (commented instead)** — so they are distinguishable from each other, and
+  from a genuinely quiet night, in `logs/` the morning after. A single shared "not filed" line would
+  collapse four different operator responses (raise the cap / check `gh` auth / investigate a
+  collapsing bug / nothing, this one is working as designed) into one.
+- [ ] The refresh-hit branch must not be able to fail silently: if the refresh returns a number but
+  the recurrence comment fails to post, the node stays out of `recorded` — the existing
+  `comment_on_issue` contract — and the failure is logged as a comment failure, not swallowed into
+  the refresh-hit line.
 
 ## Test Impact
 
@@ -542,6 +555,11 @@ here).
   created and the remainder is deferred, logged, and left out of `recorded`; and a second test where
   `create_issue` returns `None`, asserting that create spends no budget and its node stays out of
   `recorded` so the next run retries it.
+- [ ] `TestPreCreateRefreshComments` — NEW: a fake GitHub whose `open_issues` returns an empty map
+  on the run's opening read and a map containing the survivor's title on the pre-create refresh.
+  Assert `create_issue` is not called, `comment_on_issue` **is** called once against the refreshed
+  number, the node lands in `recorded`, and the refresh-hit log line fires. A sibling test makes
+  that comment fail and asserts the node stays out of `recorded`.
 - [ ] `TestFingerprintCollisionIsLogged` — NEW: two survivors in one run resolving to the same
   fingerprint; assert exactly one `create_issue` call, a `WARNING` naming the fingerprint and the
   skipped node, and — the anti-assertion that pins the owner's report-only decision — that no
@@ -660,6 +678,15 @@ run. The window shrinks from "duration of the entire filing loop" (minutes, with
 inside it) to "one `gh` round-trip". This is a genuine reduction and not a closure; the residue is
 reported rather than converged (Race 3). Cost is one extra `gh` read per created issue, which is bounded by
 `NIGHTLY_MAX_ISSUES_PER_RUN` and therefore small.
+**What a hit does — comment, never a bare skip.** A refresh that finds the title already open means
+an external actor filed it during this loop, so the finding is a *recurrence*, not a duplicate of
+something this run created. It routes through `comment_on_issue()` against the number the refresh
+returned, reusing the shape `partition_already_open()` (`scripts/nightly_regression_tests.py:2397-2425`,
+per-node caller `:2881-2889`) already applies to the run's opening read, and the node is recorded on
+a successful comment exactly as the existing recurrence path records it. A bare skip would leave the
+night with neither an issue nor a comment for a real finding — the silent hole `## Risks` Risk 1
+calls worse than a duplicate, merely relocated into the smaller window. This is the fourth non-filing
+outcome and it carries its own log line (`## Failure Path Test Strategy`).
 
 ### Race 3: Two hosts, or a create whose response was lost — REPORTED, CONVERGENCE DEFERRED
 **Location:** the new `create_issue()` call site.
@@ -668,7 +695,8 @@ re-read before either create lands; or one `gh issue create` succeeds server-sid
 is lost, so the client cannot tell whether an issue exists.
 **Data prerequisite:** a duplicate must be *detectable* after the fact with an exact key. Titles are
 not that key — humans edit titles, and the cascade path already deliberately keys on a signature
-rather than a title (`resolve_cascade_issue`, line 1165, for exactly this reason).
+rather than a title (`resolve_cascade_issue`, `scripts/nightly_regression_tests.py:2366`, for
+exactly this reason).
 **State prerequisite:** eventually, exactly one live issue per finding.
 **Disposition — detect and report; do not converge.** The owner ruled on 2026-09-18
 (`## Decisions` #2) that the detector does not gain issue-closing privilege and that the convergent
@@ -795,8 +823,8 @@ Approach): silence during a real regression is the larger harm there.
   `gh issue comment`. The `TestPromptsNeverNameTheSearchIndex` sibling assertion added in
   `## Test Impact` — no surviving prompt contains a creation instruction — is the mechanical
   enforcement of that narrowing.
-- **`tools.valor_session create --role eng` remains the dispatch mechanism** if the investigation
-  session survives (`## Open Questions`), unchanged in shape; only its prompt payload changes.
+- **`tools.valor_session create --role eng` remains the dispatch mechanism** for the investigation
+  session, which is kept (`## Decisions` #1), unchanged in shape; only its prompt payload changes.
 
 ## Documentation
 
@@ -841,6 +869,8 @@ Approach): silence during a real regression is the larger harm there.
   failed create spends no budget and leaves its node out of `recorded`.
 - [ ] A second finding in one run resolving to an already-filed fingerprint is skipped and logged,
   not filed (`TestFingerprintCollisionIsLogged`).
+- [ ] A pre-create refresh that finds the title already open **comments** on it and records the node;
+  it never silently skips (`TestPreCreateRefreshComments`).
 - [ ] The detector never closes an issue: `scripts/nightly_regression_tests.py` contains no
   `gh issue close` invocation and no close helper.
 - [ ] `write_triage_ledger`, `NodeDisposition`, and the ledger prompt paragraph are gone from the
@@ -849,12 +879,17 @@ Approach): silence during a real regression is the larger harm there.
   creates nothing.
 - [ ] #3382-#3397 and the enumerated 09-16 pairs are CLOSED as `NOT_PLANNED` with a pointer to
   their survivor.
-- [ ] **Human-readable outcome check** (not a count): after the change, take the next real nightly
-  run's issue list and have a reader who is not the filer — Tom, or whoever triages that morning —
-  state, for each issue, what is broken, without opening the linked node logs. Every issue must be
+- [ ] **[POST-DEPLOY, NOT A MERGE GATE] Human-readable outcome check** (not a count): every other
+  row above is mechanically checkable at merge time; this one is not, because it needs a real
+  nightly run to have happened. **Owner:** whoever triages the tracker that morning (Tom by default).
+  **Trigger:** the first real nightly run after `/update` carries the merged ref to the machine that
+  runs the schedule (`## No-Gos` [EXTERNAL]). **Check:** take that run's issue list and, for each
+  issue, state what is broken without opening the linked node logs — every issue must be
   self-describing from its title and first paragraph. An issue that fails this read is a filing-body
-  defect even if the counts are perfect; the whole point of the change is that a morning's triage
-  is legible, not merely short.
+  defect even if the counts are perfect; the whole point of the change is that a morning's triage is
+  legible, not merely short. A failure here is a follow-up issue against the body builder, not a
+  revert: the counts and the duplicate-prevention this plan exists for are already proven by the
+  rows above. Task 9 does **not** block on this row.
 - [ ] Tests pass (`/do-test`, scoped to `tests/unit/test_nightly_regression_tests.py`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] No xfail conversions apply — `grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/unit/test_nightly_regression_tests.py` returns nothing.
@@ -932,7 +967,11 @@ path existing.
 - **Parallel**: false
 - Replace the per-node dispatch block at `:2941-2970` and the cascade dispatch at `:2856-2866`
   with calls to `create_issue()`.
-- Refresh the open-issue map immediately before each create (Race 2).
+- Refresh the open-issue map immediately before each create (Race 2). **On a hit, comment via
+  `comment_on_issue()` against the number the refresh returned and record the node on success** —
+  reuse `partition_already_open()`'s shape (`:2397-2425`, per-node caller `:2881-2889`) and key the
+  fresh dict on the same `f"Nightly regression: {node}"` / `cascade["title"]` strings the opening
+  read used, or the refresh silently never matches. A bare skip here is a dropped recurrence.
 - Decrement `issue_budget` and extend `recorded` only on a confirmed number (Race 4).
 - Add `DispatchOutcome.filed_issues: dict[str, int]`; make `issues_filed` derived from it.
 - Remove the `None` sentinel from `cascade_issues` and the now-dead upgrade path in
@@ -986,8 +1025,8 @@ path existing.
 - Execute every disposition in `## Test Impact`, in the order given (shared harness first).
 - Extract the four duplicated fake-`gh` harnesses (1241, 1406, 2580, 2800) into one fixture that
   stubs `create_issue` alongside `comment_on_issue`.
-- Write `TestCreateIssue`, `TestFilingIdempotence`, `TestFingerprintCollisionIsLogged`,
-  `TestIssueBudgetSpendsOnlyConfirmedCreates`.
+- Write `TestCreateIssue`, `TestFilingIdempotence`, `TestPreCreateRefreshComments`,
+  `TestFingerprintCollisionIsLogged`, `TestIssueBudgetSpendsOnlyConfirmedCreates`.
 - Run only this file. Never the full `tests/unit/` tree.
 
 ### 6. Close the historical duplicates
@@ -1027,7 +1066,8 @@ path existing.
 ### 9. Final validation
 - **Task ID**: validate-all
 - **Depends On**: build-create-issue, build-filing-loop, build-collision-report, build-retire-agent-filing, build-tests, cleanup-duplicates, document-feature, review-cruft
-- **Validates**: every row of the `## Verification` table, run in order, plus every `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
+- **Validates**: every row of the `## Verification` table, run in order, plus every *mechanically-checkable* `## Success Criteria` checkbox. This task's validation is the table itself — it exists to run it.
+- The one `## Success Criteria` row Task 9 does **not** confirm is the `[POST-DEPLOY, NOT A MERGE GATE]` human-readable outcome check, which needs a real nightly run and is owned by the morning triager. Record it as deferred-to-post-deploy in the validation report rather than passing or failing it — a validator that silently rubber-stamps it, or silently drops it, is the failure mode this carve-out exists to prevent.
 - **Assigned To**: filing-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -1044,6 +1084,7 @@ path existing.
 | Idempotence regression test exists | `grep -c "class TestFilingIdempotence" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Budget test exists | `grep -c "class TestIssueBudgetSpendsOnlyConfirmedCreates" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Collision-report test exists | `grep -c "class TestFingerprintCollisionIsLogged" tests/unit/test_nightly_regression_tests.py` | output > 0 |
+| Refresh-hit comments test exists | `grep -c "class TestPreCreateRefreshComments" tests/unit/test_nightly_regression_tests.py` | output > 0 |
 | Kill switch wired | `grep -c "NIGHTLY_AUTO_FILE" scripts/nightly_regression_tests.py` | output > 0 |
 | Anti-criterion: no prompt tells an agent to create an issue | `grep -c "gh issue create" scripts/nightly_regression_tests.py` | match count == 0 |
 | Anti-criterion: the detector never closes an issue | `grep -c 'issue", "close\|gh issue close' scripts/nightly_regression_tests.py` | match count == 0 |
@@ -1097,10 +1138,10 @@ two behavioral gaps and two stale cross-references left by revision 2's deletion
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
-| CONCERN | Risk & Robustness (Adversary) | The pre-create re-read (Race 2 / Key Elements) is specified as a duplicate-prevention check but never says what happens **on a hit**. The initial-read path handles that case by commenting instead of filing (`partition_already_open`, `scripts/nightly_regression_tests.py:2397-2425`, per-node caller `:2881-2889`), preserving the recurrence signal; `## Failure Path Test Strategy` enumerates only three non-filing outcomes and has no fourth for "refresh found a same-title issue mid-loop". If the implementation skips-and-leaves-unrecorded on a refresh hit, a legitimate recurrence comment is silently dropped — the "silent hole" class Risk 1 calls worse than a duplicate, relocated to a narrower window rather than eliminated. | pending | Add an explicit fourth branch to the create loop: a refresh hit routes through `comment_on_issue` against the number the refresh just returned, not a skip-and-log like a fingerprint collision. Reuse `partition_already_open` (`:2397`) and its call site (`:2881-2889`) per-create inside the loop replacing `:2941-2970`; the refresh call is `open_issues()` (`:2065-2125`), and the fresh dict must be re-keyed against the same `f"Nightly regression: {node}"` / `cascade["title"]` strings the original read used or it silently never matches. Own log line, own test. |
-| CONCERN | Scope & Value (User) | `## Success Criteria` mixes mechanically-verifiable rows with the human-readable outcome check, which cannot be evaluated until a real nightly run happens in production and a human triager reads its output — yet Task 9 (`validate-all`) is defined as confirming **every** `## Success Criteria` row, with no carve-out. As written the plan's own completion gate cannot be closed at merge time. | pending | Split Task 9's `**Validates**` line to cover every *mechanically-checkable* row, and move the human-readable read to a named post-deploy observation with an owner and a trigger (the first real nightly run after `/update` reaches the runner machine), so the row is neither silently rubber-stamped by the validator nor silently dropped. |
-| CONCERN | History & Consistency (Consistency Auditor) | `## Agent Integration` still reads "remains the dispatch mechanism **if the investigation session survives** (`## Open Questions`)" — a stale cross-reference to a section that now says "None open", and conditional phrasing that re-opens a question `## Decisions` #1 and Task 4 ("Decided, no gate") both close. | pending | Replace the conditional clause with "(kept per `## Decisions` #1)", matching the wording already used in Task 4 and Risk 4's mitigation. |
-| CONCERN | History & Consistency (Consistency Auditor) | Race 3's data prerequisite cites `resolve_cascade_issue`, line 1165. That function is defined at `scripts/nightly_regression_tests.py:2366`; line 1165 of that file is `@dataclass(frozen=True)` preceding the unrelated `GateCaps` class. Line 1165 of the **test** file is `class TestResolveCascadeIssue`, so the citation was copied from the wrong file. The claim itself is correct (`:2391-2394`), but every other citation in the plan (`:2280`, `:2450`, `:2518`, `:2696`, `:3265`, test-file `672`) verifies exactly, so the one wrong pointer is the outlier. | pending | Change `line 1165` to `line 2366` in the Race 3 "Data prerequisite" sentence. |
+| CONCERN | Risk & Robustness (Adversary) | The pre-create re-read (Race 2 / Key Elements) is specified as a duplicate-prevention check but never says what happens **on a hit**. The initial-read path handles that case by commenting instead of filing (`partition_already_open`, `scripts/nightly_regression_tests.py:2397-2425`, per-node caller `:2881-2889`), preserving the recurrence signal; `## Failure Path Test Strategy` enumerates only three non-filing outcomes and has no fourth for "refresh found a same-title issue mid-loop". If the implementation skips-and-leaves-unrecorded on a refresh hit, a legitimate recurrence comment is silently dropped — the "silent hole" class Risk 1 calls worse than a duplicate, relocated to a narrower window rather than eliminated. | **FIXED** — revision 3: the refresh-hit branch is now specified everywhere it has to be. `## Solution` Key Elements and Race 2 both state that a hit routes through `comment_on_issue()` against the number the refresh returned, reusing `partition_already_open()`'s shape, and record the node on a successful comment. Task 2 carries the same instruction with the re-keying gotcha. `## Failure Path Test Strategy` now names **four** non-filing outcomes and pins that a failed recurrence comment leaves the node out of `recorded`. New `TestPreCreateRefreshComments` plus a `## Verification` row and a `## Success Criteria` row. | Add an explicit fourth branch to the create loop: a refresh hit routes through `comment_on_issue` against the number the refresh just returned, not a skip-and-log like a fingerprint collision. Reuse `partition_already_open` (`:2397`) and its call site (`:2881-2889`) per-create inside the loop replacing `:2941-2970`; the refresh call is `open_issues()` (`:2065-2125`), and the fresh dict must be re-keyed against the same `f"Nightly regression: {node}"` / `cascade["title"]` strings the original read used or it silently never matches. Own log line, own test. |
+| CONCERN | Scope & Value (User) | `## Success Criteria` mixes mechanically-verifiable rows with the human-readable outcome check, which cannot be evaluated until a real nightly run happens in production and a human triager reads its output — yet Task 9 (`validate-all`) is defined as confirming **every** `## Success Criteria` row, with no carve-out. As written the plan's own completion gate cannot be closed at merge time. | **FIXED** — revision 3: the row is relabelled `[POST-DEPLOY, NOT A MERGE GATE]` and carries an owner (the morning triager), a trigger (the first real nightly run after `/update` reaches the scheduling machine), and an explicit disposition — a failure there is a follow-up issue against the body builder, not a revert. Task 9's `**Validates**` line is split to *mechanically-checkable* rows and instructs the validator to record this one as deferred-to-post-deploy rather than passing or failing it. | Split Task 9's `**Validates**` line to cover every *mechanically-checkable* row, and move the human-readable read to a named post-deploy observation with an owner and a trigger (the first real nightly run after `/update` reaches the runner machine), so the row is neither silently rubber-stamped by the validator nor silently dropped. |
+| CONCERN | History & Consistency (Consistency Auditor) | `## Agent Integration` still reads "remains the dispatch mechanism **if the investigation session survives** (`## Open Questions`)" — a stale cross-reference to a section that now says "None open", and conditional phrasing that re-opens a question `## Decisions` #1 and Task 4 ("Decided, no gate") both close. | **FIXED** — revision 3: `## Agent Integration` now reads "remains the dispatch mechanism for the investigation session, which is kept (`## Decisions` #1)". No conditional clause and no pointer at `## Open Questions`. | Replace the conditional clause with "(kept per `## Decisions` #1)", matching the wording already used in Task 4 and Risk 4's mitigation. |
+| CONCERN | History & Consistency (Consistency Auditor) | Race 3's data prerequisite cites `resolve_cascade_issue`, line 1165. That function is defined at `scripts/nightly_regression_tests.py:2366`; line 1165 of that file is `@dataclass(frozen=True)` preceding the unrelated `GateCaps` class. Line 1165 of the **test** file is `class TestResolveCascadeIssue`, so the citation was copied from the wrong file. The claim itself is correct (`:2391-2394`), but every other citation in the plan (`:2280`, `:2450`, `:2518`, `:2696`, `:3265`, test-file `672`) verifies exactly, so the one wrong pointer is the outlier. | **FIXED** — revision 3: the Race 3 data prerequisite now cites `resolve_cascade_issue`, `scripts/nightly_regression_tests.py:2366`. Verified against the source at revision time. | Change `line 1165` to `line 2366` in the Race 3 "Data prerequisite" sentence. |
 
 
 ---
