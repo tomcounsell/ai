@@ -7,7 +7,7 @@ created: 2026-09-04
 tracking: https://github.com/tomcounsell/ai/issues/2652
 last_comment_id: 5695879375
 revision_applied: true
-revision_applied_at: 2026-09-18T08:05:00Z
+revision_applied_at: 2026-09-18T09:20:00Z
 ---
 
 # Telegram Forum-Topic Awareness
@@ -139,7 +139,22 @@ lose topic identity like everything else.
 ## Architectural Impact
 
 - **New dependencies**: none (Telethon already present; `messages.GetForumTopicsRequest` is an existing-API call).
-- **Interface changes**: `TelegramMessage` +1 nullable field (Popoto migration required); relay payload optionally +`topic_id`; `projects.json` group entries optionally +`default_topic_id` (absent = today's behavior).
+- **Interface changes**: `TelegramMessage` +2 nullable fields (`topic_id`, and `topic_name` from Task 11 — one Popoto migration each); relay payload optionally +`topic_id`; `projects.json` group entries optionally +`default_topic_id` (absent = today's behavior).
+- **`topic_name` is a point-in-time snapshot and is deliberately never refreshed** (round-5
+  CONCERN, 2026-09-18). The design already knows renames happen — that is precisely why the
+  `topics:` advisory map keys on **id** rather than name, and why the session key and the
+  history filter both key on `topic_id`. The persisted name simply never inherited that
+  awareness, so it is stated here rather than left to be inferred from the config map.
+  The semantics: `topic_name` records what the topic was called **when that message was
+  ingested**, and an admin rename afterwards does not rewrite it. Old rows keep the old name.
+  This is correct, not a defect to fix later: the name exists to tell the agent what the
+  conversation was called *at the time it happened*, and a historical row relabelled with a
+  name that did not exist then would misdescribe its own context. Nothing keys on the name, so
+  a stale value cannot misroute anything — the blast radius is one line of rendered context.
+  No backfill, no reconciliation job, no TTL on the column; the short-lived in-process name
+  cache at `bridge/context.py:127-130` is the only place freshness matters, and it bounds how
+  stale a *newly ingested* row can be. The feature doc (Task 6) must say this, because a reader
+  who sees a name column and no refresh path will otherwise assume one was forgotten.
 - **Coupling**: topic resolution becomes a shared bridge helper used by live intake and all three recovery scanners — reduces per-site drift.
 - **Data ownership**: bridge owns topic capture; agent receives it read-only via context.
 - **Reversibility**: high — nullable field, optional config, guarded branch changes.
@@ -265,17 +280,24 @@ These are binding on the build, not advisory.
 
 ## Failure Path Test Strategy
 
+**Every bullet below carries an owning task** (round-5 CONCERN, 2026-09-18). These bullets were
+orphaned when the round-4 revision withdrew Task 5's "Test Impact + Failure Path" rule and
+replaced it with a partition covering `## Test Impact` only. Task 5 sweeps these as integration
+coverage; it owns **no bullet individually**, exactly as in the Test Impact partition. Where a
+bullet and a task body disagree, the owner named here wins.
+
 ### Exception Handling Coverage
-- [ ] The resolver and name-resolution paths are fail-soft by design: each `except` must log at WARNING with chat/msg ids and degrade to `topic_id=None` / id-only naming — one test per handler asserting the log + degraded value.
-- [ ] GetForumTopicsRequest failure (network, permissions, non-forum group) → id-only context, no crash, no retry storm (single attempt per cache TTL).
+- [ ] **Task 1** — the *resolver*'s `except` path is fail-soft: log at WARNING with chat/msg ids and degrade to `topic_id=None`; one test per handler asserting the log **and** the degraded value.
+- [ ] **Task 11** — the *name-resolution* `except` path (`bridge/context.py:248-269`) degrades to `topic_name=None` and id-only naming, with the same log+value assertion. Split from the bullet above because the two handlers now live in different tasks and, since Task 11, in different call sites.
+- [ ] **Task 11** — `GetForumTopicsRequest` failure (network, permissions, non-forum group) → id-only context, no crash, no retry storm (single attempt per cache TTL).
 
 ### Empty/Invalid Input Handling
-- [ ] Messages with no reply header, DM messages, and non-forum group replies → `topic_id=None`, `is_top_level=False`, byte-identical behavior to today (regression tests on existing fixtures).
-- [ ] Malformed/partial headers (forum_topic set, both ids None) → `topic_id=None`, warning logged.
+- [ ] **Task 1** — messages with no reply header, DM messages, and non-forum group replies → `topic_id=None`, `is_top_level=False`, byte-identical behavior to today (regression tests on existing fixtures).
+- [ ] **Task 1** — malformed/partial headers (forum_topic set, both ids None) → `topic_id=None`, warning logged.
 
 ### Error State Rendering
-- [ ] When a topic name cannot be resolved, context renders "topic id 123" rather than omitting topic identity or rendering a placeholder lie.
-- [ ] A configured `default_topic_id` pointing at a deleted topic: Telegram send error surfaces through the relay's existing retry/dead-letter path with the topic id named in the log — test via relay unit fixture.
+- [ ] **Task 4** — when a topic name cannot be resolved, context renders "topic id 123" rather than omitting topic identity or rendering a placeholder lie. Task 4 owns the render; Task 11 owns supplying the `None` that triggers it.
+- [ ] **Task 3** — a configured `default_topic_id` pointing at a deleted topic: the Telegram send error surfaces through the relay's existing retry/dead-letter path with the topic id named in the log — test via relay unit fixture.
 
 ## Test Impact
 
@@ -425,6 +447,50 @@ writing the disposition; do not trust this list to still be complete.
   session-context threading, not row persistence.
 - [ ] `tests/unit/test_topic_resolver.py` — CREATE: synthetic `MessageReplyHeader` truth-table
   cases including the #3831 quirk and the malformed-header degradation.
+
+## Section Ownership Sweep (round-5 CONCERN, 2026-09-18) — authoritative
+
+The round-4 fix built an ownership partition for `## Test Impact` and, in doing so, withdrew
+Task 5's old "Test Impact **+ Failure Path**" rule — which silently orphaned the six
+`## Failure Path Test Strategy` bullets. A round-4 fix reproducing the round-4 defect one
+section over is the case where accepting on the record is how it ships.
+
+So this sweep covers **every `##` section in this document**, not the two that were noticed.
+Each section is either assigned an owning task or **explicitly declared non-task prose**.
+Unowned build work does not get built and nothing reports that it did not.
+
+| Section | Carries build obligations? | Owner |
+|---|---|---|
+| `## Problem` | no | non-task prose (framing) |
+| `## Freshness Check` | no | non-task prose (evidence record) |
+| `## Prior Art` | no | non-task prose |
+| `## Research` | no | non-task prose |
+| `## Spike Results` | no | non-task prose (evidence record) |
+| `## Data Flow` | no | non-task prose |
+| `## Architectural Impact` | no | non-task prose |
+| `## Appetite` | no | non-task prose |
+| `## Prerequisites` | yes — the live observation | **Task 7** (`verify-live`, owner action) |
+| `## Solution` (Key Elements / Flow / Technical Approach) | yes | **Tasks 1, 2, 3, 4, 11** per the Technical Approach's own per-element attribution |
+| `## Failure Path Test Strategy` | yes — six bullets | **per-bullet owners tagged inline in that section**; Task 5 sweeps them as integration |
+| `## Test Impact` | yes | the Ownership partition table above (authoritative) |
+| `## Rabbit Holes` | no | non-task prose (explicit exclusions) |
+| `## Risks` | yes — each mitigation is build work | Risk 1 → **Task 7**; Risk 2 → **Task 2**; Risk 3 → **Task 3** |
+| `## Race Conditions` | yes — each mitigation is build work | Race 1 → **Task 2**; Race 2 → **Task 11** (the name-resolution cache and its single-flight lock live on the bridge, which is where Task 11 puts the call) |
+| `## No-Gos (Out of Scope)` | no | non-task prose (explicit exclusions) |
+| `## Update System` | yes | migration → **Task 1**, second migration for `topic_name` → **Task 11**; `projects.json` key documentation → **Task 6**; bridge restart → deploy flow, **no task** |
+| `## Agent Integration` | yes | `TELEGRAM_TOPIC_ID` export + `send_message` resolution → **Task 3**; "bridge imports the resolver internally" → **Task 11**; the relay-payload integration test → **Task 5** |
+| `## Documentation` | yes — five bullets | **Task 6** (`document-feature`); see Task 6's body, which now names them |
+| `## Success Criteria` | no — they are assertions, not work | validated by **Task 8** (unheld) and **Task 9** (held scope) |
+| `## Verification` | no — it is the validator's script | run by **Task 8** (unheld rows) and **Task 9** (Task-2-scoped rows) |
+| `## Team Orchestration` | no | roster metadata |
+| `## Step by Step Tasks` | n/a | the tasks themselves |
+| `## Critique Results` | no | non-task prose (history; see the round-2 correction note) |
+| `## Owner Rulings` | no | non-task prose (decisions of record) |
+
+**Any future edit that adds a `##` section, or moves an obligation between sections, must add or
+update a row here in the same commit.** An obligation whose owning task is named only inside
+another task's body is not owned — that is the exact shape round 4 found twice and round 5 found
+a third time.
 
 ## Rabbit Holes
 
@@ -687,6 +753,20 @@ itself.
 - **Task ID**: document-feature
 - **Depends On**: test-suites-unheld
 - **Assigned To**: topic-documentarian — **Agent Type**: documentarian — **Parallel**: false
+- **Scope is the `## Documentation` section's five bullets, which this task owns in full**
+  (round-5 section-ownership sweep, 2026-09-18). This body was previously empty, so the
+  Documentation bullets were owned only by the task's title. Explicitly:
+  create `docs/features/telegram-forum-topics.md`; update `docs/features/session-steering.md`
+  and `docs/features/reply-thread-context-hydration.md` **only if** their described flows gained
+  topic-visible behavior (verify at docs stage, do not edit speculatively); carry the header
+  truth table verbatim in the resolver docstring; and document the `projects.json` keys
+  (`default_topic_id`, the advisory `topics` map) in the feature doc rather than in code
+  comments. The feature doc must state the **`topic_name` snapshot semantics** recorded under
+  `## Architectural Impact`.
+- **`docs/features/README.md` is a cross-lane collision surface and this task does NOT edit it.**
+  Report the new feature doc's filename and a one-line description upward instead; the index row
+  is written once, by one writer, during DOCS. Three lanes racing a shared index file is a
+  merge conflict manufactured for no benefit.
 
 ### 7. Live verification on a bridge host [EXTERNAL constraint]
 - **Task ID**: verify-live
@@ -784,8 +864,10 @@ branch is unpushed and there is no PR, which is the cheapest place to absorb it.
 **Deliverables:**
 - `TelegramMessage.topic_name = Field(type=str, null=True)` in `models/telegram.py` (beside
   `topic_id` at `:51`), a migration appended to `MIGRATIONS` in `scripts/update/migrations.py`,
-  and the field-count assertion in `tests/unit/test_model_relationships.py:110` bumped
-  **21 → 22** in the same commit (Task 1 took it 20 → 21).
+  and the field-count assertion bumped **21 → 22** in the same commit (Task 1 took it 20 → 21).
+  The assertion is at `tests/unit/test_model_relationships.py:117` **on the branch**
+  (`:110` is its position on `main`, where it still reads `== 20`) — re-grep before editing
+  rather than navigating by either number.
 - `store_message(..., topic_name: str | None = None)` in `tools/telegram_history/__init__.py:346`,
   persisting the column. Its three production callers (`bridge/telegram_relay.py:396`,
   `bridge/telegram_bridge.py:1568`, `:3223`) pass it where a name is resolvable.
@@ -820,7 +902,11 @@ branch is unpushed and there is no PR, which is the cheapest place to absorb it.
   - [ ] `agent/session_executor.py` contains no reference to `resolve_topic_name`.
   - [ ] A test renders the agent context block for a message in a **named** topic and asserts the
         name appears; the id-only form is exercised by a separate failure-injection test.
-  - [ ] `grep -q 'channels.GetForumTopics' bridge/context.py` returns non-zero.
+  - [ ] `grep -c "channels.GetForumTopics" bridge/context.py` prints `0` — **not** `! grep -q`,
+        per the anti-criterion idiom note under `## Verification`. On a moved file `grep -q`
+        exits 2 and `!` inverts it to a pass, certifying absence against a file it never opened.
+  - [ ] The `topic_name` snapshot semantics under `## Architectural Impact` hold: nothing in this
+        task adds a refresh, backfill or reconciliation path for the persisted name.
 
 
 ## Verification
@@ -1062,8 +1148,8 @@ the "criterion satisfied by its own failure mode" family; none was found.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Scope & Value | **The ownership partition closed the class for Test Impact and left it open for Failure Path.** The partition table and Task 5's rewritten scope line cover only `## Test Impact` items. Task 5's withdrawn rule read "every Test Impact **+ Failure Path** item EXCEPT…", so withdrawing it dropped the six `## Failure Path Test Strategy` bullets (`:269`, `:272-274`, `:277-278`) — fail-soft logging, `GetForumTopicsRequest`-failure degradation, malformed-header and no-reply-header regression, the `topic id 123` fallback render, and the deleted-topic relay error. No task body claims them individually either. This is the same "owned only in prose" shape round 4 flagged at Test Impact `:296`, reproduced one section over by the fix itself. | pending | Add the six Failure Path bullets as rows in the partition table, one owner each, and change Task 5's reference to "Test Impact **and Failure Path** ownership partition". Suggested assignment: resolver / malformed-header / no-reply-header fail-soft → Task 1 (the `test_topic_resolver.py` truth table already covers header shapes); `GetForumTopicsRequest` failure and the `topic id 123` fallback → Task 11, citing its existing anti-vacuity gate item ("the id-only form is exercised by a separate failure-injection test", `:821-822`) explicitly so it is not a second unlinked obligation; deleted-topic `default_topic_id` relay error → Task 3 (`test_bridge_relay.py`). |
-| CONCERN | Risk & Robustness | **Persisted `topic_name` is a point-in-time snapshot with no stated staleness policy.** Task 11 resolves the name once at ingest and stores it per message, so a topic renamed afterwards leaves older rows carrying the old label. The plan reasons this through explicitly for `topic_id` ("old rows remain None and the field is nullable precisely so absence is honest", `:435`) and keys the `topics:` config map by id specifically "because ids survive admin renames" (`:210`) — so the design knows renames happen; that awareness just never reaches the persisted name. Neither Risk Assessment nor Race Conditions nor Task 11 says what the accepted behavior is. | pending | One sentence in Task 11, no new code. The cache TTL bounds how fast a rename reaches *new* ingests; the gap is *already-persisted* rows, which never re-resolve because the worker only reads the stored string. State the accepted behavior: `topic_name` is not re-resolved for stored rows, so a renamed topic shows the old label on historical messages and the new label on new ones within one `RECENT CONVERSATION` block — acceptable, mirroring the `topic_id`-nullable-on-old-rows precedent at `:435`. If that is not acceptable, specify a refresh policy instead; do not leave it unstated. |
+| CONCERN | Scope & Value | **The ownership partition closed the class for Test Impact and left it open for Failure Path.** The partition table and Task 5's rewritten scope line cover only `## Test Impact` items. Task 5's withdrawn rule read "every Test Impact **+ Failure Path** item EXCEPT…", so withdrawing it dropped the six `## Failure Path Test Strategy` bullets (`:269`, `:272-274`, `:277-278`) — fail-soft logging, `GetForumTopicsRequest`-failure degradation, malformed-header and no-reply-header regression, the `topic id 123` fallback render, and the deleted-topic relay error. No task body claims them individually either. This is the same "owned only in prose" shape round 4 flagged at Test Impact `:296`, reproduced one section over by the fix itself. | **ADDRESSED 2026-09-18 (round-5 revision), by a wider fix than suggested.** The Implementation Note proposed adding the six bullets to the Test Impact partition table. That would have closed the two sections now known to be affected and left the class open a third time, so instead a new authoritative **`## Section Ownership Sweep`** table was added covering **every `##` section in the document**: each is either assigned an owning task or explicitly declared non-task prose. The sweep found a third instance the concern did not name — **Task 6's body was entirely empty**, so the five `## Documentation` bullets were owned only by the task's title — plus obligations in `## Risks`, `## Race Conditions`, `## Update System` and `## Agent Integration` that had never been attributed to a task at all. Owners are now tagged inline on each Failure Path bullet, and Task 6 has a body. | Add the six Failure Path bullets as rows in the partition table, one owner each, and change Task 5's reference to "Test Impact **and Failure Path** ownership partition". Suggested assignment: resolver / malformed-header / no-reply-header fail-soft → Task 1 (the `test_topic_resolver.py` truth table already covers header shapes); `GetForumTopicsRequest` failure and the `topic id 123` fallback → Task 11, citing its existing anti-vacuity gate item ("the id-only form is exercised by a separate failure-injection test", `:821-822`) explicitly so it is not a second unlinked obligation; deleted-topic `default_topic_id` relay error → Task 3 (`test_bridge_relay.py`). |
+| CONCERN | Risk & Robustness | **Persisted `topic_name` is a point-in-time snapshot with no stated staleness policy.** Task 11 resolves the name once at ingest and stores it per message, so a topic renamed afterwards leaves older rows carrying the old label. The plan reasons this through explicitly for `topic_id` ("old rows remain None and the field is nullable precisely so absence is honest", `:435`) and keys the `topics:` config map by id specifically "because ids survive admin renames" (`:210`) — so the design knows renames happen; that awareness just never reaches the persisted name. Neither Risk Assessment nor Race Conditions nor Task 11 says what the accepted behavior is. | **ADDRESSED 2026-09-18 (round-5 revision).** The snapshot semantics are stated explicitly under `## Architectural Impact`, beside the interface change that introduces the column, rather than inside Task 11 — a property of the persisted data outlives the task that adds it, and Tasks 4 and 6 both depend on knowing it. The accepted behavior is that `topic_name` records the topic's name **at ingest time** and is never refreshed: no backfill, no reconciliation job, no TTL on the column. The reasoning is recorded rather than just the decision — nothing keys on the name, so a stale value cannot misroute anything, and a historical row relabelled with a name that did not exist then would misdescribe its own context. Task 6 must carry it into the feature doc; Task 11's anti-vacuity gate gained a checkbox asserting no refresh path was added. | One sentence in Task 11, no new code. The cache TTL bounds how fast a rename reaches *new* ingests; the gap is *already-persisted* rows, which never re-resolve because the worker only reads the stored string. State the accepted behavior: `topic_name` is not re-resolved for stored rows, so a renamed topic shows the old label on historical messages and the new label on new ones within one `RECENT CONVERSATION` block — acceptable, mirroring the `topic_id`-nullable-on-old-rows precedent at `:435`. If that is not acceptable, specify a refresh policy instead; do not leave it unstated. |
 
 ## Owner Rulings (2026-09-05, via /ask-me)
 
