@@ -354,7 +354,10 @@ def find_session_by_issue(issue_number: int, include_terminal: bool = False):
         # WRITE created so the subsequent READ finds it (#1558).
         local_id = f"sdlc-local-{issue_number}"
         try:
-            local = AgentSession.rows_for_session_id(local_id)
+            # Order FIRST (eng rows lead, newest-first within each group), then
+            # narrow, then take the head. Taking the head before narrowing would
+            # resurrect a terminal eng row as the live session.
+            local = AgentSession.rows_for_session_id(local_id, prefer_type="eng")
             # Verify the returned record's id actually matches — a query backend
             # (or test mock) that ignores the filter must not yield a false hit.
             local = [s for s in local if getattr(s, "session_id", None) == local_id]
@@ -364,9 +367,7 @@ def find_session_by_issue(issue_number: int, include_terminal: bool = False):
                     for s in local
                     if getattr(s, "status", None) not in _TERMINAL_ISSUE_LOOKUP_STATUSES
                 ]
-            for s in local:
-                if getattr(s, "session_type", None) == "eng":
-                    return s
+            # An empty set falls through to the message_text regex fallback.
             if local:
                 return local[0]
         except Exception as e:
@@ -464,12 +465,11 @@ def find_session(
     # Step 1: explicit session_id argument wins over everything below.
     if session_id:
         try:
-            sessions = AgentSession.rows_for_session_id(session_id)
-            if sessions:
-                for s in sessions:
-                    if getattr(s, "session_type", None) == "eng":
-                        return s
-                return sessions[0]
+            # No rows is NOT an answer: fall through to Step 2 (issue-based),
+            # Step 3 (env var) and auto-ensure. Never return this call directly.
+            found = AgentSession.newest_for_session_id(session_id, prefer_type="eng")
+            if found is not None:
+                return found
         except Exception as e:
             logger.debug(f"find_session by explicit id failed: {e}")
 
@@ -489,12 +489,11 @@ def find_session(
     env_id = os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
     if env_id:
         try:
-            sessions = AgentSession.rows_for_session_id(env_id)
-            if sessions:
-                for s in sessions:
-                    if getattr(s, "session_type", None) == "eng":
-                        return s
-                return sessions[0]
+            # No rows is NOT an answer: fall through to auto-ensure below.
+            # Never return this call directly.
+            found = AgentSession.newest_for_session_id(env_id, prefer_type="eng")
+            if found is not None:
+                return found
         except Exception as e:
             logger.debug(f"find_session by env id failed: {e}")
 

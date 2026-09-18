@@ -100,14 +100,11 @@ def _reload_session(session: AgentSession):
         session_id = getattr(session, "session_id", None)
         if not session_id:
             return session
-        matches = AgentSession.rows_for_session_id(session_id)
-        if not matches:
-            return session
-        # Prefer a PM session (canonical owner of stage_states)
-        for candidate in matches:
-            if getattr(candidate, "session_type", None) == "eng":
-                return candidate
-        return matches[0]
+        # Prefer a PM session (canonical owner of stage_states); newest otherwise.
+        # An empty row set returns the ORIGINAL session, never None — the same
+        # contract ``_reload_ledger`` states below.
+        matches = AgentSession.rows_for_session_id(session_id, prefer_type="eng")
+        return matches[0] if matches else session
     except Exception as e:
         logger.debug(f"update_stage_states: reload failed: {e}")
         return session

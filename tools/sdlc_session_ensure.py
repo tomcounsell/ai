@@ -773,6 +773,13 @@ def ensure_session(
                 if resolved is not None:
                     # Gate on PM session type so PM stage_states never land on
                     # a Dev/Teammate session during cross-role debugging.
+                    #
+                    # Deliberately NOT a ``prefer_type="eng"`` resolver call
+                    # (#3091): the shape differs because the question differs.
+                    # ``find_session`` above already chose among the rows. This
+                    # tests one already-resolved row's type; does not choose among rows.
+                    # Replacing it with a preference would turn a hard gate into
+                    # a ranking and let a non-eng row through.
                     if getattr(resolved, "session_type", None) == "eng":
                         # Gate on non-terminal status (AD1): if the bridge session
                         # finalized between env injection and this call, fall

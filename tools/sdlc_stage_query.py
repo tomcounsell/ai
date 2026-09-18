@@ -86,13 +86,14 @@ def _find_session_by_id(session_id: str):
 
         attempts = 0
         for attempts in class_set_retry_attempts():  # noqa: B007 — final value used below
-            sessions = AgentSession.rows_for_session_id(session_id)
-            if sessions:
-                # Prefer eng sessions (they own stage_states); newest otherwise
-                for s in sessions:
-                    if getattr(s, "session_type", None) == "eng":
-                        return s
-                return sessions[0]
+            # Eng sessions own stage_states, so the resolver's stable partition
+            # puts eng rows first and degrades to newest-first otherwise.
+            # A ``None`` here is NOT an answer: only the retry loop owns the
+            # empty case, so keep this call inside it and fall through to the
+            # next attempt rather than returning.
+            found = AgentSession.newest_for_session_id(session_id, prefer_type="eng")
+            if found is not None:
+                return found
         log_class_set_exhaustion(logger, "_find_session_by_id", session_id, attempts)
         return None
     except Exception as e:
