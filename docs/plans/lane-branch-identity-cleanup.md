@@ -88,15 +88,62 @@ The work is internal: no new dependencies, no external APIs, no ecosystem patter
 
 ## Spike Results
 
-_placeholder_
+### spike-1: Does git already refuse to delete a branch that a live worktree has checked out?
+- **Assumption**: "Cleanup can destroy the branch the worktree is standing on, so the fix must add a checked-out-branch refusal."
+- **Method**: prototype (throwaway repo + linked worktree, executed 2026-09-18)
+- **Finding**: **git already refuses, for both `-d` and `-D`.** `git branch -d feat` and `git branch -D feat` both exit 1 with `error: cannot delete branch 'feat' used by worktree at '<path>'`. The assumption is **false as stated**.
+- **Confidence**: high (executed, not read)
+- **Impact on plan**: This **reframes acceptance criterion 2**. The damage in the incident was never "deleted the branch the worktree was on" — git would have blocked that. The damage was the *inverse*: cleanup deleted `session/dev-6db9c943`, a branch that was **not** checked out anywhere and therefore deletable, while the branch actually holding the work (`session/cruft-auditor-exception-checks`) was never considered. The fix is therefore about **naming the right target**, not about adding protection to the wrong one. The plan still adds an explicit pre-check (Task 3) so the refusal is a named, logged, tested decision rather than an incidental git error string — AC 2 must be provable by a test that does not depend on git's error message.
+
+### spike-2: What does the branch read return under a detached `HEAD`?
+- **Assumption**: "`git rev-parse --abbrev-ref HEAD` yields a usable branch name."
+- **Method**: prototype (same throwaway repo, `git checkout --detach`)
+- **Finding**: it returns the literal string **`HEAD`**. `checkpoint_branch_state` (`agent_session_queue.py:608-616`) does not special-case this, so a detached lane records `branch_name = "HEAD"` on the ORM row.
+- **Confidence**: high (executed)
+- **Impact on plan**: the resolver must treat `"HEAD"` as *no branch*, never as a branch name. Any consumer handed `None` must degrade safely: cleanup skips entirely (nothing nameable to delete), and the launch guard must not attempt `git checkout HEAD`. This is not a corner case — spike-3 shows detached lanes are the majority of the divergence.
+
+### spike-3: How common is slug/branch divergence in the live fleet?
+- **Assumption**: "Divergence is rare and exotic."
+- **Method**: code-read + measurement — `git worktree list --porcelain` compared against `session/{slug}`, run 2026-09-18 on this machine
+- **Finding**: **7 of 31 lanes (23%) diverge.** Five are detached `HEAD` (`nightly-baseline`, `nightly-triage-adea87c6`, `pr-2856-review`, `pr-3080-review`, `pr-3140-review`), two are on a differently-named branch (`eval-code-simplifier` → `eval/code-simplifier`, `pr-3171-review` → `redis-client-accessor-3003`). This reproduces the issue's recon number exactly.
+- **Confidence**: high (measured)
+- **Impact on plan**: confirms the detached-`HEAD` path (spike-2) is the dominant shape and must be a first-class case, not an afterthought. Also supplies the AC-6 sweep command verbatim.
+
+### spike-4: What does the #1646 predicate do when handed a branch that does not exist?
+- **Assumption**: "A stale branch name could cause the unmerged guard to mis-fire dangerously."
+- **Method**: code-read — `merged_via_ancestor` (`worktree_manager.py:54-62`) runs `git merge-base --is-ancestor <branch> <base>` and returns `returncode == 0`.
+- **Finding**: a nonexistent branch makes git exit non-zero, so the predicate returns `False`, and `safe_delete_branch` takes the `skipped_unmerged` fail-safe path. **The guard fails safe on a bogus name** — it preserves rather than deletes.
+- **Confidence**: high
+- **Impact on plan**: the #1646 defect here is not "deletes unmerged work"; it is "**silently guards nothing**". It reports `[unmerged-branch-guard] branch 'X' preserved` about a branch that may not even exist, while the real work branch goes unexamined. AC 3 must therefore assert the predicate is *invoked with* the work-holding branch, not merely that nothing was deleted.
 
 ## Data Flow
 
-_placeholder_
+Branch identity across one turn, today (the numbers are `session_executor.py` lines unless noted):
+
+1. **Entry point** — a Telegram message becomes an `AgentSession` row; the worker dequeues it and calls the executor.
+2. **`:1400-1466` branch resolution** — `resolve_branch_for_stage` / slug mapping produces `resolved_branch = f"session/{slug}"`; `branch_name` is bound at `:1430` (slug path) or `:1466` (no-slug path). **This is the last write to `branch_name` in the entire function.**
+3. **`:1468-1491` #887 guard** — refuses an eng session with a slug running in the repo root. Reads `working_dir`, not `branch_name`. Unaffected by this plan.
+4. **`:1494-1515` #1377 launch guard** — `verify_worktree_branch(working_dir, branch_name)` compares the live `HEAD` against the derived name. Clean mismatch → auto `git checkout`; dirty mismatch or git failure → raise.
+5. **Harness runs** — `claude -p` executes inside the worktree. **The agent may `git checkout` freely. Nothing observes this.**
+6. **`:2781` `mark_work_done(working_dir, branch_name)`** — archives the plan, commits, returns to main, using the stale name in the commit message and as the return target.
+7. **`:2787` `safe_delete_branch(working_dir, branch_name, predicate=merged_via_ancestor)`** — the destructive act, on the stale name.
+8. **`finally:` `checkpoint_branch_state(session)`** (`agent_session_queue.py:593`) — reads the live `HEAD` and writes it to `AgentSession.branch_name` + `commit_sha`. **This runs *after* step 7**, so the only component that ever learns the truth learns it too late to inform the deletion.
+9. **Next turn** — re-enters at step 2, re-derives `session/{slug}`, and step 4 refuses because step 7 deleted it. `derived_branch_name` (`models/agent_session.py:1841`) would have masked a row-only fix anyway: it returns `f"session/{s}"` whenever a slug exists, discarding what step 8 recorded.
+
+**The shape of the bug is an ordering inversion plus a discarded record.** Steps 7 and 8 are in the wrong order, and step 9 throws away step 8's output. Both must change together, or the fix is partial.
 
 ## Why Previous Fixes Failed
 
-_placeholder_
+No prior fix targeted this defect, so strictly there is nothing to post-mortem. What is worth recording is why three *correct* guards stacked on top of each other still produced a dead session — and why the one prior fix that solved this exact pattern did not generalise.
+
+| Prior fix | What it did | Why it did not prevent this |
+|-----------|-------------|-----------------------------|
+| #1377 / `verify_worktree_branch` | Refuses to launch when the worktree is not on the expected branch | It trusts the caller's `expected_branch` string absolutely. A guard that validates *actual* against a *derived* expectation cannot detect that the expectation itself is wrong. |
+| #1646 / `safe_delete_branch` + `merged_via_ancestor` | Refuses to delete a branch with unmerged commits | Same flaw, same cause: it guards the branch it is *handed*. Given a stale name it fails safe (spike-4) and logs a reassuring "preserved" line about a branch nobody was going to lose. |
+| #887 / main-checkout guard | Refuses eng-with-slug sessions in the repo root | Correct and orthogonal. It checks the *directory*, never the branch, so it was never going to catch this. |
+| PR #2792 / `tools/lane_identity.py` | Replaced slug *derivation* with a single recorded slug on `PipelineLedger.slug` | **Solved this exact pattern one level up and stopped there.** Its docstring warns that "derivation wearing adoption's clothes" is the defect, and it disciplined the slug — but the branch, which is downstream of the slug, kept being re-derived by every consumer. |
+
+**Root cause pattern:** *a guard can only be as correct as the identity it is handed.* Every guard above was built to validate a value; none of them owns the value. As long as branch identity is re-derived at each call site, adding guards multiplies the number of places that can confidently assert the wrong thing. The remedy is the #2792 remedy: **record the identity once, read it everywhere, never re-derive.**
 
 ## Architectural Impact
 
