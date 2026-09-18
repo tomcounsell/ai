@@ -27,6 +27,7 @@ for how a global skill layers in repo-specific behavior, and
 | officecli | User + Model | Create, inspect, and edit Office docs (.docx/.xlsx/.pptx) |
 | prime | Infra | Codebase onboarding and architecture deep-dive |
 | reading-sms-messages | Model only | Read SMS/iMessage from the macOS Messages app |
+| rsi | Infra | Interview Tom on RSI prioritization with him present; every answer is written back through `valor-improve` at once. The one sanctioned exception to charter §9 |
 | sdlc | User + Model | Single-stage router — assess state, dispatch ONE sub-skill, return |
 | sentry | User + Model | Check Sentry for unresolved issues and run triage |
 | setup | Infra | Configure a new machine for the Valor bridge |

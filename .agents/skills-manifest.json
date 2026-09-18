@@ -797,6 +797,14 @@
       ]
     },
     {
+      "name": "rsi",
+      "scope": "project",
+      "source": ".claude/skills/rsi/SKILL.md",
+      "source_files": {},
+      "target": null,
+      "resources": []
+    },
+    {
       "name": "zoom-out",
       "scope": "global",
       "source": ".claude/skills-global/zoom-out/SKILL.md",

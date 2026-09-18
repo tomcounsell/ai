@@ -56,7 +56,16 @@ def inventory(root: Path) -> list[dict]:
         names.add(name)
         target_base = "skills-global" if scope == "global" else "skills"
         source_base = "skills-global" if scope == "global" else "skills"
-        if entry["target"] != f".agents/{target_base}/{name}":
+        if entry["target"] is None:
+            # Claude-only: the skill needs a runtime Codex lacks (a human in the
+            # loop via AskUserQuestion, say), so no Codex procedure is maintained.
+            if entry["source"] is None:
+                raise ValueError(f"Skill {name} has neither a Claude source nor a Codex target")
+            if entry["source_files"] or entry["resources"]:
+                raise ValueError(
+                    f"Claude-only skill {name} must have empty source_files and resources"
+                )
+        elif entry["target"] != f".agents/{target_base}/{name}":
             raise ValueError(f"Invalid target for {name}")
         if entry["source"] is None:
             if entry["source_files"]:
@@ -114,10 +123,14 @@ def check(root: Path) -> dict:
     }
     if source_paths != {e["source"] for e in entries if e["source"] is not None}:
         errors.append("Claude source inventory differs: review newly added/removed skills")
-    if target_paths != {e["target"] for e in entries}:
+    if target_paths != {e["target"] for e in entries if e["target"] is not None}:
         errors.append("Codex target inventory differs: every skill needs one registered target")
     for entry in entries:
         name = entry["name"]
+        if entry["target"] is None:
+            # Claude-only: the source's presence is already enforced above and
+            # there is no Codex folder to fingerprint, link-check, or drift-check.
+            continue
         folder = root / entry["target"]
         try:
             _, description = metadata(folder / "SKILL.md")
@@ -216,7 +229,11 @@ def install(root: Path, target: Path, dry_run: bool = False) -> dict:
     )
     if state.get("version") != 1 or not isinstance(state.get("skills"), dict):
         raise ValueError("Invalid installer ownership state")
-    entries = [entry for entry in inventory(root) if entry["scope"] == "global"]
+    entries = [
+        entry
+        for entry in inventory(root)
+        if entry["scope"] == "global" and entry["target"] is not None
+    ]
     changes, unchanged, conflicts = [], [], []
     # Preflight the entire batch before making any change.
     for entry in entries:

@@ -3,7 +3,9 @@
 This repository maintains 59 Codex skills corresponding one-for-one to its Claude
 skills: 16 project skills and 43 general skills. The Claude sources are unchanged.
 Codex entrypoints are independently maintained rewrites, not symlinks to Claude
-instructions and not generated search-and-replace output.
+instructions and not generated search-and-replace output. One further Claude skill,
+`rsi`, is registered as Claude-only (a null target) because its whole procedure is a
+live interview through `AskUserQuestion`, which has no Codex counterpart.
 
 ## Discovery and installation
 
@@ -94,8 +96,12 @@ corresponding hash refresh fails there rather than rotting unnoticed.
 After a Claude skill changes, review the corresponding Codex procedure and its
 resources, then update only that entry's source hashes to acknowledge the reviewed
 version. For a new Codex-only skill, add its inventory entry and resource paths with
-`"source": null` and `"source_files": {}`. Converted skills keep their real Claude
-source and hashes. A native-only entry cannot hide an existing Claude source.
+`"source": null` and `"source_files": {}`. For a Claude-only skill, one whose
+procedure depends on a Claude runtime feature Codex lacks, register its source with
+`"target": null`, `"source_files": {}`, and `"resources": []`; `check` then skips the
+drift, resource, and link checks for it, and `install` never copies it. Converted
+skills keep their real Claude source and hashes. A native-only entry cannot hide an
+existing Claude source, and a Claude-only entry cannot hide an existing Codex target.
 Do not regenerate native prose from the Claude source: the differences are deliberate.
 For substantial native changes, also run OpenAI's skill-creator quick_validate.py on
 the changed folders and examine realistic positive and negative trigger examples.
@@ -174,6 +180,7 @@ preserves the repository's original project/global distinction.
 | prime | project | [source](../../.claude/skills/prime/SKILL.md) | [Codex](../../.agents/skills/prime/SKILL.md) |
 | reading-sms-messages | project | [source](../../.claude/skills/reading-sms-messages/SKILL.md) | [Codex](../../.agents/skills/reading-sms-messages/SKILL.md) |
 | reclassify | global | [source](../../.claude/skills-global/reclassify/SKILL.md) | [Codex](../../.agents/skills-global/reclassify/SKILL.md) |
+| rsi | project | [source](../../.claude/skills/rsi/SKILL.md) | Claude-only (no Codex procedure) |
 | sdlc | project | [source](../../.claude/skills/sdlc/SKILL.md) | [Codex](../../.agents/skills/sdlc/SKILL.md) |
 | sentry | project | [source](../../.claude/skills/sentry/SKILL.md) | [Codex](../../.agents/skills/sentry/SKILL.md) |
 | setup | project | [source](../../.claude/skills/setup/SKILL.md) | [Codex](../../.agents/skills/setup/SKILL.md) |

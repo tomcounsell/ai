@@ -185,6 +185,42 @@ class SkillInstallationTests(unittest.TestCase):
         manifest.write_text(json.dumps(data))
         self.assertFalse(skills.check(self.root)["ok"])
 
+    def test_claude_only_skill_needs_no_codex_target(self):
+        import shutil
+
+        shutil.rmtree(self.native)
+        manifest = self.root / skills.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["skills"][0].update(target=None, source_files={}, resources=[])
+        manifest.write_text(json.dumps(data))
+        report = skills.check(self.root)
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["global"], 1)
+        skills.install(self.root, self.target)
+        self.assertFalse((self.target / "example").exists())
+        # Editing the Claude source of a Claude-only skill is not drift: there is
+        # no Codex procedure to review against it.
+        (self.source / "SKILL.md").write_text(
+            '---\nname: example\ndescription: "Use for an example task."\n---\n\nChanged.\n'
+        )
+        self.assertTrue(skills.check(self.root)["ok"])
+
+    def test_claude_only_entry_cannot_hide_an_existing_codex_target(self):
+        manifest = self.root / skills.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["skills"][0].update(target=None, source_files={}, resources=[])
+        manifest.write_text(json.dumps(data))
+        errors = skills.check(self.root)["errors"]
+        self.assertTrue(any("target inventory differs" in error for error in errors))
+
+    def test_entry_needs_a_source_or_a_target(self):
+        manifest = self.root / skills.MANIFEST
+        data = json.loads(manifest.read_text())
+        data["skills"][0].update(source=None, target=None, source_files={}, resources=[])
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "neither a Claude source nor a Codex target"):
+            skills.inventory(self.root)
+
     def test_standard_yaml_forms_are_installable(self):
         forms = [
             "name: example\ndescription: Create example reports when requested.",
