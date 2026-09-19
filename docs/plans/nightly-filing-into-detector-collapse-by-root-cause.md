@@ -1459,6 +1459,49 @@ exist). No task was added, removed, or renumbered: the plan stays at 8 tasks.
 
 ---
 
+### Round 7 — 2026-09-19, verdict READY TO BUILD (no concerns) (0 blockers, 0 concerns, 0 nits)
+
+FULL roster, independent: Risk & Robustness, Scope & Value, History & Consistency. Roster gate 3/3
+complete, 0 ungrounded. Run against revision 6 (`036f60846`). **No findings from the war room.**
+
+All three round-6 rows were independently re-verified as closed, each critic checking the plan text
+against `scripts/nightly_regression_tests.py` rather than taking the `Addressed By` cells at their
+word:
+
+- **The blocker HOLDS closed.** Risk & Robustness — the critic that raised it — confirmed the seed
+  branch now acquires its own `open_issues()` and `closed_issue_dispositions()` reads and takes an
+  inline check before `create_issue()` that comments and never re-files on **any** close reason,
+  correctly diverging from `partition_closed_matches()`'s deliberate `COMPLETED` re-file
+  (`:2219-2243`). All three critics independently re-confirmed that `open_issue_map` and
+  `closed_issue_map` really are `dispatch_findings()` locals (`:2774`, `:2777`, inside the function
+  opening at `:2696`), which is what makes the seed branch's own reads necessary rather than
+  duplicative. Test coverage traced: Task 5 cases 3 and 4, the `## Test Impact` `TestBuildSeedPrompt`
+  REPLACE block, and the new `## Success Criteria` row.
+- **Both concerns HOLD closed.** `head_commit` is confirmed already embedded in `seed_title` at
+  `:3209-3211`, so the `seed:{head_commit}` fingerprint threads no new state into the body builder;
+  and `### Flow` now points at `## Data Flow` step 4 as the sole canonical list, with branch counts
+  agreeing across `### Flow`, `## Data Flow` step 4, `## Failure Path Test Strategy`, and Race 2.
+
+All eight line anchors revision 6 introduced or changed (`:2019-2062`, `:2035-2038`, `:2219-2243`,
+`:2247`, `:2774-2779`, `:3209-3211`, `:3222-3235`, `:3240`) were spot-checked and land exactly on the
+code the plan describes — no drift. Scope & Value independently judged revision 6's ~100-line growth
+to be forced by the blocker rather than scope creep: the dual dedup reads and the inline check *are*
+the fix, the rejected-alternative note is documentation hygiene, and the two new test cases are the
+blocker's own regression tests. History & Consistency examined one candidate finding —
+`NIGHTLY_AUTO_FILE` absent from `.env.example` and `config/settings.py` — and dropped it on evidence:
+none of the module's six existing `NIGHTLY_*` tunables are declared there either, so the plan follows
+the established convention rather than deviating from it.
+
+Per-critic verdicts: Risk & Robustness **READY TO BUILD (no concerns)**; Scope & Value **READY TO
+BUILD (no concerns)**; History & Consistency **READY TO BUILD (no concerns)**. Aggregate:
+**READY TO BUILD (no concerns)**. Structural checks all PASS: 8 tasks, no numbering gaps, every
+`Depends On` resolves to a real task id, no cycles, every task carries a `Validates` command, every
+repo path the plan references exists, all four repo-mandated sections are present and substantive,
+and all three `## Prerequisites` check commands pass (`gh auth`, repo resolves to `tomcounsell/ai`,
+`.venv/bin/pytest` present).
+
+---
+
 ## Decisions
 
 Answered by the owner on 2026-09-18. These were `## Open Questions` 1-3; they are recorded here
