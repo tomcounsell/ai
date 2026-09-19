@@ -268,39 +268,50 @@ class TestNoDualSessionCreation:
 
 
 class TestSdkClientEnvVar:
-    """Fix 4a: Verify VALOR_SESSION_ID is present in sdk_client.py source code."""
+    """Fix 4a: Verify VALOR_SESSION_ID is injected into the harness subprocess env.
+
+    The injection site moved out of agent/sdk_client.py (now a thin
+    re-export shim over agent.session_runner.harness.claude, plan #2000
+    Task 2.2) to the ``_harness_env`` dict built in
+    agent/session_executor.py (issue #2206) -- see
+    agent/hooks/session_resolver.py's module docstring, which documents
+    session_executor.py as the injection site consumers rely on.
+    """
 
     def test_valor_session_id_in_source(self):
-        """sdk_client.py contains the VALOR_SESSION_ID env var injection code."""
+        """session_executor.py contains the VALOR_SESSION_ID env var injection code."""
         from pathlib import Path
 
-        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_client_path.read_text()
+        session_executor_path = (
+            Path(__file__).parent.parent.parent / "agent" / "session_executor.py"
+        )
+        source = session_executor_path.read_text()
 
-        # Verify the env var injection code exists
-        assert 'env["VALOR_SESSION_ID"] = session_id' in source
+        # Verify the env var injection code exists, keyed off session.session_id.
+        assert '"VALOR_SESSION_ID": session.session_id or ""' in source
         assert "VALOR_SESSION_ID" in source
 
     def test_valor_session_id_conditional_on_session_id(self):
-        """VALOR_SESSION_ID is only set when session_id is provided (not None)."""
+        """VALOR_SESSION_ID falls back to "" (falsy) rather than a raw None.
+
+        Downstream consumers read it with a truthy check (e.g.
+        ``os.environ.get("VALOR_SESSION_ID")`` in
+        agent/hooks/session_resolver.py::resolve_inflight_session), so an
+        empty string must behave the same as "not provided" -- the env var
+        assignment must never hand a bare ``session.session_id`` through
+        when it could be None/empty.
+        """
         from pathlib import Path
 
-        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_client_path.read_text()
+        session_executor_path = (
+            Path(__file__).parent.parent.parent / "agent" / "session_executor.py"
+        )
+        source = session_executor_path.read_text()
 
-        # The env var should be inside an `if session_id:` block
-        assert "if session_id:" in source
-        # Find the line with VALOR_SESSION_ID and verify it's after the condition
-        lines = source.split("\n")
-        found_condition = False
-        found_env_var = False
-        for line in lines:
-            if "if session_id:" in line and "VALOR" not in line:
-                found_condition = True
-            if found_condition and "VALOR_SESSION_ID" in line:
-                found_env_var = True
-                break
-        assert found_env_var, "VALOR_SESSION_ID should be set inside if session_id: block"
+        assert '"VALOR_SESSION_ID": session.session_id or ""' in source, (
+            "VALOR_SESSION_ID should fall back to an empty string (falsy), "
+            "not a bare/possibly-None session.session_id"
+        )
 
 
 # ── Fix 5: Full chain integration ────────────────────────────────────────────

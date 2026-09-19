@@ -113,7 +113,12 @@ def _status_of(session_id: str):
 def test_sdk_hook_blocks_over_budget(make_session, monkeypatch):
     """Over-budget → block dict + budget_tripped flag set. No loop running."""
     s = make_session(calls=10)
-    monkeypatch.setenv("AGENT_SESSION_ID", s.session_id)
+    # #2205: the hook resolves the in-flight session via VALOR_SESSION_ID (the
+    # true session_id, filtered directly) first, falling back to
+    # AGENT_SESSION_ID (the Popoto AutoKey `.id`, a primary-key lookup) only
+    # when that's absent. Setting AGENT_SESSION_ID to `s.session_id` looks up
+    # the wrong identifier namespace and silently resolves no session.
+    monkeypatch.setenv("VALOR_SESSION_ID", s.session_id)
     _reset_liveness_cooldown()
 
     result = _run_sdk_hook()
@@ -128,7 +133,9 @@ def test_sdk_hook_blocks_over_budget(make_session, monkeypatch):
 def test_sdk_hook_allows_under_budget(make_session, monkeypatch):
     """Under budget → no block; the common path is unchanged (liveness fires)."""
     s = make_session(calls=1)
-    monkeypatch.setenv("AGENT_SESSION_ID", s.session_id)
+    # See test_sdk_hook_blocks_over_budget above: VALOR_SESSION_ID (session_id),
+    # not AGENT_SESSION_ID (the AutoKey `.id`), resolves this fixture's row.
+    monkeypatch.setenv("VALOR_SESSION_ID", s.session_id)
     _reset_liveness_cooldown()
 
     result = _run_sdk_hook()

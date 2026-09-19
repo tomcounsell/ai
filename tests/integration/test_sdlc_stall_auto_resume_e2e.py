@@ -31,6 +31,7 @@ import pytest
 from agent.pipeline_ledger import PipelineLedger
 from agent.steering import peek_steering_messages
 from models.agent_session import AgentSession
+from models.room import room_id_for_session
 from reflections import sdlc_progress
 
 _PROJECT_KEY = "test-sdlc-stall-2696"
@@ -77,6 +78,13 @@ def eng_session():
         session.session_type = "eng"
         session.status = status
         session.is_ledger = is_ledger
+        # #2755's `_pick_steer_target` filters both the live and resumable
+        # rungs on `slug == lane_slug` (issue #3270 guard against steering a
+        # session belonging to a different lane, or a slugless human thread).
+        # A real eng session for this lane always carries its slug — set here
+        # so this fixture's row is actually eligible for the "steer" rung
+        # instead of silently falling through to "create".
+        session.slug = _SLUG
         session.message_text = "e2e fixture"
         session.updated_at = datetime.now(tz=UTC)
         session.save()
@@ -146,7 +154,11 @@ def test_steer_lands_on_the_real_steering_queue(project, eng_session, stalled_la
     assert stalled_lane == [], "the happy path must page nobody"
     assert "1 steered" in result["summary"]
 
-    pending = peek_steering_messages(session.session_id)
+    # #2642/#2685: a PM-originated steer with a resolvable Room now writes to
+    # the Room queue (steering:room:{room_id}), not the legacy per-session
+    # queue — the worker's turn-boundary drain dual-reads both (see
+    # agent/session_runner/runner.py), so the read here must too.
+    pending = peek_steering_messages(session.session_id, room_id=room_id_for_session(session))
     assert len(pending) == 1, f"expected one steering message, got {pending}"
     message = pending[0]
     assert message["sender"] == "pm"
@@ -181,7 +193,9 @@ def test_action_cooldown_suppresses_a_second_tick(project, eng_session, stalled_
     sdlc_progress._check_project_stalls(project)
     sdlc_progress._check_project_stalls(project)
 
-    assert len(peek_steering_messages(session.session_id)) == 1
+    assert (
+        len(peek_steering_messages(session.session_id, room_id=room_id_for_session(session))) == 1
+    )
     assert stalled_lane == []
 
     redis = sdlc_progress._get_redis()

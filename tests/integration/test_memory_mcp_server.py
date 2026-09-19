@@ -140,10 +140,28 @@ def test_fresh_shell_import_resolution():
     ``python`` binary cannot resolve project modules with only
     ``PYTHONPATH`` set — and Claude Code sessions would silently break.
 
-    Note: ``PATH`` is set to include /opt/homebrew/bin so the spawned
-    ``python3`` resolves to a Python that has the ``mcp`` SDK
-    installed. ``/usr/bin/python3`` does not (it is the system Python
-    on Darwin).
+    The registration (``scripts/update/mcp_memory.py::_expected_entry``)
+    invokes bare ``"python3"`` with only ``PYTHONPATH`` in its env, relying
+    on whatever the spawning process's ``PATH`` resolves that name to. The
+    real spawning process is the worker, whose launchd plist
+    (``~/Library/LaunchAgents/com.valor.worker.plist``) puts
+    ``.venv/bin`` ahead of everything else on ``PATH`` and sets no
+    ``VIRTUAL_ENV``/activation vars — so in production ``python3`` resolves
+    straight to the repo venv's interpreter binary, invoked unactivated.
+    This test reproduces exactly that: it invokes ``sys.executable`` (the
+    venv interpreter PATH would resolve to) directly by path, with the
+    venv-activation vars stripped and only ``PYTHONPATH`` set, so a pass
+    here proves ``PYTHONPATH`` alone is sufficient for module resolution —
+    matching what actually happens when the worker spawns this server.
+
+    An earlier version of this test invoked bare ``"python3"`` with
+    ``PATH`` pointed at ``/opt/homebrew/bin`` on the theory that the
+    Homebrew interpreter had the ``mcp`` SDK installed system-wide. That
+    was never a repo-managed invariant (no setup step installs ``mcp``
+    outside the venv) and Homebrew's Python gets reinstalled across
+    version bumps, wiping any such manual install — so that PATH doesn't
+    match production either. Resolving the interpreter by path removes
+    the dependency on that stale assumption entirely.
 
     ``PYTHONPATH`` is passed as an explicit override rather than through
     ``subprocess_env(project_root=...)``: this test's subject IS module
@@ -164,7 +182,7 @@ def test_fresh_shell_import_resolution():
     import subprocess
 
     env = subprocess_env(
-        PATH="/opt/homebrew/bin:/usr/bin:/bin",
+        PATH="/usr/bin:/bin",
         PYTHONPATH=_project_root(),
     )
     for steering_var in (
@@ -176,7 +194,7 @@ def test_fresh_shell_import_resolution():
     ):
         env.pop(steering_var, None)
     result = subprocess.run(
-        ["python3", "-m", "mcp_servers.memory_server", "--help"],
+        [sys.executable, "-m", "mcp_servers.memory_server", "--help"],
         capture_output=True,
         text=True,
         env=env,
