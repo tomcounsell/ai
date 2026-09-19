@@ -567,6 +567,16 @@ def _health_real_inputs(limit: int) -> list[Input]:
     return [Input(text, "real", ctx) for text, ctx in ordered[:limit]]
 
 
+_HEALTH_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " Default to healthy=true. Answer healthy=false only when the window"
+    " shows the same tool call with the same arguments repeated five or more times in a"
+    " row with nothing new between them, or a run of ten or more searches, globs, or web"
+    " fetches with no file read, edit, write, or command. Short windows, browser"
+    " automation, exploratory reads of different files, chunked reads with changing"
+    " offsets, and commands that differ from each other are all healthy=true."
+)
+
+
 _site(
     Site(
         id=HEALTH_JUDGE.site,
@@ -581,6 +591,7 @@ _site(
         budget_s=None,
         fixtures=lambda: _fixtures(HEALTH_ACTIVITY, FIXTURES_PER_SITE),
         real_inputs=_health_real_inputs,
+        candidate_system=_HEALTH_CANDIDATE_SYSTEM,
     )
 )
 
