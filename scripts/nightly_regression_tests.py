@@ -1866,7 +1866,8 @@ def group_body_failure_cascades(
     raise the same exception with byte-identical normalized first lines will
     merge into one umbrella. That is accepted as the smaller harm — the node
     list is in the umbrella's body for exactly this reason and a reader can
-    split it, whereas 39 separate issues drowned the two real causes entirely. The grouping rule is
+    split it, whereas 39 separate issues drowned the two real causes
+    entirely. The grouping rule is
     exact equality of the normalized line, nothing fuzzier, precisely to keep
     that risk small: the 2026-08-24 second cause (worker-key assertions inside
     a TypeError batch) had a different first line and stays separate under it.
