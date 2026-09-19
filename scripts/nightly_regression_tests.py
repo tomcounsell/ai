@@ -104,14 +104,24 @@ the same key :func:`cascade_title` hashes — and the signature is persisted
 alongside the issue number it produced in ``cascade_issues``. A title is a
 rendering that can be edited by a human or changed by a future version of this
 script; matching on one is how the same defect gets filed twice. The recorded
-number is the primary lookup and the title match is the fallback that bootstraps
-it, since the triage session, not this script, is what actually opens the issue,
-so its number is only discoverable on a later run.
+number is the primary lookup and the title match covers an umbrella this machine
+has no record of — one filed by another machine, or before this machine's state
+file existed.
+
+**This script creates every issue it files** (:func:`create_issue`, #3418), so a
+number is known the instant an issue exists and is recorded against the finding's
+signature in the same run. A filing loop that runs once, in Python, under the
+run lock is what makes that guarantee hold. The investigation session is
+dispatched afterward, to investigate and comment on numbers that already exist;
+it never creates one.
 
 ``cascade_issues`` is per-machine state, like ``dispatched_nodes``. The open-issue
-read (:func:`open_issues`) is the only check that spans machines, and it is a
-read-then-act check with no lock — two machines dispatching inside the same
-window still both file.
+read (:func:`open_issues`) is the only check that spans machines. It is refreshed
+immediately before each create, which bounds the check-then-act window to one
+``gh`` round-trip rather than the whole filing loop — GitHub offers no
+idempotency key on issue creation, so two machines filing inside that window
+still both file, and every created body carries a fingerprint
+(:data:`FINGERPRINT_MARKER_TEMPLATE`) so such a pair is identifiable afterwards.
 
 Collection-aware baseline (issue #2823)
 ----------------------------------------
@@ -119,9 +129,10 @@ The persisted state records which ``collection`` produced it. When the
 recorded collection differs from ``COLLECTION_PATHS`` (the widening night, or
 any future change of scope), the run takes the existing first-run baseline
 path: it seeds ``dispatched_nodes`` with the whole currently-failing
-population and dispatches **one** umbrella triage session, rather than filing
-every one of those nodes individually — reopening the #2429/#2430/#2462 churn
-the dedup set exists to prevent.
+population and files **one** umbrella issue for it
+(:func:`file_seed_umbrella`), rather than filing every one of those nodes
+individually — reopening the #2429/#2430/#2462 churn the dedup set exists to
+prevent.
 
 A post-run TTFT gate (issue #1227) checks cold-start latency and logs a
 regression without changing the exit code. It used to page; it now only logs,
@@ -147,7 +158,7 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -322,32 +333,33 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 # How many open issues the pre-file dedup read pulls. The `gh issue list` REST
 # path is used deliberately over `--search`, which is index-backed and lags
 # behind issue creation by minutes — exactly the window in which two machines'
-# triage sessions file the same title twice.
+# nightly runs file the same title twice.
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 
-# The one lookup instruction all three issue-filing prompts interpolate: the
-# per-node dispatch, the cascade umbrella, and the re-baseline seed. It hands
-# the agent a REST list command instead of naming GitHub's index-backed lookup,
-# which lags issue creation by minutes -- reading it inside its own lag window
-# is how one dispatch filed the same node three times and the #2960-#2999 wave
-# followed. `8524e765b` established that principle for this module's own reads;
-# the prompts went three more passes still pointing at the index, because each
-# builder carried its own copy of the sentence. One constant, three readers, so
-# they cannot drift apart again.
+# The lookup instruction the investigation prompt interpolates. It no longer
+# frames a dedup-before-filing check -- the detector files every issue itself
+# (`create_issue`, #3418) and the session it dispatches only investigates and
+# comments -- but the session still reads issue state, and it must read it the
+# same way this module does: a REST list command, never GitHub's index-backed
+# lookup, which lags issue creation by minutes. Reading that index inside its
+# own lag window is how one dispatch filed the same node three times and the
+# #2960-#2999 wave followed; `8524e765b` established the principle for this
+# module's own reads and the prompts went three more passes still pointing at
+# the index, because each builder carried its own copy of the sentence.
 #
 # The wording constraint is load-bearing and two gates enforce it from opposite
-# directions. This comment, the constant, every prompt body, and every
+# directions. This comment, the constant, the prompt body, and the
 # prompt-builder docstring must express the prohibition as "the search index"
 # and "the search API" and must never spell the flag or the phrasings out
-# literally: one gate scans the rendered prompts and requires zero hits, and
+# literally: one gate scans the rendered prompt and requires zero hits, and
 # another counts the flag across this whole module and requires exactly the
 # three legitimate mentions in the constant comments above and in
 # `open_issues`' docstring. Spelling a token out here to forbid it adds a
 # fourth and fails a passing build.
 ISSUE_LOOKUP_INSTRUCTION = (
-    "To find out whether an issue already exists, run exactly this ONCE for the "
-    "whole list below and filter the JSON locally on each exact title:\n"
+    "To read the current tracker state of any issue you need context on, run "
+    "exactly this ONCE for the whole list below and filter the JSON locally:\n"
     "  gh issue list --state all --json number,title,state,stateReason --limit 200\n"
     "Do NOT use GitHub's search index or the search API to answer this — that "
     "index lags issue creation by minutes, and reading it inside the lag window "
@@ -385,6 +397,58 @@ ENVIRONMENTAL_ESCALATE_NIGHTS_DEFAULT = 3
 # above; a comment that cannot be posted is logged and the finding is left
 # unrecorded, so the next run retries it rather than losing the recurrence.
 GH_COMMENT_TIMEOUT_SECONDS = 60
+
+# Creating one issue. Same bound and same posture as the comment above: a create
+# that cannot be confirmed is logged, spends no budget, and leaves its node
+# unrecorded, so the next run retries it against fresh GitHub state rather than
+# this run retrying a non-idempotent POST (#3418).
+GH_CREATE_TIMEOUT_SECONDS = 60
+
+# Break-glass kill switch for detector-side issue creation (#3418). Default ON:
+# the detector is the sole creator of nightly issues, so off means the tracker
+# learns nothing new tonight. `NIGHTLY_AUTO_FILE=false` stops creates while
+# leaving recurrence comments intact and logging every would-be filing in full,
+# so an operator can file by hand from logs/nightly_tests.log. It is a kill
+# switch, not a second code path — there is no flag that hands filing back to a
+# triage session, because that is the bug this exists to have ended.
+#
+# Read at CALL time via resolve_bool_knob(), never at import, for the same
+# reason every NIGHTLY_* knob is: `.env` only reaches os.environ through
+# load_env_or_die() inside main(), so an import-time read would freeze this
+# default and make the vault setting inert on the one surface that matters.
+#
+# Provisional/tunable via NIGHTLY_AUTO_FILE. On is the only defensible default;
+# the evidence that would move it is detector-side filing misbehaving on a real
+# night, and the remedy for that is a revert, not a permanent config change.
+AUTO_FILE_DEFAULT = True
+
+# Every body the detector creates carries this marker. The digest is taken over
+# the finding's stable IDENTITY — the node id for a per-node issue,
+# cascade_state_key() for an umbrella, `seed:{head_commit}` for a re-baseline
+# seed — and never over the rendered title: a human can retitle an issue and a
+# future version of this script can change cascade_title(), so a title is a
+# rendering rather than a key, which is why resolve_cascade_issue() already
+# prefers a signature over one. GitHub's REST API offers no Idempotency-Key and
+# no conditional POST (#3418 research), so a caller-generated token embedded in
+# the created resource is the only exact key available: it turns "is this a
+# twin?" into an exact-match question for the in-run collision check, for a
+# human grepping the tracker the morning after, and for any later sweep.
+FINGERPRINT_MARKER_TEMPLATE = "<!-- nightly-fingerprint: {digest} -->"
+
+# How much of a failure message a created issue body carries verbatim. GitHub
+# rejects a body over 65536 characters outright, and a filed issue that posts
+# nothing is worse than a truncated one.
+#
+# Provisional/tunable. 4000 characters is several screens of traceback, which is
+# more than a triager reads before opening the node's own log; evidence that
+# would move it is a real filed issue whose cause was cut off by the truncation.
+MAX_ISSUE_BODY_MESSAGE_CHARS = 4000
+
+# How many node IDs a created cascade umbrella body lists before truncating to a
+# count. Same reasoning and same bound as MAX_COMMENT_NODES_LISTED below: the
+# counts above the list are the load-bearing part, and a body over GitHub's
+# limit files nothing at all.
+MAX_ISSUE_BODY_NODES_LISTED = 200
 
 # How many node IDs a recurrence comment lists before truncating to a count.
 # GitHub rejects an issue comment body over 65536 characters outright, and the
@@ -480,6 +544,32 @@ def resolve_int_knob(name: str, default: int) -> int:
     except ValueError:
         log(f"WARNING: malformed {name}={raw!r} — using default {default}")
         return default
+
+
+def resolve_bool_knob(name: str, default: bool) -> bool:
+    """Read a boolean knob from the environment at CALL time.
+
+    The bool sibling of :func:`resolve_int_knob`, and it exists for the same
+    reason: this script only populates ``os.environ`` from the vault ``.env``
+    inside ``main()`` (:func:`load_env_or_die`), so an import-time read of a
+    nightly knob is always the in-code default whatever the vault says — which
+    would make an operator's break-glass setting inert on the only surface it is
+    ever set for.
+
+    ``1/true/yes/on`` and ``0/false/no/off`` are accepted, case-insensitively.
+    Anything else degrades to ``default`` with a warning rather than raising: a
+    bad knob must never take down the nightly, and reading a typo as ``False``
+    would silently disable a whole night of filing.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    log(f"WARNING: malformed {name}={raw!r} — using default {default}")
+    return default
 
 
 def load_last_run(run_file: Path | None = None) -> dict:
@@ -1405,16 +1495,17 @@ def seeded_nodes(prev: dict) -> set[str]:
 
     A seeded node has **no per-node issue**. The seed files exactly one
     umbrella titled ``Nightly regression baseline: ...``, while the per-node
-    dedup contract in :func:`_build_triage_prompt` keys on a different title,
+    title :func:`dispatch_findings` files under and
+    :func:`partition_already_open` dedups against is a different one,
     ``Nightly regression: {node}``. The two live in separate title namespaces.
 
     That mismatch is what makes a *flapping* seeded node dangerous.
     :func:`carry_dispatched_nodes` drops a node from ``dispatched_nodes`` the
     moment it stops failing, so a seeded node that passes one night and fails
     the next looks unfiled to :func:`compute_dispatch_set`. It then dispatches
-    against a per-node title that never existed, and the triage agent's
-    search-before-file check finds nothing — so it files a fresh issue, and
-    does so again on every subsequent flap. That rebuilds exactly the
+    against a per-node title that never existed, so every dedup read this
+    module takes comes back empty — and it files a fresh issue, and does so
+    again on every subsequent flap. That rebuilds exactly the
     #2429 / #2430 / #2462 duplicate-issue churn this detector exists to end.
 
     The live population makes this concrete rather than theoretical: #2807,
@@ -1485,84 +1576,6 @@ def carry_dispatched_nodes(
     """
     still_failing = prior_dispatched(prev) & set(confirmed_failing)
     return sorted(still_failing | set(just_dispatched))
-
-
-def _build_triage_prompt(
-    dispatch_nodes: list[str],
-    *,
-    dispositions: list[NodeDisposition] | None = None,
-    ledger_path: str | None = None,
-) -> str:
-    """Build the default per-node triage prompt with literal, computed titles.
-
-    Titles are computed in Python — ``f"Nightly regression: {n}"`` — rather
-    than left for the agent to derive, so the same failing node produces a
-    byte-identical title on every machine and the prompt itself pins the
-    dedup contract (#2559).
-
-    The lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
-    with :func:`_build_cascade_prompt` and :func:`_build_seed_prompt` so the
-    three can no longer drift. It hands over a REST list command instead of
-    naming GitHub's index-backed lookup, which lags issue creation by minutes:
-    reading that index inside its own lag window is how the #2960-#2999
-    duplicate wave happened, and ``8524e765b`` established the same principle
-    for this module's own reads a pass before the prompts caught up.
-
-    ``dispositions`` renders what :func:`dispatch_findings` already resolved,
-    one entry per node in the same order. ``None`` and ``[]`` both degrade to
-    the plain prompt, checked before the zip; only a non-empty list of the
-    wrong length raises. ``ledger_path`` appends the session-ledger paragraph,
-    and only a non-``None`` path does — which is what keeps the ledger scoped
-    to this prompt and independently revertible.
-    """
-    titles = [f"Nightly regression: {n}" for n in dispatch_nodes]
-    lines = [
-        "Nightly regression detector found confirmed test failures that have not "
-        "been triaged before.\n"
-        + ISSUE_LOOKUP_INSTRUCTION
-        + "For EACH node below, match the EXACT title given against that JSON. "
-        "If an OPEN issue exists, comment on "
-        "it with any new information. If a CLOSED issue exists, the close reason "
-        "decides: closed as not-planned (duplicate/consolidated) — comment there "
-        "pointing at the recurrence and do NOT open a new issue, the consolidation "
-        "target is the live tracker; closed as completed (fixed) — the failure "
-        "recurring after a fix is new information, open a new issue with EXACTLY "
-        "the title and link the closed one. If no issue exists in any state, open "
-        "a new issue with EXACTLY that title, describing the failure, its likely "
-        "cause, and suggested next steps. Do NOT attempt an auto-hotfix — this is "
-        "an investigation-and-file-an-issue task only.\n",
-    ]
-    if not dispositions:
-        for node, title in zip(dispatch_nodes, titles, strict=True):
-            lines.append(f'- Title: "{title}"\n  Node: {node}')
-    else:
-        for (node, title), disposition in zip(
-            zip(dispatch_nodes, titles, strict=True), dispositions, strict=True
-        ):
-            lines.append(
-                f'- Title: "{title}"\n  Node: {node}\n'
-                f"  Already resolved by the detector: it read all open and closed "
-                f"issues at {disposition.resolved_at} via "
-                f"{disposition.resolved_against} and found no issue carrying that "
-                f'exact title, so its finding is "{disposition.disposition}". Your '
-                f"own lookup above is a second check covering issues created since "
-                f"that read, not a re-derivation of it."
-            )
-    if ledger_path is not None:
-        lines.append(
-            f"\nSession ledger: {ledger_path}\n"
-            "Read that file FIRST on every turn, before opening anything. Its "
-            '"entries" array is exactly the list above and its "filed" array is '
-            "what this session has already opened. Skip any entry whose node "
-            'already appears in "filed". Immediately after each `gh issue create` '
-            'returns, append {"number": N, "title": ..., "node": ...} to '
-            '"filed" and save the file BEFORE moving on to the next entry — that '
-            "ordering is the whole point, since a turn replayed mid-list reads "
-            "this file to learn what its predecessor already did. If the file is "
-            'missing or cannot be parsed as JSON, treat it as if "filed" were '
-            "empty and rely on the lookup above."
-        )
-    return "\n".join(lines)
 
 
 _WORKER_RE = re.compile(r"\[(gw\d+)\]")
@@ -1851,9 +1864,10 @@ def group_body_failure_cascades(
 
     **False-merge risk, stated plainly:** two genuinely distinct defects that
     raise the same exception with byte-identical normalized first lines will
-    merge into one umbrella. That is accepted as the smaller harm — the
-    triage session reads the node list and can split the issue, whereas 39
-    separate issues drowned the two real causes entirely. The grouping rule is
+    merge into one umbrella. That is accepted as the smaller harm — the node
+    list is in the umbrella's body for exactly this reason and a reader can
+    split it, whereas 39 separate issues drowned the two real causes
+    entirely. The grouping rule is
     exact equality of the normalized line, nothing fuzzier, precisely to keep
     that risk small: the 2026-08-24 second cause (worker-key assertions inside
     a TypeError batch) had a different first line and stays separate under it.
@@ -1968,100 +1982,6 @@ def group_setup_error_cascades(
     return cascades, [n for n in node_ids if n not in grouped]
 
 
-def _build_cascade_prompt(cascade: dict) -> str:
-    """Build the umbrella prompt for one cascade — ONE issue, node list collapsed.
-
-    Its lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
-    with :func:`_build_triage_prompt` and :func:`_build_seed_prompt`: a REST
-    list command rather than GitHub's index-backed lookup, which lags issue
-    creation by minutes and produced the #2960-#2999 duplicate wave when it was
-    read inside that window (``8524e765b``). This builder takes no dispositions
-    and no ledger — see the deferral recorded in the plan for #3170.
-    """
-    nodes = cascade["nodes"]
-    workers = ", ".join(cascade["workers"]) or "serial run"
-    if cascade.get("kind") == "body":
-        shape = (
-            f"{len(nodes)} test node(s) whose test BODIES all failed with the same "
-            "normalized error line — one shared root cause (a broken common "
-            "dependency), not independent findings"
-        )
-        error_label = "Shared failure line (normalized)"
-        cause_hint = "the shared root cause"
-    else:
-        shape = (
-            f"{len(nodes)} test node(s) that all errored in fixture SETUP with the same "
-            f"message, on xdist worker(s) {workers}"
-        )
-        error_label = "Shared setup error (normalized)"
-        cause_hint = "the likely cause of the poisoning"
-    return (
-        "Nightly regression detector found a CASCADE: "
-        f"{shape}. This is ONE defect, not "
-        f"{len(nodes)}.\n" + ISSUE_LOOKUP_INSTRUCTION + "Match the EXACT title "
-        "below against that JSON. If an OPEN one exists, comment on it with the "
-        "new occurrence. If a "
-        "CLOSED one exists: closed as not-planned means comment there and do NOT "
-        "re-file (its consolidation target is the live tracker); closed as "
-        "completed means the recurrence is new information — open exactly ONE new "
-        "issue with EXACTLY that title, linking the closed one. If none exists, "
-        "open exactly ONE new issue with EXACTLY that title. Put the full node "
-        "list inside a collapsed <details> section — the body must lead with the "
-        f"shared error and {cause_hint}, not with the node list. Do NOT open "
-        "per-node issues for any node below. Do NOT attempt an auto-hotfix — "
-        "investigate and file only.\n\n"
-        f'Title: "{cascade["title"]}"\n\n'
-        f"{error_label}: {cascade['message']}\n\n"
-        "Affected node IDs:\n" + "\n".join(f"- {n}" for n in nodes)
-    )
-
-
-def _build_seed_prompt(
-    seed_title: str, seeded_nodes: list[str], *, prior_collection: object = None
-) -> str:
-    """Build the re-baseline seed umbrella prompt (issue #2823).
-
-    Extracted out of :func:`main` so all three issue-filing prompts are named,
-    testable functions: an inline string inside a 200-line function cannot be
-    rendered by a test or scanned by a gate, which is how this prompt's copy of
-    the lookup defect went four passes unnoticed.
-
-    Its lookup paragraph is :data:`ISSUE_LOOKUP_INSTRUCTION`, shared verbatim
-    with :func:`_build_triage_prompt` and :func:`_build_cascade_prompt`: a REST
-    list command rather than GitHub's index-backed lookup, which lags issue
-    creation by minutes and produced the #2960-#2999 duplicate wave when it was
-    read inside that window (``8524e765b``).
-
-    Its dedup rule is deliberately stricter than the per-node one and is
-    reproduced verbatim from the inline original: a closed umbrella is
-    commented on and never re-filed, whatever the close reason, because the
-    seed is a declaration and a re-baseline retry at the same commit must not
-    mint a twin. ``prior_collection`` exists because the text opens with the
-    collection the run moved away from, which is a :func:`main` local derivable
-    from neither other parameter; it is keyword-only and defaulted so a
-    two-positional call stays valid. This builder takes no dispositions and no
-    ledger — see the deferral recorded in the plan for #3170.
-    """
-    seed_size = len(seeded_nodes)
-    return (
-        "Nightly regression detector re-baselined its test collection "
-        f"(old={prior_collection!r}, new={COLLECTION_PATHS!r}). "
-        f"The following {seed_size} node(s) were already failing at the "
-        "moment of the re-baseline and have been absorbed into the seed — "
-        "they are NOT individually filed.\n" + ISSUE_LOOKUP_INSTRUCTION + "The EXACT "
-        f'title to match is "{seed_title}". If an open one exists, comment on '
-        "it. If a closed one exists, comment there and do NOT re-file — the "
-        "seed umbrella is a declaration, and a re-baseline retry at the same "
-        "commit must not mint a twin, whatever the close reason. Only if "
-        "neither exists, open ONE umbrella issue with EXACTLY that title, "
-        "summarizing the "
-        "population, its size, and pointing at the persisted state file "
-        "for the full node list. Do NOT file per-node issues for these. Do "
-        "NOT attempt an auto-hotfix.\n\n"
-        "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in seeded_nodes)
-    )
-
-
 def open_issues(
     *,
     limit: int = OPEN_ISSUE_LIST_LIMIT,
@@ -2069,11 +1989,11 @@ def open_issues(
 ) -> dict[str, int] | None:
     """Map ``title -> number`` for every open GitHub issue, or ``None`` if unreadable.
 
-    This is the dedup the triage agent's own search-before-file instruction
-    cannot provide. ``dispatched_nodes`` is per-machine state, so a second
-    machine running the same nightly re-dispatches titles this machine already
-    filed; and GitHub's search index lags issue creation by minutes, so even a
-    single machine's retry can miss its own issue. Reading the REST list
+    This is the only dedup that spans machines. ``dispatched_nodes`` is
+    per-machine state, so a second machine running the same nightly would
+    otherwise file titles this machine already filed; and GitHub's search index
+    lags issue creation by minutes, so even a single machine's retry can miss
+    its own issue. Reading the REST list
     endpoint (``gh issue list``, not ``--search``) sees an issue the instant it
     exists.
 
@@ -2318,6 +2238,245 @@ def comment_on_issue(number: int, body: str, *, dry_run: bool = False) -> bool:
     return True
 
 
+# Truthy, obviously-not-real issue number a --dry-run create returns, the same
+# device and the same reason as DRY_RUN_SESSION_ID: the caller's success path
+# (budget, recorded, cascade_issues, the dispatch payload) is exercised exactly
+# as it would be for real, while nothing is created. A dry run never persists
+# state, so this number never reaches a state file.
+DRY_RUN_ISSUE_NUMBER = -1
+
+_ISSUE_URL_NUMBER_RE = re.compile(r"/issues/(\d+)/?$")
+
+
+def finding_fingerprint(identity: str) -> str:
+    """The sha256 digest of one finding's stable identity.
+
+    See :data:`FINGERPRINT_MARKER_TEMPLATE` for what ``identity`` may be and why
+    it is never the rendered title.
+    """
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def fingerprint_marker(identity: str) -> str:
+    """The hidden fingerprint line every body the detector creates carries."""
+    return FINGERPRINT_MARKER_TEMPLATE.format(digest=finding_fingerprint(identity))
+
+
+def seed_identity(head_commit: str | None) -> str:
+    """The fingerprint identity of a re-baseline seed umbrella: ``seed:{head_commit}``.
+
+    The seed's identity is the baseline it declares, which is the commit — the
+    same value already embedded in ``seed_title``. Two re-baseline retries at one
+    commit therefore resolve to one fingerprint (the absorbed node count can
+    shift between retries while the baseline being declared does not), and
+    re-baselines at different commits to different ones.
+    """
+    return f"seed:{head_commit or 'unknown'}"
+
+
+def _issue_body_failure_section(test: dict | None) -> list[str]:
+    """The failing-phase label and its (truncated) output, for a created body.
+
+    A filed issue has to say what is broken without its reader opening the run
+    logs, so the phase text goes in the body verbatim up to
+    :data:`MAX_ISSUE_BODY_MESSAGE_CHARS`.
+    """
+    for phase in ("setup", "call", "teardown"):
+        message = _phase_text(test, phase) if test else ""
+        if not message:
+            continue
+        truncated = message[:MAX_ISSUE_BODY_MESSAGE_CHARS]
+        suffix = "" if truncated == message else "\n... (truncated)"
+        return [
+            f"- Failing phase: `{phase}`",
+            "",
+            "```",
+            truncated + suffix,
+            "```",
+        ]
+    return ["- Failure output: unavailable in this run's report"]
+
+
+def node_issue_body(node: str, test: dict | None, *, run_at: str, head_commit: str | None) -> str:
+    """The body of a newly created per-node issue.
+
+    Leads with the failure, because a morning's triage is read from the title and
+    the first paragraph; the fingerprint marker is last and hidden.
+    """
+    return "\n".join(
+        [
+            "The nightly regression detector confirmed this test failing on a serial "
+            "re-run, and it has not been triaged before.",
+            "",
+            f"- Node: `{node}`",
+            f"- Run: `{run_at}`",
+            f"- HEAD: `{head_commit or 'unknown'}`",
+            *_issue_body_failure_section(test),
+            "",
+            fingerprint_marker(node),
+        ]
+    )
+
+
+def cascade_issue_body(cascade: dict, *, run_at: str, head_commit: str | None) -> str:
+    """The body of a newly created cascade umbrella issue — ONE issue, node list collapsed.
+
+    Leads with the shared error rather than the node list, which is collapsed and
+    truncated: the blast-radius counts above it are what say whether the defect
+    is getting worse, and a body over GitHub's size limit files nothing at all.
+    """
+    nodes = cascade["nodes"]
+    files = sorted({n.split("::", 1)[0] for n in nodes})
+    workers = ", ".join(cascade["workers"]) or "serial run"
+    if cascade.get("kind") == "body":
+        shape = (
+            f"{len(nodes)} test node(s) whose test BODIES all failed with the same "
+            "normalized error line — one shared root cause, not independent findings"
+        )
+        error_label = "Shared failure line (normalized)"
+    else:
+        shape = (
+            f"{len(nodes)} test node(s) that all errored in fixture SETUP with the "
+            f"same message, on xdist worker(s) {workers}"
+        )
+        error_label = "Shared setup error (normalized)"
+    listed = nodes[:MAX_ISSUE_BODY_NODES_LISTED]
+    lines = [
+        f"The nightly regression detector found a CASCADE: {shape}. This is ONE "
+        f"defect, not {len(nodes)}.",
+        "",
+        f"- {error_label}: `{cascade['message']}`",
+        f"- Blast radius: {len(nodes)} node(s) across {len(files)} file(s)",
+        f"- xdist worker(s): {workers}",
+        f"- Run: `{run_at}`",
+        f"- HEAD: `{head_commit or 'unknown'}`",
+        "",
+        "<details><summary>Affected node IDs</summary>",
+        "",
+        *[f"- `{n}`" for n in listed],
+    ]
+    if len(nodes) > len(listed):
+        lines.append(f"- ...and {len(nodes) - len(listed)} more")
+    lines += ["", "</details>", "", fingerprint_marker(cascade_state_key(cascade))]
+    return "\n".join(lines)
+
+
+def seed_issue_body(
+    seeded: list[str],
+    *,
+    run_at: str,
+    head_commit: str | None,
+    prior_collection: object = None,
+) -> str:
+    """The body of the re-baseline seed umbrella — ONE issue, node list collapsed.
+
+    The seed is a *declaration* of the state a widened collection inherited, not
+    a finding: every node listed was already failing at the moment of the
+    re-baseline and is deliberately absorbed rather than filed individually, and
+    the body has to say so or a morning triager reads a 300-node umbrella as 300
+    new regressions.
+
+    ``prior_collection`` is the collection the run moved away from; it is a
+    :func:`main` local and is keyword-only and defaulted so an unknown prior
+    still renders. The fingerprint is :func:`seed_identity`'s, so two
+    re-baseline retries at one commit resolve to one fingerprint.
+    """
+    listed = seeded[:MAX_ISSUE_BODY_NODES_LISTED]
+    lines = [
+        f"The nightly regression detector re-baselined its test collection and "
+        f"absorbed {len(seeded)} already-failing node(s) into this umbrella. They "
+        "are NOT individually filed and are NOT new regressions — this issue "
+        "declares the known-failing state the widened collection inherited.",
+        "",
+        f"- Prior collection: `{prior_collection!r}`",
+        f"- New collection: `{COLLECTION_PATHS!r}`",
+        f"- Absorbed: {len(seeded)} node(s)",
+        f"- Run: `{run_at}`",
+        f"- HEAD: `{head_commit or 'unknown'}`",
+        "",
+        "<details><summary>Absorbed node IDs</summary>",
+        "",
+        *[f"- `{n}`" for n in listed],
+    ]
+    if len(seeded) > len(listed):
+        lines.append(f"- ...and {len(seeded) - len(listed)} more")
+    lines += ["", "</details>", "", fingerprint_marker(seed_identity(head_commit))]
+    return "\n".join(lines)
+
+
+def create_issue(title: str, body: str, *, dry_run: bool = False) -> int | None:
+    """Create one GitHub issue and return the number GitHub assigned, else ``None``.
+
+    The only path from a nightly finding to a new issue (#3418). Every create
+    happens at this one Python call site, with the dedup check and the create
+    adjacent, so the check and the act cannot drift apart. Filing correctness
+    cannot depend on an actor whose turn may be replayed: 8 findings once became
+    24 issues that way, which is the defect this call site exists to foreclose.
+
+    **Never retries, and no caller may add one.** GitHub's REST API supports no
+    ``Idempotency-Key`` header and no conditional request on an unsafe method, so
+    a retried create is not a retry — it is a second issue. Any failure returns
+    ``None``; the caller then spends no budget and leaves the finding out of
+    ``recorded``, so the next run re-reads live GitHub state and files it then.
+    That is exactly :func:`comment_on_issue`'s contract, for the same reason.
+
+    **Argv contract**, the same concern :func:`provision_baseline_worktree`
+    documents for its own subprocesses: list-form argv, never ``shell=True``; the
+    body on **stdin** via ``--body-file -``, because a cascade body carries a
+    collapsed node list that has been 278 entries long; and every title arrives
+    pre-prefixed (``f"Nightly regression: {node}"``, ``cascade["title"]``,
+    ``seed_title``), so a report-derived string can never lead with a ``-`` and be
+    read as a flag. A report-derived title reaches ``gh`` argv here, not merely a
+    prompt string, which is why the contract is stated rather than re-derived. An
+    empty title or body is refused before any subprocess runs.
+
+    The number is parsed from the issue URL ``gh`` prints on stdout, strictly:
+    whitespace-only output, or a URL with no trailing integer, is a failure
+    rather than a guess, because the number is load-bearing for the budget, for
+    ``cascade_issues``, and for the investigation dispatch. ``gh issue create``
+    has no ``--json`` flag (verified against gh 2.101.0: ``unknown flag: --json``,
+    which would fail flag parsing and file nothing), so the URL is the only
+    machine-readable thing it offers.
+    """
+    if not title.strip() or not body.strip():
+        log(f"WARNING: refusing to create an issue with an empty title or body: {title!r}")
+        return None
+
+    if dry_run:
+        log(f"[DRY RUN] Would create issue {title!r} ({len(body)} chars); nothing filed")
+        return DRY_RUN_ISSUE_NUMBER
+
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "create", "--title", title, "--body-file", "-"],
+            cwd=PROJECT_DIR,
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=GH_CREATE_TIMEOUT_SECONDS,  # timeout-guard: allow
+        )
+        if result.returncode != 0:
+            log(
+                f"WARNING: `gh issue create` for {title!r} exited {result.returncode}: "
+                f"{(result.stderr or '').strip()}"
+            )
+            return None
+        match = _ISSUE_URL_NUMBER_RE.search((result.stdout or "").strip())
+        if match is None:
+            log(
+                f"WARNING: could not read an issue number from `gh issue create` stdout "
+                f"for {title!r}: {result.stdout!r}"
+            )
+            return None
+        number = int(match.group(1))
+    except Exception as exc:  # noqa: BLE001  # TimeoutExpired, FileNotFoundError, ...
+        log(f"WARNING: could not create issue {title!r} ({exc})")
+        return None
+
+    log(f"Filed issue #{number}: {title}")
+    return number
+
+
 def _recurrence_header(run_at: str, head_commit: str | None) -> list[str]:
     """The two facts every recurrence comment leads with: when, and against what."""
     return [
@@ -2363,6 +2522,124 @@ def node_recurrence_comment(node: str, *, run_at: str, head_commit: str | None) 
     return "\n".join([*_recurrence_header(run_at, head_commit), f"- Node: `{node}`"])
 
 
+def seed_recurrence_comment(
+    seeded: list[str], *, run_at: str, head_commit: str | None, prior_collection: object = None
+) -> str:
+    """The comment body recording a re-baseline against an umbrella that exists.
+
+    The second re-baseline at one commit is a retry, not a new declaration, so it
+    comments on the umbrella the first one filed. The absorbed count is the part
+    that can move between retries, so it leads.
+    """
+    return "\n".join(
+        [
+            *_recurrence_header(run_at, head_commit),
+            f"- Re-baselined again, absorbing {len(seeded)} node(s)",
+            f"- Prior collection: `{prior_collection!r}`",
+            f"- New collection: `{COLLECTION_PATHS!r}`",
+        ]
+    )
+
+
+def file_seed_umbrella(
+    seed_title: str,
+    *,
+    body: str,
+    recurrence_body: str,
+    dry_run: bool = False,
+) -> int | None:
+    """The number of the re-baseline seed umbrella, creating it only if none exists.
+
+    The seed path lives in :func:`main`, outside :func:`dispatch_findings`, so
+    neither of that function's opening dedup reads is in scope here and the
+    per-create refresh in :func:`_file_finding` would not help either — it reads
+    open issues only and is structurally blind to a closed umbrella. This
+    function therefore takes its own :func:`open_issues` **and**
+    :func:`closed_issue_dispositions` reads before it creates anything.
+
+    **Its no-re-file rule is deliberately stricter than the per-node one**, and
+    that is why the check is inline here rather than routed through
+    :func:`partition_closed_matches`: a closed umbrella is commented on and
+    **never** re-filed, for every ``state_reason``, ``COMPLETED`` included. The
+    generic path deliberately re-files a ``COMPLETED`` closure because a failure
+    recurring after its fix is new information; a seed is not a failure report
+    but a declaration of a baseline, and a re-baseline retry at the same commit
+    must not mint a twin umbrella. ``closed_epilogue`` supplies the
+    why-no-duplicate sentence so the wording matches the per-node closed path.
+
+    **Both reads fail open**, the module's standing posture: a read that returned
+    ``None`` contributes no answer, the other map still decides, and if neither
+    can answer the umbrella is created — with its own log line, since that is the
+    one path that can mint a twin. The cost is bounded at one twin on a night
+    GitHub was unreadable, where refusing the baseline instead would risk losing
+    a whole night-one population.
+
+    ``NIGHTLY_AUTO_FILE`` gates the create here exactly as it does on the
+    per-node path. The switch stops creates only: both comment branches above
+    run first and are unaffected, so a re-baseline at an umbrella that already
+    exists is still recorded. There is no seed-shaped exemption — a break-glass
+    switch with one path left open is the bug, not a feature.
+
+    Returns the umbrella's number, or ``None`` when **no umbrella can be proven
+    to exist**: the create returned no number, the create was suppressed by the
+    kill switch, or an existing umbrella's recurrence comment did not post. A
+    recurrence that could not be written down has not been reported, so that run
+    has no trustworthy record either — the same contract
+    :func:`comment_on_issue` states for the per-node path, and the caller must
+    not write a baseline off it.
+    """
+    open_map = open_issues()
+    closed_map = closed_issue_dispositions()
+
+    existing = (open_map or {}).get(seed_title)
+    if existing is not None:
+        log(
+            f"Re-baseline umbrella is already open as #{existing} — commenting the "
+            "re-baseline there instead of filing a twin"
+        )
+        if comment_on_issue(existing, recurrence_body, dry_run=dry_run):
+            return existing
+        return None
+
+    closed_entry = (closed_map or {}).get(seed_title)
+    if closed_entry is not None:
+        number, reason = closed_entry
+        log(
+            f"Re-baseline umbrella exists as CLOSED #{number} ({reason or 'unknown'}) — "
+            "commenting there and NOT re-filing, whatever the close reason"
+        )
+        if comment_on_issue(
+            number, recurrence_body + "\n\n" + closed_epilogue(reason), dry_run=dry_run
+        ):
+            return number
+        return None
+
+    if not resolve_bool_knob("NIGHTLY_AUTO_FILE", AUTO_FILE_DEFAULT):
+        # The kill switch gates every create in the module, and the seed umbrella
+        # is a create like any other — the two branches above are comments and
+        # stay live, exactly as they do on the per-node path. Read here rather
+        # than passed down from main() so this function cannot be called from a
+        # future site that forgets to thread the knob; the read is at call time
+        # for the reason AUTO_FILE_DEFAULT documents.
+        #
+        # Returning None is the correct fail-closed answer and not a degradation:
+        # no umbrella can be proven to exist, so main() refuses to write the
+        # baseline and the next run re-seeds. A suppressed night that silently
+        # saved state would mark every absorbed node as filed against nothing.
+        log(
+            f"NIGHTLY_AUTO_FILE is off — not filing the re-baseline umbrella. "
+            f"Would have created:\nTitle: {seed_title}\n{body}"
+        )
+        return None
+
+    if open_map is None and closed_map is None:
+        log(
+            "Seed dedup ran blind (both the open and the closed issue read were "
+            "unreadable) — creating the re-baseline umbrella anyway, failing open"
+        )
+    return create_issue(seed_title, body, dry_run=dry_run)
+
+
 def resolve_cascade_issue(
     cascade: dict,
     open_issue_map: dict[str, int] | None,
@@ -2378,10 +2655,12 @@ def resolve_cascade_issue(
        can retitle an issue and a future version of this script can change
        :func:`cascade_title`. Keying recurrence on the title alone is how the
        same defect gets filed twice.
-    2. The title match, which is the bootstrap. This script does not open issues
-       itself — a triage session does — so the number is undiscoverable on the
-       night of filing and can only be learned by matching the title on a later
-       run. Once learned it is persisted and (1) takes over.
+    2. The title match, which covers an umbrella this machine has no record of.
+       ``cascade_issues`` is per-machine state, so an umbrella filed by another
+       machine — or before this machine's state file existed — is only findable by
+       its title. This script creates its own umbrellas (:func:`create_issue`), so
+       a locally-filed one is recorded with its real number in the same run and
+       never needs this rule; once (1) can answer, it does.
 
     ``None`` from an unreadable open-issue list means "could not tell", and the
     caller fails open by filing.
@@ -2403,8 +2682,11 @@ def partition_already_open(
     the caller can comment on it rather than merely stay quiet.
 
     Keyed on the same ``Nightly regression: {node}`` title
-    :func:`_build_triage_prompt` emits, so the check and the filing contract
-    cannot drift. A per-node finding has no signature to key on the way a
+    :func:`dispatch_findings` hands :func:`create_issue` — the detector owns both
+    the check and the create, so the two cannot drift. The per-create refresh in
+    :func:`_file_finding` keys on that identical string for the same reason: a
+    refresh keyed differently would silently never match. A per-node finding has
+    no signature to key on the way a
     cascade does — the node id *is* its identity, and it is already embedded in
     the title verbatim, so the title is a faithful key here in a way it is not
     for a cascade.
@@ -2428,170 +2710,100 @@ def partition_already_open(
 DRY_RUN_SESSION_ID = "dry-run-session"
 
 
-@dataclass(frozen=True)
-class NodeDisposition:
-    """One node's pre-resolved filing decision, carried across the dispatch boundary.
+def _build_investigation_prompt(issues: list[tuple[int, str]]) -> str:
+    """Build the one prompt this module emits: investigate filed issues, comment.
 
-    Everything here was already established in :func:`dispatch_findings` against a
-    live REST read of the open and closed issue sets. Handing it to the triage
-    agent is what stops the agent re-deriving a decision Python had already made
-    seconds earlier -- the choke point that survived four passes at the duplicate
-    filing bug (#2559, ``8524e765b``, #3134, #3075) because every one of them
-    widened what the script knew without widening what it said.
+    Takes the ``(number, subject)`` pairs the detector filed and GitHub
+    confirmed. Per-node issues, cascade umbrellas and the re-baseline seed
+    umbrella all arrive in that one shape, because the three prompts that used to
+    teach an agent three different filing contracts have nothing left to differ
+    about: the detector creates every issue itself (:func:`create_issue`, #3418),
+    so this session's whole job is root-cause narrative on an issue that already
+    exists.
+
+    **It carries no instruction to add anything to the tracker but a comment, and
+    none may be added.** A prompt that delegated filing is how one night's 8
+    findings became 24 issues — an LLM turn can be replayed, a Python loop
+    cannot. The session's permitted tracker surface is ``gh issue comment`` plus
+    the read in :data:`ISSUE_LOOKUP_INSTRUCTION`, and a gate renders this prompt
+    and requires no creation instruction in it. That is also why the prohibition
+    below is phrased as "commenting is the only tracker write": spelling the
+    forbidden verb out here would put the very string the gate scans for into the
+    text that forbids it, the same trap the wording constraint on
+    :data:`ISSUE_LOOKUP_INSTRUCTION` documents.
+
+    Titles are deliberately absent from the payload. The issue number is the
+    identity now that the detector owns creation, so there is no title contract
+    left to pin in a prompt — :func:`partition_already_open` and
+    :func:`dispatch_findings` own the ``Nightly regression: {node}`` format
+    between them, on the Python side of the boundary where both the check and the
+    create live.
     """
-
-    node: str
-    title: str
-    disposition: str
-    resolved_against: str
-    resolved_at: str
-
-
-def write_triage_ledger(slug: str, entries: list[NodeDisposition]) -> str | None:
-    """Seed ``data/nightly-triage-ledger/{slug}.json`` and return its absolute path.
-
-    The third and cheapest-to-lose of this module's three replay defences. The
-    file records the entries one triage session is permitted to file and an
-    empty ``filed`` array the agent appends to as it goes, so a turn replayed
-    with a fresh context reads what its predecessor already opened instead of
-    starting from zero. The first two defences (a live REST lookup instruction,
-    and the pre-resolved dispositions above) do the real work; this one only has
-    to hold when both are somehow bypassed.
-
-    **Fail-open, deliberately.** Any failure logs a ``WARNING`` naming the slug
-    and returns ``None``; nothing raises into the dispatch path. A ledger that
-    cannot be written must not stop the night from filing, for the same reason
-    :func:`open_issues` returns ``None`` rather than aborting: a silent night
-    during a real regression is the larger harm.
-
-    **The return type is load-bearing.** A path on success, ``None`` on failure
-    and on an empty ``entries`` list. That value is threaded straight into the
-    prompt builder, which emits its ledger paragraph only for a non-``None``
-    path -- so a caller that passes no dispositions gets no file, no paragraph
-    and no dangling instruction to read something that was never created. It is
-    also what makes this defence independently revertible.
-
-    **No file locking, on purpose.** Two sessions share a ledger only when they
-    were dispatched for an identical node set, which the run lock and
-    :func:`compute_dispatch_set` make near-impossible within a machine, and the
-    file is machine-local so two hosts never share one. A lost update degrades
-    the ledger to partial, which falls back to the two stronger defences. The
-    one case worth defending is a same-slug retry landing on a ledger a live
-    session is already appending to, so an existing file whose ``filed`` array
-    is non-empty is left exactly as it is. The write itself goes through a
-    sibling temp file and :func:`os.replace`, so a reader mid-write sees the old
-    content or the new one and never a truncated one -- unparseable JSON is
-    worse for the agent than stale-but-valid JSON.
-    """
-    if not entries:
-        return None
-
-    path = DATA_DIR / "nightly-triage-ledger" / f"{slug}.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError):
-                existing = None
-            if isinstance(existing, dict) and existing.get("filed"):
-                log(
-                    f"Triage ledger for slug={slug} already records filed issue(s) — "
-                    "leaving it as it is so a same-slug retry cannot erase them"
-                )
-                return str(path.resolve())
-        payload = {
-            "slug": slug,
-            "created_at": datetime.now(UTC).isoformat(),
-            "entries": [asdict(e) for e in entries],
-            "filed": [],
-        }
-        tmp_path = path.with_name(f"{path.name}.tmp")
-        tmp_path.write_text(json.dumps(payload, indent=2) + "\n")
-        os.replace(tmp_path, path)
-        return str(path.resolve())
-    except Exception as exc:  # noqa: BLE001  # covers OSError, TypeError, anything
-        log(f"WARNING: could not write triage ledger for slug={slug} ({exc})")
-        return None
+    lines = [
+        "Nightly regression detector filed the issue(s) below and confirmed every "
+        "number with GitHub. They already exist. For EACH one: read the issue, "
+        "investigate the failure it describes, and add what you find as a COMMENT "
+        "on that issue — the likely root cause and the suggested next steps.\n"
+        "Commenting is the only tracker write you may make. Every finding this run "
+        "produced reached the tracker before this session started, so anything "
+        "else you add there duplicates something that already exists. Do NOT "
+        "close, re-title or re-label anything either. Do NOT attempt an "
+        "auto-hotfix — this is an investigate-and-comment task only.\n" + ISSUE_LOOKUP_INSTRUCTION,
+    ]
+    for number, subject in issues:
+        lines.append(f"- Issue: #{number}\n  Subject: {subject}")
+    return "\n".join(lines)
 
 
 def maybe_dispatch_triage_session(
-    dispatch_nodes: list[str],
+    issues: list[tuple[int, str]],
     *,
-    prompt: str | None = None,
     slug_suffix: str | None = None,
-    dispositions: list[NodeDisposition] | None = None,
     dry_run: bool = False,
 ) -> str | None:
-    """Dispatch one triage Eng session for node IDs that have never been filed.
+    """Dispatch one comment-only investigation session for issues already filed.
 
-    ``dispatch_nodes`` normally comes from :func:`compute_dispatch_set`, so
-    every entry is a node no previous run handed to triage. That per-node
-    suppression is the whole dedup mechanism: a node with an issue already
-    open against it cannot reach this function a second time, which is what
-    ends the duplicate-issue churn of #2429 / #2430 / #2462 (issue #2559).
+    ``issues`` is ``(number, subject)`` pairs, every number one GitHub returned
+    to :func:`create_issue` in this run. The session is dispatched **after**
+    filing and is handed real numbers, which is what lets its prompt be a pure
+    investigation instruction: nothing it does or fails to do can change what is
+    on the tracker, so its failure mode is a missing comment rather than a
+    duplicate issue wave (#3418).
 
-    ``prompt`` overrides the default per-node title-search prompt — used by
-    the collection-aware baseline (issue #2823) to dispatch a single umbrella
-    triage session for a re-baseline seed instead of one issue per node.
-    ``slug_suffix`` overrides the sha256-derived slug, so a retried seed
-    dispatch reuses one slug instead of hashing a synthetic node ID.
-
-    ``dispositions`` carries the filing decisions :func:`dispatch_findings`
-    already resolved against a live REST read, one per node, in the same order
-    as ``dispatch_nodes``. It is the whole of what the per-node dispatch hands
-    across this boundary: it seeds the session ledger and it is rendered into
-    the default prompt so the agent confirms a decision rather than re-deriving
-    one. Three callers reach this function -- the per-node dispatch, which
-    passes it; and the cascade-umbrella and re-baseline-seed dispatches, which
-    pre-render their own ``prompt`` and pass none. Because the ledger's entries
-    come from this argument and from nothing else, those two produce no ledger
-    file and no ledger paragraph, with no separate branch to maintain.
-
-    **Ordering matters here.** The ledger write sits *below* the ``dry_run``
-    short-circuit and above the subprocess, so a preview writes no state file
-    and a real dispatch has its ledger on disk the instant the session can
-    start. Putting it above the short-circuit would put state writes back into
-    the one command an operator reaches for to preview a night safely -- the
-    exact defect the sentinel documented below was introduced to fix.
+    ``slug_suffix`` overrides the sha256-derived slug, so a retried re-baseline
+    seed dispatch reuses one slug instead of hashing a synthetic identifier.
 
     ``dry_run`` short-circuits before the subprocess and returns
     :data:`DRY_RUN_SESSION_ID`. Without it ``--dry-run`` suppressed only the
-    Telegram send while still spawning a real Eng session that files real
-    GitHub issues — which made the one command an operator would reach for to
-    preview a run the very command that could not be previewed safely. The
-    sentinel is a truthy session id so the caller's success path is exercised
-    exactly as it would be for real.
+    Telegram send while still spawning a real Eng session — which made the one
+    command an operator would reach for to preview a run the very command that
+    could not be previewed safely. The sentinel is a truthy session id so the
+    caller's success path is exercised exactly as it would be for real.
 
     Returns the dispatched session ID, or ``None`` when there is nothing to
-    dispatch or the dispatch subprocess failed. The caller records which nodes
-    actually went out via :func:`carry_dispatched_nodes`, so a failed dispatch
-    leaves its nodes unfiled and they are retried on the next run.
+    dispatch or the dispatch subprocess failed. **No caller may treat that return
+    value as evidence that an issue exists**: the issues were filed before this
+    function was called, and their numbers are the only proof of that.
     """
-    if not dispatch_nodes:
+    if not issues:
         return None
 
     if slug_suffix is not None:
         slug = f"nightly-triage-{slug_suffix}"
     else:
-        slug_hash = hashlib.sha256(",".join(sorted(set(dispatch_nodes))).encode()).hexdigest()[:8]
+        slug_hash = hashlib.sha256(
+            ",".join(str(n) for n, _ in sorted(issues)).encode()
+        ).hexdigest()[:8]
         slug = f"nightly-triage-{slug_hash}"
 
     if dry_run:
         log(
-            f"[DRY RUN] Would dispatch triage session slug={slug} for "
-            f"{len(dispatch_nodes)} node(s); no session created, no issue filed"
+            f"[DRY RUN] Would dispatch investigation session slug={slug} for "
+            f"{len(issues)} filed issue(s); no session created"
         )
         return DRY_RUN_SESSION_ID
 
-    ledger_path = write_triage_ledger(slug, list(dispositions or []))
-    message = (
-        prompt
-        if prompt is not None
-        else _build_triage_prompt(
-            dispatch_nodes, dispositions=dispositions, ledger_path=ledger_path
-        )
-    )
+    message = _build_investigation_prompt(issues)
 
     try:
         result = subprocess.run(
@@ -2614,7 +2826,7 @@ def maybe_dispatch_triage_session(
             timeout=30,  # timeout-guard: allow
         )
     except Exception as exc:  # noqa: BLE001  # covers TimeoutExpired, FileNotFoundError, etc.
-        log(f"WARNING: triage session dispatch failed ({exc})")
+        log(f"WARNING: investigation session dispatch failed ({exc})")
         return None
 
     try:
@@ -2623,7 +2835,10 @@ def maybe_dispatch_triage_session(
         log(f"WARNING: could not parse session_id from dispatch stdout: {result.stdout!r}")
         session_id = None
 
-    log(f"Triage session dispatched: slug={slug} session_id={session_id}")
+    log(
+        f"Investigation session dispatched: slug={slug} session_id={session_id} "
+        f"for issue(s) {', '.join(f'#{n}' for n, _ in issues)}"
+    )
     return session_id
 
 
@@ -2632,17 +2847,21 @@ class DispatchOutcome:
     """What one pass of :func:`dispatch_findings` actually did.
 
     ``recorded`` is the node set the caller may mark as filed — it holds only
-    nodes whose finding reached the tracker, either as a new issue's dispatch or
-    as a comment that posted successfully. A node whose dispatch or comment
-    failed is deliberately absent, so the next run retries it rather than
+    nodes whose finding reached the tracker, either as an issue GitHub confirmed
+    creating or as a comment that posted successfully. A node whose create or
+    comment failed is deliberately absent, so the next run retries it rather than
     suppressing it forever against a record that was never written.
     """
 
     recorded: list[str]
-    cascade_issues: dict[str, int | None]
+    cascade_issues: dict[str, int]
     session_id: str | None = None
-    issues_filed: int = 0
     comments_posted: int = 0
+    # Finding key -> the issue number GitHub returned for it this run: the node
+    # id for a per-node issue, cascade_state_key() for an umbrella. Populated
+    # only from a number create_issue() actually returned, which is what makes
+    # ``issues_filed`` below a fact rather than an intention (#3418).
+    filed_issues: dict[str, int] = field(default_factory=dict)
     # Nodes classified environmental (network-layer failure text) and filed
     # nowhere new. Not merged into ``recorded`` unless the node already had an
     # open exact-title issue and received its one recurrence comment: an
@@ -2656,23 +2875,34 @@ class DispatchOutcome:
     # so tomorrow's :func:`partition_environmental` can continue them.
     environmental_streaks: dict[str, int] = field(default_factory=dict)
 
+    @property
+    def issues_filed(self) -> int:
+        """How many issues this run created, derived from the numbers GitHub returned.
+
+        Deliberately not an independently-mutated counter. A counter incremented
+        before an issue exists is how a run that created 24 issues for 8 nodes
+        was measured, budgeted, and logged as 8 (#3418). Deriving the count from
+        :attr:`filed_issues` means there is no second number that could disagree
+        with the first.
+        """
+        return len(self.filed_issues)
+
 
 def carry_cascade_issues(
-    prev_cascade_issues: dict[str, int | None],
+    prev_cascade_issues: dict[str, int],
     open_issue_map: dict[str, int] | None,
-) -> dict[str, int | None]:
+) -> dict[str, int]:
     """The ``cascade_issues`` map to start this run from.
 
-    Prior entries are kept while their issue is demonstrably still open, and a
-    ``None`` (pending — dispatched, number not yet known) entry is upgraded to a
-    real number the moment its title appears in the open set. That upgrade is
-    the whole reason the pending state exists: a triage session, not this
-    script, opens the issue, so the number can only be learned later.
+    Prior entries are kept while their issue is demonstrably still open and
+    dropped otherwise: a recorded number whose issue is gone from the open set
+    has either been closed or never existed, and in both cases the correct
+    response to the cascade recurring is to file it again rather than to stay
+    silent against a record of nothing.
 
-    A pending entry that cannot be resolved is dropped. It means either the
-    dispatch never produced an issue, or the issue was filed and has since been
-    closed — and in both cases the correct response to the cascade recurring is
-    to file it again, not to stay silent against a record of nothing.
+    Every entry is a real issue number. The detector creates its own umbrellas
+    (:func:`create_issue`), so a number is known the moment one exists and there
+    is no pending state to upgrade later (#3418).
 
     An unreadable open-issue list (``None``) keeps the map verbatim: it is
     "could not tell", never evidence that anything closed.
@@ -2681,16 +2911,122 @@ def carry_cascade_issues(
         return dict(prev_cascade_issues)
 
     open_numbers = set(open_issue_map.values())
-    carried: dict[str, int | None] = {}
-    for key, number in prev_cascade_issues.items():
-        if number is None:
-            resolved = open_issue_map.get(title_for_state_key(key))
-            if resolved is not None:
-                carried[key] = resolved
-            continue
-        if number in open_numbers:
-            carried[key] = number
-    return carried
+    return {key: number for key, number in prev_cascade_issues.items() if number in open_numbers}
+
+
+def _file_finding(
+    *,
+    title: str,
+    body: str,
+    identity: str,
+    recurrence_body: str,
+    subject: str,
+    filed_fingerprints: dict[str, int],
+    budget_left: int,
+    auto_file: bool,
+    dry_run: bool,
+) -> tuple[str, int | None]:
+    """Take exactly one of the five filing branches for one finding.
+
+    Returns ``(branch, number)`` where ``branch`` is one of:
+
+    - ``"commented"`` — the pre-create refresh found ``title`` already open, so
+      an external actor filed it during this loop and the finding is a
+      *recurrence*: it is commented on, never merely skipped, because a bare skip
+      would leave the night with neither an issue nor a comment for a real
+      finding. ``number`` is the refreshed issue.
+    - ``"collision"`` — this run already filed ``identity``'s fingerprint.
+      ``number`` is the issue it was filed as. A pure skip, unlike the refresh
+      hit: that issue was created by this very run and is already counted.
+    - ``"suppressed"`` — ``NIGHTLY_AUTO_FILE`` is off. The whole would-be filing
+      is logged so an operator can file it by hand.
+    - ``"budget"`` — no budget left. The caller logs the deferral set.
+    - ``"created"`` — ``number`` is what GitHub returned.
+    - ``"failed"`` — the create, or the refresh hit's comment, did not land.
+
+    Only ``"created"`` spends budget, and only ``"created"`` and ``"commented"``
+    license the caller to record the finding. Each branch emits its own log line
+    naming the finding it concerns, because the five want five different operator
+    responses (raise the cap / check ``gh`` auth / investigate a collapsing bug /
+    nothing, this is working as designed / check ``gh`` auth *and* expect
+    duplicates from tonight) and one shared "not filed" line would collapse them.
+
+    The refresh runs **before** the budget and collision checks: checking the
+    budget first would suppress a legitimate recurrence comment on a night that
+    has already spent it. Its cost is one ``gh`` read per survivor *considered*,
+    bounded by the survivor count — 24 on the worst night on record.
+    """
+    refreshed = open_issues()
+    if refreshed is None:
+        # Fail open, exactly as the run's opening dedup read does: "unknown" is
+        # treated as "not open" and the create proceeds. A duplicate is
+        # recoverable; a silent night during a real regression is not. This line
+        # is the only signal that a night's dedup ran blind, which is why it is
+        # separate from every other outcome below.
+        log(f"Pre-create refresh unreadable — creating anyway (dedup blind) for {subject}")
+    else:
+        existing = refreshed.get(title)
+        if existing is not None:
+            log(
+                f"Pre-create refresh found #{existing} already open for {subject} — "
+                "commenting the recurrence instead of filing"
+            )
+            if comment_on_issue(existing, recurrence_body, dry_run=dry_run):
+                return "commented", existing
+            return "failed", None
+
+    fingerprint = finding_fingerprint(identity)
+    already_filed = filed_fingerprints.get(fingerprint)
+    if already_filed is not None:
+        # Report only, deliberately: the detector creates and comments, and gains
+        # no issue-closing privilege. No read-back, no closing of a twin, no
+        # pointer comment — the convergent sweep that would close a twin is
+        # deferred by owner decision (#3418 plan, `## Decisions` #2) until
+        # concurrent multi-host nightly runs are actually observed. Do not
+        # "finish" this into an auto-close.
+        log(
+            f"WARNING: fingerprint collision — {fingerprint} was already filed as "
+            f"#{already_filed} this run, so {subject} was not filed again"
+        )
+        return "collision", already_filed
+
+    if not auto_file:
+        log(
+            f"NIGHTLY_AUTO_FILE is off — not filing {subject}. Would have created:\n"
+            f"Title: {title}\n{body}"
+        )
+        return "suppressed", None
+
+    if budget_left <= 0:
+        return "budget", None
+
+    number = create_issue(title, body, dry_run=dry_run)
+    if number is None:
+        log(f"Create failed — {subject} was not filed and stays unrecorded for the next run")
+        return "failed", None
+    filed_fingerprints[fingerprint] = number
+    return "created", number
+
+
+def _dispatch_investigation(
+    outcome: DispatchOutcome, filed_subjects: dict[int, str], *, dry_run: bool
+) -> None:
+    """Hand this run's newly filed issues to one comment-only investigation session.
+
+    Called at every exit from :func:`dispatch_findings` — including the
+    ``cascades_only`` one — from a single definition, so the two paths cannot
+    drift in whether a night's findings get investigated.
+
+    Only issues this run *created* are handed over: a recurrence comment on an
+    issue that has been open for a week is not new triage surface, while a fresh
+    issue with no narrative on it is exactly what a root-cause pass is worth
+    (#3418, ``## Decisions`` #1). The dispatch happens after filing and can only
+    fail by leaving a comment unwritten, never by duplicating an issue, which is
+    why nothing downstream keys on the session id it returns.
+    """
+    outcome.session_id = maybe_dispatch_triage_session(
+        sorted(filed_subjects.items()), dry_run=dry_run
+    )
 
 
 def dispatch_findings(
@@ -2721,7 +3057,19 @@ def dispatch_findings(
     3. For every finding that already has an open issue, comment. For one whose
        issue is CLOSED as not-planned, comment there — never re-file
        (#3075 defect 1); a closure marked completed re-files, because failing
-       again after a fix is new information. For the rest, spend the budget.
+       again after a fix is new information.
+    4. For every survivor, :func:`_file_finding` takes exactly one of five
+       branches — refresh hit (comment), degraded refresh (create anyway),
+       fingerprint collision (skip), budget exhausted (defer), otherwise create —
+       and only a number :func:`create_issue` returned spends budget or lands the
+       finding in ``recorded``. The create happens here, in this process, under
+       the run lock: a Python loop has no replay semantics, which is what ends the
+       #3418 duplicate waves rather than merely narrowing them.
+    5. Last, and only once every number is known, dispatch one comment-only
+       investigation session over the issues this run created
+       (:func:`_dispatch_investigation`). It is handed real numbers and can add
+       nothing to the tracker but comments, so a replayed turn there costs a
+       duplicate comment at worst.
 
     ``cascades_only`` suppresses per-node filing entirely. The integrity-trip
     path passes it: on a night this script has just declared infrastructural,
@@ -2777,12 +3125,6 @@ def dispatch_findings(
     closed_issue_map = closed_issue_dispositions() if dispatch_nodes else None
     if dispatch_nodes and closed_issue_map is None:
         log("Closed-state dedup disabled for this run (closed issues unreadable) — failing open")
-    # Stamped here, right after the two reads, because this is the instant the
-    # dispositions below are true as of. The triage agent is told this timestamp
-    # so it can treat its own lookup as a check for issues created since, not as
-    # the authority.
-    issue_read_at = datetime.now(UTC).isoformat()
-
     outcome = DispatchOutcome(
         recorded=[],
         cascade_issues=carry_cascade_issues(prev.get("cascade_issues") or {}, open_issue_map),
@@ -2813,7 +3155,25 @@ def dispatch_findings(
             )
 
     max_issues = resolve_int_knob("NIGHTLY_MAX_ISSUES_PER_RUN", MAX_ISSUES_PER_RUN_DEFAULT)
+    # The budget is spent per issue GitHub confirms creating, never per issue this
+    # run intended to create, and ``outcome.issues_filed`` is a derived length over
+    # those confirmed numbers. That is deliberately a different posture from the
+    # dedup reads above, which fail OPEN: an unreadable ``open_issues()`` files a
+    # possible duplicate rather than producing a silent night, while an
+    # unconfirmed create is never counted, never spends budget, and never enters
+    # ``recorded``, so the next run retries it. The asymmetry is the point of
+    # #3418 — silence during a real regression is the larger harm on the read
+    # side, and a count nothing confirmed is what let one run file 24 issues and
+    # log 8 on the write side. Do not "fix" one to match the other.
     issue_budget = max_issues
+    auto_file = resolve_bool_knob("NIGHTLY_AUTO_FILE", AUTO_FILE_DEFAULT)
+    # Every fingerprint this run filed, in process, so a second finding resolving
+    # to one already filed is skipped rather than filed twice (#3418).
+    filed_fingerprints: dict[str, int] = {}
+    # Issue number -> the subject line the investigation session is handed for it.
+    # Populated only from a number create_issue() returned, so the dispatch can
+    # never name an issue that does not exist (#3418).
+    filed_subjects: dict[int, str] = {}
     deferred_cascades: list[dict] = []
 
     for cascade in cascades:
@@ -2846,23 +3206,34 @@ def dispatch_findings(
                 outcome.comments_posted += 1
                 outcome.recorded.extend(cascade["nodes"])
             continue
-        if issue_budget <= 0:
-            deferred_cascades.append(cascade)
-            continue
-        session_id = maybe_dispatch_triage_session(
-            [f"cascade:{cascade['title']}"],
-            prompt=_build_cascade_prompt(cascade),
-            slug_suffix=hashlib.sha256(cascade_state_key(cascade).encode()).hexdigest()[:8],
+        state_key = cascade_state_key(cascade)
+        subject = f"cascade umbrella {cascade['title']!r} ({len(cascade['nodes'])} node(s))"
+        branch, number = _file_finding(
+            title=cascade["title"],
+            body=cascade_issue_body(cascade, run_at=run_at, head_commit=head_commit),
+            identity=state_key,
+            recurrence_body=cascade_recurrence_comment(
+                cascade, run_at=run_at, head_commit=head_commit
+            ),
+            subject=subject,
+            filed_fingerprints=filed_fingerprints,
+            budget_left=issue_budget,
+            auto_file=auto_file,
             dry_run=dry_run,
         )
-        if session_id is not None:
+        if branch == "budget":
+            deferred_cascades.append(cascade)
+            continue
+        if branch == "created":
             issue_budget -= 1
-            outcome.issues_filed += 1
-            outcome.recorded.extend(cascade["nodes"])
-            outcome.session_id = session_id
-            # Pending: the triage session opens the issue, so its number is not
-            # knowable here. carry_cascade_issues() upgrades this on a later run.
-            outcome.cascade_issues[cascade_state_key(cascade)] = None
+            outcome.filed_issues[state_key] = number
+            filed_subjects[number] = subject
+        elif branch == "commented":
+            outcome.comments_posted += 1
+        else:
+            continue
+        outcome.recorded.extend(cascade["nodes"])
+        outcome.cascade_issues[state_key] = number
 
     if deferred_cascades:
         log(
@@ -2876,6 +3247,7 @@ def dispatch_findings(
                 f"Per-node filing suppressed for {len(single_nodes)} node(s): this run was "
                 "classified as infrastructure, so only the cascade finding is filed"
             )
+        _dispatch_investigation(outcome, filed_subjects, dry_run=dry_run)
         return outcome
 
     single_nodes, already_open = partition_already_open(single_nodes, open_issue_map)
@@ -2909,64 +3281,44 @@ def dispatch_findings(
             + ", ".join(n for n, _, _ in closed_matches)
         )
 
-    if len(single_nodes) > issue_budget:
-        log(
-            f"Issue budget reached: {len(single_nodes)} per-node issue(s) wanted but only "
-            f"{issue_budget} of MAX_ISSUES_PER_RUN={max_issues} left "
-            f"({outcome.issues_filed} spent on cascade umbrella(s)); "
-            f"deferring {len(single_nodes) - issue_budget} node(s) to a later run: "
-            + ", ".join(single_nodes[issue_budget:])
+    deferred_nodes: list[str] = []
+    for node in single_nodes:
+        subject = f"node {node}"
+        branch, number = _file_finding(
+            title=f"Nightly regression: {node}",
+            body=node_issue_body(
+                node, tests_by_id.get(node), run_at=run_at, head_commit=head_commit
+            ),
+            identity=node,
+            recurrence_body=node_recurrence_comment(node, run_at=run_at, head_commit=head_commit),
+            subject=subject,
+            filed_fingerprints=filed_fingerprints,
+            budget_left=issue_budget,
+            auto_file=auto_file,
+            dry_run=dry_run,
         )
-        single_nodes = single_nodes[:issue_budget]
+        if branch == "budget":
+            deferred_nodes.append(node)
+            continue
+        if branch == "created":
+            issue_budget -= 1
+            outcome.filed_issues[node] = number
+            filed_subjects[number] = subject
+        elif branch == "commented":
+            outcome.comments_posted += 1
+        else:
+            continue
+        outcome.recorded.append(node)
 
-    # Everything still in single_nodes survived partition_already_open and
-    # partition_closed_matches, so the script has already established that it has
-    # no issue in any state — the answer is uniformly "file". Passing that across
-    # the boundary is fix 2 of #3170: four earlier passes each made this function
-    # smarter and then threw the answer away at this one call.
-    read_shape = [
-        name
-        for name, mapping in (("open", open_issue_map), ("closed", closed_issue_map))
-        if mapping is not None
-    ]
-    # A degraded read (either map is None) means partition_already_open /
-    # partition_closed_matches fail-open above already let unfiltered nodes
-    # through single_nodes without knowing whether they truly have no issue.
-    # Only a complete read licenses the disposition's claim that "the detector
-    # already resolved this" -- on a degraded night with survivors still to
-    # dispatch, dispositions=None makes _build_triage_prompt fall back to its
-    # plain per-node form, so the agent's own live lookup (already always in
-    # the prompt) stays the sole, undemoted defense (#3170). An empty
-    # single_nodes carries no such risk either way, so it always gets `[]`.
-    # dispositions=None also withdraws the session ledger, not just the
-    # prompt paragraph: maybe_dispatch_triage_session passes list(None or [])
-    # to write_triage_ledger, which returns None (writes no file) on an empty
-    # entries list -- acceptable only because the live REST-read instruction
-    # above stays undemoted on this path.
-    if not single_nodes:
-        dispositions = []
-    elif read_shape == ["open", "closed"]:
-        resolved_against = f"gh issue list --state all ({'+'.join(read_shape)} REST read)"
-        dispositions = [
-            NodeDisposition(
-                node=node,
-                title=f"Nightly regression: {node}",
-                disposition="file",
-                resolved_against=resolved_against,
-                resolved_at=issue_read_at,
-            )
-            for node in single_nodes
-        ]
-    else:
-        dispositions = None
-    session_id = maybe_dispatch_triage_session(
-        single_nodes, dispositions=dispositions, dry_run=dry_run
-    )
-    if session_id is not None:
-        outcome.issues_filed += len(single_nodes)
-        outcome.recorded.extend(single_nodes)
-        outcome.session_id = session_id
+    if deferred_nodes:
+        log(
+            f"Issue budget reached: {len(deferred_nodes)} per-node issue(s) deferred to a "
+            f"later run with 0 of MAX_ISSUES_PER_RUN={max_issues} left "
+            f"({outcome.issues_filed} issue(s) confirmed filed this run): "
+            + ", ".join(deferred_nodes)
+        )
 
+    _dispatch_investigation(outcome, filed_subjects, dry_run=dry_run)
     return outcome
 
 
@@ -3194,14 +3546,12 @@ def main() -> int:
         f"confirmed total: {current['failed']}; collection errors: {new_errors}"
     )
 
-    triage_session_id: str | None = None
     if is_seed_run:
         # The baseline is a declaration of the known-failing state, not a
         # finding. Seed dispatched_nodes with the WHOLE confirmed set so the
         # next run does not dispatch the entire suite's standing failures as
-        # fresh discoveries, and escalate it as exactly ONE umbrella triage
-        # session rather than reusing the per-node reassignment below (which
-        # would wipe the seed to []).
+        # fresh discoveries, and record it as exactly ONE umbrella issue rather
+        # than reusing the per-node path below (which would wipe the seed to []).
         just_dispatched: list[str] = []
         dispatch_nodes: list[str] = []
         if confirmed_failing:
@@ -3210,30 +3560,52 @@ def main() -> int:
                 f"Nightly regression baseline: {seed_size} nodes absorbed "
                 f"on {current['head_commit']}"
             )
-            seed_prompt = _build_seed_prompt(
-                seed_title, confirmed_failing, prior_collection=prev.get("collection")
+            umbrella_number = file_seed_umbrella(
+                seed_title,
+                body=seed_issue_body(
+                    confirmed_failing,
+                    run_at=current["run_at"],
+                    head_commit=current["head_commit"],
+                    prior_collection=prev.get("collection"),
+                ),
+                recurrence_body=seed_recurrence_comment(
+                    confirmed_failing,
+                    run_at=current["run_at"],
+                    head_commit=current["head_commit"],
+                    prior_collection=prev.get("collection"),
+                ),
+                dry_run=args.dry_run,
             )
-            triage_session_id = maybe_dispatch_triage_session(
-                [f"seed:{len(confirmed_failing)}"],
-                prompt=seed_prompt,
+            # A baseline must NOT be written unless an umbrella issue is known to
+            # exist. Recording the seed anyway would mark every absorbed node as
+            # filed against nothing, so compute_dispatch_set() would suppress all
+            # of them forever — seeded_nodes is sticky — and the whole night-one
+            # population would be lost silently. Refusing to save state instead
+            # means the next run sees no prior state, re-seeds, and retries. This
+            # mirrors _fatal()'s existing invariant that no untrusted run reaches
+            # save_last_run().
+            #
+            # The evidence is the umbrella NUMBER, never the investigation
+            # session's id: the session is dispatched after filing and proves
+            # nothing about issue existence, so keying on it would turn a
+            # load-bearing guard into a rubber stamp. "Absent" covers both ways
+            # file_seed_umbrella() can fail to prove an umbrella — no number from
+            # the create, or an existing umbrella whose recurrence comment did
+            # not post.
+            if umbrella_number is None:
+                return _fatal(
+                    f"no re-baseline umbrella issue can be proven to exist for "
+                    f"{seed_size} absorbed node(s) — the create returned no number, "
+                    "or an existing umbrella could not be commented on; refusing to "
+                    "write a baseline so the next run retries the seed"
+                )
+            session_id = maybe_dispatch_triage_session(
+                [(umbrella_number, seed_title)],
                 slug_suffix="baseline",
                 dry_run=args.dry_run,
             )
-            # A failed seed dispatch must NOT write a baseline. Recording the
-            # seed anyway would mark every absorbed node as filed while no
-            # umbrella issue exists, so compute_dispatch_set() would suppress
-            # all of them forever and the whole night-one population would be
-            # lost silently. Refusing to save state instead means the next run
-            # sees no prior state, re-seeds, and retries the dispatch. This
-            # mirrors _fatal()'s existing invariant that no untrusted run
-            # reaches save_last_run().
-            if triage_session_id is None:
-                return _fatal(
-                    f"seed triage dispatch failed — no umbrella issue exists for "
-                    f"{seed_size} absorbed node(s); refusing to write a baseline "
-                    "so the next run retries the seed"
-                )
-            current["dispatched_session_id"] = triage_session_id
+            if session_id is not None:
+                current["dispatched_session_id"] = session_id
             just_dispatched = list(confirmed_failing)
             current["seed_collection"] = COLLECTION_PATHS
             current["seed_size"] = len(confirmed_failing)
@@ -3259,7 +3631,6 @@ def main() -> int:
         current["cascade_issues"] = outcome.cascade_issues
         current["environmental_streaks"] = outcome.environmental_streaks
         if outcome.session_id is not None:
-            triage_session_id = outcome.session_id
             current["dispatched_session_id"] = outcome.session_id
         log(
             f"Tracker: {outcome.issues_filed} issue(s) filed, "

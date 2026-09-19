@@ -46,17 +46,19 @@ to #3076.
   `data/nightly_tests_last_run.json`, but only when both runs share the same
   `collection`. A run whose recorded collection differs (the widening night,
   or any future change of scope) re-baselines instead: it seeds
-  `dispatched_nodes` with the whole currently-failing population and
-  dispatches **one** umbrella triage session, rather than re-opening the
+  `dispatched_nodes` with the whole currently-failing population and files
+  **one** umbrella issue for it itself, rather than re-opening the
   #2429/#2430/#2462 per-node duplicate-filing churn
 - Runs the TTFT regression gate as a post-test check (see below)
 - Notifies nothing, ever. The outcome of the night — baseline established,
   N newly-confirmed failures, collection error, clean run, TTFT regression —
   is a log line and, where there is a finding, a tracker write
-- On newly-confirmed failures, fires a deduped, fire-and-forget Eng-session dispatch
-  with literal, Python-computed issue titles (`Nightly regression: {node}`) to
-  investigate and file a GitHub issue — see
-  `docs/features/nightly-triage-dispatch.md#triage-session-dispatch`
+- On newly-confirmed failures, files a GitHub issue itself — `create_issue()`,
+  called from a single Python loop under the run lock, with a literal,
+  Python-computed title (`Nightly regression: {node}`) — then dispatches a
+  deduped, fire-and-forget Eng session to investigate and comment on the
+  issue(s) it just filed. The session never creates or closes anything; see
+  `docs/features/nightly-triage-dispatch.md#filing-issue-3418`
 - Collapses cascades before filing: nodes sharing one normalized setup-error
   message on one xdist worker (at least `CASCADE_MIN_GROUP_SIZE`, default 3)
   become ONE umbrella issue titled
@@ -117,9 +119,9 @@ a human is expected to notice; the log is the full record.
 
 | Condition | Tracker | Log |
 |-----------|---------|-----|
-| First run or a collection change (re-baseline) | One umbrella triage session for the absorbed population | `Baseline established[ (re-baseline: prior population absorbed)]: {total} tests, {failed} confirmed failures` |
+| First run or a collection change (re-baseline) | One umbrella issue, filed by the detector, for the absorbed population | `Baseline established[ (re-baseline: prior population absorbed)]: {total} tests, {failed} confirmed failures` |
 | Run-integrity guard tripped | Cascade only — commented if already open, filed otherwise; per-node filing suppressed | `FATAL: {reason}` then `Integrity trip recorded: N issue(s) filed, M comment(s) posted` |
-| Newly-confirmed failure, no open issue | New issue via triage session | `Tracker: N issue(s) filed, M recurrence comment(s) posted` |
+| Newly-confirmed failure, no open issue | New issue, filed by the detector | `Tracker: N issue(s) filed, M recurrence comment(s) posted` |
 | Newly-confirmed failure, issue already open | Recurrence comment on the existing issue | same line, with `M > 0` |
 | Newly-confirmed failure, exact title closed `NOT_PLANNED` (newest closure) | Recurrence comment on the closed issue; never re-filed | same line, with `M > 0` |
 | Newly-confirmed failure, exact title closed `COMPLETED` (newest closure) | New issue — failing again after a fix is new information | `Tracker: N issue(s) filed ...` |
@@ -130,6 +132,26 @@ a human is expected to notice; the log is the full record.
 | TTFT regression | Nothing | `TTFT regression: {detail}` |
 | Lock collision (overlapping run) | Nothing | collision logged, no test run |
 | Clean run | Nothing — `gh` is not even invoked | `Clean run (no newly-confirmed failures)` |
+
+**`N` in `Tracker: N issue(s) filed` is a derived count over issue numbers GitHub
+actually returned this run, not a self-reported tally.** `DispatchOutcome.issues_filed`
+is `len(filed_issues)`, where `filed_issues` gains an entry only from a number
+`create_issue()` returned and GitHub confirmed creating (issue #3418). Nothing
+increments it in anticipation of a create that has not happened yet, so the number
+logged and the number of issues that exist on the tracker can never disagree.
+
+**The dedup reads fail open; an unconfirmed create is never counted, budgeted, or
+recorded — and that asymmetry is deliberate, not an oversight to "fix" into
+consistency.** `open_issues()` and `closed_issue_dispositions()` treat an unreadable
+GitHub as "not open" / "not closed" and let the run file anyway: a possible duplicate
+is the smaller harm than a silent night during a real regression. A `create_issue()`
+call that cannot be confirmed is the opposite posture — it spends no budget, is never
+added to `filed_issues`, and leaves its finding out of `recorded`, so the next run
+re-reads live GitHub state and tries again rather than this run retrying a
+non-idempotent `POST`. The two reads and the one write cannot share one posture: a
+fail-open write would risk a second issue on a bare guess, and a fail-closed read
+would risk a silent night. Each side already fails toward the smaller harm for what
+it is.
 
 ## TTFT Regression Gate (issue #1227)
 
@@ -391,16 +413,17 @@ permanently.
 cascade's key is the normalized setup-error message (digits collapsed to `#`,
 pytest's `E ` marker and the `[gwN]` banner stripped). `cascade_issues` in the
 state file maps that signature to the issue number, so a human retitling the
-umbrella issue does not make the same defect look new. The title match remains
-as the *bootstrap*: this script never opens issues itself — a triage session
-does — so on the night of filing the number is unknowable and the entry is
-recorded as `None` (pending). `carry_cascade_issues()` upgrades it the first
-night the title appears in the open set. A pending entry that cannot be
-resolved is dropped, because that means either no issue was ever opened or it
-has since been closed, and in both cases the correct response to a recurrence
-is a fresh issue rather than silence against a record of nothing. An
-unreadable open-issue list keeps the map verbatim: `None` is "could not tell",
-never evidence that anything closed.
+umbrella issue does not make the same defect look new. Every entry is a real
+issue number: the detector creates its own umbrellas (`create_issue()`), so the
+number is known the moment one exists and there is no pending state to
+upgrade later (issue #3418). `carry_cascade_issues()` keeps a prior entry only
+while its issue is demonstrably still open in the current run's open-issue
+read, and drops it otherwise — a recorded number whose issue is gone from the
+open set has either been closed or never existed, and in both cases the
+correct response to the cascade recurring is a fresh issue rather than
+silence against a record of nothing. An unreadable open-issue list keeps the
+map verbatim: that read failing is "could not tell", never evidence that
+anything closed.
 
 `cascade_issues` is **per-machine**, exactly like `dispatched_nodes` — the
 cross-machine gap documented below applies to it unchanged. Per-node findings
@@ -449,8 +472,8 @@ writes no baseline (see "The integrity trip still reports" above).
 **Collection-aware baseline, not a bare first-run flag** — The persisted state
 records which `collection` produced it. Widening the collection (or any future
 change of scope) is treated as a fresh baseline: the whole currently-failing
-population is seeded into `dispatched_nodes` and escalated as one umbrella
-triage session, so it is never re-filed node-by-node the next time the
+population is seeded into `dispatched_nodes` and filed as one umbrella
+issue, so it is never re-filed node-by-node the next time the
 detector runs — the #2429/#2430/#2462 duplicate-filing trap this design
 protects against by construction. *Repairing* the seeded population is a
 separate lane (the #2852 model, "get `main`'s unit suite to zero"); this
@@ -506,18 +529,18 @@ suite.
 **`dispatched_nodes` is per-machine state, and cross-machine dedup is a
 convention, not an enforced invariant** — Each machine's `dispatched_nodes`
 lives in its own `data/nightly_tests_last_run.json`; two machines with the
-same red node both dispatch unless something else prevents it. Since #3131 the
-detector reads the open issue set itself (`open_issues()`) immediately before
-dispatch and, since #3134, comments on rather than re-files any finding whose
-issue is already open — which closes the common cross-machine case, but it is
-a read-then-act check with no lock, so two machines dispatching inside the
-same window still both file. The literal title remains the contract: the detector
-emits it verbatim, the triage session is handed the same REST read the
-detector uses and told to match that literal title against it (never the
-index-backed lookup, whose lag produced the #2960-#2999 wave — see
-`nightly-triage-dispatch.md`), and nothing verifies an issue was actually filed
-under it, so a future change to the title format silently reopens
-#2429/#2430/#2462 across the fleet.
+same red node both file unless something else prevents it. Since #3131 the
+detector reads the open issue set itself (`open_issues()`) once at the start
+of `dispatch_findings()` and again, per finding, immediately before each
+create (the pre-create refresh, issue #3418) — and, since #3134, comments on
+rather than re-files any finding whose issue is already open — which closes
+the common cross-machine case, but both reads are read-then-act checks with no
+cross-host lock, so two machines creating inside the same narrow refresh
+window still both file. `nightly-triage-dispatch.md` covers the fingerprint
+and in-run collision report that make a duplicate *one run* creates itself
+impossible; neither mechanism is a cross-machine lock, so a future multi-host
+duplicate is the evidence bar that would reopen the deferred reconciliation
+sweep (see that document's "Filing" section).
 `MAX_ISSUES_PER_RUN` (10) bounds the blast radius of any single run;
 a shared, Redis-backed dispatch set is the real fix and is deliberately
 deferred.
@@ -613,6 +636,38 @@ python scripts/nightly_regression_tests.py --dry-run
 # Stream live output
 tail -f logs/nightly_tests.log
 ```
+
+## Break Glass: stopping issue creation
+
+The detector is the sole creator of nightly issues. To stop it creating any,
+set `NIGHTLY_AUTO_FILE=false` in the vault `.env` (`~/Desktop/Valor/.env`).
+
+No deploy and no restart: the knob is read at call time, and the nightly job
+loads the vault `.env` at the start of every run, so the next run honors it.
+
+What the switch does and does not do:
+
+- **Stops** every `gh issue create` — per-node findings, cascade umbrellas, and
+  the re-baseline seed umbrella alike. There is no path around it.
+- **Does not stop** recurrence comments on issues that already exist. An
+  operator who has stopped filing still wants the tracker to learn that a known
+  failure recurred.
+- **Logs every would-be filing in full** — title and body — to
+  `logs/nightly_tests.log`, so an issue can be filed by hand from the log.
+- **Refuses to write a baseline** on a seed night, because no umbrella can be
+  proven to exist. The next run re-seeds and retries. This is deliberate:
+  `seeded_nodes` is sticky, so persisting it against an umbrella that was never
+  filed would suppress the entire absorbed population permanently.
+
+It is a kill switch, not a second code path — there is no setting that hands
+filing back to an agent, because an LLM turn that replays re-files, and that is
+the bug this exists to have ended (#3418). The switch is for stopping a bad
+night; the remedy for detector-side filing misbehaving is a revert, not a
+permanent config change.
+
+`NIGHTLY_MAX_ISSUES_PER_RUN` (default `10`) is the standing bound underneath it:
+one run can never create more issues than this, and the budget is spent only on
+creates GitHub confirmed.
 
 ## Uninstall
 
