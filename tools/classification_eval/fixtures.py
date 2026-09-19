@@ -143,7 +143,7 @@ INBOUND_MESSAGES: list[str] = [
     "Build a small CLI that lists every declared LLM task with its backend",
     "Add a reaction when the session is queued so I know it landed",
     "Bump pydantic-ai to the latest pin and rerun the compat gate",
-    "Delete the old run_typed_local docs, they're confusing people",
+    "Delete the old wrapper timeout docs, they're confusing people",
     "Rename the classifier module to intake_classifier and update imports",
     "Move the emoji embedding json out of data/ into the vault",
     "Clean up the stale worktrees under .worktrees, there are twenty of them",
@@ -660,12 +660,12 @@ HEALTH_ACTIVITY: list[str] = [
     "- Bash: scripts/pytest-clean.sh tests/unit/test_agent_init.py -q\n"
     "- Bash: git push --force-with-lease\n"
     "- Bash: gh pr merge 3518 --squash",
-    '- Grep: pattern="run_typed_local"\n'
+    '- Grep: pattern="sdk_timeout"\n'
     "- Read: /repo/docs/features/nonharness-llm-wrapper.md\n"
     "- Edit: /repo/docs/features/nonharness-llm-wrapper.md [old_string len=140]\n"
     "- Edit: /repo/docs/features/config-timeout-catalog.md [old_string len=61]\n"
-    '- Grep: pattern="run_typed_local"\n'
-    "- Bash: git commit -am 'Docs: the per-leg timer replaces DEFAULT_SDK_TIMEOUT'",
+    '- Grep: pattern="sdk_timeout"\n'
+    "- Bash: git commit -am 'Docs: the per-leg timer replaces the wrapper timeout constant'",
     "- Bash: curl -s localhost:11434/api/ps\n"
     "- Bash: launchctl list | grep com.valor\n"
     "- Bash: PYTHONPATH=$PWD .venv/bin/python -m tools.classification_eval"

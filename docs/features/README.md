@@ -117,6 +117,7 @@ Feature documentation for the Valor AI system. Each document describes an implem
 | [Link Content Summarization](link-summarization.md) | Auto-fetch and summarize shared links via the Perplexity API. | Shipped |
 | [Lint Auto-Fix](lint-auto-fix.md) | Automatic lint/format fixing via pre-commit and PostToolUse hooks. | Shipped |
 | [LLM Stack Compat Gate](llm-stack-compat-gate.md) | Import-safety contract on `agent/llm/`, a call-site-derived `anthropic` + `pydantic-ai` compatibility predicate run at `/update` verify and at bridge/worker startup, degraded-but-running posture with a three-channel alert and per-process dashboard markers, and coupled-set auto-bumping with per-set gates and atomic rollback. | Shipped |
+| [LLM Task Taxonomy](llm-task-taxonomy.md) | Every non-harness LLM call site declares an `LLMTask` (site id, kind, landed backend, error-cost tier, §7 class); a router resolves the backend leg per call, the site table is the doc/code parity source, and each classification landing is argued by a comparison record. | In progress |
 | [Local Doctor](local-doctor.md) | Unified health check CLI at `python -m tools.doctor`, consolidating environment, service, auth, and resource checks. | Shipped |
 | [Local Ollama Model Policy](local-model-policy.md) | Classification → `granite4.1:3b`; generation → `gemma4:31b-cloud` by default; embeddings → `nomic-embed-text`. | Shipped |
 | [Log Rotation](log-rotation.md) | User-space log rotation via LaunchAgent (`com.valor.log-rotate`): 30-minute schedule, 10 MB/3 backups, self-exclusion. | Shipped |
