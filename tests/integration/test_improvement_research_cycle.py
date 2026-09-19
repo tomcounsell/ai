@@ -205,15 +205,15 @@ def gh_runner(prs: list[dict]):
     return run
 
 
-def collect_with(monkeypatch, *, prs: list[dict]) -> tuple[dict, list[str]]:
+async def collect_with(monkeypatch, *, prs: list[dict]) -> tuple[dict, list[str]]:
     """Run the real evidence tick on this project: every adapter live, the
-    ``gh`` runner injected, the judge transport injected and counted (the
-    promise detector is off, so it must never be reached)."""
+    ``gh`` runner injected, the judge's ``run_typed`` seam faked and counted
+    (the promise detector is off, so it must never be reached)."""
     from config.settings import settings
 
     judge_calls: list[str] = []
 
-    def transport(prompt: str) -> str:
+    async def fake_run_typed(prompt: str, output_type, **kwargs):
         judge_calls.append(prompt)
         raise AssertionError("the promise detector is off; no judge call may happen")
 
@@ -222,9 +222,9 @@ def collect_with(monkeypatch, *, prs: list[dict]) -> tuple[dict, list[str]]:
     monkeypatch.setattr(
         improvement_collect, "_default_gh_runner", lambda project_key: gh_runner(prs)
     )
-    monkeypatch.setattr(improvement_collect, "_openrouter_judge", lambda model: transport)
+    monkeypatch.setattr(improvement_collect, "run_typed", fake_run_typed)
     with patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}):
-        result = improvement_collect.run_improvement_collect()
+        result = await improvement_collect.run_improvement_collect()
     return result, judge_calls
 
 
@@ -245,7 +245,7 @@ def lesson_prs() -> list[dict]:
 
 
 class TestVerdictMovesRanking:
-    def test_verdict_moves_ranking(self, charter, charter_path, store, monkeypatch):
+    async def test_verdict_moves_ranking(self, charter, charter_path, store, monkeypatch):
         from tests.unit.improvement_eval_runner_support import _approving_judge
         from tools.improvement_eval.corpus import export_corpus
 
@@ -257,7 +257,7 @@ class TestVerdictMovesRanking:
         )
         seed_memory("cycle lighthouse beacon on the headland", source="agent")
         seed_memory("cycle grocery errands for the week", source="agent")
-        collected, judge_calls = collect_with(monkeypatch, prs=lesson_prs())
+        collected, judge_calls = await collect_with(monkeypatch, prs=lesson_prs())
         assert collected["status"] == "success", collected
         assert collected["counts"]["inspirations"] == 1
         assert collected["counts"]["lessons"] == 2

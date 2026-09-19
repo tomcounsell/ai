@@ -483,14 +483,17 @@ yes/no question per entry with the charter paragraph quoted. A `yes` writes a
 `source_ref="promise:{session_id}:{sha256(session_id + content)[:16]}"`;
 judged-but-clean entries are remembered in a plain Redis set under the
 improvement control namespace (`keys.promise_judged_key`,
-`improve:{project}:_ns:promise_judged`, 30-day TTL) so a `no` is not bought
-again. The judge call is
-metered through `tools.paid_inference_meter` under `purpose="promise_detector"`
-(the meter is the reason the adapter exists as a spend: a refusal is a skip,
-never a failure) and the default transport is refused on a project
-`is_open_source` does not clear. The adapter is gated by
+`improve:{project}:_ns:promise_judged`, 30-day TTL) so a `no` is not asked
+again. The judge is `agent.llm.run_typed` with `PROMISE_JUDGE`
+(`improvement_collect.promise_judge`, #3410): the router picks the leg from
+the declaration and the project key, so charter §7 is applied there (a client
+key resolves to the subscription leg) and the call is unmetered;
+`purpose="promise_detector"` survives only for the comparison runner's gemma
+reference arm. `collect_promises` and `run_improvement_collect` are
+coroutines the reflection scheduler awaits directly. The adapter is gated by
 `ImprovementSettings.promise_detector_enabled`, off by default because it
-spends money, on top of the module-wide `enabled` switch.
+samples outbound messages and writes rows, on top of the module-wide
+`enabled` switch.
 
 The tick keeps `failed` (an adapter raised) and `skipped` (declined by rule)
 as separate lists; only a tick in which every adapter failed reports
@@ -634,8 +637,7 @@ Two `ImprovementSettings` fields, both `# @optional` in `.env.example`:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `promise_detector_enabled` | `False` | Whether `collect_promises` runs on the evidence tick. Off because each sampled message costs a judge call against the daily paid-inference pool. `IMPROVEMENT__PROMISE_DETECTOR_ENABLED` |
-| `cheap_inference_model` | `""` | The OpenRouter model id the promise judge runs on; empty falls back to `config.models.OPENROUTER_GEMMA4_FREE`. The spend gate is `promise_detector_enabled`, never this field. `IMPROVEMENT__CHEAP_INFERENCE_MODEL` |
+| `promise_detector_enabled` | `False` | Whether `collect_promises` runs on the evidence tick. Off because the adapter samples outbound messages and writes rows; each sampled message is one judge call through `run_typed(task=PROMISE_JUDGE)` on whichever backend `improvement_collect.promise_judge` landed on (#3410), unmetered. `IMPROVEMENT__PROMISE_DETECTOR_ENABLED` |
 
 `scripts/update/run.py` calls `register_improvement_planner` (cadence from
 `controller_tick_seconds`) and `register_improvement_assumption_digest`
@@ -728,9 +730,10 @@ records alone.
   corrects it.
 - The session found that `config.models.OPENROUTER_GEMMA4_FREE`
   (`google/gemma-4-e2b:free`) is delisted (a live request returns HTTP 400),
-  so the promise judge's fallback model is dead while
-  `cheap_inference_model` is empty. Recorded as a resolved `probe`
-  investigation and a model revision; the constant itself is unchanged.
+  so the comparison runner's gemma reference arm for the promise judge
+  (metered under `promise_detector`) is dead until the constant is repointed.
+  Recorded as a resolved `probe` investigation and a model revision; the
+  constant itself is unchanged.
 
 **How the parked case moves.** The planner proposes nothing for a case at
 `evaluating` (`_action_kind` returns `None`), so case

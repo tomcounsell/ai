@@ -734,23 +734,13 @@ class ImprovementSettings(BaseModel):
         default=False,
         description=(
             "Whether the no-promises observer adapter (charter §10) runs on "
-            "the evidence-collection tick. Off by default because it spends "
-            "money: each sampled outbound message costs one cheap-model judge "
-            "call against the daily paid-inference pool, so turning it on is "
-            "a deliberate act on the owning machine. When off the adapter "
-            "records a skip, never an error. Env: "
-            "IMPROVEMENT__PROMISE_DETECTOR_ENABLED."
-        ),
-    )
-    cheap_inference_model: str = Field(
-        default="",
-        description=(
-            "The OpenRouter model id the promise detector's yes/no judge "
-            "runs on, metered under the purpose ``promise_detector``. Empty "
-            "means the judge runs on ``config.models.OPENROUTER_GEMMA4_FREE``, "
-            "the free-tier model the repo's OpenRouter key already reaches; "
-            "the spend gate is ``promise_detector_enabled``, not this field. "
-            "PROVISIONAL/TUNABLE. Env: IMPROVEMENT__CHEAP_INFERENCE_MODEL."
+            "the evidence-collection tick. Off by default: the adapter samples "
+            "outbound messages and writes evidence rows, so turning it on is "
+            "a deliberate act on the owning machine. Each sampled message is "
+            "one judge call through ``agent.llm.run_typed`` on the leg the "
+            "router picks for ``improvement_collect.promise_judge`` (#3410), "
+            "unmetered. When off the adapter records a skip, never an error. "
+            "Env: IMPROVEMENT__PROMISE_DETECTOR_ENABLED."
         ),
     )
 

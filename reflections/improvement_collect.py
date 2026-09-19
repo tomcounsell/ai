@@ -62,9 +62,13 @@ stop the other four:
 5. **Promises.** Charter §10 says Valor makes no promises. This adapter reads
    the same session window as the correction detector, takes the outbound
    entries, samples the newest unjudged ones under :data:`PROMISE_SAMPLE_PER_TICK`,
-   and asks a cheap model one yes/no question per entry with the charter
-   paragraph quoted. A ``yes`` writes a ``promise`` row whose ``detail`` is the
-   judge's quoted span and whose ``confidence`` is the judge's own number.
+   and asks the judge one yes/no question per entry with the charter
+   paragraph quoted. The judge is ``agent.llm.run_typed`` with
+   :data:`PROMISE_JUDGE` (routing layer #3410): the router picks the leg from
+   the declaration and the project key, so charter §7 is applied there and
+   the call is unmetered. A ``yes`` writes a ``promise`` row whose ``detail``
+   is the judge's quoted span and whose ``confidence`` is the judge's own
+   number.
 
    **Production writer:** ``AgentSession.chat_message_log`` entries with
    ``direction="out"``, appended by
@@ -73,14 +77,11 @@ stop the other four:
    ``source_session_id`` plus an entry hash inside
    ``source_ref="promise:{session_id}:{sha256(session_id + content)[:16]}"``.
    Judged-but-clean entries are remembered in a plain Redis set under the
-   improvement control namespace so a ``no`` verdict is not bought again on
-   the next tick. The judge call is metered through
-   ``tools.paid_inference_meter`` under ``purpose="promise_detector"``; a
-   refusal is a skip, never a failure. Gated by
-   ``ImprovementSettings.promise_detector_enabled`` (off by default, it spends
-   money) on top of the module-wide kill switch, and the default transport is
-   refused on a project ``tools.improvement_eligibility.is_open_source`` does
-   not clear (charter §7).
+   improvement control namespace so a ``no`` verdict is not asked again on
+   the next tick. Gated by ``ImprovementSettings.promise_detector_enabled``
+   (off by default: the adapter samples outbound messages and writes rows,
+   so turning it on is a deliberate act on the owning machine) on top of the
+   module-wide kill switch.
 
 **No question path.** Nothing here asks a human anything. Uncertainty the
 adapters cannot resolve is recorded as evidence with ``classification="unknown"``
@@ -94,9 +95,13 @@ registered either way, so turning the switch on needs no re-registration.
 
 **Failed versus skipped.** The tick keeps two lists: ``failed`` holds the
 adapters that raised, ``skipped`` holds the adapters that declined by rule (the
-detector is off, the meter refused, the project is not open source). Only a
-tick in which every adapter failed reports ``status="error"``; a routine skip
-is a healthy tick.
+detector is off). Only a tick in which every adapter failed reports
+``status="error"``; a routine skip is a healthy tick.
+
+**The tick is a coroutine.** ``run_improvement_collect`` is awaited by the
+reflection scheduler directly; the promise adapter awaits the judge on the
+scheduler's loop, and the four sync adapters plus ``human_memories`` run
+through ``asyncio.to_thread`` so their Redis scans never block it.
 
 Registered by ``scripts/update/reflection_register.py::register_improvement_collect``
 and called from ``scripts/update/run.py``, so it survives ``/update`` and lands
@@ -106,6 +111,7 @@ on the machine that owns the ``valor`` project. See
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -113,10 +119,14 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pydantic import BaseModel
+
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from tools.improvement_control.keys import promise_judged_key
 
 logger = logging.getLogger("reflections.improvement_collect")
@@ -166,19 +176,23 @@ LESSON_LOOKBACK_DAYS = 14
 LESSON_PR_LIMIT = 100
 
 #: How many outbound entries the promise detector judges per tick, newest
-#: first. Each one is a paid judge call, so this is the spend cap per tick.
+#: first. Each one is a judge call, so this is the per-tick cap.
 #: Provisional/tunable.
 PROMISE_SAMPLE_PER_TICK = 10
 
-#: The per-tick reservation against unit 2 for the promise judge, in USD. Ten
-#: calls on a free or near-free model fit inside one cent; the meter refuses a
-#: zero, so this is the smallest amount it accepts.
-PROMISE_RESERVE_USD = 0.01
+#: The judge call's SDK-level timer, explicit because the reflection scheduler
+#: cancels a coroutine mid-request at ``effective_timeout()`` (the collector is
+#: registered with no explicit timeout, so that is ``DEFAULT_FUNCTION_TIMEOUT``,
+#: 1800 s). Budget: ``PROMISE_SAMPLE_PER_TICK`` sequential calls at 30 s each
+#: (300 s), or at the wrapper's ``DEFAULT_HARD_TIMEOUT`` outer cap on a
+#: fallback (10 * 35 s = 350 s), fit inside 1800 s several times over;
+#: ``tests/unit/test_improvement_evidence.py`` pins the inequality.
+PROMISE_JUDGE_SDK_TIMEOUT_S = 30.0
 
 #: TTL of the judged-ref set, ``keys.promise_judged_key`` (lane 3's
 #: non-Popoto ``improve:`` namespace, same rationale as the meter's keys). A
-#: ``no`` verdict writes no evidence row, so without the set a tick would buy
-#: the same ten verdicts again every fifteen minutes.
+#: ``no`` verdict writes no evidence row, so without the set a tick would ask
+#: for the same ten verdicts again every fifteen minutes.
 PROMISE_JUDGED_EXPIRY_SECONDS = 30 * 86400
 
 #: The charter §10 paragraph the judge is shown, verbatim.
@@ -787,65 +801,50 @@ def collect_lessons(
 # --- promises ----------------------------------------------------------------
 
 
-def _judge_model() -> str:
-    """The cheap model the promise judge runs on."""
-    from config.models import OPENROUTER_GEMMA4_FREE
-    from config.settings import settings
+class PromiseJudgeDecision(BaseModel):
+    """The judge's answer to :data:`PROMISE_QUESTION` for one outbound entry (C15, #3410).
 
-    return (settings.improvement.cheap_inference_model or "").strip() or OPENROUTER_GEMMA4_FREE
-
-
-class _OpenRouterJudge:
-    """The default transport: one chat completion per prompt through OpenRouter.
-
-    Accumulates ``usage.cost`` from every response so the adapter can settle
-    the reservation exactly; ``metering`` degrades to ``"unknown"`` the moment
-    a response carries no cost (charter §8: uncertain metering is not zero).
+    ``answer`` is ``True`` for a promise; ``span`` is the quoted words that
+    make the guarantee (empty otherwise); ``confidence`` is the judge's own
+    number, clamped to ``[0, 1]`` by the adapter.
     """
 
-    def __init__(self, model: str, api_key: str) -> None:
-        self.model = model
-        self._api_key = api_key
-        self.cost_usd = 0.0
-        self.metering = "exact"
-
-    def __call__(self, prompt: str) -> str:
-        import requests
-
-        from config.models import OPENROUTER_URL
-
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
-                "usage": {"include": True},
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        cost = (payload.get("usage") or {}).get("cost")
-        if isinstance(cost, (int, float)):
-            self.cost_usd += float(cost)
-        else:
-            self.metering = "unknown"
-        return str((payload.get("choices") or [{}])[0].get("message", {}).get("content") or "")
+    answer: bool
+    span: str = ""
+    confidence: float = 0.0
 
 
-def _openrouter_judge(model: str) -> Callable[[str], str] | None:
-    """Build the default transport, or None when no OpenRouter key is configured."""
-    from config.settings import settings
+# Fail-safe: any LLMCallError is a None verdict; the adapter records
+# ``promises-judge-failed`` and stops the tick's sample there.
+PROMISE_JUDGE = LLMTask(
+    site="improvement_collect.promise_judge",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.LOW,
+)
 
-    api_key = settings.api.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return None
-    return _OpenRouterJudge(model, api_key)
+PromiseTransport = Callable[[str], Awaitable[PromiseJudgeDecision | None]]
+
+
+def _default_promise_transport(project_key: str) -> PromiseTransport:
+    """The judge on the leg the router picks for ``PROMISE_JUDGE`` and ``project_key``."""
+
+    async def transport(prompt: str) -> PromiseJudgeDecision | None:
+        try:
+            return await run_typed(
+                prompt,
+                PromiseJudgeDecision,
+                task=PROMISE_JUDGE,
+                project_key=project_key,
+                sdk_timeout=PROMISE_JUDGE_SDK_TIMEOUT_S,
+            )
+        except LLMCallError as exc:
+            logger.warning(
+                "improvement_collect: promise judge call failed (%s): %s", exc.reason, exc
+            )
+            return None
+
+    return transport
 
 
 def _promise_prompt(content: str) -> str:
@@ -860,33 +859,6 @@ def _promise_prompt(content: str) -> str:
         '{"answer": "yes" or "no", "span": the exact quoted words that make the guarantee '
         '(empty when the answer is no), "confidence": a number from 0 to 1}.'
     )
-
-
-def _parse_verdict(raw: str) -> tuple[bool, str, float | None] | None:
-    """``(is_promise, span, confidence)`` from the judge's reply, or None."""
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else ""
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3]
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        return None
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    answer = str(data.get("answer") or "").strip().lower()
-    if answer not in ("yes", "no"):
-        return None
-    confidence = data.get("confidence")
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        confidence = None
-    else:
-        confidence = min(1.0, max(0.0, float(confidence)))
-    return answer == "yes", str(data.get("span") or "")[:500], confidence
 
 
 def _judged_refs(project_key: str) -> set[str]:
@@ -948,33 +920,33 @@ def _outbound_candidates(project_key: str) -> list[tuple[str, str, str, float]]:
     return candidates
 
 
-def collect_promises(
+async def collect_promises(
     project_key: str,
     *,
-    transport: Callable[[str], str] | None = None,
+    transport: PromiseTransport | None = None,
     findings: list[str] | None = None,
     skipped: list[str] | None = None,
 ) -> int:
     """Persist one ``promise`` row per sampled outbound entry the judge flags.
 
-    ``transport`` takes the judge prompt and returns the judge's reply text.
-    The default sends it to :func:`_judge_model` through OpenRouter and is only
-    built when ``tools.improvement_eligibility.is_open_source`` clears the
-    project (charter §7); an injected transport is the caller's responsibility.
+    ``transport`` takes the judge prompt and returns a
+    :class:`PromiseJudgeDecision`, or ``None`` when no verdict could be had.
+    The default awaits ``run_typed`` with :data:`PROMISE_JUDGE` and the
+    project key, so the router applies charter §7 (a client key resolves to
+    the subscription leg; ``valor`` is pinned eligible) and no gate at this
+    call site is needed; an injected transport is the caller's
+    responsibility.
 
     Order of gates, each a ``skipped`` entry and never a failure: the module
-    kill switch, ``promise_detector_enabled``, project eligibility, a missing
-    OpenRouter key, and the meter's refusal. Nothing new to judge is plain
-    zero, not a skip, and reserves nothing. One
-    reservation covers the tick's sample; it is settled from the transport's
-    ``cost_usd``/``metering`` when it reports them and otherwise as the full
-    reserved amount under ``metering="unknown"``, or released when no call was
-    made. An unparseable verdict and a raising transport each land in
-    ``findings`` and write nothing. Returns the number of rows written.
+    kill switch, then ``promise_detector_enabled``. Nothing new to judge is
+    plain zero, not a skip. A transport that raises or returns ``None`` lands
+    in ``findings`` as ``promises-judge-failed`` and ends the tick's sample
+    there, with that entry left unjudged so it is asked again next tick. The
+    Redis reads in this body (the judged set, the session scan, dedup) are
+    milliseconds and run on the loop. Returns the number of rows written.
     """
     from config.settings import settings
     from models.improvement_evidence import ImprovementEvidence
-    from tools import paid_inference_meter as meter
 
     if findings is None:
         findings = []
@@ -1003,82 +975,44 @@ def collect_promises(
         return 0
 
     if transport is None:
-        from tools.improvement_eligibility import is_open_source
-
-        if not is_open_source(project_key):
-            skipped.append("promises-skipped: project is not open source (charter §7)")
-            return 0
-        transport = _openrouter_judge(_judge_model())
-        if transport is None:
-            skipped.append("promises-skipped: no OpenRouter key configured")
-            return 0
-
-    reservation = meter.reserve(project_key, PROMISE_RESERVE_USD, purpose="promise_detector")
-    if isinstance(reservation, meter.Refusal):
-        logger.info("improvement_collect: promise judge refused by meter: %s", reservation.reason)
-        skipped.append("promises-skipped: unit 2 unavailable")
-        return 0
+        transport = _default_promise_transport(project_key)
 
     written = 0
-    calls = 0
-    try:
-        for ref, session_id, content, ts in sample:
-            try:
-                calls += 1
-                raw = transport(_promise_prompt(content))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("improvement_collect: promise judge call failed: %s", exc)
-                findings.append(f"promises-judge-failed: {exc}")
-                break
-            # The call was bought, so the entry is judged whatever came back;
-            # an unparseable reply is reported, never bought again.
-            _mark_judged(project_key, ref)
-            verdict = _parse_verdict(raw)
-            if verdict is None:
-                logger.warning(
-                    "improvement_collect: promise judge reply unparseable for %s: %r",
-                    ref,
-                    str(raw)[:120],
-                )
-                findings.append(f"promises-judge-unparseable: {ref}")
-                continue
-            is_promise, span, confidence = verdict
-            if not is_promise:
-                continue
-            try:
-                row = ImprovementEvidence.record_once(
-                    project_key,
-                    "promise",
-                    source_ref=ref,
-                    source_session_id=session_id,
-                    text=content[:2000],
-                    detail=span or None,
-                    observed_at=datetime.fromtimestamp(ts, tz=UTC) if ts else None,
-                    confidence=confidence,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("improvement_collect: promise write failed for %s: %s", ref, exc)
-                continue
-            if row is not None:
-                written += 1
-    finally:
-        if calls == 0:
-            meter.release(project_key, reservation.reservation_id)
-        else:
-            cost = getattr(transport, "cost_usd", None)
-            metering = getattr(transport, "metering", None)
-            if isinstance(cost, (int, float)) and metering in ("exact", "estimated"):
-                meter.settle(
-                    project_key, reservation.reservation_id, float(cost), metering=metering
-                )
-            else:
-                meter.settle(
-                    project_key, reservation.reservation_id, PROMISE_RESERVE_USD, metering="unknown"
-                )
+    for ref, session_id, content, ts in sample:
+        try:
+            verdict = await transport(_promise_prompt(content))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement_collect: promise judge call failed: %s", exc)
+            findings.append(f"promises-judge-failed: {exc}")
+            break
+        if verdict is None:
+            logger.warning("improvement_collect: promise judge gave no verdict for %s", ref)
+            findings.append(f"promises-judge-failed: no verdict for {ref}")
+            break
+        # The judge answered, so the entry is judged whatever it said.
+        _mark_judged(project_key, ref)
+        if not verdict.answer:
+            continue
+        try:
+            row = ImprovementEvidence.record_once(
+                project_key,
+                "promise",
+                source_ref=ref,
+                source_session_id=session_id,
+                text=content[:2000],
+                detail=verdict.span[:500] or None,
+                observed_at=datetime.fromtimestamp(ts, tz=UTC) if ts else None,
+                confidence=min(1.0, max(0.0, float(verdict.confidence))),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("improvement_collect: promise write failed for %s: %s", ref, exc)
+            continue
+        if row is not None:
+            written += 1
     return written
 
 
-def run_improvement_collect() -> dict:
+async def run_improvement_collect() -> dict:
     """Reflection entrypoint: run every observer adapter for the owning project.
 
     The owning project is ``reflections.redis_access.get_project_key()``
@@ -1088,7 +1022,10 @@ def run_improvement_collect() -> dict:
     Standard reflection result dict. Each adapter is wrapped independently so a
     single broken source degrades the tick rather than ending it — the loop
     reasons from partial evidence all the time, and a tick that recorded two of
-    three sources is worth more than one that recorded none.
+    three sources is worth more than one that recorded none. A coroutine the
+    reflection scheduler awaits directly: the promise adapter is awaited on
+    the loop, the four sync adapters and ``human_memories`` run through
+    ``asyncio.to_thread`` so their Redis scans never block it.
 
     **Gated on ``ImprovementSettings.enabled``.** ``config/settings.py`` and
     ``.env.example`` both promise that ``False`` means no evidence-collection
@@ -1126,21 +1063,27 @@ def run_improvement_collect() -> dict:
 
     # One enumeration of the memory partition per tick, shared by the two
     # adapters that read it. Fail-soft already, so no separate guard here.
-    memories = human_memories(project_key)
+    memories = await asyncio.to_thread(human_memories, project_key)
 
+    # (name, adapter, awaited): the promise adapter is a coroutine function
+    # awaited on the loop; every other adapter is sync and runs in a thread.
     adapters = (
-        ("corrections", lambda **kw: collect_corrections(memories=memories, **kw)),
-        ("inspirations", lambda **kw: collect_inspirations(memories=memories, **kw)),
-        ("expectation_coverage", collect_expectation_coverage),
-        ("lessons", collect_lessons),
-        ("promises", collect_promises),
+        ("corrections", lambda **kw: collect_corrections(memories=memories, **kw), False),
+        ("inspirations", lambda **kw: collect_inspirations(memories=memories, **kw), False),
+        ("expectation_coverage", collect_expectation_coverage, False),
+        ("lessons", collect_lessons, False),
+        ("promises", collect_promises, True),
     )
-    assert tuple(name for name, _ in adapters) == ADAPTER_NAMES
+    assert tuple(name for name, _, _ in adapters) == ADAPTER_NAMES
     n_adapters = len(adapters)
 
-    for name, adapter in adapters:
+    for name, adapter, awaited in adapters:
+        kwargs = {"project_key": project_key, "findings": findings, "skipped": skipped}
         try:
-            counts[name] = adapter(project_key=project_key, findings=findings, skipped=skipped)
+            if awaited:
+                counts[name] = await adapter(**kwargs)
+            else:
+                counts[name] = await asyncio.to_thread(adapter, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.warning("improvement_collect: adapter %s failed: %s", name, exc)
             counts[name] = 0
