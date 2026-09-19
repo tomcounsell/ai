@@ -8,12 +8,14 @@ session is ending by the time the message reaches the user.
 
 Architecture
 ------------
-The gate is **LLM-first**. The primary judgment layer is a Haiku call
-with a strengthened few-shot prompt that names a *forward-deferral*
-class. A regex backstop (``_evaluate_promise_heuristic``) is the
-**fail-closed-only** last line that fires solely on the heuristic-
-fallback branch (no API key / SDK exception / parse failure). The
-heuristic does NOT override an LLM ``ALLOW``.
+The gate is **LLM-first**. The primary judgment layer is one
+``agent.llm.run_typed`` call with :data:`PROMISE_VERDICT`
+(``promise_gate.verdict``, routing layer #3410) and a strengthened few-shot
+system prompt that names a *forward-deferral* class. A regex backstop
+(``_evaluate_promise_heuristic``) is the **fail-closed-only** last line
+that fires solely on the heuristic-fallback branch (no API key / a
+non-timeout ``LLMCallError`` / a timeout). The heuristic does NOT override
+an LLM ``ALLOW``.
 
 This split — LLM primary, regex fail-closed-only — is mandated by the
 issue (#1219) and the user-memory record ``feedback_llm_drafter_over_regex``.
@@ -86,26 +88,27 @@ p50 1871ms / p95 2352ms / p99 2543ms / max 2705ms, 0 timeouts. The
 zero-LLM short path (<200 chars, non-SDLC, no artifacts) keeps its
 existing guarantee of p50 ~= 0ms and is unchanged by this budget.
 
-The budget is separate from the SDK-level timeout. The call follows the
-RTR-correct pattern ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT):
-async with anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT,
-max_retries=0) as client:``. That ``timeout=3.0`` becomes
-``httpx.Timeout(3.0)``, which bounds connect, read, write and pool
-acquire at 3 seconds **each**, not total wall time, so a single call can
-legitimately exceed 3 seconds without firing ``APITimeoutError``; the
-semaphore acquire is a further, separately bounded 3-second wait
-(``queue_wait_ms`` on the audit row). There is therefore no exact
-structural ceiling to quote; the p99 budget above is the enforced bound
-and the audit JSONL is the source of truth for whether it holds.
-``max_retries=0`` is load-bearing: the SDK default
-(``DEFAULT_MAX_RETRIES = 2``) retries client-side timeouts, which would
-silently multiply the per-phase bound into ~3 attempts plus backoff
-(~10s) on this call's now-inline delivery path.
-The other anthropic-client helper (the convenience one that
-constructs the client for you) is **not** used here — it does not
-accept a ``timeout`` argument and would silently violate the 3-second
-budget. Coroutine-level timeouts are forbidden (PR #1055 invariant —
-they leak httpx connections under cancellation).
+The budget is separate from the SDK-level timeout. The call is
+``run_typed(..., sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT,
+max_retries=0, hard_timeout=None)``, and the Anthropic leg
+(``agent/llm/backends/anthropic.py``) carries the RTR-correct pattern:
+``async with semaphore_slot(timeout=slot_timeout):`` around a fresh
+``AsyncAnthropic`` client built with ``timeout=sdk_timeout, max_retries=0``.
+That ``timeout=3.0`` becomes ``httpx.Timeout(3.0)``, which bounds connect,
+read, write and pool acquire at 3 seconds **each**, not total wall time,
+so a single call can legitimately exceed 3 seconds without firing the
+SDK timer; the semaphore acquire is a further, separately bounded
+3-second wait (``queue_wait_ms`` on the audit row, published by the leg
+through ``slot_wait_ms``). There is therefore no exact structural ceiling
+to quote; the p99 budget above is the enforced bound and the audit JSONL
+is the source of truth for whether it holds. ``max_retries=0`` is
+load-bearing: the SDK default (``DEFAULT_MAX_RETRIES = 2``) retries
+client-side timeouts, which would silently multiply the per-phase bound
+into ~3 attempts plus backoff (~10s) on this call's now-inline delivery
+path. ``hard_timeout=None`` is load-bearing too: the wrapper's outer
+``asyncio.wait_for`` is the coroutine-level timeout PR #1055 forbids on
+this path (it leaks httpx connections under cancellation), so the only
+timer around the live request is the leg's SDK-level client timeout.
 
 The ``RTR_SDK_TIMEOUT`` constant is **imported** from
 ``bridge.read_the_room`` rather than redefined locally — both gates
@@ -127,11 +130,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import anthropic
+from pydantic import BaseModel
 
-from agent.anthropic_client import semaphore_slot
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.backends.anthropic import slot_wait_ms
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from bridge.read_the_room import RTR_SDK_TIMEOUT  # cycle-3 C-CYCLE3-1: import, do NOT redefine
-from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -228,44 +232,32 @@ You MUST call the `promise_verdict` tool with a flat structured result \
 (`action`, `reason`, `class_`)."""
 
 
-# === Tool schema (Haiku tool_use) ===
+# === Structured output (C9, #3410) ===
 
-_PROMISE_VERDICT_TOOL = {
-    "name": "promise_verdict",
-    "description": (
-        "Return the promise-gate verdict for the candidate draft. "
-        "Action must be one of allow|block."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["allow", "block"],
-                "description": "Verdict action.",
-            },
-            "reason": {
-                "type": "string",
-                "description": "Short machine-readable reason string.",
-            },
-            "class_": {
-                "type": ["string", "null"],
-                "description": (
-                    "Class label (e.g. 'forward_deferral', "
-                    "'behavioral_change'). Null for allow verdicts."
-                ),
-            },
-        },
-        "required": ["action", "reason"],
-    },
-}
+
+class PromiseVerdictDecision(BaseModel):
+    """The judge's verdict for the candidate draft; ``class_`` is empty on allow."""
+
+    action: Literal["allow", "block"]
+    reason: str = ""
+    class_: str | None = None
+
+
+# Fail-safe: None (then the regex heuristic) on a non-timeout LLMCallError;
+# a timeout propagates so the caller audits source="timeout" before the heuristic.
+PROMISE_VERDICT = LLMTask(
+    site="promise_gate.verdict",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.LOW,
+)
 
 
 # === Heuristic patterns (fail-closed-only fallback branch) ===
 
 # Forward-deferral phrases: agent commits to deliver future information
 # without same-session evidence. These fire only inside the heuristic
-# branch (no API key / SDK exception / parse failure).
+# branch (no API key / LLMCallError / timeout).
 _FORWARD_DEFERRAL_PATTERNS = [
     r"\bi'?ll\s+(?:come|get|circle|loop)\s+back\b",
     r"\bi'?ll\s+(?:report|follow)\s+(?:back|up)\b",
@@ -661,94 +653,114 @@ _queue_wait_ms: contextvars.ContextVar[float | None] = contextvars.ContextVar(
 )
 
 
-async def _evaluate_promise_async(text: str) -> PromiseVerdict | None:
-    """Run the Haiku call for the LLM-primary path.
+def _resolve_project_key(session_id: str | None) -> str | None:
+    """The project the gate call is made for, from the AgentSession ``session_id`` names.
 
-    Returns the parsed verdict on success, or ``None`` on any failure that
-    is NOT a timeout (no API key, parse failure, non-timeout SDK exception).
-    The caller falls through to the heuristic on ``None``.
+    The gate has no chat in scope, so the router's charter §7 input comes
+    from the session row (``AgentSession.get_by_id``, the same guard
+    ``_emit_session_event_if_real`` uses). A missing, synthetic
+    (``cli-{epoch}``) or unreadable id resolves to ``None``, which the router
+    fails closed to the subscription backend. Never a state-driven gate
+    decision (Concern C6): the key only picks the leg.
+    """
+    if not session_id:
+        return None
+    try:
+        from models.agent_session import AgentSession
+
+        session = AgentSession.get_by_id(session_id)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"promise_gate project_key lookup failed (non-fatal): {e}")
+        return None
+    if session is None:
+        return None
+    return getattr(session, "project_key", None) or None
+
+
+async def _evaluate_promise_async(
+    text: str, *, project_key: str | None = None
+) -> PromiseVerdict | None:
+    """Run the LLM call for the LLM-primary path.
+
+    Returns the verdict on success, or ``None`` on any failure that is NOT
+    a timeout (no API key, a non-timeout ``LLMCallError``: transport,
+    validation, a degraded stack). The caller falls through to the
+    heuristic on ``None``.
 
     Raises:
-        anthropic.APITimeoutError: the SDK-level 3s call timeout fired.
-        asyncio.TimeoutError: the semaphore acquisition (queue wait) timed
-            out — see Risk 1b in the plan.
-        Both propagate to the caller rather than being swallowed here, so
-        the caller can discriminate "timeout" from "other failure" and
-        write ``source="promise_gate_timeout"`` instead of the generic
-        ``"promise_gate_heuristic"`` fallthrough source.
+        LLMCallError: with ``reason="timeout"`` (the leg's SDK-level 3 s
+            request timer fired) or ``reason="slot_timeout"`` (the semaphore
+            acquisition, the queue wait, timed out — see Risk 1b in the
+            plan). Both propagate to the caller rather than being swallowed
+            here, so the caller can discriminate "timeout" from "other
+            failure" and write ``source="promise_gate_timeout"`` instead of
+            the generic ``"promise_gate_heuristic"`` fallthrough source.
 
-    SDK pattern follows ``bridge.read_the_room`` verbatim:
-    ``async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
-    anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as
-    client:``. See the module docstring for why ``max_retries=0`` is
+    The call is ``run_typed(..., task=PROMISE_VERDICT, project_key=...,
+    system=PROMISE_GATE_SYSTEM_PROMPT, sdk_timeout=RTR_SDK_TIMEOUT,
+    slot_timeout=RTR_SDK_TIMEOUT, max_retries=0, hard_timeout=None)``. The
+    Anthropic leg carries the pattern ``bridge.read_the_room`` established:
+    ``async with semaphore_slot(timeout=slot_timeout):`` around a fresh
+    ``AsyncAnthropic`` client built with ``timeout=sdk_timeout,
+    max_retries=0``. See the module docstring for why ``max_retries=0`` is
     load-bearing for the stated 3-second worst case.
     Honors PR #1055 httpx-cleanup invariant. Coroutine-level timeouts
     around the API call are forbidden — they leak httpx connections under
-    cancellation. The ``semaphore_slot`` timeout is NOT a coroutine-level
-    timeout around the API call; it only bounds how long this call waits
-    for a semaphore slot, so it does not reintroduce the #1055 hazard.
+    cancellation — which is why ``hard_timeout=None`` is passed: the
+    wrapper's outer cap is exactly such a timeout. The slot timeout is NOT a
+    coroutine-level timeout around the API call; it only bounds how long the
+    leg waits for a semaphore slot, so it does not reintroduce the #1055
+    hazard. ``project_key`` is the router's charter §7 input (``None`` fails
+    closed to the subscription backend).
     """
     api_key = get_anthropic_api_key()
     if not api_key:
         return None
 
-    acquire_start = time.monotonic()
+    slot_wait_ms.set(None)
     try:
-        async with semaphore_slot(timeout=RTR_SDK_TIMEOUT):
-            _queue_wait_ms.set((time.monotonic() - acquire_start) * 1000)
-            async with anthropic.AsyncAnthropic(
-                api_key=api_key,
-                timeout=RTR_SDK_TIMEOUT,
-                max_retries=0,
-            ) as client:
-                message = await client.messages.create(
-                    model=MODEL_FAST,
-                    max_tokens=300,
-                    system=PROMISE_GATE_SYSTEM_PROMPT,
-                    tools=[_PROMISE_VERDICT_TOOL],
-                    tool_choice={"type": "tool", "name": "promise_verdict"},
-                    messages=[{"role": "user", "content": text}],
-                )
-    except (TimeoutError, anthropic.APITimeoutError):
-        # Timeout is its own discriminator: it propagates so the caller can
-        # audit source="promise_gate_timeout" instead of a generic fallthrough.
-        raise
-    except Exception as e:
+        decision = await run_typed(
+            text,
+            PromiseVerdictDecision,
+            task=PROMISE_VERDICT,
+            project_key=project_key,
+            system=PROMISE_GATE_SYSTEM_PROMPT,
+            sdk_timeout=RTR_SDK_TIMEOUT,
+            slot_timeout=RTR_SDK_TIMEOUT,
+            max_retries=0,
+            hard_timeout=None,
+        )
+    except LLMCallError as e:
+        _queue_wait_ms.set(slot_wait_ms.get())
+        if e.reason in ("timeout", "slot_timeout"):
+            # Timeout is its own discriminator: it propagates so the caller
+            # can audit source="promise_gate_timeout" instead of a generic
+            # fallthrough.
+            raise
         logger.warning(f"promise_gate LLM call failed: {e!r}")
         return None
+    _queue_wait_ms.set(slot_wait_ms.get())
 
-    # Parse the tool_use block.
-    content = getattr(message, "content", None) or []
-    for block in content:
-        if (
-            getattr(block, "type", None) == "tool_use"
-            and getattr(block, "name", None) == "promise_verdict"
-        ):
-            payload = getattr(block, "input", None) or {}
-            action = payload.get("action")
-            if action not in ("allow", "block"):
-                return None
-            reason = str(payload.get("reason") or "")
-            class_ = payload.get("class_")
-            if not isinstance(class_, str) or not class_:
-                class_ = None
-            return PromiseVerdict(
-                action=action,
-                reason=reason,
-                class_=class_,
-            )
-    return None
+    class_ = decision.class_ if isinstance(decision.class_, str) and decision.class_ else None
+    return PromiseVerdict(action=decision.action, reason=decision.reason, class_=class_)
 
 
 async def _evaluate_promise_llm_or_heuristic(
     text: str,
+    *,
+    project_key: str | None = None,
 ) -> tuple[PromiseVerdict, str, float, float | None]:
     """Attempt the LLM verdict, falling through to the heuristic on failure.
 
-    Shared by both the CLI-facing ``evaluate_promise_async`` and the
-    drafter's main-path ``_evaluate_drafter_promise`` (Task 5) so the
-    LLM-attempt / timeout-discrimination / heuristic-fallthrough logic is
-    written once.
+    Shared by both the CLI-facing ``evaluate_promise_async`` (and its sync
+    wrapper ``evaluate_promise``) and the drafter's main-path
+    ``bridge.message_drafter._evaluate_drafter_promise`` (Task 5, #3027) so
+    the LLM-attempt / timeout-discrimination / heuristic-fallthrough logic
+    is written once. Every caller passes ``project_key`` (the router's
+    charter §7 input; the CLI paths resolve it from ``session_id`` through
+    ``_resolve_project_key``, the drafter reads it from its ``session``):
+    a caller that leaves it ``None`` resolves this site to the subscription
+    backend on every message regardless of its declared ``backend``.
 
     Returns ``(verdict, source_suffix, elapsed_ms, queue_wait_ms)``.
     ``source_suffix`` is one of ``"llm"``, ``"heuristic"``, ``"timeout"``,
@@ -756,11 +768,11 @@ async def _evaluate_promise_llm_or_heuristic(
     the model is never called and the regex heuristic decides) —
     callers prefix their own audit-source namespace (``"promise_gate_"`` for
     the CLI path, ``"promise_gate_drafter_"`` for the drafter path).
-    ``queue_wait_ms`` is ``None`` whenever the semaphore-acquire line was
-    never reached (no API key configured, so ``_evaluate_promise_async``
-    short-circuits before attempting the call) or the LLM call raised
-    before setting it; otherwise it is the measured wait in milliseconds
-    (``0.0`` or more, including on an immediate acquire).
+    ``queue_wait_ms`` is ``None`` whenever the leg never acquired the slot
+    (no API key configured, so ``_evaluate_promise_async`` short-circuits
+    before attempting the call, or the slot wait timed out); otherwise it
+    is the wait the leg measured in milliseconds (``0.0`` or more,
+    including on an immediate acquire).
     """
     start = time.monotonic()
     _queue_wait_ms.set(None)
@@ -770,9 +782,12 @@ async def _evaluate_promise_llm_or_heuristic(
     llm_verdict: PromiseVerdict | None = None
     timeout_hit = False
     try:
-        llm_verdict = await _evaluate_promise_async(text)
-    except (TimeoutError, anthropic.APITimeoutError):
-        timeout_hit = True
+        llm_verdict = await _evaluate_promise_async(text, project_key=project_key)
+    except LLMCallError as e:
+        if e.reason in ("timeout", "slot_timeout"):
+            timeout_hit = True
+        else:  # pragma: no cover - defensive, _evaluate_promise_async swallows these
+            logger.warning(f"promise_gate LLM path raised: {e!r}")
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"promise_gate LLM path raised: {e!r}")
     elapsed_ms = (time.monotonic() - start) * 1000
@@ -814,8 +829,9 @@ async def evaluate_promise_async(
     3. **Classifier-verdict short-circuit** — when ``classifier_verdict``
        is provided (drafter path), derive verdict from it. Skip the LLM
        call. Write audit with ``source="promise_gate_drafter_delegation"``.
-    4. **CLI Haiku path** — call ``_evaluate_promise_async`` via the shared
-       ``_evaluate_promise_llm_or_heuristic`` helper. Write audit with
+    4. **CLI LLM path** — call ``_evaluate_promise_async`` via the shared
+       ``_evaluate_promise_llm_or_heuristic`` helper, with the project key
+       resolved once from ``session_id`` (``_resolve_project_key``). Write audit with
        ``source="promise_gate_llm"`` on success, ``"promise_gate_timeout"``
        on SDK/semaphore timeout, or ``"promise_gate_heuristic"`` on any
        other heuristic fallthrough. ``elapsed_ms`` and ``queue_wait_ms``
@@ -842,7 +858,8 @@ async def evaluate_promise_async(
     )
     if early is not None:
         return early
-    outcome = await _evaluate_promise_llm_or_heuristic(text)
+    key = _resolve_project_key(session_id)
+    outcome = await _evaluate_promise_llm_or_heuristic(text, project_key=key)
     return _record_promise_outcome(text, outcome, transport=transport, session_id=session_id)
 
 
@@ -981,7 +998,8 @@ def evaluate_promise(
     if early is not None:
         return early
     start = time.monotonic()
-    outcome = _run_async_safely(_evaluate_promise_llm_or_heuristic(text))
+    key = _resolve_project_key(session_id)
+    outcome = _run_async_safely(_evaluate_promise_llm_or_heuristic(text, project_key=key))
     if outcome is None:
         outcome = (
             _evaluate_promise_heuristic(text),

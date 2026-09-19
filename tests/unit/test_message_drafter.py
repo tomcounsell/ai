@@ -1544,7 +1544,7 @@ class TestShortOutputPromiseGate:
         import bridge.promise_gate as promise_gate
         from bridge.promise_gate import PromiseVerdict
 
-        async def _fake_block(text):
+        async def _fake_block(text, project_key=None):
             return PromiseVerdict(
                 action="block",
                 reason="Forward-deferral without verifiable scheduled-delivery reference",
@@ -1578,7 +1578,7 @@ class TestMainPathLLMWiring:
         by making the raw LLM call explode if it is ever invoked."""
         import bridge.promise_gate as promise_gate
 
-        async def _explode(text):
+        async def _explode(text, project_key=None):
             raise AssertionError("short path must not call the promise-gate LLM")
 
         monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
@@ -1599,7 +1599,7 @@ class TestMainPathLLMWiring:
         (composed) path must still never reach the LLM helper."""
         import bridge.promise_gate as promise_gate
 
-        async def _explode(text):
+        async def _explode(text, project_key=None):
             raise AssertionError("use_llm=False caller must not call the promise-gate LLM")
 
         monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _explode)
@@ -1626,7 +1626,7 @@ class TestMainPathLLMWiring:
         draft."""
         import bridge.promise_gate as promise_gate
 
-        async def _raise(text):
+        async def _raise(text, project_key=None):
             raise RuntimeError("simulated SDK failure")
 
         monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _raise)
@@ -1646,16 +1646,14 @@ class TestMainPathLLMWiring:
 
     @pytest.mark.asyncio
     async def test_main_path_llm_timeout_falls_through_to_heuristic(self, monkeypatch):
-        """An ``anthropic.APITimeoutError`` on the main path falls through
+        """An ``LLMCallError(reason="timeout")`` on the main path falls through
         to the heuristic exactly like any other LLM failure — the drafter
         never blocks delivery on an infrastructure timeout."""
-        import httpx
-
         import bridge.promise_gate as promise_gate
+        from agent.llm import LLMCallError
 
-        async def _timeout(text):
-            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-            raise promise_gate.anthropic.APITimeoutError(request=request)
+        async def _timeout(text, project_key=None):
+            raise LLMCallError("leg timed out", reason="timeout")
 
         monkeypatch.setattr(promise_gate, "_evaluate_promise_async", _timeout)
 

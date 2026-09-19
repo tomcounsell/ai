@@ -802,7 +802,11 @@ async def _evaluate_drafter_promise(text: str, *, medium: str, session=None, use
         return verdict
 
     if use_llm:
-        verdict, suffix, elapsed_ms, queue_wait_ms = await _evaluate_promise_llm_or_heuristic(text)
+        # The session's project is the router's charter §7 input (#3410); a
+        # None key resolves the gate to the subscription backend.
+        key = getattr(session, "project_key", None)
+        outcome = await _evaluate_promise_llm_or_heuristic(text, project_key=key)
+        verdict, suffix, elapsed_ms, queue_wait_ms = outcome
         source = f"promise_gate_drafter_{suffix}"
     else:
         _start = time.monotonic()

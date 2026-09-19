@@ -28,6 +28,13 @@ its own client **per call**:
 5. The slot is released on ``__aexit__``. ``CancelledError`` (the
    wrapper's ``hard_timeout``) passes through untouched.
 
+The leg publishes how long it waited for the slot through
+:data:`slot_wait_ms`, a context variable set the moment the slot is held, so
+a caller that audits queue time (``bridge/promise_gate.py``'s
+``queue_wait_ms`` column) reads it after ``run_typed`` returns or raises.
+It stays at whatever the caller set (``None``) when the slot was never
+acquired.
+
 No ``asyncio.wait_for`` appears in this module: the wrapper applies
 ``hard_timeout`` outside the leg. Import-safety contract (#3001): module
 scope here is stdlib and our own code only; every third-party symbol comes
@@ -37,6 +44,7 @@ from the ``stack`` the wrapper resolved.
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +61,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
+#: Milliseconds this leg's last call in the current context waited for the
+#: shared semaphore; ``None`` until a slot is acquired. Callers that audit
+#: queue time reset it before ``run_typed`` and read it after.
+slot_wait_ms: ContextVar[float | None] = ContextVar("llm_anthropic_slot_wait_ms", default=None)
+
 
 async def call(
     prompt: str,
@@ -67,8 +80,10 @@ async def call(
     stack: LLMStack,
 ) -> BaseModel:
     """Run one schema-validated call on ``route.model`` through the shared slot."""
+    acquire_start = monotonic()
     try:
         async with semaphore_slot(timeout=slot_timeout):
+            slot_wait_ms.set((monotonic() - acquire_start) * 1000)
             sdk_timeout = bound_to_deadline(sdk_timeout, deadline, monotonic(), leg="anthropic")
             client_kwargs: dict[str, Any] = {
                 "api_key": get_anthropic_api_key(),

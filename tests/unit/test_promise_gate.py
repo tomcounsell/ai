@@ -18,15 +18,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import agent.llm.backends.anthropic as anthropic_leg
 import bridge.promise_gate as promise_gate
+from agent.llm import LLMCallError
 from bridge.promise_gate import (
+    PROMISE_VERDICT,
     PromiseVerdict,
+    PromiseVerdictDecision,
     _detect_empty_promise,
     _evaluate_promise_heuristic,
     _format_recovery_template,
+    _resolve_project_key,
     cli_check_or_exit,
     evaluate_promise,
 )
+from tests.helpers.llm_fakes import FakeRunTyped, failing
 
 pytestmark = [pytest.mark.unit, pytest.mark.sdlc]
 
@@ -61,23 +67,10 @@ class _ClassificationResult:
 # === Helpers ===
 
 
-def _mock_llm_block_message(
-    action: str = "block", reason: str = "test", class_: str | None = "forward_deferral"
-):
-    """Build a fake anthropic Message with a single ``promise_verdict`` tool_use block."""
-    block = MagicMock()
-    block.type = "tool_use"
-    block.name = "promise_verdict"
-    block.input = {"action": action, "reason": reason, "class_": class_}
-    msg = MagicMock()
-    msg.content = [block]
-    return msg
-
-
 def _patch_llm(verdict_action, *, reason: str = "test", class_: str | None = None):
     """Patch ``_evaluate_promise_async`` to return a specific verdict (or None)."""
 
-    async def _fake(text):
+    async def _fake(text, project_key=None):
         if verdict_action is None:
             return None
         return PromiseVerdict(action=verdict_action, reason=reason, class_=class_)
@@ -157,7 +150,7 @@ class TestEmptyInputAndKillSwitch:
         monkeypatch.setenv("PROMISE_GATE_ENABLED", "")
         async_mock = MagicMock()
 
-        async def _fake(_text):
+        async def _fake(_text, project_key=None):
             async_mock(_text)
             return PromiseVerdict(action="allow", reason="ok", class_=None)
 
@@ -180,7 +173,7 @@ class TestEmptyInputAndKillSwitch:
         monkeypatch.setenv("PROMISE_GATE_ENABLED", "   ")
         async_mock = MagicMock()
 
-        async def _fake(_text):
+        async def _fake(_text, project_key=None):
             async_mock(_text)
             return PromiseVerdict(action="allow", reason="ok", class_=None)
 
@@ -344,7 +337,7 @@ class TestHeuristicFallback:
         assert v.action == "allow"
 
     def test_llm_exception_falls_through_to_heuristic(self):
-        async def _raise(text):
+        async def _raise(text, project_key=None):
             raise RuntimeError("simulated LLM failure")
 
         with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_raise):
@@ -508,23 +501,24 @@ class TestCliCheckOrExit:
 
 
 class TestSDKTimeout:
-    def test_timeout_falls_through_to_heuristic_with_timeout_source(self, tmp_path, monkeypatch):
-        """A real ``anthropic.APITimeoutError`` from the SDK call is its own
-        discriminator: the caller must fall through to the heuristic AND
-        audit it as ``source="promise_gate_timeout"``, distinct from the
-        generic ``"promise_gate_heuristic"`` fallthrough that fires when the
-        LLM call fails for any other reason. The timeout must propagate out
-        of ``_evaluate_promise_async`` for that distinction to exist; a
-        swallowed timeout would audit as a generic heuristic fallthrough.
+    @pytest.mark.parametrize("reason", ["timeout", "slot_timeout"])
+    def test_timeout_falls_through_to_heuristic_with_timeout_source(
+        self, tmp_path, monkeypatch, reason
+    ):
+        """``LLMCallError(reason="timeout")`` (the leg's SDK-level timer) and
+        ``reason="slot_timeout"`` (the semaphore wait) are their own
+        discriminator: the caller must fall through to the heuristic AND audit
+        it as ``source="promise_gate_timeout"``, distinct from the generic
+        ``"promise_gate_heuristic"`` fallthrough that fires when the LLM call
+        fails for any other reason. The timeout must propagate out of
+        ``_evaluate_promise_async`` for that distinction to exist; a swallowed
+        timeout would audit as a generic heuristic fallthrough.
         """
-        import httpx
-
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
 
-        async def _timeout(text):
-            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-            raise promise_gate.anthropic.APITimeoutError(request=request)
+        async def _timeout(text, project_key=None):
+            raise LLMCallError("leg timed out", reason=reason)
 
         with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_timeout):
             v = evaluate_promise(
@@ -539,15 +533,15 @@ class TestSDKTimeout:
         assert "promise_gate_heuristic" not in contents
 
     def test_llm_none_falls_through_to_heuristic_with_heuristic_source(self, tmp_path, monkeypatch):
-        """The generic "LLM returned None" fallthrough (no API key, parse
-        failure, non-timeout SDK exception already swallowed inside
-        ``_evaluate_promise_async``) audits as ``source="promise_gate_heuristic"``
-        — never ``"promise_gate_timeout"``, which is reserved for the actual
-        timeout discriminator (previous test)."""
+        """The generic "LLM returned None" fallthrough (no API key, non-timeout
+        ``LLMCallError`` already swallowed inside ``_evaluate_promise_async``)
+        audits as ``source="promise_gate_heuristic"`` — never
+        ``"promise_gate_timeout"``, which is reserved for the actual timeout
+        discriminator (previous test)."""
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
 
-        async def _unavailable(text):
+        async def _unavailable(text, project_key=None):
             return None
 
         with patch("bridge.promise_gate._evaluate_promise_async", side_effect=_unavailable):
@@ -563,23 +557,15 @@ class TestSDKTimeout:
         assert "promise_gate_timeout" not in contents
 
     def test_semaphore_acquire_timeout_is_a_timeout_row_without_queue_wait(self, monkeypatch):
-        """``semaphore_slot(timeout=...)`` raises ``TimeoutError`` from
-        ``__aenter__`` before the slot is held, so ``_queue_wait_ms`` is never
-        set: the outcome is the ``timeout`` suffix with ``queue_wait_ms`` of
-        ``None`` while ``elapsed_ms`` is still measured. The SDK-timeout
-        counterpart (next test) is the ``timeout`` row that does carry a
-        queue-wait sample."""
+        """A slot timeout raises ``LLMCallError(reason="slot_timeout")`` from the
+        leg before the slot is held, so the leg never publishes a slot wait:
+        the outcome is the ``timeout`` suffix with ``queue_wait_ms`` of ``None``
+        while ``elapsed_ms`` is still measured. The SDK-timeout counterpart
+        (next test) is the ``timeout`` row that does carry a queue-wait sample."""
         import asyncio
 
-        class _NeverAcquires:
-            async def __aenter__(self):
-                raise TimeoutError("semaphore acquire timed out")
-
-            async def __aexit__(self, *exc):
-                return None
-
         monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
-        monkeypatch.setattr(promise_gate, "semaphore_slot", lambda timeout=None: _NeverAcquires())
+        monkeypatch.setattr(promise_gate, "run_typed", failing("slot_timeout"))
 
         verdict, suffix, elapsed_ms, queue_wait_ms = asyncio.run(
             promise_gate._evaluate_promise_llm_or_heuristic("I'll come back with thoughts")
@@ -590,51 +576,123 @@ class TestSDKTimeout:
         assert elapsed_ms >= 0
 
     def test_sdk_timeout_after_acquire_is_a_timeout_row_with_queue_wait(self, monkeypatch):
-        """Once the slot is held, ``_queue_wait_ms`` is set before the SDK
-        call, so an ``anthropic.APITimeoutError`` raised by the client yields
+        """Once the slot is held the leg publishes ``slot_wait_ms`` before the
+        request, so an ``LLMCallError(reason="timeout")`` from the request yields
         the ``timeout`` suffix WITH a measured ``queue_wait_ms``. Together with
         the previous test this pins both halves of the documented contract:
         the field is present exactly when the acquire succeeded."""
         import asyncio
 
-        import httpx
-
-        class _AcquiresImmediately:
-            async def __aenter__(self):
-                return None
-
-            async def __aexit__(self, *exc):
-                return None
-
-        class _TimingOutMessages:
-            async def create(self, **kwargs):
-                request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-                raise promise_gate.anthropic.APITimeoutError(request=request)
-
-        class _TimingOutClient:
-            def __init__(self, **kwargs):
-                self.messages = _TimingOutMessages()
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return None
-
-        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
-        monkeypatch.setattr(
-            promise_gate, "semaphore_slot", lambda timeout=None: _AcquiresImmediately()
+        fake = FakeRunTyped(
+            error=LLMCallError("request timed out", reason="timeout"),
+            on_call=lambda call: anthropic_leg.slot_wait_ms.set(12.5),
         )
-        monkeypatch.setattr(promise_gate.anthropic, "AsyncAnthropic", _TimingOutClient)
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+        monkeypatch.setattr(promise_gate, "run_typed", fake)
 
         verdict, suffix, elapsed_ms, queue_wait_ms = asyncio.run(
             promise_gate._evaluate_promise_llm_or_heuristic("I'll come back with thoughts")
         )
         assert suffix == "timeout"
         assert verdict.action == "block"
-        assert queue_wait_ms is not None
-        assert queue_wait_ms >= 0
-        assert elapsed_ms >= queue_wait_ms
+        assert queue_wait_ms == 12.5
+        assert elapsed_ms >= 0
+
+
+# === The LLM leg itself (C9, #3410) ===
+
+
+class TestEvaluatePromiseAsync:
+    """``_evaluate_promise_async`` runs on ``run_typed`` with ``PROMISE_VERDICT``
+    under the hotfix #1055 call shape."""
+
+    @pytest.fixture(autouse=True)
+    def _key(self, monkeypatch):
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+
+    async def test_verdict_and_call_shape(self, monkeypatch):
+        fake = FakeRunTyped(
+            result=PromiseVerdictDecision(action="block", reason="fd", class_="forward_deferral"),
+            on_call=lambda call: anthropic_leg.slot_wait_ms.set(3.0),
+        )
+        monkeypatch.setattr(promise_gate, "run_typed", fake)
+
+        verdict = await promise_gate._evaluate_promise_async(
+            "I'll come back with thoughts", project_key="valor"
+        )
+
+        assert verdict == PromiseVerdict(action="block", reason="fd", class_="forward_deferral")
+        call = fake.last
+        assert call.prompt == "I'll come back with thoughts"
+        assert call.task is PROMISE_VERDICT
+        assert call.project_key == "valor"
+        assert call.kwargs["system"] == promise_gate.PROMISE_GATE_SYSTEM_PROMPT
+        assert call.kwargs["sdk_timeout"] == promise_gate.RTR_SDK_TIMEOUT == 3.0
+        assert call.kwargs["slot_timeout"] == promise_gate.RTR_SDK_TIMEOUT
+        assert call.kwargs["max_retries"] == 0
+        assert call.kwargs["hard_timeout"] is None
+        assert promise_gate._queue_wait_ms.get() == 3.0
+
+    async def test_empty_class_becomes_none(self, monkeypatch):
+        fake = FakeRunTyped(result=PromiseVerdictDecision(action="allow", reason="ok", class_=""))
+        monkeypatch.setattr(promise_gate, "run_typed", fake)
+
+        verdict = await promise_gate._evaluate_promise_async("Done. PR #12 is merged.")
+
+        assert verdict == PromiseVerdict(action="allow", reason="ok", class_=None)
+
+    @pytest.mark.parametrize("reason", ["transport", "validation"])
+    async def test_non_timeout_failure_is_none_with_a_warning(self, monkeypatch, caplog, reason):
+        """The fail-safe: a non-timeout ``LLMCallError`` is swallowed here (the
+        caller falls through to the heuristic); timeouts propagate (previous class)."""
+        monkeypatch.setattr(promise_gate, "run_typed", failing(reason, "leg refused"))
+
+        with caplog.at_level("WARNING", logger="bridge.promise_gate"):
+            verdict = await promise_gate._evaluate_promise_async("I'll come back with thoughts")
+
+        assert verdict is None
+        assert any("promise_gate LLM call failed" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("reason", ["timeout", "slot_timeout"])
+    async def test_timeouts_propagate(self, monkeypatch, reason):
+        monkeypatch.setattr(promise_gate, "run_typed", failing(reason))
+
+        with pytest.raises(LLMCallError) as exc_info:
+            await promise_gate._evaluate_promise_async("I'll come back with thoughts")
+
+        assert exc_info.value.reason == reason
+
+    async def test_no_api_key_is_none_without_a_call(self, monkeypatch):
+        fake = FakeRunTyped(result=PromiseVerdictDecision(action="block", reason="never"))
+        monkeypatch.setattr(promise_gate, "run_typed", fake)
+        monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: None)
+
+        assert await promise_gate._evaluate_promise_async("I'll come back") is None
+        assert fake.calls == []
+
+
+class TestResolveProjectKey:
+    """The gate has no chat in scope, so the key comes from the AgentSession row
+    the ``session_id`` names; a missing or synthetic id resolves to ``None``."""
+
+    def test_real_session_yields_its_key(self):
+        fake_session = MagicMock()
+        fake_session.project_key = "valor"
+        with patch("models.agent_session.AgentSession.get_by_id", return_value=fake_session):
+            assert _resolve_project_key("real-id") == "valor"
+
+    @pytest.mark.parametrize("session_id", [None, "", "cli-1700000000"])
+    def test_missing_or_synthetic_id_is_none(self, session_id):
+        with patch("models.agent_session.AgentSession.get_by_id", return_value=None) as get:
+            assert _resolve_project_key(session_id) is None
+        if session_id:
+            get.assert_called_once_with(session_id)
+        else:
+            get.assert_not_called()
+
+    def test_lookup_error_is_none(self):
+        with patch("models.agent_session.AgentSession.get_by_id", side_effect=RuntimeError("down")):
+            assert _resolve_project_key("real-id") is None
 
 
 # === Audit JSONL ordering / kill-switch first-write ===
@@ -813,7 +871,7 @@ class TestLlmInputCap:
         monkeypatch.setenv("PROMISE_GATE_LLM_MAX_INPUT_CHARS", "50")
         called = False
 
-        async def _fake(text):
+        async def _fake(text, project_key=None):
             nonlocal called
             called = True
             return PromiseVerdict(action="allow", reason="llm")

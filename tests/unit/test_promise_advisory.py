@@ -235,7 +235,7 @@ class TestPromiseOverride:
         from bridge.message_drafter import _evaluate_drafter_promise
         from bridge.promise_gate import PromiseVerdict
 
-        async def _fake_block(text):
+        async def _fake_block(text, project_key=None):
             return PromiseVerdict(
                 action="block",
                 reason="Forward-deferral without verifiable scheduled-delivery reference",

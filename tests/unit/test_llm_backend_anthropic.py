@@ -223,6 +223,31 @@ class TestDeadlineRecheck:
         assert FakeAsyncAnthropic.instances[0].kwargs["timeout"] == 15.0
 
 
+class TestSlotWaitMeasurement:
+    """The leg publishes its slot wait through ``slot_wait_ms`` so a caller that
+    audits queue time (``bridge/promise_gate.py``) reads it after ``run_typed``
+    returns or raises; it is ``None`` when the slot was never acquired."""
+
+    async def test_slot_wait_is_published_once_the_slot_is_held(self, monkeypatch, stack):
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(anthropic_leg, "monotonic", lambda: clock["now"])
+        monkeypatch.setattr(anthropic_leg, "semaphore_slot", _ClockSlot(clock, consume=0.25))
+        anthropic_leg.slot_wait_ms.set(None)
+
+        await _call(stack, sdk_timeout=15.0)
+
+        assert anthropic_leg.slot_wait_ms.get() == pytest.approx(250.0)
+
+    async def test_slot_timeout_leaves_it_unset(self, monkeypatch, stack):
+        monkeypatch.setattr(anthropic_client, "_semaphore", asyncio.Semaphore(0))
+        anthropic_leg.slot_wait_ms.set(None)
+
+        with pytest.raises(LLMCallError):
+            await _call(stack, slot_timeout=0.05)
+
+        assert anthropic_leg.slot_wait_ms.get() is None
+
+
 class TestClientConstruction:
     async def test_max_retries_none_leaves_the_sdk_default(self, stack):
         await _call(stack, max_retries=None)

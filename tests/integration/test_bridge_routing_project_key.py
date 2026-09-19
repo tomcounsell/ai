@@ -10,21 +10,31 @@ assert the key the bridge resolved for the chat is the one the router sees.
 Offline: the wrapper is faked at each module's import seam; no Redis rows
 are written and no model is called.
 
-Covered here (Task 4): ``should_respond_async`` into the two routing
-classifiers it reaches (C1 ``routing.needs_response`` on an unaddressed
-group message, C2 ``routing.terminus`` on a reply to Valor) and the
-``classify_work_request`` entry point (C3). The promise-gate CLI path, the
-drafter path (``_evaluate_drafter_promise``) and ``read_the_room`` cases are
-added by Tasks 5 and 6 of the same plan.
+Covered here: ``should_respond_async`` into the two routing classifiers it
+reaches (C1 ``routing.needs_response`` on an unaddressed group message, C2
+``routing.terminus`` on a reply to Valor), the ``classify_work_request``
+entry point (C3), the promise gate's CLI path (C9 ``promise_gate.verdict``,
+key resolved from a real ``AgentSession`` row by ``session_id``) and the
+drafter's main path (``_evaluate_drafter_promise``, the caller every
+outbound reply crosses, key read from its ``session``). The
+``read_the_room`` case is added by Task 6 of the same plan.
+
+The promise-gate cases write one ``AgentSession`` row to the claimed test
+db (``project_key="valor"`` is load-bearing for the pin, so the row is
+created and deleted inside the test).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 
+import bridge.promise_gate as promise_gate
 import bridge.routing as routing
+from bridge.message_drafter import _evaluate_drafter_promise
+from bridge.promise_gate import PROMISE_VERDICT, PromiseVerdictDecision, evaluate_promise_async
 from bridge.routing import (
     NEEDS_RESPONSE,
     TERMINUS,
@@ -144,3 +154,97 @@ class TestClassifyWorkRequestThreadsTheProjectKey:
         await classify_work_request("please refactor the retry loop in the worker")
 
         assert recorder.calls[0]["project_key"] is None
+
+
+# === C9: the promise gate resolves its key from the session ===
+
+
+class _RecordingPromiseJudge:
+    """A ``run_typed`` stand-in for the promise gate: allows, records kwargs."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def __call__(self, prompt, output_type, **kwargs):
+        assert output_type is PromiseVerdictDecision
+        self.calls.append({"prompt": prompt, **kwargs})
+        return PromiseVerdictDecision(action="allow", reason="evidence present", class_=None)
+
+
+@pytest.fixture
+def promise_judge(monkeypatch, tmp_path):
+    judge = _RecordingPromiseJudge()
+    monkeypatch.setattr(promise_gate, "run_typed", judge)
+    monkeypatch.setattr(promise_gate, "get_anthropic_api_key", lambda: "test-key")
+    monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", tmp_path / "classification_audit.jsonl")
+    monkeypatch.delenv("PROMISE_GATE_ENABLED", raising=False)
+    return judge
+
+
+@pytest.fixture
+def valor_session(redis_test_db):
+    """A real ``AgentSession`` row keyed to ``valor``, deleted after the test."""
+    from models.agent_session import AgentSession
+
+    session = AgentSession.create(
+        session_id=f"test-3410-promise-{datetime.now(tz=UTC).timestamp()}",
+        session_type="eng",
+        project_key="valor",
+        working_dir="/tmp",
+        status="running",
+        chat_id="test-3410-chat",
+        message_text="please open the PR",
+        sender_name="tester",
+        created_at=datetime.now(tz=UTC),
+    )
+    try:
+        yield session
+    finally:
+        session.delete()
+
+
+LONG_DRAFT = (
+    "The retry loop in the worker now backs off exponentially and the regression "
+    "test for it is in tests/unit/test_worker_retry.py; PR #3410 carries both, "
+    "the suite is green at 2c921dbe3, and the merge is queued behind review."
+)
+
+
+class TestPromiseGateThreadsTheProjectKey:
+    async def test_real_session_id_reaches_the_judge_with_the_session_key(
+        self, promise_judge, valor_session
+    ):
+        verdict = await evaluate_promise_async(
+            LONG_DRAFT, transport="telegram", session_id=valor_session.id
+        )
+
+        assert verdict.action == "allow"
+        (call,) = promise_judge.calls
+        assert call["task"] is PROMISE_VERDICT
+        assert call["project_key"] == "valor"
+        assert call["prompt"] == LONG_DRAFT
+
+    async def test_synthetic_session_id_reaches_the_judge_with_none(self, promise_judge):
+        """The CLI senders pass ``cli-{epoch}`` ids that name no row; the router's
+        fail-closed rule then resolves the call to the subscription backend."""
+        await evaluate_promise_async(LONG_DRAFT, transport="telegram", session_id="cli-1700000000")
+
+        (call,) = promise_judge.calls
+        assert call["task"] is PROMISE_VERDICT
+        assert call["project_key"] is None
+
+
+class TestDrafterPathThreadsTheProjectKey:
+    async def test_drafter_main_path_reaches_the_judge_with_the_session_key(
+        self, promise_judge, valor_session
+    ):
+        """``bridge/message_drafter.py::_evaluate_drafter_promise`` is the caller
+        every outbound reply crosses; it reads the key from the session it holds."""
+        verdict = await _evaluate_drafter_promise(
+            LONG_DRAFT, medium="telegram", session=valor_session, use_llm=True
+        )
+
+        assert verdict.action == "allow"
+        (call,) = promise_judge.calls
+        assert call["task"] is PROMISE_VERDICT
+        assert call["project_key"] == "valor"
