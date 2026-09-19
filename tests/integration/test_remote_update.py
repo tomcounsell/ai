@@ -10,6 +10,7 @@ serially within the worker pool.
 
 import asyncio
 import os
+import re
 import subprocess
 from datetime import UTC
 from pathlib import Path
@@ -249,8 +250,15 @@ class TestRestartFlag:
 
         try:
             with patch("agent.agent_session_queue.AgentSession") as mock_session:
-                # Return running sessions for the project
-                mock_session.query.filter.return_value = [MagicMock()]
+                # Return a running session for the project. is_ledger must be
+                # explicitly False: _check_restart_flag excludes ledger-anchor
+                # sessions via _is_ledger/_truthy (#2042), and an unconfigured
+                # MagicMock's auto-created `.is_ledger` attribute is truthy,
+                # which would make this fixture look like a ledger row and get
+                # filtered out of `running` -- silently defeating the test.
+                running_session = MagicMock()
+                running_session.is_ledger = False
+                mock_session.query.filter.return_value = [running_session]
                 assert _check_restart_flag() is False
         finally:
             _active_workers.pop("testproject", None)
@@ -582,9 +590,34 @@ class TestPinHelpersRefuseLoudly:
             bump_pin_in_pyproject(tmp_path, "anthropic", "1.0.0")
 
     def test_real_pyproject_declarations_resolve(self):
-        """The live file is the shape that produced every spike-2 defect."""
-        assert get_pinned_version(PROJECT_DIR, "anthropic") == "1.5.0"
-        assert get_pinned_version(PROJECT_DIR, "pydantic-ai-slim") == "2.43.0"
+        """The live file is the shape that produced every spike-2 defect.
+
+        Deliberately version-agnostic: pins move (anthropic/pydantic-ai-slim
+        bump together via /update, see AUTO_BUMP_SETS), so this asserts the
+        *shape* of resolution rather than hardcoding a literal that a future
+        bump would falsify. It still has teeth: each exact-pin package's
+        resolved version is independently re-derived from the raw file text
+        (not via get_pinned_version) and must match exactly, and the version
+        string must be well-formed. `openai` staying unresolved guards the
+        floor-is-not-a-pin / comment-blindness behavior directly.
+        """
+        text = (PROJECT_DIR / "pyproject.toml").read_text()
+        version_re = re.compile(r"\d+\.\d+\.\d+")
+
+        for package in ("anthropic", "pydantic-ai-slim"):
+            resolved = get_pinned_version(PROJECT_DIR, package)
+            assert resolved is not None, f"{package}: expected an exact pin in pyproject.toml"
+            assert version_re.fullmatch(resolved), f"{package}: malformed version {resolved!r}"
+
+            # Independently re-derive the expected version straight from the
+            # declaration line, without going through get_pinned_version, so
+            # a regression in that function's own parsing can't self-certify.
+            line_match = re.search(
+                rf'^\s*"{re.escape(package)}(?:\[[^\]]*\])?==([\d.]+)"', text, re.MULTILINE
+            )
+            assert line_match is not None, f"{package}: could not locate its declaration line"
+            assert resolved == line_match.group(1)
+
         # A floor is not a pin, and `openai` sits inside the slim line's comment.
         assert get_pinned_version(PROJECT_DIR, "openai") is None
 

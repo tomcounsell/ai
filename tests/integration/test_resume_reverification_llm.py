@@ -55,7 +55,7 @@ RAILS_SECTION_HEADER = "## Re-Verification on Resume"
 # Anchor for the inline work-patterns caveat; the stripped variant cuts from
 # here to the end of the paragraph. If this substring ever drifts, the strip
 # guard fails loudly rather than silently producing an un-stripped control.
-WORK_PATTERNS_CAVEAT_ANCHOR = "But not announcing the resume does NOT mean"
+WORK_PATTERNS_CAVEAT_ANCHOR = "but not announcing the resume does"
 
 
 @pytest.fixture(autouse=True)
@@ -112,21 +112,24 @@ def _strip_reverification(rails: str, work_patterns: str) -> tuple[str, str]:
     stripped_rails = "".join(out)
     assert RAILS_SECTION_HEADER not in stripped_rails, "Rails section survived stripping"
 
-    # --- work-patterns: cut the caveat sentence to end of its paragraph line ---
-    wp_lines = work_patterns.splitlines(keepends=True)
-    stripped_wp_lines: list[str] = []
+    # --- work-patterns: cut the caveat sentence from its anchor to the end of
+    # its markdown paragraph. The source hard-wraps prose across multiple
+    # physical lines, so the cut must operate on paragraphs (blank-line
+    # delimited blocks), not on the single physical line containing the
+    # anchor — otherwise wrapped continuation lines (and the cross-reference
+    # to the rails section) survive the strip. ---
+    wp_paragraphs = work_patterns.split("\n\n")
+    stripped_wp_paragraphs: list[str] = []
     cut = False
-    for line in wp_lines:
-        if WORK_PATTERNS_CAVEAT_ANCHOR in line:
-            head = line[: line.index(WORK_PATTERNS_CAVEAT_ANCHOR)].rstrip()
-            # Preserve the sentence terminator of the retained resume sentence.
-            newline = "\n" if line.endswith("\n") else ""
-            stripped_wp_lines.append(head + newline)
+    for paragraph in wp_paragraphs:
+        if WORK_PATTERNS_CAVEAT_ANCHOR in paragraph:
+            head = paragraph[: paragraph.index(WORK_PATTERNS_CAVEAT_ANCHOR)].rstrip()
+            stripped_wp_paragraphs.append(head)
             cut = True
             continue
-        stripped_wp_lines.append(line)
+        stripped_wp_paragraphs.append(paragraph)
     assert cut, "Failed to locate the work-patterns caveat to strip"
-    stripped_wp = "".join(stripped_wp_lines)
+    stripped_wp = "\n\n".join(stripped_wp_paragraphs)
     assert "Re-Verification on Resume" not in stripped_wp, "Caveat cross-ref survived stripping"
     return stripped_rails, stripped_wp
 

@@ -376,12 +376,28 @@ async def test_reap_not_found_owner_reclaimed_but_no_stale(registry):
 @pytest.mark.asyncio
 async def test_reap_lookup_error_owner_no_reclaim_no_stale(registry):
     """A lookup-error (_ABSENT) owner: Phase-2 skips reclaim (fresh read raised) AND
-    the stale-check records _ABSENT (not terminal) → no reclaim, no stale, no crash."""
+    the stale-check records _ABSENT (not terminal) → no reclaim, no stale, no crash.
+
+    Mocks the UNDERLYING ``AgentSession.query.filter`` (not ``get_by_id`` /
+    ``get_by_id_strict`` directly) — per #1868 (agent/session_health.py Phase 2),
+    the stale-check owner map uses ``get_by_id`` while Phase-2 reclaim uses the
+    raising ``get_by_id_strict`` sibling; mocking either helper alone leaves the
+    other's real call path unexercised and the assertion would pass for the
+    wrong reason. See tests/integration/test_slot_lease_reclaim.py, the
+    authoritative #1868 regression test, for the same pattern.
+    """
     session = await _orphan_slot(registry, status="completed")
     before = registry.permits_free()
     _redis().delete(f"{_HOST}:worker-watchdog:bridge_contract_stale")
 
-    with patch.object(AgentSession, "get_by_id", side_effect=RuntimeError("redis blip")):
+    real_filter = AgentSession.query.filter
+
+    def _fake_filter(*args, **kwargs):
+        if kwargs.get("id") == session.id:
+            raise RuntimeError("redis blip")
+        return real_filter(*args, **kwargs)
+
+    with patch.object(AgentSession.query, "filter", side_effect=_fake_filter):
         sh._reap_slot_leases()  # must not raise
 
     assert registry.permits_free() == before, "lookup-error owner must NOT be reclaimed"
@@ -395,7 +411,13 @@ async def test_reap_lookup_error_owner_no_reclaim_no_stale(registry):
 async def test_reap_resume_during_drain_not_reclaimed(registry):
     """Regression guard: an owner terminal at owner-map-snapshot time but re-reads
     NON-terminal at Phase-2 reclaim time (a resume-during-drain simulation) must NOT
-    be reclaimed — proving Phase-2's FRESH re-read prevents the live-permit strip."""
+    be reclaimed — proving Phase-2's FRESH re-read prevents the live-permit strip.
+
+    Mocks the UNDERLYING ``AgentSession.query.filter`` (see the sibling test above
+    for why): call #1 is the stale-check owner-map build (``get_by_id``, before
+    Phase 2) and returns a terminal record; call #2 is Phase-2's fresh
+    ``get_by_id_strict`` read (the reclaim decision) and returns a live record.
+    """
     from types import SimpleNamespace
 
     session = await _orphan_slot(registry, status="completed")
@@ -404,13 +426,16 @@ async def test_reap_resume_during_drain_not_reclaimed(registry):
     terminal_rec = SimpleNamespace(status="completed", project_key="test")
     live_rec = SimpleNamespace(status="running", project_key="test")
     calls = {"n": 0}
+    real_filter = AgentSession.query.filter
 
-    def _fake_get_by_id(_owner_id):
+    def _fake_filter(*args, **kwargs):
+        if kwargs.get("id") != session.id:
+            return real_filter(*args, **kwargs)
         calls["n"] += 1
         # Call #1 = owner-map snapshot (terminal); call #2 = Phase-2 fresh read (live).
-        return terminal_rec if calls["n"] == 1 else live_rec
+        return [terminal_rec] if calls["n"] == 1 else [live_rec]
 
-    with patch.object(AgentSession, "get_by_id", side_effect=_fake_get_by_id):
+    with patch.object(AgentSession.query, "filter", side_effect=_fake_filter):
         sh._reap_slot_leases()
 
     assert registry.permits_free() == before, "resumed (now-live) owner's permit must survive"
