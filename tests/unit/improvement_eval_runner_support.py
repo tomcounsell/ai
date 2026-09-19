@@ -179,10 +179,19 @@ def arm_child_embedding_parity(monkeypatch):
     In production no such asymmetry exists: parent and arm both configure the
     provider from the same environment.
 
-    Dropping the key from the environment the child inherits restores the
+    Pinning the key empty in the environment the child inherits restores the
     symmetry at the harness layer, where the asymmetry was introduced. It also
     keeps these unit tests off the live OpenAI embedding endpoint, which the arm
     child was otherwise calling for real. The digest gate itself is untouched --
     it was reporting a true condition.
+
+    The pin is empty-but-present, never ``delenv``. ``configure_embedding_provider``
+    reacts to an absent key by re-reading it from ``REPO_ROOT/.env``
+    (``agent/embedding_provider.py``), and ``scripts/pytest-clean.sh`` pins
+    ``PYTHONPATH`` to the invoking checkout -- so a delete is silently undone in
+    any checkout that has the vault ``.env`` symlink, which the main checkout
+    does and this worktree does not. ``load_dotenv`` defaults to
+    ``override=False`` and treats ``""`` as present, so the empty pin survives
+    that fallback and the provider resolves to ``None`` in every checkout.
     """
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
