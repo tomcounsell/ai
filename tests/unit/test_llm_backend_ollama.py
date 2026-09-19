@@ -122,11 +122,24 @@ class FakeAsyncOpenAI:
 
 
 def _install(monkeypatch, behaviour) -> None:
+    """Fake the Ollama client and pin a fallback-free Ollama route.
+
+    ``resolve`` gives a ``valor`` call an Anthropic fallback (Task 2), and a
+    leg failure would otherwise run the real Anthropic leg with the real
+    key: a live, billed call from a unit test. These tests are about the
+    Ollama leg's own failure shapes, so the route is pinned to the leg with
+    ``fallback=None``; the fallback path is ``test_llm_wrapper.py``'s.
+    """
     FakeAsyncOpenAI.instances = []
     FakeAsyncOpenAI.behaviour = staticmethod(behaviour)
     real = wrapper_mod._load_stack()
     fake = dataclasses.replace(real, AsyncOpenAI=FakeAsyncOpenAI)
     monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+    monkeypatch.setattr(
+        wrapper_mod,
+        "resolve",
+        lambda task, project_key, *, model: Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL),
+    )
 
 
 def _tool_name(kwargs: dict) -> str:

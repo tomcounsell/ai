@@ -20,7 +20,12 @@ wrapper's contract, driven end to end through the Anthropic leg
   outside the leg, and bounds wall-clock time regardless of a larger
   SDK-level ``timeout`` kwarg.
 * Empty/None/whitespace-only prompts fail fast with no LLM call and no
-  hang.
+  hang, and a call without ``task=`` raises ``TypeError`` naming it.
+* Routing and the fallback budget (Task 2), with both legs faked at the
+  ``_LEGS`` table and the wrapper's ``monotonic`` patched: the per-backend
+  SDK timer read from ``settings.timeouts``, the fallback's ``sdk_timeout``
+  / ``slot_timeout`` / ``max_retries=0`` / ``deadline``, the skip under
+  0.5 s of budget, and the ``llm_route`` / ``llm_fallback`` log lines.
 
 Network isolation: every test monkeypatches ``anthropic.AsyncAnthropic``
 (a fake, non-network client) and the memoized loader
