@@ -155,3 +155,34 @@ def _rejecting_protocol(corpus):
 def _evaluate(experiment, **kwargs):
     kwargs.setdefault("judges", [_approving_judge])
     return runner.evaluate(str(experiment.id), PK, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def arm_child_embedding_parity(monkeypatch):
+    """Give the arm subprocess the same (absent) embedding provider as the parent.
+
+    The corpus identity gate in ``runner.py`` compares the digest the parent
+    recorded at export time against the digest an arm reports after restoring
+    and re-exporting. ``canonical_corpus_digest`` strips the provider
+    *fingerprint* (``embedding_provenance``, ``state.<field>.provenance``) but
+    deliberately keeps the vector bytes, so the two processes must resolve the
+    same provider or the gate fires on a difference that is an artifact of the
+    harness rather than of the corpus.
+
+    Under pytest they do not. ``tests/unit/conftest.py``'s autouse
+    ``_no_live_embedding_provider`` nulls popoto's process-global provider in
+    the parent, while ``arena.build_child_env`` copies ``os.environ`` wholesale
+    into the arm child -- so the child's ``config.memory_defaults.apply_defaults``
+    sees ``OPENAI_API_KEY`` and installs a live 1536-dim ``OpenAIProvider``. The
+    parent exports vectorless records, the arm exports vector-carrying ones, and
+    every run in these modules aborts ``infra_failure`` at the gate (#3355).
+    In production no such asymmetry exists: parent and arm both configure the
+    provider from the same environment.
+
+    Dropping the key from the environment the child inherits restores the
+    symmetry at the harness layer, where the asymmetry was introduced. It also
+    keeps these unit tests off the live OpenAI embedding endpoint, which the arm
+    child was otherwise calling for real. The digest gate itself is untouched --
+    it was reporting a true condition.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)

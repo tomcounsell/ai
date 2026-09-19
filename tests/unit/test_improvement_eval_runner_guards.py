@@ -33,6 +33,7 @@ from tests.unit.improvement_eval_runner_support import (  # noqa: F401 -- fixtur
     _reload,
     _reload_evaluation,
     _seed_memory,
+    arm_child_embedding_parity,
     charter_fixture,
     corpus_fixture,
 )
