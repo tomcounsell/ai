@@ -645,9 +645,12 @@ _site(
 # --- C12: job_router.route (stays on granite; latency-only record) --------------------
 
 _JOB_CANDIDATES = [
-    SimpleNamespace(job_id="job-ui-redesign", current_goal=lambda: "Redesign the settings UI"),
-    SimpleNamespace(job_id="job-login-bug", current_goal=lambda: "Fix the login page bug"),
+    {"job_id": "job-ui-redesign", "goal": "Redesign the settings UI"},
+    {"job_id": "job-login-bug", "goal": "Fix the login page bug"},
 ]
+"""Candidate jobs as plain data so a saved draw round-trips through JSON; the
+prompt builder gives them the ``job_id`` / ``current_goal()`` shape the
+router's prompt reads."""
 _JOB_TEST_EXAMPLES = [
     "make the settings page buttons blue",
     "the login form still throws on submit",
@@ -657,7 +660,11 @@ _JOB_TEST_EXAMPLES = [
 
 
 def _job_route_prompt(inp: Input) -> str:
-    return _build_prompt(inp.text, list(inp.context.get("candidates", _JOB_CANDIDATES)))
+    jobs = [
+        SimpleNamespace(job_id=c["job_id"], current_goal=lambda goal=c["goal"]: goal)
+        for c in inp.context.get("candidates", _JOB_CANDIDATES)
+    ]
+    return _build_prompt(inp.text, jobs)
 
 
 def _job_route_fixtures() -> list[Input]:

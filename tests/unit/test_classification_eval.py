@@ -547,6 +547,10 @@ def test_site_row_fixtures_build_prompts_and_labels(site_id):
             assert row.candidate_prompt(inp) != row.prompt(inp), "candidate tail did not apply"
     sample = (row.candidate_output_type or row.output_type).model_json_schema()
     assert sample["properties"]
+    # A saved draw (--save-inputs) must round-trip, so the row's context is plain data.
+    from tools.classification_eval.arms import dump_inputs, load_inputs
+
+    assert load_inputs(dump_inputs(fixtures)) == fixtures
 
 
 # --- the gemma reference arm's pacing (C15) ------------------------------------------
