@@ -155,6 +155,10 @@ class FakeGitHub:
         self.closed_reads = 0
         self.create_calls: list[tuple[str, str]] = []
         self.comment_calls: list[tuple[int, str]] = []
+        # ``dry_run`` as each call site passed it, per call, so a flag that
+        # stopped propagating is visible rather than merely harmless-looking.
+        self.create_dry_runs: list[bool] = []
+        self.comment_dry_runs: list[bool] = []
         self.dispatches: list[tuple[list[tuple[int, str]], dict]] = []
         self._next_number = 9000
         # Hooks, for the failure postures: ``create_hook(title, body) -> int|None``
@@ -188,6 +192,7 @@ class FakeGitHub:
 
     def create_issue(self, title: str, body: str, *, dry_run: bool = False):
         self.create_calls.append((title, body))
+        self.create_dry_runs.append(dry_run)
         if self.create_hook is not None:
             number = self.create_hook(title, body)
         else:
@@ -199,6 +204,7 @@ class FakeGitHub:
 
     def comment_on_issue(self, number: int, body: str, *, dry_run: bool = False) -> bool:
         self.comment_calls.append((number, body))
+        self.comment_dry_runs.append(dry_run)
         return True if self.comment_hook is None else self.comment_hook(number, body)
 
     def maybe_dispatch_triage_session(self, issues, **kwargs):
@@ -1186,17 +1192,25 @@ class TestGroupSetupErrorCascades:
         )[0][0]
         assert one["title"] == two["title"]
 
-    def test_prompt_orders_one_issue_with_a_collapsed_node_list(self) -> None:
+    def test_body_states_one_issue_with_a_collapsed_node_list(self) -> None:
+        """Renamed from ``test_prompt_orders_one_issue_...``.
+
+        The one-defect framing and the collapsed node list used to be
+        INSTRUCTIONS to an agent about the issue it should open. The detector
+        writes that issue itself now, so the same claims are asserted against the
+        body it creates -- and "Do NOT open per-node issues" has no analogue,
+        because there is no longer anything that could: per-node filing is
+        suppressed in Python by ``group_setup_error_cascades`` claiming the nodes.
+        """
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(5)]
         report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
         cascade = nrt.group_setup_error_cascades(report, nodes)[0][0]
-        prompt = nrt._build_cascade_prompt(cascade)
-        assert cascade["title"] in prompt
-        assert "ONE defect" in prompt
-        assert "<details>" in prompt
-        assert "Do NOT open per-node issues" in prompt
+        body = nrt.cascade_issue_body(cascade, run_at="RUN", head_commit="HEAD")
+        assert "ONE defect" in body
+        assert "<details>" in body
+        assert CREATE_INSTRUCTION_TOKENS.findall(body) == []
         for n in nodes:
-            assert n in prompt
+            assert n in body
 
 
 class TestResolveIntKnob:
@@ -1716,88 +1730,96 @@ class TestHandleIntegrityTrip:
             "dispatched_nodes": [],
         }
 
-    def test_trip_still_files_the_cascade(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+    def _state_file(self, monkeypatch, tmp_path: Path) -> Path:
         monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
-        monkeypatch.setattr(nrt, "open_issues", lambda: {})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
         monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
-        filed: list[list[str]] = []
-        monkeypatch.setattr(
-            nrt,
-            "maybe_dispatch_triage_session",
-            lambda ns, **kw: (filed.append(list(ns)), "sess-1")[1] if ns else None,
-        )
-        nodes, report = self._storm()
-        prev = self._prev()
+        return tmp_path / "last_run.json"
 
-        rc = nrt._handle_integrity_trip("infrastructure, not a red suite", report, None, prev)
+    def test_trip_still_files_the_cascade(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
+        state = self._state_file(monkeypatch, tmp_path)
+        nodes, report = self._storm()
+
+        rc = nrt._handle_integrity_trip(
+            "infrastructure, not a red suite", report, None, self._prev()
+        )
 
         assert rc == 1
-        assert len(filed) == 1, "the storm was filed exactly once"
-        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        title = nrt.cascade_title(self.MSG)
+        assert fake_github.created_titles == [title], "the storm was filed exactly once"
+        saved = json.loads(state.read_text())
         assert saved["dispatched_nodes"] == sorted(nodes)
-        assert saved["cascade_issues"] == {self.MSG: None}
+        # The recorded number is the umbrella's REAL number now, not the None
+        # placeholder the agent-filing era had to persist.
+        assert saved["cascade_issues"] == {self.MSG: fake_github.open_map[title]}
 
-    def test_trip_never_overwrites_the_baseline(self, monkeypatch, tmp_path: Path) -> None:
+    def test_trip_never_overwrites_the_baseline(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
         """The guard just declared these totals untrustworthy; they must not land."""
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
-        monkeypatch.setattr(nrt, "open_issues", lambda: {})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
+        state = self._state_file(monkeypatch, tmp_path)
         _, report = self._storm()
-        prev = self._prev()
 
-        nrt._handle_integrity_trip("bad run", report, {"total": 40, "failed": 20}, prev)
+        nrt._handle_integrity_trip("bad run", report, {"total": 40, "failed": 20}, self._prev())
 
-        saved = json.loads(nrt.LAST_RUN_FILE.read_text())
+        saved = json.loads(state.read_text())
         assert saved["total"] == 16000
         assert saved["failed"] == 0
         assert saved["failing_tests"] == []
 
-    def test_trip_with_no_report_writes_nothing(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
+    def test_trip_with_no_report_writes_nothing(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
+        state = self._state_file(monkeypatch, tmp_path)
+        fake_github.create_hook = lambda title, body: pytest.fail("filed with no report")
         monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh with no report"))
         monkeypatch.setattr(
             nrt, "closed_issue_dispositions", lambda: pytest.fail("read gh closed set")
         )
         assert nrt._handle_integrity_trip("no report", None, None, self._prev()) == 1
-        assert not nrt.LAST_RUN_FILE.exists()
+        assert not state.exists()
 
-    def test_already_filed_storm_is_not_filed_again(self, monkeypatch, tmp_path: Path) -> None:
-        """Night after night, the same storm is one issue plus one comment each."""
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
-        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
-        monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        commented: list[int] = []
-        monkeypatch.setattr(
-            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
-        )
-        monkeypatch.setattr(
-            nrt, "maybe_dispatch_triage_session", lambda *a, **k: pytest.fail("filed a twin")
-        )
+    def test_already_filed_storm_is_not_filed_again(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Night after night, the same storm is one issue plus one comment each.
+
+        The twin guard is pinned to ``create_issue`` rather than to the dispatch:
+        the dispatch no longer files anything, so watching it would leave the
+        actual duplication path unwatched.
+        """
+        state = self._state_file(monkeypatch, tmp_path)
+        fake_github.open_map = {nrt.cascade_title(self.MSG): 4242}
+        fake_github.create_hook = lambda title, body: pytest.fail("filed a twin")
         nodes, report = self._storm()
         prev = self._prev() | {"cascade_issues": {self.MSG: 4242}}
 
         assert nrt._handle_integrity_trip("bad run", report, None, prev) == 1
-        assert commented == [4242]
-        assert json.loads(nrt.LAST_RUN_FILE.read_text())["dispatched_nodes"] == sorted(nodes)
+        assert fake_github.commented == [4242]
+        assert json.loads(state.read_text())["dispatched_nodes"] == sorted(nodes)
 
-    def test_dry_run_trip_writes_no_state(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "LAST_RUN_FILE", tmp_path / "last_run.json")
-        monkeypatch.setattr(nrt, "open_issues", lambda: {})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        monkeypatch.setattr(nrt, "_get_head_commit", lambda: "cafe1234")
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda ns, **kw: "sess-1")
+    def test_dry_run_trip_writes_no_state(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
+        state = self._state_file(monkeypatch, tmp_path)
         _, report = self._storm()
         assert nrt._handle_integrity_trip("bad run", report, None, self._prev(), dry_run=True) == 1
-        assert not nrt.LAST_RUN_FILE.exists()
+        assert not state.exists()
+
+    def test_dry_run_trip_creates_no_issue(
+        self, fake_github: FakeGitHub, monkeypatch, tmp_path: Path
+    ) -> None:
+        """The trip path has its own filing call site and its own dry_run kwarg.
+
+        Before #3418 the flag only had to reach a dispatch; it now has to reach
+        ``create_issue``, and a storm is the largest single population the script
+        ever files at once.
+        """
+        self._state_file(monkeypatch, tmp_path)
+        _, report = self._storm()
+        nrt._handle_integrity_trip("bad run", report, None, self._prev(), dry_run=True)
+        assert fake_github.create_dry_runs == [True]
 
 
 class TestMaybeDispatchTriage:
@@ -2811,128 +2833,109 @@ class TestEnvironmentalClassification:
 class TestClosedIssueDedup:
     """A closed exact-title issue must never be silently re-filed (#3075 defect 1)."""
 
-    def _dispatch(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map, prev=None):
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
-        commented: list[int] = []
-        monkeypatch.setattr(
-            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+    def _dispatch(self, gh: FakeGitHub, *, nodes, report, open_map, closed_map, prev=None):
+        """Thin wrapper over the shared harness, kept for this class's argument order."""
+        return dispatch_with(
+            gh,
+            nodes=nodes,
+            report=report,
+            open_map=open_map,
+            closed_map=closed_map,
+            prev=prev,
         )
-        filed: list[list[str]] = []
-
-        def fake_dispatch(ns, **kw):
-            if not ns:
-                return None
-            filed.append(list(ns))
-            return "sess-1"
-
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
-        outcome = nrt.dispatch_findings(
-            report, nodes, prev or {}, run_at="2026-09-04T03:00:00Z", head_commit="cafe1234"
-        )
-        return outcome, commented, filed
 
     def test_closed_not_planned_node_gets_a_comment_never_a_refile(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         """The regression test the acceptance criteria demand: only issue is CLOSED."""
         node = "tests/unit/test_dead.py::test_watchdog"
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[node],
             report={"tests": [_body_failed(node, "gw0", "E   AssertionError: dead")]},
             open_map={},
             closed_map={f"Nightly regression: {node}": (2971, "NOT_PLANNED")},
         )
-        assert filed == []
-        assert commented == [2971]
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [2971]
         assert outcome.recorded == [node]
         assert outcome.issues_filed == 0
 
     def test_closed_completed_refiles_because_recurrence_is_new_information(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         node = "tests/unit/test_fixed.py::test_regressed_again"
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[node],
             report={"tests": [_body_failed(node, "gw0", "E   AssertionError: back")]},
             open_map={},
             closed_map={f"Nightly regression: {node}": (2500, "COMPLETED")},
         )
-        assert commented == []
-        assert filed == [[node]]
+        assert fake_github.commented == []
+        assert fake_github.created_titles == [f"Nightly regression: {node}"]
         assert outcome.issues_filed == 1
 
     def test_unknown_close_reason_comments_rather_than_refiling(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         node = "tests/unit/test_x.py::test_y"
-        _, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        self._dispatch(
+            fake_github,
             nodes=[node],
             report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
             open_map={},
             closed_map={f"Nightly regression: {node}": (11, "")},
         )
-        assert filed == []
-        assert commented == [11]
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [11]
 
-    def test_unreadable_closed_set_fails_open_and_files(self, monkeypatch, tmp_path: Path) -> None:
+    def test_unreadable_closed_set_fails_open_and_files(self, fake_github: FakeGitHub) -> None:
         node = "tests/unit/test_x.py::test_y"
-        _, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        self._dispatch(
+            fake_github,
             nodes=[node],
             report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
             open_map={},
             closed_map=None,
         )
-        assert commented == []
-        assert filed == [[node]]
+        assert fake_github.commented == []
+        assert fake_github.created_titles == [f"Nightly regression: {node}"]
 
-    def test_open_issue_wins_over_closed_record(self, monkeypatch, tmp_path: Path) -> None:
+    def test_open_issue_wins_over_closed_record(self, fake_github: FakeGitHub) -> None:
         """An open issue is the live tracker even when a closed twin also matches."""
         node = "tests/unit/test_x.py::test_y"
         title = f"Nightly regression: {node}"
-        _, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        self._dispatch(
+            fake_github,
             nodes=[node],
             report={"tests": [_body_failed(node, "gw0", "E   AssertionError: eh")]},
             open_map={title: 99},
             closed_map={title: (11, "NOT_PLANNED")},
         )
-        assert filed == []
-        assert commented == [99]
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [99]
 
     def test_closed_not_planned_cascade_comments_instead_of_refiling(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         msg = "RuntimeError: registry mismatch client=localhost:6379"
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(6)]
         report = {"tests": [_errored(n, "gw2", msg) for n in nodes]}
         normalized = nrt.setup_error_signature(report["tests"][0])[1]
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=nodes,
             report=report,
             open_map={},
             closed_map={nrt.cascade_title(normalized): (3131, "NOT_PLANNED")},
         )
-        assert filed == []
-        assert commented == [3131]
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [3131]
         assert outcome.recorded == sorted(nodes)
         assert normalized not in outcome.cascade_issues
 
-    def test_environmental_nodes_are_excluded_and_reported(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
+    def test_environmental_nodes_are_excluded_and_reported(self, fake_github: FakeGitHub) -> None:
         env_node = "tests/integration/test_net.py::test_fetch"
         code_node = "tests/unit/test_logic.py::test_math"
         report = {
@@ -2941,32 +2944,33 @@ class TestClosedIssueDedup:
                 _body_failed(code_node, "gw1", "E   AssertionError: 3 != 4"),
             ]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node, code_node],
             report=report,
             open_map={},
             closed_map={},
         )
-        assert filed == [[code_node]]
+        assert fake_github.created_titles == [f"Nightly regression: {code_node}"]
         assert outcome.environmental == [env_node]
         assert env_node not in outcome.recorded
 
     def test_body_group_files_one_umbrella_with_body_namespaced_state(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         line = "E   TypeError: AsyncAnthropic.__init__() got an unexpected keyword"
         nodes = [f"tests/unit/test_llm_{i}.py::test_{i}" for i in range(6)]
         report = {"tests": [_body_failed(n, "gw0", line) for n in nodes]}
         normalized = nrt.body_failure_signature(report["tests"][0])
-        outcome, commented, filed = self._dispatch(
-            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
+        outcome = self._dispatch(
+            fake_github, nodes=nodes, report=report, open_map={}, closed_map={}
         )
-        assert commented == []
-        assert len(filed) == 1
-        assert filed[0] == [f"cascade:{nrt.body_cascade_title(normalized)}"]
-        assert outcome.cascade_issues == {"body::" + normalized: None}
+        assert fake_github.commented == []
+        title = nrt.body_cascade_title(normalized)
+        assert fake_github.created_titles == [title]
+        # The body namespace survives into state keyed to the umbrella's real
+        # number; a `None` here was the placeholder the agent-filing era needed.
+        assert outcome.cascade_issues == {"body::" + normalized: fake_github.open_map[title]}
         assert outcome.recorded == sorted(nodes)
 
     def test_closed_issue_dispositions_parses_state_reason(
@@ -3031,27 +3035,17 @@ def _setup_failed(nodeid: str, worker: str, line: str) -> dict:
 class TestReviewFindings3142:
     """Regression pins for the #3142 review round (blocker + tech debt)."""
 
-    def _dispatch(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map, prev=None):
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
-        commented: list[int] = []
-        monkeypatch.setattr(
-            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
+    def _dispatch(self, gh: FakeGitHub, *, nodes, report, open_map, closed_map, prev=None):
+        """Thin wrapper over the shared harness, kept for this class's argument order."""
+        return dispatch_with(
+            gh,
+            nodes=nodes,
+            report=report,
+            open_map=open_map,
+            closed_map=closed_map,
+            prev=prev,
+            run_at="2026-09-05T03:00:00Z",
         )
-        filed: list[list[str]] = []
-
-        def fake_dispatch(ns, **kw):
-            if not ns:
-                return None
-            filed.append(list(ns))
-            return "sess-1"
-
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
-        outcome = nrt.dispatch_findings(
-            report, nodes, prev or {}, run_at="2026-09-05T03:00:00Z", head_commit="cafe1234"
-        )
-        return outcome, commented, filed
 
     def test_duplicate_closed_titles_resolve_to_newest_closure(self, monkeypatch, tmp_path):
         """The row with the newest ``closedAt`` per title wins, never the oldest.
@@ -3165,30 +3159,29 @@ class TestReviewFindings3142:
         assert not nrt.is_environmental_failure(test)
 
     def test_environmental_streak_persists_and_stays_excluded_below_threshold(
-        self, monkeypatch, tmp_path
+        self, fake_github: FakeGitHub
     ):
         env_node = "tests/integration/test_net.py::test_fetch"
         report = {
             "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node],
             report=report,
             open_map={},
             closed_map={},
             prev={"environmental_streaks": {env_node: 1}},
         )
-        assert filed == []
-        assert commented == []
+        assert fake_github.create_calls == []
+        assert fake_github.commented == []
         assert outcome.environmental == [env_node]
         assert outcome.escalated == []
         assert outcome.environmental_streaks == {env_node: 2}
         assert env_node not in outcome.recorded
 
     def test_environmental_streak_escalates_to_ordinary_filing_on_night_three(
-        self, monkeypatch, tmp_path
+        self, fake_github: FakeGitHub
     ):
         """#3163 gap 1: a persistent environmental-looking failure is a code bug
         until proven otherwise. Night three files it through the normal path."""
@@ -3196,60 +3189,59 @@ class TestReviewFindings3142:
         report = {
             "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node],
             report=report,
             open_map={},
             closed_map={},
             prev={"environmental_streaks": {env_node: 2}},
         )
-        assert filed == [[env_node]]
+        assert fake_github.created_titles == [f"Nightly regression: {env_node}"]
         assert outcome.escalated == [env_node]
         assert outcome.environmental == []
         assert outcome.environmental_streaks == {env_node: 3}
         assert env_node in outcome.recorded
 
     def test_environmental_streak_resets_when_tonight_is_not_environmental(
-        self, monkeypatch, tmp_path
+        self, fake_github: FakeGitHub
     ):
         env_node = "tests/integration/test_net.py::test_fetch"
         gone_node = "tests/integration/test_net.py::test_gone"
         report = {"tests": [_body_failed(env_node, "gw0", "E   AssertionError: 3 != 4")]}
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node],
             report=report,
             open_map={},
             closed_map={},
             prev={"environmental_streaks": {env_node: 2, gone_node: 5}},
         )
-        assert filed == [[env_node]]
+        assert fake_github.created_titles == [f"Nightly regression: {env_node}"]
         assert outcome.environmental_streaks == {}
 
-    def test_environmental_escalation_knob_zero_disables(self, monkeypatch, tmp_path):
+    def test_environmental_escalation_knob_zero_disables(
+        self, fake_github: FakeGitHub, monkeypatch
+    ):
         monkeypatch.setenv("NIGHTLY_ENVIRONMENTAL_ESCALATE_NIGHTS", "0")
         env_node = "tests/integration/test_net.py::test_fetch"
         report = {
             "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node],
             report=report,
             open_map={},
             closed_map={},
             prev={"environmental_streaks": {env_node: 40}},
         )
-        assert filed == []
+        assert fake_github.create_calls == []
         assert outcome.environmental == [env_node]
         assert outcome.environmental_streaks == {env_node: 41}
 
     def test_environmental_node_with_open_issue_gets_one_recurrence_comment(
-        self, monkeypatch, tmp_path
+        self, fake_github: FakeGitHub
     ):
         """#3163 gap 1b: the exclusion used to run before the open-issue
         partition, so a tracked node got no recurrence comment while it looked
@@ -3259,16 +3251,15 @@ class TestReviewFindings3142:
         report = {
             "tests": [_body_failed(env_node, "gw0", "E   httpx.ConnectError: Connection refused")]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=[env_node],
             report=report,
             open_map={f"Nightly regression: {env_node}": 777},
             closed_map={},
         )
-        assert filed == []
-        assert commented == [777]
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [777]
         assert outcome.comments_posted == 1
         assert outcome.recorded == [env_node]
         assert outcome.environmental == [env_node]
@@ -3283,7 +3274,7 @@ class TestReviewFindings3142:
             {"environmental_streaks": {"a::t": 2, "b::t": 0, "c::t": "3", 4: 1}}
         ) == {"a::t": 2}
 
-    def test_environmental_setup_storm_files_nothing(self, monkeypatch, tmp_path):
+    def test_environmental_setup_storm_files_nothing(self, fake_github: FakeGitHub):
         """A >=3-node network setup storm is excluded BEFORE cascade grouping.
 
         The #3142 formal-review blocker: grouped environmental setup errors
@@ -3296,15 +3287,15 @@ class TestReviewFindings3142:
                 for n in nodes
             ]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
+        outcome = self._dispatch(
+            fake_github, nodes=nodes, report=report, open_map={}, closed_map={}
         )
         assert sorted(outcome.environmental) == sorted(nodes)
-        assert filed == []
-        assert commented == []
+        assert fake_github.create_calls == []
+        assert fake_github.commented == []
         assert outcome.issues_filed == 0
 
-    def test_end_to_end_replay_dispatch_shapes(self, monkeypatch, tmp_path):
+    def test_end_to_end_replay_dispatch_shapes(self, fake_github: FakeGitHub):
         """One dispatch_findings call over a 16-node constructed report.
 
         In-suite replay per issue #3075 AC 1: setup storm collapses to one
@@ -3343,9 +3334,8 @@ class TestReviewFindings3142:
                 _body_failed(node_done, "gw0", "E   ValueError: regressed case"),
             ]
         }
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = self._dispatch(
+            fake_github,
             nodes=nodes,
             report=report,
             open_map={f"Nightly regression: {node_open}": 500},
@@ -3355,13 +3345,19 @@ class TestReviewFindings3142:
             },
         )
         assert sorted(outcome.environmental) == sorted(env)
-        cascade_dispatches = [f for f in filed if f[0].startswith("cascade:")]
-        assert len(cascade_dispatches) == 2
-        assert [node_done] in filed
-        assert len(filed) == 3
-        assert sorted(commented) == [500, 501]
+        # Three creates, and the umbrellas are now identified by their real
+        # titles rather than by a `cascade:` pseudo-node in a dispatch list.
+        created = fake_github.created_titles
+        assert len(created) == 3
+        assert len(outcome.cascade_issues) == 2
+        assert f"Nightly regression: {node_done}" in created
+        assert sorted(fake_github.commented) == [500, 501]
         assert outcome.issues_filed == 3
         assert outcome.comments_posted == 2
+        # One investigation dispatch for the whole night, carrying every number
+        # the detector actually created.
+        dispatched, _ = fake_github.dispatches[-1]
+        assert sorted(n for n, _ in dispatched) == sorted(outcome.filed_issues.values())
 
     def test_epilogue_is_single_sourced(self):
         node_comment = nrt.closed_recurrence_comment(
@@ -3371,219 +3367,189 @@ class TestReviewFindings3142:
 
 
 class TestPromptsNeverNameTheSearchIndex:
-    """All THREE issue-filing prompts hand over a REST command (#3170 fix 1).
+    """The one surviving prompt hands over a REST command (#3170 fix 1).
 
     The module's own reads were moved off GitHub's index-backed lookup by
     ``8524e765b`` and are held there by
     ``test_open_issues_uses_the_rest_list_not_the_lagging_search``. This is the
-    same contract one layer out, for the reads the module tells an *agent* to
+    same contract one layer out, for the read the module tells an *agent* to
     make -- the layer that stayed unfixed through four passes and produced the
     #2960-#2999 duplicate wave. The two tests are one contract; a prompt that
     names the index is the same defect as a script that queries it.
 
-    Parametrized over all three prompts on purpose: hardening one and gating on
-    it reported clean with two thirds of the hole open.
+    The parametrization over three prompts is gone with the two prompts: the
+    detector files every issue itself now, so there is one prompt and no way for
+    three copies of this instruction to drift apart (#3418).
     """
 
-    def _prompts(self) -> dict[str, str]:
-        cascade = {
-            "nodes": ["tests/unit/test_a.py::test_1"],
-            "workers": ["gw1"],
-            "kind": "body",
-            "title": "Nightly regression cascade: boom",
-            "message": "AssertionError: boom",
-        }
-        return {
-            "per-node": nrt._build_triage_prompt(["tests/unit/test_a.py::test_1"]),
-            "cascade": nrt._build_cascade_prompt(cascade),
-            "seed": nrt._build_seed_prompt("Nightly regression baseline: 2 nodes", ["a::t1"]),
-        }
+    ISSUES = [(4242, "node tests/unit/test_a.py::test_1")]
 
-    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
-    def test_prompt_hands_over_the_rest_command(self, name: str) -> None:
-        prompt = self._prompts()[name]
+    def _prompt(self) -> str:
+        return nrt._build_investigation_prompt(self.ISSUES)
+
+    def test_prompt_hands_over_the_rest_command(self) -> None:
         assert (
-            "gh issue list --state all --json number,title,state,stateReason --limit 200" in prompt
+            "gh issue list --state all --json number,title,state,stateReason --limit 200"
+            in self._prompt()
         )
 
-    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
-    def test_prompt_carries_the_prohibition_and_its_reason(self, name: str) -> None:
-        prompt = self._prompts()[name]
+    def test_prompt_carries_the_prohibition_and_its_reason(self) -> None:
+        prompt = self._prompt()
         assert "search index" in prompt
         assert "#2960-#2999" in prompt
 
-    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
-    def test_prompt_warns_that_statereason_is_empty_on_open_rows(self, name: str) -> None:
-        prompt = self._prompts()[name]
+    def test_prompt_warns_that_statereason_is_empty_on_open_rows(self) -> None:
+        prompt = self._prompt()
         assert "stateReason" in prompt
         assert "empty string on OPEN rows" in prompt
 
-    @pytest.mark.parametrize("name", ["per-node", "cascade", "seed"])
-    def test_prompt_never_names_the_index_backed_lookup(self, name: str) -> None:
-        assert SEARCH_TOKENS.findall(self._prompts()[name]) == []
+    def test_prompt_never_names_the_index_backed_lookup(self) -> None:
+        assert SEARCH_TOKENS.findall(self._prompt()) == []
 
-    def test_all_three_share_one_constant(self) -> None:
-        """One string, three readers -- so the three cannot drift again."""
-        for prompt in self._prompts().values():
-            assert nrt.ISSUE_LOOKUP_INSTRUCTION in prompt
+    def test_the_lookup_instruction_is_still_read_from_the_one_constant(self) -> None:
+        """Replaces ``test_all_three_share_one_constant``.
+
+        Three readers cannot drift once there is one reader, but an inlined copy
+        still could, so the prompt must be composed from the constant.
+        """
+        assert nrt.ISSUE_LOOKUP_INSTRUCTION in self._prompt()
+
+    def test_the_prompt_asks_for_no_issue_creation(self) -> None:
+        """The sibling the search-index contract always needed.
+
+        Every assertion above is about how the agent READS the tracker. The
+        #3418 incident was about what it WROTE: an instruction to file is how 8
+        findings became 24 issues, because an LLM turn can be replayed. The
+        prompt must therefore carry no creation instruction at all, for an empty
+        issue list as much as a populated one.
+        """
+        for issues in ([], self.ISSUES, [(1, "cascade umbrella 'x' (9 node(s))")]):
+            prompt = nrt._build_investigation_prompt(issues)
+            assert CREATE_INSTRUCTION_TOKENS.findall(prompt) == []
 
 
-class TestBuildSeedPrompt:
-    """Extraction out of main() must be a move, not a rewrite (#3170)."""
+class TestSeedUmbrellaIsCreatedByTheDetector:
+    """Replaces ``TestBuildSeedPrompt``: the seed umbrella is a create, not a prompt.
+
+    The seed path used to render its own prompt telling an agent to search for
+    an exact title and file the umbrella only if nothing matched. The stricter
+    rule that prompt carried in prose -- a CLOSED umbrella is commented on and
+    never re-filed, whatever the ``state_reason`` -- is now executable code in
+    :func:`file_seed_umbrella`, so it is asserted as behaviour rather than as
+    wording (#3418).
+    """
 
     TITLE = "Nightly regression baseline: 2 nodes absorbed on abc1234"
-    NODES = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
 
-    def _inline_original(self, prior_collection) -> str:
-        """The text as main() carried it, before extraction.
-
-        Kept literal here rather than described, so byte-identity is *gated*
-        rather than asserted: the seed's dedup rule is stricter than the
-        per-node one (a closed umbrella is commented on and never re-filed,
-        whatever the close reason) and a paraphrase during the move would have
-        softened it silently.
-        """
-        seed_size = len(self.NODES)
-        seed_title = self.TITLE
-        return (
-            "Nightly regression detector re-baselined its test collection "
-            f"(old={prior_collection!r}, new={nrt.COLLECTION_PATHS!r}). "
-            f"The following {seed_size} node(s) were already failing at the "
-            "moment of the re-baseline and have been absorbed into the seed — "
-            "they are NOT individually filed. Search open AND closed issues for "
-            f'the EXACT title "{seed_title}". If an open one exists, comment on '
-            "it. If a closed one exists, comment there and do NOT re-file — the "
-            "seed umbrella is a declaration, and a re-baseline retry at the same "
-            "commit must not mint a twin, whatever the close reason. Only if "
-            "neither exists, open ONE umbrella issue with EXACTLY that title, "
-            "summarizing the "
-            "population, its size, and pointing at the persisted state file "
-            "for the full node list. Do NOT file per-node issues for these. Do "
-            "NOT attempt an auto-hotfix.\n\n"
-            "Seeded node IDs:\n" + "\n".join(f"- {n}" for n in self.NODES)
+    def _file(self, gh: FakeGitHub, *, dry_run: bool = False):
+        return nrt.file_seed_umbrella(
+            self.TITLE,
+            body="the seed body",
+            recurrence_body="the recurrence body",
+            dry_run=dry_run,
         )
 
-    def _substitute_back(self, rendered: str) -> str:
-        """Undo the one sentence fix 1 replaced, so the rest can be diffed exactly."""
-        new_unit = "\n" + nrt.ISSUE_LOOKUP_INSTRUCTION + "The EXACT title to match is"
-        assert new_unit in rendered
-        return rendered.replace(new_unit, " Search open AND closed issues for the EXACT title", 1)
+    def test_no_existing_umbrella_creates_exactly_one(self, fake_github: FakeGitHub) -> None:
+        number = self._file(fake_github)
+        assert fake_github.created_titles == [self.TITLE]
+        assert fake_github.body_for(self.TITLE) == "the seed body"
+        assert number == fake_github.open_map[self.TITLE]
+        assert fake_github.commented == []
 
-    def test_byte_identical_to_the_inline_original_apart_from_the_lookup_sentence(self) -> None:
-        prior = ["tests/", "docs/"]
-        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES, prior_collection=prior)
-        assert self._substitute_back(rendered) == self._inline_original(prior)
+    def test_an_open_umbrella_is_commented_on_and_not_re_filed(
+        self, fake_github: FakeGitHub
+    ) -> None:
+        fake_github.open_map = {self.TITLE: 3300}
+        assert self._file(fake_github) == 3300
+        assert fake_github.create_calls == []
+        assert fake_github.comment_calls == [(3300, "the recurrence body")]
 
-    def test_prior_collection_renders_and_defaults_to_none(self) -> None:
-        """The third parameter is the one a two-parameter signature would drop.
+    @pytest.mark.parametrize("reason", ["COMPLETED", "NOT_PLANNED", ""])
+    def test_a_closed_umbrella_is_never_re_filed_whatever_the_reason(
+        self, fake_github: FakeGitHub, reason: str
+    ) -> None:
+        """The seed's rule is deliberately stricter than the per-node one.
 
-        ``old=`` interpolates a main() local derivable from neither the title
-        nor the node list, so a signature without it loses the clause outright
-        while every other assertion here still passes.
+        ``COMPLETED`` is the case that matters and the one a reader expects to
+        behave like :func:`partition_closed_matches`, which re-files it because a
+        recurrence after a fix is new information. A seed is not a failure report
+        but a declaration of a baseline, so a re-baseline retry at the same commit
+        must not mint a twin umbrella -- it comments and returns the closed
+        number.
         """
-        with_prior = nrt._build_seed_prompt(self.TITLE, self.NODES, prior_collection=["old/"])
-        assert "(old=['old/'], new=['tests/'])" in with_prior
-        default = nrt._build_seed_prompt(self.TITLE, self.NODES)
-        assert "(old=None, new=['tests/'])" in default
+        fake_github.open_map = {}
+        fake_github.closed_map = {self.TITLE: (2900, reason)}
+        assert self._file(fake_github) == 2900
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [2900]
+        body = fake_github.comment_calls[0][1]
+        assert body.startswith("the recurrence body")
+        assert nrt.closed_epilogue(reason) in body
+        assert "NOT re-filing, whatever the close reason" in log_text()
 
-    def test_the_stricter_closed_rule_survives_the_move(self) -> None:
-        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES)
-        assert "comment there and do NOT re-file" in rendered
-        assert "whatever the close reason" in rendered
-
-    def test_carries_no_ledger_and_no_pre_resolved_block(self) -> None:
-        rendered = nrt._build_seed_prompt(self.TITLE, self.NODES)
-        assert "nightly-triage-ledger" not in rendered
-        assert "Already resolved by the detector" not in rendered
-
-
-class TestWriteTriageLedger:
-    """The third, advisory replay defence: seeded by the script, appended by the agent."""
-
-    SLUG = "nightly-triage-a1b2c3d4"
-
-    def _ledger_dir(self, monkeypatch, tmp_path: Path) -> Path:
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "DATA_DIR", tmp_path / "data")
-        return tmp_path / "data" / "nightly-triage-ledger"
-
-    def test_happy_path_shape_and_absolute_return(self, monkeypatch, tmp_path: Path) -> None:
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        entries = [_disposition("a::t1"), _disposition("b::t2")]
-        returned = nrt.write_triage_ledger(self.SLUG, entries)
-        assert Path(returned).is_absolute()
-        assert Path(returned) == (ledger_dir / f"{self.SLUG}.json").resolve()
-        payload = json.loads(Path(returned).read_text())
-        assert payload["slug"] == self.SLUG
-        assert payload["created_at"]
-        assert payload["filed"] == []
-        assert [e["node"] for e in payload["entries"]] == ["a::t1", "b::t2"]
-        assert payload["entries"][0]["disposition"] == "file"
-
-    def test_empty_entries_writes_nothing_and_returns_none(
-        self, monkeypatch, tmp_path: Path
+    def test_a_closed_umbrella_whose_comment_failed_proves_nothing(
+        self, fake_github: FakeGitHub
     ) -> None:
-        """An empty ledger would read to a replay as 'nothing left to file'."""
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        assert nrt.write_triage_ledger(self.SLUG, []) is None
-        assert not ledger_dir.exists()
+        """No number means main() refuses the baseline, and that is the point.
 
-    def test_an_unwritable_target_logs_a_warning_and_returns_none(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
-        """Fail-open: a ledger that cannot be written must not stop the night filing."""
-        log_file = tmp_path / "nightly.log"
-        monkeypatch.setattr(nrt, "LOG_FILE", log_file)
-        blocker = tmp_path / "data"
-        blocker.write_text("not a directory")
-        monkeypatch.setattr(nrt, "DATA_DIR", blocker)
-        assert nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")]) is None
-        assert "WARNING" in log_file.read_text()
-        assert self.SLUG in log_file.read_text()
-
-    def test_a_live_sessions_appends_are_never_re_seeded_away(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
-        """A same-slug retry must not erase what the first session already filed.
-
-        maybe_dispatch_triage_session returns None whenever the subprocess exits
-        zero but its stdout will not parse, so an identical node set can come
-        back on a later run under the same sha256 slug while the first session's
-        issues really exist.
+        A recurrence that could not be written down has not been reported, so
+        the run has no trustworthy record either. Returning the number anyway
+        would let main() persist ``seeded_nodes`` -- a sticky set -- against an
+        umbrella nobody was told recurred.
         """
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        first = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
-        payload = json.loads(Path(first).read_text())
-        payload["filed"] = [{"number": 4242, "title": "t", "node": "a::t1"}]
-        Path(first).write_text(json.dumps(payload))
+        fake_github.open_map = {}
+        fake_github.closed_map = {self.TITLE: (2900, "COMPLETED")}
+        fake_github.comment_hook = lambda number, body: False
+        assert self._file(fake_github) is None
+        assert fake_github.create_calls == []
 
-        second = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
-        assert second == first
-        assert json.loads(Path(first).read_text())["filed"] == payload["filed"]
-        assert sorted(x.name for x in ledger_dir.iterdir()) == [f"{self.SLUG}.json"]
-
-    def test_an_untouched_ledger_with_no_filings_is_re_seeded(
-        self, monkeypatch, tmp_path: Path
+    def test_an_open_umbrella_whose_comment_failed_proves_nothing(
+        self, fake_github: FakeGitHub
     ) -> None:
-        """The guard keys on filings, not on the file existing."""
-        self._ledger_dir(monkeypatch, tmp_path)
-        nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
-        returned = nrt.write_triage_ledger(self.SLUG, [_disposition("b::t2")])
-        payload = json.loads(Path(returned).read_text())
-        assert [e["node"] for e in payload["entries"]] == ["b::t2"]
+        fake_github.open_map = {self.TITLE: 3300}
+        fake_github.comment_hook = lambda number, body: False
+        assert self._file(fake_github) is None
+        assert fake_github.create_calls == []
 
-    def test_the_write_is_atomic_and_leaves_no_temp_file(self, monkeypatch, tmp_path: Path) -> None:
-        """Truncated JSON is worse for the agent than stale-but-valid JSON."""
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
-        assert [x.name for x in ledger_dir.iterdir()] == [f"{self.SLUG}.json"]
-
-    def test_a_corrupt_existing_ledger_is_overwritten_rather_than_raising(
-        self, monkeypatch, tmp_path: Path
+    def test_both_reads_unreadable_creates_anyway_and_says_so(
+        self, fake_github: FakeGitHub
     ) -> None:
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        ledger_dir.mkdir(parents=True)
-        (ledger_dir / f"{self.SLUG}.json").write_text("{ truncated")
-        returned = nrt.write_triage_ledger(self.SLUG, [_disposition("a::t1")])
-        assert returned is not None
-        assert json.loads(Path(returned).read_text())["filed"] == []
+        """Fail open, bounded at one twin on a night GitHub was unreadable.
+
+        Refusing the baseline instead would risk losing a whole night-one
+        population, so the cost is paid deliberately -- and logged, because this
+        is the one seed path that can mint a duplicate umbrella.
+        """
+        fake_github.open_map = None
+        fake_github.closed_map = None
+        number = self._file(fake_github)
+        assert fake_github.created_titles == [self.TITLE]
+        assert number is not None
+        assert "Seed dedup ran blind" in log_text()
+
+    def test_one_unreadable_read_still_lets_the_other_decide(self, fake_github: FakeGitHub) -> None:
+        """A read that returned ``None`` contributes no answer, it does not veto one.
+
+        With the open map unreadable and a closed match present, the closed rule
+        must still fire -- and without the blind-dedup log line, which would be a
+        false claim that neither map could answer.
+        """
+        fake_github.open_map = None
+        fake_github.closed_map = {self.TITLE: (2900, "NOT_PLANNED")}
+        assert self._file(fake_github) == 2900
+        assert fake_github.create_calls == []
+        assert "Seed dedup ran blind" not in log_text()
+
+    def test_dry_run_propagates_to_the_create(self, fake_github: FakeGitHub) -> None:
+        self._file(fake_github, dry_run=True)
+        assert fake_github.create_dry_runs == [True]
+
+    def test_the_seed_reads_both_maps_itself(self, fake_github: FakeGitHub) -> None:
+        """It lives outside ``dispatch_findings``, so neither opening read is in scope.
+
+        The per-create refresh would not help either: it reads open issues only
+        and is structurally blind to a closed umbrella, which is the case the
+        seed's stricter rule exists for.
+        """
+        self._file(fake_github)
+        assert (fake_github.open_reads, fake_github.closed_reads) == (1, 1)
