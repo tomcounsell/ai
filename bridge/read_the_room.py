@@ -19,18 +19,25 @@ Design notes
   *unfiltered* -- the system prompt below tells the model to treat any entry
   with ``sender`` in ``{valor, system}`` as agent-authored context, not as a
   competing input.
-* **Fail-open contract:** Any error path -- LLM timeout, malformed tool_use,
-  Redis error, snapshot fetch failure -- returns ``RoomVerdict(action="send",
-  reason="rtr_error")`` and emits a ``rtr.failed`` ``session_event``. RTR is
-  a guard, not a blocker.
-* **Hotfix #1055 invariant:** The Anthropic call uses
-  ``semaphore_slot()`` + ``async with anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT)``
-  for httpx-level cleanup on cancellation. ``asyncio.wait_for`` is forbidden
-  here -- it leaks httpx connections under cancellation.
+* **Fail-open contract:** Any error path -- LLM timeout, slot timeout, a
+  transport refusal, a response the leg could not validate as a
+  ``RoomVerdict``, Redis error, snapshot fetch failure -- returns
+  ``RoomVerdict(action="send", reason="rtr_error")`` and emits a
+  ``rtr.failed`` ``session_event``. RTR is a guard, not a blocker.
+* **Hotfix #1055 invariant:** The call is ``run_typed(..., task=READ_THE_ROOM,
+  sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0,
+  hard_timeout=None)``, and the Anthropic leg
+  (``agent/llm/backends/anthropic.py``) carries the pattern: ``async with
+  semaphore_slot(timeout=slot_timeout):`` around a fresh ``AsyncAnthropic``
+  client built with ``timeout=sdk_timeout, max_retries=0`` for httpx-level
+  cleanup on cancellation. ``asyncio.wait_for`` is forbidden here -- it leaks
+  httpx connections under cancellation -- which is why ``hard_timeout=None``
+  is passed: the wrapper's outer cap is exactly such a timeout. The slot
+  timeout only bounds the wait for a semaphore slot, never the live request.
 
 Public surface
 --------------
-* ``RoomVerdict`` -- the verdict dataclass returned to the call site.
+* ``RoomVerdict`` -- the verdict model returned to the call site.
 * ``read_the_room(draft_text, chat_id, session) -> RoomVerdict`` -- the
   async entry point. Runs unconditionally for GROUP chats; DMs are always
   excluded (issue #2199).
@@ -44,15 +51,13 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
-import anthropic
+from pydantic import BaseModel, field_validator
 
-from agent.anthropic_client import semaphore_slot
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, TaskKind
 from bridge.message_drafter import SHORT_OUTPUT_THRESHOLD
-from config.models import MODEL_FAST
-from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +73,17 @@ RTR_SUPPRESS_EMOJI = "👀"
 DEFAULT_K = 10
 DEFAULT_MAX_AGE_SECONDS = 300  # 5 minutes
 
-# SDK-level timeout passed to anthropic.AsyncAnthropic(timeout=...). The
-# httpx layer cancels and cleans up the connection on timeout.
+# SDK-level timeout the Anthropic leg gives its AsyncAnthropic client as
+# ``sdk_timeout``, and the bound on the leg's semaphore wait as
+# ``slot_timeout``. The httpx layer cancels and cleans up the connection on
+# timeout.
 #
 # Deliberately NOT settings.timeouts.anthropic_sdk_s (issue #1968 audit):
 # that field is paired with anthropic_hard_s for the #1925 double-timeout
 # backend-call sites (agent/llm/wrapper.py, agent/memory_extraction.py).
 # RTR gates real-time outgoing-message latency on a single fast-fail SDK
-# timer (no outer asyncio.wait_for per the Hotfix #1055 invariant above) --
+# timer (no outer asyncio.wait_for per the Hotfix #1055 invariant above,
+# hence ``hard_timeout=None`` on the call) --
 # structurally the same "load-bearing fast-fail cap" category as a
 # watchdog health-probe, not a backend-call timeout. Bumping it to the
 # 30s backend value would let a hung Haiku call stall every outgoing
@@ -191,24 +199,39 @@ def _humanize_age(age_seconds: float) -> str:
     return f"{hours // 24} days ago"
 
 
-# === Verdict dataclass ===
+# === Verdict model ===
 
 
-@dataclass
-class RoomVerdict:
-    """Outcome of a read-the-room pass.
+class RoomVerdict(BaseModel):
+    """Outcome of a read-the-room pass; also the ``run_typed`` output schema.
 
     Attributes:
         action: One of ``"send"``, ``"trim"``, or ``"suppress"``.
         revised_text: Replacement text when ``action == "trim"``.
-            ``None`` for ``send`` and ``suppress``.
+            ``None`` for ``send`` and ``suppress``; an empty string from the
+            model is normalized to ``None``.
         reason: Short machine-readable reason string. Used in
             ``session_events`` entries for observability.
     """
 
-    action: str  # "send" | "trim" | "suppress"
+    action: Literal["send", "trim", "suppress"]
     revised_text: str | None = None
     reason: str = ""
+
+    @field_validator("revised_text", mode="before")
+    @classmethod
+    def _empty_is_none(cls, value: Any) -> Any:
+        return value if value else None
+
+
+# Thinking: reads the room and may rewrite the draft under a 3 s budget.
+# Fail-safe: ``send`` with reason ``rtr_error`` on any LLMCallError, plus an
+# ``rtr.failed`` session event (RTR is a guard, not a blocker).
+READ_THE_ROOM = LLMTask(
+    site="read_the_room.verdict",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 
 # === System prompt ===
@@ -254,8 +277,7 @@ seconds (self-duplicate). Use `reason="self_duplicate"` for the latter case.
 Conservative bias: when in doubt, return `send`. False suppression is harder to \
 detect than false trim because the human gets no signal back.
 
-You MUST call the `room_verdict` tool with a flat structured result \
-(`action`, `revised_text`, `reason`)."""
+Answer with a flat structured result (`action`, `revised_text`, `reason`)."""
 
 
 # === Snapshot fetching ===
@@ -387,60 +409,6 @@ def _append_event(session: Any, event: dict[str, Any]) -> None:
         logger.debug("RTR session_events append failed (non-fatal): %s", e)
 
 
-# === Tool schema ===
-
-_ROOM_VERDICT_TOOL = {
-    "name": "room_verdict",
-    "description": (
-        "Return the read-the-room verdict for the candidate draft. "
-        "Action must be one of send|trim|suppress."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["send", "trim", "suppress"],
-                "description": "Verdict action.",
-            },
-            "revised_text": {
-                "type": ["string", "null"],
-                "description": ("Replacement text when action='trim'. Null for send/suppress."),
-            },
-            "reason": {
-                "type": "string",
-                "description": "Short machine-readable reason string.",
-            },
-        },
-        "required": ["action", "reason"],
-    },
-}
-
-
-def _parse_verdict_block(message: Any) -> RoomVerdict:
-    """Extract the verdict from a Haiku message response.
-
-    Raises ``ValueError`` if the response does not contain a usable
-    ``room_verdict`` tool_use block. Caller wraps in try/except for fail-open.
-    """
-    content = getattr(message, "content", None) or []
-    for block in content:
-        block_type = getattr(block, "type", None)
-        if block_type == "tool_use" and getattr(block, "name", None) == "room_verdict":
-            payload = getattr(block, "input", None) or {}
-            action = payload.get("action")
-            if action not in ("send", "trim", "suppress"):
-                raise ValueError(f"unexpected RTR action: {action!r}")
-            revised = payload.get("revised_text")
-            reason = payload.get("reason") or ""
-            return RoomVerdict(
-                action=action,
-                revised_text=revised if isinstance(revised, str) and revised else None,
-                reason=str(reason),
-            )
-    raise ValueError("no room_verdict tool_use block in response")
-
-
 # === Public entry point ===
 
 
@@ -486,9 +454,11 @@ async def read_the_room(
             ``TelegramRelayOutputHandler.send``, NOT the raw input or
             ``draft.text``.
         chat_id: Target Telegram chat identifier.
-        session: Optional ``AgentSession`` for observability. RTR appends
-            ``rtr.*`` entries to ``session.session_events`` for trim,
-            suppress, suppress_fallthrough, bypass, and failure cases.
+        session: Optional ``AgentSession``. Its ``project_key`` is the
+            router's input (``None`` fails closed to the subscription
+            backend), and RTR appends ``rtr.*`` entries to
+            ``session.session_events`` for trim, suppress,
+            suppress_fallthrough, bypass, and failure cases.
         k: Snapshot K cap (default 10).
         max_age_seconds: Snapshot time window in seconds (default 300).
 
@@ -554,8 +524,9 @@ async def read_the_room(
     if not snapshot:
         return RoomVerdict(action="send", reason="empty_snapshot")
 
-    # ── Haiku call (post-#1055 pattern: semaphore_slot + inner async with
-    #    AsyncAnthropic(timeout=RTR_SDK_TIMEOUT); NO asyncio.wait_for). ──
+    # ── Haiku call (hotfix #1055 shape: the leg holds a semaphore slot around
+    #    a fresh AsyncAnthropic client (timeout=RTR_SDK_TIMEOUT, max_retries=0); NO
+    #    asyncio.wait_for, so hard_timeout=None keeps the wrapper's cap off). ──
     trigger_age_block = (
         f"## Trigger age\nThe message that prompted this draft arrived "
         f"{_humanize_age(trigger_age)}.\n\n"
@@ -568,49 +539,25 @@ async def read_the_room(
         f"{trigger_age_block}"
         "## Draft about to be sent\n"
         f"{draft_text}\n\n"
-        "Decide via the room_verdict tool."
+        "Decide: send, trim, or suppress."
     )
 
     try:
-        async with semaphore_slot():
-            async with anthropic.AsyncAnthropic(
-                api_key=get_anthropic_api_key(),
-                timeout=RTR_SDK_TIMEOUT,
-            ) as client:
-                message = await client.messages.create(
-                    model=MODEL_FAST,
-                    max_tokens=400,
-                    system=READ_THE_ROOM_SYSTEM_PROMPT,
-                    tools=[_ROOM_VERDICT_TOOL],
-                    tool_choice={"type": "tool", "name": "room_verdict"},
-                    messages=[{"role": "user", "content": user_payload}],
-                )
-
-        verdict = _parse_verdict_block(message)
-        # If the model returns trim with no revised_text, treat as send (no
-        # rewrite available -> nothing to substitute).
-        if verdict.action == "trim" and not verdict.revised_text:
-            return RoomVerdict(
-                action="send",
-                reason="trim_missing_revised_text",
-            )
-        return verdict
-
-    except anthropic.APITimeoutError as e:
-        logger.warning("RTR Haiku call timed out: %s", e)
-        _append_event(
-            session,
-            _make_event(
-                "rtr.failed",
-                chat_id=chat_id,
-                draft_text=draft_text,
-                reason="rtr_error",
-                error="APITimeoutError",
-            ),
+        verdict = await run_typed(
+            user_payload,
+            RoomVerdict,
+            task=READ_THE_ROOM,
+            system=READ_THE_ROOM_SYSTEM_PROMPT,
+            project_key=getattr(session, "project_key", None),
+            sdk_timeout=RTR_SDK_TIMEOUT,
+            slot_timeout=RTR_SDK_TIMEOUT,
+            max_retries=0,
+            hard_timeout=None,
         )
-        return RoomVerdict(action="send", reason="rtr_error")
-    except anthropic.APIConnectionError as e:
-        logger.warning("RTR Haiku call connection error: %s", e)
+    except LLMCallError as e:
+        # Timeout (SDK timer or slot wait), transport refusal, or a schema
+        # validation the leg could not repair: all fail open.
+        logger.warning("%s call failed (%s): %s", READ_THE_ROOM.site, e.reason, e)
         _append_event(
             session,
             _make_event(
@@ -618,34 +565,7 @@ async def read_the_room(
                 chat_id=chat_id,
                 draft_text=draft_text,
                 reason="rtr_error",
-                error="APIConnectionError",
-            ),
-        )
-        return RoomVerdict(action="send", reason="rtr_error")
-    except anthropic.APIError as e:
-        logger.warning("RTR Haiku API error: %s", e)
-        _append_event(
-            session,
-            _make_event(
-                "rtr.failed",
-                chat_id=chat_id,
-                draft_text=draft_text,
-                reason="rtr_error",
-                error="APIError",
-            ),
-        )
-        return RoomVerdict(action="send", reason="rtr_error")
-    except ValueError as e:
-        # Bad tool_use shape -- _parse_verdict_block raised.
-        logger.warning("RTR parse error: %s", e)
-        _append_event(
-            session,
-            _make_event(
-                "rtr.failed",
-                chat_id=chat_id,
-                draft_text=draft_text,
-                reason="rtr_error",
-                error="ValueError",
+                error=f"LLMCallError:{e.reason}",
             ),
         )
         return RoomVerdict(action="send", reason="rtr_error")
@@ -663,6 +583,12 @@ async def read_the_room(
             ),
         )
         return RoomVerdict(action="send", reason="rtr_error")
+
+    # If the model returns trim with no revised_text, treat as send (no
+    # rewrite available -> nothing to substitute).
+    if verdict.action == "trim" and not verdict.revised_text:
+        return RoomVerdict(action="send", reason="trim_missing_revised_text")
+    return verdict
 
 
 # Public re-exports so call sites can `from bridge.read_the_room import ...`

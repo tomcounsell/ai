@@ -136,9 +136,10 @@ class TestSharedModuleIsTheOnlyConstructor:
       via ``semaphore_slot()`` then constructs its own client with hotfix
       #1055 invariants: ``async with AsyncAnthropic(timeout=...)`` +
       double-timeout for httpx cleanup), OR
-    * be the module ``bridge/read_the_room.py`` (issue #1193 — same hotfix
-      #1055 pattern: ``semaphore_slot()`` + inner ``async with
-      AsyncAnthropic(timeout=3.0)`` for SDK-level httpx cleanup).
+    * be ``run_typed``'s Anthropic leg, ``agent/llm/backends/anthropic.py``
+      (``semaphore_slot(timeout=slot_timeout)`` around a fresh client built
+      with ``timeout=sdk_timeout``), which carries every migrated site,
+      ``bridge/read_the_room.py`` included (#3410).
 
     Any other direct instantiation bypasses the shared semaphore and
     regresses #1111.
@@ -150,7 +151,6 @@ class TestSharedModuleIsTheOnlyConstructor:
         {
             "agent/anthropic_client.py",  # the shared module itself
             "agent/memory_extraction.py",  # hotfix #1055 invariants
-            "bridge/read_the_room.py",  # hotfix #1055 pattern (issue #1193)
             # run_typed's Anthropic leg (#1925, #3410): semaphore_slot() + fresh client
             "agent/llm/backends/anthropic.py",
             # Compat predicate (#3001). The one exemption that does NOT acquire
@@ -202,23 +202,6 @@ class TestSharedModuleIsTheOnlyConstructor:
         source = Path("agent/memory_extraction.py").read_text()
         assert "semaphore_slot" in source, (
             "agent/memory_extraction.py must import and use "
-            "agent.anthropic_client.semaphore_slot to gate the #1111 semaphore "
-            "around its bespoke AsyncAnthropic construction."
-        )
-
-    def test_read_the_room_acquires_shared_semaphore(self):
-        """``bridge/read_the_room.py`` must route through ``semaphore_slot()``.
-
-        Issue #1193 -- the RTR pre-send pass uses the same hotfix #1055 pattern
-        as memory_extraction (semaphore_slot + inner async-with AsyncAnthropic
-        for SDK-level httpx cleanup). The shared semaphore must still gate the
-        call so RTR counts against the global concurrency budget (#1111).
-        """
-        from pathlib import Path
-
-        source = Path("bridge/read_the_room.py").read_text()
-        assert "semaphore_slot" in source, (
-            "bridge/read_the_room.py must import and use "
             "agent.anthropic_client.semaphore_slot to gate the #1111 semaphore "
             "around its bespoke AsyncAnthropic construction."
         )

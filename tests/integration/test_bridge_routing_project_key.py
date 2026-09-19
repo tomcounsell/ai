@@ -16,12 +16,12 @@ reaches (C1 ``routing.needs_response`` on an unaddressed group message, C2
 entry point (C3), the promise gate's CLI path (C9 ``promise_gate.verdict``,
 key resolved from a real ``AgentSession`` row by ``session_id``) and the
 drafter's main path (``_evaluate_drafter_promise``, the caller every
-outbound reply crosses, key read from its ``session``). The
-``read_the_room`` case is added by Task 6 of the same plan.
+outbound reply crosses, key read from its ``session``), and read-the-room
+(``read_the_room.verdict``, key read from the ``session`` it is handed).
 
-The promise-gate cases write one ``AgentSession`` row to the claimed test
-db (``project_key="valor"`` is load-bearing for the pin, so the row is
-created and deleted inside the test).
+The promise-gate and read-the-room cases write one ``AgentSession`` row to
+the claimed test db (``project_key="valor"`` is load-bearing for the pin, so
+the row is created and deleted inside the test).
 """
 
 from __future__ import annotations
@@ -32,9 +32,11 @@ from types import SimpleNamespace
 import pytest
 
 import bridge.promise_gate as promise_gate
+import bridge.read_the_room as rtr_module
 import bridge.routing as routing
 from bridge.message_drafter import _evaluate_drafter_promise
 from bridge.promise_gate import PROMISE_VERDICT, PromiseVerdictDecision, evaluate_promise_async
+from bridge.read_the_room import READ_THE_ROOM, RoomVerdict, read_the_room
 from bridge.routing import (
     NEEDS_RESPONSE,
     TERMINUS,
@@ -45,6 +47,7 @@ from bridge.routing import (
     classify_work_request,
     should_respond_async,
 )
+from tests.helpers.llm_fakes import FakeRunTyped
 
 PROJECT_KEY = "test-routing-project"
 
@@ -248,3 +251,31 @@ class TestDrafterPathThreadsTheProjectKey:
         (call,) = promise_judge.calls
         assert call["task"] is PROMISE_VERDICT
         assert call["project_key"] == "valor"
+
+
+# === read-the-room resolves its key from the session it is handed ===
+
+
+class TestReadTheRoomThreadsTheProjectKey:
+    async def test_group_draft_reaches_the_leg_with_the_session_key(
+        self, monkeypatch, valor_session
+    ):
+        """``read_the_room(draft, chat_id, session)`` reads ``session.project_key``;
+        a thinking task stays on Anthropic, so the key matters for the
+        fail-closed rule's symmetry rather than for the leg it lands on."""
+        fake = FakeRunTyped(result=RoomVerdict(action="send", reason="clean"))
+        monkeypatch.setattr(rtr_module, "run_typed", fake)
+
+        async def snapshot(chat_id, *, k, max_age_seconds):
+            return [{"sender": "Tom", "content": "is the retry loop fixed yet?"}]
+
+        monkeypatch.setattr(rtr_module, "_fetch_snapshot", snapshot)
+
+        verdict = await read_the_room(LONG_DRAFT, "-1001234567890", session=valor_session)
+
+        assert verdict.action == "send"
+        (call,) = fake.calls
+        assert call.output_type is RoomVerdict
+        assert call.task is READ_THE_ROOM
+        assert call.project_key == "valor"
+        assert call.kwargs["hard_timeout"] is None
