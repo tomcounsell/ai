@@ -129,9 +129,10 @@ The persisted state records which ``collection`` produced it. When the
 recorded collection differs from ``COLLECTION_PATHS`` (the widening night, or
 any future change of scope), the run takes the existing first-run baseline
 path: it seeds ``dispatched_nodes`` with the whole currently-failing
-population and dispatches **one** umbrella triage session, rather than filing
-every one of those nodes individually — reopening the #2429/#2430/#2462 churn
-the dedup set exists to prevent.
+population and files **one** umbrella issue for it
+(:func:`file_seed_umbrella`), rather than filing every one of those nodes
+individually — reopening the #2429/#2430/#2462 churn the dedup set exists to
+prevent.
 
 A post-run TTFT gate (issue #1227) checks cold-start latency and logs a
 regression without changing the exit code. It used to page; it now only logs,
@@ -332,7 +333,7 @@ MAX_SETUP_ERRORS_DEFAULT = 50
 # How many open issues the pre-file dedup read pulls. The `gh issue list` REST
 # path is used deliberately over `--search`, which is index-backed and lags
 # behind issue creation by minutes — exactly the window in which two machines'
-# triage sessions file the same title twice.
+# nightly runs file the same title twice.
 OPEN_ISSUE_LIST_LIMIT = 1000
 OPEN_ISSUE_LIST_TIMEOUT_SECONDS = 60
 
@@ -1502,9 +1503,9 @@ def seeded_nodes(prev: dict) -> set[str]:
     :func:`carry_dispatched_nodes` drops a node from ``dispatched_nodes`` the
     moment it stops failing, so a seeded node that passes one night and fails
     the next looks unfiled to :func:`compute_dispatch_set`. It then dispatches
-    against a per-node title that never existed, and the triage agent's
-    search-before-file check finds nothing — so it files a fresh issue, and
-    does so again on every subsequent flap. That rebuilds exactly the
+    against a per-node title that never existed, so every dedup read this
+    module takes comes back empty — and it files a fresh issue, and does so
+    again on every subsequent flap. That rebuilds exactly the
     #2429 / #2430 / #2462 duplicate-issue churn this detector exists to end.
 
     The live population makes this concrete rather than theoretical: #2807,
@@ -1863,9 +1864,9 @@ def group_body_failure_cascades(
 
     **False-merge risk, stated plainly:** two genuinely distinct defects that
     raise the same exception with byte-identical normalized first lines will
-    merge into one umbrella. That is accepted as the smaller harm — the
-    triage session reads the node list and can split the issue, whereas 39
-    separate issues drowned the two real causes entirely. The grouping rule is
+    merge into one umbrella. That is accepted as the smaller harm — the node
+    list is in the umbrella's body for exactly this reason and a reader can
+    split it, whereas 39 separate issues drowned the two real causes entirely. The grouping rule is
     exact equality of the normalized line, nothing fuzzier, precisely to keep
     that risk small: the 2026-08-24 second cause (worker-key assertions inside
     a TypeError batch) had a different first line and stays separate under it.
@@ -1987,11 +1988,11 @@ def open_issues(
 ) -> dict[str, int] | None:
     """Map ``title -> number`` for every open GitHub issue, or ``None`` if unreadable.
 
-    This is the dedup the triage agent's own search-before-file instruction
-    cannot provide. ``dispatched_nodes`` is per-machine state, so a second
-    machine running the same nightly re-dispatches titles this machine already
-    filed; and GitHub's search index lags issue creation by minutes, so even a
-    single machine's retry can miss its own issue. Reading the REST list
+    This is the only dedup that spans machines. ``dispatched_nodes`` is
+    per-machine state, so a second machine running the same nightly would
+    otherwise file titles this machine already filed; and GitHub's search index
+    lags issue creation by minutes, so even a single machine's retry can miss
+    its own issue. Reading the REST list
     endpoint (``gh issue list``, not ``--search``) sees an issue the instant it
     exists.
 
