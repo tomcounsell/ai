@@ -315,6 +315,18 @@ def _agreement(reference: ArmResult, candidate: ArmResult) -> dict[str, float | 
     return {"mean": ci.mean, "lower": ci.lower, "upper": ci.upper, "n": ci.n}
 
 
+def require_minimum(site: Site, inputs: Sequence[Input]) -> int:
+    """Raise :class:`ShortfallError` under the site minimum; return the real count."""
+    n_real = sum(1 for inp in inputs if inp.source == "real")
+    n = len(inputs)
+    if n < site.minimum_n:
+        raise ShortfallError(
+            f"site {site.id}: {n} inputs ({n_real} real), minimum {site.minimum_n}; "
+            f"short by {site.minimum_n - n}. No record written."
+        )
+    return n_real
+
+
 async def compare(
     site: Site,
     inputs: Sequence[Input],
@@ -330,13 +342,8 @@ async def compare(
     agreement). Raises :class:`ShortfallError` under the site minimum before
     any arm runs, so no reference spend precedes the refusal.
     """
-    n_real = sum(1 for inp in inputs if inp.source == "real")
+    n_real = require_minimum(site, inputs)
     n = len(inputs)
-    if n < site.minimum_n:
-        raise ShortfallError(
-            f"site {site.id}: {n} inputs ({n_real} real), minimum {site.minimum_n}; "
-            f"short by {site.minimum_n - n}. No record written."
-        )
     if not candidates:
         raise ValueError("compare needs at least one candidate arm")
 

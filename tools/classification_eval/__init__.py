@@ -64,6 +64,7 @@ from tools.classification_eval.core import (
     latency_budget_s,
     percentile,
     render_report,
+    require_minimum,
 )
 from tools.classification_eval.records import (
     attach_claims,
@@ -101,5 +102,6 @@ __all__ = [
     "latest_record",
     "percentile",
     "render_report",
+    "require_minimum",
     "write_record",
 ]

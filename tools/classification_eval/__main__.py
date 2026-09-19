@@ -40,6 +40,7 @@ from tools.classification_eval import (
     declared_classification_tasks,
     is_contended,
     render_report,
+    require_minimum,
     write_record,
 )
 
@@ -126,13 +127,10 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
     if args.save_inputs:
         args.save_inputs.write_text(live.dump_inputs(inputs), encoding="utf-8")
 
-    n_real = sum(1 for i in inputs if i.source == "real")
-    if len(inputs) < site.minimum_n:
-        print(
-            f"site {site.id}: {len(inputs)} inputs ({n_real} real), minimum {site.minimum_n};"
-            f" short by {site.minimum_n - len(inputs)}. No record written.",
-            file=sys.stderr,
-        )
+    try:
+        require_minimum(site, inputs)
+    except ShortfallError as e:
+        print(str(e), file=sys.stderr)
         return 2
 
     contended = is_contended()
@@ -160,9 +158,6 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
             candidates=_candidate_arms(site.id, candidates),
             contended=contended,
         )
-    except ShortfallError as e:
-        print(str(e), file=sys.stderr)
-        return 2
     finally:
         if transport is not None:
             transport.settle(project_key=args.project_key)

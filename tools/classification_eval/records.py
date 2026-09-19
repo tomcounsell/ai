@@ -3,21 +3,19 @@
 Records are ``ImprovementEvidence(kind="classifier_comparison")`` rows on
 the ``valor`` partition, written and read only through the Popoto ORM.
 Claims land on a ``probe`` investigation of case :data:`CASE_ID` through
-``tools/improvement_investigations.py``. Site discovery is an AST walk over
-the source roots for module-level ``LLMTask(kind=CLASSIFICATION, ...)``
-declarations, so ``--audit`` imports no bridge module.
+``tools/improvement_investigations.py``. Site discovery reads the registry
+``agent.llm.tasks.declared_sites`` (a static AST walk), so ``--audit``
+imports no bridge module.
 """
 
 from __future__ import annotations
 
-import ast
 import json
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from tools.classification_eval.core import (
     CASE_ID,
     EVIDENCE_KIND,
@@ -177,51 +175,11 @@ def audit(tasks: Sequence[LLMTask], *, project_key: str = PROJECT_KEY) -> int:
 
 # --- declared sites ----------------------------------------------------------------------
 
-_SOURCE_ROOTS = ("agent", "bridge", "worker", "tools", "reflections", "scripts")
-_ENUMS = {"kind": TaskKind, "backend": Backend, "error_cost": ErrorCost}
 
+def declared_classification_tasks() -> list[LLMTask]:
+    """Every declared ``LLMTask`` with ``kind=CLASSIFICATION``, from the site
+    registry ``agent.llm.tasks.declared_sites`` (a static AST walk over the
+    source roots, so ``--audit`` imports no bridge module)."""
+    from agent.llm.tasks import declared_sites
 
-def _task_from_call(node: ast.Call) -> LLMTask | None:
-    kwargs: dict[str, Any] = {}
-    for kw in node.keywords:
-        value = kw.value
-        if kw.arg in _ENUMS and isinstance(value, ast.Attribute):
-            kwargs[kw.arg] = _ENUMS[kw.arg][value.attr]
-        elif isinstance(value, ast.Constant):
-            kwargs[kw.arg] = value.value
-    if kwargs.get("kind") is not TaskKind.CLASSIFICATION:
-        return None
-    try:
-        return LLMTask(**kwargs)
-    except TypeError:
-        return None
-
-
-def declared_classification_tasks(repo_root: Path | None = None) -> list[LLMTask]:
-    """Every module-level ``LLMTask(kind=CLASSIFICATION, ...)`` under the
-    source roots, read from the AST so no bridge module is imported.
-
-    This is the site discovery ``--audit`` walks. When ``agent/llm/tasks.py``
-    grows a registry, this becomes a read of that registry.
-    """
-    root = repo_root or Path(__file__).resolve().parents[2]
-    found: list[LLMTask] = []
-    for top in _SOURCE_ROOTS:
-        for path in sorted((root / top).rglob("*.py")):
-            if "tests" in path.parts or path.name.startswith("test_"):
-                continue
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError, OSError):
-                continue
-            for node in tree.body:
-                if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
-                    continue
-                func = node.value.func
-                name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-                if name != "LLMTask":
-                    continue
-                task = _task_from_call(node.value)
-                if task is not None:
-                    found.append(task)
-    return found
+    return [d.task for d in declared_sites() if d.task.kind is TaskKind.CLASSIFICATION]
