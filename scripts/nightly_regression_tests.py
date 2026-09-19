@@ -3055,7 +3055,7 @@ def _file_finding(
     already_filed = filed_fingerprints.get(fingerprint)
     if already_filed is not None:
         # Report only, deliberately: the detector creates and comments, and gains
-        # no issue-closing privilege. No read-back, no `gh issue close`, no
+        # no issue-closing privilege. No read-back, no closing of a twin, no
         # pointer comment — the convergent sweep that would close a twin is
         # deferred by owner decision (#3418 plan, `## Decisions` #2) until
         # concurrent multi-host nightly runs are actually observed. Do not
