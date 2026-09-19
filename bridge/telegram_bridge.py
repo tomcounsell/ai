@@ -1937,7 +1937,7 @@ async def main():
             try:
                 from tools.classifier import classify_request_async
 
-                result = await classify_request_async(clean_text)
+                result = await classify_request_async(clean_text, project_key=project_key)
                 classification_result["type"] = result.get("type")
                 classification_result["confidence"] = result.get("confidence")
                 logger.debug(

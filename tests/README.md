@@ -292,7 +292,6 @@ tests/
 | unit | `test_auto_continue.py` | 22 | Auto-continue logic |
 | unit | `test_work_request_classifier.py` | 16 | Work request classification |
 | integration | `test_stage_aware_auto_continue.py` | 39 | Stage-aware auto-continue |
-| tools | `test_classifier.py` | 17 | Classifier tool tests |
 
 ### `validation` — Quality checks and parsing
 
