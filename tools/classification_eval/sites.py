@@ -183,6 +183,35 @@ def _terminus_prompt(inp: Input) -> str:
     return terminus_prompt(inp.text.strip(), str(inp.context.get("thread", "")), False)
 
 
+_TERMINUS_REFERENCE_RULE = (
+    "- If the sender is a bot and the message is declarative (no question) → reply SILENT\n"
+)
+_TERMINUS_CANDIDATE_RULE = (
+    "- If the message is declarative and needs nothing from Valor (a status line, an FYI,"
+    " a bare acknowledgment, a greeting, talk between other people), or the sender is a"
+    " bot and the message has no question → reply SILENT\n"
+)
+
+
+def _terminus_candidate_prompt(inp: Input) -> str:
+    """The reference prompt with the SILENT rule widened past bot senders: a
+    3B model applies the rule list literally and never answers SILENT for a
+    human sender, where Haiku follows the examples."""
+    return _terminus_prompt(inp).replace(_TERMINUS_REFERENCE_RULE, _TERMINUS_CANDIDATE_RULE)
+
+
+_TERMINUS_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " Three verdicts. RESPOND: the reply asks a question, requests or"
+    " commands an action, reports a problem, or gives a correction or new instruction."
+    " REACT: the reply closes the conversation with agreement, approval, thanks, or"
+    " praise ('ok great', 'sounds good', 'nice work', 'yes, that approach works')."
+    " SILENT: the reply needs nothing from Valor: a bare acknowledgment ('got it',"
+    " 'brb', 'thanks'), a greeting or sign-off to the group, social talk or plans between"
+    " other people, and any declarative status line (a deploy, CI, build, issue, or"
+    " session notice) that asks for nothing."
+)
+
+
 _site(
     Site(
         id=TERMINUS.site,
@@ -194,6 +223,8 @@ _site(
         minimum_n=ROUTING_MINIMUM_N,
         budget_s=None,
         fixtures=lambda: _fixtures(INBOUND_MESSAGES, ROUTING_FIXTURES),
+        candidate_prompt=_terminus_candidate_prompt,
+        candidate_system=_TERMINUS_CANDIDATE_SYSTEM,
     )
 )
 
