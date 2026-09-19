@@ -260,87 +260,90 @@ Inbound message → bridge resolves project → classifier declares its task →
 
 ### Exception Handling Coverage
 - [ ] Every migrated site keeps its `except Exception` or `except LLMCallError` block; for each, a test asserts the fail-safe value AND the log line (`logger.warning` with the site id) when the leg raises `LLMCallError`: C5 `{}`-equivalent dict, C9 `None` → heuristic, C10 `False`, C11 `healthy=True`, C14 `None`, C15 `promises-judge-failed`, read-the-room `send`/`rtr_error`.
-- [ ] Router fallback: a test makes the primary leg raise and asserts the fallback leg ran exactly once, the result carries `source="fallback"`, and a warning names the site and backend.
-- [ ] Shadow leg exceptions are caught inside the background task, counted on a per-site Redis counter, and never propagate; a test asserts the primary result is unaffected when the shadow leg raises or times out.
-- [ ] Decisions leg: HTTP non-200, JSON decode error, missing answer id, unknown choice value, timeout, and meter `Refusal` each raise `LLMCallError` with a distinct message; six unit tests with recorded responses.
-- [ ] `peek_open_source` never raises; a test asserts a cache miss returns `None` and schedules exactly one refresh per key.
+- [ ] Router fallback: a test makes the Ollama leg raise `LLMCallError(reason="transport")` and asserts the Anthropic leg ran exactly once with `sdk_timeout` equal to the remaining deadline and a warning names the site and both backends; a second test spends the deadline in the primary and asserts the fallback is skipped and the primary's `LLMCallError` propagates.
+- [ ] Anthropic leg slot timeout: with the semaphore held, a call with `slot_timeout=0.05` raises `LLMCallError(reason="slot_timeout")` and the `AsyncAnthropic` constructor was never entered (fake client records construction); no `asyncio.wait_for` appears around the API call in either leg (asserted by the enumeration test's token walk over `agent/llm/backends/`).
+- [ ] Ollama leg: connection refused, HTTP 5xx, schema-validation exhaustion, and SDK timeout each raise `LLMCallError` with a distinct `reason`; four unit tests against a fake `AsyncOpenAI`.
+- [ ] `is_eligible("valor")` is `True` with the cache empty and `gh` unavailable (monkeypatched to raise); `peek_open_source` never raises; a test asserts a cache miss returns `None` and schedules exactly one refresh per key.
 
 ### Empty/Invalid Input Handling
 - [ ] `run_typed` keeps its `ValueError` on empty or whitespace prompt before any routing; test unchanged.
-- [ ] Decisions question builder on an output type with no `Literal`/`bool` field raises `LLMCallError` before any HTTP call (tested).
-- [ ] `decision_options` with an empty list for a dynamic field raises before spend (C12 with zero candidates never reaches the leg today; the test pins that).
-- [ ] Settings CSV parsing: empty string → empty set; whitespace and duplicate ids tolerated; unknown site ids logged once at startup by `tools/doctor` (tested).
+- [ ] `run_typed` without `task=` raises `TypeError` naming the kwarg (pinned so a missed site fails loudly, Risk 2).
+- [ ] `resolve` with `project_key=None` on an `OLLAMA` classification task returns the Anthropic route (fail closed, tested).
+- [ ] The comparison runner with fewer inputs than the site's minimum refuses to write a record and prints the shortfall (tested).
 
 ### Error State Rendering
-- [ ] `python -m tools.doctor` gains a "LLM routing" section listing every switched site, its resolved backend, and whether a local fallback resolves; a test renders it with one switched site and one unknown site id.
-- [ ] The comparison runner's report renders the rejection case (candidate error rate above 2%) with the reason, not a blank table; tested with a recorded failing arm.
+- [ ] `python -m tools.doctor` gains an "LLM routing" section listing every declared site, its kind, its declared backend, the route `resolve` returns for `valor` and for a client key, and the per-process eligibility cache state; a test renders it with one cold key.
+- [ ] The comparison runner's report renders the miss case (agreement under the tier bar, or candidate error rate above 2%) with the failing criterion named, not a blank table; tested with a recorded failing arm.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_job_router.py` (fakes `bridge.job_router.run_typed_local`): UPDATE: patch `bridge.job_router.run_typed`; the fake keeps `**kwargs`.
 - [ ] `tests/unit/test_intake_classifier.py` (fakes `run_typed_local`): UPDATE: patch `run_typed` in `tools.classifier`.
+- [ ] `tests/unit/test_llm_wrapper_local.py`: REPLACE with `tests/unit/test_llm_backend_ollama.py` (the leg's four failure reasons, SDK-level timeout, no `wait_for`); `run_typed_local` is deleted.
+- [ ] `tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS`: UPDATE `(ImprovementEvidence, "kind")` from 10 to 11 with the reasoned comment.
 - [ ] `tests/integration/test_job_routing.py`: UPDATE: same patch target change.
-- [ ] `tests/unit/test_promise_gate.py` (monkeypatches `promise_gate.anthropic.AsyncAnthropic` and `get_anthropic_api_key`; 56 tests): REPLACE the transport-level fakes with a `run_typed` fake returning `PromiseVerdictDecision`; the timeout test asserts `LLMCallError` from a timing-out leg still routes to the heuristic.
+- [ ] `tests/unit/test_promise_gate.py` (monkeypatches `promise_gate.anthropic.AsyncAnthropic` and `get_anthropic_api_key`; 56 tests): REPLACE the transport-level fakes with a `run_typed` fake returning `PromiseVerdictDecision`; the timeout test asserts `LLMCallError(reason="timeout")` and `LLMCallError(reason="slot_timeout")` each still route to the heuristic with source `timeout`.
 - [ ] `tests/unit/test_promise_gate_measurement.py`, `test_promise_gate_audit.py`, `test_promise_gate_session_events.py`: UPDATE where they construct the client fake; behavior assertions unchanged.
 - [ ] `tests/unit/test_read_the_room.py` (monkeypatches `rtr_module.anthropic.AsyncAnthropic`; 37 tests): REPLACE the fake constructor with a `run_typed` fake returning `RoomVerdict`; every short-circuit and error-path assertion stays.
 - [ ] `tests/unit/test_session_completion.py`, `tests/unit/test_session_completion_zombie.py`: UPDATE the novelty-judge fakes to `run_typed`.
 - [ ] `tests/unit/test_health_check.py` (38 tests): UPDATE the `_judge_health` fakes from `anthropic_slot` to `run_typed`; the "unparseable judge response" case becomes an `LLMCallError` case with the same `healthy=True` outcome.
 - [ ] `tests/unit/test_pr_classification_fastpath.py`: UPDATE: `classify_request_async` fake returns the same dict; tests for the deleted sync `classify_request` are DELETED.
 - [ ] `tests/unit/test_memory_quality.py`: UPDATE the `_gemma_classify` fakes from `ollama.chat` to `run_typed`.
-- [ ] `tests/unit/test_improvement_evidence.py` (84 tests): UPDATE the `_OpenRouterJudge` fakes to the leg-level fake; the metering assertions move to the leg.
+- [ ] `tests/unit/test_improvement_evidence.py` (84 tests): UPDATE the `_OpenRouterJudge` fakes to a `run_typed` fake returning `PromiseJudgeDecision`; the `promise_detector` reserve/settle assertions are DELETED with the OpenRouter call (the judge is local and unmetered after this PR).
 - [ ] `tests/unit/test_emoji_embedding.py`: DELETE the `find_best_emoji` / `_compute_embedding` / cache tests (dead path removed); KEEP the `find_best_emoji_for_message` tests.
-- [ ] `tests/unit/test_llm_wrapper.py`, `tests/unit/test_llm_wrapper_local.py`: UPDATE: calls pass `task=`; add router and fallback tests.
-- [ ] `tests/unit/test_routing.py`, `test_intent_classifier.py`, `test_agent_catchup.py`, `test_injection_inspection.py`, `test_context_recall.py`, `test_context_recall_wiring.py`, `test_email_cs_triage.py`, `tests/unit/memory_extraction/test_memory_extraction_event_loop_safety.py`: no change expected (fakes accept `**kwargs`; `call_args[0]` positional assertions still hold). Listed so the builder runs them first as the "unchanged with default settings" proof.
-- [ ] `tests/unit/test_models.py`: UPDATE: add `test_openrouter_jev_endpoint_is_listed` against `/api/v1/models/typesafe/jev-1.13/endpoints` (no auth needed), `integration` marker, fail-closed like its sibling.
+- [ ] `tests/unit/test_llm_wrapper.py`: UPDATE: calls pass `task=`; the `hard_timeout` test moves to the wrapper level (outside the leg); add router, fallback-deadline, and slot-timeout tests.
+- [ ] `tests/unit/test_routing.py`, `test_intent_classifier.py`, `test_agent_catchup.py`, `test_injection_inspection.py`, `test_context_recall.py`, `test_context_recall_wiring.py`, `test_email_cs_triage.py`, `tests/unit/memory_extraction/test_memory_extraction_event_loop_safety.py`: no change expected (they fake `run_typed` itself, which is backend-agnostic; fakes accept `**kwargs`; `call_args[0]` positional assertions still hold). Listed so the builder runs them first as the "wrapper contract unchanged" proof.
+- [ ] `tests/unit/test_improvement_eligibility.py`: UPDATE: add `is_eligible` (valor pin, client miss, `None`), `peek_open_source`, `warm_cache`, and the single-refresh race test.
 
 ## Rabbit Holes
 
-- **Re-scoring the incumbents' prompts while migrating.** Every prompt string moves verbatim. Prompt improvements are a different experiment with their own comparison.
-- **A general "provider registry" with dynamic plugin discovery.** Four legs, one enum, one `if` chain in `resolve`. Add the fifth leg when it exists.
+- **Re-scoring the reference prompts.** The reference arm runs each site's prompt verbatim on the site's `main` backend so the record measures the backend change alone. The builder shapes only the candidate arm's prompt; improving the reference is a different experiment with its own comparison.
+- **A general "provider registry" with dynamic plugin discovery.** Two legs in lane A, one enum, one `if` chain in `resolve`. Add a leg when it exists.
 - **Making eligibility finer than the project.** §7 is per message's project. Per-message content classification of "private context" is a research question, not a routing rule.
+- **Tuning the Ollama server** (`OLLAMA_NUM_PARALLEL`, `OLLAMA_KEEP_ALIVE`, quantization). The infra doc records the two settings the hot path depends on; the comparison runner measures under the server as configured. Server tuning past that is #3420's territory.
 - **Jev `score`, `not_for`, `inspect`, JSON-object `state`.** Unexercised by the probe; out of scope.
 - **Emoji choice as a structured decision.** No model on `main` today, no ground truth, a new network call on every message. Filed separately (No-Gos).
-- **Replacing `is_open_source`'s `gh` shell-out with a projects.json field.** Would change the source of truth for §7 across the improvement tooling. The cache peek is enough here.
+- **Replacing `is_open_source`'s `gh` shell-out with a projects.json field.** Would change the source of truth for §7 across the improvement tooling. The `valor` pin plus the cache peek is enough here.
 - **Rewriting `tools/improvement_eval/` to accept a classifier envelope.** Spike-3 says no; the standalone runner is 200 lines.
 
 ## Risks
 
 ### Risk 1: Hot-path regressions from migrating promise gate, read-the-room, and the completion judge
-**Impact:** Every outbound message crosses at least two of these; a regression drops or delays replies.
-**Mitigation:** These three migrate last in lane A, each in its own commit, each with a slot-starvation test proving the 3 s budget holds through the wrapper, and each behind the byte-identical fail-safe. `run_typed` gains `max_retries` so C9's `max_retries=0` survives. The PR review checks the p95 of `read_the_room` on the local bridge before and after via `tests/unit/test_read_the_room.py`'s timing fixture.
+**Impact:** Every outbound message crosses at least two of these; a regression drops or delays replies, and a coroutine-level timeout around the API call leaks httpx connections (hotfix #1055).
+**Mitigation:** These three migrate last among the raw sites, each in its own commit, each calling `run_typed` with `hard_timeout=None`, `sdk_timeout=RTR_SDK_TIMEOUT`, `slot_timeout=RTR_SDK_TIMEOUT`, `max_retries=0`, each with a slot-starvation test proving the leg raises without entering the client, and each behind the byte-identical fail-safe. The enumeration test's token walk asserts no `asyncio.wait_for` in the three modules or in `agent/llm/backends/`. The PR review checks the p95 of `read_the_room` on the local bridge before and after via `tests/unit/test_read_the_room.py`'s timing fixture.
 
 ### Risk 2: Required `task=` breaks an unlisted caller
 **Impact:** A `TypeError` at call time in a path the enumeration test did not cover.
 **Mitigation:** The enumeration test runs the same AST walk the builder uses to find sites; `python -m ruff check` plus the full `tests/unit/` run are gates; `run_typed` raises a clear `TypeError` naming the missing kwarg.
 
-### Risk 3: Eligibility fails closed so hard that no site ever sees a candidate
-**Impact:** The comparison collects nothing on the shadow path.
-**Mitigation:** Bridge warms the cache for `ACTIVE_PROJECTS` at startup; `tools/doctor` reports per-project eligibility; the comparison runner uses the blocking `is_open_source` (it is offline) and reports how many inputs were excluded and why.
+### Risk 3: Eligibility fails closed in a process that never warmed its cache
+**Impact:** A client-keyed classification call in a cold process resolves to the subscription backend when the project is in fact open source. (`valor` is pinned, so this repo's own rooms are never affected.)
+**Mitigation:** The bridge warms `ACTIVE_PROJECTS` and the worker warms its loaded `projects` at startup; a miss schedules one refresh so the second call in a burst sees the answer; `tools/doctor` prints the per-process cache state; the comparison runner is offline and uses the blocking `is_open_source`. The failure direction is the safe one under §7.
 
-### Risk 4: GLiClass ONNX from Python cannot be made to match the reference pipeline
-**Impact:** Lane B has no candidate to compare against granite.
-**Mitigation:** Spike-2's rejection exit. Granite is already a local backend; lane B still produces the granite latency numbers #2494 lacks and the runner both later lanes use.
+### Risk 4: Granite misses the bar on the high-tier sites after iteration
+**Impact:** C1 through C4 land on Haiku and the "local-first" outcome is partial in lane A.
+**Mitigation:** The taxonomy, the router, the legs, the runner, and the records ship regardless; each miss is a recorded result with the failing criterion named, which is exactly the evidence #3420 (GLiClass) needs to target the right sites. Lower tiers land first so the iteration loop is calibrated before the expensive sites.
 
-### Risk 5: Jev shadow spend or a runaway shadow loop
-**Impact:** Unit-2 budget ($10/day) consumed by shadow calls, or shadow tasks piling up.
-**Mitigation:** Every shadow call reserves through the meter; a `Refusal` drops the call. Shadow tasks are created with `asyncio.create_task`, bounded by `decisions_s`, and capped by a per-process semaphore of 4; a counter on refusal and overflow shows in `valor-improve budget` via receipts under purpose `structured_decision`.
+### Risk 5: Ollama serialization or cold start breaks the 3 s budget under a burst
+**Impact:** Ollama runs one request at a time by default and unloads granite after five idle minutes; a burst of messages, or the first message after a quiet spell, times out the local leg on C8, C9, or C10 and the fallback has too little deadline left, so the caller sees its fail-safe where Haiku answered today.
+**Mitigation:** The comparison runner measures p95 at concurrency 4 and the bar requires it within budget; the infra doc pins `OLLAMA_KEEP_ALIVE=-1` and `OLLAMA_NUM_PARALLEL=4` for the bridge machine and `tools/doctor` reports the loaded model and its keep-alive; a budgeted site whose p95 misses lands on `ANTHROPIC` by the bar.
 
 ### Risk 6: Test fakes drift from the leg protocol
 **Impact:** Green tests that reach no leg.
 **Mitigation:** One shared fake in `tests/helpers/llm_fakes.py` implementing the leg protocol, used by every migrated test; a mutation check per migrated site during review (each fail-safe test must fail when the fail-safe line is deleted).
 
-### Risk 7: OpenRouter changes the alpha shape
-**Impact:** Decisions leg returns `LLMCallError` on every call.
-**Mitigation:** The leg's fallback runs; the live-listing probe and one recorded-response test fail by name; the wire shape lives in one module.
+### Risk 7: The comparison inputs are too few or too clean
+**Impact:** A site clears 95% on its unit-test examples and misbehaves on real traffic.
+**Mitigation:** The minimum `n` (50, and 200 for C1 through C4) must include real inbound `valor` messages from the memory store, not only test fixtures; the record carries the input source split; a site whose real-message sample cannot reach the minimum lands on `ANTHROPIC`.
 
 ## Race Conditions
 
-### Race 1: Shadow task outlives the request and holds the Anthropic semaphore
-**Location:** `agent/llm/wrapper.py::run_typed` shadow dispatch
-**Trigger:** Primary result returns; shadow task still running when the caller's coroutine completes.
-**Data prerequisite:** The primary result must be captured before the shadow task is created.
-**State prerequisite:** Shadow legs never enter `semaphore_slot()` (the decisions leg is HTTP to OpenRouter, not Anthropic).
-**Mitigation:** Shadow runs only the decisions or local legs, never the Anthropic leg; bounded by `asyncio.wait_for(decisions_s)`; per-process `asyncio.Semaphore(4)`; exceptions swallowed and counted; a test asserts the semaphore count is unchanged during a shadow call.
+### Race 1: Fallback leg queues on the Anthropic semaphore past the caller's budget
+**Location:** `agent/llm/wrapper.py::run_typed` fallback dispatch; `agent/llm/backends/anthropic.py`
+**Trigger:** The Ollama leg fails fast (connection refused) on a budgeted site while the Anthropic semaphore is saturated; the fallback waits for a slot.
+**Data prerequisite:** The deadline is captured before the primary call.
+**State prerequisite:** The fallback's `slot_timeout` is the remaining deadline, never the caller's original value.
+**Mitigation:** The wrapper passes `min(slot_timeout, remaining)` and `sdk_timeout=remaining` to the fallback and skips it under 0.5 s; a slot timeout raises before the client is constructed; a test saturates the semaphore and asserts the fallback raises `LLMCallError(reason="slot_timeout")` inside the budget.
 
 ### Race 2: Eligibility refresh storms on a cold cache
 **Location:** `tools/improvement_eligibility.py::peek_open_source`
@@ -349,19 +352,12 @@ Inbound message → bridge resolves project → classifier declares its task →
 **State prerequisite:** At most one in-flight refresh per project key.
 **Mitigation:** A per-key `_REFRESHING: set[str]` guarded by the existing module lock; refresh runs in `run_in_executor`; a test fires 50 concurrent peeks and asserts one `gh` call.
 
-### Race 3: Meter reserve without settle on a cancelled shadow task
-**Location:** `agent/llm/backends/decisions.py`
-**Trigger:** `asyncio.wait_for` cancels the shadow leg after the reservation, before the response.
-**Data prerequisite:** reservation id captured before the HTTP call.
-**State prerequisite:** the reservation must be released or settled exactly once.
-**Mitigation:** `try/finally` releases the reservation on `CancelledError`; `sweep_unsettled_reservations` (existing) covers a hard crash. Tested with a cancelled task.
-
-### Race 4: Settings read mid-flip
-**Location:** `agent/llm/router.py::resolve`
-**Trigger:** `.env` edited while the bridge runs.
+### Race 3: Comparison runner arms interleave with live bridge traffic on one Ollama server
+**Location:** `tools/classification_eval/`
+**Trigger:** The builder runs a concurrency-4 latency measurement while the local bridge is serving messages through the same Ollama daemon.
 **Data prerequisite:** none
-**State prerequisite:** Settings are read once per process (pydantic-settings), so a flip needs a restart, which is the existing contract for every `MODELS__*` key.
-**Mitigation:** Documented; `tools/doctor` shows the live-resolved routes.
+**State prerequisite:** Latency numbers in a record must come from a run with no other Ollama clients, or the record must say otherwise.
+**Mitigation:** The runner checks whether the bridge and worker services are loaded (`launchctl list` for the `com.valor.*` labels) before a latency run and stamps `contended: true` on the record when either is; the reviewer's bar reads only uncontended latency, and the builder stops the services (`./scripts/valor-service.sh stop`) for the measurement. Tested with a fake `launchctl` output.
 
 ## No-Gos (Out of Scope)
 
