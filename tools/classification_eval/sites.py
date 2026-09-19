@@ -38,6 +38,9 @@ import hashlib
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
+
+from pydantic import BaseModel
 
 from agent.health_check import (
     CHECK_INTERVAL,
@@ -499,6 +502,26 @@ def _novelty_real(limit: int) -> list[Input]:
     ]
 
 
+class _NoveltyCandidate(BaseModel):
+    """C10's candidate schema: the reason is generated before the action, and
+    ``new`` is the first enum value, because in native JSON mode a 3B model
+    writes the fields in schema order and leans on the first value listed."""
+
+    reason: str
+    action: Literal["new", "restate"]
+
+
+_NOVELTY_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " Compare the final-summary draft with the prior message. Answer"
+    " 'new' when the draft carries any fact the prior message lacks: a commit hash, a PR"
+    " or issue number, a count, a file name, an error, a decision, a next step, or a"
+    " different outcome; also answer 'new' when the prior message was sent more than"
+    " two minutes ago, or when the draft is about something else entirely. Answer"
+    " 'restate' only when the prior message is recent and the draft says the same"
+    " thing in other words with nothing added."
+)
+
+
 _site(
     Site(
         id=COMPLETION_NOVELTY.site,
@@ -514,6 +537,8 @@ _site(
         budget_s=HOT_PATH_BUDGET_S,
         fixtures=_novelty_fixtures,
         real_inputs=_novelty_real,
+        candidate_system=_NOVELTY_CANDIDATE_SYSTEM,
+        candidate_output_type=_NoveltyCandidate,
     )
 )
 
