@@ -13,8 +13,12 @@ around that asymmetry.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import subprocess
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -289,3 +293,194 @@ class TestAgentCallSiteRefusal:
         assert outcome["passed"] is True
         assert ("reserve", "open-thing", 0.02, "agent_trial", "arm:refusal-3311:t1") in meter.calls
         assert meter.calls[-1][0] == "settle"
+
+
+# ---------------------------------------------------------------------------
+# The router's read (#3410): valor pinned, cache-only peek, one refresh per key
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def refreshing_clear():
+    """``_REFRESHING`` starts and ends empty for the scheduling tests."""
+    with improvement_eligibility._LOCK:
+        improvement_eligibility._REFRESHING.clear()
+    yield
+    with improvement_eligibility._LOCK:
+        improvement_eligibility._REFRESHING.clear()
+
+
+class TestValorPin:
+    """``valor`` is eligible in code, ahead of any cache read or ``gh`` call."""
+
+    def test_is_eligible_valor_with_cache_empty_and_gh_raising(self):
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert improvement_eligibility.is_eligible("valor") is True
+        assert run.call_count == 0
+
+    def test_is_open_source_valor_never_shells_out(self):
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert is_open_source("valor") is True
+        assert run.call_count == 0
+
+    def test_valor_needs_no_projects_entry(self):
+        assert "valor" not in CONFIG["projects"]
+        assert improvement_eligibility.is_eligible("valor") is True
+
+
+class TestIsEligible:
+    def test_none_is_not_eligible(self, refreshing_clear):
+        with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))) as run:
+            assert improvement_eligibility.is_eligible(None) is False
+        assert run.call_count == 0
+        assert improvement_eligibility._REFRESHING == set()
+
+    def test_a_client_miss_is_not_eligible_and_never_blocks(self, refreshing_clear):
+        """No loop: the miss is the answer, no refresh is scheduled, nothing raises."""
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert improvement_eligibility.is_eligible("client-thing") is False
+        assert run.call_count == 0, "a cache miss on the router path must not shell out"
+        assert improvement_eligibility._REFRESHING == set()
+
+    def test_a_cached_public_answer_is_eligible(self):
+        with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))):
+            assert is_open_source("open-thing") is True
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert improvement_eligibility.is_eligible("open-thing") is True
+        assert run.call_count == 0
+
+    def test_a_cached_private_answer_is_not_eligible(self):
+        with _gh(return_value=_completed(json.dumps({"visibility": "PRIVATE"}))):
+            assert is_open_source("client-thing") is False
+        assert improvement_eligibility.is_eligible("client-thing") is False
+
+
+class TestPeekOpenSource:
+    def test_miss_is_none_and_never_raises(self):
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert improvement_eligibility.peek_open_source("client-thing") is None
+            assert improvement_eligibility.peek_open_source("unknown-project") is None
+        assert run.call_count == 0
+
+    def test_hit_is_the_cached_answer(self):
+        with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))):
+            is_open_source("open-thing")
+        assert improvement_eligibility.peek_open_source("open-thing") is True
+
+    def test_an_expired_entry_is_a_miss(self):
+        with _gh(return_value=_completed(json.dumps({"visibility": "PUBLIC"}))):
+            is_open_source("open-thing", ttl_seconds=0)
+        assert improvement_eligibility.peek_open_source("open-thing") is None
+
+    def test_peek_never_schedules(self, refreshing_clear):
+        async def _under_a_loop():
+            return improvement_eligibility.peek_open_source("client-thing")
+
+        assert asyncio.run(_under_a_loop()) is None
+        assert improvement_eligibility._REFRESHING == set()
+
+
+class TestRefreshRace:
+    """Race 2: a burst of misses on one key costs one ``gh`` call."""
+
+    async def test_fifty_concurrent_misses_issue_one_gh_call(self, refreshing_clear):
+        calls = {"n": 0}
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_gh(argv, **kwargs):
+            calls["n"] += 1
+            started.set()
+            release.wait(5)
+            return _completed(json.dumps({"visibility": "PRIVATE"}))
+
+        with _gh(side_effect=slow_gh):
+            answers = await asyncio.gather(*(_call_is_eligible("client-thing") for _ in range(50)))
+            assert set(answers) == {False}
+            assert started.wait(5), "the one refresh never started"
+            assert improvement_eligibility._REFRESHING == {"client-thing"}
+            release.set()
+            await _wait_until(lambda: "client-thing" not in improvement_eligibility._REFRESHING)
+
+        assert calls["n"] == 1
+        assert improvement_eligibility.peek_open_source("client-thing") is False
+
+    def test_no_running_loop_schedules_nothing(self, refreshing_clear):
+        with _gh(side_effect=FileNotFoundError("gh")) as run:
+            assert improvement_eligibility._schedule_refresh("client-thing") is False
+            assert improvement_eligibility.is_eligible("client-thing") is False
+        assert run.call_count == 0
+        assert improvement_eligibility._REFRESHING == set()
+
+    async def test_a_raising_refresh_releases_the_key(self, refreshing_clear):
+        with _gh(side_effect=FileNotFoundError("gh")):
+            assert improvement_eligibility.is_eligible("client-thing") is False
+            await _wait_until(lambda: "client-thing" not in improvement_eligibility._REFRESHING)
+        assert improvement_eligibility.peek_open_source("client-thing") is None
+
+
+async def _call_is_eligible(key: str) -> bool:
+    return improvement_eligibility.is_eligible(key)
+
+
+async def _wait_until(predicate, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        await asyncio.sleep(0.01)
+
+
+class TestWarmCache:
+    async def test_warms_every_key_and_logs_the_counts(self, caplog):
+        answers = {
+            "tomcounsell/ai": json.dumps({"visibility": "PUBLIC"}),
+            "acme/private-app": json.dumps({"visibility": "PRIVATE"}),
+        }
+
+        def fake_run(argv, **kwargs):
+            repo = next(a for a in argv if "/" in a)
+            return _completed(answers[repo])
+
+        with _gh(side_effect=fake_run), caplog.at_level(logging.INFO, logger="tools"):
+            await improvement_eligibility.warm_cache(["open-thing", "client-thing", "valor"])
+
+        assert improvement_eligibility.peek_open_source("open-thing") is True
+        assert improvement_eligibility.peek_open_source("client-thing") is False
+        lines = [r.getMessage() for r in caplog.records if "eligibility warm-up done" in r.message]
+        assert lines == ["eligibility warm-up done keys=3 public=2 failed=0"]
+
+    async def test_one_raising_key_does_not_stop_the_others(self, caplog, monkeypatch):
+        def fake_open_source(key):
+            if key == "client-thing":
+                raise RuntimeError("boom")
+            return key == "open-thing"
+
+        monkeypatch.setattr(improvement_eligibility, "is_open_source", fake_open_source)
+        with caplog.at_level(logging.INFO, logger="tools"):
+            await improvement_eligibility.warm_cache(["open-thing", "client-thing", "no-github"])
+
+        lines = [r.getMessage() for r in caplog.records if "eligibility warm-up done" in r.message]
+        assert lines == ["eligibility warm-up done keys=3 public=1 failed=1"]
+
+    async def test_schedule_holds_the_task_until_it_completes(self, monkeypatch, caplog):
+        gate = threading.Event()
+
+        def slow_open_source(key):
+            gate.wait(5)
+            return True
+
+        monkeypatch.setattr(improvement_eligibility, "is_open_source", slow_open_source)
+        with caplog.at_level(logging.INFO, logger="tools"):
+            task = improvement_eligibility.schedule_warm_cache(["a", "b"])
+            assert isinstance(task, asyncio.Task)
+            assert not task.done()
+            assert task in improvement_eligibility._BACKGROUND_TASKS
+            gate.set()
+            await task
+        assert task not in improvement_eligibility._BACKGROUND_TASKS
+        assert any("keys=2 public=2 failed=0" in r.getMessage() for r in caplog.records)
+
+    def test_schedule_needs_a_running_loop(self):
+        with pytest.raises(RuntimeError):
+            improvement_eligibility.schedule_warm_cache(["a"])
