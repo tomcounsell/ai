@@ -48,10 +48,12 @@ _process_inbound_email()  (bridge/email_bridge.py)
 ### Tier 1 — `tools/email_cs/triage.py`
 
 Classifies via the [non-harness LLM wrapper](nonharness-llm-wrapper.md)
-(`agent.llm.run_typed`, Haiku/`MODEL_FAST`) with a typed `EmailTriageDecision`
-output model. PydanticAI validates the schema directly (single auto-retry on
-mismatch), replacing the previous `ollama_client.chat()` call plus tolerant
-post-hoc JSON extraction (`extract_json_payload`). Fail-safe by contract: every
+(`agent.llm.run_typed(task=EMAIL_TRIAGE)`, Haiku/`MODEL_FAST`) with a typed
+`EmailTriageDecision` output model. The declaration (site `email_cs.triage`,
+`backend=ANTHROPIC`, `client_only=True`) keeps the call on the subscription leg
+for every project key: customer email is client work under charter §7, so the
+router never sends it to a local model. PydanticAI validates the schema directly
+(single auto-retry on mismatch). Fail-safe by contract: every
 error path (LLM call failure, schema-validation exhaustion, empty input,
 `customer_id is None`) deterministically returns an **escalate** `Triage` — it
 never raises into the bridge and never silently auto-handles.

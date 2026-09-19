@@ -130,6 +130,31 @@ python -m agent.llm.compat --json --allow-network   # adds one real billed API c
 
 Fails closed: any exception resolves to degraded and alerts; a missing API key reports its own distinct status rather than reading as an incompatible pair.
 
+### Classification Comparison Runner (`tools.classification_eval`)
+
+Runs one declared classification site's reference backend against candidate arms (`ollama`, `anthropic`) on real inbound `valor` messages and writes a `classifier_comparison` evidence record with the agreement, latency, and error-rate numbers the landing bar reads. A site's `LLMTask` declaration lands on `backend=OLLAMA` only with a record that clears the bar (`--audit` applies it to every site). Sites, bars, and the record format: [`docs/features/llm-task-taxonomy.md`](features/llm-task-taxonomy.md); operating the Ollama daemon it measures against: [`docs/infra/llm-task-routing.md`](infra/llm-task-routing.md).
+
+```bash
+python -m tools.classification_eval --list-sites                                  # the declared site rows
+python -m tools.classification_eval --site routing.terminus --candidate ollama    # reference vs candidate, record written
+python -m tools.classification_eval --site job_router.route --latency-only        # no reference arm (C12, C13, C14)
+python -m tools.classification_eval --audit                                       # bar check for every site; exit 1 on any miss
+```
+
+`--real-limit N` sizes the sample (default 400); `--save-inputs` / `--inputs` write and replay a JSON-lines sample; `--no-attach` writes the record without claims; `--reference-model paid` (C15 only) meters the gemma reference arm on the paid route under purpose `promise_detector`. Exit 2 when the site's input minimum is unmet.
+
+### Doctor (`tools.doctor`)
+
+Machine health checks: venv pin, services, Telegram session, models, and (full runs only) the `LLM routing` category, which lists every declared `LLMTask` site with its kind, backend, error cost, and the leg the router resolves for `valor` and for a client key, plus the eligibility-cache state and whether the Ollama daemon answers when any site declares `backend=OLLAMA`.
+
+```bash
+python -m tools.doctor                # full run, includes LLM routing
+python -m tools.doctor --quick        # skips the slow checks (Telegram probe, model verification, LLM routing)
+python -m tools.doctor --json         # machine-readable results
+python -m tools.doctor --quality      # adds ruff lint, ruff format, and pytest
+python -m tools.doctor --install-hook # git pre-push hook that runs doctor --quick
+```
+
 ### Design System Sync (`tools.design_system_sync`)
 
 Deterministic one-way generator from Pen `.pen` JSON to DESIGN.md + `brand.css` + `source.css` + DTCG/Tailwind exports. Drives Step 6 (CSS sync) and Step 7 (gap-audit diff) of the `do-design-system` skill. `.pen` is the only human-editable file; every other artifact is regenerable. See `docs/features/design-system-tooling.md` for the full pipeline, schema mapping, and consumer-repo adoption patterns.

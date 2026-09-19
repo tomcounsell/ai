@@ -154,11 +154,12 @@ counters. See [`durability-model.md`](durability-model.md).
 
 ### LLM-first, regex fail-closed-only
 
-The primary judgment layer is a Haiku call with a strengthened
-few-shot prompt that names a *forward-deferral* class. A regex
+The primary judgment layer is a Haiku call (`run_typed(task=PROMISE_VERDICT)`,
+site `promise_gate.verdict`, typed `PromiseVerdictDecision` output) with a
+strengthened few-shot prompt that names a *forward-deferral* class. A regex
 backstop is the **fail-closed-only** last line that fires solely on
-the heuristic-fallback branch (no API key / SDK exception / parse
-failure). The heuristic does NOT override an LLM `ALLOW`.
+the heuristic-fallback branch (no API key / a non-timeout `LLMCallError` /
+a timeout). The heuristic does NOT override an LLM `ALLOW`.
 
 ### What the gate actually keys on
 
@@ -437,9 +438,11 @@ documented as a follow-up).
   [Read-the-Room Pre-Send Pass](read-the-room.md).
 
 The SDK-level timeout is separate from the budget and is not a
-wall-clock ceiling. The call uses the RTR-correct pattern
-`async with semaphore_slot(timeout=RTR_SDK_TIMEOUT): async with
-anthropic.AsyncAnthropic(timeout=RTR_SDK_TIMEOUT, max_retries=0) as client:`.
+wall-clock ceiling. The call is `run_typed(..., task=PROMISE_VERDICT,
+sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0,
+hard_timeout=None)`, and the Anthropic leg (`agent/llm/backends/anthropic.py`)
+runs the RTR-correct pattern `async with semaphore_slot(timeout=slot_timeout):`
+around a fresh `AsyncAnthropic(timeout=sdk_timeout, max_retries=0)` client.
 That `timeout=3.0` becomes `httpx.Timeout(3.0)`, which bounds connect,
 read, write and pool acquire at 3 seconds **each**, so a single call can
 exceed 3 seconds without firing `APITimeoutError`. The p99 budget above
