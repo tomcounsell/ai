@@ -6,6 +6,8 @@ owner: Valor Engels
 created: 2026-09-18
 tracking: https://github.com/tomcounsell/ai/issues/3410
 last_comment_id: 5737918683
+revision_applied: true
+revision_applied_at: 2026-09-19T01:15:25Z
 ---
 
 # LLM Task Taxonomy and Routing Layer
@@ -400,12 +402,12 @@ Anti-criteria for the code-level No-Gos are in Verification: no emoji embedding 
 ## Success Criteria
 
 - [ ] Every non-harness LLM call site in `agent/ bridge/ worker/ tools/ reflections/ scripts/` declares an `LLMTask`; `tests/unit/test_llm_task_taxonomy.py` passes and fails when a `task=` kwarg is removed from any one site (mutation-checked in review).
-- [ ] With default settings every existing unit test in the "no change expected" list passes unchanged, and `resolve()` returns `task.incumbent` for every declared site (table-driven test over all declarations).
-- [ ] C5, C9, C10, C11, C14, C15, and read-the-room go through `run_typed`; `grep` finds no `AsyncAnthropic(`, `anthropic_slot(`, `ollama.chat(`, or `requests.post(OPENROUTER_URL` in those seven modules.
-- [ ] A client-project message through each switched classification site resolves to the subscription backend; `email_cs.triage` resolves to it under every switch combination.
-- [ ] Every classification site resolves a local backend (`resolve(task, key, settings_with_site_switched).fallback.backend == OLLAMA`, table-driven).
+- [ ] Every existing unit test in the "no change expected" list passes unchanged; `resolve()` returns the Anthropic route for every thinking and `client_only` site and for every `OLLAMA` site with a client key or `None`, and the Ollama route with an Anthropic fallback for every `OLLAMA` site with key `valor` (table-driven test over all declarations, `gh` monkeypatched unavailable).
+- [ ] C5, C9, C10, C11, C14, C15, and read-the-room go through `run_typed`; `grep` finds no `AsyncAnthropic(`, `anthropic_slot(`, `ollama.chat(`, `requests.post(`, or `asyncio.wait_for(` in those seven modules; `run_typed_local` no longer exists.
+- [ ] Every classification site except C16 declares `backend=OLLAMA` or `backend=ANTHROPIC` with a `classifier_comparison` record on case `1ec40086` whose id appears in the site's row of the taxonomy table; every `OLLAMA` landing clears its tier bar in that record, and every `ANTHROPIC` landing's record names the failing criterion. C12, C13, C14 carry latency-only records.
+- [ ] `email_cs.triage` and `tools/email_cs/agents.py` resolve to the Anthropic leg for every project key.
 - [ ] The dead emoji embedding path is gone; `find_best_emoji_for_message` behavior and tests unchanged.
-- [ ] `tools/doctor` shows the routing section.
+- [ ] `tools/doctor` shows the routing section with per-process eligibility cache state.
 - [ ] Tests pass (`/do-test`); documentation updated (`/do-docs`); `python -m ruff check` and `python -m ruff format --check` clean.
 - [ ] Issues #3420, #3421, #3422 exist and reference this plan; #3410 closes with lane A.
 
@@ -413,22 +415,22 @@ Anti-criteria for the code-level No-Gos are in Verification: no emoji embedding 
 
 ### Team Members
 
-- **Builder (taxonomy and router)**
+- **Builder (taxonomy, router, legs, runner)**
   - Name: taxonomy-builder
-  - Role: `agent/llm/tasks.py`, `router.py`, `backends/` split, `run_typed` signature, settings, eligibility peek, enumeration test
+  - Role: `agent/llm/tasks.py`, `router.py`, `backends/` split with the #1055 invariant in the legs, `run_typed` signature, eligibility pin and peek, `tools/classification_eval/`, enumeration test
   - Agent Type: builder
   - Domain: async/concurrency (Race 1, Race 2)
   - Resume: true
 
-- **Builder (site migration)**
+- **Builder (site migration and landing)**
   - Name: sites-builder
-  - Role: tag the `run_typed` sites, migrate the six raw classification sites and read-the-room, thread `project_key`, delete the dead emoji path
+  - Role: tag the `run_typed` sites, migrate the six raw classification sites and read-the-room, thread `project_key`, delete the dead emoji path, run the per-site comparison loop and set each site's `backend`
   - Agent Type: builder
   - Resume: true
 
-- **Validator (behavior parity)**
+- **Validator (behavior parity and the bar)**
   - Name: parity-validator
-  - Role: run the "no change expected" test list first, then the full suite; mutation-check each fail-safe and the enumeration test
+  - Role: run the "no change expected" test list first, then the full suite; mutation-check each fail-safe and the enumeration test; re-read every comparison record against the acceptance bar
   - Agent Type: validator
   - Resume: true
 
@@ -449,91 +451,116 @@ Lane A only (this issue). Lanes B and C are #3420 and #3421.
 ### 1. Taxonomy types and leg split
 - **Task ID**: build-taxonomy
 - **Depends On**: none
-- **Validates**: `tests/unit/test_llm_wrapper.py`, `tests/unit/test_llm_wrapper_local.py`, `tests/unit/test_llm_import_safety.py`, `tests/unit/test_llm_stack_degraded_start.py`, `tests/unit/test_llm_tasks.py` (create)
+- **Validates**: `tests/unit/test_llm_wrapper.py`, `tests/unit/test_llm_backend_anthropic.py` (create), `tests/unit/test_llm_backend_ollama.py` (create, replaces `test_llm_wrapper_local.py`), `tests/unit/test_llm_import_safety.py`, `tests/unit/test_llm_stack_degraded_start.py`, `tests/unit/test_llm_tasks.py` (create)
 - **Informed By**: spike-1 (only `choice`/`noul` needed later), spike-4 (eligibility peek)
 - **Assigned To**: taxonomy-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `agent/llm/tasks.py` with `TaskKind`, `Backend`, `ErrorCost`, `LLMTask` (frozen dataclass, `site`, `kind`, `incumbent`, `error_cost=MEDIUM`, `client_only=False`, `noul_threshold=0.5`, `question=None`, `thresholds=None`).
-- Move the Anthropic body of `run_typed` to `agent/llm/backends/anthropic.py::call` and the Ollama body of `run_typed_local` to `agent/llm/backends/ollama.py::call`, each implementing the leg protocol; `run_typed_local` becomes a thin call into the Ollama leg (kept for the router and tests, forbidden at call sites by the enumeration test).
-- Add `system`, `max_retries`, `decision_options` to the Anthropic leg (PydanticAI `Agent(system_prompt=...)`, `AsyncAnthropic(max_retries=...)`); add optional `base_url`/`api_key` to the Ollama leg so it can serve OpenRouter chat/completions for C15.
-- Ensure `hard_timeout` wraps semaphore acquisition; add a slot-starvation test.
+- Create `agent/llm/tasks.py` with `TaskKind`, `Backend` (`ANTHROPIC`, `OLLAMA`), `ErrorCost`, `LLMTask` (frozen dataclass: `site`, `kind`, `backend`, `error_cost=MEDIUM`, `client_only=False`). Nothing for #3421's question builder.
+- Move the Anthropic body of `run_typed` to `agent/llm/backends/anthropic.py::call` and the Ollama body of `run_typed_local` to `agent/llm/backends/ollama.py::call`, each implementing `call(prompt, output_type, route, *, system, sdk_timeout, slot_timeout, max_retries)`; delete `run_typed_local`.
+- Anthropic leg: `semaphore_slot(timeout=slot_timeout)` entered before the client is constructed, `TimeoutError` there → `LLMCallError(reason="slot_timeout")`; `AsyncAnthropic(timeout=sdk_timeout, max_retries=max_retries)`; PydanticAI `Agent(system_prompt=system)`. No `asyncio.wait_for` inside the leg; the wrapper applies `hard_timeout` outside it when the caller passes one.
+- Ollama leg: `OllamaProvider(openai_client=AsyncOpenAI(base_url=..., api_key="ollama", timeout=sdk_timeout, max_retries=0))`, `sdk_timeout` defaulting to `settings.timeouts.local_typed_hard_s`; the `asyncio.wait_for` is removed. `LLMCallError.reason` in `{timeout, slot_timeout, transport, validation}`.
+- Slot-starvation and cancellation tests for the Anthropic leg; the four-reason tests for the Ollama leg.
 
-### 2. Router, settings, eligibility peek
+### 2. Router, eligibility, wrapper, doctor
 - **Task ID**: build-router
 - **Depends On**: build-taxonomy
-- **Validates**: `tests/unit/test_llm_router.py` (create), `tests/unit/test_llm_router_eligibility.py` (create), `tests/unit/test_improvement_eligibility.py` (extend), `tests/unit/test_env_declaration_readers.py`, `tests/unit/test_settings*.py`
+- **Validates**: `tests/unit/test_llm_router.py` (create), `tests/unit/test_llm_router_eligibility.py` (create), `tests/unit/test_improvement_eligibility.py` (extend), `tests/unit/test_worker_startup_warm_cache.py` (create), `tests/unit/test_doctor.py` (extend)
 - **Informed By**: spike-4
 - **Assigned To**: taxonomy-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `agent/llm/router.py::resolve(task, project_key, settings) -> Route` with the rule order in Data Flow step 4; `Route(backend, model, fallback=None, shadow=None)`.
-- `ModelSettings` fields and `_set` properties; `TimeoutSettings.decisions_s`; `.env.example` entries with `# @optional`; `config/models.py` `JEV`, `OPENROUTER_DECISIONS_URL`, `MODEL_INFO[JEV]`.
-- `tools/improvement_eligibility.py::peek_open_source`, `warm_cache`, single in-flight refresh per key (Race 2 test).
-- `run_typed(prompt, output_type, *, task, project_key=None, model=..., system=None, sdk_timeout, hard_timeout, max_retries=None, decision_options=None)`: resolve, primary leg, fallback-once, shadow dispatch (Race 1 test; the decisions and local legs do not exist yet, so `resolve` returns incumbent-only routes until #3420/#3421 register their legs, and a switched-on site with no registered leg logs once and stays on the incumbent).
-- `tools/doctor` routing section.
+- `agent/llm/router.py::resolve(task, project_key) -> Route(backend, model, fallback=None)` with the four rules in Data Flow step 4.
+- `tools/improvement_eligibility.py`: `is_eligible(project_key)` with `if project_key == "valor": return True` ahead of the cache read (the blocking `is_open_source` gets the same pin), `peek_open_source`, `warm_cache`, single in-flight refresh per key (Race 2 test). Bridge warms `ACTIVE_PROJECTS`; `worker/__main__.py::_run_worker` warms `list(projects)`.
+- `run_typed(prompt, output_type, *, task, project_key=None, model=MODEL_FAST, system=None, sdk_timeout=DEFAULT_SDK_TIMEOUT, slot_timeout=None, hard_timeout=DEFAULT_HARD_TIMEOUT, max_retries=None)`: validate, resolve, deadline, primary leg, fallback once within the remaining deadline (Race 1 test), `hard_timeout` applied outside the leg only when not `None`.
+- `tools/doctor` "LLM routing" section: every declared site with kind, backend, the route for `valor` and for a client key, and the per-process eligibility cache state; plus the Ollama loaded model and keep-alive (Risk 5).
 
-### 3. Tag the wrapper sites and thread project keys
+### 3. Comparison runner and evidence kind
+- **Task ID**: build-comparison-runner
+- **Depends On**: build-taxonomy
+- **Validates**: `tests/unit/test_classification_eval.py` (create), `tests/unit/test_improvement_models.py` (UPDATE `VOCABULARY_MAXIMUMS`), `tests/unit/test_improvement_evidence.py`
+- **Informed By**: spike-3
+- **Assigned To**: taxonomy-builder
+- **Agent Type**: builder
+- **Parallel**: true (with build-router)
+- `tools/classification_eval/`: `compare(site, inputs, arms) -> ComparisonRecord` (agreement with `clustered_bootstrap_ci`, p50/p95 at concurrency 1 and 4, cost, error rate, `n` with input-source split, `contended` flag from Race 3); input loaders for a site's unit-test examples and for `valor` messages from the memory store; the reference-arm callers for Haiku (prompt verbatim through the Anthropic leg) and gemma via OpenRouter (metered under the existing purpose, used once for C15); `python -m tools.classification_eval --site <id> --candidate ollama` writes the record and attaches claims to an investigation on case `1ec40086`; the miss report names the failing criterion; `--audit` walks every declared classification site, prints declared backend, record id, and bar result, and exits 1 on an `OLLAMA` landing without a passing record or a site without a record (Verification row).
+- Append `"classifier_comparison"` to `EVIDENCE_KINDS` and raise `VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")]` to 11 with the reasoned comment, in the same commit.
+
+### 4. Tag the wrapper sites and thread project keys
 - **Task ID**: build-tag-sites
 - **Depends On**: build-router
 - **Validates**: `tests/unit/test_routing.py`, `test_intent_classifier.py`, `test_agent_catchup.py`, `test_injection_inspection.py`, `test_context_recall.py`, `test_context_recall_wiring.py`, `test_email_cs_triage.py`, `test_job_router.py`, `test_intake_classifier.py`, `tests/integration/test_job_routing.py`, `tests/integration/test_bridge_routing_project_key.py` (create), `tests/unit/memory_extraction/*`
 - **Assigned To**: sites-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Declare `LLMTask` constants at C1, C2, C3, C4, C6, C7, C8, C12, C13, C16 and at every thinking site on `run_typed` (`agent/memory_extraction.py`, `tools/memory_eval/query_set.py`, and the rest of the issue's thinking list that already uses the wrapper); C7's `risk` becomes a `Literal`; C12 and C13 call `run_typed` with `incumbent=OLLAMA`.
+- Declare `LLMTask` constants at C1, C2, C3, C4, C6, C7, C8, C12, C13, C16 (C16 `client_only=True`, `backend=ANTHROPIC`; C12 and C13 `backend=OLLAMA`; the rest `backend=ANTHROPIC` at this step, changed per site in Task 7) and at every thinking site on `run_typed` (`agent/memory_extraction.py`, `tools/memory_eval/query_set.py`, and the rest of the issue's thinking list that already uses the wrapper); C7's `risk` becomes a `Literal`; C12 and C13 call `run_typed`.
 - Add `project_key` keywords and pass `project["_key"]` from `should_respond_async`; C6 from the chat's project; C8 from the outbound chat.
-- Module-level `LLMTask(kind=THINKING)` declarations in raw-transport thinking modules (`bridge/media.py`, `tools/image_analysis/`, `tools/image_tagging/`, `tools/test_judge/`, `reflections/pm_briefings/builder.py`, `reflections/utilities.py`, `scripts/memory_consolidation.py`, `tools/knowledge/indexer.py`, `tools/valor_calendar.py`, `tools/doc_summary/`, `tools/documentation/`, `tools/improvement_eval/arm_worker.py` and judges, `tools/email_cs/agents.py` with `client_only=True`), exactly as the enumeration test's allowlist requires.
+- Module-level `LLMTask(kind=THINKING, backend=ANTHROPIC)` declarations in every raw-transport module the census found on `main` that is not migrated in Tasks 5 and 6 and not on the allowlist: `bridge/media.py`, `tools/image_analysis/__init__.py`, `tools/image_tagging/__init__.py`, `tools/test_judge/__init__.py`, `reflections/pm_briefings/builder.py`, `reflections/utilities.py`, `scripts/memory_consolidation.py`, `scripts/evaluate_build.py`, `tools/knowledge/indexer.py`, `tools/knowledge/converter.py`, `tools/valor_calendar.py`, `tools/doc_summary/__init__.py`, `tools/documentation/__init__.py`, `tools/cross_vendor_judge.py`, `tools/impact_finder_core.py` (its `messages.create(` at `:395`), `tools/improvement_eval/arm_worker.py`, `tools/improvement_eval/judges/serves_charter.py`, and `tools/email_cs/agents.py` with `client_only=True`. `tools/image_gen/__init__.py` goes on the allowlist with its reason; `tools/transcribe/__init__.py` and `tools/link_analysis/__init__.py` match no token once `audio.transcriptions` and `embeddings.create(` are out of the list. Re-run the census (`/usr/bin/grep -rln "messages.create(\|ollama.chat(\|chat.completions.create(\|OPENROUTER_URL" --include='*.py' agent bridge worker tools reflections scripts`) at the head this task builds on and reconcile any new module before Task 8.
 
-### 4. Migrate the six raw classification sites
+### 5. Migrate the six raw classification sites
 - **Task ID**: build-migrate-raw
 - **Depends On**: build-tag-sites
 - **Validates**: `tests/unit/test_pr_classification_fastpath.py`, `test_session_completion.py`, `test_session_completion_zombie.py`, `test_health_check.py`, `test_memory_quality.py`, `test_improvement_evidence.py`, `test_promise_gate*.py`, `tests/helpers/llm_fakes.py` (create)
 - **Assigned To**: sites-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Order: C5, C11, C10, C14, C15, then C9 (hot path last). One commit per site. Each keeps its fail-safe value and its log line; each test asserts both under `LLMCallError`.
+- Order: C5, C11, C14, C15, C10, then C9 (hot path last). One commit per site, each on `backend=ANTHROPIC` (C14 on `OLLAMA`, its backend today) so the migration commit changes transport only. Each keeps its fail-safe value and its log line; each test asserts both under `LLMCallError`.
 - C5: `WorkTypeDecision` model; delete sync `classify_request` and the `anthropic` import; `classify_request_async` returns the same dict.
-- C15: the Ollama leg with `base_url=OPENROUTER_URL`; the meter reserve/settle moves into the leg under purpose `promise_detector`; `_OpenRouterJudge` deleted.
-- C9: `max_retries=0`, `sdk_timeout=RTR_SDK_TIMEOUT`, `hard_timeout=RTR_SDK_TIMEOUT`; timeout still routes to the heuristic with source `timeout`.
+- C15: `PromiseJudgeDecision` on `run_typed`; `_OpenRouterJudge`, the `requests` call, and the `promise_detector` reserve/settle deleted.
+- C10 and C9: `run_typed(..., sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0, hard_timeout=None)`; C9's slot timeout and SDK timeout each still route to the heuristic with source `timeout`; the #1055 docstring text in both modules now points at the leg.
 
-### 5. Migrate read-the-room and delete the dead emoji path
+### 6. Migrate read-the-room and delete the dead emoji path
 - **Task ID**: build-migrate-rtr
 - **Depends On**: build-migrate-raw
 - **Validates**: `tests/unit/test_read_the_room.py`, `tests/unit/test_emoji_embedding.py`, `tests/unit/test_react_with_emoji.py`
 - **Assigned To**: sites-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `RoomVerdict` becomes a `BaseModel` with `action: Literal["send", "trim", "suppress"]`; `read_the_room` calls `run_typed(task=READ_THE_ROOM, system=READ_THE_ROOM_SYSTEM_PROMPT, project_key=..., sdk_timeout=RTR_SDK_TIMEOUT, hard_timeout=RTR_SDK_TIMEOUT)`; `trim` without `revised_text` still becomes `send`; every error path still yields `send`/`rtr_error`.
+- `RoomVerdict` becomes a `BaseModel` with `action: Literal["send", "trim", "suppress"]`; `read_the_room` calls `run_typed(task=READ_THE_ROOM, system=READ_THE_ROOM_SYSTEM_PROMPT, project_key=..., sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0, hard_timeout=None)`; `trim` without `revised_text` still becomes `send`; every error path still yields `send`/`rtr_error`; the module docstring's #1055 paragraph points at the leg.
 - Delete `find_best_emoji`, `_compute_embedding`, the embedding cache, `OPENROUTER_EMBEDDINGS_URL`, `EMBEDDING_MODEL`, `REACTION_TOP_K`, `REACTION_TEMPERATURE`, `_softmax_sample`; fix the stale comment at `bridge/telegram_bridge.py:1894`; keep `EMOJI_LABELS` (it is the option list #3422 will need) with a comment saying so.
 
-### 6. Enumeration and parity tests
+### 7. Land each classification site on its backend
+- **Task ID**: build-land-sites
+- **Depends On**: build-migrate-rtr, build-comparison-runner
+- **Validates**: `tests/unit/test_llm_router.py` (table-driven route test over all declarations), the site's own test file, and the comparison record per site (`valor-improve investigation list --case 1ec40086ca1d422e90ef747775ff7f64`)
+- **Assigned To**: sites-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Stop the local services for latency runs (Race 3). For each site in order C6, C9, C15, C5, C7, C8, C10, C11, C1, C2, C3, C4: run the comparison against the reference arm; iterate on the candidate arm (prompt, `system`, schema) within half a build day; set `backend=OLLAMA` when the record clears the tier bar, else keep `backend=ANTHROPIC`; if C4 lands on `OLLAMA`, re-tune `TEAMMATE_CONFIDENCE_THRESHOLD` on the record; commit per site with the record id in the message and the site's row in the taxonomy table.
+- Run latency-only records for C12, C13, C14 on granite.
+- Write the per-site landing summary (site, backend, agreement, p95 at 4, error rate, `n`, record id, failing criterion if any) into the PR body; the reviewer applies the bar from it.
+
+### 8. Enumeration and parity tests
 - **Task ID**: build-enumeration-test
-- **Depends On**: build-migrate-rtr
+- **Depends On**: build-land-sites
 - **Validates**: `tests/unit/test_llm_task_taxonomy.py` (create)
 - **Assigned To**: taxonomy-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement the five checks from Key Elements; seed a fake untagged call in a temp module to prove the test bites (red-state proof pasted into the PR).
+- Implement the five checks from Key Elements with the narrowed token list and the allowlist; seed a fake untagged call in a temp module to prove the test bites (red-state proof pasted into the PR); assert no `asyncio.wait_for` in `agent/llm/backends/`, `bridge/promise_gate.py`, `bridge/read_the_room.py`, `agent/session_completion.py`.
 
-### 7. Validate lane A
+### 9. Validate lane A
 - **Task ID**: validate-lane-a
 - **Depends On**: build-enumeration-test
+- **Validates**: the "no change expected" list, `scripts/pytest-clean.sh tests/unit/`, the mutation checks (one per migrated fail-safe plus the enumeration test), and every Verification row except the three doc rows and the follow-up-issues row
 - **Assigned To**: parity-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the "no change expected" list, then `scripts/pytest-clean.sh tests/unit/`; mutation-check each migrated fail-safe and the enumeration test; confirm the Verification table.
+- Run the "no change expected" list, then `scripts/pytest-clean.sh tests/unit/`; mutation-check each migrated fail-safe and the enumeration test; re-read every comparison record against the bar and flag any `OLLAMA` landing whose record misses; confirm the Verification table.
 
-### 8. Documentation
+### 10. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-lane-a
+- **Validates**: `scripts/pytest-clean.sh tests/unit/test_llm_task_taxonomy.py -q` (doc/code parity check 5), Verification rows "Taxonomy doc exists with the site table", "Feature index updated", "Infra doc exists"
 - **Assigned To**: taxonomy-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
-- The Documentation section; the taxonomy table must list every declared site id (parity test).
+- The Documentation section; the taxonomy table must list every declared site id with its landed backend and record id (parity test).
 
-### 9. Final validation
+### 11. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
+- **Validates**: the full Verification table and every Success Criteria checkbox
 - **Assigned To**: parity-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -548,38 +575,31 @@ Lane A only (this issue). Lanes B and C are #3420 and #3421.
 | Format clean | `.venv/bin/python -m ruff format --check .` | exit code 0 |
 | Taxonomy test exists and passes | `scripts/pytest-clean.sh tests/unit/test_llm_task_taxonomy.py -q` | exit code 0 |
 | Router tests pass | `scripts/pytest-clean.sh tests/unit/test_llm_router.py tests/unit/test_llm_router_eligibility.py -q` | exit code 0 |
-| Every site declares a task | `grep -rn "run_typed(" agent bridge worker tools reflections scripts --include=*.py \| grep -v "agent/llm/" \| grep -vc "task="` | match count == 0 |
-| No direct `run_typed_local` at call sites | `grep -rn "run_typed_local(" agent bridge worker tools reflections scripts --include=*.py \| grep -vc "agent/llm/"` | match count == 0 |
-| Raw Anthropic client gone from migrated modules | `grep -c "AsyncAnthropic(\|anthropic_slot(" bridge/promise_gate.py bridge/read_the_room.py agent/session_completion.py agent/health_check.py tools/classifier.py` | match count == 0 |
-| Raw Ollama and OpenRouter calls gone from migrated modules | `grep -c "ollama.chat(\|requests.post(" reflections/memory/memory_quality_audit.py reflections/improvement_collect.py` | match count == 0 |
-| Anti-criterion: emoji embedding path deleted | `grep -c "OPENROUTER_EMBEDDINGS_URL\|def find_best_emoji(\|_softmax_sample" tools/emoji_embedding.py` | match count == 0 |
-| Anti-criterion: no site switched on by default | `grep -c 'structured_decision_sites: str = ""\|structured_decision_shadow_sites: str = ""\|classification_local_sites: str = ""' config/settings.py` | output contains 3 |
-| Anti-criterion: sync `classify_request` deleted | `grep -c "^def classify_request(" tools/classifier.py` | match count == 0 |
-| Env keys declared | `grep -c "MODELS__STRUCTURED_DECISION_SITES\|MODELS__STRUCTURED_DECISION_SHADOW_SITES\|MODELS__CLASSIFICATION_LOCAL_SITES\|TIMEOUTS__DECISIONS_S" .env.example` | output contains 4 |
-| Taxonomy doc exists with the site table | `grep -c "routing.needs_response" docs/features/llm-task-taxonomy.md` | output > 0 |
+| Every site declares a task | `/usr/bin/grep -rn "run_typed(" agent bridge worker tools reflections scripts --include=*.py \| grep -v "agent/llm/" \| grep -vc "task="` | match count == 0 |
+| `run_typed_local` deleted | `/usr/bin/grep -rc "run_typed_local" agent bridge worker tools reflections scripts tests --include=*.py \| grep -v ":0$" \| wc -l` | 0 |
+| Raw Anthropic client gone from migrated modules | `/usr/bin/grep -c "AsyncAnthropic(\|anthropic_slot(" bridge/promise_gate.py bridge/read_the_room.py agent/session_completion.py agent/health_check.py tools/classifier.py` | every count == 0 |
+| Raw Ollama and OpenRouter calls gone from migrated modules | `/usr/bin/grep -c "ollama.chat(\|requests.post(" reflections/memory/memory_quality_audit.py reflections/improvement_collect.py` | every count == 0 |
+| Hotfix #1055: no coroutine-level timeout on the hot path | `/usr/bin/grep -c "asyncio.wait_for(" bridge/promise_gate.py bridge/read_the_room.py agent/session_completion.py agent/llm/backends/anthropic.py agent/llm/backends/ollama.py` | every count == 0 |
+| Anti-criterion: emoji embedding path deleted | `/usr/bin/grep -c "OPENROUTER_EMBEDDINGS_URL\|def find_best_emoji(\|_softmax_sample" tools/emoji_embedding.py` | match count == 0 |
+| Anti-criterion: no per-site backend switch in settings | `/usr/bin/grep -c "_sites\|structured_decision\|classification_local" config/settings.py` | match count == 0 |
+| Every landed site's declared backend matches its record | `.venv/bin/python -m tools.classification_eval --audit` (prints one row per classification site: declared backend, record id, bar result; exits 1 on any `OLLAMA` landing without a passing record or any site without a record) | exit code 0 |
+| Anti-criterion: sync `classify_request` deleted | `/usr/bin/grep -c "^def classify_request(" tools/classifier.py` | match count == 0 |
+| Evidence kind registered | `/usr/bin/grep -c '"classifier_comparison"' models/improvement_evidence.py` | output > 0 |
+| Taxonomy doc exists with the site table | `/usr/bin/grep -c "routing.needs_response" docs/features/llm-task-taxonomy.md` | output > 0 |
 | Feature index updated | `grep -c "llm-task-taxonomy.md" docs/features/README.md` | output > 0 |
 | Infra doc exists | `test -f docs/infra/llm-task-routing.md` | exit code 0 |
 | Follow-up issues exist | `gh issue view 3420 --json state -q .state && gh issue view 3421 --json state -q .state && gh issue view 3422 --json state -q .state` | exit code 0 |
 
 ## Critique Results
 
-Round 1 (2026-09-19, FULL depth, independent roster of 3 critics). Verdict: NEEDS REVISION (3 blockers, 3 concerns, 1 nit).
+Round 1 (2026-09-19, FULL depth, independent roster of 3 critics). Verdict: NEEDS REVISION (3 blockers, 3 concerns, 1 nit). All seven rows are addressed by revision 1 (2026-09-19); the "Addressed By" column names the section that now carries the change.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Scope & Value, History & Consistency, Risk & Robustness, structural | The plan predates Tom's 2026-09-19 answers (issue comment 5737918683; frontmatter `last_comment_id: 5730470971` is stale). Tom: "actually remove backward compatibility ... Do not engineer a transition phase ... no default-off switches, no shadow phase as a prerequisite step. The routing layer lands with the classification sites moved onto it, the builder iterates until quality holds, and PR approval is the gate"; the 95/90/85 tiers are the reviewer's per-site acceptance bar; pin `valor` §7-eligible in code. The plan still ships five empty-by-default CSV switches, "Shadow mode is the only Jev mode until the market settles", `Route(fallback, shadow)` shadow dispatch, the "no site switched on by default" anti-criterion, Risk 5 and Race 1 (both about shadow spend), Data Flow step 4 routing `valor` through the `gh`-backed fail-closed cache, and Open Question 4 still open. Local-first and no-single-external-provider-on-hot-paths (comment 5727973163) still govern which backend each site lands on. | pending | Revise: each site's `LLMTask.incumbent` names the backend it lands on in lane A (local-first per Tom's ordering; Haiku where no local backend is acceptable at review), with no `structured_decision_sites` / `structured_decision_shadow_sites` / `classification_local_sites` CSV switches and no shadow dispatch in `run_typed`; delete the Verification row `grep -c 'structured_decision_sites: str = ""\|...' config/settings.py` and replace it with a check that every migrated site's declared incumbent matches the backend it landed on; rewrite Risk 5 / Race 1 (or drop them) and reframe the Flip Policy as the PR reviewer's per-site acceptance bar; add `if project_key == "valor": return True` ahead of the cache read in `peek_open_source` / `is_open_source` (client projects keep the fail-closed `gh` check); bump `last_comment_id` to 5737918683 and close Open Questions 1, 2, 4 with Tom's answers. Where shadow-style side-by-side measurement survives, it is an engineering technique the builder may use to iterate, not a settings-gated phase. |
-| BLOCKER | Risk & Robustness | Tasks 4 and 5 migrate C9 (promise gate), C10 (completion judge), and read-the-room onto `run_typed` with `hard_timeout=RTR_SDK_TIMEOUT`, but `run_typed` implements `hard_timeout` as `asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)` around the live API call (`agent/llm/wrapper.py:215-216`), which is exactly the pattern each of those modules forbids under the hotfix #1055 invariant ("Coroutine-level timeouts around the API call are forbidden, they leak httpx connections under cancellation": `bridge/promise_gate.py:685-689`, `bridge/read_the_room.py:26-28`, `agent/session_completion.py:444`). The plan's "hard_timeout must bound semaphore acquisition as well as the SDK call" makes the hazard worse, not better. | pending | For C9, C10, and read-the-room call `run_typed(..., sdk_timeout=RTR_SDK_TIMEOUT, hard_timeout=None)` so the only timer is the SDK-level `AsyncAnthropic(timeout=...)`; bound queue wait separately with `semaphore_slot(timeout=RTR_SDK_TIMEOUT)` (`agent/anthropic_client.py:211`) by giving the Anthropic leg a `slot_timeout` kwarg rather than widening `hard_timeout`; add a cancellation test proving the leg raises `LLMCallError` on slot timeout without entering the client context, and keep the #1055 docstring invariants in the three modules pointing at the leg. Alternatively (design call, per Tom's answer 3) leave read-the-room on its raw client behind an allowlist entry; either way the plan must state which. |
-| BLOCKER | History & Consistency, structural | Enumeration-test check 3 requires every module carrying a raw-transport token to declare a module-level `LLMTask` or sit in the four-module allowlist, but Task 3's declaration list omits seven modules that match the plan's own token list on `main`: `scripts/evaluate_build.py`, `tools/cross_vendor_judge.py`, `tools/image_gen/__init__.py`, `tools/impact_finder_core.py` (`embeddings.create(`), `tools/knowledge/converter.py`, `tools/link_analysis/__init__.py`, `tools/transcribe/__init__.py` (`audio.transcriptions`). Task 6's test fails on untouched files mid-build, and the "Every site declares a task" success criterion is unmeetable as written. | pending | Extend Task 3's declaration list with the seven modules (each tagged `kind=THINKING`, or `client_only=True` where applicable), or add them to the check-3 allowlist with a one-line reason each; decide explicitly whether embeddings (`embeddings.create(`), transcription (`audio.transcriptions`), and image generation count as LLM call sites for the taxonomy, and if not, drop those tokens from the check-3 list so the test and the doc table agree. Verify with `/usr/bin/grep -rln "messages.create(\|ollama.chat(\|chat.completions.create(\|audio.transcriptions\|embeddings.create(\|OPENROUTER_URL" --include='*.py' agent bridge worker tools reflections scripts` (30 modules on `main`) before Task 6. |
-| CONCERN | Scope & Value | `LLMTask` carries `question`, `noul_threshold`, `thresholds: dict[Backend, float]`, and `run_typed` gains `decision_options`, all of which exist only to serve the lane-C decisions leg's question builder and per-backend thresholds; no lane A task constructs anything that reads them. | pending | Ship lane A with `LLMTask(site, kind, incumbent, error_cost, client_only)` and `run_typed(..., task, project_key, system, max_retries)` only; frozen-dataclass fields with defaults and keyword-only optional kwargs are additive, so #3421 adds `noul_threshold`, `thresholds`, `question`, and `decision_options` without touching any lane-A call site. Keep the leg protocol's `decision_options` slot out of lane A's `backends/__init__.py` signature as well. |
-| CONCERN | History & Consistency, structural | Architectural Impact and Update System say the new `ImprovementEvidence` kinds `classifier_comparison` / `classifier_shadow` are "string kinds on an existing model; no Popoto schema change", but `EVIDENCE_KINDS` (`models/improvement_evidence.py:85`) is a closed 10-value tuple, `record_once` (`:254`) coerces an unknown kind to `"other"` with only a warning, and `tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")] = 10` caps the count. Rows written under the new kinds would silently land as `"other"`. | pending | Wherever the comparison design survives (lane B/C plans written from this document), add an explicit step: append both kinds to `EVIDENCE_KINDS` and raise `VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")]` to 12 with the reasoned comment the module header demands, in the same commit as the first writer; reword "no schema change" to "no field change; the closed kind vocabulary widens by two". No Redis migration is needed because the index is an `IndexedField` on a string value. |
-| CONCERN | Risk & Robustness | `peek_open_source` reads a process-local cache (`tools/improvement_eligibility.py`: module-level dict, TTL 900 s, no Redis), and the only warm-up the plan names is `bridge/telegram_bridge.py` startup; C10 and C11 run in the worker process, which has no described warm-up, so every worker restart fails those sites closed to the incumbent until a scheduled refresh lands. | pending | The `valor` pin from the first blocker closes most of this (`if project_key == "valor": return True` ahead of the cache read); for client-keyed sessions add a `warm_cache(...)` call at `worker` startup mirroring the bridge one, and have `tools/doctor`'s routing section print per-process cache state so a cold worker is visible. |
-| NIT | structural | Tasks 7, 8, and 9 (validate-lane-a, document-feature, validate-all) carry no `Validates` line; Task 8 in particular has no command even though the Verification table already holds the three doc greps. | pending | |
-
----
-
-## Open Questions
-
-1. **Lane split as three issues.** This plan ships lane A under #3410 and files #3420 (local backend evaluation) and #3421 (decisions transport and shadow comparison) with this document as their design source, so #3410's Jev-specific acceptance criteria are met by #3421. Alternative: keep #3410 open across all three PRs with `Refs #3410`, which needs a merge-gate override per PR. Preference: the split.
-2. **Flip-policy bars.** `high` 95% / `medium` 90% / `low` 85% agreement, cost at or below one tenth for Haiku sites, p95 at or below the incumbent for granite sites, candidate error rate at or below 2%. These are the issue's numbers reshaped by Tom's error-cost comment. Adjust before #3421 runs its comparison, not after.
-3. **Read-the-room migrates in lane A.** It is the last raw Anthropic client in the bridge and a thinking task by this taxonomy. Migrating it is the cleanest way to make the enumeration test allowlist-free in `bridge/`. If the hot-path risk is judged too high for one PR, it moves to its own commit series behind a review gate, still in lane A.
-4. **`is_open_source` as the §7 oracle for the hot path.** The router trusts its cache and fails closed on a miss. Should the `valor` project (this repo) be pinned eligible in code rather than depend on a `gh` visibility read at startup?
+| BLOCKER | Scope & Value, History & Consistency, Risk & Robustness, structural | The plan predated Tom's 2026-09-19 answers (issue comment 5737918683; frontmatter `last_comment_id` was stale). Tom: "actually remove backward compatibility ... Do not engineer a transition phase ... no default-off switches, no shadow phase as a prerequisite step"; the 95/90/85 tiers are the reviewer's per-site acceptance bar; pin `valor` §7-eligible in code. The plan still shipped five empty-by-default CSV switches, shadow mode, `Route(fallback, shadow)` shadow dispatch, the "no site switched on by default" anti-criterion, Risk 5 and Race 1 about shadow spend, `valor` routed through the `gh`-backed cache, and Open Question 4 open. | Problem; Desired outcome 2 and 3; Data Flow steps 3 to 6; Architectural Impact; Key Elements (Taxonomy, Routing point, Eligibility, Settings, Acceptance bar); Technical Approach ("Landing on granite is the builder's iteration loop", "Deleted from lane A by Tom's answer 2"); Risks 4, 5, 7; Race 1; Verification rows "no per-site backend switch in settings" and "Every landed site's declared backend matches its record"; Task 7; frontmatter `last_comment_id: 5737918683`; Open Questions removed | `LLMTask.backend` names the backend each site lands on; no `structured_decision_sites` / `structured_decision_shadow_sites` / `classification_local_sites` and no shadow dispatch exist; `is_eligible("valor")` is `True` ahead of the cache read and client projects keep the fail-closed `gh` check; the comparison runner moved into lane A as the builder's iteration evidence and the reviewer's bar input, not a settings-gated phase; local-first and no-single-external-provider still govern #3421. |
+| BLOCKER | Risk & Robustness | Tasks 4 and 5 migrated C9, C10, and read-the-room onto `run_typed` with `hard_timeout=RTR_SDK_TIMEOUT`, but `run_typed` implements `hard_timeout` as `asyncio.wait_for` around the live API call (`agent/llm/wrapper.py:215-216`), the pattern each module forbids under hotfix #1055 (`bridge/promise_gate.py:685-689`, `bridge/read_the_room.py:26-28`, `agent/session_completion.py:444`); "hard_timeout must bound semaphore acquisition as well" made it worse. | Technical Approach (first two bullets); Data Flow step 5; Key Elements (Backend legs); Failure Path (slot timeout, Ollama leg); Risk 1; Race 1; Tasks 1, 5, 6, 8; Verification row "Hotfix #1055: no coroutine-level timeout on the hot path" | The three sites call `run_typed(..., sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0, hard_timeout=None)`; the Anthropic leg gains `slot_timeout` (`semaphore_slot(timeout=...)`, `agent/anthropic_client.py:211`) entered before the client is constructed, with a cancellation test proving `LLMCallError(reason="slot_timeout")` without entering the client; the Ollama leg's `asyncio.wait_for` becomes an SDK-level `AsyncOpenAI(timeout=...)`; `hard_timeout` is applied by the wrapper outside the leg, only when passed; the three module docstrings keep the invariant and point at the leg. Design call on read-the-room: it migrates in lane A. |
+| BLOCKER | History & Consistency, structural | Enumeration-test check 3 required a module-level `LLMTask` in every module carrying a raw-transport token, but Task 3's list omitted seven modules matching the plan's token list on `main` (`scripts/evaluate_build.py`, `tools/cross_vendor_judge.py`, `tools/image_gen/__init__.py`, `tools/impact_finder_core.py`, `tools/knowledge/converter.py`, `tools/link_analysis/__init__.py`, `tools/transcribe/__init__.py`), so Task 6's test would fail on untouched files. | Key Elements (Enumeration test); Technical Approach ("Thinking sites are tagged, not migrated"); Task 4; Freshness Check notes (census re-run at `001d9040e`) | Embeddings, transcription, and image generation are declared outside the taxonomy (no prompt-in, decision-or-thought-out), so `audio.transcriptions` and `embeddings.create(` leave the token list and `tools/transcribe/`, `tools/link_analysis/` need nothing; `tools/image_gen/__init__.py` joins the allowlist with a reason; `scripts/evaluate_build.py`, `tools/cross_vendor_judge.py`, `tools/knowledge/converter.py`, `tools/impact_finder_core.py` (its `messages.create(` at `:395`) join the declaration list as `THINKING`. Task 4 re-runs the census at its build head. |
+| CONCERN | Scope & Value | `LLMTask` carried `question`, `noul_threshold`, `thresholds`, and `run_typed` gained `decision_options`, all serving only #3421's question builder; nothing in lane A read them. | Key Elements (Taxonomy, Backend legs); Architectural Impact (Interface changes); Technical Approach ("Confidence thresholds stay per site"); Task 1 | Lane A ships `LLMTask(site, kind, backend, error_cost, client_only)` and `run_typed(..., task, project_key, model, system, sdk_timeout, slot_timeout, hard_timeout, max_retries)`; the leg protocol has no `decision_options` slot; #3421 adds its fields additively. |
+| CONCERN | History & Consistency, structural | `EVIDENCE_KINDS` (`models/improvement_evidence.py:85`) is a closed 10-value tuple, `record_once` coerces an unknown kind to `"other"` with a warning, and `VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")] = 10` caps the count; the "no schema change" claim would have landed rows as `"other"`. | Architectural Impact (Data ownership); Update System; Test Impact; Task 3; Verification row "Evidence kind registered" | `"classifier_comparison"` is appended to `EVIDENCE_KINDS` and the maximum raised to 11 with the reasoned comment, in the same commit as the runner; `classifier_shadow` is gone with shadow mode; wording is "no field change; the closed kind vocabulary widens by one". |
+| CONCERN | Risk & Robustness | `peek_open_source` reads a process-local cache; the only warm-up named was the bridge, so C10 and C11 in the worker failed closed on every worker restart. | Data Flow (closing paragraph); Key Elements (Eligibility); Risk 3; Agent Integration; Task 2 | The `valor` pin closes this for this repo's rooms; `worker/__main__.py::_run_worker` warms `list(projects)` at startup mirroring the bridge; `tools/doctor` prints per-process cache state; `tests/unit/test_worker_startup_warm_cache.py` pins the warm-up. |
+| NIT | structural | Tasks 7, 8, and 9 carried no `Validates` line. | Tasks 9, 10, 11 | Each now names its commands or table rows. |
