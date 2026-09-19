@@ -83,6 +83,7 @@ class LLMStack:
 
     anthropic: Any
     Agent: Any
+    NativeOutput: Any
     AnthropicModel: Any
     OpenAIChatModel: Any
     AnthropicProvider: Any
@@ -101,7 +102,7 @@ def _load_stack() -> LLMStack:
     """
     import anthropic
     from openai import AsyncOpenAI
-    from pydantic_ai import Agent
+    from pydantic_ai import Agent, NativeOutput
     from pydantic_ai.models.anthropic import AnthropicModel
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -110,6 +111,7 @@ def _load_stack() -> LLMStack:
     return LLMStack(
         anthropic=anthropic,
         Agent=Agent,
+        NativeOutput=NativeOutput,
         AnthropicModel=AnthropicModel,
         OpenAIChatModel=OpenAIChatModel,
         AnthropicProvider=AnthropicProvider,

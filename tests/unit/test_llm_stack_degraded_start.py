@@ -426,15 +426,16 @@ async def test_two_axis_split_leaves_the_local_leg_running(predicate, captures):
     import unittest.mock
 
     from pydantic import BaseModel
-    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
 
     class Decision(BaseModel):
         decision: str
 
     def _respond(messages, info: AgentInfo) -> ModelResponse:
-        tool_name = info.output_tools[0].name if info.output_tools else None
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"decision": "ok"})])
+        # The Ollama leg asks for native JSON-schema output, so the answer is
+        # the object as message text, never a tool call.
+        return ModelResponse(parts=[TextPart(content='{"decision": "ok"}')])
 
     real = wrapper_mod._load_stack()
     fake = dataclasses.replace(

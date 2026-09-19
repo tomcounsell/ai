@@ -11,6 +11,12 @@ differs from the Anthropic leg in three deliberate ways:
   stack.AsyncOpenAI(base_url=..., api_key="ollama", timeout=sdk_timeout,
   max_retries=0) as client`` then ``stack.OllamaProvider(openai_client=
   client)`` inside the block, so no call leaves an unclosed httpx client.
+* **Native JSON-schema output**: the agent runs with
+  ``stack.NativeOutput(output_type)``, so the request carries the schema as
+  ``response_format`` and the daemon's sampler constrains the answer to it.
+  PydanticAI's tool-mode default is the wrong shape for granite through
+  llama-server, which emits the tool call as message content on a third of
+  calls and fails validation each time (#3410 Task 7).
 * **One SDK-level timer**: ``timeout=sdk_timeout`` on the client is the only
   timer around the live request (hotfix #1055: no ``asyncio.wait_for``
   around an LLM call); ``max_retries=0`` keeps that one timer bounding one
@@ -63,7 +69,13 @@ async def call(
     ) as client:
         provider = stack.OllamaProvider(openai_client=client)
         pydantic_model = stack.OpenAIChatModel(route.model, provider=provider)
-        agent_kwargs: dict[str, Any] = {"output_type": output_type}
+        # Native JSON-schema output (Ollama's ``response_format``): the sampler
+        # constrains the answer to the schema. PydanticAI's tool-mode default
+        # fails validation on about a third of granite calls, because granite
+        # through llama-server emits the tool call as message content (#3410
+        # Task 7, the C9 record); native mode validated every call and answered
+        # in a third of the time.
+        agent_kwargs: dict[str, Any] = {"output_type": stack.NativeOutput(output_type)}
         if system is not None:
             agent_kwargs["system_prompt"] = system
         agent = stack.Agent(pydantic_model, **agent_kwargs)

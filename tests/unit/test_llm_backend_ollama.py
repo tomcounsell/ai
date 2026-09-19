@@ -18,6 +18,11 @@ What is pinned:
 * The client carries the leg's SDK-level timer and ``max_retries=0``, the
   Ollama base URL, and a placeholder key; the deadline re-check runs once
   before the client exists.
+* The request asks for the output natively (``response_format`` with the
+  output type's ``json_schema``) and defines no tools: granite through
+  llama-server emits a tool call as message content often enough that the
+  tool-mode default fails validation on a third of calls (Task 7, C9), while
+  the sampler-constrained native mode validates every time.
 * No ``asyncio.wait_for`` around the request (the hotfix #1055 invariant,
   also asserted by the enumeration test's check 6).
 """
@@ -34,10 +39,6 @@ import openai
 import pytest
 from openai.types.chat import ChatCompletion, ChatCompletionMessage
 from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message_tool_call import (
-    ChatCompletionMessageToolCall,
-    Function,
-)
 from pydantic import BaseModel
 
 from agent.llm import LLMCallError, LLMStackIncompatible, LLMTask, run_typed
@@ -57,24 +58,16 @@ class Decision(BaseModel):
     confidence: float
 
 
-def _completion(tool_name: str, args: dict) -> ChatCompletion:
-    """A real ``ChatCompletion`` calling PydanticAI's structured-output tool."""
+def _completion(args: dict) -> ChatCompletion:
+    """A real ``ChatCompletion`` answering in native JSON-schema mode: the
+    validated object is the message content."""
     return ChatCompletion(
         id="chatcmpl-test",
         choices=[
             Choice(
-                finish_reason="tool_calls",
+                finish_reason="stop",
                 index=0,
-                message=ChatCompletionMessage(
-                    role="assistant",
-                    tool_calls=[
-                        ChatCompletionMessageToolCall(
-                            id="call-1",
-                            type="function",
-                            function=Function(name=tool_name, arguments=json.dumps(args)),
-                        )
-                    ],
-                ),
+                message=ChatCompletionMessage(role="assistant", content=json.dumps(args)),
             )
         ],
         created=0,
@@ -142,16 +135,12 @@ def _install(monkeypatch, behaviour) -> None:
     )
 
 
-def _tool_name(kwargs: dict) -> str:
-    return kwargs["tools"][0]["function"]["name"]
-
-
 async def _ok(kwargs):
-    return _completion(_tool_name(kwargs), {"decision": "bind", "confidence": 0.9})
+    return _completion({"decision": "bind", "confidence": 0.9})
 
 
 async def _invalid(kwargs):
-    return _completion(_tool_name(kwargs), {"decision": "bind"})
+    return _completion({"decision": "bind"})
 
 
 async def _refused(kwargs):
@@ -194,6 +183,20 @@ class TestSuccess:
         assert client.timeout == settings.timeouts.local_typed_hard_s
         assert client.max_retries == 0
         assert client.chat.completions.calls[0]["model"] == OLLAMA_CLASSIFIER_MODEL
+
+    async def test_output_is_requested_natively_with_no_tools(self, monkeypatch):
+        """``response_format`` carries the output type's JSON schema and the
+        request defines no tools, so the sampler constrains the answer."""
+        _install(monkeypatch, _ok)
+
+        await _call()
+
+        request = FakeAsyncOpenAI.instances[0].chat.completions.calls[0]
+        response_format = request["response_format"]
+        assert response_format["type"] == "json_schema"
+        schema = response_format["json_schema"]["schema"]
+        assert set(schema["properties"]) == {"decision", "confidence"}
+        assert not request.get("tools")
 
     async def test_explicit_sdk_timeout_wins(self, monkeypatch):
         _install(monkeypatch, _ok)
