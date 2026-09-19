@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.doctor import (
     CheckResult,
     format_json,
@@ -851,3 +853,97 @@ class TestCheckGwsAuth:
 
         assert _check_gws_auth not in get_checks(quick=True)
         assert _check_gws_auth in get_checks(quick=False)
+
+
+# ---------------------------------------------------------------------------
+# LLM routing section (#3410)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckLLMRouting:
+    """The "LLM routing" section: every declared site, routes, cache state, daemon."""
+
+    @pytest.fixture(autouse=True)
+    def _cold_and_offline(self, monkeypatch):
+        from tools import improvement_eligibility
+
+        improvement_eligibility._clear_cache()
+
+        def _no_gh(*args, **kwargs):
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr(improvement_eligibility.subprocess, "run", _no_gh)
+        yield
+        improvement_eligibility._clear_cache()
+
+    def test_llm_routing_section_cold_client_key_sync(self, monkeypatch):
+        """Synchronous, like ``run_checks``: no loop, so a cold client key is a miss."""
+        from agent.llm.tasks import Backend, declared_sites
+        from tools import doctor
+        from tools import improvement_eligibility as elig
+
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+
+        results = doctor._check_llm_routing(client_key="client-thing")
+
+        assert results and all(r.category == "LLM routing" for r in results)
+        by_name = {r.name: r for r in results}
+        cache = by_name["eligibility_cache"]
+        assert "valor=pinned eligible" in cache.message
+        assert "client-thing=miss (no loop; refresh not scheduled)" in cache.message
+        assert cache.passed is True
+        assert elig._REFRESHING == set(), "the sync path must schedule nothing"
+
+        sites = declared_sites()
+        for declared in sites:
+            row = by_name[declared.task.site]
+            assert f"kind={declared.task.kind.value}" in row.message
+            assert f"backend={declared.task.backend.value}" in row.message
+            assert "client->anthropic" in row.message
+            if declared.task.backend is Backend.OLLAMA and declared.task.kind.value != "thinking":
+                assert "valor->ollama (fallback anthropic)" in row.message
+            else:
+                assert "valor->anthropic" in row.message
+
+        daemon = by_name["ollama_daemon"]
+        ollama_sites = [d.task.site for d in sites if d.task.backend is Backend.OLLAMA]
+        assert daemon.passed is (not ollama_sites)
+        assert "local_typed_hard_s=" in daemon.message
+        for site in ollama_sites:
+            assert site in daemon.message
+
+    def test_daemon_row_reports_the_loaded_model_and_keep_alive(self, monkeypatch):
+        from config.models import OLLAMA_CLASSIFIER_MODEL
+        from config.settings import settings
+        from tools import doctor
+
+        monkeypatch.setattr(
+            doctor,
+            "_ollama_status",
+            lambda: {
+                "pulled": [OLLAMA_CLASSIFIER_MODEL, "other:1b"],
+                "loaded": {OLLAMA_CLASSIFIER_MODEL: "2099-01-01T00:00:00Z"},
+            },
+        )
+        results = doctor._check_llm_routing(client_key="client-thing")
+        daemon = {r.name: r for r in results}["ollama_daemon"]
+        assert daemon.passed is True
+        assert f"loaded={OLLAMA_CLASSIFIER_MODEL}" in daemon.message
+        assert "expires_at=2099-01-01T00:00:00Z" in daemon.message
+        assert f"local_typed_hard_s={settings.timeouts.local_typed_hard_s}" in daemon.message
+
+    def test_a_cached_client_answer_renders_as_a_hit(self, monkeypatch):
+        from tools import doctor
+        from tools import improvement_eligibility as elig
+
+        elig._CACHE["client-thing"] = (False, float("inf"))
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        results = doctor._check_llm_routing(client_key="client-thing")
+        cache = {r.name: r for r in results}["eligibility_cache"]
+        assert "client-thing=cached private" in cache.message
+
+    def test_registered_in_the_full_run_only(self):
+        from tools.doctor import _check_llm_routing
+
+        assert _check_llm_routing in get_checks(quick=False)
+        assert _check_llm_routing not in get_checks(quick=True)
