@@ -18,7 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agent.llm import run_typed
+from agent.llm import LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from config.enums import ClassificationType, PersonaType, SessionType
 from config.models import MODEL_FAST
 
@@ -649,16 +650,43 @@ class NeedsResponseDecision(BaseModel):
     needs_response: bool
 
 
+# Fail-safe: any error answers True (respond), so no genuine question is dropped.
+NEEDS_RESPONSE = LLMTask(
+    site="routing.needs_response",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.HIGH,
+)
+
+
 class TerminusDecision(BaseModel):
     """Typed structured output for ``classify_conversation_terminus`` (#1925)."""
 
     verdict: Literal["RESPOND", "REACT", "SILENT"]
 
 
+# Fail-safe: any error answers "RESPOND", the conservative terminus verdict.
+TERMINUS = LLMTask(
+    site="routing.terminus",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.HIGH,
+)
+
+
 class RoutingDecision(BaseModel):
     """Typed structured output for the work-request routing classifier (#1925)."""
 
     category: Literal["sdlc", "collaboration", "other", "question"]
+
+
+# Fail-safe: ``classify_work_request`` maps any error to QUESTION (no SDLC overhead).
+WORK_REQUEST = LLMTask(
+    site="routing.work_request",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.HIGH,
+)
 
 
 # Acknowledgment and social tokens that don't need a response.
@@ -712,7 +740,7 @@ _ACKNOWLEDGMENT_TOKENS: set[str] = {
 }
 
 
-async def classify_needs_response(text: str) -> bool:
+async def classify_needs_response(text: str, *, project_key: str | None = None) -> bool:
     """Classify whether a message needs a full response.
 
     Returns ``True`` if the message warrants an agent session, ``False`` if
@@ -720,6 +748,10 @@ async def classify_needs_response(text: str) -> bool:
 
     The function is intentionally conservative: if LLM classification
     fails, it defaults to ``True`` so no genuine question is dropped.
+
+    ``project_key`` is the chat's project (``project["_key"]``); the router
+    reads it for charter §7 eligibility (#3410). ``None`` fails closed to
+    the subscription backend.
     """
     # Fast path: very short messages are usually acknowledgments
     if len(text.strip()) < 3:
@@ -742,7 +774,13 @@ async def classify_needs_response(text: str) -> bool:
         f"Message: {text[:200]}"
     )
     try:
-        decision = await run_typed(prompt, NeedsResponseDecision, model=MODEL_FAST)
+        decision = await run_typed(
+            prompt,
+            NeedsResponseDecision,
+            task=NEEDS_RESPONSE,
+            project_key=project_key,
+            model=MODEL_FAST,
+        )
         logger.info(
             "classify_needs_response: needs_response=%s",
             decision.needs_response,
@@ -754,14 +792,14 @@ async def classify_needs_response(text: str) -> bool:
         return True
 
 
-async def classify_needs_response_async(text: str) -> bool:
+async def classify_needs_response_async(text: str, *, project_key: str | None = None) -> bool:
     """Backward-compatible async alias for ``classify_needs_response`` (#1925).
 
     ``classify_needs_response`` used to be a blocking sync function offloaded
     to a thread-pool executor here; now that it calls the async ``run_typed``
     wrapper directly, this is a thin delegate kept for API stability.
     """
-    return await classify_needs_response(text)
+    return await classify_needs_response(text, project_key=project_key)
 
 
 # Regex for standalone "?" — excludes URL query-string params like ?q=1 or &page=2
@@ -819,6 +857,8 @@ async def classify_conversation_terminus(
     text: str,
     thread_messages: list[str],  # recent turns, oldest first
     sender_is_bot: bool = False,
+    *,
+    project_key: str | None = None,
 ) -> str:
     """Classify whether a reply-to-Valor message is a conversation terminus.
 
@@ -826,6 +866,9 @@ async def classify_conversation_terminus(
     - "RESPOND" — message warrants a reply (default/conservative)
     - "REACT"   — thread is winding down; set an acknowledgment emoji (human-only)
     - "SILENT"  — bot loop or acknowledgment; do nothing
+
+    ``project_key`` is the chat's project, read by the router for charter §7
+    eligibility (#3410); ``None`` fails closed to the subscription backend.
 
     Fast-path order (critical — checked before LLM):
     0. human sender + imperative continuation verb at start of any line → RESPOND
@@ -963,7 +1006,9 @@ async def classify_conversation_terminus(
     # verdict (with a single auto-retry on mismatch), so the old
     # ``if raw in (...)`` garbage-output guard is enforced structurally.
     try:
-        decision = await run_typed(prompt, TerminusDecision, model=MODEL_FAST)
+        decision = await run_typed(
+            prompt, TerminusDecision, task=TERMINUS, project_key=project_key, model=MODEL_FAST
+        )
         result = decision.verdict
         logger.info("classify_terminus: verdict=%s", result)
     except Exception as e:
@@ -1011,7 +1056,7 @@ _PASSTHROUGH_EXACT = {
 }
 
 
-async def classify_work_request(message: str) -> str:
+async def classify_work_request(message: str, *, project_key: str | None = None) -> str:
     """Classify a message into one of four routing buckets (or passthrough).
 
     Returns:
@@ -1020,6 +1065,9 @@ async def classify_work_request(message: str) -> str:
         "other" - Ambiguous task; PM uses judgment
         "question" - Informational query, pass through as-is
         "passthrough" - Already has skill invocation or is conversational
+
+    ``project_key`` is the chat's project, read by the router for charter §7
+    eligibility (#3410); ``None`` fails closed to the subscription backend.
     """
     if not message or not message.strip():
         return "passthrough"
@@ -1050,7 +1098,7 @@ async def classify_work_request(message: str) -> str:
 
     # #1925: PydanticAI wrapper (Haiku default) replaces the Ollama/Haiku pair.
     try:
-        result = await _classify_work_request_llm(text)
+        result = await _classify_work_request_llm(text, project_key=project_key)
         logger.info(f"[routing] Classified as {result}: {text[:120]}")
         return result
     except Exception as e:
@@ -1078,7 +1126,7 @@ def _get_principal_priorities_for_classification() -> str:
         return ""
 
 
-async def _classify_work_request_llm(text: str) -> str:
+async def _classify_work_request_llm(text: str, *, project_key: str | None = None) -> str:
     """Use the LLM wrapper to classify a message into sdlc/collaboration/other/question.
 
     Four-way classification with "collaboration" as the default for ambiguous
@@ -1109,7 +1157,9 @@ async def _classify_work_request_llm(text: str) -> str:
         f"Message: {text[:300]}"
     )
 
-    decision = await run_typed(prompt, RoutingDecision, model=MODEL_FAST)
+    decision = await run_typed(
+        prompt, RoutingDecision, task=WORK_REQUEST, project_key=project_key, model=MODEL_FAST
+    )
     if decision.category == "sdlc":
         return ClassificationType.SDLC
     if decision.category == "collaboration":
@@ -1119,14 +1169,14 @@ async def _classify_work_request_llm(text: str) -> str:
     return ClassificationType.QUESTION
 
 
-async def classify_work_request_async(message: str) -> str:
+async def classify_work_request_async(message: str, *, project_key: str | None = None) -> str:
     """Backward-compatible async alias for ``classify_work_request`` (#1925).
 
     ``classify_work_request`` used to be a blocking sync function offloaded
     to a thread-pool executor here; now that it calls the async ``run_typed``
     wrapper directly, this is a thin delegate kept for API stability.
     """
-    return await classify_work_request(message)
+    return await classify_work_request(message, project_key=project_key)
 
 
 # =============================================================================
@@ -1315,6 +1365,9 @@ async def should_respond_async(
         return False, False
 
     telegram_config = project.get("telegram", {})
+    # The chat's project key rides every classifier call below so the router
+    # can apply charter §7 per message (#3410).
+    project_key = project.get("_key")
 
     # Reply-to detection — needed for session continuation regardless of who sent the
     # replied-to message (#996: replies to own messages should also steer the session).
@@ -1333,6 +1386,7 @@ async def should_respond_async(
                     text=text,
                     thread_messages=[replied_msg.message or ""] if replied_msg else [],
                     sender_is_bot=sender_is_bot,
+                    project_key=project_key,
                 )
                 if terminus == "RESPOND":
                     logger.info("Reply to Valor detected - continuing session")
@@ -1411,7 +1465,7 @@ async def should_respond_async(
 
     # Case 1: Unaddressed message → use Ollama to classify
     logger.debug("Case 1: Unaddressed message - classifying with Ollama")
-    should_respond = await classify_needs_response_async(text)
+    should_respond = await classify_needs_response_async(text, project_key=project_key)
     if not should_respond:
         logger.info(f"Classified as ignore: {text[:50]}...")
         return False, False
