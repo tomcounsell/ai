@@ -3826,6 +3826,61 @@ class TestSeedUmbrellaIsCreatedByTheDetector:
         self._file(fake_github, dry_run=True)
         assert fake_github.create_dry_runs == [True]
 
+    def test_the_kill_switch_suppresses_the_seed_create(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The seed path is a create, so ``NIGHTLY_AUTO_FILE`` must reach it.
+
+        It lives in :func:`main`, outside :func:`dispatch_findings`, so it never
+        saw that function's ``auto_file`` read and was the one create in the
+        module an operator's break-glass switch did not stop. Set AFTER import,
+        the only way to distinguish a call-time read from a captured default.
+
+        ``None`` is the required answer: no umbrella can be proven to exist, so
+        main() refuses the baseline and the next run re-seeds. Returning a
+        number would let it persist ``seeded_nodes`` -- sticky -- against an
+        umbrella that was never filed, suppressing the whole night-one
+        population forever.
+        """
+        monkeypatch.setenv("NIGHTLY_AUTO_FILE", "false")
+        assert self._file(fake_github) is None
+        assert fake_github.create_calls == []
+        assert fake_github.commented == []
+        text = log_text()
+        assert "NIGHTLY_AUTO_FILE is off" in text
+        assert self.TITLE in text
+        assert "the seed body" in text
+
+    def test_the_kill_switch_does_not_suppress_the_seed_recurrence_comment(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The switch stops creates, never comments -- same posture as per-node.
+
+        An operator who has stopped filing still wants the tracker to learn that
+        a baseline recurred at an umbrella that already exists.
+        """
+        monkeypatch.setenv("NIGHTLY_AUTO_FILE", "false")
+        fake_github.open_map = {self.TITLE: 3300}
+        assert self._file(fake_github) == 3300
+        assert fake_github.create_calls == []
+        assert fake_github.comment_calls == [(3300, "the recurrence body")]
+
+    def test_the_kill_switch_beats_the_fail_open_create(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Blind dedup fails OPEN toward a create; the switch still wins.
+
+        Failing open exists so an unreadable tracker cannot produce a silent
+        night. It is not a licence to create while an operator has explicitly
+        stopped creates -- that combination is exactly how a break-glass switch
+        gets discovered to have a hole in it on the night it is pulled.
+        """
+        monkeypatch.setenv("NIGHTLY_AUTO_FILE", "false")
+        fake_github.open_map = None
+        fake_github.closed_map = None
+        assert self._file(fake_github) is None
+        assert fake_github.create_calls == []
+
     def test_the_seed_reads_both_maps_itself(self, fake_github: FakeGitHub) -> None:
         """It lives outside ``dispatch_findings``, so neither opening read is in scope.
 

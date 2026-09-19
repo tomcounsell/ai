@@ -637,6 +637,38 @@ python scripts/nightly_regression_tests.py --dry-run
 tail -f logs/nightly_tests.log
 ```
 
+## Break Glass: stopping issue creation
+
+The detector is the sole creator of nightly issues. To stop it creating any,
+set `NIGHTLY_AUTO_FILE=false` in the vault `.env` (`~/Desktop/Valor/.env`).
+
+No deploy and no restart: the knob is read at call time, and the nightly job
+loads the vault `.env` at the start of every run, so the next run honors it.
+
+What the switch does and does not do:
+
+- **Stops** every `gh issue create` — per-node findings, cascade umbrellas, and
+  the re-baseline seed umbrella alike. There is no path around it.
+- **Does not stop** recurrence comments on issues that already exist. An
+  operator who has stopped filing still wants the tracker to learn that a known
+  failure recurred.
+- **Logs every would-be filing in full** — title and body — to
+  `logs/nightly_tests.log`, so an issue can be filed by hand from the log.
+- **Refuses to write a baseline** on a seed night, because no umbrella can be
+  proven to exist. The next run re-seeds and retries. This is deliberate:
+  `seeded_nodes` is sticky, so persisting it against an umbrella that was never
+  filed would suppress the entire absorbed population permanently.
+
+It is a kill switch, not a second code path — there is no setting that hands
+filing back to an agent, because an LLM turn that replays re-files, and that is
+the bug this exists to have ended (#3418). The switch is for stopping a bad
+night; the remedy for detector-side filing misbehaving is a revert, not a
+permanent config change.
+
+`NIGHTLY_MAX_ISSUES_PER_RUN` (default `10`) is the standing bound underneath it:
+one run can never create more issues than this, and the budget is spent only on
+creates GitHub confirmed.
+
 ## Uninstall
 
 ```bash

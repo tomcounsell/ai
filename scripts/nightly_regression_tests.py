@@ -2574,12 +2574,19 @@ def file_seed_umbrella(
     GitHub was unreadable, where refusing the baseline instead would risk losing
     a whole night-one population.
 
+    ``NIGHTLY_AUTO_FILE`` gates the create here exactly as it does on the
+    per-node path. The switch stops creates only: both comment branches above
+    run first and are unaffected, so a re-baseline at an umbrella that already
+    exists is still recorded. There is no seed-shaped exemption — a break-glass
+    switch with one path left open is the bug, not a feature.
+
     Returns the umbrella's number, or ``None`` when **no umbrella can be proven
-    to exist**: the create returned no number, or an existing umbrella's
-    recurrence comment did not post. A recurrence that could not be written down
-    has not been reported, so that run has no trustworthy record either — the
-    same contract :func:`comment_on_issue` states for the per-node path, and the
-    caller must not write a baseline off it.
+    to exist**: the create returned no number, the create was suppressed by the
+    kill switch, or an existing umbrella's recurrence comment did not post. A
+    recurrence that could not be written down has not been reported, so that run
+    has no trustworthy record either — the same contract
+    :func:`comment_on_issue` states for the per-node path, and the caller must
+    not write a baseline off it.
     """
     open_map = open_issues()
     closed_map = closed_issue_dispositions()
@@ -2605,6 +2612,24 @@ def file_seed_umbrella(
             number, recurrence_body + "\n\n" + closed_epilogue(reason), dry_run=dry_run
         ):
             return number
+        return None
+
+    if not resolve_bool_knob("NIGHTLY_AUTO_FILE", AUTO_FILE_DEFAULT):
+        # The kill switch gates every create in the module, and the seed umbrella
+        # is a create like any other — the two branches above are comments and
+        # stay live, exactly as they do on the per-node path. Read here rather
+        # than passed down from main() so this function cannot be called from a
+        # future site that forgets to thread the knob; the read is at call time
+        # for the reason AUTO_FILE_DEFAULT documents.
+        #
+        # Returning None is the correct fail-closed answer and not a degradation:
+        # no umbrella can be proven to exist, so main() refuses to write the
+        # baseline and the next run re-seeds. A suppressed night that silently
+        # saved state would mark every absorbed node as filed against nothing.
+        log(
+            f"NIGHTLY_AUTO_FILE is off — not filing the re-baseline umbrella. "
+            f"Would have created:\nTitle: {seed_title}\n{body}"
+        )
         return None
 
     if open_map is None and closed_map is None:
