@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
 revision_applied: true
-revision_applied_at: 2026-09-18T15:17:59Z
+revision_applied_at: 2026-09-19T00:44:53Z
 tracking: https://github.com/tomcounsell/ai/issues/3418
 last_comment_id: 5729821863
 ---
@@ -338,8 +338,16 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
   return leaves the node out of `recorded`, so the next run retries it against fresh GitHub state,
   matching `comment_on_issue`'s existing contract exactly.
 - **Filing fingerprint**: every body the detector creates carries a hidden
-  `<!-- nightly-fingerprint: {sha256} -->` line derived from the finding's stable identity (the
-  node id for a per-node issue, the cascade state key for an umbrella). Titles can be edited by
+  `<!-- nightly-fingerprint: {sha256} -->` line derived from the finding's stable identity. Three
+  shapes, one per thing the detector can create: the node id for a per-node issue, the cascade state
+  key for an umbrella, and — for the re-baseline seed umbrella — the literal string
+  `seed:{head_commit}`, where `head_commit` is the same `current['head_commit']` value already
+  embedded in `seed_title` (`scripts/nightly_regression_tests.py:3209-3211`), so the seed body
+  builder needs no state threaded into it that `main()`'s seed branch does not already hold. Two
+  re-baseline retries at one commit therefore resolve to one fingerprint, and re-baselines at
+  different commits to different ones — which is the seed's actual identity, since the absorbed node
+  count can shift between retries at the same commit while the baseline being declared does not.
+  Titles can be edited by
   humans; the fingerprint cannot drift. It is what makes "is this a twin?" an exact-match question rather
   than a string-similarity one — for the in-run registry today, for a human grepping the tracker
   the morning after, and for the deferred sweep if evidence ever reopens it.
@@ -370,10 +378,9 @@ stamping (#3243), quota-exhaustion misclassification (#3347). See `## No-Gos`.
 
 Nightly run completes → serial re-confirm → `dispatch_findings()` → collapse (environmental,
 setup cascades, body cascades) → **comment branch** (existing, unchanged: open-issue and
-closed-not-planned recurrences) → **file branch (new)**: for each survivor, one of the outcomes
-enumerated in `## Data Flow` step 4, which is the canonical list — comment-on-refresh-hit,
-skip-on-collision, defer-on-exhausted-budget, or `create_issue()` → record real number → decrement
-budget → derived `issues_filed` →
+closed-not-planned recurrences) → **file branch (new)**: for each survivor, exactly one of the five
+outcomes enumerated in `## Data Flow` step 4, which is the canonical list and is not restated here →
+record real number → decrement budget → derived `issues_filed` →
 **dispatch investigation session** with the real numbers and a comment-only instruction →
 log `Tracker: N issue(s) filed` where N is the count of numbers GitHub returned.
 
@@ -558,9 +565,15 @@ Task 4): its "Only if neither exists, open ONE umbrella issue with EXACTLY that 
 last issue-creation instruction any prompt in this module emits, and `main()`'s seed branch now
 creates the umbrella itself via `create_issue()`. Replace the class with
 `TestSeedUmbrellaIsCreatedByTheDetector`, which asserts the create call, the `(number, seed_title)`
-dispatch, and — the load-bearing half — that a seed run whose create returns `None` writes no
+dispatch, and — the load-bearing halves — (a) that a seed run whose create returns `None` writes no
 baseline and `_fatal`s, preserving the sticky-`seeded_nodes` invariant the old session-id guard at
-`:3222-3235` carried.
+`:3222-3235` carried, and (b) that a `seed_title` matching an issue **closed as `COMPLETED`** makes
+**zero `create_issue` calls** and comments on that closed number instead. (b) is the regression test
+for the seed's stricter no-re-file rule (Task 4 change 2): the rule lived only in the deleted
+`_build_seed_prompt()` docstring and text, and `partition_closed_matches()` implements its opposite,
+so without this case the conversion silently re-files a twin umbrella on any re-baseline retry at the
+same commit. The class therefore has to stub `open_issues` and `closed_issue_dispositions` for the
+seed path too, not just `create_issue`.
 
 **Classes needing targeted updates:**
 - [ ] `TestCarryCascadeIssues` (1199) — UPDATE: the `None`-sentinel upgrade path is removed.
@@ -959,6 +972,10 @@ tracker a human reads every morning.
   not filed (`TestFingerprintCollisionIsLogged`).
 - [ ] A pre-create refresh that finds the title already open **comments** on it and records the node;
   it never silently skips (`TestPreCreateRefreshComments`).
+- [ ] The re-baseline seed umbrella keeps its stricter no-re-file rule after the prompt carrying it
+  is deleted: a `seed_title` matching an issue closed as **`COMPLETED`** is commented on and
+  **never** re-filed — zero `create_issue` calls
+  (`TestSeedUmbrellaIsCreatedByTheDetector`, case 3).
 - [ ] The detector never closes an issue: `scripts/nightly_regression_tests.py` contains no
   `gh issue close` invocation and no close helper.
 - [ ] `write_triage_ledger`, `NodeDisposition`, and the ledger prompt paragraph are gone from the
@@ -1150,20 +1167,59 @@ path existing.
   dispatch lives in `main()` at `:3198-3241`, *outside* `dispatch_findings()`, and today calls
   `maybe_dispatch_triage_session([f"seed:{len(confirmed_failing)}"], prompt=seed_prompt,
   slug_suffix="baseline", …)`. Narrowing the signature without touching it breaks that caller.
-  Three changes, in order:
-  1. `main()`'s seed branch calls `create_issue(seed_title, seed_body)` itself and captures the
-     number, exactly as `dispatch_findings()` does. The seed umbrella is created by the detector.
-  2. The `_fatal` guard at `:3222-3235` keys on **that number being `None`**, not on a returned
-     session id. Its invariant — "A failed seed dispatch must NOT write a baseline", because
+  Five changes, in order:
+  1. **The seed branch does its own dedup reads, and one of them is the closed map.** The seed
+     branch lives in `main()`, *outside* `dispatch_findings()`, so neither of the run's opening
+     dedup reads is in scope for it — `open_issue_map` and `closed_issue_map` are
+     `dispatch_findings()` locals (`:2774-2779`). Nor does the per-survivor pre-create refresh help:
+     it reads `open_issues()` only and is structurally blind to a closed umbrella. So before it
+     creates anything, the seed branch calls `open_issues()` **and**
+     `closed_issue_dispositions()` itself and looks `seed_title` up in both.
+  2. **The seed's stricter no-re-file rule moves from the prompt into code.** `_build_seed_prompt()`'s
+     docstring (`:2035-2038`) records a rule "deliberately stricter than the per-node one": a closed
+     umbrella is commented on and **never** re-filed, whatever the close reason, because the seed is
+     a declaration and a re-baseline retry at the same commit must not mint a twin. Deleting the
+     prompt (change 5) deletes the only place that rule currently lives, and the generic path
+     implements its opposite: `partition_closed_matches()` (`:2219-2243`) deliberately returns a
+     `COMPLETED` closure to `to_file`. The seed branch therefore does **not** route through
+     `partition_closed_matches()`. It takes an inline, seed-only check on the two maps from change 1,
+     and it takes it **before `create_issue()` is ever called**:
+     - `seed_title` present in the open map → `comment_on_issue()` against that number. No create.
+     - `seed_title` present in the closed map → `comment_on_issue()` against that number, with
+       `closed_epilogue(state_reason)` (`:2247`) supplying the why-no-duplicate sentence so the
+       wording matches the per-node closed path. **No create, for every `state_reason`, `COMPLETED`
+       included.** This is the one branch `partition_closed_matches()` would get wrong, and it is the
+       whole reason the check is inline.
+     - Neither map holds `seed_title` → `create_issue(seed_title, seed_body)`.
+     - A read that returned `None` (unreadable) contributes no answer: the other map still decides,
+       and if neither can answer, the branch creates, with its own log line. This is the module's
+       standing fail-open posture on both dedup reads and matches `## Data Flow` step 4 branch (b).
+       The cost is bounded at one twin umbrella on a night GitHub was unreadable; failing closed
+       instead would refuse the baseline and risk losing a whole night-one population, which
+       `## Risks` Risk 1 ranks as the worse harm.
+     *Rejected alternative:* a `strict=True` / `seed=True` parameter on
+     `partition_closed_matches()`. It would work, but it hangs a seed-only flag on a function whose
+     only other caller is the per-node path and whose docstring exists to justify the `COMPLETED`
+     carve-out that the flag then negates. The seed branch needs its own reads regardless
+     (change 1) and handles exactly one title, so the partition helper buys it nothing.
+  3. `main()`'s seed branch captures an **umbrella number** from whichever of change 2's branches it
+     took — created or commented-on-existing. That number, not a session id, is what the rest of the
+     seed path carries; the dispatch then passes `[(number, seed_title)]` like every other caller.
+  4. The `_fatal` guard at `:3222-3235` keys on **that umbrella number being absent**, not on a
+     returned session id. Its invariant — "A failed seed dispatch must NOT write a baseline", because
      `seeded_nodes` (`:3240`) is sticky and a false green suppresses a whole night-one population
      against an issue that was never filed — is correct and must survive; only its evidence changes.
      After this change a session id proves nothing about issue existence, so keying on it would turn
-     a load-bearing guard into a rubber stamp.
-  3. `_build_seed_prompt()` (`:2019-2062`) collapses into the one investigation prompt and is
+     a load-bearing guard into a rubber stamp. "Absent" is precise: no number from `create_issue()`,
+     **or** an existing umbrella whose `comment_on_issue()` returned `False`. A recurrence that could
+     not be written down has not been reported, so that run has no trustworthy record either and must
+     not write a baseline — the same contract `comment_on_issue`'s docstring already states for the
+     per-node path.
+  5. `_build_seed_prompt()` (`:2019-2062`) collapses into the one investigation prompt and is
      deleted. Its "Only if neither exists, open ONE umbrella issue with EXACTLY that title" text is
      the last issue-creation instruction in any prompt this module emits — the thing
-     `## Success Criteria` row 1 asserts is gone. The seed dispatch then passes
-     `[(number, seed_title)]` like every other caller.
+     `## Success Criteria` row 1 asserts is gone. Its stricter dedup rule is not lost with it —
+     change 2 carries it into code.
 - Strip the dedup-before-filing framing from `ISSUE_LOOKUP_INSTRUCTION`; keep the search-index
   prohibition for whatever lookup the investigation session still performs.
 - Leave no commented-out code and no "formerly" comments.
@@ -1188,9 +1244,20 @@ path existing.
   `os.environ` **after import** (the call-time-read regression) and assert zero `create_issue` calls,
   recurrence comments still posted, one would-be-filing log line per survivor, and `recorded`
   unchanged so nothing enters `dispatched_nodes`.
-- `TestSeedUmbrellaIsCreatedByTheDetector` covers `## Decisions` #5: a seed run creates the umbrella
-  via `create_issue` and writes a baseline; a seed run whose create returns `None` writes **no**
-  baseline and `_fatal`s, so the next run re-seeds.
+- `TestSeedUmbrellaIsCreatedByTheDetector` covers `## Decisions` #5 and Task 4's five-change seed
+  conversion, with four cases:
+  1. A seed run with both dedup maps empty creates the umbrella via `create_issue` and writes a
+     baseline.
+  2. A seed run whose create returns `None` writes **no** baseline and `_fatal`s, so the next run
+     re-seeds.
+  3. **The stricter closed-umbrella rule** (Task 4 change 2, the round-6 blocker): `seed_title`
+     matches an issue in the closed map whose `state_reason` is **`COMPLETED`** — the reason
+     `partition_closed_matches()` deliberately re-files. Assert **zero `create_issue` calls**, one
+     `comment_on_issue` against that closed number, and a baseline written. This is the case a
+     re-baseline retry at the same commit hits, and the one that mints a twin if the generic dedup is
+     inherited.
+  4. Same shape as (3) but `comment_on_issue` returns `False`: assert **no** baseline and a `_fatal`,
+     per Task 4 change 4's definition of an absent umbrella number.
 - Run only this file. Never the full `tests/unit/` tree.
 
 ### 6. Documentation
@@ -1368,15 +1435,27 @@ deletes was carrying.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|----------------------|
-| BLOCKER | Risk & Robustness (Skeptic) | The seed-umbrella conversion drops the seed's stricter closed-issue dedup rule. Task 4 step 1 says `main()` creates the umbrella "exactly as `dispatch_findings()` does", and step 3 deletes `_build_seed_prompt()` — whose docstring (`scripts/nightly_regression_tests.py:2035-2038`) records a rule "deliberately stricter than the per-node one": a closed umbrella is commented on and **never re-filed, whatever the close reason**, because a re-baseline retry at the same commit must not mint a twin. The generic path implements the opposite: `partition_closed_matches()` (`:2219-2243`) puts a `COMPLETED` closure back in `to_file`, and `dispatch_findings()`'s pre-create refresh reads `open_issues()` only, so a closed seed umbrella is invisible to it. Nothing in Task 4, Task 5, `## Test Impact` or `## Success Criteria` preserves the rule; `TestSeedUmbrellaIsCreatedByTheDetector` covers only create-success and create-returns-`None`. A re-baseline retry against a seed umbrella closed as COMPLETED mints a duplicate — the exact failure class this plan exists to eliminate. | pending | Either (a) add a `seed=True` / `strict=True` parameter to `partition_closed_matches()` that forces the closed branch regardless of `state_reason`, or (b) put a seed-only check inline in `main()`'s seed branch — `if closed_map and closed_map.get(seed_title) is not None: comment and return` — **before** `create_issue()` is ever called. Note the seed branch must read the closed map at all, which `dispatch_findings()`'s open-only refresh does not do. `TestSeedUmbrellaIsCreatedByTheDetector` (Task 5) must gain a case where the seed title matches an issue closed as COMPLETED and assert zero `create_issue` calls. |
-| CONCERN | Risk & Robustness (Skeptic) | The seed umbrella has no specified fingerprint derivation. `## Key Elements` defines the filing fingerprint for two shapes only — the node id for a per-node issue, the cascade state key for an umbrella — while Task 3 and Key Elements both say every body the detector creates carries one. A builder implementing Task 4 has nothing to copy for the seed case and must invent a third derivation, risking either an omitted fingerprint (the seed body silently falls outside the detection mechanism `## Decisions` #2 leans on) or an ad hoc key that collides across re-baselines at different commits. | pending | `seed_title` already embeds `current['head_commit']` (`scripts/nightly_regression_tests.py:3209-3211`); key the seed fingerprint on that same head-commit string so no new state has to be threaded into the body builder, and state the derivation in one sentence under `## Key Elements` → Filing fingerprint. |
-| CONCERN | History & Consistency (Consistency Auditor) | `### Flow` still restates the branch set it claims not to. `## Data Flow` step 4 asserts "this list is canonical; `### Flow` points at it rather than restating it", and round 5's own NIT disposition claims the restatement was removed — but the live `### Flow` text (plan lines 369-378) still carries a dash gloss, "comment-on-refresh-hit, skip-on-collision, defer-on-exhausted-budget, or `create_issue()`", naming 4 of the 5 branches. The one it omits is (b) **Refresh degraded**, which `## Failure Path Test Strategy` and Race 2 both treat as a separately-logged outcome. A reader who trusts the "canonical, not restated" framing and reads only `### Flow` concludes there are four outcomes and misses the fail-open-on-unreadable-refresh case. | pending | In `### Flow` (plan line ~372-375) either delete the enumeration entirely so the cross-reference is genuine ("one of the five outcomes enumerated in `## Data Flow` step 4"), or name all five including refresh-degraded-falls-through-to-create. Grep the plan for `comment-on-refresh-hit` to find the exact line; afterwards verify `### Flow` and `## Data Flow` step 4 state the same branch count. |
+| BLOCKER | Risk & Robustness (Skeptic) | The seed-umbrella conversion drops the seed's stricter closed-issue dedup rule. Task 4 step 1 says `main()` creates the umbrella "exactly as `dispatch_findings()` does", and step 3 deletes `_build_seed_prompt()` — whose docstring (`scripts/nightly_regression_tests.py:2035-2038`) records a rule "deliberately stricter than the per-node one": a closed umbrella is commented on and **never re-filed, whatever the close reason**, because a re-baseline retry at the same commit must not mint a twin. The generic path implements the opposite: `partition_closed_matches()` (`:2219-2243`) puts a `COMPLETED` closure back in `to_file`, and `dispatch_findings()`'s pre-create refresh reads `open_issues()` only, so a closed seed umbrella is invisible to it. Nothing in Task 4, Task 5, `## Test Impact` or `## Success Criteria` preserves the rule; `TestSeedUmbrellaIsCreatedByTheDetector` covers only create-success and create-returns-`None`. A re-baseline retry against a seed umbrella closed as COMPLETED mints a duplicate — the exact failure class this plan exists to eliminate. | FIXED in revision 6 — Task 4 (`build-retire-agent-filing`), seed-conversion changes 1-4: the seed branch reads `open_issues()` **and** `closed_issue_dispositions()` itself (change 1, since both maps are `dispatch_findings()` locals and the pre-create refresh is open-only), and takes an inline seed-only check **before** `create_issue()` in which a closed-map hit comments and never re-files for **every** `state_reason`, `COMPLETED` included (change 2). Option (a), a `strict=` parameter on `partition_closed_matches()`, is recorded as the rejected alternative with its reason. Change 4 redefines the `_fatal` guard's "absent umbrella" to cover a failed comment. Test coverage: `TestSeedUmbrellaIsCreatedByTheDetector` case 3 (closed as `COMPLETED` → zero `create_issue` calls) and case 4 (comment fails → no baseline, `_fatal`) in Task 5, mirrored in `## Test Impact` (`TestBuildSeedPrompt` REPLACE block) and as a new `## Success Criteria` row. | Either (a) add a `seed=True` / `strict=True` parameter to `partition_closed_matches()` that forces the closed branch regardless of `state_reason`, or (b) put a seed-only check inline in `main()`'s seed branch — `if closed_map and closed_map.get(seed_title) is not None: comment and return` — **before** `create_issue()` is ever called. Note the seed branch must read the closed map at all, which `dispatch_findings()`'s open-only refresh does not do. `TestSeedUmbrellaIsCreatedByTheDetector` (Task 5) must gain a case where the seed title matches an issue closed as COMPLETED and assert zero `create_issue` calls. |
+| CONCERN | Risk & Robustness (Skeptic) | The seed umbrella has no specified fingerprint derivation. `## Key Elements` defines the filing fingerprint for two shapes only — the node id for a per-node issue, the cascade state key for an umbrella — while Task 3 and Key Elements both say every body the detector creates carries one. A builder implementing Task 4 has nothing to copy for the seed case and must invent a third derivation, risking either an omitted fingerprint (the seed body silently falls outside the detection mechanism `## Decisions` #2 leans on) or an ad hoc key that collides across re-baselines at different commits. | FIXED in revision 6 — `## Solution` → `### Key Elements` → Filing fingerprint now names three shapes rather than two, the third being the seed umbrella's `seed:{head_commit}`, keyed on the `current['head_commit']` string already embedded in `seed_title` (`scripts/nightly_regression_tests.py:3209-3211`) so no new state reaches the body builder. The paragraph also states the consequence the derivation buys: retries at one commit collapse to one fingerprint, different commits to different ones. | `seed_title` already embeds `current['head_commit']` (`scripts/nightly_regression_tests.py:3209-3211`); key the seed fingerprint on that same head-commit string so no new state has to be threaded into the body builder, and state the derivation in one sentence under `## Key Elements` → Filing fingerprint. |
+| CONCERN | History & Consistency (Consistency Auditor) | `### Flow` still restates the branch set it claims not to. `## Data Flow` step 4 asserts "this list is canonical; `### Flow` points at it rather than restating it", and round 5's own NIT disposition claims the restatement was removed — but the live `### Flow` text (plan lines 369-378) still carries a dash gloss, "comment-on-refresh-hit, skip-on-collision, defer-on-exhausted-budget, or `create_issue()`", naming 4 of the 5 branches. The one it omits is (b) **Refresh degraded**, which `## Failure Path Test Strategy` and Race 2 both treat as a separately-logged outcome. A reader who trusts the "canonical, not restated" framing and reads only `### Flow` concludes there are four outcomes and misses the fail-open-on-unreadable-refresh case. | FIXED in revision 6 — `### Flow` no longer enumerates anything. The gloss is deleted and the clause now reads "exactly one of the five outcomes enumerated in `## Data Flow` step 4, which is the canonical list and is not restated here", making the cross-reference genuine. Verified: `## Data Flow` step 4 lists five branches, (a) refresh hit through (e) otherwise, and `grep -n "comment-on-refresh-hit"` over the plan now hits only this round-6 row (the critic's own quotation of the deleted text), never `### Flow`. | In `### Flow` (plan line ~372-375) either delete the enumeration entirely so the cross-reference is genuine ("one of the five outcomes enumerated in `## Data Flow` step 4"), or name all five including refresh-degraded-falls-through-to-create. Grep the plan for `comment-on-refresh-hit` to find the exact line; afterwards verify `### Flow` and `## Data Flow` step 4 state the same branch count. |
 
 Per-critic verdicts: Risk & Robustness **NEEDS REVISION**; Scope & Value **READY TO BUILD (no
 concerns)**; History & Consistency **READY TO BUILD (with concerns)**. Aggregate: **NEEDS REVISION**,
 carried by the single Risk & Robustness blocker. Structural checks all PASS: 8 tasks, no numbering
 gaps, every `Depends On` resolves to a real task id, no cycles, every task carries a `Validates`
 command, all referenced repo paths exist, and every `## Success Criteria` row maps to a task.
+
+**Revision 6 disposition (2026-09-19).** All three rows above are closed — see each row's
+`Addressed By` cell for the section that carries the fix. The blocker took option (b) from its
+Implementation Note (an inline seed-only closed-map check in `main()`'s seed branch, before
+`create_issue()`), because the seed branch has to acquire its own dedup reads either way: the run's
+`open_issue_map` / `closed_issue_map` are `dispatch_findings()` locals (`:2774-2779`) and the
+per-survivor pre-create refresh reads `open_issues()` only. Option (a) is recorded inline as the
+rejected alternative with its reason, so a builder does not re-litigate it. Two test cases were added
+to `TestSeedUmbrellaIsCreatedByTheDetector` (Task 5 cases 3 and 4), reflected in `## Test Impact` and
+in one new `## Success Criteria` row; no existing `## Verification` row needed changing, because the
+seed row already executes the whole class and is RED on the unmodified worktree (the class does not
+exist). No task was added, removed, or renumbered: the plan stays at 8 tasks.
 
 ---
 
