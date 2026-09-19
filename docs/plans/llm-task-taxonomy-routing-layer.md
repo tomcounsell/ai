@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-09-18
 tracking: https://github.com/tomcounsell/ai/issues/3410
-last_comment_id: 5730470971
+last_comment_id: 5737918683
 ---
 
 # LLM Task Taxonomy and Routing Layer
@@ -14,7 +14,7 @@ last_comment_id: 5730470971
 
 Outside the `claude -p` harness, this repo makes about thirty smaller LLM calls. Some think (extract memories, draft a briefing, judge a test). Many only decide (does this message need a reply, which routing bucket, is this an interjection, bind to which job). Both kinds are written the same way at the call site: a hand-picked model constant and a hand-picked transport. Nothing in code says "this call returns one of four labels" versus "this call writes a paragraph".
 
-That absence has a cost we have already paid twice. #1923/#1925 moved the bridge classifiers off Ollama onto Haiku by editing every call site. #2494 moved two of them back onto local granite by editing those call sites again. Each move was a per-site rewrite because there is no routing point; the model choice lives in seventeen places. Tom's framing on 2026-09-18: classification with a model is fundamentally different from standard LLM work, so divide the AI tasks into classification and thinking and route each appropriately. His follow-up the same day set the order: taxonomy and routing point first, local CPU backends evaluated first, an external structured-decision provider (TypeSafe Jev 1.13) in shadow mode only until the market settles, and no site flips to an external provider without a local fallback wired.
+That absence has a cost we have already paid twice. #1923/#1925 moved the bridge classifiers off Ollama onto Haiku by editing every call site. #2494 moved two of them back onto local granite by editing those call sites again. Each move was a per-site rewrite because there is no routing point; the model choice lives in seventeen places. Tom's framing on 2026-09-18: classification with a model is fundamentally different from standard LLM work, so divide the AI tasks into classification and thinking and route each appropriately. His follow-up the same day set the order: taxonomy and routing point first, local CPU backends first, an external structured-decision provider (TypeSafe Jev 1.13) only behind a local fallback and only once the market settles. His answers to this plan's open questions on 2026-09-19 (issue comment 5737918683) set the delivery shape, verbatim: "this is a must win. actually remove backward compatibility. the builder will flip and revise it to make it work until the PR is approved. Do not engineer a transition phase." So there are no default-off switches and no shadow phase. The routing layer lands with the classification sites moved onto their backends, the builder iterates until quality holds, the 95/90/85 agreement tiers are the reviewer's per-site acceptance bar, and PR approval is the gate.
 
 **Current behavior:**
 
@@ -29,8 +29,8 @@ Verified on `main` at `2cf8da648` (details in Freshness Check):
 **Desired outcome:**
 
 1. Every non-harness LLM call site declares its task kind in code. A test enumerates the sites and fails on an undeclared one.
-2. One routing point in `agent/llm/` resolves backend and transport from task kind, per-call context eligibility, and settings. With default settings, behavior on `main` is byte-for-byte what it is today, and existing unit tests pass unchanged.
-3. Every classification site can resolve a local backend through the routing point. Candidate backends (local zero-shot, then the Jev decisions transport) plug in behind one interface, are evaluated by paired comparison against each site's incumbent with the record attached to improvement case `1ec40086ca1d422e90ef747775ff7f64`, and flip on per site only where an error-cost-aware bar is met. A rejection is a recorded result.
+2. One routing point in `agent/llm/` resolves backend and transport from the task's declaration and per-call context eligibility (charter §7: `valor` pinned eligible in code, client projects fail closed). Thinking sites keep their current backend and behavior; unit tests that fake the wrapper pass unchanged.
+3. Every classification site lands on a local backend (granite via Ollama) in lane A, with the subscription backend as its runtime fallback and as the backend for client-keyed context. Each landing carries a paired comparison record against the site's prior backend, attached to improvement case `1ec40086ca1d422e90ef747775ff7f64`; the reviewer applies the error-cost tier bar per site, and a site that misses the bar after the builder's iteration lands on Haiku with the record saying why. Later backends (GLiClass in #3420, the Jev decisions transport in #3421) plug in behind the same leg protocol and land the same way, each external one behind a local fallback.
 
 ## Freshness Check
 
@@ -73,7 +73,7 @@ Wrapper: `run_typed(prompt, output_type, *, model=MODEL_FAST, sdk_timeout, hard_
 
 **Active plans in `docs/plans/` overlapping this area:** `recursive-self-improvement.md` (#3177) owns the improvement case substrate and the meter; this plan consumes both and adds no controller logic. `durability-room-job-agentrun.md` (#2494) owns C12; this plan changes only C12's transport call and keeps its threshold semantics on the incumbent. Coordination, not conflict.
 
-**Notes:** Two corrections carried into the plan: the emoji site (originally C16; the issue table was renumbered on 2026-09-18 and email triage is now C16) leaves the classification list (no model on `main`; the dead embedding path is deleted under this plan and a decision-backed emoji choice is filed separately), and read-the-room's action set is `send/trim/suppress`. The issue's live Jev probe is confirmed: the `jev-issue` agent ran it on 2026-09-18 from this repo's venv, and the verbatim request and response are in Research.
+**Notes:** Two corrections carried into the plan: the emoji site (originally C16; the issue table was renumbered on 2026-09-18 and email triage is now C16) leaves the classification list (no model on `main`; the dead embedding path is deleted under this plan and a decision-backed emoji choice is filed separately), and read-the-room's action set is `send/trim/suppress`. The issue's live Jev probe is confirmed: the `jev-issue` agent ran it on 2026-09-18 from this repo's venv, and the verbatim request and response are in Research. Revision 1 (2026-09-19) incorporates Tom's answers in comment 5737918683 and the round-1 critique; the hotfix #1055 invariants were re-read on `main` at `001d9040e` (`bridge/promise_gate.py:685-689`, `bridge/read_the_room.py:26-28`, `agent/session_completion.py:444`) and the raw-transport module census was re-run (32 files match the plan's original token list; 30 excluding `tools/image_gen/tests/test_image_gen.py` and the comment-only hit in `agent/memory_extraction.py:43`).
 
 ## Prior Art
 
@@ -126,7 +126,7 @@ Wrapper: `run_typed(prompt, output_type, *, model=MODEL_FAST, sdk_timeout, hard_
 
    *Informs:* the decisions transport is one `httpx` POST with this exact body, built from the output type's `Literal` and `bool` fields; no `openrouter` SDK (alpha endpoint, no verified async client, one more dependency outside the coupled pin set).
 
-2. **Quality prior** (issue comment 5727818556, from TypeSafe's own numbers at https://geotoolbox.ai/blog/what-is-jev-ai): Jev agrees with reference answers 67.8% across four workflows against 73.1% for Claude Opus 5; latency 70 to 500 ms; choice caps at 255 options. *Informs:* a flat 90% agreement bar is above Jev's published quality, so the flip policy is error-cost-tiered and the taxonomy plus router is the deliverable even if Jev flips zero sites.
+2. **Quality prior** (issue comment 5727818556, from TypeSafe's own numbers at https://geotoolbox.ai/blog/what-is-jev-ai): Jev agrees with reference answers 67.8% across four workflows against 73.1% for Claude Opus 5; latency 70 to 500 ms; choice caps at 255 options. *Informs:* a flat 90% agreement bar is above Jev's published quality, so the per-site acceptance bar is error-cost-tiered and the taxonomy plus router is the deliverable even if Jev lands on zero sites in #3421.
 
 3. **GLiClass** (https://github.com/Knowledgator/GLiClass, https://docs.knowledgator.com/docs/frameworks/gliclass/): `pip install gliclass` pulls `torch` and `transformers`; models `knowledgator/gliclass-small-v1.0`, `-base-v1.0`, `-edge-v3.0` are Apache-2.0; single-label and multi-label via `classification_type`; labels are packed into the input so the practical label bound is the encoder's 512-token window. Knowledgator publishes pre-exported ONNX (`model.onnx`, `model-int8-quantized.onnx`) for `gliclass-base-v1.0`, and `GLiClass.c` shows the onnxruntime packing and post-processing. No Python path from ONNX file to scores is documented; it has to be written. Latency per text on CPU: not published (UNVERIFIED; expect tens of ms for small/int8). *Informs:* the local zero-shot backend is a bounded prototype with an explicit rejection exit (Spike Results, spike-2), not a promise.
 
@@ -150,21 +150,21 @@ A `tools.memory_search save` of findings 1 and 3 was attempted at plan time and 
 - **Method**: web-research
 - **Finding**: Pre-exported ONNX exists for `gliclass-base-v1.0`; the packing and post-processing exist only in C (`GLiClass.c`). Feasible in principle, unmeasured. Not resolved at plan time.
 - **Confidence**: medium
-- **Impact on plan**: lane B task `build-local-zero-shot` is time-boxed (one build day) with a rejection exit: if the ONNX path cannot produce per-label scores matching the reference pipeline on a 20-item fixture, the lane records GLiClass as rejected and granite stays the local backend. Either outcome satisfies the acceptance criterion "every classification site can resolve a local backend", because `run_typed_local` (granite via PydanticAI) already accepts any output type.
+- **Impact on plan**: #3420's `build-local-zero-shot` task is time-boxed (one build day) with a rejection exit: if the ONNX path cannot produce per-label scores matching the reference pipeline on a 20-item fixture, the lane records GLiClass as rejected and granite stays the local backend. Either outcome keeps "every classification site lands on a local backend" true, because the Ollama leg (granite via PydanticAI, today's `run_typed_local` body) already accepts any output type.
 
 ### spike-3: Can `tools/improvement_eval/` host an incumbent-vs-candidate classifier comparison?
 - **Assumption**: "The existing paired-arm harness can score agreement and latency."
 - **Method**: code-read (`tools/improvement_eval/runner.py`, `arm_worker.py`, `statistics.py`, `tools/improvement_experiment.py::ENVELOPES`)
 - **Finding**: No. Its envelopes are `retrieval_parameters` and `agent_task`; its endpoints are ranked-id metrics and agent-task outcomes; a classifier-backend candidate is rejected at envelope validation. `tools/improvement_recursion/arms.py::ArmRunner` is a lighter protocol but scores gains, not agreement. `cross_vendor_judge.py` has no agreement or latency fields.
 - **Confidence**: high
-- **Impact on plan**: a small standalone runner `tools/classification_eval/` writes `ImprovementEvidence` rows (kind `classifier_comparison`) and attaches its claims to an investigation on case `1ec40086` via `tools/improvement_investigations.py::record_claims`. `statistics.py::clustered_bootstrap_ci` is reused for the agreement interval.
+- **Impact on plan**: a small standalone runner `tools/classification_eval/` (lane A, because the reviewer's per-site bar needs its numbers) writes `ImprovementEvidence` rows (kind `classifier_comparison`, appended to the closed `EVIDENCE_KINDS` vocabulary in the same commit) and attaches its claims to an investigation on case `1ec40086` via `tools/improvement_investigations.py::record_claims`. `statistics.py::clustered_bootstrap_ci` is reused for the agreement interval.
 
 ### spike-4: Is `is_open_source` safe on the message hot path?
 - **Assumption**: "Eligibility can be checked per call."
 - **Method**: code-read (`tools/improvement_eligibility.py:83`)
 - **Finding**: It shells `gh repo view --json visibility` with a 10 s timeout on a cache miss (process-local cache, TTL 900 s, fails closed). A miss on the C1/C2 path would blow a 3 s budget.
 - **Confidence**: high
-- **Impact on plan**: the router reads the cache only (`peek_open_source`), treats a miss as ineligible for that call, and schedules a background refresh; the bridge warms the cache for `ACTIVE_PROJECTS` at startup.
+- **Impact on plan**: `valor` is pinned eligible in code ahead of any cache read (Tom, answer 4); for every other project key the router reads the cache only (`peek_open_source`), treats a miss as ineligible for that call, and schedules one background refresh per key; the bridge warms the cache for `ACTIVE_PROJECTS` and the worker for its loaded `projects` at startup, since the cache is process-local.
 
 ## Data Flow
 
