@@ -189,8 +189,7 @@ def arm_child_embedding_parity(monkeypatch):
     reacts to an absent key by re-reading it from ``REPO_ROOT/.env``
     (``agent/embedding_provider.py``), and ``scripts/pytest-clean.sh`` pins
     ``PYTHONPATH`` to the invoking checkout -- so a delete is silently undone in
-    any checkout that has the vault ``.env`` symlink, which the main checkout
-    does and this worktree does not. ``load_dotenv`` defaults to
+    any checkout that has the vault ``.env`` symlink. ``load_dotenv`` defaults to
     ``override=False`` and treats ``""`` as present, so the empty pin survives
     that fallback and the provider resolves to ``None`` in every checkout.
     """
