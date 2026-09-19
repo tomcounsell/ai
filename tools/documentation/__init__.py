@@ -10,7 +10,16 @@ from typing import Literal
 
 import requests
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+
+# Thinking: documentation generation over raw HTTP (Anthropic, OpenRouter fallback).
+# Fail-safe: an ``{"error": ...}`` dict on timeout, transport, or any other error.
+DOCUMENTATION = LLMTask(
+    site="documentation.generate",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Documentation generation needs reasoning capability

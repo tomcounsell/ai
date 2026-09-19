@@ -22,8 +22,17 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.paths import DATA_DIR
 from utils.utc import utc_now
+
+# Thinking: names a feature for a calendar event (raw Anthropic client, lazy import).
+# Fail-safe: ``None`` (the feature key is used as-is).
+FEATURE_NAME = LLMTask(
+    site="valor_calendar.feature_name",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 # Calendar config lives in ~/Desktop/Valor/, queue/cache in data/
 CALENDAR_CONFIG_PATH = Path.home() / "Desktop" / "Valor" / "calendar_config.json"

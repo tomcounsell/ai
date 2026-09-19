@@ -30,7 +30,16 @@ if _project_root not in sys.path:
 
 import anthropic  # noqa: E402
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind  # noqa: E402
 from config.models import HAIKU  # noqa: E402
+
+# Thinking: per-criterion PASS/FAIL verdicts with reasoning over a diff (raw Anthropic).
+# Fail-safe: none; the script exits non-zero on a failed call.
+BUILD_EVALUATION = LLMTask(
+    site="evaluate_build.verdicts",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 # Configure logging to file and stderr
 LOG_FILE = Path("logs/evaluate_build.log")

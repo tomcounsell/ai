@@ -17,9 +17,18 @@ import logging
 import os
 from pathlib import Path
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import HAIKU
 from models.content_decode import decoded_content
 from utils.json_cache import JsonCache, get_or_compute
+
+# Thinking: summarizes a long knowledge document (raw Anthropic, cached).
+# Fail-safe: ``""`` then a truncated-content fallback, logged.
+KNOWLEDGE_SUMMARY = LLMTask(
+    site="knowledge.summarize",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger(__name__)
 

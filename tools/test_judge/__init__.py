@@ -11,7 +11,16 @@ from typing import Literal
 import anthropic
 import requests
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+
+# Thinking: free-text JSON judgment over a test run (raw Anthropic / OpenRouter).
+# Fail-safe: an ``{"error": ...}`` dict on timeout, transport, or parse failure.
+TEST_JUDGE = LLMTask(
+    site="test_judge.judge",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 DEFAULT_MODEL = MODEL_REASONING
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET

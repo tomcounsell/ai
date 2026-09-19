@@ -12,7 +12,16 @@ from pathlib import Path
 
 import requests
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+
+# Thinking: vision tagging over raw HTTP (Anthropic, OpenRouter fallback).
+# Fail-safe: an ``{"error": ...}`` dict for every failure path.
+IMAGE_TAGGING = LLMTask(
+    site="image_tagging.tag",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Vision tasks - Anthropic API (primary), OpenRouter (fallback)

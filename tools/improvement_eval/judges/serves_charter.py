@@ -27,6 +27,17 @@ import logging
 import subprocess
 import tempfile
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
+# Thinking: the serves-charter judge (raw OpenAI-compatible client on the
+# open-source provider, the claude subscription harness otherwise).
+# Fail-safe: none; a failed judge call fails the trial.
+SERVES_CHARTER_JUDGE = LLMTask(
+    site="improvement_eval.serves_charter",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Reserved judge id, disjoint from "code-quality", "risk", "cross-vendor".

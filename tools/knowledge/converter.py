@@ -49,7 +49,16 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import HAIKU
+
+# Thinking: the converter's LLM-path availability probe (raw OpenAI-compatible client).
+# Fail-safe: ``False`` (LLM path disabled) on any error.
+CONVERTER_PROBE = LLMTask(
+    site="knowledge.converter_probe",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger(__name__)
 

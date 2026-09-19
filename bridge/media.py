@@ -13,7 +13,17 @@ from telethon.tl.types import (
     MessageMediaPhoto,
 )
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
 logger = logging.getLogger(__name__)
+
+# Thinking: describes an inbound image (vision, raw Anthropic client in a thread).
+# Fail-safe: ``None`` (no description attached), logged.
+IMAGE_DESCRIPTION = LLMTask(
+    site="media.image_description",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 # =============================================================================
 # Media Directories

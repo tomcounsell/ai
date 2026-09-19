@@ -56,8 +56,19 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
 from .errors import InfraFailure
 from .judges.rubric import extract_verdict
+
+# Thinking: an experiment arm's agent session over OpenRouter (raw HTTP,
+# lazy import). Fail-safe: none; the worker raises and the trial is recorded
+# as an error.
+OPENROUTER_ARM = LLMTask(
+    site="improvement_eval.openrouter_arm",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 JOB_MODES = ("restore", "retrieve", "digest", "agent_run")
 
