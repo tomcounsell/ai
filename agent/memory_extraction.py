@@ -49,10 +49,10 @@ logger = logging.getLogger(__name__)
 #
 # Sourced from settings.timeouts.anthropic_sdk_s / anthropic_hard_s (issue
 # #1968) -- these two fields are the single source of truth for BOTH these
-# constants and agent/llm/wrapper.py's `DEFAULT_SDK_TIMEOUT` /
-# `DEFAULT_HARD_TIMEOUT`, which previously duplicated the same 30.0/35.0
-# pair verbatim. Preserve the two-timer structure -- never collapse to one
-# value.
+# constants and the run_typed pair (the Anthropic leg's default SDK timer in
+# agent/llm/backends/ and agent/llm/wrapper.py's `DEFAULT_HARD_TIMEOUT`),
+# which previously duplicated the same 30.0/35.0 pair verbatim. Preserve the
+# two-timer structure -- never collapse to one value.
 _EXTRACTION_SDK_TIMEOUT = settings.timeouts.anthropic_sdk_s
 _EXTRACTION_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 

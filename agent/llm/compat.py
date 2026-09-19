@@ -133,8 +133,8 @@ _MARKER_STEM = "llm-stack-degraded"
 # ``None`` means "not yet resolved" -- the predicate's purity is asserted
 # against exactly that: a ``check_llm_stack_compat`` call must leave this
 # ``None``. The two axes are memoized beside it because they are consumed
-# separately: ``run_typed`` is gated on both, ``run_typed_local`` on
-# ``loader_ok`` alone.
+# separately: an Anthropic-routed ``run_typed`` is gated on both, an
+# Ollama-routed ``run_typed`` on ``loader_ok`` alone.
 _DEGRADED: bool | None = None
 _LOADER_OK: bool = True
 _COMPATIBLE: bool = True
@@ -165,9 +165,10 @@ class CompatResult:
     ``compatible`` -- the installed ``anthropic`` ``create`` signature
     accepts everything the installed ``pydantic_ai`` actually forwards.
 
-    They are separate because ``run_typed_local`` (granite on Ollama) never
-    touches ``anthropic``: an Anthropic *signature* break must not fall the
-    two hot-path classifiers back to their conservative defaults fleet-wide.
+    They are separate because an Ollama-routed ``run_typed`` (granite on
+    Ollama) never touches ``anthropic``: an Anthropic *signature* break must
+    not fall the two hot-path classifiers back to their conservative
+    defaults fleet-wide.
 
     ``probe_skipped`` -- ``True`` only on the ``allow_network=True`` /
     no-API-key branch of ``_check_network``: the pair was never actually
@@ -773,11 +774,12 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
 def stack_axes() -> tuple[bool, bool]:
     """``(loader_ok, compatible)`` for this process, forcing resolution.
 
-    The two axes stay separate all the way to the call sites:
-    ``run_typed`` is gated on both, ``run_typed_local`` on ``loader_ok``
-    alone, because the local granite-on-Ollama leg never touches
-    ``anthropic`` and an Anthropic *signature* break must not fall the two
-    hot-path classifiers back to their conservative defaults fleet-wide.
+    The two axes stay separate all the way to the call sites: an
+    Anthropic-routed ``run_typed`` is gated on both, an Ollama-routed
+    ``run_typed`` on ``loader_ok`` alone, because the local
+    granite-on-Ollama leg never touches ``anthropic`` and an Anthropic
+    *signature* break must not fall the two hot-path classifiers back to
+    their conservative defaults fleet-wide.
     """
     resolve_degraded_flag()
     return _LOADER_OK, _COMPATIBLE

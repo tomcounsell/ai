@@ -7,8 +7,9 @@ with type, confidence score, and reasoning.
 Also provides intake classification for message intent routing:
 classifies messages as interjection or new_work to support bridge-level
 message routing (#320). The intent classifier runs on the LOCAL granite
-model via PydanticAI (``agent.llm.run_typed_local`` — durability plan
-#2494 Task 13); work-request classification stays on Haiku.
+model via PydanticAI (``agent.llm.run_typed`` with :data:`INTAKE_INTENT`,
+``backend=OLLAMA``; durability plan #2494 Task 13, routing layer #3410);
+work-request classification stays on Haiku.
 
 Usage:
     from tools.classifier import classify_request
@@ -38,6 +39,8 @@ import anthropic
 from pydantic import BaseModel
 
 from agent.anthropic_client import anthropic_slot
+from agent.llm import LLMTask, run_typed
+from agent.llm.tasks import Backend, TaskKind
 from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
@@ -308,8 +311,9 @@ class IntentDecision(BaseModel):
     """Strict structured output for the intake intent classifier.
 
     Durability plan #2494 Task 13: the intake classifier runs on the local
-    granite model via PydanticAI (``agent.llm.run_typed_local``) with this
-    schema-validated output instead of the prior hand-parsed Haiku JSON.
+    granite model via PydanticAI (``agent.llm.run_typed`` with
+    ``INTAKE_INTENT``) with this schema-validated output instead of the
+    prior hand-parsed Haiku JSON.
     The ``acknowledgment`` class retired with ``AgentSession.expectations``:
     Jobs — never hard-closed, revived by any steer — replace session-level
     acknowledgment semantics, so the taxonomy is two-class.
@@ -318,6 +322,12 @@ class IntentDecision(BaseModel):
     intent: Literal["interjection", "new_work"]
     confidence: float
     reason: str
+
+
+# Fail-safe: any LLMCallError classifies as new_work with confidence 0.0.
+INTAKE_INTENT = LLMTask(
+    site="classifier.intake_intent", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA
+)
 
 
 class IntentDecisionWithRecall(IntentDecision):
@@ -394,7 +404,6 @@ async def classify_message_intent_async(
         }
 
     try:
-        from agent.llm import run_typed_local
         from bridge.context_recall import inbound_enabled
 
         # Prompt and schema are chosen together — never one without the other.
@@ -412,7 +421,7 @@ async def classify_message_intent_async(
             session_status=session_status if session_status else "(unknown)",
         )
 
-        decision = await run_typed_local(prompt, output_model)
+        decision = await run_typed(prompt, output_model, task=INTAKE_INTENT)
 
         if not (0.0 <= decision.confidence <= 1.0):
             raise ValueError(f"Invalid confidence value: {decision.confidence}")

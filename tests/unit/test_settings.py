@@ -37,7 +37,7 @@ class TestTimeoutSettingsDefaults:
         assert TimeoutSettings().redis_socket_s == 5.0
 
     def test_anthropic_sdk_default(self):
-        """Must match agent/llm/wrapper.py DEFAULT_SDK_TIMEOUT (issue #1925)."""
+        """The Anthropic leg's default SDK timer (agent/llm/backends, issue #1925)."""
         assert TimeoutSettings().anthropic_sdk_s == 30.0
 
     def test_anthropic_hard_default(self):

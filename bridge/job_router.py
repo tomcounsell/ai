@@ -17,8 +17,9 @@ on that router's proven shape:
   message. The durable Room-inbox append precedes routing, so router
   latency and failures are a UX cost, not a durability cost.
 
-The granite call goes through :func:`agent.llm.run_typed_local`
-(PydanticAI + OllamaProvider) with the strict :class:`JobRouteDecision`
+The granite call goes through :func:`agent.llm.run_typed` with
+:data:`JOB_ROUTE` (``backend=OLLAMA``: PydanticAI + OllamaProvider on the
+Ollama leg for eligible context) and the strict :class:`JobRouteDecision`
 output model — per the two-transport rule, harness for session work,
 PydanticAI for all non-harness LLM calls.
 
@@ -43,7 +44,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from agent.llm import run_typed_local
+from agent.llm import LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from models.job import Job
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,15 @@ class JobRouteDecision(BaseModel):
     decision: Literal["bind", "new"]
     job_id: str | None
     confidence: float
+
+
+# Fail-safe: any LLMCallError mints NEW (total fail-open, never a wrong bind).
+JOB_ROUTE = LLMTask(
+    site="job_router.route",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.OLLAMA,
+    error_cost=ErrorCost.HIGH,
+)
 
 
 # ── Permanent message → job index ────────────────────────────────────
@@ -205,7 +216,7 @@ async def route_message(
     2. **Reply-to**: the parent message's binding in the permanent reply
        index — a dict lookup, no model call.
     3. **Zero candidates** → mint NEW, no model call.
-    4. **Granite bind-or-mint** via ``run_typed_local`` with the strict
+    4. **Granite bind-or-mint** via ``run_typed(task=JOB_ROUTE)`` with the strict
        :class:`JobRouteDecision` output; post-hoc ``valid_ids`` membership
        check; confidence threshold; every failure direction is NEW.
 
@@ -271,7 +282,9 @@ async def route_message(
 async def _classify(room_id: str, message_text: str, candidates: list[Job]) -> Job | None:
     """Granite verdict over the candidate set. ``None`` means NEW (fail-open)."""
     try:
-        decision = await run_typed_local(_build_prompt(message_text, candidates), JobRouteDecision)
+        decision = await run_typed(
+            _build_prompt(message_text, candidates), JobRouteDecision, task=JOB_ROUTE
+        )
     except Exception as e:  # noqa: BLE001 — total fail-open to NEW
         logger.warning("[job-router] classifier failed; failing open to NEW: %s", e)
         return None
