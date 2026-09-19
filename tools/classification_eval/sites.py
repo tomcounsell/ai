@@ -302,6 +302,43 @@ def _catchup_fixtures() -> list[Input]:
     return rows[:FIXTURES_PER_SITE]
 
 
+_CATCHUP_REFERENCE_TAIL = (
+    "Reply with ONLY one of: ANSWERED, UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED."
+)
+_CATCHUP_CANDIDATE_TAIL = (
+    "Respond with only a JSON object of the form "
+    '{"verdict": "ANSWERED" | "UNANSWERED_NEEDS_REPLY" | "UNANSWERED_NO_REPLY_NEEDED"}.'
+)
+CANDIDATE_SYSTEM = (
+    "You are a strict classifier inside an automated pipeline. Read the task, decide, "
+    "and reply with only the JSON object the task asks for: no prose, no markdown."
+)
+"""The candidate ``system`` shared by the granite arms: a 3B model follows a
+plain-text "reply with one of" instruction literally, and the leg validates
+JSON, so the candidate side is told the output shape once, up front."""
+
+
+_CATCHUP_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " Apply these rules in order and stop at the first that fits."
+    " 1. A line tagged 'Valor:' appears after the message in question in the thread:"
+    " ANSWERED. 2. The message names Valor (@valorengels or 'Valor') or replies to a"
+    " Valor line: UNANSWERED_NEEDS_REPLY. 3. Anything else, including requests, questions,"
+    " and chatter between other people that do not name Valor: UNANSWERED_NO_REPLY_NEEDED."
+    " When unsure, answer ANSWERED."
+)
+
+
+def _catchup_prompt(inp: Input) -> str:
+    return _build_judge_prompt(
+        str(inp.context["transcript"]), inp.text, int(inp.context.get("inbound_id", 1))
+    )
+
+
+def _catchup_candidate_prompt(inp: Input) -> str:
+    """The reference prompt with its final instruction rewritten for JSON output."""
+    return _catchup_prompt(inp).replace(_CATCHUP_REFERENCE_TAIL, _CATCHUP_CANDIDATE_TAIL)
+
+
 def _catchup_real(limit: int) -> list[Input]:
     return [
         Input(inp.text, "real", {"transcript": f"User: {inp.text}", "inbound_id": 500 + i})
@@ -313,9 +350,7 @@ _site(
     Site(
         id=CATCHUP_JUDGE.site,
         task=CATCHUP_JUDGE,
-        prompt=lambda inp: _build_judge_prompt(
-            str(inp.context["transcript"]), inp.text, int(inp.context.get("inbound_id", 1))
-        ),
+        prompt=_catchup_prompt,
         output_type=CatchupJudgeVerdict,
         label=lambda out: out.verdict,
         reference="anthropic",
@@ -323,6 +358,8 @@ _site(
         budget_s=None,
         fixtures=_catchup_fixtures,
         real_inputs=_catchup_real,
+        candidate_prompt=_catchup_candidate_prompt,
+        candidate_system=_CATCHUP_CANDIDATE_SYSTEM,
     )
 )
 

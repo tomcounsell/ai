@@ -154,6 +154,8 @@ class ArmResult:
     cost_metering: str = "exact"
     price: dict[str, Any] = field(default_factory=dict)
     labels: list[str | None] = field(default_factory=list)
+    """The agreement-pass label per input, in input order (``None`` on an
+    error); kept in the record so a disagreement can be read back per input."""
     agreement: dict[str, float | int] | None = None
 
     @property
@@ -197,6 +199,7 @@ class ArmResult:
             "cost_metering": self.cost_metering,
             "price": self.price,
             "agreement": self.agreement,
+            "labels": self.labels,
         }
 
 

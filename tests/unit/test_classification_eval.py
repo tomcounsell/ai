@@ -123,6 +123,8 @@ async def test_compare_math_on_fake_arms():
     assert arm.error_rate == pytest.approx(7 / 120)
     assert arm.p95_c4 >= arm.p50_c4 >= 0.0
     assert record.as_dict()["candidates"]["ollama"]["agreement"]["mean"] == arm.agreement["mean"]
+    assert len(record.as_dict()["candidates"]["ollama"]["labels"]) == 60
+    assert record.as_dict()["candidates"]["ollama"]["labels"][16] is None  # call 17 errored
 
 
 async def test_compare_refuses_fewer_inputs_than_the_site_minimum():
@@ -525,7 +527,9 @@ def test_every_non_client_classification_site_has_a_row():
         assert row.tier == declared[site_id].error_cost.value
 
 
-@pytest.mark.parametrize("site_id", sorted(__import__("tools.classification_eval.sites", fromlist=["SITES"]).SITES))
+@pytest.mark.parametrize(
+    "site_id", sorted(__import__("tools.classification_eval.sites", fromlist=["SITES"]).SITES)
+)
 def test_site_row_fixtures_build_prompts_and_labels(site_id):
     """Each row's fixture loader yields inputs its prompt builders accept, the
     candidate builders accept, and the label reducer reads from the row's
@@ -540,5 +544,6 @@ def test_site_row_fixtures_build_prompts_and_labels(site_id):
         assert row.prompt(inp).strip()
         if row.candidate_prompt is not None:
             assert row.candidate_prompt(inp).strip()
+            assert row.candidate_prompt(inp) != row.prompt(inp), "candidate tail did not apply"
     sample = (row.candidate_output_type or row.output_type).model_json_schema()
     assert sample["properties"]
