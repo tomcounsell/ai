@@ -1314,6 +1314,16 @@ async def main():
 
     resolve_degraded_flag("bridge")
 
+    # Warm the charter-§7 eligibility cache for ACTIVE_PROJECTS (#3410). The
+    # task is held in tools.improvement_eligibility._BACKGROUND_TASKS and is
+    # never awaited ahead of the connect step: is_open_source shells
+    # `gh repo view` with a 10 s timeout per key, and nothing may sit ahead
+    # of "Connected to Telegram". A classifier call that lands before the
+    # warm-up finishes takes the fail-closed miss (Anthropic).
+    from tools.improvement_eligibility import schedule_warm_cache
+
+    schedule_warm_cache(ACTIVE_PROJECTS)
+
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
