@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import inspect
 import json
 import re
 import signal
@@ -63,22 +64,223 @@ def _no_real_tracker_writes(monkeypatch: pytest.MonkeyPatch):
     return guarded_run
 
 
-def _assert_per_node_dispatch(mock_dispatch, nodes: list[str]) -> None:
-    """Assert the per-node dispatch went out for ``nodes`` with matching dispositions.
+# An issue-creation instruction in any prompt this module emits. The whole point
+# of #3418 is that the detector creates every issue itself, so a surviving
+# instruction telling an agent to open one is the drift this anti-criterion
+# exists to catch. Written with word boundaries and an explicit article on
+# purpose: ISSUE_LOOKUP_INSTRUCTION legitimately contains the phrase "issue
+# creation" (describing the search index's lag), and a looser pattern would
+# match the sentence that forbids the behaviour.
+CREATE_INSTRUCTION_TOKENS = re.compile(
+    r"gh issue create|\b(?:open|file|create)\s+(?:ONE|one|a|an)\s+(?:new\s+|umbrella\s+)?issue\b",
+    re.I,
+)
 
-    Replaces a bare ``assert_called_once_with(nodes, dry_run=False)``: the
-    per-node call now also carries the ``dispositions=`` the detector resolved
-    (#3170 fix 2), and an exact-kwargs assertion would have to be rewritten
-    again the next time the channel widens. This checks the two things the old
-    assertion checked plus the one the new argument is for -- that the
-    dispositions cover exactly the dispatched nodes, in order.
+
+def _assert_per_node_dispatch(mock_dispatch, nodes: list[str]) -> None:
+    """Assert one investigation dispatch went out carrying a real number per node.
+
+    Replaces the pre-#3418 assertion over ``dispositions=``, which described what
+    a filing agent was told about each node. No agent files now, so the only
+    thing worth pinning about the hand-off is that every entry in it is an issue
+    the detector already created: a ``(number, subject)`` pair whose number is a
+    real integer GitHub returned, in the ``node {nodeid}`` subject shape
+    ``dispatch_findings`` builds. A dispatch naming an issue that does not exist
+    is the defect this channel used to have.
     """
     mock_dispatch.assert_called_once()
     args, kwargs = mock_dispatch.call_args
-    assert args == (nodes,)
+    assert len(args) == 1
+    issues = list(args[0])
+    assert [subject for _, subject in issues] == [f"node {n}" for n in nodes]
+    assert all(isinstance(number, int) and number > 0 for number, _ in issues)
     assert kwargs["dry_run"] is False
-    assert [d.node for d in kwargs["dispositions"]] == nodes
-    assert all(d.disposition == "file" for d in kwargs["dispositions"])
+
+
+# Sentinel for "this read answers with the same map as the run's opening read".
+# Distinct from ``None``, which is the module's own "the read failed" signal.
+_SAME_AS_OPEN = object()
+
+_AUTO_NUMBER = object()
+
+
+def _numbering(create_return: object = _AUTO_NUMBER):
+    """A ``create_issue`` stand-in for the main() harnesses.
+
+    ``create_issue`` reaching a real ``gh issue create`` subprocess from a unit
+    test is not a hypothetical: an unstubbed run of this file opened 94 real
+    issues. Every main() patch block routes through here so there is one place
+    that has to stay stubbed, and it hands back plausible ascending numbers so
+    the state main() persists is the state a real night would persist.
+    ``create_return=None`` models the create that failed.
+    """
+    numbers: list[int] = []
+
+    def fake_create(title: str, body: str, *, dry_run: bool = False):
+        number = len(numbers) + 7001 if create_return is _AUTO_NUMBER else create_return
+        numbers.append(number)
+        return number
+
+    fake_create.numbers = numbers
+    return fake_create
+
+
+class FakeGitHub:
+    """One in-memory stand-in for every ``gh`` call the filing path makes.
+
+    Replaces four near-identical hand-rolled harnesses. Each of those patched
+    ``open_issues``, ``closed_issue_dispositions``, ``comment_on_issue`` and
+    ``maybe_dispatch_triage_session`` and **none** patched a create, which was
+    harmless while filing was delegated to a triage session and became a live
+    hazard the moment ``create_issue`` landed: informational runs of this file
+    created 94 real GitHub issues that way (#3423-#3516). One fixture that stubs
+    the create alongside the comment is the structural fix; the module-wide
+    ``_no_real_tracker_writes`` guard is the backstop for whatever this fixture
+    does not cover.
+
+    The fake is stateful rather than a set of constant returns, because the
+    behaviour under test is check-then-act: a created issue becomes open from
+    that moment on, which is what lets one instance answer both passes of
+    :class:`TestFilingIdempotence` honestly. Reads hand out copies, so a caller
+    holding an earlier snapshot sees the state it actually read.
+    """
+
+    def __init__(self) -> None:
+        self.open_map: dict[str, int] | None = {}
+        self.closed_map: dict[str, tuple[int, str]] | None = {}
+        # What every read AFTER the run's opening one answers. The pre-create
+        # refresh is the reason this is separately settable.
+        self.refresh_map: object = _SAME_AS_OPEN
+        self.open_reads = 0
+        self.closed_reads = 0
+        self.create_calls: list[tuple[str, str]] = []
+        self.comment_calls: list[tuple[int, str]] = []
+        self.dispatches: list[tuple[list[tuple[int, str]], dict]] = []
+        self._next_number = 9000
+        # Hooks, for the failure postures: ``create_hook(title, body) -> int|None``
+        # and ``comment_hook(number, body) -> bool``.
+        self.create_hook = None
+        self.comment_hook = None
+
+    # -- assertions read these -------------------------------------------------
+    @property
+    def created_titles(self) -> list[str]:
+        return [title for title, _ in self.create_calls]
+
+    @property
+    def commented(self) -> list[int]:
+        return [number for number, _ in self.comment_calls]
+
+    def body_for(self, title: str) -> str:
+        return next(body for t, body in self.create_calls if t == title)
+
+    # -- the stubbed module functions -----------------------------------------
+    def open_issues(self, *args, **kwargs):
+        self.open_reads += 1
+        source = self.open_map
+        if self.open_reads > 1 and self.refresh_map is not _SAME_AS_OPEN:
+            source = self.refresh_map
+        return None if source is None else dict(source)
+
+    def closed_issue_dispositions(self, *args, **kwargs):
+        self.closed_reads += 1
+        return None if self.closed_map is None else dict(self.closed_map)
+
+    def create_issue(self, title: str, body: str, *, dry_run: bool = False):
+        self.create_calls.append((title, body))
+        if self.create_hook is not None:
+            number = self.create_hook(title, body)
+        else:
+            self._next_number += 1
+            number = self._next_number
+        if number is not None and self.open_map is not None:
+            self.open_map[title] = number
+        return number
+
+    def comment_on_issue(self, number: int, body: str, *, dry_run: bool = False) -> bool:
+        self.comment_calls.append((number, body))
+        return True if self.comment_hook is None else self.comment_hook(number, body)
+
+    def maybe_dispatch_triage_session(self, issues, **kwargs):
+        pairs = list(issues)
+        self.dispatches.append((pairs, kwargs))
+        return "sess-1" if pairs else None
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
+        monkeypatch.setattr(nrt, "open_issues", self.open_issues)
+        monkeypatch.setattr(nrt, "closed_issue_dispositions", self.closed_issue_dispositions)
+        monkeypatch.setattr(nrt, "create_issue", self.create_issue)
+        monkeypatch.setattr(nrt, "comment_on_issue", self.comment_on_issue)
+        monkeypatch.setattr(
+            nrt, "maybe_dispatch_triage_session", self.maybe_dispatch_triage_session
+        )
+        return self
+
+
+@pytest.fixture
+def fake_github(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeGitHub:
+    """A :class:`FakeGitHub` installed over the module, with the log redirected."""
+    monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+    return FakeGitHub().install(monkeypatch)
+
+
+def log_text() -> str:
+    """Whatever the module logged this test, or ``""`` if it logged nothing."""
+    return nrt.LOG_FILE.read_text() if nrt.LOG_FILE.exists() else ""
+
+
+def dispatch_with(
+    gh: FakeGitHub,
+    *,
+    nodes: list[str],
+    report: dict,
+    open_map: object = _SAME_AS_OPEN,
+    closed_map: object = _SAME_AS_OPEN,
+    refresh_map: object = _SAME_AS_OPEN,
+    prev: dict | None = None,
+    run_at: str = "2026-09-04T03:00:00Z",
+    head_commit: str = "cafe1234",
+    **kwargs,
+) -> nrt.DispatchOutcome:
+    """Run one ``dispatch_findings`` pass against ``gh``.
+
+    ``open_map=None`` and ``closed_map=None`` mean the read failed, which is the
+    module's own convention and why the "leave it alone" default is a sentinel
+    rather than ``None``.
+    """
+    if open_map is not _SAME_AS_OPEN:
+        gh.open_map = open_map
+    if closed_map is not _SAME_AS_OPEN:
+        gh.closed_map = closed_map
+    if refresh_map is not _SAME_AS_OPEN:
+        gh.refresh_map = refresh_map
+    return nrt.dispatch_findings(
+        report,
+        nodes,
+        prev or {},
+        run_at=run_at,
+        head_commit=head_commit,
+        **kwargs,
+    )
+
+
+def body_failure_report(nodes: list[str]) -> dict:
+    """A report whose nodes each failed in their own test BODY with their own line.
+
+    Distinct lines on purpose: body grouping needs a shared normalized line, so
+    each node stays its own finding and the per-node filing path is what runs.
+    """
+    return {
+        "tests": [
+            {
+                "nodeid": n,
+                "outcome": "failed",
+                "setup": {"outcome": "passed"},
+                "call": {"outcome": "failed", "longrepr": f"[gw1] AssertionError: {n}"},
+            }
+            for n in nodes
+        ]
+    }
 
 
 class TestLoadLastRun:
@@ -852,72 +1054,45 @@ class TestCarryDispatchedNodes:
         assert nrt.carry_dispatched_nodes(prev, ["a::t1"], []) == []
 
 
-def _disposition(node: str, *, at: str = "2026-09-05T06:00:00+00:00") -> nrt.NodeDisposition:
-    return nrt.NodeDisposition(
-        node=node,
-        title=f"Nightly regression: {node}",
-        disposition="file",
-        resolved_against="gh issue list --state all (open+closed REST read)",
-        resolved_at=at,
-    )
+class TestBuildInvestigationPrompt:
+    """The one prompt this module still emits: investigate, comment, create nothing.
 
+    Replaces ``TestBuildTriagePrompt``. Its subject — what a filing agent was
+    told about each node it should file — no longer exists: the detector creates
+    every issue itself and hands the session numbers GitHub already confirmed
+    (#3418). What is left worth pinning is that the numbers arrive literally
+    (the #2559 concern, one layer on: an agent that has to *derive* an
+    identifier gets it wrong), and that nothing in the text asks for a second
+    tracker write.
+    """
 
-class TestBuildTriagePrompt:
-    """Titles are computed in Python -- literal, not agent-derived (#2559)."""
+    def test_literal_issue_numbers_present(self) -> None:
+        """The numbers, AND the lookup mechanism the session is told to use.
 
-    def test_literal_titles_present(self) -> None:
-        """The titles, AND the lookup mechanism the agent is told to use.
-
-        The title half alone stayed true across the #3170 change and was
-        therefore blind to it: the prompt could keep every literal title while
-        still directing the agent at the index-backed lookup that produced the
-        #2960-#2999 wave. The two halves belong in one test.
+        The identifier half alone stayed true across the #3170 change and was
+        therefore blind to it: the prompt could carry every literal identifier
+        while still directing the agent at the index-backed lookup that produced
+        the #2960-#2999 wave. The two halves belong in one test.
         """
-        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        prompt = nrt._build_triage_prompt(nodes)
-        for n in nodes:
-            assert f"Nightly regression: {n}" in prompt
+        issues = [(4242, "node tests/unit/test_a.py::test_1"), (4243, "cascade umbrella 'boom'")]
+        prompt = nrt._build_investigation_prompt(issues)
+        for number, subject in issues:
+            assert f"#{number}" in prompt
+            assert subject in prompt
         assert "gh issue list --state all" in prompt
         assert not SEARCH_TOKENS.search(prompt)
 
-    def test_dispositions_render_the_detectors_own_finding_per_node(self) -> None:
-        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        dispositions = [_disposition(n) for n in nodes]
-        prompt = nrt._build_triage_prompt(nodes, dispositions=dispositions)
-        for n in nodes:
-            assert f"Nightly regression: {n}" in prompt
-        assert prompt.count("2026-09-05T06:00:00+00:00") == 2
-        assert prompt.count("gh issue list --state all (open+closed REST read)") == 2
+    def test_the_prompt_asks_for_a_comment_and_nothing_else(self) -> None:
+        """The anti-criterion at the builder, not only at the parametrized gate."""
+        prompt = nrt._build_investigation_prompt([(4242, "node a::t1")])
+        assert "COMMENT" in prompt
+        assert CREATE_INSTRUCTION_TOKENS.findall(prompt) == []
 
-    def test_empty_disposition_list_degrades_to_the_plain_prompt(self) -> None:
-        """``[]`` and ``None`` both take the same branch, checked before the zip.
-
-        The pair with the mismatch test below pins an ordering that reads as a
-        contradiction unless it is stated: ``if not dispositions`` runs first,
-        so an empty list never reaches ``zip(..., strict=True)`` and never
-        raises, while a non-empty wrong-length list always does.
-        """
-        nodes = ["a::t1", "b::t2", "c::t3"]
-        assert nrt._build_triage_prompt(nodes, dispositions=[]) == nrt._build_triage_prompt(nodes)
-
-    def test_wrong_length_disposition_list_raises(self) -> None:
-        nodes = ["a::t1", "b::t2", "c::t3"]
-        with pytest.raises(ValueError):
-            nrt._build_triage_prompt(
-                nodes, dispositions=[_disposition("a::t1"), _disposition("b::t2")]
-            )
-
-    def test_ledger_paragraph_is_emitted_only_for_a_non_none_path(self) -> None:
-        nodes = ["a::t1"]
-        without = nrt._build_triage_prompt(nodes)
-        assert "Session ledger" not in without
-        assert "nightly-triage-ledger" not in without
-        with_path = nrt._build_triage_prompt(nodes, ledger_path="/abs/nightly-triage-ledger/x.json")
-        assert "/abs/nightly-triage-ledger/x.json" in with_path
-        assert "Read that file FIRST on every turn" in with_path
-        assert "BEFORE moving on to the next entry" in with_path
-        assert "cannot be parsed as JSON" in with_path
-        assert not SEARCH_TOKENS.search(with_path)
+    def test_an_empty_issue_list_still_renders_the_instruction_block(self) -> None:
+        """``maybe_dispatch_triage_session`` gates on emptiness before it ever
+        builds a prompt, so an empty list must degrade rather than raise."""
+        prompt = nrt._build_investigation_prompt([])
+        assert nrt.ISSUE_LOOKUP_INSTRUCTION in prompt
 
 
 def _errored(nodeid: str, worker: str, message: str) -> dict:
@@ -1234,22 +1409,31 @@ class TestResolveCascadeIssue:
 
 
 class TestCarryCascadeIssues:
+    """Every entry is a real number now, so there is no pending state to upgrade."""
+
     MSG = "RuntimeError: redis client is not on the claimed server"
 
-    def test_pending_entry_is_upgraded_once_the_title_appears(self) -> None:
-        title = nrt.cascade_title(self.MSG)
-        assert nrt.carry_cascade_issues({self.MSG: None}, {title: 4242}) == {self.MSG: 4242}
+    def test_a_still_open_entry_is_kept_verbatim(self) -> None:
+        """Replaces the ``None``-sentinel upgrade case.
 
-    def test_unresolvable_pending_entry_is_dropped(self) -> None:
-        """No issue exists, so a recurrence deserves a fresh filing, not silence."""
-        assert nrt.carry_cascade_issues({self.MSG: None}, {}) == {}
+        The detector creates its own umbrellas, so the number is known the moment
+        one exists and ``cascade_issues`` never holds a placeholder to resolve on
+        a later run (#3418). What the function still has to do is keep an entry
+        whose issue is demonstrably open.
+        """
+        title = nrt.cascade_title(self.MSG)
+        assert nrt.carry_cascade_issues({self.MSG: 4242}, {title: 4242}) == {self.MSG: 4242}
 
     def test_closed_issue_drops_out(self) -> None:
+        """No issue is open, so a recurrence deserves a fresh filing, not silence."""
         assert nrt.carry_cascade_issues({self.MSG: 4242}, {"unrelated": 7}) == {}
+
+    def test_an_empty_open_map_drops_everything(self) -> None:
+        assert nrt.carry_cascade_issues({self.MSG: 4242}, {}) == {}
 
     def test_unreadable_open_list_keeps_the_map_verbatim(self) -> None:
         """`None` is "could not tell", never evidence that anything closed."""
-        prev = {self.MSG: 4242, "other": None}
+        prev = {self.MSG: 4242, "other": 77}
         assert nrt.carry_cascade_issues(prev, None) == prev
 
 
@@ -1261,124 +1445,121 @@ class TestDispatchFindings:
     def _report(self, nodes):
         return {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
 
-    def _body_failures(self, nodes):
-        """Test-body failures never collapse, so each is its own finding."""
-        return {
-            "tests": [
-                {
-                    "nodeid": n,
-                    "outcome": "failed",
-                    "setup": {"outcome": "passed"},
-                    "call": {"outcome": "failed", "longrepr": f"[gw1] AssertionError: {n}"},
-                }
-                for n in nodes
-            ]
-        }
-
-    def _dispatch(self, monkeypatch, tmp_path, *, nodes, open_map, prev=None, report=None, **kw):
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        commented: list[int] = []
-        monkeypatch.setattr(
-            nrt, "comment_on_issue", lambda n, body, **kw: commented.append(n) or True
-        )
-        filed: list[list[str]] = []
-
-        def fake_dispatch(ns, **kw):
-            if not ns:
-                return None
-            filed.append(list(ns))
-            return "sess-1"
-
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", fake_dispatch)
-        outcome = nrt.dispatch_findings(
-            report if report is not None else self._report(nodes),
-            nodes,
-            prev or {},
-            run_at="2026-09-04T03:00:00Z",
-            head_commit="cafe1234",
-            **kw,
-        )
-        return outcome, commented, filed
-
-    def test_night_one_files_one_issue_and_records_the_signature_as_pending(
-        self, monkeypatch, tmp_path: Path
+    def test_night_one_creates_one_umbrella_and_records_its_real_number(
+        self, fake_github: FakeGitHub
     ) -> None:
+        """Renamed from ``..._records_the_signature_as_pending``.
+
+        There is no pending state left to record: ``create_issue`` returns the
+        number GitHub assigned, so ``cascade_issues`` and ``filed_issues`` both
+        carry that number from the moment the umbrella exists (#3418).
+        """
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
-        outcome, commented, filed = self._dispatch(monkeypatch, tmp_path, nodes=nodes, open_map={})
+        outcome = dispatch_with(fake_github, nodes=nodes, report=self._report(nodes), open_map={})
+        title = nrt.cascade_title(self.MSG)
+        assert fake_github.created_titles == [title]
+        number = outcome.filed_issues[self.MSG]
+        assert isinstance(number, int)
         assert (outcome.issues_filed, outcome.comments_posted) == (1, 0)
-        assert commented == []
-        assert len(filed) == 1
+        assert fake_github.commented == []
         assert outcome.recorded == sorted(nodes)
-        assert outcome.cascade_issues == {self.MSG: None}
+        assert outcome.cascade_issues == {self.MSG: number}
+        # The created body carries the fingerprint of the cascade's STATE KEY,
+        # which is what makes a twin an exact-match question later.
+        assert nrt.fingerprint_marker(self.MSG) in fake_github.body_for(title)
+        assert fake_github.dispatches[-1][0] == [
+            (number, f"cascade umbrella {title!r} (9 node(s))")
+        ]
 
     def test_night_two_comments_instead_of_filing_a_second_issue(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         """The whole point: a recurring cascade accretes a comment, never a twin."""
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = dispatch_with(
+            fake_github,
             nodes=nodes,
+            report=self._report(nodes),
             open_map={nrt.cascade_title(self.MSG): 4242},
-            prev={"cascade_issues": {self.MSG: None}},
+            prev={"cascade_issues": {self.MSG: 4242}},
         )
+        assert fake_github.create_calls == []
         assert (outcome.issues_filed, outcome.comments_posted) == (0, 1)
-        assert commented == [4242]
-        assert filed == []
+        assert fake_github.commented == [4242]
         assert outcome.recorded == sorted(nodes)
         assert outcome.cascade_issues == {self.MSG: 4242}
 
     def test_a_comment_that_failed_to_post_leaves_the_finding_unrecorded(
-        self, monkeypatch, tmp_path: Path
+        self, fake_github: FakeGitHub
     ) -> None:
         """Recording it as handled would lose the recurrence permanently."""
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
-        monkeypatch.setattr(nrt, "open_issues", lambda: {nrt.cascade_title(self.MSG): 4242})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        monkeypatch.setattr(nrt, "comment_on_issue", lambda *a, **k: False)
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
-        outcome = nrt.dispatch_findings(
-            self._report(nodes), nodes, {}, run_at="RUN", head_commit="HEAD"
+        fake_github.comment_hook = lambda number, body: False
+        outcome = dispatch_with(
+            fake_github,
+            nodes=nodes,
+            report=self._report(nodes),
+            open_map={nrt.cascade_title(self.MSG): 4242},
         )
         assert outcome.recorded == []
         assert outcome.comments_posted == 0
 
-    def test_per_node_recurrence_is_commented_not_suppressed(
-        self, monkeypatch, tmp_path: Path
+    def test_a_create_that_failed_leaves_the_finding_unrecorded(
+        self, fake_github: FakeGitHub
     ) -> None:
+        """The create half of the same contract, which had no coverage before.
+
+        ``create_issue`` never retries (a retried POST is a second issue), so a
+        failure has to leave the finding out of ``recorded`` or the next run
+        suppresses it against an issue that was never created.
+        """
+        nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
+        fake_github.create_hook = lambda title, body: None
+        outcome = dispatch_with(fake_github, nodes=nodes, report=self._report(nodes), open_map={})
+        assert len(fake_github.create_calls) == 1
+        assert outcome.recorded == []
+        assert outcome.filed_issues == {}
+        assert outcome.issues_filed == 0
+        assert outcome.cascade_issues == {}
+        assert "Create failed" in log_text()
+
+    def test_per_node_recurrence_is_commented_not_suppressed(self, fake_github: FakeGitHub) -> None:
         """#3131 dropped the duplicate silently, which lost the recurrence signal."""
         nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = dispatch_with(
+            fake_github,
             nodes=nodes,
-            report=self._body_failures(nodes),
+            report=body_failure_report(nodes),
             open_map={"Nightly regression: tests/unit/test_a.py::test_1": 11},
         )
-        assert commented == [11]
-        assert filed == [["tests/unit/test_b.py::test_2"]]
+        assert fake_github.commented == [11]
+        assert fake_github.created_titles == ["Nightly regression: tests/unit/test_b.py::test_2"]
         assert sorted(outcome.recorded) == sorted(nodes)
 
-    def test_comments_do_not_spend_the_issue_budget(self, monkeypatch, tmp_path: Path) -> None:
-        """The cap bounds NEW tracker surface, and a comment creates none."""
+    def test_comments_do_not_spend_the_issue_budget(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cap bounds NEW tracker surface, and a comment creates none.
+
+        The budget now decrements per confirmed create, so a cap of 1 against
+        three recurrences plus one genuinely new node has to produce three
+        comments and still afford the one create.
+        """
         monkeypatch.setenv("NIGHTLY_MAX_ISSUES_PER_RUN", "1")
         nodes = [f"tests/unit/test_{c}.py::test_1" for c in "abcd"]
-        outcome, commented, filed = self._dispatch(
-            monkeypatch,
-            tmp_path,
+        outcome = dispatch_with(
+            fake_github,
             nodes=nodes,
-            report=self._body_failures(nodes),
+            report=body_failure_report(nodes),
             open_map={f"Nightly regression: {n}": i for i, n in enumerate(nodes[:3], start=1)},
         )
-        assert sorted(commented) == [1, 2, 3]
-        assert filed == [["tests/unit/test_d.py::test_1"]]
+        assert sorted(fake_github.commented) == [1, 2, 3]
+        assert fake_github.created_titles == ["Nightly regression: tests/unit/test_d.py::test_1"]
+        assert outcome.issues_filed == 1
         assert sorted(outcome.recorded) == sorted(nodes)
 
-    def test_cascades_only_suppresses_per_node_filing(self, monkeypatch, tmp_path: Path) -> None:
+    def test_cascades_only_suppresses_per_node_filing(self, fake_github: FakeGitHub) -> None:
+        """``cascades_only`` suppresses per-node CREATES now, not a per-node dispatch."""
         cascade_nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
         report = self._report(cascade_nodes)
         loner = "tests/unit/test_z.py::test_solo"
@@ -1390,179 +1571,131 @@ class TestDispatchFindings:
                 "call": {"outcome": "failed", "longrepr": "[gw1] AssertionError: nope"},
             }
         )
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "open_issues", lambda: {})
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: {})
-        filed: list[list[str]] = []
-        monkeypatch.setattr(
-            nrt,
-            "maybe_dispatch_triage_session",
-            lambda ns, **kw: (filed.append(list(ns)), "sess-1")[1] if ns else None,
-        )
-        outcome = nrt.dispatch_findings(
-            report,
-            [*cascade_nodes, loner],
-            {},
-            run_at="RUN",
-            head_commit="HEAD",
+        outcome = dispatch_with(
+            fake_github,
+            nodes=[*cascade_nodes, loner],
+            report=report,
+            open_map={},
             cascades_only=True,
         )
         assert outcome.issues_filed == 1
+        assert fake_github.created_titles == [nrt.cascade_title(self.MSG)]
+        assert f"Nightly regression: {loner}" not in fake_github.created_titles
         assert loner not in outcome.recorded
-        assert len(filed) == 1 and filed[0][0].startswith("cascade:")
+        # The investigation dispatch still fires from the cascades-only exit, and
+        # carries the umbrella's real number rather than a `cascade:` pseudo-node.
+        dispatched, _ = fake_github.dispatches[-1]
+        assert [n for n, _ in dispatched] == [outcome.filed_issues[self.MSG]]
 
-    def test_a_clean_night_never_shells_out_to_gh(self, monkeypatch, tmp_path: Path) -> None:
+    def test_a_clean_night_never_shells_out_to_gh(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Extended to the create path: a clean night reaches no `gh` verb at all."""
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
         monkeypatch.setattr(nrt, "open_issues", lambda: pytest.fail("read gh on a clean night"))
         monkeypatch.setattr(
             nrt, "closed_issue_dispositions", lambda: pytest.fail("read gh closed set")
         )
+        monkeypatch.setattr(
+            nrt, "create_issue", lambda *a, **k: pytest.fail("created on a clean night")
+        )
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda *a, **k: pytest.fail("commented on a clean night")
+        )
         monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", lambda *a, **k: None)
         outcome = nrt.dispatch_findings({"tests": []}, [], {}, run_at="RUN", head_commit="HEAD")
         assert outcome.recorded == []
+        assert outcome.issues_filed == 0
 
 
-class TestDispositionHandoff:
-    """What dispatch_findings knows must reach the agent, and only for per-node."""
+class TestSurvivorsReachCreateIssue:
+    """Replaces ``TestDispositionHandoff``.
+
+    Its subject — the ``dispositions=`` a filing agent was handed — ceased to
+    exist with ``NodeDisposition``. The same four questions are still worth
+    asking, one layer in: which findings reach ``create_issue``, and what the two
+    degraded-read postures do to that set.
+    """
 
     MSG = "RuntimeError: redis client is not on the claimed server"
 
-    def _body_failures(self, nodes):
-        return {
-            "tests": [
-                {
-                    "nodeid": n,
-                    "outcome": "failed",
-                    "setup": {"outcome": "passed"},
-                    "call": {"outcome": "failed", "longrepr": f"[gw1] AssertionError: {n}"},
-                }
-                for n in nodes
-            ]
-        }
+    def test_only_the_untracked_survivor_is_created(self, fake_github: FakeGitHub) -> None:
+        """The second-writer hazard, pinned at the create.
 
-    def _run(self, monkeypatch, tmp_path, *, nodes, report, open_map, closed_map):
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
-        monkeypatch.setattr(nrt, "open_issues", lambda: open_map)
-        monkeypatch.setattr(nrt, "closed_issue_dispositions", lambda: closed_map)
-        monkeypatch.setattr(nrt, "comment_on_issue", lambda n, body, **kw: True)
-        calls: list[tuple[list[str], dict]] = []
-
-        def spy(ns, **kw):
-            calls.append((list(ns), kw))
-            return "sess-1" if ns else None
-
-        monkeypatch.setattr(nrt, "maybe_dispatch_triage_session", spy)
-        nrt.dispatch_findings(
-            report,
-            nodes,
-            {},
-            run_at="2026-09-05T03:00:00Z",
-            head_commit="cafe1234",
-        )
-        return calls
-
-    def test_dispositions_cover_the_survivors_and_nothing_already_tracked(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
-        """The second-writer hazard, pinned.
-
-        An already-open node and a closed-not-planned node are commented on by
-        the script itself and dropped before the dispatch. Handing either to the
-        agent would make it a second writer for the same comment, so the channel
-        must carry only the nodes the agent is being asked to act on.
+        An already-open node and a closed-not-planned node are commented on and
+        dropped before filing; only the genuinely new node becomes an issue, with
+        the exact title ``partition_already_open`` keys its dedup on and a body
+        carrying that node's fingerprint.
         """
         already_open = "tests/unit/test_open.py::test_1"
         closed_np = "tests/unit/test_closed.py::test_2"
         survivor = "tests/unit/test_new.py::test_3"
         nodes = [already_open, closed_np, survivor]
-        calls = self._run(
-            monkeypatch,
-            tmp_path,
+        outcome = dispatch_with(
+            fake_github,
             nodes=nodes,
-            report=self._body_failures(nodes),
+            report=body_failure_report(nodes),
             open_map={f"Nightly regression: {already_open}": 11},
             closed_map={f"Nightly regression: {closed_np}": (22, "NOT_PLANNED")},
         )
-        per_node = [c for c in calls if c[0]]
-        assert len(per_node) == 1
-        dispatched, kwargs = per_node[0]
-        assert dispatched == [survivor]
-        assert [d.node for d in kwargs["dispositions"]] == [survivor]
-        assert kwargs["dispositions"][0].title == f"Nightly regression: {survivor}"
-        assert kwargs["dispositions"][0].disposition == "file"
-        assert kwargs["dispositions"][0].resolved_at
-        assert "gh issue list --state all" in kwargs["dispositions"][0].resolved_against
+        assert fake_github.created_titles == [f"Nightly regression: {survivor}"]
+        body = fake_github.body_for(f"Nightly regression: {survivor}")
+        assert nrt.fingerprint_marker(survivor) in body
+        assert f"`{survivor}`" in body
+        assert sorted(fake_github.commented) == [11, 22]
+        assert outcome.filed_issues == {
+            survivor: fake_github.open_map[f"Nightly regression: {survivor}"]
+        }
 
-    def test_no_dispositions_when_open_read_fails(self, monkeypatch, tmp_path: Path) -> None:
-        """A failed open-issue read must not assert a detector resolution.
+    def test_an_unreadable_open_read_still_files(self, fake_github: FakeGitHub) -> None:
+        """Fail-open, preserved for the create path, and SAID so in the log.
 
-        ``partition_already_open`` fails open on ``open_map=None`` -- every
-        node, including ones that actually have an open issue, survives into
-        ``single_nodes`` unfiltered. Without this fix, dispatch_findings would
-        still hand those survivors a ``dispositions`` list claiming "it read
-        all open and closed issues... and found no issue carrying that exact
-        title", which is false, and which demotes the agent's own live lookup
-        to "a second check" on exactly the night that lookup is the only real
-        defense left.
+        An unreadable open map is the one night the dedup is blind, and the
+        degraded-refresh line is the only signal of it — the run otherwise files
+        everything it should, so a missing line makes a blind night look normal.
         """
         survivor = "tests/unit/test_new.py::test_3"
-        nodes = [survivor]
-        calls = self._run(
-            monkeypatch,
-            tmp_path,
-            nodes=nodes,
-            report=self._body_failures(nodes),
+        outcome = dispatch_with(
+            fake_github,
+            nodes=[survivor],
+            report=body_failure_report([survivor]),
             open_map=None,
             closed_map={},
         )
-        per_node = [c for c in calls if c[0]]
-        assert len(per_node) == 1
-        dispatched, kwargs = per_node[0]
-        assert dispatched == [survivor]
-        assert kwargs["dispositions"] is None
+        assert fake_github.created_titles == [f"Nightly regression: {survivor}"]
+        assert outcome.issues_filed == 1
+        text = log_text()
+        assert "Dedup disabled for this run (open issues unreadable)" in text
+        assert "Pre-create refresh unreadable" in text
 
-    def test_no_dispositions_when_closed_read_fails(self, monkeypatch, tmp_path: Path) -> None:
-        """A partial read (only one of open/closed readable) is still degraded.
-
-        ``open_map={}`` is readable-but-empty while ``closed_map=None`` means
-        the closed-issue read failed, so ``read_shape == ["open"]``: a partial
-        read, not the full read fix 2 requires. Handing out a disposition here
-        would render a ``resolved_against`` naming only the open read while the
-        prompt sentence still claims "it read all open and closed issues" --
-        self-contradictory, and it demotes the agent's own lookup on the one
-        night a closed-not-planned recurrence could otherwise slip through.
-        """
+    def test_an_unreadable_closed_read_still_files(self, fake_github: FakeGitHub) -> None:
+        """The same posture for the closed read, which has its own log line."""
         survivor = "tests/unit/test_new.py::test_3"
-        nodes = [survivor]
-        calls = self._run(
-            monkeypatch,
-            tmp_path,
-            nodes=nodes,
-            report=self._body_failures(nodes),
+        outcome = dispatch_with(
+            fake_github,
+            nodes=[survivor],
+            report=body_failure_report([survivor]),
             open_map={},
             closed_map=None,
         )
-        per_node = [c for c in calls if c[0]]
-        assert len(per_node) == 1
-        dispatched, kwargs = per_node[0]
-        assert dispatched == [survivor]
-        assert kwargs["dispositions"] is None
+        assert fake_github.created_titles == [f"Nightly regression: {survivor}"]
+        assert outcome.issues_filed == 1
+        assert "Closed-state dedup disabled for this run" in log_text()
 
-    def test_cascade_dispatch_is_handed_no_dispositions(self, monkeypatch, tmp_path: Path) -> None:
-        """The narrowing, pinned in behaviour rather than only in prose.
-
-        Fixes 2 and 3 stop at the per-node path. The cascade umbrella keeps its
-        pre-rendered ``prompt=`` and gets no disposition, which is what keeps
-        it from acquiring a ledger it has no builder parameter to read.
-        """
+    def test_the_cascade_umbrella_is_created_not_dispatched_to_be_filed(
+        self, fake_github: FakeGitHub
+    ) -> None:
+        """The umbrella used to be an instruction in a prompt; it is a create now."""
         nodes = [f"tests/unit/test_m.py::test_{i}" for i in range(9)]
         report = {"tests": [_errored(n, "gw2", self.MSG) for n in nodes]}
-        calls = self._run(
-            monkeypatch, tmp_path, nodes=nodes, report=report, open_map={}, closed_map={}
-        )
-        cascade_calls = [c for c in calls if c[1].get("prompt") is not None]
-        assert len(cascade_calls) == 1
-        assert "dispositions" not in cascade_calls[0][1]
+        outcome = dispatch_with(fake_github, nodes=nodes, report=report, open_map={}, closed_map={})
+        title = nrt.cascade_title(self.MSG)
+        assert fake_github.created_titles == [title]
+        number = outcome.filed_issues[self.MSG]
+        dispatched, kwargs = fake_github.dispatches[-1]
+        assert dispatched == [(number, f"cascade umbrella {title!r} (9 node(s))")]
+        assert "prompt" not in kwargs
+        assert "dispositions" not in kwargs
 
 
 class TestHandleIntegrityTrip:
@@ -1689,19 +1822,20 @@ class TestMaybeDispatchTriage:
         previewed safely.
         """
         nrt.LOG_FILE = tmp_path / "test.log"
-        nodes = ["tests/unit/test_a.py::test_1"]
         with patch("subprocess.run") as mock_run:
-            session_id = nrt.maybe_dispatch_triage_session(nodes, dry_run=True)
+            session_id = nrt.maybe_dispatch_triage_session(
+                [(4242, "node tests/unit/test_a.py::test_1")], dry_run=True
+            )
         mock_run.assert_not_called()
         assert session_id == nrt.DRY_RUN_SESSION_ID
 
     def test_dispatch_once(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
-        nodes = ["tests/unit/test_a.py::test_1"]
+        issues = [(4242, "node tests/unit/test_a.py::test_1")]
         with patch(
             "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
         ) as mock_run:
-            session_id = nrt.maybe_dispatch_triage_session(nodes)
+            session_id = nrt.maybe_dispatch_triage_session(issues)
         assert session_id == "abc123"
         argv = mock_run.call_args.args[0]
         assert argv[0] == sys.executable
@@ -1709,65 +1843,81 @@ class TestMaybeDispatchTriage:
         assert "eng" in argv
         assert "--slug" in argv
         slug_idx = argv.index("--slug")
-        expected_slug_hash = hashlib.sha256(",".join(sorted(set(nodes))).encode()).hexdigest()[:8]
+        # The slug is keyed on the ISSUE NUMBERS now, not on node ids: the
+        # investigation's subject is the set of issues it was handed.
+        expected_slug_hash = hashlib.sha256(b"4242").hexdigest()[:8]
         assert argv[slug_idx + 1] == f"nightly-triage-{expected_slug_hash}"
         assert "--json" in argv
 
-    def test_literal_titles_in_prompt(self, tmp_path: Path) -> None:
-        """A prompt that only INSTRUCTS the agent to build a title proves
-        nothing (#2559) -- the titles must be computed and asserted literally."""
-        nrt.LOG_FILE = tmp_path / "test.log"
-        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
-        with patch(
-            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
-        ) as mock_run:
-            nrt.maybe_dispatch_triage_session(nodes)
-        argv = mock_run.call_args.args[0]
-        msg = argv[argv.index("--message") + 1]
-        for n in nodes:
-            assert f"Nightly regression: {n}" in msg
+    def test_literal_issue_numbers_in_prompt(self, tmp_path: Path) -> None:
+        """Renamed from ``test_literal_titles_in_prompt``.
 
-    def test_prompt_override_replaces_default(self, tmp_path: Path) -> None:
+        A prompt that only INSTRUCTS the agent to look up its issues proves
+        nothing (#2559). The detector already created them, so the numbers and
+        their subjects must be computed and asserted literally.
+        """
         nrt.LOG_FILE = tmp_path / "test.log"
+        issues = [
+            (11, "node tests/unit/test_a.py::test_1"),
+            (22, "node tests/unit/test_b.py::test_2"),
+        ]
         with patch(
             "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
         ) as mock_run:
-            nrt.maybe_dispatch_triage_session(["seed:3"], prompt="CUSTOM UMBRELLA PROMPT")
+            nrt.maybe_dispatch_triage_session(issues)
         argv = mock_run.call_args.args[0]
         msg = argv[argv.index("--message") + 1]
-        assert msg == "CUSTOM UMBRELLA PROMPT"
+        for number, subject in issues:
+            assert f"#{number}" in msg
+            assert subject in msg
+
+    def test_the_dispatch_takes_no_prompt_override(self, tmp_path: Path) -> None:
+        """Replaces ``test_prompt_override_replaces_default``.
+
+        The seed path used to hand in its own prompt, which is how two callers
+        ended up able to ask an agent to file. There is one prompt builder now
+        and the parameter is gone, so passing it must be a hard error rather
+        than a silently ignored kwarg.
+        """
+        nrt.LOG_FILE = tmp_path / "test.log"
+        assert "prompt" not in inspect.signature(nrt.maybe_dispatch_triage_session).parameters
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "abc"}')):
+            with pytest.raises(TypeError):
+                nrt.maybe_dispatch_triage_session(
+                    [(4242, "seed umbrella")], prompt="CUSTOM UMBRELLA PROMPT"
+                )
 
     def test_slug_suffix_override(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch(
             "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
         ) as mock_run:
-            nrt.maybe_dispatch_triage_session(["seed:3"], slug_suffix="baseline")
+            nrt.maybe_dispatch_triage_session([(4242, "seed umbrella")], slug_suffix="baseline")
         argv = mock_run.call_args.args[0]
         assert argv[argv.index("--slug") + 1] == "nightly-triage-baseline"
 
     def test_subprocess_failure_safe(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch("subprocess.run", side_effect=FileNotFoundError("no python")):
-            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
+            session_id = nrt.maybe_dispatch_triage_session([(11, "node a::t1")])
         assert session_id is None
 
     def test_session_id_parsed_from_json_stdout(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch("subprocess.run", return_value=self._fake_result('{"session_id": "xyz789"}')):
-            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
+            session_id = nrt.maybe_dispatch_triage_session([(11, "node a::t1")])
         assert session_id == "xyz789"
 
     def test_malformed_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch("subprocess.run", return_value=self._fake_result("not json")):
-            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
+            session_id = nrt.maybe_dispatch_triage_session([(11, "node a::t1")])
         assert session_id is None
 
     def test_empty_stdout_returns_none_not_crash(self, tmp_path: Path) -> None:
         nrt.LOG_FILE = tmp_path / "test.log"
         with patch("subprocess.run", return_value=self._fake_result("")):
-            session_id = nrt.maybe_dispatch_triage_session(["tests/unit/test_a.py::test_1"])
+            session_id = nrt.maybe_dispatch_triage_session([(11, "node a::t1")])
         assert session_id is None
 
     def test_empty_dispatch_set_no_dispatch(self, tmp_path: Path) -> None:
@@ -1776,80 +1926,26 @@ class TestMaybeDispatchTriage:
             assert nrt.maybe_dispatch_triage_session([]) is None
             mock_run.assert_not_called()
 
-    def _ledger_dir(self, monkeypatch, tmp_path: Path) -> Path:
-        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "test.log")
-        monkeypatch.setattr(nrt, "DATA_DIR", tmp_path / "data")
-        return tmp_path / "data" / "nightly-triage-ledger"
-
-    def test_real_per_node_dispatch_seeds_a_ledger_and_names_it_in_the_message(
+    def test_the_dispatch_writes_no_ledger_and_takes_no_dispositions(
         self, monkeypatch, tmp_path: Path
     ) -> None:
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        nodes = ["tests/unit/test_a.py::test_1"]
-        with patch(
-            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
-        ) as mock_run:
-            nrt.maybe_dispatch_triage_session(nodes, dispositions=[_disposition(nodes[0])])
-        written = sorted(ledger_dir.glob("*.json"))
-        assert len(written) == 1
-        payload = json.loads(written[0].read_text())
-        assert [e["node"] for e in payload["entries"]] == nodes
-        assert payload["filed"] == []
-        msg = mock_run.call_args.args[0][mock_run.call_args.args[0].index("--message") + 1]
-        assert str(written[0].resolve()) in msg
+        """Replaces the four ledger tests deleted with ``write_triage_ledger``.
 
-    def test_dry_run_writes_no_ledger(self, monkeypatch, tmp_path: Path) -> None:
-        """The ledger write sits BELOW the dry-run short-circuit, and must stay there.
-
-        ``--dry-run`` is the one command an operator reaches for to preview a
-        night. The sentinel exists because an earlier version spawned real
-        sessions that filed real issues under it; a state write placed above
-        the short-circuit puts that class of defect back.
+        The ledger existed to tell a filing agent which issues it had already
+        created across a replayed turn. The detector's own idempotence replaced
+        it, so the guarantee worth keeping is the negative one: a dispatch
+        writes nothing under DATA_DIR and has no ``dispositions=`` parameter.
         """
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        nodes = ["tests/unit/test_a.py::test_1"]
-        with patch("subprocess.run") as mock_run:
-            session_id = nrt.maybe_dispatch_triage_session(
-                nodes, dispositions=[_disposition(nodes[0])], dry_run=True
-            )
-        mock_run.assert_not_called()
-        assert session_id == nrt.DRY_RUN_SESSION_ID
-        assert not ledger_dir.exists()
-
-    def test_prompt_override_dispatch_writes_no_ledger(self, monkeypatch, tmp_path: Path) -> None:
-        """The scope narrowing, at the one place it is enforced.
-
-        The cascade and re-baseline-seed dispatches pass a pre-rendered prompt
-        and no dispositions, so the entry list is empty, no file is created,
-        and ``nightly-triage-baseline.json`` never exists. One gate does the
-        whole narrowing; there is no separate branch to keep in step.
-        """
-        ledger_dir = self._ledger_dir(monkeypatch, tmp_path)
-        with patch(
-            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
-        ) as mock_run:
-            nrt.maybe_dispatch_triage_session(
-                ["seed:3"], prompt="CUSTOM UMBRELLA PROMPT", slug_suffix="baseline"
-            )
-        assert not ledger_dir.exists()
-        argv = mock_run.call_args.args[0]
-        assert argv[argv.index("--message") + 1] == "CUSTOM UMBRELLA PROMPT"
-
-    def test_a_failed_ledger_write_does_not_stop_the_dispatch(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
         monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "test.log")
-        monkeypatch.setattr(nrt, "write_triage_ledger", lambda slug, entries: None)
-        nodes = ["tests/unit/test_a.py::test_1"]
-        with patch(
-            "subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')
-        ) as mock_run:
-            session_id = nrt.maybe_dispatch_triage_session(
-                nodes, dispositions=[_disposition(nodes[0])]
-            )
-        assert session_id == "abc123"
-        argv = mock_run.call_args.args[0]
-        assert "nightly-triage-ledger" not in argv[argv.index("--message") + 1]
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        monkeypatch.setattr(nrt, "DATA_DIR", data_dir)
+        params = inspect.signature(nrt.maybe_dispatch_triage_session).parameters
+        assert "dispositions" not in params
+        assert not hasattr(nrt, "write_triage_ledger")
+        with patch("subprocess.run", return_value=self._fake_result('{"session_id": "abc123"}')):
+            assert nrt.maybe_dispatch_triage_session([(11, "node a::t1")]) == "abc123"
+        assert list(data_dir.iterdir()) == []
 
 
 class TestMainDispatchPersistence:
@@ -1874,6 +1970,7 @@ class TestMainDispatchPersistence:
         dispatch_return,
         *,
         serial_trusted: bool = True,
+        create_return: object = _AUTO_NUMBER,
     ):
         nrt.LOG_FILE = tmp_path / "test.log"
         nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
@@ -1903,10 +2000,17 @@ class TestMainDispatchPersistence:
             ) as mock_dispatch,
             patch.object(nrt, "open_issues", return_value={}),
             patch.object(nrt, "closed_issue_dispositions", return_value={}),
+            # Filing is the detector's own subprocess now (#3418), so main()
+            # reaches `gh issue create` directly on every non-clean night.
+            # Leaving it unpatched is how an informational run of this file
+            # opened 94 real issues.
+            patch.object(nrt, "create_issue", side_effect=_numbering(create_return)) as mock_create,
+            patch.object(nrt, "comment_on_issue", return_value=True),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
             rc = nrt.main()
+        self.mock_create = mock_create
         return (
             rc,
             json.loads(nrt.LAST_RUN_FILE.read_text()),
@@ -1936,10 +2040,19 @@ class TestMainDispatchPersistence:
         prev = self._prev(failing_tests=[standing], dispatched_nodes=[standing])
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [standing], None)
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dispositions=[], dry_run=False)
+        mock_dispatch.assert_called_once_with([], dry_run=False)
         assert saved["dispatched_nodes"] == [standing]
 
-    def test_failed_dispatch_leaves_nodes_unfiled_for_retry(self, tmp_path: Path) -> None:
+    def test_a_failed_dispatch_keeps_the_nodes_filed(self, tmp_path: Path) -> None:
+        """Renamed from ``test_failed_dispatch_leaves_nodes_unfiled_for_retry``.
+
+        The dispatch used to BE the filing, so its failure meant nothing had
+        been filed. ``create_issue`` has already succeeded by the time the
+        session is dispatched (#3418), so retrying the node would open a second
+        issue for the same failure — the exact duplication this change exists to
+        stop. The node stays recorded; only the session id is left alone so the
+        earlier one is not overwritten with nothing.
+        """
         node = "tests/unit/test_a.py::test_new"
         prev = self._prev(
             failing_tests=[], dispatched_nodes=[], dispatched_session_id="earlier-session"
@@ -1947,8 +2060,34 @@ class TestMainDispatchPersistence:
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, prev, [node], None)
         assert rc == 0
         _assert_per_node_dispatch(mock_dispatch, [node])
+        assert saved["dispatched_nodes"] == [node]
+        assert saved["dispatched_session_id"] == "earlier-session"
+
+    def test_a_failed_create_leaves_the_node_unfiled_for_retry(self, tmp_path: Path) -> None:
+        """The retry guarantee, re-pinned to the step that now owns filing.
+
+        A create that returned no number filed nothing, so the node must stay
+        out of ``dispatched_nodes`` or the next run suppresses it against an
+        issue that does not exist — and with no dispatch either, since there is
+        no issue to investigate.
+        """
+        node = "tests/unit/test_a.py::test_new"
+        prev = self._prev(
+            failing_tests=[], dispatched_nodes=[], dispatched_session_id="earlier-session"
+        )
+        rc, saved, mock_dispatch, _ = self._run_main(
+            # None matches what the real dispatch returns for an empty issue
+            # list, which is what a night with nothing filed hands it.
+            tmp_path,
+            prev,
+            [node],
+            None,
+            create_return=None,
+        )
+        assert rc == 0
         assert saved["dispatched_nodes"] == []
         assert saved["dispatched_session_id"] == "earlier-session"
+        mock_dispatch.assert_called_once_with([], dry_run=False)
 
     def test_successful_dispatch_records_the_nodes_and_session(self, tmp_path: Path) -> None:
         node = "tests/unit/test_a.py::test_new"
@@ -2006,10 +2145,13 @@ class TestMainDispatchPersistence:
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel") as disp,
             patch.object(nrt, "open_issues", return_value={}),
             patch.object(nrt, "closed_issue_dispositions", return_value={}),
+            patch.object(nrt, "create_issue", side_effect=_numbering(_AUTO_NUMBER)) as create,
+            patch.object(nrt, "comment_on_issue", return_value=True),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
             rc = nrt.main()
+        self.mock_create = create
         return rc, disp, pre_existing
 
     def test_dry_run_propagates_to_per_node_dispatch(self, tmp_path: Path) -> None:
@@ -2066,6 +2208,8 @@ class TestMainDispatchPersistence:
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sentinel"),
             patch.object(nrt, "open_issues", return_value={}),
             patch.object(nrt, "closed_issue_dispositions", return_value={}),
+            patch.object(nrt, "create_issue", return_value=nrt.DRY_RUN_ISSUE_NUMBER),
+            patch.object(nrt, "comment_on_issue", return_value=True),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="deadbeef"),
         ):
@@ -2074,15 +2218,23 @@ class TestMainDispatchPersistence:
         assert rc == 0
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing, "--dry-run persisted state"
 
-    def test_seed_prompt_carries_the_exact_umbrella_title(self, tmp_path: Path) -> None:
+    def test_the_seed_umbrella_is_created_with_the_exact_title(self, tmp_path: Path) -> None:
+        """Replaces ``test_seed_prompt_carries_the_exact_umbrella_title``.
+
+        The title used to be asserted through the prompt because an agent was
+        the one typing it. main() now hands it to ``create_issue`` itself, so
+        the title is asserted at the create and the resulting number is what
+        travels to the investigation dispatch.
+        """
         standing = ["a::t1", "b::t2"]
         rc, saved, mock_dispatch, _ = self._run_main(tmp_path, {}, standing, "seed-session")
         assert rc == 0
-        prompt = mock_dispatch.call_args.kwargs.get("prompt")
         expected_title = (
             f"Nightly regression baseline: {len(standing)} nodes absorbed on {saved['head_commit']}"
         )
-        assert expected_title in prompt
+        assert self.mock_create.call_args.args[0] == expected_title
+        umbrella_number = self.mock_create.side_effect.numbers[0]
+        assert mock_dispatch.call_args.args[0] == [(umbrella_number, expected_title)]
 
     def test_dispatched_hash_is_gone_from_persisted_state(self, tmp_path: Path) -> None:
         prev = self._prev(failing_tests=[], dispatched_hash="stale", dispatched_nodes=[])
@@ -2116,27 +2268,54 @@ class TestMainDispatchPersistence:
         assert mock_dispatch.call_count == 1
         assert mock_dispatch.call_args.kwargs.get("slug_suffix") == "baseline"
 
-    def test_failed_seed_dispatch_writes_no_baseline(self, tmp_path: Path) -> None:
-        """A seed whose umbrella dispatch failed must not record a baseline.
+    def test_an_unprovable_seed_umbrella_writes_no_baseline(self, tmp_path: Path) -> None:
+        """Replaces ``test_failed_seed_dispatch_writes_no_baseline``.
 
-        Recording it would mark every absorbed node as filed while no umbrella
-        issue exists, so compute_dispatch_set() would suppress the entire
-        night-one population forever -- behind a Telegram message that reads
-        like success. Refusing to save state means the next run re-seeds and
-        retries, matching _fatal()'s invariant that no untrusted run reaches
-        save_last_run().
+        The evidence gate moved: a failed triage dispatch used to be fatal,
+        because the agent was the thing that would have filed. The umbrella now
+        exists (or does not) before any session is dispatched, so the fatal
+        condition is ``file_seed_umbrella`` returning no NUMBER — deliberately
+        keyed on the issue rather than on the session, since a session proves
+        nothing about issue existence.
+
+        Recording a baseline anyway would mark every absorbed node as filed
+        while no umbrella exists, so compute_dispatch_set() would suppress the
+        entire night-one population forever -- behind a Telegram message that
+        reads like success. Refusing to save state means the next run re-seeds
+        and retries, matching _fatal()'s invariant that no untrusted run
+        reaches save_last_run().
         """
         prev = {"collection": ["tests/unit/"], "failing_tests": [], "dispatched_nodes": []}
         pre_existing_bytes = json.dumps(prev)
         nrt.LAST_RUN_FILE = tmp_path / "last_run.json"
         confirmed = ["a::t1", "b::t2", "c::t3"]
-        rc, _, _, log_text = self._run_main(tmp_path, prev, confirmed, None)
+        rc, _, mock_dispatch, log_text = self._run_main(
+            tmp_path, prev, confirmed, "seed-session", create_return=None
+        )
 
         assert rc == 1
         # The pre-existing state file is byte-identical -- no baseline written.
         assert nrt.LAST_RUN_FILE.read_text() == pre_existing_bytes
         # And the reason is recorded, rather than a success-shaped log line.
-        assert "seed triage dispatch failed" in log_text
+        assert "no re-baseline umbrella issue can be proven to exist" in log_text
+        # The investigation session is never dispatched against an issue that
+        # cannot be proven to exist.
+        mock_dispatch.assert_not_called()
+
+    def test_a_failed_seed_dispatch_still_writes_the_baseline(self, tmp_path: Path) -> None:
+        """The other half of the moved gate, which had no coverage before.
+
+        The umbrella is proven to exist by the time the dispatch is attempted,
+        so a session that fails to spawn costs the run its root-cause narrative
+        and nothing else. Treating it as fatal would throw away a baseline whose
+        issue is already on the tracker, and the next run would re-seed against
+        it and mint nothing but noise.
+        """
+        confirmed = ["a::t1", "b::t2"]
+        rc, saved, _, _ = self._run_main(tmp_path, {}, confirmed, None)
+        assert rc == 0
+        assert saved["seeded_nodes"] == sorted(confirmed)
+        assert saved.get("dispatched_session_id") is None
 
     def test_seeded_nodes_are_carried_forward_across_runs(self, tmp_path: Path) -> None:
         """The seed's umbrella coverage must outlive the night it was written.
@@ -2164,7 +2343,7 @@ class TestMainDispatchPersistence:
         rc, saved, mock_dispatch, log_text = self._run_main(tmp_path, prev, [node], None)
 
         assert rc == 0
-        mock_dispatch.assert_called_once_with([], dispositions=[], dry_run=False)
+        mock_dispatch.assert_called_once_with([], dry_run=False)
         assert saved["seeded_nodes"] == [node]
         # The regression is still recorded even though no issue is filed.
         assert "newly-confirmed failure" in log_text
@@ -2350,6 +2529,22 @@ class TestLoadEnvOrDie:
 class TestFatalPathIntegration:
     """Every pre-alert exit from main() routes through _fatal() (issue #2823)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_filing_on_a_fatal_path(self, monkeypatch: pytest.MonkeyPatch):
+        """A fatal exit must reach no tracker write, and must not be able to.
+
+        Every case here trips before dispatch, so an unstubbed ``create_issue``
+        would sit here silently until a refactor moved one of these exits past
+        the filing step — at which point the test would start opening real
+        issues instead of failing. Stubbing it to fail makes that a red test.
+        """
+        monkeypatch.setattr(
+            nrt, "create_issue", lambda *a, **k: pytest.fail("a fatal path filed an issue")
+        )
+        monkeypatch.setattr(
+            nrt, "comment_on_issue", lambda *a, **k: pytest.fail("a fatal path commented")
+        )
+
     def _base_patches(self, tmp_path: Path):
         nrt.LOG_FILE = tmp_path / "test.log"
         nrt.LOCK_FILE = tmp_path / "nightly_tests.lock"
@@ -2501,6 +2696,8 @@ class TestPersistedStateKeyInvariance:
             patch.object(nrt, "maybe_dispatch_triage_session", return_value="sess-1"),
             patch.object(nrt, "open_issues", return_value={}),
             patch.object(nrt, "closed_issue_dispositions", return_value={}),
+            patch.object(nrt, "create_issue", side_effect=_numbering()),
+            patch.object(nrt, "comment_on_issue", return_value=True),
             patch.object(nrt, "run_ttft_gate", return_value=None),
             patch.object(nrt, "_get_head_commit", return_value="headsha"),
             patch.object(nrt, "classify_against_baseline", return_value=classification),
