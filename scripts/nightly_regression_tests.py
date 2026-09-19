@@ -386,6 +386,58 @@ ENVIRONMENTAL_ESCALATE_NIGHTS_DEFAULT = 3
 # unrecorded, so the next run retries it rather than losing the recurrence.
 GH_COMMENT_TIMEOUT_SECONDS = 60
 
+# Creating one issue. Same bound and same posture as the comment above: a create
+# that cannot be confirmed is logged, spends no budget, and leaves its node
+# unrecorded, so the next run retries it against fresh GitHub state rather than
+# this run retrying a non-idempotent POST (#3418).
+GH_CREATE_TIMEOUT_SECONDS = 60
+
+# Break-glass kill switch for detector-side issue creation (#3418). Default ON:
+# the detector is the sole creator of nightly issues, so off means the tracker
+# learns nothing new tonight. `NIGHTLY_AUTO_FILE=false` stops creates while
+# leaving recurrence comments intact and logging every would-be filing in full,
+# so an operator can file by hand from logs/nightly_tests.log. It is a kill
+# switch, not a second code path — there is no flag that hands filing back to a
+# triage session, because that is the bug this exists to have ended.
+#
+# Read at CALL time via resolve_bool_knob(), never at import, for the same
+# reason every NIGHTLY_* knob is: `.env` only reaches os.environ through
+# load_env_or_die() inside main(), so an import-time read would freeze this
+# default and make the vault setting inert on the one surface that matters.
+#
+# Provisional/tunable via NIGHTLY_AUTO_FILE. On is the only defensible default;
+# the evidence that would move it is detector-side filing misbehaving on a real
+# night, and the remedy for that is a revert, not a permanent config change.
+AUTO_FILE_DEFAULT = True
+
+# Every body the detector creates carries this marker. The digest is taken over
+# the finding's stable IDENTITY — the node id for a per-node issue,
+# cascade_state_key() for an umbrella, `seed:{head_commit}` for a re-baseline
+# seed — and never over the rendered title: a human can retitle an issue and a
+# future version of this script can change cascade_title(), so a title is a
+# rendering rather than a key, which is why resolve_cascade_issue() already
+# prefers a signature over one. GitHub's REST API offers no Idempotency-Key and
+# no conditional POST (#3418 research), so a caller-generated token embedded in
+# the created resource is the only exact key available: it turns "is this a
+# twin?" into an exact-match question for the in-run collision check, for a
+# human grepping the tracker the morning after, and for any later sweep.
+FINGERPRINT_MARKER_TEMPLATE = "<!-- nightly-fingerprint: {digest} -->"
+
+# How much of a failure message a created issue body carries verbatim. GitHub
+# rejects a body over 65536 characters outright, and a filed issue that posts
+# nothing is worse than a truncated one.
+#
+# Provisional/tunable. 4000 characters is several screens of traceback, which is
+# more than a triager reads before opening the node's own log; evidence that
+# would move it is a real filed issue whose cause was cut off by the truncation.
+MAX_ISSUE_BODY_MESSAGE_CHARS = 4000
+
+# How many node IDs a created cascade umbrella body lists before truncating to a
+# count. Same reasoning and same bound as MAX_COMMENT_NODES_LISTED below: the
+# counts above the list are the load-bearing part, and a body over GitHub's
+# limit files nothing at all.
+MAX_ISSUE_BODY_NODES_LISTED = 200
+
 # How many node IDs a recurrence comment lists before truncating to a count.
 # GitHub rejects an issue comment body over 65536 characters outright, and the
 # motivating cascade (278 nodes) already renders ~31KB — a whole-suite poisoning
@@ -480,6 +532,32 @@ def resolve_int_knob(name: str, default: int) -> int:
     except ValueError:
         log(f"WARNING: malformed {name}={raw!r} — using default {default}")
         return default
+
+
+def resolve_bool_knob(name: str, default: bool) -> bool:
+    """Read a boolean knob from the environment at CALL time.
+
+    The bool sibling of :func:`resolve_int_knob`, and it exists for the same
+    reason: this script only populates ``os.environ`` from the vault ``.env``
+    inside ``main()`` (:func:`load_env_or_die`), so an import-time read of a
+    nightly knob is always the in-code default whatever the vault says — which
+    would make an operator's break-glass setting inert on the only surface it is
+    ever set for.
+
+    ``1/true/yes/on`` and ``0/false/no/off`` are accepted, case-insensitively.
+    Anything else degrades to ``default`` with a warning rather than raising: a
+    bad knob must never take down the nightly, and reading a typo as ``False``
+    would silently disable a whole night of filing.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    log(f"WARNING: malformed {name}={raw!r} — using default {default}")
+    return default
 
 
 def load_last_run(run_file: Path | None = None) -> dict:
@@ -2316,6 +2394,203 @@ def comment_on_issue(number: int, body: str, *, dry_run: bool = False) -> bool:
 
     log(f"Commented recurrence on issue #{number}")
     return True
+
+
+# Truthy, obviously-not-real issue number a --dry-run create returns, the same
+# device and the same reason as DRY_RUN_SESSION_ID: the caller's success path
+# (budget, recorded, cascade_issues, the dispatch payload) is exercised exactly
+# as it would be for real, while nothing is created. A dry run never persists
+# state, so this number never reaches a state file.
+DRY_RUN_ISSUE_NUMBER = -1
+
+_ISSUE_URL_NUMBER_RE = re.compile(r"/issues/(\d+)/?$")
+
+
+def finding_fingerprint(identity: str) -> str:
+    """The sha256 digest of one finding's stable identity.
+
+    See :data:`FINGERPRINT_MARKER_TEMPLATE` for what ``identity`` may be and why
+    it is never the rendered title.
+    """
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def fingerprint_marker(identity: str) -> str:
+    """The hidden fingerprint line every body the detector creates carries."""
+    return FINGERPRINT_MARKER_TEMPLATE.format(digest=finding_fingerprint(identity))
+
+
+def seed_identity(head_commit: str | None) -> str:
+    """The fingerprint identity of a re-baseline seed umbrella: ``seed:{head_commit}``.
+
+    The seed's identity is the baseline it declares, which is the commit — the
+    same value already embedded in ``seed_title``. Two re-baseline retries at one
+    commit therefore resolve to one fingerprint (the absorbed node count can
+    shift between retries while the baseline being declared does not), and
+    re-baselines at different commits to different ones.
+    """
+    return f"seed:{head_commit or 'unknown'}"
+
+
+def _issue_body_failure_section(test: dict | None) -> list[str]:
+    """The failing-phase label and its (truncated) output, for a created body.
+
+    A filed issue has to say what is broken without its reader opening the run
+    logs, so the phase text goes in the body verbatim up to
+    :data:`MAX_ISSUE_BODY_MESSAGE_CHARS`.
+    """
+    for phase in ("setup", "call", "teardown"):
+        message = _phase_text(test, phase) if test else ""
+        if not message:
+            continue
+        truncated = message[:MAX_ISSUE_BODY_MESSAGE_CHARS]
+        suffix = "" if truncated == message else "\n... (truncated)"
+        return [
+            f"- Failing phase: `{phase}`",
+            "",
+            "```",
+            truncated + suffix,
+            "```",
+        ]
+    return ["- Failure output: unavailable in this run's report"]
+
+
+def node_issue_body(node: str, test: dict | None, *, run_at: str, head_commit: str | None) -> str:
+    """The body of a newly created per-node issue.
+
+    Leads with the failure, because a morning's triage is read from the title and
+    the first paragraph; the fingerprint marker is last and hidden.
+    """
+    return "\n".join(
+        [
+            "The nightly regression detector confirmed this test failing on a serial "
+            "re-run, and it has not been triaged before.",
+            "",
+            f"- Node: `{node}`",
+            f"- Run: `{run_at}`",
+            f"- HEAD: `{head_commit or 'unknown'}`",
+            *_issue_body_failure_section(test),
+            "",
+            fingerprint_marker(node),
+        ]
+    )
+
+
+def cascade_issue_body(cascade: dict, *, run_at: str, head_commit: str | None) -> str:
+    """The body of a newly created cascade umbrella issue — ONE issue, node list collapsed.
+
+    Leads with the shared error rather than the node list, which is collapsed and
+    truncated: the blast-radius counts above it are what say whether the defect
+    is getting worse, and a body over GitHub's size limit files nothing at all.
+    """
+    nodes = cascade["nodes"]
+    files = sorted({n.split("::", 1)[0] for n in nodes})
+    workers = ", ".join(cascade["workers"]) or "serial run"
+    if cascade.get("kind") == "body":
+        shape = (
+            f"{len(nodes)} test node(s) whose test BODIES all failed with the same "
+            "normalized error line — one shared root cause, not independent findings"
+        )
+        error_label = "Shared failure line (normalized)"
+    else:
+        shape = (
+            f"{len(nodes)} test node(s) that all errored in fixture SETUP with the "
+            f"same message, on xdist worker(s) {workers}"
+        )
+        error_label = "Shared setup error (normalized)"
+    listed = nodes[:MAX_ISSUE_BODY_NODES_LISTED]
+    lines = [
+        f"The nightly regression detector found a CASCADE: {shape}. This is ONE "
+        f"defect, not {len(nodes)}.",
+        "",
+        f"- {error_label}: `{cascade['message']}`",
+        f"- Blast radius: {len(nodes)} node(s) across {len(files)} file(s)",
+        f"- xdist worker(s): {workers}",
+        f"- Run: `{run_at}`",
+        f"- HEAD: `{head_commit or 'unknown'}`",
+        "",
+        "<details><summary>Affected node IDs</summary>",
+        "",
+        *[f"- `{n}`" for n in listed],
+    ]
+    if len(nodes) > len(listed):
+        lines.append(f"- ...and {len(nodes) - len(listed)} more")
+    lines += ["", "</details>", "", fingerprint_marker(cascade_state_key(cascade))]
+    return "\n".join(lines)
+
+
+def create_issue(title: str, body: str, *, dry_run: bool = False) -> int | None:
+    """Create one GitHub issue and return the number GitHub assigned, else ``None``.
+
+    The sibling :func:`comment_on_issue` never had, and after #3418 the only path
+    from a nightly finding to a new issue. Filing used to be delegated to a
+    triage session's own ``gh issue create``, where a replayed turn re-ran the
+    whole loop and one night's 8 findings became 24 issues; the detector now
+    creates its own, at a Python call site with the dedup check and the create
+    adjacent.
+
+    **Never retries, and no caller may add one.** GitHub's REST API supports no
+    ``Idempotency-Key`` header and no conditional request on an unsafe method, so
+    a retried create is not a retry — it is a second issue. Any failure returns
+    ``None``; the caller then spends no budget and leaves the finding out of
+    ``recorded``, so the next run re-reads live GitHub state and files it then.
+    That is exactly :func:`comment_on_issue`'s contract, for the same reason.
+
+    **Argv contract**, the same concern :func:`provision_baseline_worktree`
+    documents for its own subprocesses: list-form argv, never ``shell=True``; the
+    body on **stdin** via ``--body-file -``, because a cascade body carries a
+    collapsed node list that has been 278 entries long; and every title arrives
+    pre-prefixed (``f"Nightly regression: {node}"``, ``cascade["title"]``,
+    ``seed_title``), so a report-derived string can never lead with a ``-`` and be
+    read as a flag. Titles used to reach only a prompt string and now reach ``gh``
+    argv, which is why this is stated here rather than left to be re-derived. An
+    empty title or body is refused before any subprocess runs.
+
+    The number is parsed from the issue URL ``gh`` prints on stdout, strictly:
+    whitespace-only output, or a URL with no trailing integer, is a failure
+    rather than a guess, because the number is load-bearing for the budget, for
+    ``cascade_issues``, and for the investigation dispatch. ``gh issue create``
+    has no ``--json`` flag (verified against gh 2.101.0: ``unknown flag: --json``,
+    which would fail flag parsing and file nothing), so the URL is the only
+    machine-readable thing it offers.
+    """
+    if not title.strip() or not body.strip():
+        log(f"WARNING: refusing to create an issue with an empty title or body: {title!r}")
+        return None
+
+    if dry_run:
+        log(f"[DRY RUN] Would create issue {title!r} ({len(body)} chars); nothing filed")
+        return DRY_RUN_ISSUE_NUMBER
+
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "create", "--title", title, "--body-file", "-"],
+            cwd=PROJECT_DIR,
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=GH_CREATE_TIMEOUT_SECONDS,  # timeout-guard: allow
+        )
+        if result.returncode != 0:
+            log(
+                f"WARNING: `gh issue create` for {title!r} exited {result.returncode}: "
+                f"{(result.stderr or '').strip()}"
+            )
+            return None
+        match = _ISSUE_URL_NUMBER_RE.search((result.stdout or "").strip())
+        if match is None:
+            log(
+                f"WARNING: could not read an issue number from `gh issue create` stdout "
+                f"for {title!r}: {result.stdout!r}"
+            )
+            return None
+        number = int(match.group(1))
+    except Exception as exc:  # noqa: BLE001  # TimeoutExpired, FileNotFoundError, ...
+        log(f"WARNING: could not create issue {title!r} ({exc})")
+        return None
+
+    log(f"Filed issue #{number}: {title}")
+    return number
 
 
 def _recurrence_header(run_at: str, head_commit: str | None) -> list[str]:
