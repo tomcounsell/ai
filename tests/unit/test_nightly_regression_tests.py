@@ -26,6 +26,43 @@ import nightly_regression_tests as nrt
 SEARCH_TOKENS = re.compile(r"--search|gh search|search all|search open", re.I)
 
 
+# Argv prefixes that mutate the real tracker. A unit test that reaches one of
+# these has escaped its stubs: during this feature's build, informational runs of
+# this file created 94 real GitHub issues (#3423-#3516) because four fake-`gh`
+# harnesses stubbed ``comment_on_issue`` but not ``create_issue``. The fixture
+# below makes that failure loud instead of indistinguishable from a pass.
+_FORBIDDEN_GH_ARGV = (
+    ("gh", "issue", "create"),
+    ("gh", "issue", "close"),
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_tracker_writes(monkeypatch: pytest.MonkeyPatch):
+    """Fail any test in this module whose argv would write to the live tracker.
+
+    Autouse and module-wide on purpose: a future test that forgets to stub
+    ``create_issue`` must fail rather than quietly file an issue. Tests that patch
+    ``subprocess.run`` themselves shadow this guard, which is correct — they are
+    not shelling out at all. If this fixture ever fires, fix the test; never the
+    guard.
+    """
+    real_run = subprocess.run
+
+    def guarded_run(argv, *args, **kwargs):
+        as_tuple = tuple(str(a) for a in argv) if isinstance(argv, (list, tuple)) else (str(argv),)
+        for forbidden in _FORBIDDEN_GH_ARGV:
+            if as_tuple[: len(forbidden)] == forbidden:
+                pytest.fail(
+                    "a unit test reached the live tracker: "
+                    f"{' '.join(as_tuple)} — stub create_issue/comment_on_issue"
+                )
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
+    return guarded_run
+
+
 def _assert_per_node_dispatch(mock_dispatch, nodes: list[str]) -> None:
     """Assert the per-node dispatch went out for ``nodes`` with matching dispositions.
 
