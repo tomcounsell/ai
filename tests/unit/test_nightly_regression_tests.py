@@ -1307,6 +1307,89 @@ class TestPreFileDedup:
         assert nrt.open_issues() is None
 
 
+class TestCreateIssue:
+    """Mirrors ``TestPreFileDedup`` one-for-one, but for the write side (#3418).
+
+    ``create_issue`` is deliberately modelled on ``comment_on_issue`` two hundred
+    lines above it: same argv shape, same stdin discipline, same "log and return
+    falsy, never raise" posture, same ``dry_run`` short-circuit. These tests pin
+    that contract directly rather than through ``dispatch_findings``.
+    """
+
+    def test_argv_shape_and_body_on_stdin_and_cwd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        seen: dict[str, object] = {}
+
+        class FakeResult:
+            returncode = 0
+            stdout = "https://github.com/owner/repo/issues/4242\n"
+            stderr = ""
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            seen["kwargs"] = kwargs
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        title = "Nightly regression: tests/unit/test_a.py::test_1"
+        assert nrt.create_issue(title, "the body") == 4242
+        assert seen["argv"] == ["gh", "issue", "create", "--title", title, "--body-file", "-"]
+        assert title not in seen["argv"][-2:], "the title is not smuggled onto stdin"
+        assert seen["kwargs"]["cwd"] == nrt.PROJECT_DIR
+        assert seen["kwargs"]["input"] == "the body"
+
+    def test_dry_run_creates_nothing_and_returns_a_truthy_sentinel(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(
+            nrt.subprocess, "run", lambda *a, **k: pytest.fail("dry run must not shell out")
+        )
+        result = nrt.create_issue("title", "body", dry_run=True)
+        # Truthy-but-not-a-real-number: the caller's success path (budget,
+        # recorded, cascade_issues, the dispatch payload) runs exactly as it
+        # would for a real create, but the number is the DRY_RUN_ISSUE_NUMBER
+        # sentinel, never a number GitHub actually assigned.
+        assert result == nrt.DRY_RUN_ISSUE_NUMBER
+        assert result
+
+    @pytest.mark.parametrize("side", ["title", "body"])
+    def test_empty_title_or_body_is_refused_before_any_subprocess(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, side: str
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+        monkeypatch.setattr(
+            nrt.subprocess, "run", lambda *a, **k: pytest.fail("must not shell out")
+        )
+        title = "" if side == "title" else "Nightly regression: a::t1"
+        body = "" if side == "body" else "some body"
+        assert nrt.create_issue(title, body) is None
+
+    @pytest.mark.parametrize("failure", ["rc", "raise", "garbage", "empty"])
+    def test_create_issue_returns_none_on_any_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+    ) -> None:
+        monkeypatch.setattr(nrt, "LOG_FILE", tmp_path / "nightly.log")
+
+        class FakeResult:
+            returncode = 1 if failure == "rc" else 0
+            stdout = {
+                "garbage": "not a url",
+                "empty": "   ",
+            }.get(failure, "https://github.com/owner/repo/issues/1")
+            stderr = "boom"
+
+        def fake_run(argv, **kwargs):
+            if failure == "raise":
+                raise FileNotFoundError("gh missing")
+            return FakeResult()
+
+        monkeypatch.setattr(nrt.subprocess, "run", fake_run)
+        assert nrt.create_issue("Nightly regression: a::t1", "body") is None
+
+
 class TestRecurrenceComments:
     """A recurrence that is not written down has not been reported (#3134)."""
 
@@ -1710,6 +1793,205 @@ class TestSurvivorsReachCreateIssue:
         assert dispatched == [(number, f"cascade umbrella {title!r} (9 node(s))")]
         assert "prompt" not in kwargs
         assert "dispositions" not in kwargs
+
+
+class TestFilingIdempotence:
+    """The regression test for #3382-#3405 and the whole #3170 class.
+
+    Run ``dispatch_findings`` twice against ONE in-memory ``FakeGitHub`` whose
+    ``create_issue`` mutates the open-issue map, the way a real create does.
+    Nothing prior to #3418 could write this test: the duplication happened
+    inside an LLM session's subprocess with no assertable surface. Now the
+    create is a module function reached from one Python loop, so a second pass
+    over the same findings has to create nothing.
+    """
+
+    def test_second_pass_creates_zero_and_comments_once_per_node(
+        self, fake_github: FakeGitHub
+    ) -> None:
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        report = body_failure_report(nodes)
+
+        first = dispatch_with(fake_github, nodes=nodes, report=report, open_map={}, closed_map={})
+        assert sorted(first.filed_issues) == sorted(nodes)
+        assert len(fake_github.create_calls) == len(nodes)
+        created_numbers = sorted(fake_github.open_map.values())
+
+        second = dispatch_with(fake_github, nodes=nodes, report=report, closed_map={})
+        assert len(fake_github.create_calls) == len(nodes), "pass two created zero new issues"
+        assert second.filed_issues == {}
+        assert second.issues_filed == 0
+        assert sorted(fake_github.commented) == created_numbers
+        assert second.comments_posted == len(nodes)
+        assert sorted(second.recorded) == sorted(nodes)
+
+
+class TestPreCreateRefreshComments:
+    """A fake whose opening read is empty but the pre-create refresh is not.
+
+    Models an external actor filing the same title between this run's opening
+    ``open_issues()`` read and its per-survivor create: the refresh is the last
+    check before a create, so it must win over a stale opening snapshot.
+    """
+
+    def test_refresh_hit_comments_instead_of_creating(self, fake_github: FakeGitHub) -> None:
+        survivor = "tests/unit/test_new.py::test_3"
+        title = f"Nightly regression: {survivor}"
+        outcome = dispatch_with(
+            fake_github,
+            nodes=[survivor],
+            report=body_failure_report([survivor]),
+            open_map={},
+            closed_map={},
+            refresh_map={title: 555},
+        )
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [555]
+        assert outcome.recorded == [survivor]
+        assert "Pre-create refresh found #555" in log_text()
+
+    def test_refresh_hit_whose_comment_fails_leaves_the_node_unrecorded(
+        self, fake_github: FakeGitHub
+    ) -> None:
+        survivor = "tests/unit/test_new.py::test_3"
+        title = f"Nightly regression: {survivor}"
+        fake_github.comment_hook = lambda number, body: False
+        outcome = dispatch_with(
+            fake_github,
+            nodes=[survivor],
+            report=body_failure_report([survivor]),
+            open_map={},
+            closed_map={},
+            refresh_map={title: 555},
+        )
+        assert fake_github.create_calls == []
+        assert outcome.recorded == []
+        assert outcome.comments_posted == 0
+
+
+class TestFingerprintCollisionIsLogged:
+    """A second finding resolving to a fingerprint already filed THIS run.
+
+    The report-only decision is deliberate (#3418 plan, ``## Decisions`` #2): no
+    read-back, no closing of a twin. The anti-assertion below pins that the
+    detector never gains a close privilege it was not given.
+    """
+
+    def test_second_finding_with_the_same_fingerprint_is_skipped(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(nrt, "finding_fingerprint", lambda identity: "collided-fingerprint")
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        outcome = dispatch_with(
+            fake_github,
+            nodes=nodes,
+            report=body_failure_report(nodes),
+            open_map={},
+            closed_map={},
+        )
+        assert len(fake_github.create_calls) == 1
+        assert outcome.filed_issues == {
+            nodes[0]: fake_github.open_map[f"Nightly regression: {nodes[0]}"]
+        }
+        assert nodes[1] not in outcome.recorded
+
+        text = log_text()
+        assert "WARNING" in text
+        assert "fingerprint collision" in text
+        assert "collided-fingerprint" in text
+        assert f"node {nodes[1]}" in text
+
+        # Anti-assertion: report-only. No close ever shelled out, and no close
+        # helper exists on the module for a caller to reach for.
+        assert not hasattr(nrt, "close_issue")
+        assert "gh issue close" not in text
+
+
+class TestIssueBudgetSpendsOnlyConfirmedCreates:
+    """The cap bounds confirmed creates, never intentions (#3418)."""
+
+    def test_cap_creates_exactly_the_cap_and_defers_the_rest(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NIGHTLY_MAX_ISSUES_PER_RUN", "2")
+        nodes = [f"tests/unit/test_{c}.py::test_1" for c in "abcd"]
+        outcome = dispatch_with(
+            fake_github,
+            nodes=nodes,
+            report=body_failure_report(nodes),
+            open_map={},
+            closed_map={},
+        )
+        assert len(fake_github.create_calls) == 2
+        assert outcome.issues_filed == 2
+        deferred = [n for n in nodes if n not in outcome.recorded]
+        assert len(deferred) == 2
+        assert sorted(outcome.recorded) == nodes[:2]
+        assert "Issue budget reached" in log_text()
+
+    def test_a_failed_create_spends_no_budget_so_the_next_survivor_can_still_file(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NIGHTLY_MAX_ISSUES_PER_RUN", "1")
+        calls = {"n": 0}
+
+        def hook(title: str, body: str):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+            fake_github._next_number += 1
+            number = fake_github._next_number
+            fake_github.open_map[title] = number
+            return number
+
+        fake_github.create_hook = hook
+        nodes = ["tests/unit/test_a.py::test_1", "tests/unit/test_b.py::test_2"]
+        outcome = dispatch_with(
+            fake_github,
+            nodes=nodes,
+            report=body_failure_report(nodes),
+            open_map={},
+            closed_map={},
+        )
+        assert calls["n"] == 2
+        # The failed first create spent no budget, so the cap of 1 still
+        # affords the second node's create.
+        assert outcome.issues_filed == 1
+        assert nodes[0] not in outcome.recorded
+        assert nodes[1] in outcome.recorded
+        assert "Create failed" in log_text()
+
+
+class TestKillSwitchSuppressesCreates:
+    """``NIGHTLY_AUTO_FILE`` is read at call time, never captured at import.
+
+    Set after ``nightly_regression_tests`` is already imported, which is the
+    only way this test can distinguish an import-time read (always the in-code
+    default, since the vault ``.env`` is only loaded inside ``main()``) from the
+    call-time read the module actually implements (:func:`resolve_bool_knob`).
+    """
+
+    def test_kill_switch_suppresses_creates_but_not_comments(
+        self, fake_github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NIGHTLY_AUTO_FILE", "false")
+        already_open = "tests/unit/test_open.py::test_1"
+        survivors = ["tests/unit/test_new.py::test_2", "tests/unit/test_new.py::test_3"]
+        nodes = [already_open, *survivors]
+        outcome = dispatch_with(
+            fake_github,
+            nodes=nodes,
+            report=body_failure_report(nodes),
+            open_map={f"Nightly regression: {already_open}": 11},
+            closed_map={},
+        )
+        assert fake_github.create_calls == []
+        assert fake_github.commented == [11]
+        assert outcome.recorded == [already_open]
+        for survivor in survivors:
+            assert survivor not in outcome.recorded
+        text = log_text()
+        assert text.count("NIGHTLY_AUTO_FILE is off") == len(survivors)
 
 
 class TestHandleIntegrityTrip:
