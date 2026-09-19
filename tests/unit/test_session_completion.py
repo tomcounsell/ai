@@ -82,7 +82,7 @@ def test_drafter_calls_omit_system_prompt_via_ast():
     )
 
 
-@pytest.mark.parametrize("call_lineno_anchor", [786, 848])
+@pytest.mark.parametrize("call_lineno_anchor", [768, 830])
 def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     """Sanity: the documented drafter call lines still resolve to a harness call.
 
@@ -106,8 +106,12 @@ def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     ``_INTERRUPTED_SENT_DEDUP_TTL_SECONDS``, ``_OUTBOX_TTL``) near the top
     of the file; shifted again by 6 lines in #3091 when the fresh-record
     re-read in ``_complete_agent_session`` moved onto
-    ``AgentSession.rows_for_session_id`` and dropped its local sorts.
-    Current anchors: 786 (Pass 1) / 848 (Pass 2).
+    ``AgentSession.rows_for_session_id`` and dropped its local sorts; shifted
+    again by 18 lines in #3410 when ``_judge_completion_novelty`` moved onto
+    ``agent.llm.run_typed`` (the inline tool schema and client construction
+    went, a ``CompletionNoveltyDecision`` model, its ``LLMTask`` and the
+    judge's system prompt constant arrived near the top of the file).
+    Current anchors: 768 (Pass 1) / 830 (Pass 2).
 
     A future refactor that moves these calls is fine as long as the AST
     guard above stays green, but this test pins the documented anchors so
@@ -124,3 +128,63 @@ def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
         f"session_completion.py (window {start}-{end}). If the file has been "
         f"refactored, update the anchor in this test and in docs/plans/sdlc-1148.md."
     )
+
+
+class TestJudgeCompletionNovelty:
+    """C10 (#3410): the borderline-band judge runs on ``run_typed`` with
+    ``COMPLETION_NOVELTY`` under the hotfix #1055 call shape."""
+
+    @staticmethod
+    def _install(monkeypatch, fake):
+        import agent.session_completion as sc
+
+        monkeypatch.setattr(sc, "run_typed", fake)
+
+    async def test_restate_suppresses_and_new_delivers(self, monkeypatch):
+        from agent.session_completion import (
+            _COMPLETION_NOVELTY_JUDGE_TIMEOUT_S,
+            COMPLETION_NOVELTY,
+            CompletionNoveltyDecision,
+            _judge_completion_novelty,
+        )
+        from tests.helpers.llm_fakes import FakeRunTyped
+
+        fake = FakeRunTyped(result=CompletionNoveltyDecision(action="restate", reason="same"))
+        self._install(monkeypatch, fake)
+        assert (
+            await _judge_completion_novelty(
+                prior_text="PR #12 opened",
+                prior_ts=0.0,
+                draft_text="Opened PR #12",
+                project_key="valor",
+            )
+            is True
+        )
+        call = fake.last
+        assert call.task is COMPLETION_NOVELTY
+        assert call.project_key == "valor"
+        assert call.kwargs["sdk_timeout"] == _COMPLETION_NOVELTY_JUDGE_TIMEOUT_S == 3.0
+        assert call.kwargs["slot_timeout"] == 3.0
+        assert call.kwargs["max_retries"] == 0
+        assert call.kwargs["hard_timeout"] is None
+        assert call.kwargs["system"]
+        assert "PR #12 opened" in call.prompt and "Opened PR #12" in call.prompt
+
+        fake.result = CompletionNoveltyDecision(action="new", reason="adds the commit sha")
+        assert (
+            await _judge_completion_novelty(prior_text="a", prior_ts=0.0, draft_text="b") is False
+        )
+
+    @pytest.mark.parametrize("reason", ["timeout", "slot_timeout", "transport", "validation"])
+    async def test_any_llm_failure_delivers_with_a_warning(self, monkeypatch, caplog, reason):
+        """Fail-open: every ``LLMCallError`` returns False (deliver) and logs the
+        judge failure at WARNING; the completion still ships when the judge is down."""
+        from agent.session_completion import _judge_completion_novelty
+        from tests.helpers.llm_fakes import failing
+
+        self._install(monkeypatch, failing(reason))
+        with caplog.at_level("WARNING", logger="agent.session_completion"):
+            result = await _judge_completion_novelty(prior_text="a", prior_ts=0.0, draft_text="b")
+
+        assert result is False
+        assert any("novelty judge failed" in r.message for r in caplog.records)

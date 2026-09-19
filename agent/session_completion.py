@@ -6,8 +6,12 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import BaseModel
+
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -282,15 +286,51 @@ _INTERRUPTED_SENT_DEDUP_TTL_SECONDS = 120
 # whole output-handler module -- see the comment at the call site).
 _OUTBOX_TTL = 3600
 
-# SDK-level timeout for the Haiku completion-novelty judge's direct Anthropic
-# SDK call. Deliberately NOT settings.timeouts.anthropic_sdk_s (issue #1968
-# audit): that field is paired with anthropic_hard_s for the #1925
-# double-timeout backend-call sites (agent/llm/wrapper.py,
-# agent/memory_extraction.py). This judge call fails open (returns "deliver")
-# on any error/timeout, so a short fast-fail cap is the deliberately-correct
-# choice, not a duplicate to collapse into the 30s backend value. Mirrors
-# bridge/read_the_room.py's RTR_SDK_TIMEOUT.
+# SDK-level timeout for the completion-novelty judge's leg, passed to
+# run_typed as both sdk_timeout and slot_timeout. Deliberately NOT
+# settings.timeouts.anthropic_sdk_s (issue #1968 audit): that is the Anthropic
+# leg's default timer for the thinking sites. This judge call fails open
+# (returns "deliver") on any error/timeout, so a short fast-fail cap is the
+# deliberately-correct choice, not a duplicate to collapse into the 30s
+# backend value. Mirrors bridge/read_the_room.py's RTR_SDK_TIMEOUT.
 _COMPLETION_NOVELTY_JUDGE_TIMEOUT_S = 3.0
+
+
+class CompletionNoveltyDecision(BaseModel):
+    """The borderline-band judge's verdict (C10, #3410)."""
+
+    action: Literal["restate", "new"]
+    reason: str = ""
+
+
+# Fail-safe: any LLMCallError is False (deliver); the completion ships when the judge is down.
+COMPLETION_NOVELTY = LLMTask(
+    site="session_completion.novelty",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.MEDIUM,
+)
+
+# The judge's system prompt. The local name avoids the kwarg-shaped token
+# tests/unit/test_session_completion.py forbids anywhere in this file (Risk 4
+# regression guard for the harness drafter calls); this judge is NOT a
+# harness call, it goes through agent.llm.run_typed.
+_COMPLETION_NOVELTY_JUDGE_SYSTEM = (
+    "You are a strict deduplication judge for a developer-assistant chat. "
+    "A sub-skill already sent a message to the user during this session. "
+    "Now the session-completion runner wants to send a final summary. "
+    "Your job: decide whether the final summary is materially-new for the "
+    "user (deliver) or substantially the same as the prior message (suppress).\n"
+    "\n"
+    "Bias toward 'new' when the prior message is older than ~2 minutes — "
+    "the user has likely scrolled away and benefits from a fresh anchor. "
+    "Bias toward 'restate' when the prior message is recent and the draft "
+    "is a reformatted version with no new outcomes (no new PR/commit/error/decision).\n"
+    "\n"
+    "Return action 'restate' when the draft is substantially the same content as "
+    "the prior message (suppress), or 'new' when the draft adds material outcomes "
+    "the user does not yet have (deliver), with a short machine-readable reason."
+)
 
 
 def _pipeline_complete_lock_key(parent_id: str) -> str:
@@ -431,126 +471,68 @@ async def _judge_completion_novelty(
     prior_text: str,
     prior_ts: float,
     draft_text: str,
+    *,
+    project_key: str | None = None,
 ) -> bool:
-    """Borderline-band Haiku judge: is ``draft_text`` materially new vs.
+    """Borderline-band judge: is ``draft_text`` materially new vs.
     ``prior_text`` (sent at ``prior_ts``)?
 
     Returns ``True`` to suppress (judge says "restate"), ``False`` to send
-    (judge says "new" OR any failure). Fail-open: every exception path
+    (judge says "new" OR any failure). Fail-open: every ``LLMCallError``
     returns ``False`` so the completion still ships when the judge is down.
 
-    Pattern adapted from ``bridge/read_the_room.py::read_the_room`` —
-    ``semaphore_slot`` + ``async with anthropic.AsyncAnthropic(timeout=...)``,
-    NO outer ``asyncio.wait_for``. Uses the ``MODEL_FAST`` (Haiku) family
-    with a single ``tool_use`` block.
+    Runs on ``agent.llm.run_typed`` with ``COMPLETION_NOVELTY`` (#3410) under
+    the hotfix #1055 call shape shared with ``bridge/read_the_room.py`` and
+    ``bridge/promise_gate.py``: ``sdk_timeout`` and ``slot_timeout`` are the
+    3 s cap, ``max_retries=0`` bounds one attempt, and ``hard_timeout=None``
+    keeps every coroutine-level timeout off the call path. The only timer
+    around the live request is the leg's SDK-level client timeout, and the
+    slot wait is bounded separately inside the leg.
+
+    ``project_key`` is the parent session's project, read by the router for
+    charter §7 eligibility; ``None`` fails closed to the subscription backend.
     """
+    import time as _t
+
+    # Format relative time delta so the judge can weight stale-vs-fresh
+    # context (Risk 1 mitigation: bias toward "new" when the prior is
+    # older than ~2 minutes — the user has likely scrolled away).
     try:
-        import time as _t
+        age_secs = max(0, int(_t.time() - float(prior_ts)))
+    except Exception:
+        age_secs = 0
+    if age_secs < 60:
+        relative_time = f"{age_secs}s ago"
+    elif age_secs < 3600:
+        relative_time = f"{age_secs // 60}m ago"
+    else:
+        relative_time = f"{age_secs // 3600}h ago"
 
-        import anthropic
+    user_payload = (
+        f"## Prior message (sent {relative_time})\n{prior_text}\n\n"
+        f"## Final-summary draft about to be sent\n{draft_text}\n\n"
+        "Return your verdict: 'restate' or 'new'."
+    )
 
-        from agent.anthropic_client import semaphore_slot
-        from config.models import MODEL_FAST
-        from utils.api_keys import get_anthropic_api_key
-
-        # Format relative time delta so the judge can weight stale-vs-fresh
-        # context (Risk 1 mitigation: bias toward "new" when the prior is
-        # older than ~2 minutes — the user has likely scrolled away).
-        try:
-            age_secs = max(0, int(_t.time() - float(prior_ts)))
-        except Exception:
-            age_secs = 0
-        if age_secs < 60:
-            relative_time = f"{age_secs}s ago"
-        elif age_secs < 3600:
-            relative_time = f"{age_secs // 60}m ago"
-        else:
-            relative_time = f"{age_secs // 3600}h ago"
-
-        tool = {
-            "name": "completion_novelty_verdict",
-            "description": (
-                "Decide whether the candidate completion-summary draft restates the "
-                "prior message or contains materially-new information for the user."
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["restate", "new"],
-                        "description": (
-                            "'restate' = draft is substantially the same content as "
-                            "the prior message; suppress. 'new' = draft adds material "
-                            "outcomes the user does not yet have; deliver."
-                        ),
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Short machine-readable reason string.",
-                    },
-                },
-                "required": ["action", "reason"],
-            },
-        }
-
-        # Local variable name is `judge_system` (NOT the obvious-looking
-        # alternative) because tests/unit/test_session_completion.py forbids
-        # that literal kwarg-shaped token anywhere in this file — Risk 4
-        # regression guard for the harness drafter calls. This Haiku judge
-        # is NOT a harness call (it talks to the Anthropic SDK directly).
-        judge_system = (
-            "You are a strict deduplication judge for a developer-assistant chat. "
-            "A sub-skill already sent a message to the user during this session. "
-            "Now the session-completion runner wants to send a final summary. "
-            "Your job: decide whether the final summary is materially-new for the "
-            "user (deliver) or substantially the same as the prior message (suppress).\n"
-            "\n"
-            "Bias toward 'new' when the prior message is older than ~2 minutes — "
-            "the user has likely scrolled away and benefits from a fresh anchor. "
-            "Bias toward 'restate' when the prior message is recent and the draft "
-            "is a reformatted version with no new outcomes (no new PR/commit/error/decision)."
+    try:
+        decision = await run_typed(
+            user_payload,
+            CompletionNoveltyDecision,
+            task=COMPLETION_NOVELTY,
+            project_key=project_key,
+            system=_COMPLETION_NOVELTY_JUDGE_SYSTEM,
+            sdk_timeout=_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S,
+            slot_timeout=_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S,
+            max_retries=0,
+            hard_timeout=None,
         )
-        user_payload = (
-            f"## Prior message (sent {relative_time})\n{prior_text}\n\n"
-            f"## Final-summary draft about to be sent\n{draft_text}\n\n"
-            "Return your verdict via the completion_novelty_verdict tool."
-        )
-
-        async with semaphore_slot():
-            async with anthropic.AsyncAnthropic(
-                api_key=get_anthropic_api_key(),
-                timeout=_COMPLETION_NOVELTY_JUDGE_TIMEOUT_S,
-            ) as client:
-                message = await client.messages.create(
-                    model=MODEL_FAST,
-                    max_tokens=200,
-                    system=judge_system,
-                    tools=[tool],
-                    tool_choice={"type": "tool", "name": "completion_novelty_verdict"},
-                    messages=[{"role": "user", "content": user_payload}],
-                )
-
-        content = getattr(message, "content", None) or []
-        for block in content:
-            if (
-                getattr(block, "type", None) == "tool_use"
-                and getattr(block, "name", None) == "completion_novelty_verdict"
-            ):
-                payload = getattr(block, "input", None) or {}
-                action = payload.get("action")
-                if action == "restate":
-                    return True
-                if action == "new":
-                    return False
-        # No usable tool_use block → fail-open (deliver).
-        return False
-    except Exception as judge_err:
+    except LLMCallError as judge_err:
         logger.warning(
-            "[completion-runner] Haiku novelty judge failed (non-fatal, defaulting to deliver): %s",
+            "[completion-runner] novelty judge failed (non-fatal, defaulting to deliver): %s",
             judge_err,
         )
         return False
+    return decision.action == "restate"
 
 
 def _queue_completion_suppress_reaction(
@@ -1008,6 +990,7 @@ async def _deliver_pipeline_completion(
                                 prior_text=prior["text"],
                                 prior_ts=prior["ts"],
                                 draft_text=final_text,
+                                project_key=getattr(parent, "project_key", None),
                             )
                             if judge_verdict:
                                 suppress_decision = True
