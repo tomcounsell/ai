@@ -188,12 +188,12 @@ class TestDeclaredSites:
         assert DECLARATION_ROOTS == ("agent", "bridge", "worker", "tools", "reflections", "scripts")
 
     def test_matches_a_text_census_of_the_roots(self):
-        """Every ``LLMTask(`` outside ``tasks.py`` and tests is a discovered declaration."""
+        """Every module-level ``NAME = LLMTask(`` outside tests is a discovered declaration."""
         grep = _REAL_RUN(
             [
                 "/usr/bin/grep",
-                "-rln",
-                "LLMTask(",
+                "-rlE",
+                r"^[A-Za-z_][A-Za-z0-9_]* *(: *[A-Za-z_]+ *)?= *LLMTask\(",
                 "--include=*.py",
                 *DECLARATION_ROOTS,
             ],
@@ -202,10 +202,6 @@ class TestDeclaredSites:
             cwd=Path(tasks_mod.__file__).resolve().parents[2],
         ).stdout.split()
         census = {
-            p
-            for p in grep
-            if p != "agent/llm/tasks.py"
-            and "/tests/" not in p
-            and not p.rsplit("/", 1)[-1].startswith("test_")
+            p for p in grep if "/tests/" not in p and not p.rsplit("/", 1)[-1].startswith("test_")
         }
         assert census == {d.path for d in SITES}

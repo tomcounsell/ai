@@ -190,17 +190,19 @@ async def test_run_typed_raises_typed_and_fires_all_channels(broken_loader, capt
     from pydantic import BaseModel
 
     from agent.llm import run_typed
+    from agent.llm.tasks import Backend, LLMTask, TaskKind
     from agent.llm.wrapper import LLMCallError, LLMStackIncompatible
 
     class Out(BaseModel):
         answer: str
 
+    task = LLMTask(site="test.import_safety", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC)
     compat = broken_loader
     assert compat._DEGRADED is None, "no startup hook has run in this process"
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
     with pytest.raises(LLMStackIncompatible) as excinfo:
-        await run_typed("hello", Out)
+        await run_typed("hello", Out, task=task)
 
     # Subclassing is what keeps every existing fail-safe working unchanged.
     assert isinstance(excinfo.value, LLMCallError)

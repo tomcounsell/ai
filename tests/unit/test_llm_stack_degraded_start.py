@@ -455,6 +455,89 @@ async def test_two_axis_split_leaves_the_local_leg_running(predicate, captures):
     assert result.decision == "ok"
 
 
+async def test_fallback_under_a_signature_break_raises_typed_not_provider_error(
+    predicate, captures
+):
+    """The fallback leg runs the Anthropic guard before it runs Anthropic.
+
+    An Ollama-routed ``valor`` call passes the primary guard (loader axis
+    only). When granite fails and the route falls back to Anthropic, the
+    wrapper runs ``_guard_stack("run_typed:fallback", signature_axis=True)``
+    first, so a signature-broken pair surfaces as ``LLMStackIncompatible``
+    (an ``LLMCallError`` every fail-safe already catches) rather than as a
+    provider ``TypeError`` from inside pydantic_ai (#3410).
+    """
+    import dataclasses
+    import unittest.mock
+
+    from pydantic import BaseModel
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    class Decision(BaseModel):
+        decision: str
+
+    def _granite_down(messages, info: AgentInfo):
+        raise RuntimeError("connection refused")
+
+    def _never_anthropic(model_name, *, provider):
+        raise AssertionError("the Anthropic leg must not be reached past a failed guard")
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(
+        real,
+        OpenAIChatModel=lambda model_name, *, provider: FunctionModel(
+            _granite_down, model_name=model_name
+        ),
+        OllamaProvider=lambda *, openai_client: object(),
+        AsyncOpenAI=_FakeAsyncOpenAI,
+        AnthropicModel=_never_anthropic,
+    )
+    predicate(_signature_break())
+
+    with unittest.mock.patch.object(wrapper_mod, "_load_stack", lambda: fake):
+        with pytest.raises(LLMStackIncompatible, match="run_typed:fallback"):
+            await wrapper_mod.run_typed("hello", Decision, task=LOCAL, project_key="valor")
+    assert len(captures) == 1, "the fallback guard's resolution fires the alert"
+
+
+def test_skip_guard_reaches_neither_guard(monkeypatch, captures):
+    """``_skip_guard=True`` (the compat probe's one call site) never resolves the flag.
+
+    Driven through the real caller, ``compat._check_network``: with the
+    process already memoized as signature-degraded, a guarded call would
+    raise ``LLMStackIncompatible``; the probe returns ``None`` (success)
+    because it skips both guard calls, and the memo is untouched.
+    """
+    import dataclasses
+
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    import utils.api_keys as api_keys_mod
+    from agent.llm.backends import anthropic as anthropic_leg
+
+    def _respond(messages, info: AgentInfo) -> ModelResponse:
+        tool_name = info.output_tools[0].name if info.output_tools else None
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"answer": "hi"})])
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(
+        real,
+        AnthropicModel=lambda model_name, *, provider: FunctionModel(
+            _respond, model_name=model_name
+        ),
+    )
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+    monkeypatch.setattr(anthropic_leg, "get_anthropic_api_key", lambda: "fake-test-key")
+    monkeypatch.setattr(api_keys_mod, "get_anthropic_api_key", lambda: "fake-test-key")
+    monkeypatch.setattr(compat, "_DEGRADED", True)
+    monkeypatch.setattr(compat, "_COMPATIBLE", False)
+
+    assert compat._check_network("0.0.0", "9.9.9") is None
+    assert compat._DEGRADED is True and compat._COMPATIBLE is False
+    assert captures == []
+
+
 class _FakeAsyncOpenAI:
     """An ``AsyncOpenAI`` stand-in that only supports ``async with``."""
 

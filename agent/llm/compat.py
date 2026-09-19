@@ -115,11 +115,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
 logger = logging.getLogger(__name__)
 
 # Sentinel token shared by every break-glass path in this module, so one
 # grep over the logs finds them all.
 SENTINEL = "LLM_STACK_COMPAT"
+
+# The auto-bump ``llm`` gate's live probe (``_check_network``): one billed
+# ``run_typed`` call on the Anthropic leg. THINKING short-circuits at the
+# router's first rule, so the probe exercises the real Anthropic transport
+# whatever key or eligibility state this process is in. Fail-safe: none;
+# the probe reports the exception as the gate's reason.
+NETWORK_PROBE = LLMTask(
+    site="compat.network_probe", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
 
 # Marker-directory seam. Production default is cwd-independent and matches
 # ``ui/app.py``'s ``Path(__file__).parent.parent / "data"`` so the dashboard
@@ -523,7 +534,7 @@ def _check_network(
         answer: str
 
     try:
-        asyncio.run(run_typed("Reply with answer=hi", _Probe, _skip_guard=True))
+        asyncio.run(run_typed("Reply with answer=hi", _Probe, task=NETWORK_PROBE, _skip_guard=True))
     except Exception as exc:
         return CompatResult(
             compatible=False,
