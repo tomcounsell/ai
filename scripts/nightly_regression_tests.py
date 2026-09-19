@@ -110,10 +110,10 @@ file existed.
 
 **This script creates every issue it files** (:func:`create_issue`, #3418), so a
 number is known the instant an issue exists and is recorded against the finding's
-signature in the same run. Filing used to be delegated to a triage session that
-ran ``gh issue create`` from a prompt, where a replayed turn re-ran the whole
-filing loop: one night's 8 findings became 24 issues. The session is still
-dispatched, to investigate and comment on numbers that already exist.
+signature in the same run. A filing loop that runs once, in Python, under the
+run lock is what makes that guarantee hold. The investigation session is
+dispatched afterward, to investigate and comment on numbers that already exist;
+it never creates one.
 
 ``cascade_issues`` is per-machine state, like ``dispatched_nodes``. The open-issue
 read (:func:`open_issues`) is the only check that spans machines. It is refreshed
@@ -2406,12 +2406,11 @@ def seed_issue_body(
 def create_issue(title: str, body: str, *, dry_run: bool = False) -> int | None:
     """Create one GitHub issue and return the number GitHub assigned, else ``None``.
 
-    The sibling :func:`comment_on_issue` never had, and after #3418 the only path
-    from a nightly finding to a new issue. Filing used to be delegated to a
-    triage session's own ``gh issue create``, where a replayed turn re-ran the
-    whole loop and one night's 8 findings became 24 issues; the detector now
-    creates its own, at a Python call site with the dedup check and the create
-    adjacent.
+    The only path from a nightly finding to a new issue (#3418). Every create
+    happens at this one Python call site, with the dedup check and the create
+    adjacent, so the check and the act cannot drift apart. Filing correctness
+    cannot depend on an actor whose turn may be replayed: 8 findings once became
+    24 issues that way, which is the defect this call site exists to foreclose.
 
     **Never retries, and no caller may add one.** GitHub's REST API supports no
     ``Idempotency-Key`` header and no conditional request on an unsafe method, so
@@ -2426,8 +2425,8 @@ def create_issue(title: str, body: str, *, dry_run: bool = False) -> int | None:
     collapsed node list that has been 278 entries long; and every title arrives
     pre-prefixed (``f"Nightly regression: {node}"``, ``cascade["title"]``,
     ``seed_title``), so a report-derived string can never lead with a ``-`` and be
-    read as a flag. Titles used to reach only a prompt string and now reach ``gh``
-    argv, which is why this is stated here rather than left to be re-derived. An
+    read as a flag. A report-derived title reaches ``gh`` argv here, not merely a
+    prompt string, which is why the contract is stated rather than re-derived. An
     empty title or body is refused before any subprocess runs.
 
     The number is parsed from the issue URL ``gh`` prints on stdout, strictly:
@@ -2854,10 +2853,9 @@ class DispatchOutcome:
     def issues_filed(self) -> int:
         """How many issues this run created, derived from the numbers GitHub returned.
 
-        Deliberately not an independently-mutated counter. It used to be
-        incremented the instant a triage-session dispatch returned a session id,
-        before any issue existed — which is how a run that created 24 issues for
-        8 nodes was measured, budgeted, and logged as 8 (#3418). Deriving it from
+        Deliberately not an independently-mutated counter. A counter incremented
+        before an issue exists is how a run that created 24 issues for 8 nodes
+        was measured, budgeted, and logged as 8 (#3418). Deriving the count from
         :attr:`filed_issues` means there is no second number that could disagree
         with the first.
         """
