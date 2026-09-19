@@ -361,38 +361,37 @@ Inbound message → bridge resolves project → classifier declares its task →
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #3420] Lane B: local backend evaluation (granite baseline measurements, GLiClass ONNX candidate, comparison runner, records on case `1ec40086`). Depends on lane A's `LLMTask`, router, and leg protocol. Its design is fixed in this document; its own plan is written against the merged interfaces.
-- [SEPARATE-SLUG #3421] Lane C: decisions transport, shadow mode, Jev paired comparison, per-site flip decisions, C15 pre-screen cascade if the numbers justify it. Depends on lanes A and B (a flip needs a local fallback and a per-backend threshold).
+- [SEPARATE-SLUG #3420] Lane B: the GLiClass ONNX candidate (`local_zero_shot` leg, optional extra, lazy weights), compared against granite with lane A's runner on the sites granite missed first, landing per site by the same bar. Depends on lane A's `LLMTask`, router, leg protocol, and runner. Its design is fixed in this document; its own plan is written against the merged interfaces.
+- [SEPARATE-SLUG #3421] Lane C: the decisions transport (`decisions` leg, question builder from Research finding 1, metering under purpose `structured_decision`, live-listing probe test), compared with lane A's runner and landing per site by the same bar, always with the Ollama leg as its fallback and never on a site whose local backend missed the bar (no single external provider on a hot path). Per Tom's answer 2 there is no shadow phase: the comparison is the builder's iteration evidence, and PR approval is the gate. Depends on lane A; can run in parallel with #3420.
 - [SEPARATE-SLUG #3422] Emoji reaction choice as a structured-decision site (72-way `choice` over `EMOJI_LABELS`). Today's path makes no model call; adding one is a new capability with no ground truth, and Tom's ordering says local first.
 - [EXTERNAL] Any change to the RSI charter's §7 boundary or to the $10/day unit-2 budget. Tom-owned.
 - [EXTERNAL] Choosing a second structured-decision provider when one appears. The leg protocol admits it; the choice is a research investigation on the case.
 
-Anti-criteria for the code-level No-Gos are in Verification: no emoji embedding call path remains, no site is switched on by default, and no raw Anthropic client remains in the migrated modules.
+Anti-criteria for the code-level No-Gos are in Verification: no emoji embedding call path remains, no per-site backend switch exists in settings, and no raw Anthropic, Ollama, or OpenRouter client remains in the migrated modules.
 
 ## Update System
 
-- `pyproject.toml`: lane A adds no dependency. Lane B (#3420) adds the optional extra `classification-local`; `/update`'s `uv sync` does not install extras by default, so the local zero-shot leg raises `LLMCallError("classification-local extra not installed")` and the router falls back to the incumbent on machines without it. `tools/doctor` reports the extra's presence.
-- Model weights for the local zero-shot leg (lane B) download lazily to `data/models/gliclass/` on first use with a checksum; no update-script step. Documented in `docs/infra/llm-task-routing.md`.
-- Config propagation: five new `MODELS__*` keys and one `TIMEOUTS__DECISIONS_S`, all with in-code defaults and `# @optional` in `.env.example`; nothing to copy into the vault `.env`.
-- Migrations: none. No Popoto schema changes (new evidence kinds are string values on an existing model).
-- Services: after lane A merges, `./scripts/valor-service.sh restart` (the bridge imports the wrapper); `/update` already does this.
+- `pyproject.toml`: lane A adds no dependency. #3420 adds the optional extra `classification-local`; `/update`'s `uv sync` does not install extras by default, so the local zero-shot leg raises `LLMCallError("classification-local extra not installed")` and the router falls back on machines without it. `tools/doctor` reports the extra's presence.
+- Ollama on every bridge machine must serve `granite4.1:3b` (already required by C12 and C13 on `main`) and should run with `OLLAMA_KEEP_ALIVE=-1` and `OLLAMA_NUM_PARALLEL=4` (Risk 5). These are launchd environment settings on the Ollama service, outside this repo; `docs/infra/llm-task-routing.md` records them and `tools/doctor` reports the loaded model and keep-alive so a machine without them is visible after `/update`. No update-script change.
+- Config propagation: none. No new env keys in lane A; `TIMEOUTS__LOCAL_TYPED_HARD_S` keeps its name with narrowed semantics.
+- Migrations: none. No Popoto field changes; the `EVIDENCE_KINDS` vocabulary widens by one string value on an existing `IndexedField`.
+- Services: after lane A merges, `./scripts/valor-service.sh restart` (the bridge and worker import the wrapper); `/update` already does this.
 
 ## Agent Integration
 
-- No new `[project.scripts]` entry for the agent. The comparison runner is a developer tool invoked as `python -m tools.classification_eval` (lane B); results reach the agent through `valor-improve case show` and `valor-improve investigation list --case 1ec40086ca1d422e90ef747775ff7f64`, which already exist.
-- The bridge calls the new code directly: `bridge/telegram_bridge.py` startup calls `tools.improvement_eligibility.warm_cache(ACTIVE_PROJECTS)`; every classifier in `bridge/` reaches the router through `agent.llm.run_typed`.
-- Integration tests: `tests/unit/test_llm_task_taxonomy.py` (enumeration and parity); `tests/unit/test_llm_router_eligibility.py` feeds a message mapped to a client project through each switched classification site with the switch on and asserts the subscription backend was called, and asserts `email_cs.triage` and `tools/email_cs/agents.py` resolve to the subscription backend under every switch combination; `tests/integration/test_bridge_routing_project_key.py` asserts `should_respond_async` passes `project["_key"]` through to the three routing classifiers.
+- No new `[project.scripts]` entry for the agent. The comparison runner is a developer tool invoked as `python -m tools.classification_eval`; results reach the agent through `valor-improve case show` and `valor-improve investigation list --case 1ec40086ca1d422e90ef747775ff7f64`, which already exist.
+- The bridge and the worker call the new code directly: `bridge/telegram_bridge.py` startup calls `tools.improvement_eligibility.warm_cache(ACTIVE_PROJECTS)` and `worker/__main__.py::_run_worker` calls `warm_cache(list(projects))` before its loops start; every classifier in `bridge/` and the two session-side judges reach the router through `agent.llm.run_typed`.
+- Integration tests: `tests/unit/test_llm_task_taxonomy.py` (enumeration and parity); `tests/unit/test_llm_router_eligibility.py` feeds a message mapped to a client project through every `OLLAMA`-backed classification site and asserts the Anthropic leg was called, feeds a `valor` message through the same sites with `gh` unavailable and asserts the Ollama leg was called, and asserts `email_cs.triage` and `tools/email_cs/agents.py` resolve to the Anthropic leg for every project key; `tests/integration/test_bridge_routing_project_key.py` asserts `should_respond_async` passes `project["_key"]` through to the three routing classifiers; `tests/unit/test_worker_startup_warm_cache.py` asserts `_run_worker` warms the cache for its loaded projects.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/llm-task-taxonomy.md`: the two kinds, the `LLMTask` declaration, the full site table (id, kind, incumbent, error-cost tier, §7 class) that the parity test reads, the router rules in order, eligibility and the fail-closed rule, the switches and shadow mode, the flip policy tiers and bars, and where comparison records live.
-- [ ] Update `docs/features/nonharness-llm-wrapper.md`: the `run_typed` signature, the leg protocol, the "Migrated Call Sites" table extended to every site (read-the-room no longer "skipped"; C5, C9, C10, C11, C14, C15 added), and a pointer to the taxonomy page.
-- [ ] Update `docs/features/local-model-policy.md`: granite is the local fallback leg for every classification site; the classifier/generation constant split now lives in the taxonomy.
-- [ ] Update `docs/features/config-timeout-catalog.md`: `TIMEOUTS__DECISIONS_S`.
-- [ ] Update `docs/features/env-completeness-validation.md` only if a new sigil is needed (expected: none; the six keys are `# @optional`).
+- [ ] Create `docs/features/llm-task-taxonomy.md`: the two kinds, the `LLMTask` declaration, the full site table (id, kind, landed backend, error-cost tier, §7 class, comparison record id) that the parity test reads, the router rules in order, eligibility with the `valor` pin and the fail-closed rule, the acceptance bar tiers and criteria as the reviewer applies them, and where comparison records live.
+- [ ] Update `docs/features/nonharness-llm-wrapper.md`: the `run_typed` signature, the leg protocol, the hotfix #1055 invariant as the legs now carry it (`slot_timeout`, SDK timers, `hard_timeout` outside the leg), the "Migrated Call Sites" table extended to every site (read-the-room no longer "skipped"; C5, C9, C10, C11, C14, C15 added), `run_typed_local` removed, and a pointer to the taxonomy page.
+- [ ] Update `docs/features/local-model-policy.md`: granite is the declared backend for the classification sites that cleared the bar and the fallback rule; the classifier/generation constant split now lives in the taxonomy.
+- [ ] Update `docs/features/config-timeout-catalog.md`: `TIMEOUTS__LOCAL_TYPED_HARD_S` is the Ollama leg's SDK-level timer.
 - [ ] Add a row to `docs/features/README.md` for the taxonomy page.
-- [ ] Create `docs/infra/llm-task-routing.md`: OpenRouter decisions endpoint (URL, auth, pricing with retrieval date, 32k context, alpha status), unit-2 metering purpose `structured_decision`, local model weights location and size, and the rollback (empty the switches, restart).
+- [ ] Create `docs/infra/llm-task-routing.md`: Ollama service requirements for the hot path (`granite4.1:3b` pulled, `OLLAMA_KEEP_ALIVE=-1`, `OLLAMA_NUM_PARALLEL=4`, how to set them on launchd), the comparison runner's reference-arm spend (Haiku and gemma, metered purposes), and the rollback (set a site's `backend` back and restart). #3421 adds the decisions endpoint section.
 
 ### Inline Documentation
 - [ ] Module docstrings for `agent/llm/tasks.py`, `router.py`, `backends/__init__.py` stating the protocol and the fail-closed rule.
