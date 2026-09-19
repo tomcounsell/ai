@@ -8,13 +8,13 @@ site added later is covered without touching this file:
   classification site reaches the Anthropic leg;
 * a ``valor`` message through the same sites, with ``gh`` unavailable and
   the cache cold, reaches the Ollama leg (the code pin, not the cache);
-* every ``client_only`` site (``email_cs.*`` once Task 4 declares them)
-  reaches the Anthropic leg for every project key, ``valor`` included.
+* every ``client_only`` site (the two ``email_cs.*`` declarations) reaches
+  the Anthropic leg for every project key, ``valor`` included.
 
 The ``email_cs`` assertion is written against ``client_only`` semantics: it
 parametrizes over whatever the registry carries, and a dedicated case pins
-the two email_cs site ids once their declarations exist (skipped until
-then, so the file is green at Task 2 and grows with Task 4).
+the two email_cs site ids so a declaration that drops ``client_only`` fails
+by name.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ OLLAMA_CLASSIFICATION = [
     and not d.task.client_only
 ]
 CLIENT_ONLY = [d.task for d in SITES if d.task.client_only]
-EMAIL_CS_SITES = ("email_cs.triage", "email_cs.agents")
+EMAIL_CS_SITES = ("email_cs.triage", "email_cs.action")
 
 
 class Decision(BaseModel):
@@ -109,10 +109,8 @@ class TestClientOnlySites:
 
     @pytest.mark.parametrize("site", EMAIL_CS_SITES)
     def test_email_cs_sites_are_declared_client_only(self, site):
-        """Pins the two email_cs declarations once Task 4 lands them."""
+        """Pins the two email_cs declarations (charter §7: client work)."""
         by_site = {d.task.site: d.task for d in SITES}
-        if site not in by_site:
-            pytest.skip(f"{site} not declared yet (Task 4 adds it)")
         task = by_site[site]
         assert task.client_only is True
         assert task.backend is Backend.ANTHROPIC
