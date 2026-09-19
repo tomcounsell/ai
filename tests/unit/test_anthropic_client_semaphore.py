@@ -153,7 +153,8 @@ class TestSharedModuleIsTheOnlyConstructor:
             "agent/session_completion.py",  # mirrors read_the_room #1055 pattern (issue #1262)
             "bridge/read_the_room.py",  # hotfix #1055 pattern (issue #1193)
             "bridge/promise_gate.py",  # mirrors read_the_room #1055 pattern
-            "agent/llm/backends/anthropic.py",  # run_typed's Anthropic leg (#1925, #3410) -- semaphore_slot() + fresh client
+            # run_typed's Anthropic leg (#1925, #3410): semaphore_slot() + fresh client
+            "agent/llm/backends/anthropic.py",
             # Compat predicate (#3001). The one exemption that does NOT acquire
             # the semaphore, because it makes no call: the client is
             # constructed with a dummy key purely so `inspect.signature` can

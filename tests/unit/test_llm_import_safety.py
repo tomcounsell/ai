@@ -22,8 +22,9 @@ interpreter has no cache to be wrong about.
 The shim is a directory placed first on ``PYTHONPATH`` holding
 ``anthropic`` and ``openai`` modules and a ``pydantic_ai`` package whose
 bodies raise ``ImportError`` (``openai`` joined when the Ollama leg's
-``AsyncOpenAI`` entered the loader, #3410). ``PYTHONPATH`` entries precede site-packages, so the child
-resolves the raising stubs rather than the installed distributions.
+``AsyncOpenAI`` entered the loader, #3410). ``PYTHONPATH`` entries precede
+site-packages, so the child resolves the raising stubs rather than the
+installed distributions.
 
 The alert / typed-exception half of the contract stays **in process** and
 lives at the bottom of this file: with the loader raising, ``run_typed``

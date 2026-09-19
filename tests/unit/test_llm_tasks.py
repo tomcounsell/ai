@@ -11,9 +11,9 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
 
 from agent.llm import LLMCallError, LLMStackIncompatible
+from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
 
 
 class TestEnums:

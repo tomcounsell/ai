@@ -353,7 +353,9 @@ class TestHardTimeoutBound:
 
         _install_function_model(monkeypatch, fn)
 
-        result = await run_typed("classify: hello there", Classification, task=THINK, hard_timeout=None)
+        result = await run_typed(
+            "classify: hello there", Classification, task=THINK, hard_timeout=None
+        )
         assert result.label == "x"
 
 

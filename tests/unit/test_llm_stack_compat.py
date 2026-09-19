@@ -332,7 +332,6 @@ def _install_fake_network_stack(monkeypatch, fn):
         return FunctionModel(fn, model_name=model_name)
 
     import utils.api_keys as api_keys_mod
-
     from agent.llm.backends import anthropic as anthropic_leg
 
     real = wrapper_mod._load_stack()

@@ -37,24 +37,24 @@ and their own keyword fields with defaults; nothing for them lives here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class TaskKind(str, Enum):
+class TaskKind(StrEnum):
     """The two populations of non-harness LLM calls."""
 
     CLASSIFICATION = "classification"
     THINKING = "thinking"
 
 
-class Backend(str, Enum):
+class Backend(StrEnum):
     """A backend leg under ``agent/llm/backends/``; the value is its log token."""
 
     ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
 
 
-class ErrorCost(str, Enum):
+class ErrorCost(StrEnum):
     """What a wrong answer costs at the site; sets the acceptance-bar tier."""
 
     LOW = "low"
