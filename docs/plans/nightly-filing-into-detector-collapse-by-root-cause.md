@@ -1500,6 +1500,14 @@ repo path the plan references exists, all four repo-mandated sections are presen
 and all three `## Prerequisites` check commands pass (`gh auth`, repo resolves to `tomcounsell/ai`,
 `.venv/bin/pytest` present).
 
+**How this round was dispatched.** Rounds 6 and 7 were dispatched by invoking `/do-plan` and
+`/do-plan-critique` directly rather than through `/sdlc`, because the router blocked at guard **G2**
+(`critique cycle cap reached (5/2)`) and escalated to the human — which is why `revision_round_count`
+reads 5 against a `MAX_CRITIQUE_CYCLES` of 2 on a lane that reached a clean verdict. The cap was
+**spent under explicit PM authorization for exactly one more revision + critique round, not raised**:
+`FEATURES__MAX_CRITIQUE_CYCLES` is untouched, so any future revision-demanding verdict on this lane
+trips G2 again immediately and needs a fresh human ruling.
+
 ---
 
 ## Decisions
