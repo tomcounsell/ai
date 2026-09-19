@@ -1,9 +1,10 @@
 # Nightly Triage Dispatch
 
 Two additions to the nightly regression detector (`scripts/nightly_regression_tests.py`)
-that decide when it runs and what it does with a finding: an advisory run lock, and a
-fire-and-forget triage session dispatch that hands newly-confirmed failures to an Eng
-session for investigation and issue-filing.
+that decide when it runs and what it does with a finding: an advisory run lock, and the
+filing/investigation split — the detector files every issue itself and comments on every
+recurrence, then hands the issues it just created to an Eng session for root-cause
+investigation and comment only.
 
 The detector notifies nothing — the GitHub issue tracker is its only output surface
 (#3134). A third addition shipped here originally, a best-effort LLM summarizer for
@@ -12,7 +13,9 @@ the Telegram alert text, and was deleted with the alert it existed to compose.
 ## Status
 
 Shipped — Scope 1 of issue #2192 ("Nightly Regression Detector & Sentry Triage
-Reflection — Dedupe, Readable Alerts, Auto-Triage").
+Reflection — Dedupe, Readable Alerts, Auto-Triage"). Filing moved from the
+triage session into the detector itself, with a per-body fingerprint and an
+in-run collision report, in issue #3418.
 
 **Scope 2 (Sentry triage reflection, `reflections/sentry_triage.py`) is a separate,
 later PR and has not shipped yet.** This document covers Scope 1 only — the nightly
@@ -39,116 +42,171 @@ before it could safely act).
 
 Builds on the existing nightly detector (see `docs/features/nightly-regression-tests.md`
 for the base run: pytest, serial re-confirmation, delta computation). This feature adds
-three behaviors layered around that base run:
+two behaviors layered around that base run:
 
 1. **Run lock** — prevents two overlapping launchd invocations from both running the
    suite and both filing against the same window.
-2. **Triage dispatch** — spins up an Eng session to investigate failures that have not
-   been triaged before and file a GitHub issue, deduped per node against BOTH the open
-   and closed sets: an open issue gets a recurrence comment instead of a second issue,
-   and a title closed `NOT_PLANNED` (by its most recent closure) is commented on and
-   never re-filed, while one closed `COMPLETED` re-files because failing again after a
-   fix is new information. The prompts state the same open-and-closed rule so the
-   pre-flight and the agent's instructions cannot drift (see the base doc's
-   "Comment-over-create" decision and issue #3075). Three defences then keep a
-   *replayed* turn from filing a second issue for a node the same session already
-   opened, which is what produced the #2960–#2999 wave (issue #3170):
-   - **All three prompts hand over the lookup command.** `ISSUE_LOOKUP_INSTRUCTION`
-     carries the literal `gh issue list --state all …` REST read, so the agent sees an
-     issue the instant it exists rather than waiting on an index that lags creation by
-     minutes.
-   - **The per-node dispatch carries the detector's own resolved dispositions**, so the
-     agent confirms a decision instead of re-deriving one.
-   - **The per-node dispatch seeds a session ledger** recording what it has already
-     filed. See "Replay Idempotency" below.
+2. **Filing, then investigation** — the detector is the sole creator of every nightly
+   issue: per-node issues, cascade umbrellas, and the re-baseline seed umbrella all go
+   through one function, `create_issue()`, called from a single Python loop inside the
+   run lock. Once filing for the night is done, an Eng session is dispatched with the
+   real issue numbers GitHub returned and a comment-only mandate: investigate and write
+   a root-cause comment on each, add nothing else to the tracker.
 
-   Fixes two and three stop at the per-node path deliberately, and the gap is a
-   decision rather than an oversight: the cascade umbrella and the re-baseline seed
-   pre-render their own prompt at the call site and their builders take no disposition
-   or ledger parameter, so a disposition built for them would have no reader. Every
-   observed duplicate-filing incident came out of the per-node path. Both override
-   paths still get the lookup command, which is the defence that addresses the read
-   failure itself. Widening the other two is the first thing to do if a cascade or seed
-   duplicate is ever seen.
+### Filing (issue #3418)
 
-### Three prompts, one lookup instruction
+`create_issue(title, body, *, dry_run=False)` shells `gh issue create --title ...
+--body-file -` (body on stdin, for the same reason `comment_on_issue` takes its body
+that way — a cascade body can carry a collapsed list hundreds of nodes long), parses
+the issue number out of the URL `gh` prints on stdout, and returns `None` on any
+failure — a non-zero exit, an unparseable or empty stdout, a timeout, a missing
+binary. **It never retries.** GitHub's REST API has no `Idempotency-Key` header and no
+conditional request on an unsafe method, so a retried create is not a retry, it is a
+second issue. A `None` return spends no budget and leaves the finding out of
+`recorded`, so the next run re-reads live GitHub state and files it then — the same
+contract `comment_on_issue()` already has.
 
-There are **three** issue-filing prompts, not one, and each dispatches a session that
-opens real GitHub issues:
+`dispatch_findings()` calls `create_issue()` from one loop, under the run's `fcntl`
+lock (`TestRunLock`), for every survivor and every cascade umbrella. There is no
+second actor and no replay window: a crashed run does not re-enter the loop, it exits,
+and the next night's run starts over against fresh GitHub state.
 
-| Builder | Dispatched from | Files |
-|---------|-----------------|-------|
-| `_build_triage_prompt` | `dispatch_findings`, per surviving node | One issue per node |
-| `_build_cascade_prompt` | `dispatch_findings`, per collapsed cascade | One umbrella issue |
-| `_build_seed_prompt` | `main()`, on a collection re-baseline | One seed umbrella issue |
+For each finding, `_file_finding()` takes exactly one of five branches, each with its
+own log line:
 
-All three interpolate the same `ISSUE_LOOKUP_INSTRUCTION` constant. That matters
-historically: the doc used to imply a single prompt, which is how the cascade and seed
-prompts went four passes at this bug without ever being hardened — each carried its own
-copy of the sentence, and each pass fixed the copy it happened to be looking at. The
-seed prompt lived inline inside `main()` until #3170 and could not be rendered by a
-test or scanned by a gate at all; extracting it into a named builder is what made its
-copy of the defect visible.
+- **Refresh hit (comment)** — immediately before creating, the open-issue map is
+  re-read. If the title is already open — an external actor filed it during this very
+  loop — the finding is a genuine recurrence: `comment_on_issue()` posts against the
+  refreshed number. This is a comment, never a silent skip, because dropping a real
+  recurrence is worse than a duplicate (see below).
+- **Degraded refresh (create anyway)** — the refresh read failed. Unknown is treated
+  as "not open," matching the run's opening dedup posture: fail open, create, and log
+  that tonight's dedup ran blind.
+- **Fingerprint collision (skip)** — this run already filed the same fingerprint. Pure
+  skip: the issue that fingerprint maps to was created by this run and is already
+  counted.
+- **Budget exhausted (defer)** — no budget left; the finding is deferred, unrecorded,
+  to a later run.
+- **Created** — `create_issue()` returns a real number, which is recorded and spends
+  one unit of `NIGHTLY_MAX_ISSUES_PER_RUN`.
 
-### Replay Idempotency
+Only the created and refresh-hit-commented branches license the caller to mark the
+finding `recorded`; only a create spends budget.
 
-`data/nightly-triage-ledger/{slug}.json` is the third and last-resort defence: a record
-on disk of what one triage session has already filed, so a turn replayed with a fresh
-context reads its predecessor's work instead of starting from zero.
+**Fingerprint.** Every body the detector creates ends with a hidden
+`<!-- nightly-fingerprint: {sha256} -->` line, keyed on the finding's stable identity
+— the node id for a per-node issue, the cascade's state key for an umbrella, and
+`seed:{head_commit}` for a re-baseline seed — never on the rendered title, because a
+title can be edited by a human or reworded by a future version of this script while
+the identity underneath does not change. `finding_fingerprint()` / `fingerprint_marker()`
+compute it; a re-baseline retry at the same commit collapses to the same fingerprint,
+and a retry at a different commit does not.
 
-```json
-{
-  "slug": "nightly-triage-a1b2c3d4",
-  "created_at": "2026-09-05T06:00:00Z",
-  "entries": [
-    {"node": "tests/unit/test_a.py::test_1",
-     "title": "Nightly regression: tests/unit/test_a.py::test_1",
-     "disposition": "file",
-     "resolved_against": "gh issue list --state all (open+closed REST read)",
-     "resolved_at": "2026-09-05T06:00:00Z"}
-  ],
-  "filed": []
-}
-```
+**In-run collision report.** `dispatch_findings()` keeps an in-process
+`dict[fingerprint, issue_number]` of everything it has created so far this run. A
+second finding resolving to a fingerprint already in that dict is skipped and logged
+by name — nothing more. **The detector creates and comments; it never closes an
+issue.** There is no read-back after a collision, no `gh issue close`, no pointer
+comment linking the twin to its survivor. That convergent sweep is deliberately
+deferred pending real evidence of concurrent multi-host nightly runs (see the plan's
+`## Decisions` #2 and `## No-Gos`) — do not "finish" the collision report into an
+auto-close.
 
-- **Who writes what.** `write_triage_ledger` seeds `slug`, `created_at`, `entries` and
-  an empty `filed` before the session subprocess starts; the triage agent appends to
-  `filed` after each `gh issue create`, before moving to the next entry.
-- **Per-node dispatch only.** `entries` derives from the `dispositions` argument and
-  from nothing else, so the two `prompt=`-override dispatches produce an empty entry
-  list, no file is created for them, and `nightly-triage-baseline.json` never exists.
-  One gate does the whole narrowing; there is no separate branch.
-- **Advisory and fail-open.** Any write failure logs a `WARNING` naming the slug and
-  returns `None`; the dispatch proceeds without a ledger paragraph in its prompt. A
-  ledger that cannot be written must not stop the night from filing, the same posture
-  `open_issues()` takes when it cannot read. The prompt also tells the agent to treat a
-  missing or unparseable ledger as an empty `filed` list.
-- **Degraded read, same no-file outcome, different cause.** A degraded read (either the
-  open-issues or closed-issues REST read fails) also produces no ledger file:
-  `dispatch_findings` passes `dispositions=None` in that case, `maybe_dispatch_triage_session`
-  calls `write_triage_ledger` with an empty entries list, and `write_triage_ledger` returns
-  `None`, the same no-file outcome as the write failure above but from withheld dispositions
-  rather than a failed write, with the live REST-read instruction in every prompt remaining
-  undemoted as the defense that actually covers a degraded read.
-- **Written after the `--dry-run` short-circuit.** A preview writes no state file.
-- **Deliberately unlocked.** Two sessions share a ledger only when dispatched for an
-  identical node set, which the run lock and `compute_dispatch_set` make
-  near-impossible within a machine, and the file is machine-local so two hosts never
-  share one. The one case defended is a same-slug retry landing on a ledger a live
-  session is appending to: an existing file whose `filed` array is non-empty is left
-  exactly as it is. The write itself goes through a temp file and `os.replace`, because
-  truncated JSON is worse for the agent than stale-but-valid JSON.
-- **Why `data/` and not the lane worktree.** The issue asked for a session-local file
-  under `.worktrees/{slug}/`. That worktree is a git checkout, so a file there shows up
-  in the agent's own `git status` and dies with the lane on teardown — and the
-  stale-branch sweep described under "Lane reaping" keeps any lane whose tree is dirty,
-  so a ledger inside the lane would make every triage worktree permanently unreapable,
-  reintroducing the accumulation #3162 just fixed. `data/` is already this script's
-  state home, is gitignored, survives teardown, and is reachable by absolute path from
-  inside a worktree. The slug-keyed filename preserves the session-local property.
-- **Growth is bounded by distinct failure sets, not by nights.** The per-node dispatch
-  never passes `slug_suffix`, so its slug is always the sha256 of the sorted node set
-  and a recurring failure set overwrites its own file. No pruning job.
+### Comment-only investigation session
+
+`maybe_dispatch_triage_session(issues, *, slug_suffix=None, dry_run=False)` is called
+once per `dispatch_findings()` pass, **after** every create for the night has already
+happened, with `issues` a list of `(number, subject)` pairs — every number one
+`create_issue()` call returned and GitHub confirmed. The dispatched Eng session's
+prompt (`_build_investigation_prompt`) is unconditional: read each issue, investigate,
+add a root-cause comment, and nothing else. No prompt this module renders contains an
+issue-creation instruction; the module's search-index-avoidance wording
+(`ISSUE_LOOKUP_INSTRUCTION`) survives only for whatever lookup the investigation
+session still performs, never for filing.
+
+Because the numbers are already real, nothing about this dispatch's outcome can add a
+duplicate issue: a replayed or continued session turn here costs an extra comment at
+worst, never a second issue. `--slug`, `--json`, and the 30-second subprocess timeout
+work exactly as before — see the "Invocation contract" details that still apply,
+below.
+
+- **Invocation contract**: shells out to
+  `python -m tools.valor_session create --role eng --slug nightly-triage-<hash8>
+  --json --message <prompt>`.
+  - `--slug` is **mandatory** on this call. A slugless `valor_session create` call
+    for a non-teammate role tries to auto-derive a slug from an `issue #N` pattern
+    in the message and exits 1 silently if none is found — nightly prompts have no
+    such pattern, so omitting `--slug` would make every dispatch fail quietly.
+  - `--json` is required so the dispatched session ID can be parsed back out of
+    stdout (`json.loads(stdout)["session_id"]`, wrapped in try/except — a parse
+    failure just means the session ID doesn't make it into the persisted state,
+    it doesn't fail the dispatch or the run).
+  - The subprocess call has a 30s timeout; any exception (timeout, missing binary,
+    non-zero exit) is caught, logged as a warning, and treated as "no dispatch" —
+    this is fire-and-forget, not a blocking dependency of the nightly run.
+  - No caller may treat a returned session id as evidence that an issue exists: the
+    issues were filed, and their numbers confirmed, before this function was ever
+    called.
+- **Dedup semantics for filing itself** are per node, not per set. `dispatched_nodes`
+  in `data/nightly_tests_last_run.json` holds every node ID a previous run recorded as
+  filed or commented; `compute_dispatch_set` subtracts it from the confirmed-failing
+  set, so a node with an issue already open against it cannot reach a second create.
+  - The delta and the filing decision answer **different questions**. The delta asks
+    "is this a regression since last night" (`compute_new_failures`); filing asks
+    "does this node already have an issue". Conflating them is what made a standing
+    failure re-triage on every run that had any new failure, so #2429, #2430 and
+    #2462 each opened an issue over the same dead watchdog node (issue #2559).
+  - `carry_dispatched_nodes` persists the union of (previously dispatched ∩ still
+    failing) and whatever this run recorded. A node that stops failing drops out, so
+    a genuine re-regression is filable again later, and a **renamed** node retires
+    itself with no special case: `df6097fe6` renamed the watchdog node the churn kept
+    citing, and the old ID simply stops appearing in the confirmed set.
+  - Only what actually reached the tracker is recorded. A failed create or a failed
+    comment leaves its node unrecorded, so the next run retries it instead of
+    silently swallowing the failure.
+  - A **first (baseline) run** seeds `dispatched_nodes` with the confirmed set and
+    files nothing per-node — see "Baseline seed" under
+    `docs/features/nightly-regression-tests.md`. The baseline declares the known-failing
+    state rather than reporting a finding, so without the seed the *next* run would
+    file the entire standing set as fresh discoveries.
+  - `dispatched_session_id` records the most recent successful investigation dispatch
+    and is carried forward on runs that dispatch nothing.
+- **Mandate**: investigate and comment only — never file, never close, never
+  auto-hotfix. Auto-hotfixing nightly regressions is out of scope and explicitly
+  called out as a No-Go in the originating plan
+  (`docs/plans/nightly-regression-triage.md`).
+
+## Post-merge operator step: close the historical duplicates (issue #3418)
+
+Filing moved into the detector after five prior passes at replay-driven duplicate
+filing failed; the last incident before the move produced 26 duplicate issues across
+two nights (#3355–#3405). Their closure is a one-shot, irreversible operator action
+against live tracker state, has no code dependency on this module, and is deliberately
+kept outside the pipeline — a human runs it once, after merge, and stops-and-asks on
+any surprise rather than retrying.
+
+1. **Confirm the list is still accurate before touching anything.** Someone may have
+   already closed or edited one of these issues by hand:
+
+   ```bash
+   for n in $(seq 3355 3405); do
+     printf '%s\t' "$n"; gh issue view "$n" --json state,stateReason,title -q '[.state,.stateReason,.title]|@tsv'
+   done
+   ```
+
+2. **Close the 09-17 duplicates: #3382-#3397** (waves 1 and 2), as `NOT_PLANNED`, each
+   with a comment naming its surviving twin. **The survivors are #3398-#3405** (wave
+   3) — the same 8 node titles, filed a third time. Pair each closure with its wave-3
+   twin by matching the byte-identical title, not by arithmetic offset.
+3. **Close the 09-16 duplicates**, keeping the **lower** number in each pair:
+   #3365-#3374 are closed; #3355-#3364 survive.
+4. **Verify**, with the same `seq 3355 3405` loop as step 1: #3365-#3374 and
+   #3382-#3397 must report `CLOSED` / `NOT_PLANNED`, and #3355-#3364 and #3398-#3405
+   must still be `OPEN`.
+
+If this step is never run, the duplicates stay open and a morning's triage list stays
+noisy, but nothing in the shipped filing path depends on their state:
+`open_issues()` collapses same-title rows regardless.
 
 ## Run Lock (Race 1)
 
@@ -169,59 +227,9 @@ loading prior state or running any tests.
   and returns `0` immediately — no test run, no tracker write, no state write. The
   losing invocation is a no-op, not a failure.
 
-## Triage Session Dispatch
-
-`maybe_dispatch_triage_session(dispatch_nodes)` fires off an Eng-role `AgentSession` to
-investigate failing tests that have never been triaged before. The set comes from
-`compute_dispatch_set(prev, confirmed_failing)`.
-
-- **Invocation contract**: shells out to
-  `python -m tools.valor_session create --role eng --slug nightly-triage-<hash8>
-  --json --message <prompt>`.
-  - `--slug` is **mandatory** on this call. A slugless `valor_session create` call
-    for a non-teammate role tries to auto-derive a slug from an `issue #N` pattern
-    in the message and exits 1 silently if none is found — nightly prompts have no
-    such pattern, so omitting `--slug` would make every dispatch fail quietly.
-  - `--json` is required so the dispatched session ID can be parsed back out of
-    stdout (`json.loads(stdout)["session_id"]`, wrapped in try/except — a parse
-    failure just means the session ID doesn't make it into the persisted state,
-    it doesn't fail the dispatch or the run).
-  - The subprocess call has a 30s timeout; any exception (timeout, missing binary,
-    non-zero exit) is caught, logged as a warning, and treated as "no dispatch" —
-    this is fire-and-forget, not a blocking dependency of the nightly run.
-- **Dedup semantics**: dedup is **per node**, not per set. `dispatched_nodes` in
-  `data/nightly_tests_last_run.json` holds every node ID a previous run handed to
-  triage; `compute_dispatch_set` subtracts it from the confirmed-failing set, so a
-  node with an issue already open against it cannot reach a second dispatch.
-  - The delta and the dispatch answer **different questions**. The delta asks "is this
-    a regression since last night" (`compute_new_failures`); the dispatch asks "does
-    this node already have an issue". Conflating them is what made a standing failure
-    re-triage on every run that had any new failure, so #2429, #2430 and #2462 each
-    opened an issue over the same dead watchdog node (issue #2559).
-  - `carry_dispatched_nodes` persists the union of (previously dispatched ∩ still
-    failing) and whatever this run dispatched. A node that stops failing drops out, so
-    a genuine re-regression is dispatchable again later, and a **renamed** node retires
-    itself with no special case: `df6097fe6` renamed the watchdog node the churn kept
-    citing, and the old ID simply stops appearing in the confirmed set.
-  - Only what actually went out is recorded. A failed dispatch leaves its nodes unfiled,
-    so the next run retries them instead of silently swallowing the failure. This is
-    also why the dispatch set is not `compute_new_failures`: a node whose dispatch
-    failed is no longer "new" but is still unfiled.
-  - A **first (baseline) run** seeds `dispatched_nodes` with the confirmed set and
-    dispatches nothing. The baseline declares the known-failing state rather than
-    reporting a finding, so without the seed the *next* run would file the entire
-    standing set as fresh discoveries.
-  - `dispatched_session_id` records the most recent successful dispatch and is carried
-    forward on runs that dispatch nothing.
-- **Mandate**: the dispatched session's prompt is explicit that the task is
-  investigate-and-file-a-`/do-issue`-quality GitHub issue describing the failure, its
-  likely cause, and suggested next steps — **not** an auto-hotfix. Auto-hotfixing
-  nightly regressions is out of scope and explicitly called out as a No-Go in the
-  originating plan (`docs/plans/nightly-regression-triage.md`).
-
 ### Lane reaping
 
-Every dispatch mints a `session/nightly-triage-*` branch and a
+Every investigation dispatch mints a `session/nightly-triage-*` branch and a
 `.worktrees/nightly-triage-*` worktree, and the triage session leaves both behind
 when it ends. The 2026-08-24 incident accumulated 13 branches and 14 worktrees this
 way (issue #3162). The rule that keeps the count at zero: **a nightly-triage lane is
@@ -249,10 +257,14 @@ by a script with nothing to come back for. `tools/disk_reclaim.py` remains the
 
 | File | Purpose |
 |------|---------|
-| `scripts/nightly_regression_tests.py` | Adds `_acquire_run_lock` and `maybe_dispatch_triage_session` around the existing detector; see `docs/features/nightly-regression-tests.md` for the base run mechanics |
+| `scripts/nightly_regression_tests.py` | Adds `_acquire_run_lock`, `create_issue`, and `maybe_dispatch_triage_session` around the existing detector; see `docs/features/nightly-regression-tests.md` for the base run mechanics |
 | `data/nightly_tests.lock` | Advisory lock file for `_acquire_run_lock` (gitignored, empty — existence and the flock state are all that matter) |
 | `data/nightly_tests_last_run.json` | Now also carries `dispatched_nodes` and `dispatched_session_id` alongside the existing delta-state fields |
-| `data/nightly-triage-ledger/{slug}.json` | Per-node dispatch replay ledger (gitignored, machine-local, advisory) — see "Replay Idempotency" |
+
+`data/nightly-triage-ledger/` is inert: no code path reads or writes it. If the
+directory exists on a machine, it is gitignored scratch that nothing consults, and no
+automation deletes it. An operator who finds it can ignore or remove it freely; there
+is no state in it to migrate.
 
 ## Design Decisions
 
@@ -261,27 +273,36 @@ state files rather than depending on Redis (see the base doc's "Local JSON state
 Redis" decision). A lock file in the same `data/` directory keeps that pattern
 consistent and needs no external dependency.
 
-**Dispatch is fire-and-forget, not awaited** — the nightly script's job is to detect
-and record, not to babysit a triage investigation. The dispatch subprocess call has a
-short timeout and any failure degrades to "no triage session for this finding," never a
-blocked or failed nightly run.
+**The detector files; the session investigates** (issue #3418) — filing correctness
+cannot depend on an actor whose turn can be replayed. `create_issue()` runs once per
+finding, in one Python loop, under the run lock, and returns the number GitHub
+actually assigned; the investigation session is dispatched only afterward, with those
+confirmed numbers, and is permitted to comment and nothing else. See "Filing" above
+for the fingerprint and collision-report mechanics that make a duplicate the same run
+creates itself impossible, and "Post-merge operator step" for the one-shot cleanup
+this change left behind.
+
+**Investigation dispatch is fire-and-forget, not awaited** — the nightly script's job
+is to detect, file, and record — not to babysit an investigation. The dispatch
+subprocess call has a short timeout and any failure degrades to "no root-cause comment
+for this finding," never a blocked or failed nightly run.
 
 **Hash-based dedup over a run-count or time-based dedup** — the confirmed-failing set
 is the signal that actually matters: two different failing sets should each get their
-own triage session, but the same unresolved set showing up night after night should
-not re-dispatch. A content hash captures that directly.
+own investigation dispatch, but the same unresolved set showing up night after night
+should not re-dispatch. A content hash captures that directly.
 
 ## Manual Testing
 
 ```bash
-# Preview a full run including the dispatch path. --dry-run files nothing, posts no
-# comment, and writes no state, but the dispatch decision logic still executes if
-# there are newly-confirmed failures.
+# Preview a full run including the filing and dispatch paths. --dry-run files
+# nothing, posts no comment, and writes no state, but the filing and dispatch
+# decision logic still executes if there are newly-confirmed failures.
 python scripts/nightly_regression_tests.py --dry-run
 ```
 
-`maybe_dispatch_triage_session()` can also be exercised directly against fake node IDs
-for a quick sanity check without running the full suite.
+`maybe_dispatch_triage_session()` can also be exercised directly against fake
+`(number, subject)` pairs for a quick sanity check without running the full suite.
 
 ## See Also
 
@@ -289,6 +310,8 @@ for a quick sanity check without running the full suite.
   extends (run cadence, serial re-confirmation gate, delta computation, cascade
   collapsing, comment-over-create, and what each outcome produces)
 - `docs/plans/nightly-regression-triage.md` — originating plan, including the No-Gos
-  that keep triage dispatch investigate-only
+  that keep the investigation session comment-only
+- `docs/plans/nightly-filing-into-detector-collapse-by-root-cause.md` — the #3418
+  plan that moved filing into the detector
 - `docs/features/eng-session-architecture.md` — Eng session semantics for the
-  dispatched triage session
+  dispatched investigation session
