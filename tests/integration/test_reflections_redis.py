@@ -110,11 +110,20 @@ class TestAnalyzeSessionsFromRedis:
         assert "thrash_sessions" not in result
 
     def test_detects_failed_sessions(self):
-        """Failed sessions appear in error_patterns."""
+        """Failed sessions appear in error_patterns.
+
+        ``summary`` is a derived property backed by ``session_events`` (it is
+        computed from the most recent ``summary`` event, not a plain Field —
+        see models/agent_session.py), so it must be set via attribute
+        assignment on an already-saved instance rather than passed as a
+        ``create()`` kwarg: the setter appends a session_event and does a
+        partial save keyed on the record already existing, which a
+        constructor-time kwarg predates.
+        """
         from models.agent_session import AgentSession
         from reflections.session_intelligence import _analyze_sessions_from_redis
 
-        AgentSession.create(
+        session = AgentSession.create(
             session_id="failed-session",
             project_key="ai",
             status="failed",
@@ -123,8 +132,8 @@ class TestAnalyzeSessionsFromRedis:
             updated_at=datetime.now(tz=UTC),
             turn_count=2,
             tool_call_count=3,
-            summary="Crashed during build step",
         )
+        session.summary = "Crashed during build step"
 
         today = __import__("utils.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = _analyze_sessions_from_redis(today)
@@ -184,27 +193,15 @@ class TestRedisIndexCleanupReflection:
         names = [r["name"] for r in config["reflections"]]
         assert "redis-index-cleanup" in names
 
-    def test_reflection_entry_structure(self):
-        """Verify the reflection entry has required fields."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        entry = next(r for r in config["reflections"] if r["name"] == "redis-index-cleanup")
-        assert entry["execution_type"] == "function"
-        assert entry["callable"] == "scripts.popoto_index_cleanup.run_cleanup"
-        assert entry["enabled"] is True
-        # The registry schema uses `every: <N><unit>` (e.g. "86400s"), not a bare
-        # `interval: <seconds>` int (issue #1578 Category A drift). Parse it the
-        # same way the scheduler does.
-        from agent.reflection_schedule import parse_every_duration
-
-        assert parse_every_duration(entry["every"]) == 86400
-        assert entry["priority"] == "low"
+    # test_reflection_entry_structure was removed (see #3223-adjacent triage):
+    # config/reflections.yaml moved to the vault (~/Desktop/Valor/reflections.yaml,
+    # iCloud-synced, private) in c2af09602 and now evolves independently of this
+    # repo -- its "redis-index-cleanup" entry's callable has already drifted from
+    # what this test hardcoded (agent.session_health.cleanup_corrupted_agent_sessions
+    # vs. the asserted scripts.popoto_index_cleanup.run_cleanup), proving the
+    # assertion doesn't hold by design. The only code-under-test it exercised,
+    # parse_every_duration's "Ns" parsing, is already covered directly by
+    # tests/unit/test_reflection_schedule_grammar.py::TestDurationHelpers.
 
     def test_cleanup_callable_importable(self):
         """Verify the cleanup function can be imported."""

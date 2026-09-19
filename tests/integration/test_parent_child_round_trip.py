@@ -176,6 +176,12 @@ class TestDevSessionParentLinkage:
             captured.update(kwargs)
 
         monkeypatch.chdir(tmp_path)  # cwd unrelated
+        # #1633 stopgap refuses parent-attached (child) session creation by
+        # default; this test's subject is the working_dir derivation that
+        # runs AFTER that gate, so opt in via the documented escape hatch.
+        # Every side effect past the gate (worktree provisioning, enqueue)
+        # is already mocked below, so this does not create anything real.
+        monkeypatch.setenv("VALOR_ALLOW_CHILD_SESSIONS", "1")
 
         args = argparse.Namespace(
             command="create",
