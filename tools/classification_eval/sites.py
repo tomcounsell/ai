@@ -145,6 +145,15 @@ def _digest_order(items: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
     return sorted(items, key=lambda item: hashlib.sha256(item[0].encode()).hexdigest())
 
 
+CANDIDATE_SYSTEM = (
+    "You are a strict classifier inside an automated pipeline. Read the task, decide, "
+    "and reply with only the JSON object the task asks for: no prose, no markdown."
+)
+"""The candidate ``system`` shared by the granite arms: a 3B model follows a
+plain-text "reply with one of" instruction literally, and the leg validates
+JSON, so the candidate side is told the output shape once, up front."""
+
+
 # --- C1: routing.needs_response ------------------------------------------------------
 
 _site(
@@ -225,6 +234,20 @@ _site(
 
 # --- C5: classifier.work_type ----------------------------------------------------------
 
+_WORK_TYPE_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " Decide the category by these rules, in order. sdlc: the message"
+    " itself says /sdlc, 'pipeline', 'issue #N' or 'PR N', or is a bare one-line command"
+    " to a pipeline (deploy, ship it, merge it, close the issue, continue, eta?, status?)."
+    " bug: the message reports a specific thing that is broken, crashing, failing, or"
+    " returning wrong results right now (a symptom is described). Asking to fix or"
+    " check something without describing a symptom is not a bug. feature: it asks for"
+    " new functionality that does not exist yet. chore: everything else: dependency"
+    " bumps, refactors, migrations, docs, notes, adjustments to work in progress,"
+    " questions about how something works, greetings, acknowledgments, and chatter."
+    " Dependency bumps and reruns of a gate are chore, never sdlc."
+)
+
+
 _site(
     Site(
         id=WORK_TYPE.site,
@@ -238,6 +261,7 @@ _site(
         minimum_n=DEFAULT_MINIMUM_N,
         budget_s=None,
         fixtures=lambda: _fixtures(INBOUND_MESSAGES, FIXTURES_PER_SITE),
+        candidate_system=_WORK_TYPE_CANDIDATE_SYSTEM,
     )
 )
 
@@ -309,15 +333,6 @@ _CATCHUP_CANDIDATE_TAIL = (
     "Respond with only a JSON object of the form "
     '{"verdict": "ANSWERED" | "UNANSWERED_NEEDS_REPLY" | "UNANSWERED_NO_REPLY_NEEDED"}.'
 )
-CANDIDATE_SYSTEM = (
-    "You are a strict classifier inside an automated pipeline. Read the task, decide, "
-    "and reply with only the JSON object the task asks for: no prose, no markdown."
-)
-"""The candidate ``system`` shared by the granite arms: a 3B model follows a
-plain-text "reply with one of" instruction literally, and the leg validates
-JSON, so the candidate side is told the output shape once, up front."""
-
-
 _CATCHUP_CANDIDATE_SYSTEM = (
     CANDIDATE_SYSTEM + " Apply these rules in order and stop at the first that fits."
     " 1. A line tagged 'Valor:' appears after the message in question in the thread:"
