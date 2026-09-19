@@ -6,7 +6,7 @@ Schema (schema-gate ruling for ``docs/plans/recursive-self-improvement.md``):
   ``project_key`` (``KeyField``) for the partition. A single recency
   ``SortedField(created_at, partition_by="project_key")`` serves every "what
   has the system observed lately" read.
-- Two IndexedFields, both low-cardinality: ``kind`` (ten values, see
+- Two IndexedFields, both low-cardinality: ``kind`` (eleven values, see
   :data:`EVIDENCE_KINDS`) and ``classification`` (five values, see
   :data:`EVIDENCE_CLASSIFICATIONS`). The schema gate's rule is a cardinality
   rule — never index a pid, uuid, or timestamp. ``source_session_id`` and
@@ -72,9 +72,18 @@ logger = logging.getLogger(__name__)
 #: (the planner's case-opening rules for lessons, the dashboard's burden panel
 #: for promises), so each needs its own index set. A ``lesson`` coerced to
 #: ``other`` is unqueryable as a lesson. That makes ten, past the gate's
-#: default of eight, and the reasoned exemption lives in
+#: default of eight.
+#:
+#: The LLM task taxonomy (#3410) brings the eleventh, ``classifier_comparison``:
+#: one row per run of ``python -m tools.classification_eval``, written by the
+#: runner and read by its ``--audit`` walk, which looks up the latest record
+#: for every declared classification site to check the landed backend against
+#: the acceptance bar. That read is a partition-and-kind index read; a record
+#: coerced to ``other`` would make the audit scan every ``other`` row and
+#: parse each ``detail`` to find its own, so the kind earns its index set. The
+#: reasoned exemption lives in
 #: ``tests/unit/test_improvement_models.py::VOCABULARY_MAXIMUMS`` under
-#: ``(ImprovementEvidence, "kind"): 10``. An eleventh kind moves that number
+#: ``(ImprovementEvidence, "kind"): 11``. A twelfth kind moves that number
 #: with a new argument, never with a free append.
 #:
 #: TTL decision (lane 7, #3274): the 30-day window stands. A budget week is 7
@@ -93,9 +102,10 @@ EVIDENCE_KINDS: tuple[str, ...] = (
     "other",
     "lesson",  # one line scraped from a merged PR's lessons section (lane 5, #3217)
     "promise",  # an outbound message the judge read as an unqualified guarantee (lane 5, #3217)
-    # 10 kinds: two past DEFAULT_VOCABULARY_MAXIMUM, carried by the reasoned
+    "classifier_comparison",  # one comparison-runner record per site run (#3410)
+    # 11 kinds: three past DEFAULT_VOCABULARY_MAXIMUM, carried by the reasoned
     # VOCABULARY_MAXIMUMS[(ImprovementEvidence, "kind")] entry in
-    # tests/unit/test_improvement_models.py (lane 5, #3217)
+    # tests/unit/test_improvement_models.py (lane 5, #3217; #3410)
 )
 
 #: How a correction is read. ``unknown`` is the honest default: classification
