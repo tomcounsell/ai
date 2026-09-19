@@ -233,6 +233,20 @@ _site(
 # The production prompt carries the condensed principal context when it loads;
 # the runner passes none so the prompt is the same on every machine.
 
+_WORK_REQUEST_CANDIDATE_SYSTEM = (
+    CANDIDATE_SYSTEM + " sdlc: the message reports something broken, failing, crashing,"
+    " leaking, or wrong (a bug report is work even when phrased as a question), or asks"
+    " to fix, build, add, implement, refactor, migrate, deploy, merge, ship, or"
+    " investigate code. collaboration: a task with no code change, such as add to the"
+    " knowledge base, draft or file an issue, send a message or status update, write or"
+    " summarize a doc, save a note, look something up, review a PR. other: an"
+    " acknowledgment, praise, greeting, social chatter, an adjustment to work in"
+    " progress ('actually make it blue'), brainstorming, or an open-ended discussion."
+    " question: a request for information, explanation, or opinion (how, what, where,"
+    " why, when, which) with no action requested."
+)
+
+
 _site(
     Site(
         id=WORK_REQUEST.site,
@@ -244,6 +258,7 @@ _site(
         minimum_n=ROUTING_MINIMUM_N,
         budget_s=None,
         fixtures=lambda: _fixtures(INBOUND_MESSAGES, ROUTING_FIXTURES),
+        candidate_system=_WORK_REQUEST_CANDIDATE_SYSTEM,
     )
 )
 
