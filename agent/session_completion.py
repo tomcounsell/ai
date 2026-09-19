@@ -467,6 +467,15 @@ async def _await_outbox_drained(
         return True  # fail-open — never block delivery on monitoring
 
 
+def completion_novelty_prompt(prior_text: str, relative_time: str, draft_text: str) -> str:
+    """The judge's user payload; also the comparison runner's reference prompt (C10)."""
+    return (
+        f"## Prior message (sent {relative_time})\n{prior_text}\n\n"
+        f"## Final-summary draft about to be sent\n{draft_text}\n\n"
+        "Return your verdict: 'restate' or 'new'."
+    )
+
+
 async def _judge_completion_novelty(
     prior_text: str,
     prior_ts: float,
@@ -508,15 +517,9 @@ async def _judge_completion_novelty(
     else:
         relative_time = f"{age_secs // 3600}h ago"
 
-    user_payload = (
-        f"## Prior message (sent {relative_time})\n{prior_text}\n\n"
-        f"## Final-summary draft about to be sent\n{draft_text}\n\n"
-        "Return your verdict: 'restate' or 'new'."
-    )
-
     try:
         decision = await run_typed(
-            user_payload,
+            completion_novelty_prompt(prior_text, relative_time, draft_text),
             CompletionNoveltyDecision,
             task=COMPLETION_NOVELTY,
             project_key=project_key,

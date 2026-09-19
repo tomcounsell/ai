@@ -123,7 +123,7 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
     if args.inputs:
         inputs = live.load_inputs(args.inputs.read_text(encoding="utf-8"))
     else:
-        inputs = site.fixtures() + live.real_messages(args.real_limit, project_key=args.project_key)
+        inputs = live.site_inputs(site, args.real_limit, project_key=args.project_key)
     if args.save_inputs:
         args.save_inputs.write_text(live.dump_inputs(inputs), encoding="utf-8")
 

@@ -152,6 +152,69 @@ async def test_latency_only_record_carries_no_agreement():
     assert record.contended is True
 
 
+async def test_reference_system_reaches_the_reference_and_the_candidate_inherits_it():
+    """A site whose production call carries a ``system`` (C9, C10) runs the
+    reference arm with it verbatim; the candidate gets the same one unless the
+    row sets ``candidate_system``."""
+    from dataclasses import replace
+
+    seen: dict[str, list[str | None]] = {"reference": [], "ollama": []}
+
+    def arm(name: str) -> Arm:
+        async def call(prompt: str, system: str | None, output_type: type[BaseModel]):
+            seen[name].append(system)
+            return Verdict(answer="yes"), 0.0
+
+        return Arm(name=name, backend=name, model="m", price=PRICE, call=call)
+
+    site = replace(_site(minimum_n=2), system="be strict")
+    await compare(
+        site, _inputs(2, 0), reference=arm("reference"), candidates=[arm("ollama")], contended=False
+    )
+    assert set(seen["reference"]) == {"be strict"} and set(seen["ollama"]) == {"be strict"}
+
+    seen["reference"].clear()
+    seen["ollama"].clear()
+    tuned = replace(site, candidate_system="be terse")
+    await compare(
+        tuned,
+        _inputs(2, 0),
+        reference=arm("reference"),
+        candidates=[arm("ollama")],
+        contended=False,
+    )
+    assert set(seen["reference"]) == {"be strict"} and set(seen["ollama"]) == {"be terse"}
+
+
+def test_site_inputs_use_the_row_loader_when_it_has_one():
+    """A site whose production input is not an inbound message (C11's activity
+    window, C14's memory row) names its own real-input loader; every other row
+    draws real inbound messages through the default loader."""
+    from dataclasses import replace
+
+    from tools.classification_eval.arms import site_inputs
+
+    default_calls: list[int] = []
+
+    def default(limit: int, *, project_key: str) -> list[Input]:
+        default_calls.append(limit)
+        return [Input("real inbound", "real")]
+
+    plain = _site()
+    assert site_inputs(plain, 7, project_key="valor", default=default) == [
+        Input("fixture?", "fixture"),
+        Input("real inbound", "real"),
+    ]
+    assert default_calls == [7]
+
+    own = replace(plain, real_inputs=lambda limit: [Input(f"row {limit}", "real")])
+    assert site_inputs(own, 3, project_key="valor", default=default) == [
+        Input("fixture?", "fixture"),
+        Input("row 3", "real"),
+    ]
+    assert default_calls == [7]
+
+
 # --- the bar and the miss report -----------------------------------------------
 
 
@@ -225,6 +288,11 @@ def _record_dict(
         ({"n_real": 99}, ["n_real"]),
         ({"latency_only": True, "p95_c4": 9.0}, []),
         ({"latency_only": True, "p95_c4": 3.5, "budget_s": 3.0}, ["p95_c4"]),
+        # A latency-only record measures no agreement, so the real-message
+        # share (Risk 7, an agreement safeguard) is not one of its criteria;
+        # the total input minimum and the error rate still are.
+        ({"latency_only": True, "n_real": 5}, []),
+        ({"latency_only": True, "n_real": 5, "n": 150}, ["n"]),
         ({"agreement": 0.5, "contended": True, "n_real": 1}, ["agreement", "contended", "n_real"]),
     ],
 )
@@ -438,3 +506,39 @@ def test_parse_json_output_rejects_prose():
 
     with pytest.raises(ValueError):
         parse_json_output("yes, it is a promise", Verdict)
+
+
+# --- the site table (Task 7) ---------------------------------------------------------
+
+
+def test_every_non_client_classification_site_has_a_row():
+    """Task 7: every declared classification site except the client-only one
+    has a ``sites.py`` row whose task is the declaration itself, so a row cannot
+    drift from the declared tier or backend."""
+    from tools.classification_eval.sites import SITES
+
+    declared = {t.site: t for t in declared_classification_tasks() if not t.client_only}
+    assert set(SITES) == set(declared)
+    for site_id, row in SITES.items():
+        assert row.id == site_id
+        assert row.task == declared[site_id]
+        assert row.tier == declared[site_id].error_cost.value
+
+
+@pytest.mark.parametrize("site_id", sorted(__import__("tools.classification_eval.sites", fromlist=["SITES"]).SITES))
+def test_site_row_fixtures_build_prompts_and_labels(site_id):
+    """Each row's fixture loader yields inputs its prompt builders accept, the
+    candidate builders accept, and the label reducer reads from the row's
+    output type; a broken row fails here before any reference spend."""
+    from tools.classification_eval.sites import SITES
+
+    row = SITES[site_id]
+    fixtures = row.fixtures()
+    assert fixtures and all(inp.source == "fixture" for inp in fixtures)
+    assert len({inp.text for inp in fixtures}) == len(fixtures), "duplicate fixture text"
+    for inp in fixtures:
+        assert row.prompt(inp).strip()
+        if row.candidate_prompt is not None:
+            assert row.candidate_prompt(inp).strip()
+    sample = (row.candidate_output_type or row.output_type).model_json_schema()
+    assert sample["properties"]

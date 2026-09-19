@@ -28,13 +28,14 @@ import hashlib
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL, OPENROUTER_GEMMA4_FREE
-from tools.classification_eval import CASE_ID, PROJECT_KEY, Arm, Input, Price
+from tools.classification_eval import CASE_ID, PROJECT_KEY, Arm, Input, Price, Site
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,23 @@ def real_messages(
         picked.append((hashlib.sha256(text.encode()).hexdigest(), text))
     picked.sort()
     return [Input(text, "real") for _, text in picked[:limit]]
+
+
+def site_inputs(
+    site: Site,
+    real_limit: int,
+    *,
+    project_key: str = PROJECT_KEY,
+    default: Callable[..., list[Input]] = real_messages,
+) -> list[Input]:
+    """The row's fixtures followed by its real inputs: the row's own loader
+    when it names one (``Site.real_inputs``), else real inbound messages
+    through ``default`` (:func:`real_messages`; the test seam)."""
+    if site.real_inputs is not None:
+        real = site.real_inputs(real_limit)
+    else:
+        real = default(real_limit, project_key=project_key)
+    return site.fixtures() + real
 
 
 def dump_inputs(inputs: list[Input]) -> str:

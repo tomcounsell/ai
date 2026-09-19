@@ -95,15 +95,20 @@ class Arm:
 class Site:
     """One row of the site table (``tools/classification_eval/sites.py``).
 
-    ``prompt`` builds the reference prompt verbatim from an :class:`Input`;
-    the candidate side defaults to the same prompt, output type, and no
-    ``system``, and the landing builder overrides ``candidate_prompt``,
-    ``candidate_system``, or ``candidate_output_type`` while iterating.
-    ``label`` reduces an output to the one string agreement compares.
-    ``reference`` names the live reference arm: ``"anthropic"`` (Haiku
-    through the Anthropic leg) or ``"openrouter_gemma"`` (C15's ``main``
-    backend). ``budget_s`` is the site's own p95 budget when it has one (the
-    3 s sites), else ``None`` for the reference-relative rule.
+    ``prompt`` builds the reference prompt verbatim from an :class:`Input`
+    and ``system`` is the reference ``system`` string when the production
+    call carries one (C9, C10); the candidate side defaults to the same
+    prompt, system, and output type, and the landing builder overrides
+    ``candidate_prompt``, ``candidate_system``, or ``candidate_output_type``
+    while iterating. ``label`` reduces an output to the one string agreement
+    compares. ``reference`` names the live reference arm: ``"anthropic"``
+    (Haiku through the Anthropic leg) or ``"openrouter_gemma"`` (C15's
+    ``main`` backend). ``budget_s`` is the site's own p95 budget when it has
+    one (the 3 s sites), else ``None`` for the reference-relative rule.
+    ``real_inputs`` is the row's own real-input loader for a site whose
+    production input is not an inbound message (C11 reads activity windows
+    from real transcripts, C14 reads real memory rows); ``None`` draws real
+    inbound ``valor`` messages through the default loader.
     """
 
     id: str
@@ -115,9 +120,11 @@ class Site:
     minimum_n: int
     budget_s: float | None
     fixtures: Callable[[], list[Input]]
+    system: str | None = None
     candidate_prompt: Callable[[Input], str] | None = None
     candidate_system: str | None = None
     candidate_output_type: type[BaseModel] | None = None
+    real_inputs: Callable[[int], list[Input]] | None = None
     model: str | None = None
 
     @property
@@ -350,16 +357,15 @@ async def compare(
     ref_result = None
     if reference is not None:
         ref_result = await _run_arm(
-            reference, inputs, site.prompt, None, site.output_type, site.label
+            reference, inputs, site.prompt, site.system, site.output_type, site.label
         )
 
     cand_prompt = site.candidate_prompt or site.prompt
+    cand_system = site.system if site.candidate_system is None else site.candidate_system
     cand_type = site.candidate_output_type or site.output_type
     cand_results: dict[str, ArmResult] = {}
     for arm in candidates:
-        result = await _run_arm(
-            arm, inputs, cand_prompt, site.candidate_system, cand_type, site.label
-        )
+        result = await _run_arm(arm, inputs, cand_prompt, cand_system, cand_type, site.label)
         if ref_result is not None:
             result.agreement = _agreement(ref_result, result)
         cand_results[arm.name] = result
@@ -396,10 +402,17 @@ def latency_budget_s(record: Mapping[str, Any]) -> float | None:
 
 
 def evaluate_bar(record: Mapping[str, Any], arm_name: str) -> list[str]:
-    """The failing criteria for ``arm_name`` in ``record``; empty means it clears the bar."""
+    """The failing criteria for ``arm_name`` in ``record``; empty means it clears the bar.
+
+    A latency-only record (a site that stays on granite by the plan, C12 to
+    C14) measures no agreement, so the two agreement safeguards, the tier bar
+    and the real-message share (Risk 7), are not among its criteria; the
+    input minimum, the error rate, contention, and any site budget still are.
+    """
     arm = record["candidates"][arm_name]
+    latency_only = bool(record.get("latency_only"))
     failed: list[str] = []
-    if not record.get("latency_only"):
+    if not latency_only:
         agreement = arm.get("agreement") or {}
         if float(agreement.get("mean", 0.0)) < TIER_BAR[record["tier"]]:
             failed.append("agreement")
@@ -412,7 +425,7 @@ def evaluate_bar(record: Mapping[str, Any], arm_name: str) -> list[str]:
         failed.append("error_rate")
     if int(record["n"]) < int(record["minimum_n"]):
         failed.append("n")
-    if int(record["n_real"]) < int(record["minimum_n"]) / 2:
+    if not latency_only and int(record["n_real"]) < int(record["minimum_n"]) / 2:
         failed.append("n_real")
     return failed
 

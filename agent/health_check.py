@@ -375,7 +375,13 @@ def _read_recent_activity(transcript_path: str, max_entries: int = 30) -> str:
     lines = path.read_text().strip().splitlines()
     # Take the tail
     recent = lines[-max_entries:] if len(lines) > max_entries else lines
+    return activity_from_transcript_lines(recent)
 
+
+def activity_from_transcript_lines(recent: list[str]) -> str:
+    """Summarize the tool calls in a window of transcript JSONL lines, the
+    exact text the judge prompt receives; the comparison runner (C11) feeds
+    it windows of real transcripts."""
     tool_calls: list[str] = []
     for line in recent:
         try:

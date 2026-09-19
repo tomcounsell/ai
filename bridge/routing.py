@@ -740,6 +740,74 @@ _ACKNOWLEDGMENT_TOKENS: set[str] = {
 }
 
 
+def needs_response_prompt(text: str) -> str:
+    """The C1 prompt for ``text``; also the comparison runner's reference prompt."""
+    return (
+        "Classify this message.\n\n"
+        "needs_response=true: a question, request, instruction, bug report, "
+        "or anything needing action.\n"
+        "needs_response=false: an acknowledgment, thanks, greeting, side chat, "
+        "or social message.\n\n"
+        f"Message: {text[:200]}"
+    )
+
+
+def terminus_prompt(text_stripped: str, thread_context: str, sender_is_bot: bool) -> str:
+    """The C2 prompt for one reply; also the comparison runner's reference prompt."""
+    return (
+        "Classify this reply in a conversation thread. "
+        "The reply was sent to Valor (an AI agent).\n\n"
+        f"Reply text: {text_stripped[:300]}\n\n"
+        "Recent thread context (may be empty):\n"
+        f"{thread_context[:400] if thread_context else '(none)'}\n\n"
+        f"Sender is a bot: {sender_is_bot}\n\n"
+        "Examples:\n"
+        '"Continue to finish all stage of SDLC" → RESPOND\n'
+        '"Go ahead and merge" → RESPOND\n'
+        '"Run it again" → RESPOND\n'
+        '"Proceed with the plan" → RESPOND\n'
+        '"merge it" → RESPOND\n'
+        '"deploy when ready" → RESPOND\n'
+        '"fix the failing test" → RESPOND\n'
+        '"I left a comment on PR 1316\\n\\nContinue to finish all stage of SDLC" → RESPOND\n'
+        '"ok great" → REACT\n'
+        '"sounds good" → REACT\n'
+        '"nice work" → REACT\n'
+        '"👍" → SILENT\n'
+        '"thanks" → SILENT\n'
+        '"got it" → SILENT\n\n'
+        "Instructions:\n"
+        "- If the message contains a question or requests action → reply RESPOND\n"
+        "- If the message is a natural conversation closer (completion language,\n"
+        "  agreement, acknowledgment without question) → reply REACT\n"
+        "- If the message adds nothing new or is redundant with prior context"
+        " → reply REACT\n"
+        "- If the sender is a bot and the message is declarative (no question)"
+        " → reply SILENT\n"
+        "- Default to RESPOND when uncertain\n\n"
+        "Classify the reply above."
+    )
+
+
+def work_request_prompt(text: str, principal_hint: str = "") -> str:
+    """The C3 prompt for ``text``; also the comparison runner's reference prompt."""
+    return (
+        "Classify this message into one of: sdlc, collaboration, other, question.\n\n"
+        '- "sdlc" = work request that could result in code changes or a PR:\n'
+        "  fix bug, add feature, implement, refactor, investigate issue,\n"
+        "  create/update codebase, deploy, resolve problem, continue/resume work\n"
+        '- "collaboration" = direct task the PM can handle without coding:\n'
+        "  add this to the knowledge base, draft an issue, send a status update,\n"
+        "  write a doc about Y, save this file, search memory, look up info and act\n"
+        '- "other" = ambiguous task that does not clearly fit sdlc or collaboration\n'
+        '- "question" = purely asking for info, explanation, opinion,\n'
+        "  how does X work, what is Y, conversational/social\n\n"
+        "If in doubt, classify as collaboration.\n\n"
+        f"{principal_hint}"
+        f"Message: {text[:300]}"
+    )
+
+
 async def classify_needs_response(text: str, *, project_key: str | None = None) -> bool:
     """Classify whether a message needs a full response.
 
@@ -765,17 +833,9 @@ async def classify_needs_response(text: str, *, project_key: str | None = None) 
     # #1925: run_typed holds agent.anthropic_client's shared semaphore slot
     # for the whole call internally, and enforces the boolean schema directly
     # via forced tool-calling -- no free-text "work"/"ignore" parse needed.
-    prompt = (
-        "Classify this message.\n\n"
-        "needs_response=true: a question, request, instruction, bug report, "
-        "or anything needing action.\n"
-        "needs_response=false: an acknowledgment, thanks, greeting, side chat, "
-        "or social message.\n\n"
-        f"Message: {text[:200]}"
-    )
     try:
         decision = await run_typed(
-            prompt,
+            needs_response_prompt(text),
             NeedsResponseDecision,
             task=NEEDS_RESPONSE,
             project_key=project_key,
@@ -967,39 +1027,7 @@ async def classify_conversation_terminus(
 
     # LLM classification (#1925: PydanticAI wrapper, Haiku default)
     thread_context = "\n".join(thread_messages[-2:]) if thread_messages else ""
-    prompt = (
-        "Classify this reply in a conversation thread. "
-        "The reply was sent to Valor (an AI agent).\n\n"
-        f"Reply text: {text_stripped[:300]}\n\n"
-        "Recent thread context (may be empty):\n"
-        f"{thread_context[:400] if thread_context else '(none)'}\n\n"
-        f"Sender is a bot: {sender_is_bot}\n\n"
-        "Examples:\n"
-        '"Continue to finish all stage of SDLC" → RESPOND\n'
-        '"Go ahead and merge" → RESPOND\n'
-        '"Run it again" → RESPOND\n'
-        '"Proceed with the plan" → RESPOND\n'
-        '"merge it" → RESPOND\n'
-        '"deploy when ready" → RESPOND\n'
-        '"fix the failing test" → RESPOND\n'
-        '"I left a comment on PR 1316\\n\\nContinue to finish all stage of SDLC" → RESPOND\n'
-        '"ok great" → REACT\n'
-        '"sounds good" → REACT\n'
-        '"nice work" → REACT\n'
-        '"👍" → SILENT\n'
-        '"thanks" → SILENT\n'
-        '"got it" → SILENT\n\n'
-        "Instructions:\n"
-        "- If the message contains a question or requests action → reply RESPOND\n"
-        "- If the message is a natural conversation closer (completion language,\n"
-        "  agreement, acknowledgment without question) → reply REACT\n"
-        "- If the message adds nothing new or is redundant with prior context"
-        " → reply REACT\n"
-        "- If the sender is a bot and the message is declarative (no question)"
-        " → reply SILENT\n"
-        "- Default to RESPOND when uncertain\n\n"
-        "Classify the reply above."
-    )
+    prompt = terminus_prompt(text_stripped, thread_context, sender_is_bot)
 
     # #1925: single run_typed call replaces the Ollama-first/Haiku-fallback
     # pair. PydanticAI's Literal schema forces a valid RESPOND/REACT/SILENT
@@ -1141,24 +1169,12 @@ async def _classify_work_request_llm(text: str, *, project_key: str | None = Non
     if principal:
         principal_hint = f"\n\nContext — active projects and priorities:\n{principal[:500]}\n\n"
 
-    prompt = (
-        "Classify this message into one of: sdlc, collaboration, other, question.\n\n"
-        '- "sdlc" = work request that could result in code changes or a PR:\n'
-        "  fix bug, add feature, implement, refactor, investigate issue,\n"
-        "  create/update codebase, deploy, resolve problem, continue/resume work\n"
-        '- "collaboration" = direct task the PM can handle without coding:\n'
-        "  add this to the knowledge base, draft an issue, send a status update,\n"
-        "  write a doc about Y, save this file, search memory, look up info and act\n"
-        '- "other" = ambiguous task that does not clearly fit sdlc or collaboration\n'
-        '- "question" = purely asking for info, explanation, opinion,\n'
-        "  how does X work, what is Y, conversational/social\n\n"
-        "If in doubt, classify as collaboration.\n\n"
-        f"{principal_hint}"
-        f"Message: {text[:300]}"
-    )
-
     decision = await run_typed(
-        prompt, RoutingDecision, task=WORK_REQUEST, project_key=project_key, model=MODEL_FAST
+        work_request_prompt(text, principal_hint),
+        RoutingDecision,
+        task=WORK_REQUEST,
+        project_key=project_key,
+        model=MODEL_FAST,
     )
     if decision.category == "sdlc":
         return ClassificationType.SDLC
