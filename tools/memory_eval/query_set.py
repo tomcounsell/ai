@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
 logger = logging.getLogger(__name__)
 
 # Minimum character length for a generated query to count as non-degenerate.
@@ -48,10 +50,23 @@ class GeneratedQuery(BaseModel):
     query: str = Field(description="A realistic natural-language search query")
 
 
+# Thinking: writes a search query. Fail-safe: ``None`` (the item is skipped).
+QUERY_GENERATION = LLMTask(
+    site="memory_eval.query_generation", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
+
+
 class RelevanceGrade(BaseModel):
     """Schema for the pooled-judgment grading LLM call."""
 
     grade: int = Field(ge=0, le=3, description="Relevance grade 0-3")
+
+
+# Thinking: a graded judgment over free text. Fail-safe: the pair is dropped
+# from the judgment dict (logged), never given a fabricated grade.
+RELEVANCE_GRADING = LLMTask(
+    site="memory_eval.relevance_grading", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
 
 
 @dataclass(frozen=True)
@@ -114,7 +129,7 @@ async def _generate_one(content: str) -> str | None:
 
     prompt = _GENERATION_PROMPT.format(content=content[:MAX_CONTENT_CHARS])
     try:
-        result = await run_typed(prompt, GeneratedQuery)
+        result = await run_typed(prompt, GeneratedQuery, task=QUERY_GENERATION)
     except (LLMCallError, ValueError) as e:
         logger.warning("[memory_eval] known-item generation failed: %s", e)
         return None
@@ -187,7 +202,7 @@ def build_pooled_judgments(
         for memory_id, content in pooled_records.items():
             prompt = _GRADING_PROMPT.format(query=query, content=content[:MAX_CONTENT_CHARS])
             try:
-                result = await run_typed(prompt, RelevanceGrade)
+                result = await run_typed(prompt, RelevanceGrade, task=RELEVANCE_GRADING)
             except (LLMCallError, ValueError) as e:
                 logger.warning(
                     "[memory_eval] pooled grading failed for memory_id=%s: %s", memory_id, e

@@ -31,7 +31,8 @@ import time
 
 from pydantic import BaseModel
 
-from agent.llm import LLMCallError, run_typed
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, TaskKind
 from config.models import MODEL_FAST
 from config.settings import settings
 
@@ -325,6 +326,14 @@ class ExtractionResult(BaseModel):
     text: str
 
 
+# Thinking: prose and JSON extraction, subscription backend only. Fail-safe:
+# none here; ``_llm_call`` re-raises and each caller's broad ``except`` records
+# the error and yields nothing for that pass.
+MEMORY_EXTRACTION = LLMTask(
+    site="memory_extraction.extract", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
+
+
 async def _llm_call(
     model: str,
     max_tokens: int,
@@ -371,6 +380,7 @@ async def _llm_call(
         result = await run_typed(
             prompt,
             ExtractionResult,
+            task=MEMORY_EXTRACTION,
             model=model,
             sdk_timeout=_EXTRACTION_SDK_TIMEOUT,
             hard_timeout=_EXTRACTION_HARD_TIMEOUT,
