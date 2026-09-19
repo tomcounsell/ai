@@ -8,9 +8,15 @@ This document defines which Ollama models run locally on each machine and which 
 
 | Workload | Model | Config source | Notes |
 |----------|-------|--------------|-------|
-| **Classification** (bridge routing, memory audit, email triage) | `granite4.1:3b` | `OLLAMA_CLASSIFIER_MODEL` in `config/models.py` | Hard precondition: worker will not start without it. |
+| **Classification** (the sites declared `backend=OLLAMA` in the [taxonomy table](llm-task-taxonomy.md#site-table): Job bind-or-mint, intake intent, memory audit) | `granite4.1:3b` | `OLLAMA_CLASSIFIER_MODEL` in `config/models.py`, run by the Ollama leg of `run_typed` | Hard precondition: worker will not start without it. |
 | **Free-text generation** (memory title generation, test AI judge, knowledge doc summarization) | `gemma4:31b-cloud` (default) or `gemma4:31b-mlx` (RAM-rich) | `settings.models.ollama_generation_model` (`config/settings.py`) | Soft / fail-soft everywhere. Override per machine via env `MODELS__OLLAMA_GENERATION_MODEL`. |
 | **Embeddings** | `nomic-embed-text` | `agent/embedding_provider.py` | Out of scope for this consolidation; local only. |
+
+## Which classification sites run on granite
+
+The classifier/generation split is a property of each call site's `LLMTask` declaration, not of the model constant: a site declares `kind=CLASSIFICATION` with `backend=Backend.OLLAMA`, and `agent/llm/router.py::resolve` sends it to the Ollama leg on `OLLAMA_CLASSIFIER_MODEL` for eligible context, with the Anthropic leg (Haiku) as the one-shot fallback when the local leg raises. Thinking sites (`kind=THINKING`) never run on a local model. A classification site lands on granite only with a comparison record that clears the acceptance bar; a site that misses declares `backend=Backend.ANTHROPIC` with its record attached. The landed backend per site, the router rules, and the bar are in [LLM Task Taxonomy](llm-task-taxonomy.md).
+
+The fallback rule: a client-keyed call, a `None` key, or a cold eligibility cache resolves to the subscription backend before any local call (charter §7, fail-closed); a local leg that times out, refuses, or fails schema validation falls back to Haiku once inside the caller's budget and logs `llm_fallback`. The daemon settings that keep the local leg inside its budget (`OLLAMA_KEEP_ALIVE=-1`, `OLLAMA_NUM_PARALLEL=4`) and the rollback levers are in [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md).
 
 ## Steady-state local Ollama per machine type
 
@@ -50,7 +56,9 @@ Prior to issue #1636, `gemma4:e2b` was the single local model for all Ollama wor
 
 ## See also
 
-- [Headless Session Runner](headless-session-runner.md) — the session-execution substrate; session dispatch has no ollama dependency (D2, issue #1924). The classifier model above serves bridge routing and email triage only.
-- [Subconscious Memory](subconscious-memory.md#title-generation) — title-generator and generation model usage.
-- [SDLC-First Routing](sdlc-first-routing.md) — bridge classifier using `OLLAMA_CLASSIFIER_MODEL`.
-- [Email CS Auto-Reply](email-cs-auto-reply.md) — email triage using `OLLAMA_CLASSIFIER_MODEL`.
+- [LLM Task Taxonomy](llm-task-taxonomy.md): which sites declare `backend=OLLAMA`, the router rules, and the acceptance bar.
+- [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md): Ollama service settings per machine, log evidence, rollback.
+- [Headless Session Runner](headless-session-runner.md): the session-execution substrate; session dispatch has no ollama dependency (D2, issue #1924).
+- [Subconscious Memory](subconscious-memory.md#title-generation): title-generator and generation model usage.
+- [Intake Classifier](intake-classifier.md) and [Durability Model](durability-model.md): the two bridge sites on granite.
+- [Email CS Auto-Reply](email-cs-auto-reply.md): email triage, `client_only` on the subscription backend.

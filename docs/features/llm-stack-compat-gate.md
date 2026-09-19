@@ -46,10 +46,10 @@ Failures are not memoized (`functools.cache` caches returns, not exceptions), so
 
 | Axis | Question | Gates |
 |---|---|---|
-| `loader_ok` | Does the third-party stack import at all? | `run_typed` **and** `run_typed_local` |
-| `compatible` | Does the installed `anthropic`'s `create` accept everything the installed `pydantic_ai` forwards? | `run_typed` only |
+| `loader_ok` | Does the third-party stack import at all? | every `run_typed` call, whichever leg the router picks |
+| `compatible` | Does the installed `anthropic`'s `create` accept everything the installed `pydantic_ai` forwards? | Anthropic-routed `run_typed` only |
 
-They stay separate all the way to the call sites through `stack_axes()`. `run_typed_local` is the granite-on-Ollama leg and never touches `anthropic`, so an Anthropic *signature* break must not fall the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) back to their conservative defaults fleet-wide.
+They stay separate all the way to the call sites through `stack_axes()`. An Ollama-routed `run_typed` call (a site declared `backend=OLLAMA` for eligible context, such as intake intent in `tools/classifier.py` or Job bind-or-mint in `bridge/job_router.py`) never touches `anthropic`, so an Anthropic *signature* break must not fall those hot-path classifiers back to their conservative defaults fleet-wide. The wrapper picks the axis from the route: `_guard_stack("run_typed", signature_axis=(route.backend is Backend.ANTHROPIC))`, and `_guard_stack("run_typed:fallback", signature_axis=True)` ahead of an Anthropic fallback leg. See [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md#the-degraded-stack-guard-by-route-axis).
 
 ### The forwarded-kwarg set comes from the call site
 
@@ -115,7 +115,7 @@ The update-script call sites are subprocess-only. `verify.py` and `deps.py` neve
 An incompatible stack at bridge or worker startup **does not exit the process.**
 
 - The process comes up. Telegram intake continues: messages are received, AgentSessions are enqueued to Redis, nothing is dropped.
-- A degraded flag is set. `run_typed` and `run_typed_local` fail fast with `LLMStackIncompatible`.
+- A degraded flag is set. `run_typed` fails fast with `LLMStackIncompatible` on every route the failed axis covers.
 - The condition is alarmed on the first transition, from inside the resolver.
 
 Degraded-but-running is precisely the state that hid the 2026-08-24 incident for six hours. Exiting would trade a silent LLM outage for an immediate total outage plus a launchd crash-loop, which is worse. So **the alert is the entire safety property.** If the alert does not fire, this feature has shipped nothing.
@@ -128,7 +128,7 @@ class LLMStackIncompatible(LLMCallError):
 
 A subclass of `LLMCallError` on purpose: every existing `except LLMCallError` fail-safe keeps working with no edit, so a degraded stack degrades each call site to its own conservative default (routing → respond, email triage → escalate, memory extraction → skip, intake → default classification, router → NEW Job) instead of surfacing a raw provider `TypeError` from deep inside `pydantic_ai`.
 
-`agent/llm/wrapper.py::_guard_stack(caller, *, signature_axis)` raises it. `run_typed` passes `signature_axis=True`; `run_typed_local` passes `False`.
+`agent/llm/wrapper.py::_guard_stack(caller, *, signature_axis)` raises it. An Anthropic-routed `run_typed` passes `signature_axis=True`; an Ollama-routed one passes `False`.
 
 ### The alert is bound to flag resolution, not to startup
 
@@ -140,7 +140,7 @@ The startup hooks in `bridge/telegram_bridge.py::main` and `worker/__main__.py` 
 
 Because the thing being alarmed **is** the LLM stack, the alert must not route through it. Forbidden in the alert path:
 
-- No `run_typed` / `run_typed_local`. They are exactly what is broken.
+- No `run_typed`. It is exactly what is broken.
 - No message drafter, no LLM summarization, no persona pass.
 - No dynamic body composition. The body is a **static string** plus the two resolved version numbers, the failed axis, and the captured exception type and message.
 
@@ -286,11 +286,11 @@ This is bounded work on the maintainer machine only, on cycles where a pin actua
 
 ## The Whole-Stack Loader Couples `openai` to the LLM Set's Reachable Versions
 
-`pydantic-ai-slim` ≥2.34 requires `openai` ≥3.x for `pydantic_ai.models.openai`, and `_load_stack` is deliberately whole-stack: it imports `from pydantic_ai.models.openai import OpenAIChatModel` unconditionally, because `run_typed_local` needs `OpenAIChatModel` for the Ollama leg. So any operation that moves the LLM set past that boundary must move the `openai` floor in the same operation, even though no packaging metadata declares the coupling.
+`pydantic-ai-slim` ≥2.34 requires `openai` ≥3.x for `pydantic_ai.models.openai`, and `_load_stack` is deliberately whole-stack: it imports `from pydantic_ai.models.openai import OpenAIChatModel` and `from openai import AsyncOpenAI` unconditionally, because the Ollama leg (`agent/llm/backends/ollama.py`) takes both from the stack. So any operation that moves the LLM set past that boundary must move the `openai` floor in the same operation, even though no packaging metadata declares the coupling.
 
 The #3073 upgrade proved both halves live. Its first gate run, with `openai` still at 2.x, returned `loader_ok=false` (``"Please install `openai` to use the OpenAI model"``) and correctly rolled the set back; moving the floor to `>=3.0.0` in the same operation as the pins made the gate pass. That is the gate catching a real, un-runnable stack before it shipped, exactly as designed.
 
-Do not read this coupling as an argument for relaxing the whole-stack loader or for a per-symbol import menu; the whole-stack loader is what makes the failure loud instead of latent in `run_typed_local`. And do not change the `openai` guard in `deps.py` on its account: removing the assertion would let an auto-bump try to rewrite a floor declaration, which `bump_pin_in_pyproject` refuses by design.
+Do not read this coupling as an argument for relaxing the whole-stack loader or for a per-symbol import menu; the whole-stack loader is what makes the failure loud instead of latent in the Ollama leg. And do not change the `openai` guard in `deps.py` on its account: removing the assertion would let an auto-bump try to rewrite a floor declaration, which `bump_pin_in_pyproject` refuses by design.
 
 ## Files
 
@@ -298,7 +298,9 @@ Do not read this coupling as an argument for relaxing the whole-stack loader or 
 |---|---|
 | `agent/llm/compat.py` | predicate, degraded flag, alert emitter, marker, `--json` CLI |
 | `agent/anthropic_client.py` | `_load_stack`, the one memoized whole-stack loader |
-| `agent/llm/wrapper.py` | `LLMStackIncompatible`, `_guard_stack`, `run_typed`, `run_typed_local` |
+| `agent/llm/wrapper.py` | `_guard_stack`, `run_typed` (the axis chosen per route) |
+| `agent/llm/errors.py` | `LLMCallError`, `LLMStackIncompatible` |
+| `agent/llm/backends/` | the Anthropic and Ollama legs; every third-party symbol comes from the resolved stack |
 | `bridge/telegram_bridge.py` | startup resolution, `_sentry_before_send` sentinel exemption |
 | `worker/__main__.py` | startup resolution |
 | `ui/app.py` | `_get_llm_stack_health`, the marker glob into `/dashboard.json` |
@@ -312,7 +314,7 @@ Do not read this coupling as an argument for relaxing the whole-stack loader or 
 
 ## See Also
 
-- [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md) — what `run_typed` / `run_typed_local` are and every call site that uses them.
+- [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md): `run_typed`, its two backend legs, and every call site that uses it.
 - [Remote Update](remote-update.md) — the `/update` orchestrator this gate runs inside.
 - [/update Warning Channel](update-warning-channel.md) — how a failed `ToolCheck` reaches chat.
 - [Config Timeout Catalog](config-timeout-catalog.md) — `TIMEOUTS__*` fields, including `local_typed_hard_s`.
