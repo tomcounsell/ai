@@ -547,3 +547,67 @@ def test_site_row_fixtures_build_prompts_and_labels(site_id):
             assert row.candidate_prompt(inp) != row.prompt(inp), "candidate tail did not apply"
     sample = (row.candidate_output_type or row.output_type).model_json_schema()
     assert sample["properties"]
+
+
+# --- the gemma reference arm's pacing (C15) ------------------------------------------
+
+
+async def test_gemma_arm_paces_requests_and_retries_a_429(monkeypatch):
+    """OpenRouter's free models allow about twenty requests a minute; the arm
+    spaces its requests and, on a 429, waits and retries instead of counting
+    the call as a reference error."""
+    import httpx
+
+    from tools.classification_eval.arms import OpenRouterGemmaArm
+
+    statuses = iter([429, 200, 200])
+    sleeps: list[float] = []
+    stamps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = next(statuses)
+        stamps.append(len(sleeps))
+        if status == 429:
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"answer": "yes"}'}}],
+                "usage": {"cost": 0.0},
+            },
+        )
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    arm = OpenRouterGemmaArm(
+        "test-key", transport=httpx.MockTransport(handler), min_interval_s=3.0, sleep=fake_sleep
+    )
+    first, cost, waited = await arm("p1", None, Verdict)
+    second, _, _ = await arm("p2", None, Verdict)
+    assert first.answer == "yes" and second.answer == "yes" and cost == 0.0
+    # The 429 cost one retry wait; the second call waited out the interval;
+    # the arm reports the waiting so the runner keeps it out of the latency.
+    assert len(sleeps) >= 2 and all(s > 0 for s in sleeps)
+    assert waited >= 0.0
+    assert arm.metering == "exact"
+
+
+async def test_an_arm_s_reported_rate_limit_wait_is_left_out_of_its_latency():
+    """A paced reference arm returns the seconds it spent waiting on its own
+    limiter as a third element; the runner subtracts it, so the reference p95
+    (and the budget derived from it) measures the request, not the pacing."""
+
+    async def call(prompt: str, system: str | None, output_type: type[BaseModel]):
+        return Verdict(answer="yes"), 0.0, 5.0
+
+    arm = Arm(name="paced", backend="openrouter", model="m", price=PRICE, call=call)
+    record = await compare(
+        _site(minimum_n=2),
+        _inputs(2, 0),
+        reference=arm,
+        candidates=[_arm("ollama", "ollama")],
+        contended=False,
+    )
+    assert record.reference.p95_c1 < 1.0 and record.reference.p95_c4 < 1.0
+    assert all(latency >= 0.0 for latency in record.reference.latency_c1)

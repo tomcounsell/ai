@@ -24,11 +24,13 @@ built lazily so importing this module touches no network client.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from time import perf_counter
 from typing import Any
 
 from pydantic import BaseModel
@@ -41,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 METER_PURPOSE = "promise_detector"
 OPENROUTER_TIMEOUT_S = 60
+OPENROUTER_FREE_MIN_INTERVAL_S = 3.2
+"""Spacing between gemma requests: OpenRouter's free models allow about twenty
+requests a minute, and a burst past that answers 429 on nearly every call."""
+OPENROUTER_429_RETRIES = 4
 
 HAIKU_PRICE = Price(
     model=MODEL_FAST,
@@ -136,15 +142,33 @@ class OpenRouterGemmaArm:
 
     ``reserve()`` before the run and ``settle()`` after; ``metering`` drops
     to ``"unknown"`` the moment a response carries no ``usage.cost``
-    (charter §8: uncertain metering is never zero).
+    (charter §8: uncertain metering is never zero). Requests are spaced
+    ``min_interval_s`` apart under one lock (the latency pass at concurrency
+    4 shares it) and a 429 waits out ``Retry-After`` (else the interval) and
+    retries up to :data:`OPENROUTER_429_RETRIES` times, so a rate limit is a
+    pause rather than a reference error. ``transport`` and ``sleep`` are the
+    test seams.
     """
 
-    def __init__(self, api_key: str, *, model: str = OPENROUTER_GEMMA4_FREE) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        model: str = OPENROUTER_GEMMA4_FREE,
+        transport: Any | None = None,
+        min_interval_s: float = OPENROUTER_FREE_MIN_INTERVAL_S,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+    ) -> None:
         self._api_key = api_key
         self.model = model
         self.cost_usd = 0.0
         self.metering = "exact"
         self.reservation_id: str | None = None
+        self._transport = transport
+        self._min_interval_s = min_interval_s
+        self._sleep = sleep or asyncio.sleep
+        self._lock: asyncio.Lock | None = None
+        self._last_sent = 0.0
 
     def reserve(self, calls: int, *, project_key: str = PROJECT_KEY) -> None:
         from tools.paid_inference_meter import Refusal, reserve
@@ -164,29 +188,53 @@ class OpenRouterGemmaArm:
         settle(project_key, self.reservation_id, self.cost_usd, metering=self.metering)
         self.reservation_id = None
 
+    async def _post(self, client: Any, body: dict[str, Any]) -> tuple[Any, float]:
+        """One paced request and the seconds spent waiting for it: on the
+        limiter's lock and interval, and on a 429's retry pause."""
+        from config.models import OPENROUTER_URL
+
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        waited = 0.0
+        for attempt in range(OPENROUTER_429_RETRIES + 1):
+            queued = perf_counter()
+            async with self._lock:
+                wait = self._last_sent + self._min_interval_s - perf_counter()
+                if wait > 0:
+                    await self._sleep(wait)
+                waited += perf_counter() - queued
+                self._last_sent = perf_counter()
+                response = await client.post(OPENROUTER_URL, headers=headers, json=body)
+            if response.status_code != 429 or attempt == OPENROUTER_429_RETRIES:
+                return response, waited
+            retry_after = response.headers.get("retry-after")
+            try:
+                pause = float(retry_after) if retry_after else self._min_interval_s
+            except ValueError:
+                pause = self._min_interval_s
+            paused = perf_counter()
+            await self._sleep(max(pause, self._min_interval_s))
+            waited += perf_counter() - paused
+        return response, waited
+
     async def __call__(self, prompt: str, system: str | None, output_type: type[BaseModel]):
         import httpx
-
-        from config.models import OPENROUTER_URL
 
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        async with httpx.AsyncClient(timeout=OPENROUTER_TIMEOUT_S) as client:
-            response = await client.post(
-                OPENROUTER_URL,
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "max_tokens": 200,
-                    "usage": {"include": True},
-                },
-            )
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 200,
+            "usage": {"include": True},
+        }
+        async with httpx.AsyncClient(
+            timeout=OPENROUTER_TIMEOUT_S, transport=self._transport
+        ) as client:
+            response, waited = await self._post(client, body)
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
         cost = (payload.get("usage") or {}).get("cost")
@@ -196,7 +244,7 @@ class OpenRouterGemmaArm:
             self.metering = "unknown"
             cost = None
         content = str((payload.get("choices") or [{}])[0].get("message", {}).get("content") or "")
-        return parse_json_output(content, output_type), cost
+        return parse_json_output(content, output_type), cost, waited
 
 
 def openrouter_gemma_arm(*, name: str = "openrouter_gemma") -> tuple[Arm, OpenRouterGemmaArm]:

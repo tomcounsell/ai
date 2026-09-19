@@ -72,12 +72,15 @@ class Price:
     note: str = ""
 
 
-ArmCall = Callable[[str, str | None, type[BaseModel]], Awaitable[tuple[BaseModel, float | None]]]
+ArmCall = Callable[[str, str | None, type[BaseModel]], Awaitable[tuple[Any, ...]]]
 """``(prompt, system, output_type) -> (validated output, cost in USD or None)``.
 
 ``None`` cost means the transport reported no usage; the runner estimates it
 from the prompt and output lengths at the arm's :class:`Price` and stamps the
-record ``cost_metering="estimated"``. Any exception is one error for the arm."""
+record ``cost_metering="estimated"``. An arm that paces itself against a
+rate limit (the gemma reference arm) may return a third element, the seconds
+it spent waiting on its own limiter, which the runner leaves out of the
+call's latency. Any exception is one error for the arm."""
 
 
 @dataclass(frozen=True)
@@ -266,14 +269,15 @@ async def _one_call(
     """Run one call, account it on ``result``, return ``(output, latency)``."""
     started = perf_counter()
     try:
-        output, cost = await arm.call(prompt, system, output_type)
+        output, cost, *rest = await arm.call(prompt, system, output_type)
     except Exception as e:
         elapsed = perf_counter() - started
         result.calls += 1
         result.errors += 1
         logger.warning("classification_eval: arm %s errored: %s", arm.name, e)
         return None, elapsed
-    elapsed = perf_counter() - started
+    waited = float(rest[0]) if rest else 0.0
+    elapsed = max(0.0, perf_counter() - started - waited)
     result.calls += 1
     if cost is None:
         cost = _estimate_cost(arm.price, prompt, output)
