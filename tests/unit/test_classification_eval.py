@@ -611,3 +611,16 @@ async def test_an_arm_s_reported_rate_limit_wait_is_left_out_of_its_latency():
     )
     assert record.reference.p95_c1 < 1.0 and record.reference.p95_c4 < 1.0
     assert all(latency >= 0.0 for latency in record.reference.latency_c1)
+
+
+def test_gemma_arm_paid_route_carries_its_own_model_and_price(monkeypatch):
+    from config.settings import settings
+    from tools.classification_eval import arms
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(settings.api, "openrouter_api_key", "test-key")
+    free_arm, _ = arms.openrouter_gemma_arm()
+    paid_arm, transport = arms.openrouter_gemma_arm(paid=True)
+    assert free_arm.model.endswith(":free") and free_arm.price.usd_per_mtoken_in == 0.0
+    assert paid_arm.model == free_arm.model.removesuffix(":free") == transport.model
+    assert paid_arm.price.usd_per_mtoken_in > 0.0 and paid_arm.price.retrieved_at

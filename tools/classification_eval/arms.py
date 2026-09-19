@@ -62,6 +62,17 @@ GEMMA_FREE_PRICE = Price(
     retrieved_at="2026-09-17",
     note="OpenRouter free tier (#3338); usage.cost on each response is the metered truth",
 )
+OPENROUTER_GEMMA4_PAID = OPENROUTER_GEMMA4_FREE.removesuffix(":free")
+GEMMA_PAID_PRICE = Price(
+    model=OPENROUTER_GEMMA4_PAID,
+    usd_per_mtoken_in=0.09,
+    usd_per_mtoken_out=0.30,
+    retrieved_at="2026-09-19",
+    note="OpenRouter list price for the same weights on the paid route; usage.cost is metered",
+)
+"""The paid route of C15's reference model, for a run made while the free
+route is throttled upstream (Google AI Studio answers 429 on every call for
+a while); the same weights, the same provider, a metered price."""
 GRANITE_PRICE = Price(
     model=OLLAMA_CLASSIFIER_MODEL,
     usd_per_mtoken_in=0.0,
@@ -247,8 +258,12 @@ class OpenRouterGemmaArm:
         return parse_json_output(content, output_type), cost, waited
 
 
-def openrouter_gemma_arm(*, name: str = "openrouter_gemma") -> tuple[Arm, OpenRouterGemmaArm]:
-    """The metered gemma reference arm; the caller reserves and settles the transport."""
+def openrouter_gemma_arm(
+    *, name: str = "openrouter_gemma", paid: bool = False
+) -> tuple[Arm, OpenRouterGemmaArm]:
+    """The metered gemma reference arm; the caller reserves and settles the
+    transport. ``paid`` selects :data:`OPENROUTER_GEMMA4_PAID` for a run made
+    while the free route is throttled upstream."""
     import os
 
     from config.settings import settings
@@ -256,14 +271,9 @@ def openrouter_gemma_arm(*, name: str = "openrouter_gemma") -> tuple[Arm, OpenRo
     api_key = settings.api.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured; the gemma reference arm needs it")
-    transport = OpenRouterGemmaArm(api_key)
-    arm = Arm(
-        name=name,
-        backend="openrouter",
-        model=transport.model,
-        price=GEMMA_FREE_PRICE,
-        call=transport,
-    )
+    price = GEMMA_PAID_PRICE if paid else GEMMA_FREE_PRICE
+    transport = OpenRouterGemmaArm(api_key, model=price.model)
+    arm = Arm(name=name, backend="openrouter", model=transport.model, price=price, call=transport)
     return arm, transport
 
 

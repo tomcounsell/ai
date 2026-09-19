@@ -99,6 +99,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-attach", action="store_true", help="write the record but record no claims"
     )
+    parser.add_argument(
+        "--reference-model",
+        choices=("free", "paid"),
+        default="free",
+        help="C15 only: the gemma route; 'paid' is the same weights at a metered price,"
+        " for a run made while the free route is throttled upstream",
+    )
     parser.add_argument("--audit", action="store_true", help="apply the bar to every site")
     parser.add_argument("--list-sites", action="store_true", help="print the site rows")
     parser.add_argument("--project-key", default=PROJECT_KEY, help=argparse.SUPPRESS)
@@ -145,7 +152,7 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
     reference = None
     if not args.latency_only:
         if site.reference == "openrouter_gemma":
-            reference, transport = live.openrouter_gemma_arm()
+            reference, transport = live.openrouter_gemma_arm(paid=args.reference_model == "paid")
             transport.reserve(len(inputs) * 2, project_key=args.project_key)
         else:
             reference = live.anthropic_arm(site.id, model=site.model, name="anthropic")
