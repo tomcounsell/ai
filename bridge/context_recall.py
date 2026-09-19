@@ -32,6 +32,8 @@ import shlex
 
 from pydantic import BaseModel, Field
 
+from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
+
 # Shared with bridge/injection_inspection.py on purpose: both modules embed an
 # LLM-authored, attacker-influenceable "reason" string into a trusted prompt
 # prefix, and this reuses that module's sanitizer instead of growing a second
@@ -125,6 +127,15 @@ class ContextRecallVerdict(BaseModel):
 
     advised: bool = False
     reason: str = Field(default="")
+
+
+# Fail-safe: any error answers advised=False, so the message is sent as drafted.
+CONTEXT_RECALL_ADVISED = LLMTask(
+    site="context_recall.advised",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.MEDIUM,
+)
 
 
 def inbound_enabled() -> bool:
@@ -243,16 +254,22 @@ def _prefilter(text: str | None) -> bool:
     return "?" in stripped
 
 
-async def check_outbound_context_recall(text: str | None) -> ContextRecallVerdict:
+async def check_outbound_context_recall(
+    text: str | None, *, project_key: str | None = None
+) -> ContextRecallVerdict:
     """Judge whether outbound PM text is a recoverable-context question.
 
-    Haiku rather than granite on this edge: a false positive here suppresses a
-    real message and costs a human round trip, so precision is worth the paid
-    call. The structural prefilter keeps it off the hot path.
+    A false positive here suppresses a real message and costs a human round
+    trip, so precision matters; the structural prefilter keeps the call off
+    the hot path.
 
     Never raises. Every failure mode — kill switch off, prefilter reject,
     timeout, provider error, schema exhaustion — returns ``advised=False``, so
     the message is sent exactly as it would be today.
+
+    ``project_key`` is the outbound session's project, read by the router for
+    charter §7 eligibility (#3410); ``None`` fails closed to the subscription
+    backend.
     """
     try:
         if not outbound_enabled():
@@ -269,6 +286,8 @@ async def check_outbound_context_recall(text: str | None) -> ContextRecallVerdic
         verdict = await run_typed(
             OUTBOUND_CONTEXT_RECALL_PROMPT.format(text=text),
             ContextRecallVerdict,
+            task=CONTEXT_RECALL_ADVISED,
+            project_key=project_key,
             sdk_timeout=3.0,
         )
         return verdict

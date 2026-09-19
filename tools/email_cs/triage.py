@@ -18,7 +18,8 @@ import logging
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent.llm import run_typed
+from agent.llm import LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from config.models import MODEL_FAST
 
 from .schema import ESCALATION_SIGNALS, Category, Triage, escalate_triage
@@ -93,6 +94,18 @@ class EmailTriageDecision(BaseModel):
         return v if v in ESCALATION_SIGNALS else ""
 
 
+# Fail-safe: any error escalates to a human (RAISE_TO_HUMAN), never auto-handles.
+# client_only: Cuttlefish customer email is client work; charter §7 keeps it on
+# the subscription backend for every project key.
+EMAIL_TRIAGE = LLMTask(
+    site="email_cs.triage",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.MEDIUM,
+    client_only=True,
+)
+
+
 async def triage_local(subject: str, body: str, customer_id: str | None) -> Triage:
     """Classify an inbound customer email into one of four lanes (Tier 1).
 
@@ -124,7 +137,7 @@ async def triage_local(subject: str, body: str, customer_id: str | None) -> Tria
     # (bad category, out-of-range confidence) now raises here too, so it
     # shares the same conservative escalate path as an LLM-down failure.
     try:
-        decision = await run_typed(prompt, EmailTriageDecision, model=MODEL_FAST)
+        decision = await run_typed(prompt, EmailTriageDecision, task=EMAIL_TRIAGE, model=MODEL_FAST)
     except Exception as e:
         logger.warning(f"[email_cs.triage] LLM classification failed, escalating: {e}")
         return escalate_triage(f"tier1 llm failure: {e}")

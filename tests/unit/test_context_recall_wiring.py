@@ -71,7 +71,7 @@ class TestPersistRoutingFieldsSurvivesAFailingCheck:
         handler = _make_handler()
         session = _session()
 
-        async def boom(_text):
+        async def boom(_text, **_kwargs):
             raise RuntimeError("context-recall exploded")
 
         monkeypatch.setattr("bridge.context_recall.check_outbound_context_recall", boom)
@@ -107,7 +107,7 @@ class TestPersistRoutingFieldsSurvivesAFailingCheck:
         """Fail-open: a broken check never holds a message."""
         handler = _make_handler()
 
-        async def boom(_text):
+        async def boom(_text, **_kwargs):
             raise RuntimeError("nope")
 
         monkeypatch.setattr("bridge.context_recall.check_outbound_context_recall", boom)
@@ -120,18 +120,25 @@ class TestPersistRoutingFieldsSurvivesAFailingCheck:
 
 
 class TestOutboundBounce:
-    def _advise(self, monkeypatch, advised=True):
+    def _advise(self, monkeypatch, advised=True, seen_kwargs=None):
         from bridge.context_recall import ContextRecallVerdict
 
-        async def fake(_text):
+        async def fake(_text, **kwargs):
+            if seen_kwargs is not None:
+                seen_kwargs.append(kwargs)
             return ContextRecallVerdict(advised=advised, reason="referent clarification")
 
         monkeypatch.setattr("bridge.context_recall.check_outbound_context_recall", fake)
 
     def test_clean_question_is_held_and_bounced(self, monkeypatch):
-        """The headline case: needs_self_draft=False, yet the message is held."""
+        """The headline case: needs_self_draft=False, yet the message is held.
+
+        Also pins the C8 project-key thread (#3410): the check receives the
+        session's ``project_key`` so the router can apply charter §7.
+        """
         handler = _make_handler()
-        self._advise(monkeypatch)
+        seen_kwargs: list[dict] = []
+        self._advise(monkeypatch, seen_kwargs=seen_kwargs)
         # Pin the exact advisory text so the assertion below is load-bearing:
         # a broken advisory-wiring path (e.g. the advisory silently dropped
         # before reaching the pushed instruction) must fail this test.
@@ -149,12 +156,15 @@ class TestOutboundBounce:
             patch("agent.steering.peek_steering_sender", return_value=None),
             patch("agent.steering.bump_self_draft_attempts", return_value=1),
         ):
-            asyncio.run(handler.send("123", "Which PR do you mean?", 0, session=_session()))
+            session = _session()
+            session.project_key = "test-ctx-project"
+            asyncio.run(handler.send("123", "Which PR do you mean?", 0, session=session))
 
         handler._redis.rpush.assert_not_called()
         assert len(pushed) == 1
         instruction = pushed[0][0][1]
         assert ADVISORY in instruction
+        assert [k["project_key"] for k in seen_kwargs] == ["test-ctx-project"]
 
     def test_instruction_does_not_claim_a_validator_violation(self, monkeypatch):
         """SELF_DRAFT_INSTRUCTION's wire-format claim is false for this bounce."""
@@ -246,7 +256,7 @@ class TestBudgetExhaustionKeepsTheDraft:
     def _advise(self, monkeypatch):
         from bridge.context_recall import ContextRecallVerdict
 
-        async def fake(_text):
+        async def fake(_text, **_kwargs):
             return ContextRecallVerdict(advised=True, reason="r")
 
         monkeypatch.setattr("bridge.context_recall.check_outbound_context_recall", fake)

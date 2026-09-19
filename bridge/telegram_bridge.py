@@ -2358,6 +2358,7 @@ async def main():
                         message=clean_text,
                         session_context=target_session.context_summary or "",
                         session_status=target_session.status or "",
+                        project_key=project_key,
                     )
 
                     intent = intent_result.get("intent", "new_work")

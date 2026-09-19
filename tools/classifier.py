@@ -40,7 +40,7 @@ from pydantic import BaseModel
 
 from agent.anthropic_client import anthropic_slot
 from agent.llm import LLMTask, run_typed
-from agent.llm.tasks import Backend, TaskKind
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from config.models import MODEL_FAST
 from utils.api_keys import get_anthropic_api_key
 
@@ -326,7 +326,10 @@ class IntentDecision(BaseModel):
 
 # Fail-safe: any LLMCallError classifies as new_work with confidence 0.0.
 INTAKE_INTENT = LLMTask(
-    site="classifier.intake_intent", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA
+    site="classifier.intake_intent",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.OLLAMA,
+    error_cost=ErrorCost.MEDIUM,
 )
 
 
@@ -354,6 +357,8 @@ async def classify_message_intent_async(
     message: str,
     session_context: str = "",
     session_status: str = "",
+    *,
+    project_key: str | None = None,
 ) -> dict:
     """Classify a message's intent for bridge routing, on local granite.
 
@@ -369,6 +374,9 @@ async def classify_message_intent_async(
         message: The incoming message text to classify.
         session_context: Summary of the active session (context_summary field).
         session_status: Current session status (running/active/dormant).
+        project_key: The chat's project, read by the router for charter §7
+            eligibility (#3410); ``None`` fails closed to the subscription
+            backend.
 
     Returns:
         Dict with keys:
@@ -421,7 +429,9 @@ async def classify_message_intent_async(
             session_status=session_status if session_status else "(unknown)",
         )
 
-        decision = await run_typed(prompt, output_model, task=INTAKE_INTENT)
+        decision = await run_typed(
+            prompt, output_model, task=INTAKE_INTENT, project_key=project_key
+        )
 
         if not (0.0 <= decision.confidence <= 1.0):
             raise ValueError(f"Invalid confidence value: {decision.confidence}")

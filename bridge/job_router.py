@@ -206,8 +206,13 @@ async def route_message(
     message_key: str,
     *,
     reply_to_message_key: str | None = None,
+    project_key: str | None = None,
 ) -> Job:
     """Bind an inbound message to a Job, or mint a NEW one. Never raises.
+
+    ``project_key`` is the Room's project, read by the router for charter §7
+    eligibility on the granite verdict (#3410); ``None`` fails closed to the
+    subscription backend.
 
     Resolution order:
 
@@ -253,7 +258,7 @@ async def route_message(
         if not candidates:
             logger.info("[job-router] no candidate jobs in %s; minting NEW", room_id)
         else:
-            bound_job = await _classify(room_id, message_text, candidates)
+            bound_job = await _classify(room_id, message_text, candidates, project_key=project_key)
 
     if bound_job is None:
         bound_job = Job.mint(room_id, message_text)
@@ -279,11 +284,20 @@ async def route_message(
     return bound_job
 
 
-async def _classify(room_id: str, message_text: str, candidates: list[Job]) -> Job | None:
+async def _classify(
+    room_id: str,
+    message_text: str,
+    candidates: list[Job],
+    *,
+    project_key: str | None = None,
+) -> Job | None:
     """Granite verdict over the candidate set. ``None`` means NEW (fail-open)."""
     try:
         decision = await run_typed(
-            _build_prompt(message_text, candidates), JobRouteDecision, task=JOB_ROUTE
+            _build_prompt(message_text, candidates),
+            JobRouteDecision,
+            task=JOB_ROUTE,
+            project_key=project_key,
         )
     except Exception as e:  # noqa: BLE001 — total fail-open to NEW
         logger.warning("[job-router] classifier failed; failing open to NEW: %s", e)

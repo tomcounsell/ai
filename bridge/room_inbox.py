@@ -114,6 +114,7 @@ async def shadow_route_job(
             text,
             telegram_message_key(chat_id, message_id),
             reply_to_message_key=reply_key,
+            project_key=project_key,
         )
     except Exception as e:  # noqa: BLE001 — intake must survive a router outage
         logger.error(
