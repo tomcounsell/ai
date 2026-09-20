@@ -204,6 +204,14 @@ KNOWN_MISTAGS: dict[str, str] = {
         "which does not itself resolve. 'sdlc' is correct for this file: the "
         "PreToolUse hook is an SDLC surface. Kept deliberately (#3175)."
     ),
+    "tests/unit/hooks/test_validate_commit_message_sdlc.py": (
+        "R2 POLICY: sibling (2 of 6, alongside "
+        "test_pre_tool_use_foreground_subagents.py) resolving to 'sdlc' via "
+        "'sdlc', against 4 unmarked siblings in tests/unit/hooks/, which does "
+        "not itself resolve. 'sdlc' is correct for this file: it tests the "
+        "commit-msg hook that enforces hotfix-issue-disposition, an SDLC "
+        "pipeline surface (#3259). Kept deliberately."
+    ),
 }
 
 

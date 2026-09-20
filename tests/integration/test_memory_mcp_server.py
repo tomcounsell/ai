@@ -133,54 +133,73 @@ def test_cold_start_latency():
 
 @pytest.mark.integration
 def test_fresh_shell_import_resolution():
-    """Stripped-env smoke check (cycle-3 C5).
+    """The registered MCP entry is launchable exactly as ``/update`` writes it.
 
-    The registered MCP command runs in whatever environment Claude Code
-    spawns its subprocesses in. Failures here mean the registered
-    ``python`` binary cannot resolve project modules with only
-    ``PYTHONPATH`` set — and Claude Code sessions would silently break.
+    **What this proves.** ``scripts/update/mcp_memory.py::_expected_entry`` is
+    the canonical shape ``/update`` installs into ``~/.claude.json``. This test
+    takes that entry verbatim — its ``command`` (resolved through ``PATH``, as
+    a *name*, never by absolute path), its ``args``, and its declared ``env`` —
+    and spawns it the way Claude Code spawns a stdio MCP server. A pass means
+    the registration as written starts a process that advertises the memory
+    tools. It goes red if the registered module path, the command name, or the
+    declared env ever stops being launchable — i.e. if ``/update`` would write
+    a registration that cannot run.
 
-    Note: ``PATH`` is set to include /opt/homebrew/bin so the spawned
-    ``python3`` resolves to a Python that has the ``mcp`` SDK
-    installed. ``/usr/bin/python3`` does not (it is the system Python
-    on Darwin).
+    ``PATH`` is built with the venv's ``bin`` first, which is not a convenience:
+    it is the one production-relevant fact about how the bare name ``python3``
+    resolves. The real spawner is the worker, whose launchd plist
+    (``~/Library/LaunchAgents/com.valor.worker.plist``) puts ``.venv/bin``
+    ahead of everything else and sets no activation vars. ``cwd`` is a
+    directory outside the repo so an implicit current-directory ``sys.path``
+    entry cannot stand in for the registration.
 
-    ``PYTHONPATH`` is passed as an explicit override rather than through
-    ``subprocess_env(project_root=...)``: this test's subject IS module
-    resolution from ``PYTHONPATH`` alone, so the value must replace the
-    parent's rather than be prepended to it. The venv-steering variables
-    are stripped for the same reason — inheriting them would let the child
-    resolve modules through the activated venv and the test would pass for
-    the wrong reason. ``subprocess_env`` still supplies REDIS_URL so the
-    child's Popoto lands on this process's claimed test db, not db0 (#2763).
+    **What this does NOT prove: that ``PYTHONPATH`` is the channel that makes
+    the import resolve.** It is not, and has not been for some time. The repo
+    venv carries an editable install (``_editable_impl_valor_bridge.pth``) and
+    ``.pth`` files are processed by ``site`` before ``PYTHONPATH`` is ever
+    consulted, so the venv interpreter finds ``mcp_servers`` with no
+    ``PYTHONPATH`` set at all. Since production's ``python3`` IS that venv
+    interpreter, the declared ``PYTHONPATH`` is belt-and-braces in production
+    too, not the load-bearing channel.
 
-    Every other interpreter-steering variable is stripped too. Building the env
-    from ``subprocess_env`` means the child inherits the parent's environment
-    rather than the three-key whitelist this test used before #2763, so the
-    strips are what keep the assertion's subject intact: with any of these left
-    in place the child could resolve modules through a channel other than
-    ``PYTHONPATH`` and the test would pass without proving anything.
+    A previous revision of this test claimed to isolate ``PYTHONPATH`` as the
+    only channel by popping five interpreter-steering variables (``VIRTUAL_ENV``,
+    ``PYTHONHOME``, ``PYTHONUSERBASE``, ``PYTHONNOUSERSITE``, ``PYTHONSAFEPATH``).
+    None of those disables ``.pth`` processing, so both of its assertions passed
+    under ``env -i`` with no ``PYTHONPATH`` whatsoever: the test was a tautology.
+    That ceremony is deleted rather than rebuilt around a stricter interpreter
+    flag, because an invocation contrived to make ``PYTHONPATH`` load-bearing
+    (``-S``, say) would no longer be the invocation production performs, and
+    guarding a contract production does not have is how the tautology got here.
     """
     import subprocess
+    import tempfile
 
+    from scripts.update.mcp_memory import _expected_entry
+
+    entry = _expected_entry(_project_root())
+    # subprocess_env still supplies REDIS_URL so the child's Popoto lands on
+    # this process's claimed test db rather than db0 (#2763); the entry's own
+    # env keys are merged last and win.
     env = subprocess_env(
-        PATH="/opt/homebrew/bin:/usr/bin:/bin",
-        PYTHONPATH=_project_root(),
+        PATH=f"{Path(sys.executable).parent}:/usr/bin:/bin",
+        **entry["env"],
     )
-    for steering_var in (
-        "VIRTUAL_ENV",
-        "PYTHONHOME",
-        "PYTHONUSERBASE",
-        "PYTHONNOUSERSITE",
-        "PYTHONSAFEPATH",
-    ):
-        env.pop(steering_var, None)
-    result = subprocess.run(
-        ["python3", "-m", "mcp_servers.memory_server", "--help"],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
+
+    with tempfile.TemporaryDirectory() as outside_repo:
+        result = subprocess.run(
+            [entry["command"], *entry["args"], "--help"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=outside_repo,
+            timeout=10,
+        )
+
+    assert result.returncode == 0, (
+        f"registered MCP entry {entry['command']} {entry['args']} failed to launch: "
+        f"{result.stderr or result.stdout}"
     )
-    assert result.returncode == 0, f"fresh-shell import failed: {result.stderr or result.stdout}"
-    assert "memory_get" in (result.stderr + result.stdout)
+    assert "memory_get" in (result.stderr + result.stdout), (
+        "registered MCP entry launched but did not advertise the memory tools"
+    )

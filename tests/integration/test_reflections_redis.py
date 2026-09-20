@@ -110,11 +110,20 @@ class TestAnalyzeSessionsFromRedis:
         assert "thrash_sessions" not in result
 
     def test_detects_failed_sessions(self):
-        """Failed sessions appear in error_patterns."""
+        """Failed sessions appear in error_patterns.
+
+        ``summary`` is a derived property backed by ``session_events`` (it is
+        computed from the most recent ``summary`` event, not a plain Field —
+        see models/agent_session.py), so it must be set via attribute
+        assignment on an already-saved instance rather than passed as a
+        ``create()`` kwarg: the setter appends a session_event and does a
+        partial save keyed on the record already existing, which a
+        constructor-time kwarg predates.
+        """
         from models.agent_session import AgentSession
         from reflections.session_intelligence import _analyze_sessions_from_redis
 
-        AgentSession.create(
+        session = AgentSession.create(
             session_id="failed-session",
             project_key="ai",
             status="failed",
@@ -123,8 +132,8 @@ class TestAnalyzeSessionsFromRedis:
             updated_at=datetime.now(tz=UTC),
             turn_count=2,
             tool_call_count=3,
-            summary="Crashed during build step",
         )
+        session.summary = "Crashed during build step"
 
         today = __import__("utils.utc", fromlist=["utc_now"]).utc_now().strftime("%Y-%m-%d")
         result = _analyze_sessions_from_redis(today)
@@ -168,46 +177,34 @@ class TestIgnoreLogRedis:
         assert len(ReflectionIgnore.query.all()) == 0
 
 
-class TestRedisIndexCleanupReflection:
-    """Tests for redis-index-cleanup reflection registration."""
-
-    def test_reflection_registered_in_yaml(self):
-        """Verify redis-index-cleanup exists in reflections.yaml."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        names = [r["name"] for r in config["reflections"]]
-        assert "redis-index-cleanup" in names
-
-    def test_reflection_entry_structure(self):
-        """Verify the reflection entry has required fields."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        entry = next(r for r in config["reflections"] if r["name"] == "redis-index-cleanup")
-        assert entry["execution_type"] == "function"
-        assert entry["callable"] == "scripts.popoto_index_cleanup.run_cleanup"
-        assert entry["enabled"] is True
-        # The registry schema uses `every: <N><unit>` (e.g. "86400s"), not a bare
-        # `interval: <seconds>` int (issue #1578 Category A drift). Parse it the
-        # same way the scheduler does.
-        from agent.reflection_schedule import parse_every_duration
-
-        assert parse_every_duration(entry["every"]) == 86400
-        assert entry["priority"] == "low"
-
-    def test_cleanup_callable_importable(self):
-        """Verify the cleanup function can be imported."""
-        from scripts.popoto_index_cleanup import run_cleanup
-
-        assert callable(run_cleanup)
+# TestRedisIndexCleanupReflection was removed entirely. It held three tests; all
+# three had lost their subject, and the root cause is one the node-list-driven
+# triage in this PR reached only for the third.
+#
+# - test_reflection_entry_structure and test_reflection_registered_in_yaml both
+#   read config/reflections.yaml. That file moved to the private, iCloud-synced
+#   vault (~/Desktop/Valor/reflections.yaml) in c2af09602, is gitignored
+#   (.gitignore:8), and is copied into a checkout only by machine provisioning
+#   (scripts/install_email_bridge.sh:150). test_reflection_registered_in_yaml
+#   therefore raises FileNotFoundError in any clean checkout -- verified here,
+#   not inferred -- and passed on the nightly machine only because that machine
+#   is provisioned. It is not retargetable while staying test-only: the repo
+#   holds no reflections registry to assert against, and the vault file is
+#   private, absent from CI, and evolves independently of this repo, so a test
+#   pointed at it would assert operator config rather than a repo contract.
+#
+# - test_cleanup_callable_importable asserted that
+#   scripts.popoto_index_cleanup.run_cleanup is importable, framed as the
+#   redis-index-cleanup reflection's callable. That framing is false: the live
+#   vault entry for redis-index-cleanup dispatches
+#   agent.session_health.cleanup_corrupted_agent_sessions, and the vault has
+#   zero references to popoto_index_cleanup, so nothing schedules run_cleanup.
+#   Its only surviving claim -- that the symbol imports -- is already proven by
+#   the module-level `from scripts.popoto_index_cleanup import run_cleanup` in
+#   tests/unit/test_popoto_cleanup_reflection.py, which additionally exercises
+#   run_cleanup behaviourally (orphan reaping, slow-rebuild abandonment, count
+#   accuracy). Deleting it loses no coverage.
+#
+# parse_every_duration's "Ns" parsing, the only code-under-test the removed
+# structural assertions touched, stays covered by
+# tests/unit/test_reflection_schedule_grammar.py::TestDurationHelpers.

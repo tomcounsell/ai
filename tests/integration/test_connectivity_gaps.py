@@ -11,7 +11,11 @@ Tests use real Redis (db=1 via redis_test_db fixture) for integration
 validation. Mock-based tests are used only where SDK imports are needed.
 """
 
+import os
+import tempfile
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -267,40 +271,150 @@ class TestNoDualSessionCreation:
 # ── Fix 4a: SDK client env var injection ─────────────────────────────────────
 
 
+class _EnvCapturingRunner:
+    """Spy over ``agent.session_runner.SessionRunner`` recording ctor kwargs.
+
+    Patched in at ``agent.session_runner.SessionRunner`` because the executor
+    imports the symbol at call time. Recording the kwargs is what lets these
+    tests assert on the env dict the executor actually HANDS to the runner,
+    rather than on the source text that builds it.
+    """
+
+    instances: list["_EnvCapturingRunner"] = []
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        type(self).instances.append(self)
+
+    async def run(self, user_message: str):
+        from agent.session_runner import RunSummary
+
+        return RunSummary(exit_reason="pm_complete", turn_count=1)
+
+
+@contextmanager
+def _dispatch_harness():
+    """Patch the runner and stub the git worktree operations the executor does.
+
+    A slugless eng session gets a synthetic slug and then a real worktree
+    create + branch verify, neither of which can succeed under test. Mirrors
+    ``tests/unit/test_session_executor_runner_dispatch.py::_patch_worktree``.
+    """
+    _EnvCapturingRunner.instances = []
+    wt_path = os.path.join(tempfile.mkdtemp(), ".worktrees", "test-slot")
+    os.makedirs(wt_path, exist_ok=True)
+    with (
+        patch("agent.session_runner.SessionRunner", _EnvCapturingRunner),
+        patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+        patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+    ):
+        yield
+    _EnvCapturingRunner.instances = []
+
+
+def _dispatch_session(session_id: str) -> AgentSession:
+    """A minimal eng AgentSession the executor will dispatch to the runner."""
+    session = AgentSession.create(
+        session_id=session_id,
+        session_type="eng",
+        project_key="test",
+        working_dir="/tmp",
+        status="pending",
+        chat_id="999",
+        message_text="hello runner",
+        sender_name="tester",
+        created_at=datetime.now(tz=UTC),
+        turn_count=0,
+        tool_call_count=0,
+    )
+    # The executor's agent_session lookup filters on status="running"; the
+    # worker performs this transition before dispatch.
+    session.status = "running"
+    session.save(update_fields=["status"])
+    return session
+
+
+async def _captured_session_env(session: AgentSession) -> dict:
+    """Run the executor against ``session`` and return the runner's session_env."""
+    from agent.session_executor import _execute_agent_session
+
+    with _dispatch_harness():
+        await _execute_agent_session(session)
+        assert _EnvCapturingRunner.instances, "SessionRunner was never constructed"
+        return _EnvCapturingRunner.instances[0].init_kwargs.get("session_env")
+
+
 class TestSdkClientEnvVar:
-    """Fix 4a: Verify VALOR_SESSION_ID is present in sdk_client.py source code."""
+    """Fix 4a: VALOR_SESSION_ID is injected into the harness subprocess env.
 
-    def test_valor_session_id_in_source(self):
-        """sdk_client.py contains the VALOR_SESSION_ID env var injection code."""
-        from pathlib import Path
+    The injection site is the ``_harness_env`` dict built in
+    agent/session_executor.py (issue #2206) and handed to ``SessionRunner``
+    as ``session_env``. It is NOT in agent/sdk_client.py: that module has
+    zero occurrences of ``VALOR_SESSION_ID``, which is the load-bearing fact
+    here. (An earlier revision of this docstring called sdk_client.py "a thin
+    re-export shim"; it is 1531 lines. The characterization was wrong even
+    though the zero-occurrences fact it rested on is right.) See
+    agent/hooks/session_resolver.py's module docstring, which documents
+    session_executor.py as the injection site consumers rely on.
 
-        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_client_path.read_text()
+    Both tests below assert on the env dict the executor HANDS to the runner.
+    They previously grepped agent/session_executor.py for the literal
+    ``'"VALOR_SESSION_ID": session.session_id or ""'`` -- the same
+    source-grep failure mode that broke these two nodes in the first place,
+    only aimed at a newer module. A ``ruff format`` reflow, a dict-key
+    reorder, or renaming the local ``session`` would have re-broken them with
+    behavior untouched, and conversely they passed whether or not
+    ``_harness_env`` ever reached the subprocess. Capturing the constructor
+    kwarg removes both halves of that.
+    """
 
-        # Verify the env var injection code exists
-        assert 'env["VALOR_SESSION_ID"] = session_id' in source
-        assert "VALOR_SESSION_ID" in source
+    @pytest.mark.asyncio
+    async def test_valor_session_id_in_source(self, redis_test_db):
+        """The env handed to the runner carries VALOR_SESSION_ID = session_id.
 
-    def test_valor_session_id_conditional_on_session_id(self):
-        """VALOR_SESSION_ID is only set when session_id is provided (not None)."""
-        from pathlib import Path
+        Pins it to the human-shaped ``session_id`` (tg_valor_..., sdlc-local-...)
+        and NOT the per-run Popoto AutoKey ``agent_session_id``, which travels
+        separately as AGENT_SESSION_ID. Conflating the two is the wrong-identifier
+        namespace bug that silently resolves no session downstream.
+        """
+        session = _dispatch_session("tg_valor_connectivity_4a")
 
-        sdk_client_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
-        source = sdk_client_path.read_text()
+        env = await _captured_session_env(session)
 
-        # The env var should be inside an `if session_id:` block
-        assert "if session_id:" in source
-        # Find the line with VALOR_SESSION_ID and verify it's after the condition
-        lines = source.split("\n")
-        found_condition = False
-        found_env_var = False
-        for line in lines:
-            if "if session_id:" in line and "VALOR" not in line:
-                found_condition = True
-            if found_condition and "VALOR_SESSION_ID" in line:
-                found_env_var = True
-                break
-        assert found_env_var, "VALOR_SESSION_ID should be set inside if session_id: block"
+        assert isinstance(env, dict)
+        assert env["VALOR_SESSION_ID"] == "tg_valor_connectivity_4a"
+        assert env["VALOR_SESSION_ID"] == session.session_id
+        assert env["VALOR_SESSION_ID"] != env.get("AGENT_SESSION_ID")
+
+    @pytest.mark.asyncio
+    async def test_valor_session_id_conditional_on_session_id(self, redis_test_db):
+        """A falsy session_id yields "" -- never a bare None, never absent.
+
+        Downstream consumers read this with a truthy check (e.g.
+        ``os.environ.get("VALOR_SESSION_ID")`` in
+        agent/hooks/session_resolver.py::resolve_inflight_session), and the env
+        dict is passed to a subprocess, where a ``None`` value is not a falsy
+        string but a TypeError. So the key must be present and hold ``""``.
+        """
+        session = _dispatch_session("tg_valor_connectivity_4a_falsy")
+        # session_id is a plain Field (models/agent_session.py:164), not a
+        # KeyField, so the in-memory value can be emptied to exercise the
+        # falsy branch without fighting KeyMutationError.
+        #
+        # "" and not None deliberately: review asked for None so that the
+        # `or ""` in _harness_env would be load-bearing, but None is
+        # unreachable at that point -- _execute_agent_session short-circuits
+        # before it ever constructs SessionRunner ("SessionRunner was never
+        # constructed"). "" is the only falsy value production can actually
+        # carry here, so it is what this node asserts on. The `or ""` guard
+        # remains defensive against a caller that bypasses that short-circuit.
+        session.session_id = ""
+
+        env = await _captured_session_env(session)
+
+        assert "VALOR_SESSION_ID" in env, "key must be present, not omitted"
+        assert env["VALOR_SESSION_ID"] == ""
+        assert isinstance(env["VALOR_SESSION_ID"], str), "None would break the subprocess env"
 
 
 # ── Fix 5: Full chain integration ────────────────────────────────────────────
