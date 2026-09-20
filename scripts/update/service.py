@@ -8,6 +8,7 @@ import plistlib
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1126,12 +1127,18 @@ def install_caffeinate() -> bool:
 
 # === Release verification via boot-SHA beacons (issue #1898) ===
 
-# Per-process relevant path sets — IDENTICAL to the restart gates' diff sets in
-# scripts/remote-update.sh (#1091 relevant-diff design). Classifier and restart
-# gate must agree by construction: a process is `stale` only when commits
-# touching ITS OWN paths landed after its boot SHA. Raw `boot_sha != HEAD`
-# equality is deliberately never used — docs-only commits legitimately advance
-# HEAD past healthy, correctly-un-restarted processes.
+# Per-process relevant path sets (#1091 relevant-diff design). A process is
+# `stale` only when commits touching ITS OWN paths landed after its boot SHA.
+# Raw `boot_sha != HEAD` equality is deliberately never used — docs-only commits
+# legitimately advance HEAD past healthy, correctly-un-restarted processes.
+#
+# The restart gates in scripts/remote-update.sh do not re-implement any of this:
+# they shell out to `python -m scripts.update.restart_gate`, which calls
+# :func:`classify_process` with these very lists (#3528). Classifier and restart
+# gate therefore agree by construction — same paths AND same diff base. They
+# used to agree on paths only: the gates diffed the pull delta
+# (BEFORE_SHA..AFTER_SHA) while the classifier diffed boot_sha..HEAD, so a
+# deferred restart left a machine permanently stale-but-ungated.
 BRIDGE_RELEVANT_PATHS = [
     "bridge/",
     "agent/",
@@ -1151,6 +1158,19 @@ WORKER_RELEVANT_PATHS = [
     "reflections/",
     "pyproject.toml",
 ]
+
+# Single registry of the per-process knobs both the release verifier and the
+# restart gate need (#3528): the relevant path set, and how to find the PID.
+# The PID getters are wrapped in lambdas so both callers resolve the module
+# attribute at call time and can never observe different probes.
+PROCESS_RELEVANT_PATHS: dict[str, list[str]] = {
+    "bridge": BRIDGE_RELEVANT_PATHS,
+    "worker": WORKER_RELEVANT_PATHS,
+}
+PROCESS_PID_GETTERS: dict[str, Callable[[], int | None]] = {
+    "bridge": lambda: get_bridge_pid(),
+    "worker": lambda: get_worker_pid(),
+}
 
 # Bridge eligibility uses the same on-disk plist signal as the restart gate in
 # remote-update.sh (Decision 23, #1898): a machine with the bridge role but no
@@ -1237,7 +1257,7 @@ def read_boot_beacon(beacon_path: Path) -> tuple[str, float] | None:
         return None
 
 
-def _classify_process(
+def classify_process(
     project_dir: Path,
     head_sha: str,
     process_name: str,
@@ -1298,7 +1318,7 @@ def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict
 
     Returns ``{process_name: {running, boot_sha, beacon_ts, process_start_ts,
     classification}}`` with classification in ``{matches, stale, unknown}``
-    per :func:`_classify_process` (positive staleness against the process's
+    per :func:`classify_process` (positive staleness against the process's
     OWN relevant path set — never raw HEAD equality).
 
     Per-process machine-role gating (same gates run.py Step 5 uses):
@@ -1313,11 +1333,19 @@ def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict
     """
     results: dict = {}
     if machine_check.get("bridge_projects") and BRIDGE_PLIST_PATH.exists():
-        results["bridge"] = _classify_process(
-            project_dir, head_sha, "bridge", get_bridge_pid(), BRIDGE_RELEVANT_PATHS
+        results["bridge"] = classify_process(
+            project_dir,
+            head_sha,
+            "bridge",
+            PROCESS_PID_GETTERS["bridge"](),
+            PROCESS_RELEVANT_PATHS["bridge"],
         )
     if machine_check.get("projects"):
-        results["worker"] = _classify_process(
-            project_dir, head_sha, "worker", get_worker_pid(), WORKER_RELEVANT_PATHS
+        results["worker"] = classify_process(
+            project_dir,
+            head_sha,
+            "worker",
+            PROCESS_PID_GETTERS["worker"](),
+            PROCESS_RELEVANT_PATHS["worker"],
         )
     return results

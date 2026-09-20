@@ -580,11 +580,29 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 The ~30-min update cron (`scripts/remote-update.sh`) restarts the worker
 only when ALL of the following hold:
 
-1. **The release actually changed** (`BEFORE_SHA != AFTER_SHA`) **and the
-   diff touches worker-loaded paths** (`worker/ agent/ mcp_servers/ models/
-   tools/ bridge/ reflections/ pyproject.toml`). Docs-only pushes — notably
-   the plan commits every SDLC pipeline pushes to main — never trigger a
-   restart, which breaks the plan-commit → self-restart livelock.
+1. **The running worker is behind HEAD on worker-loaded paths** (`worker/
+   agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`).
+   Docs-only pushes — notably the plan commits every SDLC pipeline pushes to
+   main — never trigger a restart, which breaks the plan-commit →
+   self-restart livelock.
+
+   The shell does not compute this itself. It shells out to
+   `python -m scripts.update.restart_gate --process worker` (exit 0 =
+   restart), which calls the very classifier the terminal release verify
+   uses — `service.classify_process` over `WORKER_RELEVANT_PATHS` — and so
+   diffs the **running worker's boot SHA against HEAD**. When the release is
+   unclassifiable (no boot beacon, worker not running, orphaned beacon,
+   unresolvable boot SHA — a fresh install) the gate falls back to this
+   cycle's pull delta, `BEFORE_SHA..AFTER_SHA`, over the same paths.
+
+   The boot-SHA base is load-bearing, not a refinement (#3528). The gate used
+   to diff only the pull delta. Any cycle that deferred its restart (drain
+   timeout below, the #3164 self-ancestor refusal, a failed kickstart) left
+   the commits on disk but not in the process — and every later cron cycle
+   pulled nothing, so `BEFORE_SHA == AFTER_SHA` and the gate reported "no
+   worker-relevant changes" forever while the verify reported
+   `release verify FAILED` forever. Sharing the classifier means gate and
+   verify cannot reach opposite verdicts about the same process.
 2. **The machine is idle**: before the kickstart, the script runs the drain
    probe `python -m scripts.update.drain --timeout $UPDATE_WORKER_DRAIN_TIMEOUT_S
    --poll $UPDATE_WORKER_DRAIN_POLL_S` (defaults 300s / 10s), which polls
