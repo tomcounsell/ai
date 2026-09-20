@@ -22,12 +22,14 @@ timestamps. No production Redis, no live services.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from bridge.update import _LEGACY_WARNING_PREFIXES
 from scripts.update import restart_gate, service
 from scripts.update.git import get_short_sha
 from scripts.update.service import verify_running_release
@@ -225,8 +227,35 @@ def test_unexpected_failure_prints_a_distinct_gate_error(repo, live_processes, m
     monkeypatch.setattr(restart_gate, "decide", boom)
     assert _run_gate(repo, "worker", before="a", after="b") == 1
     out = capsys.readouterr().out
-    assert "GATE ERROR" in out
+    assert "restart gate failed" in out
     assert "not restarting" in out
+    assert out.startswith(_LEGACY_WARNING_PREFIXES), out
+
+
+@pytest.mark.parametrize(
+    ("scenario", "patch_target"),
+    [("classify", "classify_process"), ("diff", "run_cmd")],
+)
+def test_degraded_paths_print_a_prefix_the_bridge_actually_scans(
+    repo, live_processes, monkeypatch, capsys, scenario, patch_target
+):
+    """Every degraded gate line must reach the /update report (#3529 review).
+
+    `bridge/update.py::extract_update_warnings` line-anchors on
+    ``_LEGACY_WARNING_PREFIXES`` over STDOUT. A diagnostic printed to stderr, or
+    one prefixed ``[restart-gate]``, parses as nothing: the Telegram report then
+    reads a confident green while the gate silently declined to classify.
+    """
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"{scenario} exploded")
+
+    monkeypatch.setattr(service, patch_target, boom)
+    _run_gate(repo, "worker", before="a", after="b")
+    captured = capsys.readouterr()
+    assert captured.err == "", f"degraded line went to stderr: {captured.err!r}"
+    warned = [ln for ln in captured.out.splitlines() if ln.startswith(_LEGACY_WARNING_PREFIXES)]
+    assert warned, captured.out
 
 
 def test_classification_failure_degrades_to_pull_delta(repo, live_processes, monkeypatch):
@@ -248,7 +277,13 @@ def test_classification_failure_degrades_to_pull_delta(repo, live_processes, mon
 
 
 def test_gate_and_verifier_share_their_per_process_registry():
-    """No second copy of the path sets or the PID probes can exist (#3528)."""
+    """The registry entries ARE the backing constants, not copies of them (#3528).
+
+    Identity, not equality: an entry rebound to a freshly-built list would still
+    compare equal today and drift silently on the next edit to either side. This
+    cannot prove no copy exists anywhere — only that these two lookups resolve to
+    the one object the verifier reads.
+    """
     assert service.PROCESS_RELEVANT_PATHS["worker"] is service.WORKER_RELEVANT_PATHS
     assert service.PROCESS_RELEVANT_PATHS["bridge"] is service.BRIDGE_RELEVANT_PATHS
     assert set(service.PROCESS_PID_GETTERS) == set(service.PROCESS_RELEVANT_PATHS)
@@ -261,9 +296,17 @@ def test_pid_getters_resolve_through_the_module_at_call_time(monkeypatch):
 
 
 def test_shell_gates_call_the_module_and_hand_roll_no_diff():
-    """remote-update.sh must not grow an inline relevance diff again."""
+    """remote-update.sh must not grow an inline relevance diff again.
+
+    Matched by intent rather than by one exact quoting: the pre-#3528 gate was
+    `git diff "$BEFORE_SHA" "$AFTER_SHA" -- <paths>`, but `git diff
+    "$BEFORE_SHA".."$AFTER_SHA"` or locally-renamed vars would reintroduce the
+    same wrong diff base while slipping a literal-substring check.
+    """
     script = (Path(__file__).parent.parent.parent / "scripts" / "remote-update.sh").read_text()
     assert script.count("scripts.update.restart_gate --process") == 2
     assert "--process worker" in script
     assert "--process bridge" in script
-    assert 'diff "$BEFORE_SHA" "$AFTER_SHA"' not in script
+    # Any `git diff` reaching for two *_SHA shell vars is the banned shape.
+    inline_diff = re.compile(r"git\s+(?:-C\s+\S+\s+)?diff\b[^\n|]*\$\{?\w*SHA[^\n|]*\$\{?\w*SHA")
+    assert not inline_diff.search(script), "remote-update.sh regrew an inline relevance diff"

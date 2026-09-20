@@ -43,6 +43,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.update.service import PROCESS_RELEVANT_PATHS
+
 pytestmark = pytest.mark.unit
 
 PROJECT_DIR = Path(__file__).parent.parent.parent
@@ -130,10 +132,10 @@ case " $* " in
         if [ -n "${GATE_CRASH:-}" ]; then exit 3; fi
         if [ "$PROC" = "worker" ]; then
             if [ -n "${GATE_WORKER_STALE:-}" ]; then exit 0; fi
-            PATHS="worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml"
+            PATHS="__WORKER_PATHS__"
         else
             if [ -n "${GATE_BRIDGE_STALE:-}" ]; then exit 0; fi
-            PATHS="bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml"
+            PATHS="__BRIDGE_PATHS__"
         fi
         if [ -z "$BEFORE" ] || [ "$BEFORE" = "$AFTER" ]; then exit 1; fi
         # shellcheck disable=SC2086
@@ -145,6 +147,14 @@ case " $* " in
 esac
 exit 0
 """
+
+# The stub's two path lists are filled from the single registry
+# (service.PROCESS_RELEVANT_PATHS), never retyped — retyping them is exactly the
+# second copy the #3528 registry exists to prevent, and a drifted copy would let
+# these shell tests keep passing while asserting the old relevance contract.
+PYTHON_STUB = PYTHON_STUB.replace(
+    "__WORKER_PATHS__", " ".join(PROCESS_RELEVANT_PATHS["worker"])
+).replace("__BRIDGE_PATHS__", " ".join(PROCESS_RELEVANT_PATHS["bridge"]))
 
 
 def _git(repo: Path, *args: str) -> str:

@@ -64,7 +64,7 @@ def pull_delta_touches_paths(
             cwd=project_dir,
         )
     except Exception as exc:  # noqa: BLE001 - a hung/broken git must not decide a restart
-        print(f"[restart-gate] pull-delta diff failed ({exc})", file=sys.stderr)
+        print(f"WARNING: restart gate pull-delta diff failed ({exc})")
         return False
     if result.returncode != 0:
         # Unresolvable SHAs (shallow clone, history rewrite) — inconclusive,
@@ -79,6 +79,12 @@ def decide(project_dir: Path, process_name: str, before: str, after: str) -> tup
 
     try:
         head_sha = git.get_short_sha(project_dir)
+        if not head_sha:
+            # `git rev-parse --short HEAD` returned empty (unreadable HEAD).
+            # Classifying against "" would build the range `{boot_sha}..`, which
+            # git silently resolves to `boot_sha..HEAD` — right answer, blank SHA
+            # in the operator line. Treat it as unclassifiable instead.
+            raise ValueError("git rev-parse --short HEAD returned empty output")
         info = service.classify_process(
             project_dir,
             head_sha,
@@ -89,7 +95,7 @@ def decide(project_dir: Path, process_name: str, before: str, after: str) -> tup
         classification = info["classification"]
     except Exception as exc:  # noqa: BLE001 - any probe failure degrades to the pull delta
         classification = "unknown"
-        print(f"[restart-gate] {process_name}: classification failed ({exc})", file=sys.stderr)
+        print(f"WARNING: restart gate could not classify {process_name} ({exc})")
 
     if classification == "stale":
         return True, (
@@ -130,7 +136,15 @@ def main(argv: list[str] | None = None) -> int:
         # remains the right verdict: an inconclusive gate must never SIGKILL a
         # live worker's in-flight sessions, and the terminal release verify
         # still escalates a genuinely stale process on the same cycle.
-        print(f"GATE ERROR: {args.process} restart gate failed ({exc}) — not restarting")
+        #
+        # `ERROR:` and the `WARNING:` lines above are not free-form prose: they
+        # are two of the four line-anchored prefixes bridge/update.py's
+        # _LEGACY_WARNING_PREFIXES scans for, which is how a diagnostic reaches
+        # the Telegram /update report and spawns a fix session. Everything the
+        # gate prints on a degraded path goes to STDOUT with one of those
+        # prefixes; a stderr line, or one starting "[restart-gate]", is parsed
+        # as nothing and the report reads a confident green.
+        print(f"ERROR: {args.process} restart gate failed ({exc}) — not restarting")
         return 1
     print(f"[restart-gate] {'RESTART' if restart_needed else 'SKIP'}: {reason}")
     return 0 if restart_needed else 1
