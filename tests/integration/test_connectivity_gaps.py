@@ -400,6 +400,14 @@ class TestSdkClientEnvVar:
         # session_id is a plain Field (models/agent_session.py:164), not a
         # KeyField, so the in-memory value can be emptied to exercise the
         # falsy branch without fighting KeyMutationError.
+        #
+        # "" and not None deliberately: review asked for None so that the
+        # `or ""` in _harness_env would be load-bearing, but None is
+        # unreachable at that point -- _execute_agent_session short-circuits
+        # before it ever constructs SessionRunner ("SessionRunner was never
+        # constructed"). "" is the only falsy value production can actually
+        # carry here, so it is what this node asserts on. The `or ""` guard
+        # remains defensive against a caller that bypasses that short-circuit.
         session.session_id = ""
 
         env = await _captured_session_env(session)
