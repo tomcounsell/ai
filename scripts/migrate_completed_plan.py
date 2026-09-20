@@ -252,13 +252,23 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     """Guarded git-mv of a root plan into the completed-plan archive.
 
     Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
-    "rebase-conflict-skip". Never raises -- all failure modes return a verdict
-    string and log the reason.
+    "stale-main-skip", "rolled-back-skip". Never raises -- all failure modes
+    return a verdict string and log the reason.
 
-    Known behavior: the final ``git push origin main`` publishes the whole
-    local main, so unpushed commits already sitting on a clean local main
-    ride along with the migration commit. Accepted for this repo's
-    always-push workflow (PR #1903 review nit).
+    Freshness precondition (issue #3530): before mutating, local ``main`` must
+    already match ``origin/main`` or be cleanly fast-forwardable to it. A
+    local ``main`` that already carries commits ``origin/main`` lacks is
+    refused outright (``"stale-main-skip"``) rather than stacking another
+    migration commit on top of it -- a machine that can never win the push
+    race would otherwise accumulate unpushed commits on ``main`` forever,
+    breaking every subsequent ``/update`` fast-forward on that machine.
+
+    Rollback on failure to land (issue #3530): if the eventual push can't
+    land -- either a genuine rebase conflict, or exhausting the retry budget
+    on a plain non-fast-forward rejection -- the local migration commit is
+    dropped via ``git reset --hard origin/main`` before returning. The commit
+    is a pure rename with no unique content, so nothing is lost; the next
+    ``--sweep``/``--issue`` invocation just redoes it from a clean base.
     """
     plan_path = Path(plan_path)
 
@@ -311,6 +321,50 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
         print(f"[DRY-RUN] Would migrate {plan_path.name} -> {COMPLETED_PLANS_DIR}/")
         return "migrated"
 
+    # Freshness precondition (#3530): refuse to mutate on top of a local main
+    # that's already ahead of origin/main -- that's exactly how a machine that
+    # keeps losing the push race accumulates permanently unpushed commits on
+    # main. If local is simply behind, fast-forward it first. A repo with no
+    # 'origin' remote (e.g. a local-only test repo) has nothing to compare
+    # against, so it skips straight to the commit as before.
+    remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
+    has_origin = remote_check.returncode == 0
+    if has_origin:
+        fetch_result = _run_git(["fetch", "origin", "main"], cwd=repo_root, timeout=60)
+        if fetch_result.returncode != 0:
+            print(
+                f"[ERROR] git fetch origin main failed for {plan_path.name}: "
+                f"{fetch_result.stderr.strip()}"
+            )
+            return "dirty-tree-skip"
+
+        ahead_behind = _run_git(
+            ["rev-list", "--left-right", "--count", "main...origin/main"], cwd=repo_root
+        )
+        if ahead_behind.returncode != 0:
+            print(
+                f"[ERROR] Could not compare main to origin/main for {plan_path.name}: "
+                f"{ahead_behind.stderr.strip()}"
+            )
+            return "dirty-tree-skip"
+
+        ahead_str, _, _behind_str = ahead_behind.stdout.strip().partition("\t")
+        ahead = int(ahead_str or "0")
+        if ahead > 0:
+            print(
+                f"[SKIP] local main is {ahead} commit(s) ahead of origin/main; refusing to "
+                f"stack another migration commit on a diverged main: {plan_path.name}"
+            )
+            return "stale-main-skip"
+
+        ff_result = _run_git(["merge", "--ff-only", "origin/main"], cwd=repo_root)
+        if ff_result.returncode != 0:
+            print(
+                f"[ERROR] fast-forward to origin/main failed for {plan_path.name}: "
+                f"{ff_result.stderr.strip()}"
+            )
+            return "dirty-tree-skip"
+
     completed_path.parent.mkdir(parents=True, exist_ok=True)
     mv_result = _run_git(["mv", str(plan_path), str(completed_path)], cwd=repo_root)
     if mv_result.returncode != 0:
@@ -327,14 +381,13 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
 
     # If there's no 'origin' remote (e.g. a local-only test repo), the migration
     # is already durable as a local commit -- nothing more to do.
-    remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
-    if remote_check.returncode != 0:
+    if not has_origin:
         print(f"[MIGRATED] {plan_path.name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
         return "migrated"
 
     # Rebase-retry loop: a losing push replays atop the winner. Distinguish a
-    # genuine textual conflict (abort + leave tree clean, never resolve
-    # unattended) from a plain non-fast-forward rejection (retry).
+    # genuine textual conflict (abort, roll back, never resolve unattended)
+    # from a plain non-fast-forward rejection (retry).
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         push_result = _run_git(["push", "origin", "main"], cwd=repo_root, timeout=60)
@@ -358,14 +411,25 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
             _rebase_in_progress(repo_root) or "conflict" in conflict_text
         ):
             _run_git(["rebase", "--abort"], cwd=repo_root)
+            # Drop the stranded local commit (#3530) rather than leaving main
+            # permanently ahead of origin/main: it's a pure rename with no
+            # unique content, so the next sweep/--issue run just redoes it.
+            _run_git(["reset", "--hard", "origin/main"], cwd=repo_root)
             print(
-                f"[ERROR] Rebase conflict migrating {plan_path.name}; "
-                "aborted rebase, tree left clean"
+                f"[ERROR] Rebase conflict migrating {plan_path.name}; rolled back local main "
+                "to origin/main"
             )
-            return "rebase-conflict-skip"
+            return "rolled-back-skip"
 
-    print(f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts")
-    return "rebase-conflict-skip"
+    # Exhausted the retry budget without a conflict (e.g. repeatedly losing
+    # the push race, or a transient network/gh failure). Same rollback as the
+    # conflict path (#3530): never return leaving local main ahead of origin.
+    _run_git(["reset", "--hard", "origin/main"], cwd=repo_root)
+    print(
+        f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts; "
+        "rolled back local main to origin/main"
+    )
+    return "rolled-back-skip"
 
 
 def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) -> Path | None:

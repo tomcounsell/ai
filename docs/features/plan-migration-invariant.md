@@ -39,12 +39,26 @@ is the **only** code that moves a plan out of root. It:
   either check fails, it takes a **report-only fallback**: logs which plan it
   *would* migrate, mutates nothing, and returns `"dirty-tree-skip"`. This
   never mutates a checkout another session is using.
+- Requires local `main` to already match `origin/main`, or be cleanly
+  fast-forwardable to it, before doing any `git mv`/commit (issue #3530). If
+  local `main` already carries commits `origin/main` lacks, the primitive
+  refuses outright and returns `"stale-main-skip"` rather than stacking
+  another migration commit on a diverged `main` — the failure mode that let
+  one machine (which lost every push race for two weeks) silently accumulate
+  12 permanently-unpushed commits on `main`, breaking that machine's
+  `/update` fast-forward on every subsequent run. If local `main` is simply
+  behind, it's fast-forwarded first (`git merge --ff-only origin/main`).
 - On a real move, commits and pushes with a bounded rebase-retry loop: a
   losing push (another process won the race to `main`) replays via
-  `git pull --rebase && git push`, retried up to 3 times. A genuine textual
-  rebase conflict (not just a non-fast-forward rejection) aborts the rebase,
-  leaves the tree clean, and returns `"rebase-conflict-skip"` — it never
-  resolves a conflict unattended.
+  `git fetch && git rebase origin/main && git push`, retried up to 3 times.
+  If that push can't land — a genuine textual rebase conflict, or exhausting
+  all 3 attempts on a plain non-fast-forward rejection — the primitive drops
+  the stranded local commit with `git reset --hard origin/main` and returns
+  `"rolled-back-skip"`. This is safe because the commit is a pure rename with
+  no unique content: nothing is lost, and the next `--sweep`/`--issue`
+  invocation simply redoes the migration from a clean base. The primitive
+  never returns leaving local `main` ahead of `origin/main`, and it never
+  resolves a genuine conflict unattended.
 
 ### Why the archive sits outside `docs/plans/`
 

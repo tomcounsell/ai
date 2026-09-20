@@ -354,6 +354,203 @@ class TestMigratePlanToCompleted:
         assert status.stdout.strip() == "", "apply=False must leave the tree untouched"
 
 
+class TestMigratePlanToCompletedFreshness:
+    """Freshness precondition + rollback against a real 'origin' remote (#3530).
+
+    Regression coverage for the drift mechanism that let one machine
+    accumulate 12 permanently-unpushed "Migrate completed plan" commits on
+    local main: the primitive used to commit before checking freshness, and
+    left the commit stranded whenever the push loop couldn't land it. These
+    tests use a real bare 'origin' repo and a second 'racer' clone to
+    reproduce genuine git races rather than mocking git's behavior.
+    """
+
+    def _init_repo_with_origin(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Bare 'origin.git' + a clone at 'repo' wired to it as `origin`."""
+        origin = tmp_path / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        repo = tmp_path / "repo"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(repo)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / COMPLETED_PLANS_DIR).mkdir(parents=True)
+        return origin, repo
+
+    def _clone(self, origin: Path, dest: Path, *, name: str) -> Path:
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(dest, "config", "user.email", f"{name}@example.com")
+        _git(dest, "config", "user.name", name)
+        return dest
+
+    def _write_plan(self, repo: Path, name: str, tracking_issue: int = 1900) -> Path:
+        plan = repo / "docs" / "plans" / name
+        plan.write_text(
+            f"---\ntracking: https://github.com/tomcounsell/ai/issues/{tracking_issue}\n"
+            f"---\n# {name}\n"
+        )
+        return plan
+
+    def test_stale_main_refuses_and_preserves_plan(self, tmp_path):
+        """Local main already ahead of origin/main -> refuse, mutate nothing."""
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "example-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        # An unrelated local-only commit -- exactly the shape a prior stranded
+        # migration commit would leave behind.
+        (repo / "local-only.txt").write_text("never pushed\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "local-only change")
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "stale-main-skip"
+        assert plan.exists(), "refusal must never touch the plan"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
+        assert not completed.exists()
+        # The pre-existing local-only commit must survive untouched -- a
+        # refusal never resets anything out from under the caller.
+        log = _git(repo, "log", "--oneline", "-1")
+        assert "local-only change" in log.stdout
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+    def test_rebase_conflict_rolls_back_local_commit(self, tmp_path, monkeypatch):
+        """A genuine rebase conflict rolls local main back to origin/main (#3530)."""
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "conflict-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        racer = self._clone(origin, tmp_path / "racer", name="Racer")
+        racer_completed_dir = racer / COMPLETED_PLANS_DIR
+        racer_completed = racer_completed_dir / "conflict-plan.md"
+
+        injected = {"done": False}
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            # Land a racer commit that plants an UNRELATED file directly at
+            # the destination path (no `git mv`, source plan left untouched)
+            # right after our local commit lands, mirroring the real race
+            # window: another process pushes between our commit and our push.
+            # git's rebase treats our side as a clean rename (A deleted, B
+            # added, content unchanged) and would silently ride along with
+            # ANY unilateral edit on the other side -- a bare content tweak at
+            # either path never conflicts there. What it cannot auto-resolve
+            # is our rename product colliding with an independent add at the
+            # same destination path with different content: a genuine
+            # rename/add conflict.
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode == 0:
+                injected["done"] = True
+                racer_completed_dir.mkdir(parents=True, exist_ok=True)
+                racer_completed.write_text("racer already put something else here\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", "racer migrates the same plan concurrently")
+                _git(racer, "push", "-q", "origin", "main")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        # Local main must land exactly on origin/main's tip -- never ahead.
+        local_log = _git(repo, "log", "--oneline", "-1")
+        origin_log = subprocess.run(
+            ["git", "log", "--oneline", "-1", "main"],
+            cwd=str(origin),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert local_log.stdout.strip() == origin_log.stdout.strip()
+        assert "racer migrates the same plan concurrently" in local_log.stdout
+        # Nothing lost: the racer never touched the source plan, and the
+        # rollback lands local main exactly on origin/main -- so the plan is
+        # still in root, untouched, ready for the next run to redo the
+        # migration. Our own rolled-back copy never touched the archive.
+        assert plan.exists()
+        completed = repo / COMPLETED_PLANS_DIR / "conflict-plan.md"
+        assert completed.exists()
+        assert "racer already put something else here" in completed.read_text()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+    def test_push_exhaustion_rolls_back_local_commit(self, tmp_path, monkeypatch):
+        """Losing the push race 3 times straight rolls back, never stacks (#3530)."""
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "exhaust-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        racer = self._clone(origin, tmp_path / "racer", name="Racer")
+        racer_counter = {"n": 0}
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["push", "origin", "main"]:
+                # Always win the race with an unrelated-file commit, so our
+                # push keeps losing but the eventual rebase never conflicts.
+                racer_counter["n"] += 1
+                n = racer_counter["n"]
+                (racer / f"racer-file-{n}.txt").write_text(f"racer commit {n}\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", f"racer commit {n}")
+                _git(racer, "push", "-q", "origin", "main")
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        assert racer_counter["n"] == 3, "must have retried the full budget before giving up"
+        local_log = _git(repo, "log", "--oneline", "-1")
+        origin_log = subprocess.run(
+            ["git", "log", "--oneline", "-1", "main"],
+            cwd=str(origin),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert local_log.stdout.strip() == origin_log.stdout.strip()
+        assert "racer commit 3" in local_log.stdout
+        # Nothing lost: the plan is back in root, untouched by the racer's
+        # unrelated commits, ready for the next run to redo the migration.
+        assert plan.exists()
+        completed = repo / COMPLETED_PLANS_DIR / "exhaust-plan.md"
+        assert not completed.exists()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+
 # --- Helpers ---
 
 
