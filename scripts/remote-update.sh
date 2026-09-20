@@ -342,14 +342,24 @@ except Exception as e:
 PYEOF
     fi
 
+    # Restart gate (#1091 relevance, #3528 diff base). Delegated to Python so
+    # the gate and the terminal release verify reach their verdict through ONE
+    # classifier (scripts/update/service.py::classify_process) over ONE path
+    # set (WORKER_RELEVANT_PATHS). The gate used to diff this cycle's pull
+    # delta inline here; that base is wrong whenever a restart was skipped on
+    # the cycle that pulled the code (drain timeout, #3164 self-ancestor
+    # refusal, failed kickstart). Every later cycle pulls nothing, so
+    # BEFORE_SHA == AFTER_SHA and the inline diff reported "no relevant
+    # changes" forever while verify_release reported FAILED forever. The
+    # classifier diffs the RUNNING worker's boot SHA against HEAD, so a
+    # deferred restart is picked up on the very next cycle. --before/--after
+    # are the fallback base used only when the release is unclassifiable
+    # (no beacon / worker not running / fresh install).
+    # Exit 0 = restart, 1 = skip.
     NEED_RESTART=false
-    if [ "$BEFORE_SHA" != "$AFTER_SHA" ]; then
-        # Check whether the diff touches directories/files the worker loads.
-        if git -C "$PROJECT_DIR" diff "$BEFORE_SHA" "$AFTER_SHA" -- \
-            worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ \
-            pyproject.toml | grep -q . ; then
-            NEED_RESTART=true
-        fi
+    if "$PYTHON" -m scripts.update.restart_gate --process worker \
+        --before "$BEFORE_SHA" --after "$AFTER_SHA"; then
+        NEED_RESTART=true
     fi
 
     # Liveness cross-check (#2141): `launchctl list | grep` can false-negative
@@ -477,17 +487,17 @@ fi
 # stale on the mainline success path. Restarting the bridge is safe — it
 # holds no agent sessions (the worker is the sole session executor) and its
 # Telethon catchup scan backfills any messages missed during the brief
-# restart window. Gated on a bridge-relevant diff (mirrors the #1091 worker
-# gate) and on the bridge plist being installed on this machine.
+# restart window. Gated on the shared restart gate (same classifier and path
+# set as the terminal verify — see the worker gate's note and #3528) and on the
+# bridge plist being installed on this machine. The plist check comes FIRST and
+# short-circuits: a machine with the bridge role but no installed plist has no
+# restart path at all, and verify_release skips it for the same reason.
 BRIDGE_LABEL="${SERVICE_LABEL_PREFIX}.bridge"
 BRIDGE_DST="$HOME/Library/LaunchAgents/${BRIDGE_LABEL}.plist"
 NEED_BRIDGE_RESTART=false
-if [ "$BEFORE_SHA" != "$AFTER_SHA" ] && [ -f "$BRIDGE_DST" ]; then
-    if git -C "$PROJECT_DIR" diff "$BEFORE_SHA" "$AFTER_SHA" -- \
-        bridge/ agent/ mcp_servers/ models/ tools/ config/ \
-        pyproject.toml | grep -q . ; then
-        NEED_BRIDGE_RESTART=true
-    fi
+if [ -f "$BRIDGE_DST" ] && "$PYTHON" -m scripts.update.restart_gate --process bridge \
+    --before "$BEFORE_SHA" --after "$AFTER_SHA"; then
+    NEED_BRIDGE_RESTART=true
 fi
 
 # ── Terminal release verify (issue #1898) ────────────────────────────

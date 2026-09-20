@@ -21,6 +21,15 @@ Covers the #1898 bridge-restart tail sequence:
   chat context is exported; the pure-cron path stages nothing.
 - the lock-collision branch prints a distinct "bridge restart in progress"
   notice when the planned-restart marker is fresh.
+
+And the #3528 restart-gate wiring:
+
+- both gates shell out to ``python -m scripts.update.restart_gate`` rather
+  than hand-rolling a pull-delta ``git diff``;
+- a no-op cron cycle (nothing pulled) still restarts a process the gate calls
+  stale — the wedge that made a deferred restart permanent;
+- a no-op cycle with nothing stale restarts nothing;
+- the bridge plist check still short-circuits ahead of the gate.
 """
 
 from __future__ import annotations
@@ -91,15 +100,47 @@ service_pid_is_own_ancestor() { return 1; }
 service_pid_refuse_self_kill() { return 0; }
 """
 
+# The restart-gate arm models the real `python -m scripts.update.restart_gate`
+# (#3528). In this sandbox there is no boot beacon and no running service, so
+# the REAL gate classifies `unknown` and takes its pull-delta fallback — which
+# is exactly what this arm reproduces, keeping the pre-#3528 shell tests
+# meaningful. GATE_WORKER_STALE / GATE_BRIDGE_STALE force the `stale` verdict
+# the real classifier returns when a running process is behind HEAD on its own
+# paths; that is the wedge case, and it is orthogonal to the pull delta.
 PYTHON_STUB = """#!/bin/bash
 echo "PY $*" >> "$CALL_LOG"
 if [ "${1:-}" = "-" ]; then cat > /dev/null; exit 0; fi
-for a in "$@"; do
-    if [ "$a" = "scripts.update.verify_release" ]; then
+case " $* " in
+    *" scripts.update.verify_release "*)
         echo "VERIFY $*" >> "$CALL_LOG"
         exit "${VERIFY_RC:-0}"
-    fi
-done
+        ;;
+    *" scripts.update.restart_gate "*)
+        echo "GATE $*" >> "$CALL_LOG"
+        PROC=""; BEFORE=""; AFTER=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --process) PROC="$2"; shift 2 ;;
+                --before) BEFORE="$2"; shift 2 ;;
+                --after) AFTER="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [ "$PROC" = "worker" ]; then
+            if [ -n "${GATE_WORKER_STALE:-}" ]; then exit 0; fi
+            PATHS="worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml"
+        else
+            if [ -n "${GATE_BRIDGE_STALE:-}" ]; then exit 0; fi
+            PATHS="bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml"
+        fi
+        if [ -z "$BEFORE" ] || [ "$BEFORE" = "$AFTER" ]; then exit 1; fi
+        # shellcheck disable=SC2086
+        if git -C "$PROJ_DIR" diff --name-only "$BEFORE" "$AFTER" -- $PATHS | grep -q .; then
+            exit 0
+        fi
+        exit 1
+        ;;
+esac
 exit 0
 """
 
@@ -246,6 +287,68 @@ def test_no_bridge_kickstart_on_irrelevant_diff(harness):
     assert len(verify) == 1
     assert "--skip-bridge" not in verify[0]
     assert "--since 0" in verify[0]
+    assert result.returncode == 0
+
+
+def test_gate_invoked_per_process_with_the_pull_delta(harness):
+    """Both gates delegate to the shared module, never an inline diff (#3528)."""
+    harness.push_upstream_commit("docs/notes.md", "docs-only")
+    harness.run()
+    gate_lines = [line for line in harness.calls().splitlines() if line.startswith("GATE ")]
+    assert len(gate_lines) == 2, harness.calls()
+    assert any("--process worker" in line for line in gate_lines)
+    assert any("--process bridge" in line for line in gate_lines)
+    # The pull delta is still handed over — it is the gate's unknown-release
+    # fallback base, not the primary signal.
+    for line in gate_lines:
+        assert "--before " in line and "--after " in line
+
+
+def test_noop_cycle_restarts_a_stale_worker(harness):
+    """#3528: nothing pulled, worker behind HEAD on its own paths → restart."""
+    result = harness.run(extra_env={"GATE_WORKER_STALE": "1"})
+    calls = harness.calls()
+    assert any("kickstart" in line and "com.valor.worker" in line for line in calls.splitlines()), (
+        calls
+    )
+    assert "No worker-relevant changes detected" not in result.stdout
+    assert "Worker restarted" in result.stdout
+    # A real restart moment is handed to the verify's beacon poll.
+    assert "--since 0" not in harness.verify_lines()[0]
+    assert result.returncode == 0
+
+
+def test_noop_cycle_restarts_a_stale_bridge(harness):
+    """#3528, bridge half: the plist check still gates, the delta no longer does."""
+    result = harness.run(extra_env={"GATE_BRIDGE_STALE": "1"})
+    calls = harness.calls()
+    assert any("kickstart" in line and "com.valor.bridge" in line for line in calls.splitlines()), (
+        calls
+    )
+    assert "--skip-bridge" in harness.verify_lines()[0]
+    assert result.returncode == 0
+
+
+def test_noop_cycle_with_current_processes_restarts_nothing(harness):
+    """The common no-op cron cycle: no pull, nothing stale, nothing touched."""
+    result = harness.run()
+    calls = harness.calls()
+    assert not any("kickstart" in line for line in calls.splitlines()), calls
+    assert "No worker-relevant changes detected" in result.stdout
+    assert result.returncode == 0
+
+
+def test_stale_bridge_without_plist_is_not_restarted(tmp_path):
+    """No installed plist = no restart path; the gate is not even consulted."""
+    harness = Harness(tmp_path, bridge_plist=False)
+    result = harness.run(extra_env={"GATE_BRIDGE_STALE": "1"})
+    calls = harness.calls()
+    assert not any(
+        "kickstart" in line and "com.valor.bridge" in line for line in calls.splitlines()
+    )
+    assert not any(
+        line.startswith("GATE ") and "--process bridge" in line for line in calls.splitlines()
+    )
     assert result.returncode == 0
 
 
