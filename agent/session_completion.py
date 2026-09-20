@@ -508,7 +508,7 @@ async def _judge_completion_novelty(
     # older than ~2 minutes — the user has likely scrolled away).
     try:
         age_secs = max(0, int(_t.time() - float(prior_ts)))
-    except Exception:
+    except Exception:  # swallow-ok: an unparseable prior_ts reads as "just now", the safe bias
         age_secs = 0
     if age_secs < 60:
         relative_time = f"{age_secs}s ago"

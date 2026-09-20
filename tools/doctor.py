@@ -1737,6 +1737,7 @@ def _ollama_status() -> dict | None:
     the keep-alive evidence: ``OLLAMA_KEEP_ALIVE=-1`` shows as a far-future
     instant). Stdlib only, 2 s per request, no daemon means ``None``.
     """
+    import logging
     import urllib.request
 
     base = settings.models.ollama_host.rstrip("/")
@@ -1745,7 +1746,8 @@ def _ollama_status() -> dict | None:
             tags = json.loads(resp.read().decode("utf-8"))
         with urllib.request.urlopen(f"{base}/api/ps", timeout=2) as resp:  # noqa: S310
             ps = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).debug("Ollama probe at %s did not answer: %s", base, e)
         return None
     pulled = [m.get("name") or m.get("model") for m in tags.get("models", [])]
     loaded = {(m.get("name") or m.get("model")): m.get("expires_at") for m in ps.get("models", [])}
@@ -1779,7 +1781,7 @@ def _sample_client_key() -> str:
         for key in load_config().get("projects", {}):
             if key != VALOR_PROJECT_KEY:
                 return key
-    except Exception:  # noqa: S110 -- config unreadable: the placeholder still renders
+    except Exception:  # noqa: S110  # swallow-ok: config unreadable, the placeholder still renders
         pass
     return "client-example"
 
