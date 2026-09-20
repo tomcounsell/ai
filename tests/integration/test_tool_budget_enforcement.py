@@ -148,9 +148,20 @@ def test_sdk_hook_allows_under_budget(make_session, monkeypatch):
 
 
 def test_sdk_hook_disabled_allows(make_session, monkeypatch):
+    """Kill switch off → an over-budget session is allowed through.
+
+    The session must genuinely RESOLVE for this to cover the kill switch at
+    all. See test_sdk_hook_blocks_over_budget: VALOR_SESSION_ID (session_id),
+    not AGENT_SESSION_ID (the Popoto AutoKey `.id`), is what resolves this
+    fixture's row. Setting AGENT_SESSION_ID to a session_id resolves nothing,
+    so the hook allows for the trivial no-session reason and the test passes
+    identically with TOOL_BUDGET_ENABLED left True — proving nothing about the
+    switch. With the resolution fixed, flipping the switch back to True makes
+    this test fail, which is the coverage it is here for.
+    """
     s = make_session(calls=10)
     monkeypatch.setattr(tool_budget, "TOOL_BUDGET_ENABLED", False)
-    monkeypatch.setenv("AGENT_SESSION_ID", s.session_id)
+    monkeypatch.setenv("VALOR_SESSION_ID", s.session_id)
     _reset_liveness_cooldown()
 
     assert "decision" not in _run_sdk_hook()
