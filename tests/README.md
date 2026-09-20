@@ -293,6 +293,19 @@ tests/
 | unit | `test_work_request_classifier.py` | 16 | Work request classification |
 | integration | `test_stage_aware_auto_continue.py` | 39 | Stage-aware auto-continue |
 
+### `llm` — Task taxonomy and routing (#3410)
+
+| Level | File | Tests | Description |
+|-------|------|------:|-------------|
+| unit | `test_llm_task_taxonomy.py` | 13 | AST walk: every `run_typed` carries `task=`, site table parity with `docs/features/llm-task-taxonomy.md`, hotfix #1055 invariant |
+| unit | `test_llm_tasks.py` | 11 | `LLMTask` declaration shape and `declared_sites()` literal-only walk |
+| unit | `test_llm_router.py` | 16 | Table-driven `resolve` over every declaration |
+| unit | `test_llm_router_eligibility.py` | 6 | Client keys land on Anthropic; `valor` lands on Ollama with `gh` unavailable; `email_cs.triage` pinned |
+| unit | `test_llm_backend_anthropic.py` | 17 | Anthropic leg: semaphore, timeouts, typed errors |
+| unit | `test_llm_backend_ollama.py` | 16 | Ollama leg: single request timer, `LLMCallError` on transport and timeout |
+| unit | `test_classification_eval.py` | 27 | Comparison runner math, minimum-n refusal, acceptance bar, contention, audit exit codes |
+| unit | `test_worker_startup_warm_cache.py` | 5 | Eligibility warm-up task is held and never awaited ahead of connect |
+
 ### `validation` — Quality checks and parsing
 
 | Level | File | Tests | Description |
