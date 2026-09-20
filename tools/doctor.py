@@ -1740,6 +1740,7 @@ def _ollama_status() -> dict | None:
     import logging
     import urllib.request
 
+    logger = logging.getLogger(__name__)
     base = settings.models.ollama_host.rstrip("/")
     try:
         with urllib.request.urlopen(f"{base}/api/tags", timeout=2) as resp:  # noqa: S310
@@ -1747,7 +1748,7 @@ def _ollama_status() -> dict | None:
         with urllib.request.urlopen(f"{base}/api/ps", timeout=2) as resp:  # noqa: S310
             ps = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        logging.getLogger(__name__).debug("Ollama probe at %s did not answer: %s", base, e)
+        logger.debug("Ollama probe at %s did not answer: %s", base, e)
         return None
     pulled = [m.get("name") or m.get("model") for m in tags.get("models", [])]
     loaded = {(m.get("name") or m.get("model")): m.get("expires_at") for m in ps.get("models", [])}
