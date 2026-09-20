@@ -28,6 +28,9 @@ from unittest import mock
 
 import pytest
 
+from tests.unit.improvement_eval_runner_support import (  # noqa: F401 -- fixture
+    arm_child_embedding_parity,
+)
 from tools.improvement_eval.errors import InfraFailure
 
 PK_AGENT_RUN = "test3311agentrun"

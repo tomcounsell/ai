@@ -25,6 +25,9 @@ from models.improvement_evaluation import ImprovementEvaluation
 from models.improvement_experiment import ImprovementExperiment
 from models.improvement_investigation import ImprovementInvestigation
 from models.verifying_artifact_store import VerifyingArtifactStore
+from tests.unit.improvement_eval_runner_support import (  # noqa: F401 -- fixture
+    arm_child_embedding_parity,
+)
 from tools import improvement as cli
 from tools import improvement_experiment as ex
 from tools.improvement_control import keys

@@ -1,11 +1,5 @@
 """Claude Agent SDK integration for Valor."""
 
-from .agent_session_queue import (
-    PRIORITY_RANK,
-    AgentSession,
-    enqueue_agent_session,
-    register_callbacks,
-)
 from .branch_manager import (
     BranchState,
     WorkStatus,
@@ -63,11 +57,7 @@ __all__ = [
     "format_branch_state_message",
     "BranchState",
     "WorkStatus",
-    "AgentSession",
-    "enqueue_agent_session",
-    "PRIORITY_RANK",
     "check_revival",
-    "register_callbacks",
     "cleanup_stale_branches",
     "record_revival_cooldown",
     "queue_revival_agent_session",
