@@ -283,9 +283,10 @@ async def run() -> dict:
                 )
                 # Only a real "migrated" verdict represents an actual git mv (or,
                 # in report-only mode, the informational equivalent). The other
-                # verdicts (dirty-tree-skip, fetch-failed-skip, stale-main-skip,
-                # rolled-back-skip, rollback-refused-skip, already-migrated,
-                # unknown) are report-only fallbacks/no-ops --
+                # verdicts (dirty-tree-skip, fetch-failed-skip,
+                # stale-main-skip, mutation-failed-skip, rolled-back-skip,
+                # rollback-refused-skip, already-migrated, unknown) are
+                # report-only fallbacks/no-ops --
                 # counting those would consume the per-run cap and inflate the
                 # summary on runs that moved nothing (PR #1903 review Tech Debt).
                 if verdict == "migrated":

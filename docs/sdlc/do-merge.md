@@ -185,19 +185,23 @@ those plans instead. See `docs/features/plan-migration-invariant.md`.
 
 **A non-zero exit from this command is not a no-op to ignore.** The CLI exits
 `0` only for `migrated`/`already-migrated`; it exits `1` and prints
-`Verdict: dirty-tree-skip`, `Verdict: fetch-failed-skip`, `Verdict:
-stale-main-skip`, `Verdict: rolled-back-skip`, or `Verdict:
-rollback-refused-skip` when the primitive took its report-only fallback,
-couldn't reach `origin` to compare/fast-forward, refused to mutate a diverged
-local `main`, rolled back a migration commit that couldn't land, or refused
-that rollback because another session's commit landed on the shared checkout
-in the interim, instead of moving the plan. Do not silently retry or swallow
-this — surface it in the merge report so a human knows the primary path did
-not migrate this plan and the daily reflection backstop is the only thing
-that will (within its next cycle, not immediately). `rollback-refused-skip`
-in particular needs a human to look at the shared `main` checkout directly —
-it means a stranded migration commit is coexisting with someone else's work
-there.
+`Verdict: dirty-tree-skip`,
+`Verdict: fetch-failed-skip`,
+`Verdict: stale-main-skip`,
+`Verdict: mutation-failed-skip`,
+`Verdict: rolled-back-skip`, or
+`Verdict: rollback-refused-skip`
+when the primitive took its report-only fallback, couldn't reach `origin` to
+compare/fast-forward, refused to mutate a diverged local `main`, failed its own
+`git mv`/`git commit` after the preconditions passed, rolled back a migration
+commit that couldn't land, or could not safely drop that commit, instead of
+moving the plan. Do not silently retry or swallow this — surface it in the
+merge report so a human knows the primary path did not migrate this plan and
+the daily reflection backstop is the only thing that will (within its next
+cycle, not immediately). `rollback-refused-skip` in particular needs a human to
+look at the shared `main` checkout directly — it means git refused to drop the
+migration commit (a peer's uncommitted edits or commit are in the way, or the
+index was locked), so that commit is still stranded on local `main`.
 
 ## Post-Merge Memory Extraction
 

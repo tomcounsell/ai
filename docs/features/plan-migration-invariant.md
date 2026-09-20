@@ -38,7 +38,10 @@ is the **only** code that moves a plan out of root. It:
 - Requires `HEAD == main` and a clean working tree before doing anything. If
   either check fails, it takes a **report-only fallback**: logs which plan it
   *would* migrate, mutates nothing, and returns `"dirty-tree-skip"`. This
-  never mutates a checkout another session is using.
+  never mutates a checkout another session is using. A `git mv` or `git
+  commit` that fails *after* those preconditions passed is a different
+  signal — the primitive was already mid-mutation — and returns
+  `"mutation-failed-skip"` after undoing its own rename.
 - Requires local `main` to already match `origin/main`, or be cleanly
   fast-forwardable to it, before doing any `git mv`/commit (issue #3530). If
   local `main` already carries commits `origin/main` lacks, the primitive
@@ -60,19 +63,41 @@ is the **only** code that moves a plan out of root. It:
   `git fetch && git rebase origin/main && git push`, retried up to 3 times.
   If that push can't land — a genuine textual rebase conflict, or exhausting
   all 3 attempts on a plain non-fast-forward rejection — the primitive drops
-  the stranded local commit, but only if it can confirm HEAD is *exactly*
-  that one commit ahead of `origin/main` (matched by commit subject): this
-  shared checkout can pick up another session's commit in the window between
-  our commit and the failed push, and an unconditional `git reset --hard
-  origin/main` would silently destroy that commit along with ours. When the
-  check passes, it resets and returns `"rolled-back-skip"` — safe because the
-  commit is a pure rename with no unique content: nothing is lost, and the
-  next `--sweep`/`--issue` invocation simply redoes the migration from a
-  clean base. When the check fails (HEAD carries more than our commit), it
-  refuses to reset and returns `"rollback-refused-skip"` instead, leaving
-  `main` for manual recovery rather than risking another session's work. The
-  primitive never blindly resets a shared checkout, and it never resolves a
-  genuine conflict unattended.
+  its own migration commit and nothing else, and returns
+  `"rolled-back-skip"`. The dropped commit is a pure rename of one file
+  (the commit is pathspec-scoped, so a peer's staged work in this shared
+  index is never swept into it), so the next `--sweep`/`--issue` invocation
+  simply redoes the migration from a clean base.
+
+### Rolling back safely on a shared checkout
+
+The `main` checkout this primitive runs in is shared: another session can hold
+uncommitted tracked edits there, or land its own commit, inside the window
+between our `git commit` and our failed push. The rollback therefore lets
+**git** enforce safety rather than pre-checking it — a `git status --porcelain`
+pre-check leaves a check-then-act window a peer can lose work in, which no
+in-process re-check can close. Three shapes, keyed on `origin/main..HEAD` after
+a fresh fetch:
+
+| Ahead of `origin/main` | Action | Verdict |
+|---|---|---|
+| nothing, rename present on `origin/main` | none — the push landed server-side and the client misreported it | `migrated` |
+| exactly our migration commit | `git reset --keep origin/main` | `rolled-back-skip` |
+| ours plus a peer's commit | `git rebase --onto <ours>^ <ours>` — drops only ours, replays theirs | `rolled-back-skip` |
+
+`--keep` and `--onto` both **abort** rather than overwrite a locally-modified
+file, so a peer's uncommitted work is never destroyed. Whenever git declines,
+the ahead-set has an unrecognised shape, or the drop's exit status is non-zero
+for any other reason (a contended `.git/index.lock`, say), the primitive
+returns `"rollback-refused-skip"` with `main` left exactly as it was for manual
+recovery — it never reports a rollback it did not perform. It never resolves a
+genuine conflict unattended.
+
+Every git subcommand runs through `_run_git`, which never raises: a blown
+timeout is reported as a non-zero `CompletedProcess` like any other failure. A
+`subprocess.TimeoutExpired` escaping the primitive would bypass every path
+above, strand the commit on `main`, and abort the reflection sweep that calls
+it.
 
 ### Why the archive sits outside `docs/plans/`
 
