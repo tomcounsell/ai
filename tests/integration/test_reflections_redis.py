@@ -177,34 +177,34 @@ class TestIgnoreLogRedis:
         assert len(ReflectionIgnore.query.all()) == 0
 
 
-class TestRedisIndexCleanupReflection:
-    """Tests for redis-index-cleanup reflection registration."""
-
-    def test_reflection_registered_in_yaml(self):
-        """Verify redis-index-cleanup exists in reflections.yaml."""
-        from pathlib import Path
-
-        import yaml
-
-        config_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-
-        names = [r["name"] for r in config["reflections"]]
-        assert "redis-index-cleanup" in names
-
-    # test_reflection_entry_structure was removed (see #3223-adjacent triage):
-    # config/reflections.yaml moved to the vault (~/Desktop/Valor/reflections.yaml,
-    # iCloud-synced, private) in c2af09602 and now evolves independently of this
-    # repo -- its "redis-index-cleanup" entry's callable has already drifted from
-    # what this test hardcoded (agent.session_health.cleanup_corrupted_agent_sessions
-    # vs. the asserted scripts.popoto_index_cleanup.run_cleanup), proving the
-    # assertion doesn't hold by design. The only code-under-test it exercised,
-    # parse_every_duration's "Ns" parsing, is already covered directly by
-    # tests/unit/test_reflection_schedule_grammar.py::TestDurationHelpers.
-
-    def test_cleanup_callable_importable(self):
-        """Verify the cleanup function can be imported."""
-        from scripts.popoto_index_cleanup import run_cleanup
-
-        assert callable(run_cleanup)
+# TestRedisIndexCleanupReflection was removed entirely. It held three tests; all
+# three had lost their subject, and the root cause is one the node-list-driven
+# triage in this PR reached only for the third.
+#
+# - test_reflection_entry_structure and test_reflection_registered_in_yaml both
+#   read config/reflections.yaml. That file moved to the private, iCloud-synced
+#   vault (~/Desktop/Valor/reflections.yaml) in c2af09602, is gitignored
+#   (.gitignore:8), and is copied into a checkout only by machine provisioning
+#   (scripts/install_email_bridge.sh:150). test_reflection_registered_in_yaml
+#   therefore raises FileNotFoundError in any clean checkout -- verified here,
+#   not inferred -- and passed on the nightly machine only because that machine
+#   is provisioned. It is not retargetable while staying test-only: the repo
+#   holds no reflections registry to assert against, and the vault file is
+#   private, absent from CI, and evolves independently of this repo, so a test
+#   pointed at it would assert operator config rather than a repo contract.
+#
+# - test_cleanup_callable_importable asserted that
+#   scripts.popoto_index_cleanup.run_cleanup is importable, framed as the
+#   redis-index-cleanup reflection's callable. That framing is false: the live
+#   vault entry for redis-index-cleanup dispatches
+#   agent.session_health.cleanup_corrupted_agent_sessions, and the vault has
+#   zero references to popoto_index_cleanup, so nothing schedules run_cleanup.
+#   Its only surviving claim -- that the symbol imports -- is already proven by
+#   the module-level `from scripts.popoto_index_cleanup import run_cleanup` in
+#   tests/unit/test_popoto_cleanup_reflection.py, which additionally exercises
+#   run_cleanup behaviourally (orphan reaping, slow-rebuild abandonment, count
+#   accuracy). Deleting it loses no coverage.
+#
+# parse_every_duration's "Ns" parsing, the only code-under-test the removed
+# structural assertions touched, stays covered by
+# tests/unit/test_reflection_schedule_grammar.py::TestDurationHelpers.
