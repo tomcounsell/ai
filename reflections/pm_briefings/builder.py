@@ -24,6 +24,16 @@ import os
 import re
 from typing import Any
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
+# Thinking: drafts the PM briefing prose (raw Anthropic client, lazy import).
+# Fail-safe: none; the builder raises and the reflection records the failure.
+PM_BRIEFING = LLMTask(
+    site="pm_briefings.draft",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
+
 logger = logging.getLogger("reflections.pm_briefings.builder")
 
 

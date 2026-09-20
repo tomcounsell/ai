@@ -743,6 +743,15 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception:
         logger.warning("session_archive restore_if_empty failed at startup", exc_info=True)
 
+    # Warm the charter-§7 eligibility cache for this process's projects
+    # (#3410). The task is held in tools.improvement_eligibility._BACKGROUND_TASKS
+    # and never awaited here: is_open_source shells `gh repo view` with a 10 s
+    # timeout per key, and startup must not wait on it. A classification call
+    # that lands before it finishes takes the fail-closed miss (Anthropic).
+    from tools.improvement_eligibility import schedule_warm_cache
+
+    schedule_warm_cache(list(projects))
+
     # Register TelegramRelayOutputHandler for each project
     for project_key in projects:
         register_callbacks(project_key, handler=handler)

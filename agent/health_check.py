@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import HookContext, PostToolUseHookInput
+from pydantic import BaseModel
 
-from config.models import MODEL_FAST
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from utils.api_keys import get_anthropic_api_key
 
 logger = logging.getLogger(__name__)
@@ -198,6 +200,22 @@ Respond with ONLY a JSON object, no other text:
 """
 
 
+class HealthDecision(BaseModel):
+    """Structured output for the watchdog judge (C11, #3410)."""
+
+    healthy: bool
+    reason: str
+
+
+# Fail-safe: any LLMCallError reads as healthy (the watchdog never kills on its own outage).
+HEALTH_JUDGE = LLMTask(
+    site="health_check.judge",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.MEDIUM,
+)
+
+
 def _write_activity_stream(
     session_id: str, tool_name: str, key_args: str, tool_call_count: int
 ) -> None:
@@ -357,7 +375,13 @@ def _read_recent_activity(transcript_path: str, max_entries: int = 30) -> str:
     lines = path.read_text().strip().splitlines()
     # Take the tail
     recent = lines[-max_entries:] if len(lines) > max_entries else lines
+    return activity_from_transcript_lines(recent)
 
+
+def activity_from_transcript_lines(recent: list[str]) -> str:
+    """Summarize the tool calls in a window of transcript JSONL lines, the
+    exact text the judge prompt receives; the comparison runner (C11) feeds
+    it windows of real transcripts."""
     tool_calls: list[str] = []
     for line in recent:
         try:
@@ -426,15 +450,21 @@ def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
     return text[:100] + ("..." if len(text) > 100 else "")
 
 
-async def _judge_health(activity: str, session_context: str = "") -> dict[str, Any]:
-    """Ask Haiku to judge whether the agent is healthy.
+async def _judge_health(
+    activity: str, session_context: str = "", *, project_key: str | None = None
+) -> dict[str, Any]:
+    """Ask the judge (``HEALTH_JUDGE`` through ``run_typed``) whether the agent is healthy.
+
+    Fail-safe: a missing API key or any ``LLMCallError`` from the leg reads
+    as healthy, so the watchdog never flags a session over its own outage.
 
     Args:
         activity: Formatted tool call activity summary.
         session_context: Optional session context preamble (session_type + task).
+        project_key: The session's project, read by the router for charter
+            §7 eligibility (#3410); ``None`` fails closed to the subscription
+            backend.
     """
-    from agent.anthropic_client import anthropic_slot
-
     api_key = _get_api_key()
     if not api_key:
         logger.warning("Health check: no API key available, skipping")
@@ -446,30 +476,14 @@ async def _judge_health(activity: str, session_context: str = "") -> dict[str, A
         session_context=session_context,
     )
 
-    # Shared semaphore-gated client (#1111)
-    async with anthropic_slot() as client:
-        response = await client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=150,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-    text = response.content[0].text if response.content else ""
-
-    # Strip markdown code fences (Haiku often wraps JSON in ```json ... ```)
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
-    if text.endswith("```"):
-        text = text.rsplit("\n", 1)[0] if "\n" in text else text[:-3]
-    text = text.strip()
-
-    # Parse JSON from response
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        logger.warning(f"Health check: could not parse judge response: {text}")
-        return {"healthy": True, "reason": f"unparseable judge response: {text[:80]}"}
+        decision = await run_typed(
+            prompt, HealthDecision, task=HEALTH_JUDGE, project_key=project_key
+        )
+    except LLMCallError as e:
+        logger.warning(f"Health check: judge call failed ({e.reason}): {e}")
+        return {"healthy": True, "reason": f"judge call failed: {str(e)[:80]}"}
+    return {"healthy": decision.healthy, "reason": decision.reason}
 
 
 def _repush_messages(session_id: str, messages: list[dict], room_id: str | None = None) -> None:
@@ -638,6 +652,7 @@ async def watchdog_hook(
     # session also resolves the Room for the steering dual-read below —
     # tracking failure degrades to a legacy-only drain, never breaks the hook.
     steering_room_id: str | None = None
+    project_key: str | None = None
     try:
         from models.agent_session import AgentSession
         from models.room import room_id_for_session
@@ -653,6 +668,7 @@ async def watchdog_hook(
             s.tool_call_count = count
             s.save()
             steering_room_id = room_id_for_session(s)
+            project_key = getattr(s, "project_key", None)
     except Exception as e:
         # Non-fatal: don't let tracking break the agent.
         logger.debug("session tracking update failed for %s: %s", session_id, e)
@@ -709,7 +725,9 @@ async def watchdog_hook(
         activity = _read_recent_activity(transcript_path)
         # Enrich with session context for more accurate health verdicts
         session_context = _get_session_context(session_id)
-        result = await _judge_health(activity, session_context=session_context)
+        result = await _judge_health(
+            activity, session_context=session_context, project_key=project_key
+        )
 
         healthy = result.get("healthy", True)
         reason = result.get("reason", "no reason given")

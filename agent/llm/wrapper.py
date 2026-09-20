@@ -1,105 +1,101 @@
-"""Typed PydanticAI call wrapper for non-harness LLM calls (#1925).
+"""Typed PydanticAI call wrapper for non-harness LLM calls (#1925, #3410).
 
-Every non-harness LLM call (classification, extraction, judging) should
-route through ``run_typed`` instead of hand-rolling an ``anthropic``
-client. The caller declares a typed ``output_type`` (a ``pydantic.BaseModel``
-subclass) and gets a schema-validated instance back, with PydanticAI's
-built-in single auto-retry on schema mismatch.
+Every non-harness LLM call (classification, extraction, judging) routes
+through ``run_typed`` instead of hand-rolling a provider client. The caller
+declares a typed ``output_type`` (a ``pydantic.BaseModel`` subclass) and its
+:class:`agent.llm.tasks.LLMTask`, and gets a schema-validated instance back,
+with PydanticAI's built-in single auto-retry on schema mismatch.
 
-Event-loop safety invariant (hotfix #1055 / #1111), reconciled with
-PydanticAI (see ``docs/plans/pydantic-ai-nonharness-llm-standardization.md``
-Spike Results spike-1): ``agent/anthropic_client.py`` holds no long-lived
-shared client -- ``semaphore_slot()`` only gates concurrency, the caller
-constructs its own client. ``run_typed`` follows that pattern **per call**:
+The wrapper owns five things: prompt validation, routing
+(``agent/llm/router.py::resolve`` picks the backend leg from the task and
+the ``project_key``), the degraded-stack guard with the axis the route
+needs, the one-shot fallback inside the caller's budget, and the outer
+``hard_timeout``. The provider bodies live in ``agent/llm/backends/`` (one
+leg per :class:`agent.llm.tasks.Backend`), and the hotfix #1055 invariant
+lives there with them: each leg's only timer around the live request is an
+SDK-level client timeout, and the Anthropic leg holds ``semaphore_slot()``
+for the whole ``Agent.run()``.
 
-1. ``async with semaphore_slot():`` -- hold the shared semaphore for the
-   *entire* ``Agent.run()`` call (not just client construction), matching
-   how ``agent/memory_extraction.py::_llm_call`` uses the slot today.
-2. Inside the slot, construct a **fresh**
-   ``async with anthropic.AsyncAnthropic(api_key=..., timeout=sdk_timeout)``
-   -- per-call, per-site timeout; ``async with`` preserves hotfix #1055's
-   httpx cleanup.
-3. Inject that client into PydanticAI:
-   ``AnthropicProvider(anthropic_client=client)`` ->
-   ``AnthropicModel(model, provider=...)`` ->
-   ``Agent(model, output_type=output_type)``.
-4. When ``hard_timeout`` is not ``None``, wrap ``await agent.run(prompt)``
-   in ``asyncio.wait_for(..., timeout=hard_timeout)`` for an outer
-   wall-clock cap regardless of the SDK-level ``timeout`` kwarg.
-5. The slot is released on ``__aexit__`` (automatic via ``async with``).
+Fallback budget (plan, Data Flow step 6): the budget is the caller's,
+``sdk_timeout`` if given else ``hard_timeout`` (both ``None`` means
+uncapped). When the primary leg raises :class:`LLMCallError` and the route
+carries a fallback, the fallback runs once with ``sdk_timeout`` and
+``slot_timeout`` both bounded by what is left of that budget, ``max_retries=0``
+(one timer bounds one attempt) and ``deadline=start + budget`` (the leg
+re-checks it after its slot wait, so the slot wait and the request cannot
+each spend the whole remainder), or is skipped under
+:data:`agent.llm.backends.MIN_REMAINDER_S` of remaining budget.
+
+Two fixed-prefix log lines are the operator's evidence of which backend
+served a site: ``llm_route site=<site> backend=<backend> elapsed_ms=<int>``
+at INFO after whichever leg answered, and ``llm_fallback site=<site>
+primary=<backend> fallback=<backend> reason=<reason> elapsed_ms=<int>`` at
+WARNING ahead of a fallback leg. ``docs/infra/llm-task-routing.md`` greps
+for both.
+
+``hard_timeout`` is the one coroutine-level cap and it wraps the *legs*
+(primary and fallback together), never the request, from outside; the
+three 3 s hot-path sites pass ``hard_timeout=None`` and rely on
+``sdk_timeout`` + ``slot_timeout`` alone.
 
 Fail-safe posture: this wrapper does NOT implement a fail-safe default.
 Provider errors and exhausted schema-validation retries are logged, then
-re-raised as :class:`LLMCallError`. Each call site owns its own
-conservative default (respond / escalate / send / skip) on failure -- see
-"Preserve fail-safe posture per site" in the plan's Solution section.
+re-raised as :class:`LLMCallError` with a ``reason``. Each call site owns
+its own conservative default (respond / escalate / send / skip) on failure.
 
 Import-safety contract (#3001): module scope here is **stdlib and our own
 code only**. Every third-party LLM-stack symbol (``anthropic``,
-``pydantic_ai.*``) is resolved through
-:func:`agent.anthropic_client._load_stack`, the one memoized loader, and
-only from inside the call paths below. A machine with a broken or missing
-stack can still ``import agent.llm`` (and therefore
-``import bridge.telegram_bridge``); the failure surfaces at the call, where
-it can be reported. ``_load_stack`` is imported into this module's
-namespace, so ``monkeypatch.setattr(wrapper_mod, "_load_stack", ...)`` is
-the network-isolation seam for tests -- it replaces the old
-``wrapper_mod.OpenAIChatModel`` seam, which no longer exists because
-``OpenAIChatModel`` is not a module attribute of anything here.
+``openai.AsyncOpenAI``, ``pydantic_ai.*``) is resolved through
+:func:`agent.anthropic_client._load_stack`, the one memoized loader, only
+from inside ``run_typed``, and handed to the leg as ``stack``. A machine
+with a broken or missing stack can still ``import agent.llm`` (and
+therefore ``import bridge.telegram_bridge``); the failure surfaces at the
+call, where it can be reported. ``_load_stack`` is imported into this
+module's namespace, so ``monkeypatch.setattr(wrapper_mod, "_load_stack",
+...)`` is the network-isolation seam for tests on either leg.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from time import monotonic
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
-
-from agent.anthropic_client import _load_stack, semaphore_slot
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
+from agent.anthropic_client import _load_stack
+from agent.llm.backends import MIN_REMAINDER_S, default_sdk_timeout
+from agent.llm.backends import anthropic as anthropic_leg
+from agent.llm.backends import ollama as ollama_leg
+from agent.llm.errors import LLMCallError, LLMStackIncompatible
+from agent.llm.router import resolve
+from agent.llm.tasks import Backend, LLMTask
+from config.models import MODEL_FAST
 from config.settings import settings
-from utils.api_keys import get_anthropic_api_key
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pydantic import BaseModel
+
+__all__ = [
+    "DEFAULT_HARD_TIMEOUT",
+    "LLMCallError",
+    "LLMStackIncompatible",
+    "run_typed",
+]
 
 logger = logging.getLogger(__name__)
 
-# Mirrors agent/memory_extraction.py's double-timeout constants (hotfix #1055):
-# the SDK-level timeout lets httpx/anthropic raise a typed error first for
-# cleaner logs; the outer hard timeout fires even on half-open sockets where
-# the SDK timer never gets a socket event to fire on.
-#
-# Sourced from settings.timeouts.anthropic_sdk_s / anthropic_hard_s (issue
-# #1968) -- these two fields are the single source of truth for BOTH this
-# module's constants and agent/memory_extraction.py's
-# `_EXTRACTION_SDK_TIMEOUT` / `_EXTRACTION_HARD_TIMEOUT`, which previously
-# duplicated the same 30.0/35.0 pair verbatim. Preserve the two-timer
-# structure -- never collapse to one value.
-DEFAULT_SDK_TIMEOUT = settings.timeouts.anthropic_sdk_s
+# The outer wall-clock cap for thinking sites (hotfix #1055 double-timeout
+# pattern, sourced from settings.timeouts.anthropic_hard_s, issue #1968).
+# The inner SDK-level timer is chosen per backend leg at call time by
+# ``agent.llm.backends.default_sdk_timeout``; this module owns no SDK
+# timeout constant. Preserve the two-timer structure -- never collapse to
+# one value.
 DEFAULT_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 
-
-class LLMCallError(Exception):
-    """Raised when ``run_typed`` cannot produce a validated output.
-
-    Wraps the underlying PydanticAI/Anthropic exception (available via
-    ``__cause__``) after it has already been logged. Callers apply their
-    own site-specific conservative default on this exception -- the
-    wrapper deliberately does not pick one for them.
-    """
-
-
-# N818 (Error suffix) is waived: the name is fixed by #3001's plan and its
-# verification greps, and it inherits the suffix-free house style of
-# LLMCallError, the class every call site already catches.
-class LLMStackIncompatible(LLMCallError):  # noqa: N818
-    """Raised when this process's LLM stack is degraded (#3001).
-
-    A subclass of :class:`LLMCallError` on purpose: every existing
-    ``except LLMCallError`` fail-safe keeps working unchanged, so a
-    degraded stack degrades each call site to its own conservative default
-    instead of surfacing a raw provider ``TypeError`` from deep inside
-    ``pydantic_ai``. The alert has already fired from
-    ``agent.llm.compat.resolve_degraded_flag`` by the time this is raised.
-    """
+_LEGS = {
+    Backend.ANTHROPIC: anthropic_leg.call,
+    Backend.OLLAMA: ollama_leg.call,
+}
 
 
 def _guard_stack(caller: str, *, signature_axis: bool) -> None:
@@ -109,7 +105,7 @@ def _guard_stack(caller: str, *, signature_axis: bool) -> None:
     never ran a startup hook: the first call *is* the first read, and the
     resolver alerts on the transition.
 
-    ``signature_axis`` is ``False`` for the local granite leg, which never
+    ``signature_axis`` is ``False`` for an Ollama-routed call, which never
     touches ``anthropic`` -- an Anthropic create-signature break must not
     fall the two hot-path classifiers over.
 
@@ -140,56 +136,91 @@ async def run_typed(
     prompt: str,
     output_type: type[BaseModel],
     *,
+    task: LLMTask,
+    project_key: str | None = None,
     model: str = MODEL_FAST,
-    sdk_timeout: float = DEFAULT_SDK_TIMEOUT,
+    system: str | None = None,
+    sdk_timeout: float | None = None,
+    slot_timeout: float | None = None,
     hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,
+    max_retries: int | None = None,
     _skip_guard: bool = False,
 ) -> BaseModel:
-    """Run a schema-validated LLM call through PydanticAI.
+    """Run a schema-validated LLM call on the backend leg the router picks.
 
     Args:
         prompt: the user prompt. Must be non-empty and not
-            whitespace-only -- validated before any client/network work,
-            so a bad prompt fails fast with no LLM call and no hang.
+            whitespace-only -- validated before any routing or network
+            work, so a bad prompt fails fast with no LLM call and no hang.
         output_type: a ``pydantic.BaseModel`` subclass describing the
             desired structured output. PydanticAI validates the model's
             response against this schema and auto-retries once on
             mismatch before raising.
-        model: the model id to call. Defaults to ``config.models.MODEL_FAST``
-            (Haiku) so a single config edit swaps every non-harness call's
-            model. Per-call overrides are supported (e.g. a cheaper/local
-            model for a high-frequency hot path).
-        sdk_timeout: per-call SDK-level timeout (seconds), passed to
-            ``anthropic.AsyncAnthropic(timeout=...)``. This is the inner
-            timer of the hotfix #1055 double-timeout pattern.
+        task: the call site's :class:`agent.llm.tasks.LLMTask`. Required:
+            a call without one raises ``TypeError`` naming the kwarg, so a
+            site the taxonomy missed fails loudly (Risk 2).
+        project_key: the project the call is made for; the router's
+            eligibility input (charter §7). ``None`` fails closed to the
+            subscription backend on a local-backend task.
+        model: the Anthropic model id. Defaults to
+            ``config.models.MODEL_FAST`` (Haiku). Names the model on every
+            Anthropic route, the fallback included; the Ollama leg always
+            runs ``config.models.OLLAMA_CLASSIFIER_MODEL``.
+        system: an optional system prompt for the PydanticAI ``Agent``.
+        sdk_timeout: the leg's SDK-level request timer (seconds). ``None``
+            means the leg's default from ``settings.timeouts``
+            (``anthropic_sdk_s`` for Anthropic, ``local_typed_hard_s`` for
+            Ollama), read at call time; an explicit value always wins and
+            is also the fallback budget.
+        slot_timeout: bounds the Anthropic leg's wait for the shared
+            semaphore; ``None`` waits unbounded on the primary leg (the
+            fallback's wait is bounded by its timer). A slot wait that
+            expires raises ``LLMCallError(reason="slot_timeout")`` with no
+            client constructed.
         hard_timeout: outer wall-clock cap (seconds) via
-            ``asyncio.wait_for``. Fires even when the SDK timer doesn't
-            (e.g. half-open TCP sockets with no socket event). Pass
-            ``None`` to disable the outer cap and rely on ``sdk_timeout``
-            alone.
-        _skip_guard: internal-only (#3001). When ``True``, skips
-            ``_guard_stack`` entirely, so the call never reaches
-            ``stack_axes()`` -> ``resolve_degraded_flag()``. The sole
-            caller is ``agent.llm.compat._check_network``, the auto-bump
-            ``llm`` gate's live probe -- it must stay pure (never touch the
+            ``asyncio.wait_for`` around the legs, applied here and never
+            inside a leg; the fallback budget when ``sdk_timeout`` is
+            ``None``. Pass ``None`` to disable it and rely on the SDK-level
+            timers alone (the three 3 s hot-path sites).
+        max_retries: the SDK retry count for the primary Anthropic client;
+            ``None`` means the SDK default. The fallback leg always runs
+            with 0.
+        _skip_guard: internal-only (#3001). When ``True``, skips both
+            ``_guard_stack`` calls (primary and fallback) and nothing else,
+            so the call never reaches ``stack_axes()`` ->
+            ``resolve_degraded_flag()``. The sole caller is
+            ``agent.llm.compat._check_network``, the auto-bump ``llm``
+            gate's live probe -- it must stay pure (never touch the
             memoized degraded flag) while still getting the shared
-            ``semaphore_slot()`` and both timeouts this function already
-            applies. Not for use outside the compat gate.
+            ``semaphore_slot()`` and both timeouts. Not for use outside
+            the compat gate.
 
     Returns:
-        A validated instance of ``output_type``.
+        A validated instance of ``output_type``. It carries no marker of
+        which leg answered; the ``llm_route`` log line does.
 
     Raises:
         ValueError: ``prompt`` is empty, ``None``, or whitespace-only.
-        LLMCallError: the provider call failed, or PydanticAI's schema
-            validation retries were exhausted. The original exception is
-            logged and chained as ``__cause__``.
+        TypeError: ``task`` is missing or not an ``LLMTask``.
+        LLMCallError: the leg failed (``reason`` in ``timeout``,
+            ``slot_timeout``, ``transport``, ``validation``), the fallback
+            failed too or was skipped for want of budget (the primary's
+            error propagates), or the outer ``hard_timeout`` fired
+            (``reason="timeout"``). The original exception is logged and
+            chained as ``__cause__``.
     """
     if not prompt or not prompt.strip():
         raise ValueError("run_typed requires a non-empty, non-whitespace prompt")
+    if not isinstance(task, LLMTask):
+        raise TypeError(
+            "run_typed() requires the keyword-only argument 'task' (an agent.llm.LLMTask "
+            "declared at the call site; see docs/features/llm-task-taxonomy.md)"
+        )
+
+    route = resolve(task, project_key, model=model)
 
     if not _skip_guard:
-        _guard_stack("run_typed", signature_axis=True)
+        _guard_stack("run_typed", signature_axis=(route.backend is Backend.ANTHROPIC))
 
     try:
         stack = _load_stack()
@@ -203,118 +234,91 @@ async def run_typed(
         # LLMStackIncompatible exists to preserve.
         raise LLMStackIncompatible(f"run_typed: LLM stack failed to import: {e}") from e
 
-    async with semaphore_slot():
-        async with stack.anthropic.AsyncAnthropic(
-            api_key=get_anthropic_api_key(), timeout=sdk_timeout
-        ) as client:
-            provider = stack.AnthropicProvider(anthropic_client=client)
-            pydantic_model = stack.AnthropicModel(model, provider=provider)
-            agent = stack.Agent(pydantic_model, output_type=output_type)
+    effective = sdk_timeout if sdk_timeout is not None else default_sdk_timeout(route.backend)
+    budget = sdk_timeout if sdk_timeout is not None else hard_timeout
+    start = monotonic()
+    deadline = None if budget is None else start + budget
 
-            try:
-                if hard_timeout is not None:
-                    result = await asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)
-                else:
-                    result = await agent.run(prompt)
-            except TimeoutError as e:
-                logger.error(
-                    "[agent.llm] hard timeout (%.1fs) exceeded for model=%s: %s",
-                    hard_timeout,
-                    model,
-                    e,
+    async def _legs() -> BaseModel:
+        try:
+            result = await _LEGS[route.backend](
+                prompt,
+                output_type,
+                route,
+                system=system,
+                sdk_timeout=effective,
+                slot_timeout=slot_timeout,
+                max_retries=max_retries,
+                deadline=None,
+                stack=stack,
+            )
+            answered = route.backend
+        except LLMCallError as primary_error:
+            fallback = route.fallback
+            if fallback is None:
+                raise
+            elapsed = monotonic() - start
+            if budget is not None and budget - elapsed < MIN_REMAINDER_S:
+                logger.warning(
+                    "llm_no_fallback site=%s primary=%s reason=%s elapsed_ms=%d budget_s=%.1f",
+                    task.site,
+                    route.backend.value,
+                    primary_error.reason,
+                    int(elapsed * 1000),
+                    budget,
                 )
-                raise LLMCallError(
-                    f"run_typed exceeded hard_timeout of {hard_timeout}s for model={model}"
-                ) from e
-            except Exception as e:
-                logger.error(
-                    "[agent.llm] provider error or schema-validation exhaustion for model=%s: %s",
-                    model,
-                    e,
-                    exc_info=True,
+                raise
+            fb_default = default_sdk_timeout(fallback.backend)
+            fb_timeout = fb_default if budget is None else min(fb_default, budget - elapsed)
+            fb_slot = fb_timeout if slot_timeout is None else min(slot_timeout, fb_timeout)
+            if not _skip_guard:
+                _guard_stack(
+                    "run_typed:fallback",
+                    signature_axis=(fallback.backend is Backend.ANTHROPIC),
                 )
-                raise LLMCallError(f"run_typed failed for model={model}: {e}") from e
-
-    return result.output
-
-
-async def run_typed_local(
-    prompt: str,
-    output_type: type[BaseModel],
-    *,
-    model: str = OLLAMA_CLASSIFIER_MODEL,
-    hard_timeout: float | None = None,
-) -> BaseModel:
-    """Run a schema-validated call against the LOCAL granite model via Ollama.
-
-    The granite-on-Ollama leg of the non-harness wrapper (durability plan
-    #2494 Task 13): both hot-path classifiers — the intake classifier and the
-    Job bind-or-mint router — route through here. Same typed-output contract
-    as :func:`run_typed` (PydanticAI schema validation, single auto-retry,
-    :class:`LLMCallError` on failure), with three deliberate differences:
-
-    * **No Anthropic client and no shared Anthropic semaphore** — the call
-      never leaves this machine, so the #1111 concurrency slot (which guards
-      the Anthropic API) does not apply.
-    * **Ollama provider** — ``OllamaProvider`` against
-      ``settings.models.ollama_host`` (the ``/v1`` OpenAI-compatible surface),
-      model defaulting to ``config.models.OLLAMA_CLASSIFIER_MODEL`` (granite).
-    * **Single timeout** — one outer ``asyncio.wait_for`` wall-clock cap
-      (``settings.timeouts.local_typed_hard_s``, env-overridable via
-      ``TIMEOUTS__LOCAL_TYPED_HARD_S`` and read here per call, not at
-      module scope). The hotfix-#1055 double-timeout pattern
-      exists for half-open WAN sockets; a localhost daemon either answers or
-      refuses, so one cap suffices.
-
-    Fail-safe posture matches :func:`run_typed`: no fail-safe default here —
-    each call site owns its own conservative default (intake → default
-    classification, router → NEW Job) on :class:`LLMCallError`.
-
-    Raises:
-        ValueError: ``prompt`` is empty, ``None``, or whitespace-only.
-        LLMCallError: provider/transport failure, schema-validation
-            exhaustion, or the hard timeout fired.
-    """
-    if not prompt or not prompt.strip():
-        raise ValueError("run_typed_local requires a non-empty, non-whitespace prompt")
-
-    _guard_stack("run_typed_local", signature_axis=False)
+            logger.warning(
+                "llm_fallback site=%s primary=%s fallback=%s reason=%s elapsed_ms=%d",
+                task.site,
+                route.backend.value,
+                fallback.backend.value,
+                primary_error.reason,
+                int(elapsed * 1000),
+            )
+            result = await _LEGS[fallback.backend](
+                prompt,
+                output_type,
+                fallback,
+                system=system,
+                sdk_timeout=fb_timeout,
+                slot_timeout=fb_slot,
+                max_retries=0,
+                deadline=deadline,
+                stack=stack,
+            )
+            answered = fallback.backend
+        logger.info(
+            "llm_route site=%s backend=%s elapsed_ms=%d",
+            task.site,
+            answered.value,
+            int((monotonic() - start) * 1000),
+        )
+        return result
 
     if hard_timeout is None:
-        hard_timeout = settings.timeouts.local_typed_hard_s
-
+        return await _legs()
     try:
-        stack = _load_stack()
-    except Exception as e:
-        # `_load_stack`'s own contract is broader than ImportError ("raises
-        # whatever the import raises"); catch the same breadth run_typed and
-        # check_llm_stack_compat already do on this call.
-        raise LLMStackIncompatible(f"run_typed_local: LLM stack failed to import: {e}") from e
-
-    base_url = f"{settings.models.ollama_host.rstrip('/')}/v1"
-    provider = stack.OllamaProvider(base_url=base_url)
-    pydantic_model = stack.OpenAIChatModel(model, provider=provider)
-    agent = stack.Agent(pydantic_model, output_type=output_type)
-
-    try:
-        result = await asyncio.wait_for(agent.run(prompt), timeout=hard_timeout)
+        return await asyncio.wait_for(_legs(), timeout=hard_timeout)
     except TimeoutError as e:
         logger.error(
-            "[agent.llm] local hard timeout (%.1fs) exceeded for model=%s: %s",
+            "[agent.llm] hard timeout (%.1fs) exceeded at site=%s on the %s route for model=%s: %s",
             hard_timeout,
-            model,
+            task.site,
+            route.backend.value,
+            route.model,
             e,
         )
         raise LLMCallError(
-            f"run_typed_local exceeded hard_timeout of {hard_timeout}s for model={model}"
+            f"run_typed exceeded hard_timeout of {hard_timeout}s at site={task.site} on the "
+            f"{route.backend.value} route for model={route.model}",
+            reason="timeout",
         ) from e
-    except Exception as e:
-        logger.error(
-            "[agent.llm] local provider error or schema-validation exhaustion for model=%s: %s",
-            model,
-            e,
-            exc_info=True,
-        )
-        raise LLMCallError(f"run_typed_local failed for model={model}: {e}") from e
-
-    return result.output

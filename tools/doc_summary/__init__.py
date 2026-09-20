@@ -10,7 +10,16 @@ from typing import Literal
 
 import requests
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_FAST, OPENROUTER_HAIKU, OPENROUTER_URL
+
+# Thinking: document summary over raw HTTP (Anthropic, OpenRouter fallback).
+# Fail-safe: an ``{"error": ...}`` dict for every failure path.
+DOC_SUMMARY = LLMTask(
+    site="doc_summary.summarize",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Summarization is a fast/cheap task - use Haiku

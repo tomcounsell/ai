@@ -29,14 +29,31 @@ a later lane can promote it if cross-process sharing is ever shown to matter.
 Only determinate answers are cached. A ``gh`` outage returns False for that
 call without pinning False for the rest of the window, so a transient failure
 costs one experiment rather than fifteen minutes of them.
+
+**The router's read is cache-only (#3410).** ``agent/llm/router.py::resolve``
+runs on the message hot path, where a ``gh`` shell-out on a miss would blow a
+3 s budget (plan spike-4). So the router calls :func:`is_eligible`, which pins
+``valor`` ``True`` in code ahead of any cache read, answers every other key
+from :func:`peek_open_source` (a pure cache read), and treats a miss as
+ineligible for that call while scheduling one background refresh per key
+through :func:`_schedule_refresh` (a running loop is required; without one,
+the synchronous ``tools/doctor`` path, the miss is the answer and nothing is
+scheduled). A process warms the cache for its project list at startup with
+:func:`schedule_warm_cache`, which holds the task in :data:`_BACKGROUND_TASKS`
+for its whole life and is never awaited ahead of the process's connect step.
+The blocking :func:`is_open_source` keeps its ``gh`` shell-out for the
+improvement tooling, the refresh and the warm-up.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
+import threading
 import time
+from collections.abc import Iterable
 
 from bridge.routing import load_config
 
@@ -48,8 +65,24 @@ DEFAULT_TTL_SECONDS = 900
 #: The one visibility value that means "any provider may see this".
 _PUBLIC = "PUBLIC"
 
+#: The project key pinned eligible in code (Tom, plan answer 4): this repo's
+#: own rooms never wait on a cache and never fail closed.
+VALOR_PROJECT_KEY = "valor"
+
 #: project_key -> (answer, monotonic expiry). Process-local by design.
 _CACHE: dict[str, tuple[bool, float]] = {}
+
+#: Guards ``_REFRESHING``: ``is_eligible`` runs on the loop thread while the
+#: refresh's done-callback and the executor thread touch the set too.
+_LOCK = threading.Lock()
+
+#: Keys with a background refresh in flight (Race 2: one per key, never a storm).
+_REFRESHING: set[str] = set()
+
+#: Strong references to every warm-up task: asyncio holds tasks weakly, so a
+#: bare ``create_task`` can be collected mid-run (ruff's select has no RUF006
+#: to flag it). ``schedule_warm_cache`` adds and the done-callback discards.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
 def _clear_cache() -> None:
@@ -85,8 +118,10 @@ def is_open_source(project_key: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) 
 
     Every other outcome is False, including every failure. See the module
     docstring for why the asymmetry is deliberate and why the repository is
-    passed to ``gh`` positionally.
+    passed to ``gh`` positionally. ``valor`` is pinned True ahead of the cache.
     """
+    if project_key == VALOR_PROJECT_KEY:
+        return True
     cached = _CACHE.get(project_key)
     if cached is not None and cached[1] > time.monotonic():
         return cached[0]
@@ -129,3 +164,107 @@ def is_open_source(project_key: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS) 
     answer = str(visibility).strip().upper() == _PUBLIC
     _CACHE[project_key] = (answer, time.monotonic() + ttl_seconds)
     return answer
+
+
+def peek_open_source(project_key: str) -> bool | None:
+    """The cached answer for ``project_key``, or ``None`` on a miss.
+
+    A pure cache read: never shells out, never schedules, never raises. An
+    expired entry is a miss.
+    """
+    cached = _CACHE.get(project_key)
+    if cached is None or cached[1] <= time.monotonic():
+        return None
+    return cached[0]
+
+
+def _schedule_refresh(project_key: str) -> bool:
+    """Run ``is_open_source`` once in the background for a missed key.
+
+    Returns True when a refresh was scheduled. Needs a running loop (the
+    check comes first, so a synchronous caller such as ``tools/doctor`` gets
+    False and no thread); holds at most one refresh per key (Race 2) under
+    :data:`_LOCK`; the executor's done-callback releases the key whatever
+    the outcome, so a failed refresh can be retried on the next miss.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    with _LOCK:
+        if project_key in _REFRESHING:
+            return False
+        _REFRESHING.add(project_key)
+
+    def _done(future: asyncio.Future) -> None:
+        with _LOCK:
+            _REFRESHING.discard(project_key)
+        if not future.cancelled() and future.exception() is not None:
+            logger.warning(
+                "improvement eligibility: refresh for %r failed: %s",
+                project_key,
+                future.exception(),
+            )
+
+    # The executor's work queue holds the job; the loop future is bound to it
+    # through the callback chain, so nothing here needs a stronger reference.
+    loop.run_in_executor(None, is_open_source, project_key).add_done_callback(_done)
+    return True
+
+
+def is_eligible(project_key: str | None) -> bool:
+    """The router's hot-path read: eligible now, from what this process knows.
+
+    ``valor`` is True before any cache read. ``None`` is False. Every other
+    key is :func:`peek_open_source`; a miss is False for this call and
+    schedules one background refresh (when a loop is running) so a burst's
+    later calls see the answer. Fails closed on every uncertainty (§7).
+    """
+    if project_key == VALOR_PROJECT_KEY:
+        return True
+    if not project_key:
+        return False
+    answer = peek_open_source(project_key)
+    if answer is None:
+        _schedule_refresh(project_key)
+        return False
+    return answer
+
+
+async def warm_cache(keys: Iterable[str]) -> None:
+    """Resolve every key once in the executor so later hot-path reads hit.
+
+    ``keys`` is a process's project list (a handful of entries from
+    ``projects.json``), never a dynamic collection, so one unbounded
+    ``gather`` over it is fine. ``return_exceptions=True`` keeps one key's
+    failure from hiding the others; the closing INFO line is the operator's
+    evidence the warm-up finished (``grep "eligibility warm-up done"``).
+    A ``CancelledError`` (process shutdown) propagates untouched.
+    """
+    unique = list(dict.fromkeys(keys))
+    loop = asyncio.get_running_loop()
+    results = await asyncio.gather(
+        *(loop.run_in_executor(None, is_open_source, key) for key in unique),
+        return_exceptions=True,
+    )
+    public = sum(1 for r in results if r is True)
+    failed = sum(1 for r in results if isinstance(r, BaseException))
+    for key, result in zip(unique, results, strict=True):
+        if isinstance(result, BaseException):
+            logger.warning("improvement eligibility: warm-up for %r failed: %s", key, result)
+    logger.info("eligibility warm-up done keys=%d public=%d failed=%d", len(unique), public, failed)
+
+
+def schedule_warm_cache(keys: Iterable[str]) -> asyncio.Task:
+    """Start :func:`warm_cache` on the running loop and hold the task.
+
+    The one way a process starts the warm-up: the task lives in
+    :data:`_BACKGROUND_TASKS` until its done-callback discards it, so it
+    cannot be garbage-collected mid-run. Callers never await it ahead of
+    their connect step; ``is_open_source`` shells ``gh repo view`` with a
+    10 s timeout per key. Raises ``RuntimeError`` outside a running loop.
+    """
+    task = asyncio.get_running_loop().create_task(warm_cache(list(keys)))
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task

@@ -38,8 +38,8 @@ Design notes:
 
 Import-safety contract (#3001):
     Module scope here is **stdlib and our own code only**. Every
-    third-party LLM-stack symbol (``anthropic``, ``pydantic_ai.*``) is
-    imported inside :func:`_load_stack`, the single memoized loader for
+    third-party LLM-stack symbol (``anthropic``, ``openai.AsyncOpenAI``,
+    ``pydantic_ai.*``) is imported inside :func:`_load_stack`, the single memoized loader for
     the whole package, so ``import agent.anthropic_client`` and
     ``import agent.llm`` succeed on a machine whose installed stack is
     broken or missing. The failure then surfaces at the call path, where
@@ -83,10 +83,12 @@ class LLMStack:
 
     anthropic: Any
     Agent: Any
+    NativeOutput: Any
     AnthropicModel: Any
     OpenAIChatModel: Any
     AnthropicProvider: Any
     OllamaProvider: Any
+    AsyncOpenAI: Any
 
 
 @functools.cache
@@ -99,7 +101,8 @@ def _load_stack() -> LLMStack:
     attempt.
     """
     import anthropic
-    from pydantic_ai import Agent
+    from openai import AsyncOpenAI
+    from pydantic_ai import Agent, NativeOutput
     from pydantic_ai.models.anthropic import AnthropicModel
     from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -108,10 +111,12 @@ def _load_stack() -> LLMStack:
     return LLMStack(
         anthropic=anthropic,
         Agent=Agent,
+        NativeOutput=NativeOutput,
         AnthropicModel=AnthropicModel,
         OpenAIChatModel=OpenAIChatModel,
         AnthropicProvider=AnthropicProvider,
         OllamaProvider=OllamaProvider,
+        AsyncOpenAI=AsyncOpenAI,
     )
 
 

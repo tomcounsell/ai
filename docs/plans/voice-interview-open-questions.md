@@ -1049,9 +1049,10 @@ way, after the audio.
   is greenfield across licensing, infrastructure, and transport at once, so it
   belongs in its own issue taken only after the Telegram leg proves the pipeline.
 - **A live intent classifier in the delivery loop.** Justification: only duplex
-  traversal needs it, and the nearest measured precedent (`run_typed_local` on
-  `granite4.1:3b`, ~1.1s median / ~1.4s p95 per `config/settings.py:383`) is
-  marginal inside a call's turn-taking. Deferred with the call itself.
+  traversal needs it, and the nearest measured precedent (the Ollama leg of
+  `run_typed` on `granite4.1:3b`, ~1.1s median / ~1.4s p95 per
+  `config/settings.py:386`) is marginal inside a call's turn-taking. Deferred
+  with the call itself.
 - **Cross-project harvesting.** Justification: owner ruling. Client projects are
   deliberately separate and each is owned by exactly one machine, so a cross-repo
   harvest would violate project isolation and put one project's calling link in

@@ -19,9 +19,9 @@ default was chosen.
 | `http_request_s` | 30.0s | 1–300s | `TIMEOUTS__HTTP_REQUEST_S` | General-purpose HTTP client calls (`requests.get`/`.post`/`.put`) that are not the Anthropic SDK, e.g. `reflections/sentry_triage.py`'s Sentry API calls. |
 | `smtp_s` | 30.0s | 1–120s | `TIMEOUTS__SMTP_S` | `smtplib.SMTP(host, port, timeout=...)` connections in `bridge/email_relay.py`, `bridge/email_dead_letter.py`, `bridge/email_bridge.py`. |
 | `redis_socket_s` | 5.0s | 1–60s | `TIMEOUTS__REDIS_SOCKET_S` | Redis client `socket_timeout`/`socket_connect_timeout` on short-lived request-response connections (`config/redis_bootstrap.py`, `agent/agent_session_queue.py`'s probe connection). Does NOT apply to the dedicated `socket_timeout=None` long-lived pub/sub `listen()` connection, which is intentionally unbounded. |
-| `anthropic_sdk_s` | 30.0s | 1–300s | `TIMEOUTS__ANTHROPIC_SDK_S` | Inner SDK-level timeout for the Anthropic API call. Paired with `anthropic_hard_s`. |
-| `anthropic_hard_s` | 35.0s | 1–300s | `TIMEOUTS__ANTHROPIC_HARD_S` | Outer `asyncio.wait_for(...)` hard cap around the whole Anthropic call. Fires even when the inner SDK timer never gets a socket event (e.g. a half-open TCP connection). |
-| `local_typed_hard_s` | 20.0s | 1–300s | `TIMEOUTS__LOCAL_TYPED_HARD_S` | Wall-clock cap for local granite/Ollama calls via `agent/llm/wrapper.py::run_typed_local`, read inside the function per call rather than at module scope. A single timer (unlike the Anthropic pair above): a localhost daemon either answers or refuses, so the half-open-socket case the two-timer structure guards against does not arise. Local calls fail open at the call site, so a timeout here costs a conservative default, never a lost message. GRAIN OF SALT: provisional/tunable, sized from spike-3's measured router latency (median ~1.1s / p95 ~1.4s) with generous headroom for a cold model load. |
+| `anthropic_sdk_s` | 30.0s | 1–300s | `TIMEOUTS__ANTHROPIC_SDK_S` | Inner SDK-level timeout on the `AsyncAnthropic` client the Anthropic leg of `run_typed` builds per call (`agent/llm/backends/anthropic.py`): the leg's default when the caller passes no `sdk_timeout`, read at call time through `agent.llm.backends.default_sdk_timeout`. `agent/memory_extraction.py` reads the same field. Paired with `anthropic_hard_s`. |
+| `anthropic_hard_s` | 35.0s | 1–300s | `TIMEOUTS__ANTHROPIC_HARD_S` | Outer `asyncio.wait_for(...)` hard cap around the whole call (`agent/llm/wrapper.py::DEFAULT_HARD_TIMEOUT`, applied by the wrapper outside the leg, primary and fallback together). Fires even when the inner SDK timer never gets a socket event (e.g. a half-open TCP connection). The three 3 s hot-path sites pass `hard_timeout=None` and rely on the SDK-level timers alone. |
+| `local_typed_hard_s` | 20.0s | 1–300s | `TIMEOUTS__LOCAL_TYPED_HARD_S` | The Ollama leg's single SDK-level request timer: `AsyncOpenAI(timeout=...)` in `agent/llm/backends/ollama.py`, the leg's default when the caller passes no `sdk_timeout`, read at call time so a bump takes effect without a reload. A single timer (unlike the Anthropic pair above): a localhost daemon either answers or refuses, so the half-open-socket case the two-timer structure guards against does not arise. A timeout here raises `LLMCallError(reason="timeout")`, which falls back to the Anthropic leg once inside the caller's remaining budget or costs the site's conservative default, never a lost message. Operator lever 2 for a degraded daemon: `TIMEOUTS__LOCAL_TYPED_HARD_S=3` in the vault `.env` plus `./scripts/valor-service.sh restart` caps every local leg at 3 s so the fallback fires early (see [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md), Rollback). GRAIN OF SALT: provisional/tunable, sized from spike-3's measured router latency (median ~1.1s / p95 ~1.4s) with generous headroom for a cold model load. |
 | `agent_session_retain_ttl_s` | 2592000s (30d) | 1–2592000s | `TIMEOUTS__AGENT_SESSION_RETAIN_TTL_S` | `models/agent_session.py`'s `retain_for_resume` BUILD-session backstop (`Meta.ttl`). |
 | `last_processed_ttl_s` | 2592000s (30d) | 1–2592000s | `TIMEOUTS__LAST_PROCESSED_TTL_S` | `models/last_processed.py`'s per-chat read cursor (`Meta.ttl`). |
 | `steering_room_max_age_s` | 21600s (6h) | 60–604800s | `TIMEOUTS__STEERING_ROOM_MAX_AGE_S` | Age bound on the **Room leg** of the steering queue (`agent/steering.py`): `_drain_list` drops and `_peek_list` skips `steering:room:{room_id}` entries older than this. The Room key is immortal by design and nothing sets a TTL on it, so this is the only thing that expires an instruction nobody drained. Measures time since origination — a requeue forwards the entry's own timestamp. The `steering:{session_id}` leg is never filtered. Provisional/tunable. |
@@ -29,13 +29,19 @@ default was chosen.
 
 ### The double-timeout pattern (`anthropic_sdk_s` / `anthropic_hard_s`)
 
-`agent/llm/wrapper.py` and `agent/memory_extraction.py` use a deliberate
-two-timer pattern (inner SDK-level `timeout` + outer `asyncio.wait_for` hard
-cap). Both timers are a paired field set and the two-timer structure is
-preserved — they are never collapsed into one value. Letting the SDK/httpx
-layer raise its own typed timeout error first (before the outer hard cap
-fires) produces cleaner logs; the outer cap exists to guard against a
-half-open connection that never trips the inner timer.
+`agent/llm/` and `agent/memory_extraction.py` use a deliberate two-timer
+pattern: an inner SDK-level `timeout` on the client the backend leg builds
+(`agent/llm/backends/anthropic.py`), and an outer `asyncio.wait_for` hard
+cap the wrapper applies around the legs from outside. Both timers are a
+paired field set and the two-timer structure is preserved; they are never
+collapsed into one value. Letting the SDK/httpx layer raise its own typed
+timeout error first (before the outer hard cap fires) produces cleaner logs;
+the outer cap exists to guard against a half-open connection that never
+trips the inner timer. No leg carries a coroutine-level timeout of its own
+(hotfix #1055): the wrapper's `sdk_timeout` defaults to `None` and resolves
+per leg, so a site that passes nothing gets `anthropic_sdk_s` on the
+Anthropic leg or `local_typed_hard_s` on the Ollama leg, and an explicit
+value wins on either. See [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md).
 
 ### Session-lifecycle TTLs may be month-scale
 

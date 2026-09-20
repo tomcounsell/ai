@@ -8,12 +8,12 @@ Operational reference for the Cuttlefish email customer-service triage layer
 
 | Dependency | Role | Failure mode |
 |------------|------|--------------|
-| **Ollama** (`gemma4:e2b`) | Tier 1 local classification. Already the repo's `OLLAMA_LOCAL_MODEL`. | Down/slow → triage fails-safe to **escalate** (logged, never crashes). |
-| **Anthropic API** (`MODEL_FAST` = Haiku) | Tier 2 per-category action agent. | API error → **draft_for_human** (never auto). |
+| **Anthropic API** (`MODEL_FAST` = Haiku) | Tier 1 classification: `run_typed(task=EMAIL_TRIAGE)`, site `email_cs.triage`, declared `client_only=True` so the router keeps it on the subscription leg for every project key (charter §7: customer email is client work). | Down/slow → triage fails-safe to **escalate** (logged, never crashes). |
+| **Anthropic API** (`MODEL_FAST` = Haiku) | Tier 2 per-category action agent (site `email_cs.action`, raw `AsyncAnthropic` under `anthropic_slot`, also `client_only`). | API error → **draft_for_human** (never auto). |
 | **Cuttlefish `manage.py`** | Subprocess capability surface (`customer show/checkout-url/note/email draft`, `episode provision`). Runs in `~/src/cuttlefish/.venv`. | Timeout / non-zero exit / bad JSON → **escalate** + audit note recording the failure. |
 | **Redis** | `email:outbox:{session_id}` (auto replies), `telegram:outbox:{session_id}` (pings). | Write failure logged; ping/reply best-effort. |
 
-No new Python packages — `ollama` and `anthropic` are already in use. No new CLI
+No new Python packages: `anthropic` is already in use. No new CLI
 entry point: the layer is bridge-internal (imported directly by
 `bridge/email_bridge.py`).
 
@@ -27,7 +27,8 @@ multi-machine coordination.
 
 ## Cost & rate notes
 
-- **Tier 1** is local (Ollama) — no API cost, bounded by local GPU/CPU.
+- **Tier 1** is one Haiku call per inbound customer email on the subscription
+  leg (~$0.0001/call), never routed to a local model.
 - **Tier 2** runs only on `auto`-gated lanes (Phase ≥ 2), once per qualifying
   email, on Haiku (~$0.0001/call). Shadow mode (Phase 1) makes **zero** Tier 2
   calls — it stops after the gate and writes one audit note.
@@ -64,9 +65,9 @@ schema changes in this repo (audit records live cuttlefish-side).
 
 ## Deploy / update
 
-No `scripts/remote-update.sh` change required. `gemma4:e2b` is pulled by the
-existing `/update` Ollama-sync steps. The `projects.json` wiring is private
-config that syncs via iCloud, not via the update script.
+No `scripts/remote-update.sh` change required and no local model to pull: both
+tiers run on the Anthropic API. The `projects.json` wiring is private config
+that syncs via iCloud, not via the update script.
 
 ## Monitoring
 

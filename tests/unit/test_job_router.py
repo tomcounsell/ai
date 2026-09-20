@@ -8,7 +8,7 @@ standalone non-Popoto string key bound via SET NX (schema-gate ruling 1),
 no TTL, so reply-to routing never needs a model call.
 
 Granite is never called for real here: tests monkeypatch
-``bridge.job_router.run_typed_local``.
+``bridge.job_router.run_typed``.
 """
 
 import uuid
@@ -46,17 +46,17 @@ def scratch_message_key():
 
 
 def _decision(monkeypatch, decision: JobRouteDecision):
-    async def fake_run_typed_local(prompt, output_type, **kwargs):
+    async def fake_run_typed(prompt, output_type, **kwargs):
         return decision
 
-    monkeypatch.setattr("bridge.job_router.run_typed_local", fake_run_typed_local)
+    monkeypatch.setattr("bridge.job_router.run_typed", fake_run_typed)
 
 
 def _forbid_model_call(monkeypatch):
     async def exploding(prompt, output_type, **kwargs):
         raise AssertionError("model must not be called on this path")
 
-    monkeypatch.setattr("bridge.job_router.run_typed_local", exploding)
+    monkeypatch.setattr("bridge.job_router.run_typed", exploding)
 
 
 class TestShadowRouteJob:
@@ -218,7 +218,7 @@ class TestRouteMessage:
         async def unreachable(prompt, output_type, **kwargs):
             raise LLMCallError("ollama unreachable")
 
-        monkeypatch.setattr("bridge.job_router.run_typed_local", unreachable)
+        monkeypatch.setattr("bridge.job_router.run_typed", unreachable)
 
         job = await route_message(scratch_room_id, "unrelated", scratch_message_key)
 

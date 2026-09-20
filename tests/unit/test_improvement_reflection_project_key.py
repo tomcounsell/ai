@@ -14,7 +14,7 @@ capturing the project key each one hands to its inner call.
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -37,7 +37,7 @@ def _enabled():
     return patch.object(settings.improvement, "enabled", True)
 
 
-def _run_collect() -> str:
+async def _run_collect() -> str:
     seen: list[str] = []
 
     def human_memories(project_key):
@@ -50,13 +50,13 @@ def _run_collect() -> str:
         patch.object(improvement_collect, "_recent_sessions", return_value=[]),
         patch.object(improvement_collect, "collect_expectation_coverage", return_value=0),
         patch.object(improvement_collect, "collect_lessons", return_value=0),
-        patch.object(improvement_collect, "collect_promises", return_value=0),
+        patch.object(improvement_collect, "collect_promises", AsyncMock(return_value=0)),
     ):
-        improvement_collect.run_improvement_collect()
+        await improvement_collect.run_improvement_collect()
     return seen[0]
 
 
-def _run_planner() -> str:
+async def _run_planner() -> str:
     seen: list[str] = []
 
     def plan_tick(project_key, **kwargs):
@@ -68,7 +68,7 @@ def _run_planner() -> str:
     return seen[0]
 
 
-def _run_digest() -> str:
+async def _run_digest() -> str:
     seen: list[str] = []
 
     def collect(project_key, *, since):
@@ -80,7 +80,7 @@ def _run_digest() -> str:
     return seen[0]
 
 
-def _run_controller_tick() -> str:
+async def _run_controller_tick() -> str:
     seen: list[str] = []
 
     def tick(project_key, **kwargs):
@@ -94,7 +94,7 @@ def _run_controller_tick() -> str:
     return seen[0]
 
 
-def _run_intent_reconcile() -> str:
+async def _run_intent_reconcile() -> str:
     seen: list[str] = []
 
     def reconcile(project_key, **kwargs):
@@ -118,13 +118,13 @@ ENTRY_POINTS = {
 
 
 @pytest.mark.parametrize("name", sorted(ENTRY_POINTS))
-def test_unset_env_resolves_the_valor_project_never_default(name):
+async def test_unset_env_resolves_the_valor_project_never_default(name):
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("VALOR_PROJECT_KEY", None)
-        assert ENTRY_POINTS[name]() == "valor"
+        assert await ENTRY_POINTS[name]() == "valor"
 
 
 @pytest.mark.parametrize("name", sorted(ENTRY_POINTS))
-def test_env_names_the_owning_project(name):
+async def test_env_names_the_owning_project(name):
     with patch.dict(os.environ, {"VALOR_PROJECT_KEY": PK}):
-        assert ENTRY_POINTS[name]() == PK
+        assert await ENTRY_POINTS[name]() == PK

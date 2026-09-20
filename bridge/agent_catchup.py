@@ -52,11 +52,13 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Literal
 
 from pydantic import BaseModel
 
-from agent.llm import run_typed
+from agent.llm import LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
 from agent.private_tag import strip_private
 from bridge.dedup import get_or_init_dm_coverage_epoch
 from bridge.room_inbox import shadow_append_inbox
@@ -169,6 +171,15 @@ class CatchupJudgeVerdict(BaseModel):
     verdict: Literal[ANSWERED, UNANSWERED_NEEDS_REPLY, UNANSWERED_NO_REPLY_NEEDED]
 
 
+# Fail-safe: any error answers ANSWERED (no recovery enqueue; a miss is swept again).
+CATCHUP_JUDGE = LLMTask(
+    site="agent_catchup.judge",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.LOW,
+)
+
+
 def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> str:
     """Render the judge prompt for one inbound message against the thread."""
     return (
@@ -201,7 +212,13 @@ def _build_judge_prompt(transcript: str, inbound_text: str, inbound_id: int) -> 
     )
 
 
-async def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> str:
+async def judge_message(
+    transcript: str,
+    inbound_text: str,
+    inbound_id: int,
+    *,
+    project_key: str | None = None,
+) -> str:
     """Classify whether one inbound message is answered, by reading the thread.
 
     Returns one of three classes:
@@ -222,11 +239,21 @@ async def judge_message(transcript: str, inbound_text: str, inbound_id: int) -> 
     CONSERVATIVE CONTRACT: any error maps to ``ANSWERED`` (no reply). A missed
     reply is recoverable on the next sweep; a spurious double-reply is not.
     This function NEVER raises — every failure path returns ``ANSWERED``.
+
+    ``project_key`` is the swept chat's project (``OwnedChat.project["_key"]``),
+    read by the router for charter §7 eligibility (#3410); ``sweep_chat``
+    binds it when no ``judge_fn`` is injected.
     """
     prompt = _build_judge_prompt(transcript, inbound_text, inbound_id)
 
     try:
-        decision = await run_typed(prompt, CatchupJudgeVerdict, model=MODEL_FAST)
+        decision = await run_typed(
+            prompt,
+            CatchupJudgeVerdict,
+            task=CATCHUP_JUDGE,
+            project_key=project_key,
+            model=MODEL_FAST,
+        )
         return decision.verdict
     except Exception as e:
         logger.debug("%s judge failed: %s", LOG_PREFIX, e)
@@ -537,7 +564,7 @@ async def sweep_chat(
     chat: OwnedChat,
     *,
     enqueue_fn,
-    judge_fn=judge_message,
+    judge_fn=None,
     record_processed_fn=None,
     record_last_fn=None,
     lookback: timedelta | None = None,
@@ -557,13 +584,18 @@ async def sweep_chat(
     not the dedup write, is what makes this idempotent).
 
     ``judge_fn`` and ``enqueue_fn`` are injectable so unit tests can stub the
-    judge and assert enqueues. ``record_processed_fn`` / ``record_last_fn``
-    default to the real ``bridge.dedup`` writers.
+    judge and assert enqueues; a judge takes ``(transcript, text, message_id)``.
+    The default judge is ``judge_message`` bound to this chat's project key,
+    so the router sees the chat's project on every verdict (#3410).
+    ``record_processed_fn`` / ``record_last_fn`` default to the real
+    ``bridge.dedup`` writers.
 
     NARROW try/except: a per-message failure logs a greppable WARNING and
     continues; the per-chat caller (``run_sweep``) wraps this whole call so a
     chat-level failure is recorded and the sweep proceeds to the next chat.
     """
+    if judge_fn is None:
+        judge_fn = partial(judge_message, project_key=chat.project.get("_key"))
     if record_processed_fn is None or record_last_fn is None:
         from bridge.dedup import record_last_processed, record_message_processed
 
@@ -779,7 +811,7 @@ async def run_sweep(
     owned_chats: list[OwnedChat],
     *,
     enqueue_fn,
-    judge_fn=judge_message,
+    judge_fn=None,
     record_processed_fn=None,
     record_last_fn=None,
     lookback: timedelta | None = None,
@@ -789,6 +821,9 @@ async def run_sweep(
     Each chat's sweep is wrapped in a NARROW try/except: on failure, a greppable
     WARNING is logged and a ``ChatResult`` with ``errored=True`` is appended — the
     chat appears in the summary, the sweep never aborts. Best-effort contract.
+
+    ``judge_fn=None`` lets each ``sweep_chat`` bind ``judge_message`` to its
+    own chat's project key.
     """
     results: list[ChatResult] = []
     for chat in owned_chats:

@@ -332,14 +332,16 @@ def _install_fake_network_stack(monkeypatch, fn):
         return FunctionModel(fn, model_name=model_name)
 
     import utils.api_keys as api_keys_mod
+    from agent.llm.backends import anthropic as anthropic_leg
 
     real = wrapper_mod._load_stack()
     fake = dataclasses.replace(real, AnthropicModel=fake_anthropic_model)
     monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
-    monkeypatch.setattr(wrapper_mod, "get_anthropic_api_key", lambda: "fake-test-key")
+    # The Anthropic leg reads the key through its own bound copy (#3410).
+    monkeypatch.setattr(anthropic_leg, "get_anthropic_api_key", lambda: "fake-test-key")
     # `_check_network` imports `get_anthropic_api_key` fresh, inside its own
     # function body, so the source (`utils.api_keys`) is the seam that
-    # actually affects it -- patching `wrapper_mod`'s bound copy alone
+    # actually affects it -- patching the leg's bound copy alone
     # would leave `_check_network`'s own no-key check unpatched.
     monkeypatch.setattr(api_keys_mod, "get_anthropic_api_key", lambda: "fake-test-key")
 

@@ -101,9 +101,13 @@ VOCABULARY_MAXIMUMS: dict[tuple[type, str], int] = {
     # kind is written by its own observer adapter and read by its own
     # consumer (the planner's case-opening rules for lessons, the dashboard's
     # burden panel for promises), so each needs its own index set: a `lesson`
-    # coerced to `other` is unqueryable as a lesson. Ten index sets per
-    # project partition, membership reads only.
-    (ImprovementEvidence, "kind"): 10,
+    # coerced to `other` is unqueryable as a lesson. The LLM task taxonomy
+    # (#3410) adds `classifier_comparison`, written by
+    # `tools/classification_eval` and read back by its `--audit` walk through
+    # the partition-and-kind index; coerced to `other`, every audit would scan
+    # and parse the whole `other` set to find its own rows. Eleven index sets
+    # per project partition, membership reads only.
+    (ImprovementEvidence, "kind"): 11,
 }
 
 #: Cardinality tripwire: field names that must never carry an index, whatever

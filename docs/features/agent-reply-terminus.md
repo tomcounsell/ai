@@ -109,7 +109,7 @@ so loop-break behavior is unaffected.
 
 #### Few-Shot LLM Prompt
 
-The local Ollama classifier (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`) uses few-shot examples to reliably distinguish continuation imperatives from conversation closers, covering imperatives that do not hit Fast-Path 0 (e.g., "merge it", "run it again").
+The terminus classifier (site `routing.terminus`, declared `TERMINUS = LLMTask(backend=Backend.ANTHROPIC)` in `bridge/routing.py` and run through `run_typed(task=TERMINUS)` on Haiku) uses few-shot examples to reliably distinguish continuation imperatives from conversation closers, covering imperatives that do not hit Fast-Path 0 (e.g., "merge it", "run it again").
 
 The prompt includes 14 labeled few-shot examples drawn from real misclassified messages and canonical patterns:
 
@@ -130,7 +130,7 @@ The prompt includes 14 labeled few-shot examples drawn from real misclassified m
 "got it" → SILENT
 ```
 
-Cost: ~200 extra tokens per LLM call. Ollama is local — no $$ cost; latency impact is negligible.
+Cost: ~200 extra tokens per Haiku call; latency impact is negligible.
 
 #### DEBUG Log for Future Mining
 
@@ -146,9 +146,9 @@ To enable: set log level to DEBUG for the `bridge.routing` logger.
 
 ### LLM Classification
 
-When no fast-path fires, Ollama (local model) is tried first, with Haiku as fallback. The prompt describes the RESPOND/REACT/SILENT semantics and injects sender and thread context.
+When no fast-path fires, a single `run_typed(prompt, TerminusDecision, task=TERMINUS, project_key=...)` call on the Anthropic leg (Haiku) returns a typed RESPOND/REACT/SILENT verdict; the `Literal` schema makes a garbage verdict structurally impossible. The prompt (`terminus_prompt`) describes the semantics and injects sender and thread context.
 
-**Conservative default:** If both Ollama and Haiku fail, returns `"RESPOND"` — genuine questions are never silently dropped due to classifier error.
+**Conservative default:** If the call raises, returns `"RESPOND"`, so a genuine question is never silently dropped by a classifier error.
 
 **REACT collapse for bots:** When `sender_is_bot=True` and the LLM returns `REACT`, the result is collapsed to `SILENT`. REACT (emoji acknowledgment) is reserved for human-sender threads winding down naturally — not bot loops.
 
@@ -195,7 +195,7 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_url_with_query_param_not_respond` — URL `?q=1` not treated as question for bot sender
 - `test_classify_terminus_acknowledgment_token_returns_silent` — "got it" from human → SILENT
 - `test_classify_terminus_acknowledgment_fires_after_bot_check` — "yes" from bot → SILENT
-- `test_classify_terminus_ollama_failure_defaults_to_respond` — Ollama + Haiku both fail → RESPOND
+- `test_classify_terminus_ollama_failure_defaults_to_respond` — the `run_typed` call raises → RESPOND
 - `test_classify_terminus_empty_text_returns_respond` — empty text → RESPOND
 - `test_classify_terminus_bot_react_collapses_to_silent` — LLM REACT + bot sender → SILENT
 

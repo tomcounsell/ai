@@ -1729,6 +1729,173 @@ def _check_knowledge_zero_chunk_documents() -> CheckResult:
         )
 
 
+def _ollama_status() -> dict | None:
+    """What the local Ollama daemon reports, or ``None`` when it does not answer.
+
+    Two bounded GETs against ``settings.models.ollama_host``: ``/api/tags``
+    (pulled models) and ``/api/ps`` (loaded models with their ``expires_at``,
+    the keep-alive evidence: ``OLLAMA_KEEP_ALIVE=-1`` shows as a far-future
+    instant). Stdlib only, 2 s per request, no daemon means ``None``.
+    """
+    import logging
+    import urllib.request
+
+    logger = logging.getLogger(__name__)
+    base = settings.models.ollama_host.rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=2) as resp:  # noqa: S310
+            tags = json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(f"{base}/api/ps", timeout=2) as resp:  # noqa: S310
+            ps = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.debug("Ollama probe at %s did not answer: %s", base, e)
+        return None
+    pulled = [m.get("name") or m.get("model") for m in tags.get("models", [])]
+    loaded = {(m.get("name") or m.get("model")): m.get("expires_at") for m in ps.get("models", [])}
+    return {"pulled": [p for p in pulled if p], "loaded": loaded}
+
+
+def _eligibility_state(project_key: str) -> str:
+    """The per-process cache state for one key, as the routing section prints it."""
+    import asyncio
+
+    from tools.improvement_eligibility import VALOR_PROJECT_KEY, peek_open_source
+
+    if project_key == VALOR_PROJECT_KEY:
+        return "pinned eligible"
+    answer = peek_open_source(project_key)
+    if answer is not None:
+        return "cached public" if answer else "cached private"
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return "miss (no loop; refresh not scheduled)"
+    return "miss (refresh scheduled)"
+
+
+def _sample_client_key() -> str:
+    """The first non-``valor`` project in the config, or a placeholder."""
+    try:
+        from bridge.routing import load_config
+        from tools.improvement_eligibility import VALOR_PROJECT_KEY
+
+        for key in load_config().get("projects", {}):
+            if key != VALOR_PROJECT_KEY:
+                return key
+    except Exception:  # noqa: S110  # swallow-ok: config unreadable, the placeholder still renders
+        pass
+    return "client-example"
+
+
+def _check_llm_routing(*, client_key: str | None = None) -> list[CheckResult]:
+    """The "LLM routing" section (#3410).
+
+    One row per declared ``LLMTask`` site (kind, declared backend, the route
+    ``resolve`` returns for ``valor`` and for a client key), one row for the
+    per-process eligibility cache, and one for the Ollama daemon (loaded
+    model, keep-alive, ``local_typed_hard_s``), which fails when a declared
+    ``OLLAMA`` site would fall back to Anthropic on every call because no
+    daemon answers on this machine. Synchronous like every other check:
+    ``resolve`` is a plain function and the refresh scheduler behind the
+    cache peek is a no-op without a running loop, so a cold client key
+    renders as ``miss (no loop; refresh not scheduled)``.
+    """
+    category = "LLM routing"
+    from agent.llm.router import resolve
+    from agent.llm.tasks import Backend, declared_sites
+    from config.models import OLLAMA_CLASSIFIER_MODEL
+    from tools.improvement_eligibility import _CACHE, VALOR_PROJECT_KEY
+
+    client = client_key or _sample_client_key()
+    results: list[CheckResult] = []
+
+    def _describe(route) -> str:
+        text = route.backend.value
+        if route.fallback is not None:
+            text += f" (fallback {route.fallback.backend.value})"
+        return text
+
+    sites = declared_sites()
+    for declared in sites:
+        task = declared.task
+        message = (
+            f"kind={task.kind.value} backend={task.backend.value} "
+            f"error_cost={task.error_cost.value}"
+            + (" client_only" if task.client_only else "")
+            + f" valor->{_describe(resolve(task, VALOR_PROJECT_KEY))}"
+            f" client->{_describe(resolve(task, client))}"
+            f" [{declared.path}:{declared.lineno}]"
+        )
+        results.append(CheckResult(name=task.site, category=category, passed=True, message=message))
+
+    cached = sorted(_CACHE)
+    results.append(
+        CheckResult(
+            name="eligibility_cache",
+            category=category,
+            passed=True,
+            message=(
+                f"{VALOR_PROJECT_KEY}={_eligibility_state(VALOR_PROJECT_KEY)}; "
+                f"{client}={_eligibility_state(client)}; "
+                f"cached entries={len(cached)}" + (f" ({', '.join(cached)})" if cached else "")
+            ),
+        )
+    )
+
+    ollama_sites = [d.task.site for d in sites if d.task.backend is Backend.OLLAMA]
+    timer = f"local_typed_hard_s={settings.timeouts.local_typed_hard_s}"
+    status = _ollama_status()
+    if status is None:
+        if ollama_sites:
+            results.append(
+                CheckResult(
+                    name="ollama_daemon",
+                    category=category,
+                    passed=False,
+                    message=(
+                        f"no Ollama daemon answers at {settings.models.ollama_host}; "
+                        f"{len(ollama_sites)} declared OLLAMA site(s) fall back to Anthropic "
+                        f"on every call: {', '.join(ollama_sites)}; {timer}"
+                    ),
+                    fix=(
+                        f"Start Ollama with OLLAMA_KEEP_ALIVE=-1 OLLAMA_NUM_PARALLEL=4 and "
+                        f"pull {OLLAMA_CLASSIFIER_MODEL} (docs/infra/llm-task-routing.md)"
+                    ),
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    name="ollama_daemon",
+                    category=category,
+                    passed=True,
+                    message=f"no daemon and no declared OLLAMA site needs one; {timer}",
+                )
+            )
+        return results
+
+    pulled = OLLAMA_CLASSIFIER_MODEL in status["pulled"]
+    expires = status["loaded"].get(OLLAMA_CLASSIFIER_MODEL)
+    if expires is not None:
+        loaded_note = f"loaded={OLLAMA_CLASSIFIER_MODEL} expires_at={expires}"
+    else:
+        loaded_note = f"loaded=none (classifier {OLLAMA_CLASSIFIER_MODEL} not resident)"
+    results.append(
+        CheckResult(
+            name="ollama_daemon",
+            category=category,
+            passed=pulled or not ollama_sites,
+            message=(
+                f"{OLLAMA_CLASSIFIER_MODEL} {'pulled' if pulled else 'NOT pulled'}; "
+                f"{loaded_note}; {timer}; OLLAMA sites: "
+                f"{', '.join(ollama_sites) if ollama_sites else 'none'}"
+            ),
+            fix=None if pulled else f"ollama pull {OLLAMA_CLASSIFIER_MODEL}",
+        )
+    )
+    return results
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -2334,6 +2501,11 @@ def get_checks(
         # push -- stronger than #2473's WARN intent. Full runs (including
         # --json) keep the check, slotted with the other Services checks.
         checks.insert(checks.index(_check_worker) + 1, _check_catchup_kill_switch)
+        # The LLM routing section (#3410) is a full-run check for the same
+        # reason: its daemon row fails on a worker-only machine that declares
+        # an OLLAMA site with no Ollama running, which is a WARN, never a
+        # blocked push. Anchored on `_check_worker` (unconditional list).
+        checks.insert(checks.index(_check_worker) + 1, _check_llm_routing)
         # gws auth is registered here, not in the unconditional list above,
         # for the identical reason (#2845): this repo has no WARN tier
         # (CheckResult.passed is binary, rendered [FAIL]), so `passed=False`

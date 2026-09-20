@@ -115,11 +115,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
+
 logger = logging.getLogger(__name__)
 
 # Sentinel token shared by every break-glass path in this module, so one
 # grep over the logs finds them all.
 SENTINEL = "LLM_STACK_COMPAT"
+
+# The auto-bump ``llm`` gate's live probe (``_check_network``): one billed
+# ``run_typed`` call on the Anthropic leg. THINKING short-circuits at the
+# router's first rule, so the probe exercises the real Anthropic transport
+# whatever key or eligibility state this process is in. Fail-safe: none;
+# the probe reports the exception as the gate's reason.
+NETWORK_PROBE = LLMTask(
+    site="compat.network_probe", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
 
 # Marker-directory seam. Production default is cwd-independent and matches
 # ``ui/app.py``'s ``Path(__file__).parent.parent / "data"`` so the dashboard
@@ -133,8 +144,8 @@ _MARKER_STEM = "llm-stack-degraded"
 # ``None`` means "not yet resolved" -- the predicate's purity is asserted
 # against exactly that: a ``check_llm_stack_compat`` call must leave this
 # ``None``. The two axes are memoized beside it because they are consumed
-# separately: ``run_typed`` is gated on both, ``run_typed_local`` on
-# ``loader_ok`` alone.
+# separately: an Anthropic-routed ``run_typed`` is gated on both, an
+# Ollama-routed ``run_typed`` on ``loader_ok`` alone.
 _DEGRADED: bool | None = None
 _LOADER_OK: bool = True
 _COMPATIBLE: bool = True
@@ -165,9 +176,10 @@ class CompatResult:
     ``compatible`` -- the installed ``anthropic`` ``create`` signature
     accepts everything the installed ``pydantic_ai`` actually forwards.
 
-    They are separate because ``run_typed_local`` (granite on Ollama) never
-    touches ``anthropic``: an Anthropic *signature* break must not fall the
-    two hot-path classifiers back to their conservative defaults fleet-wide.
+    They are separate because an Ollama-routed ``run_typed`` (granite on
+    Ollama) never touches ``anthropic``: an Anthropic *signature* break must
+    not fall the two hot-path classifiers back to their conservative
+    defaults fleet-wide.
 
     ``probe_skipped`` -- ``True`` only on the ``allow_network=True`` /
     no-API-key branch of ``_check_network``: the pair was never actually
@@ -522,7 +534,7 @@ def _check_network(
         answer: str
 
     try:
-        asyncio.run(run_typed("Reply with answer=hi", _Probe, _skip_guard=True))
+        asyncio.run(run_typed("Reply with answer=hi", _Probe, task=NETWORK_PROBE, _skip_guard=True))
     except Exception as exc:
         return CompatResult(
             compatible=False,
@@ -773,11 +785,12 @@ def resolve_degraded_flag(proc: str | None = None) -> bool:
 def stack_axes() -> tuple[bool, bool]:
     """``(loader_ok, compatible)`` for this process, forcing resolution.
 
-    The two axes stay separate all the way to the call sites:
-    ``run_typed`` is gated on both, ``run_typed_local`` on ``loader_ok``
-    alone, because the local granite-on-Ollama leg never touches
-    ``anthropic`` and an Anthropic *signature* break must not fall the two
-    hot-path classifiers back to their conservative defaults fleet-wide.
+    The two axes stay separate all the way to the call sites: an
+    Anthropic-routed ``run_typed`` is gated on both, an Ollama-routed
+    ``run_typed`` on ``loader_ok`` alone, because the local
+    granite-on-Ollama leg never touches ``anthropic`` and an Anthropic
+    *signature* break must not fall the two hot-path classifiers back to
+    their conservative defaults fleet-wide.
     """
     resolve_degraded_flag()
     return _LOADER_OK, _COMPATIBLE

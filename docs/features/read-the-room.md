@@ -153,16 +153,21 @@ The deterministic stale short-circuit (above) is the one case that returns
 The RTR call is wrapped in a fail-open guard. Any error returns `send` with
 `reason="rtr_error"` and emits a `rtr.failed` `session_event`:
 
-* `anthropic.APITimeoutError` — SDK-level 3-second timeout fires.
-* `anthropic.APIConnectionError` — httpx connection issue.
-* `anthropic.APIError` — any other Anthropic API error.
-* `ValueError` — malformed `room_verdict` tool_use response.
+* `LLMCallError`: the one exception the wrapper raises; the event carries
+  `error="LLMCallError:<reason>"` with `reason` one of `timeout` (the leg's
+  SDK-level 3-second timer), `slot_timeout` (the bounded semaphore wait),
+  `transport` (connection or API error), or `validation` (a response that
+  fails the `RoomVerdict` schema; `max_retries=0`, so no repair round).
 * Last-resort `Exception` — anything else.
 
-The hotfix pattern is mandatory: `semaphore_slot()` for
-concurrency gating + an inner `async with anthropic.AsyncAnthropic(timeout=3.0)`
-for httpx-level cleanup on cancellation. **Do not** wrap with
-`asyncio.wait_for` — that leaks httpx connections.
+The call is `run_typed(user_payload, RoomVerdict, task=READ_THE_ROOM,
+sdk_timeout=RTR_SDK_TIMEOUT, slot_timeout=RTR_SDK_TIMEOUT, max_retries=0,
+hard_timeout=None)`. The hotfix #1055 pattern lives in the Anthropic leg
+(`agent/llm/backends/anthropic.py`): `semaphore_slot()` for concurrency
+gating around a fresh `AsyncAnthropic(timeout=3.0, max_retries=0)` client
+for httpx-level cleanup on cancellation. `hard_timeout=None` keeps the
+wrapper's outer `asyncio.wait_for` off this call; that cap leaks httpx
+connections.
 
 ## Observability
 
@@ -305,7 +310,7 @@ The two layers compose cleanly:
 
 See [Drafter Redundancy Suppression](drafter-redundancy-suppression.md) for full details.
 
-**PM Completion Runner Haiku Judge** (`agent/session_completion.py::_judge_completion_novelty`) is a *separate* Haiku call site distinct from RTR. It runs only inside `_deliver_pipeline_completion` for the borderline band of the post-draft suppression check (Jaccard `[0.55, 0.75)`), with its own tool schema (`completion_novelty_verdict` with `restate`/`new` enum) and 3-second timeout. It deliberately does NOT share code with RTR: RTR judges room context against a candidate draft; the completion-novelty judge compares two specific message strings (prior mid-session send vs. drafted final summary). Both follow the same fail-open pattern (`semaphore_slot()` + inline `anthropic.AsyncAnthropic(timeout=3.0)`); if the RTR Haiku model identifier or timeout changes, audit `_judge_completion_novelty` for parallel updates. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression).
+**PM Completion Runner Haiku Judge** (`agent/session_completion.py::_judge_completion_novelty`) is a *separate* Haiku call site distinct from RTR. It runs only inside `_deliver_pipeline_completion` for the borderline band of the post-draft suppression check (Jaccard `[0.55, 0.75)`), with its own output model (`CompletionNoveltyDecision`, `action` in `restate`/`new`) and 3-second timeout, declared as site `session_completion.novelty` (`COMPLETION_NOVELTY`). It deliberately does NOT share prompt or schema with RTR: RTR judges room context against a candidate draft; the completion-novelty judge compares two specific message strings (prior mid-session send vs. drafted final summary). Both are `run_typed` calls with `sdk_timeout=slot_timeout=3.0, max_retries=0, hard_timeout=None`, so both ride the Anthropic leg's fail-open pattern; if the RTR timeout changes, audit `_judge_completion_novelty` for parallel updates. See [PM Final Delivery: mid-session-send-aware completion suppression](pm-final-delivery.md#mid-session-send-aware-completion-suppression).
 
 ## Related documentation
 

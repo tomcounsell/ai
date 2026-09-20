@@ -293,7 +293,7 @@ class TestInboundClassifierIntegration:
         async def boom(*a, **k):
             raise RuntimeError("granite down")
 
-        monkeypatch.setattr("agent.llm.run_typed_local", boom)
+        monkeypatch.setattr("tools.classifier.run_typed", boom)
         result = await classify_message_intent_async("yes", session_context="Working on #2694")
         assert result["intent"] == "new_work"
         assert result["context_recall_advised"] is False
@@ -315,7 +315,7 @@ class TestInboundClassifierIntegration:
             seen["output_type"] = output_type
             return IntentDecision(intent="interjection", confidence=0.95, reason="ok")
 
-        monkeypatch.setattr("agent.llm.run_typed_local", capture)
+        monkeypatch.setattr("tools.classifier.run_typed", capture)
         await classify_message_intent_async("yes", session_context="Working on #2694")
         assert seen["output_type"] is IntentDecision
         assert CONTEXT_RECALL_PROMPT_SECTION not in seen["prompt"]
@@ -341,7 +341,7 @@ class TestInboundClassifierIntegration:
                 context_recall_reason="bare approval",
             )
 
-        monkeypatch.setattr("agent.llm.run_typed_local", capture)
+        monkeypatch.setattr("tools.classifier.run_typed", capture)
         result = await classify_message_intent_async("yes", session_context="Working on #2694")
         assert seen["output_type"] is IntentDecisionWithRecall
         assert CONTEXT_RECALL_PROMPT_SECTION in seen["prompt"]
@@ -363,7 +363,7 @@ class TestInboundClassifierIntegration:
                 context_recall_reason="ordinal with no antecedent",
             )
 
-        monkeypatch.setattr("agent.llm.run_typed_local", fake)
+        monkeypatch.setattr("tools.classifier.run_typed", fake)
         result = await classify_message_intent_async("the second one", session_context="ctx")
         assert result["intent"] == "new_work"  # clamped
         assert result["context_recall_advised"] is True

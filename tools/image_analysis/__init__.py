@@ -12,7 +12,16 @@ from typing import Literal
 
 import requests
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+
+# Thinking: vision analysis over raw HTTP (Anthropic, OpenRouter fallback).
+# Fail-safe: an ``{"error": ...}`` dict for every failure path.
+IMAGE_ANALYSIS = LLMTask(
+    site="image_analysis.analyze",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Vision tasks - Anthropic API (primary), OpenRouter (fallback)

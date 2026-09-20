@@ -37,7 +37,7 @@ class TestTimeoutSettingsDefaults:
         assert TimeoutSettings().redis_socket_s == 5.0
 
     def test_anthropic_sdk_default(self):
-        """Must match agent/llm/wrapper.py DEFAULT_SDK_TIMEOUT (issue #1925)."""
+        """The Anthropic leg's default SDK timer (agent/llm/backends, issue #1925)."""
         assert TimeoutSettings().anthropic_sdk_s == 30.0
 
     def test_anthropic_hard_default(self):
@@ -195,19 +195,16 @@ class TestImprovementSettingsControlJournal:
 
 
 class TestImprovementSettingsPromiseDetector:
-    """The no-promises detector is off by default and names no model (#3217)."""
+    """The no-promises detector is off by default (#3217); its judge is routed by #3410."""
 
     def test_defaults(self):
         s = ImprovementSettings()
         assert s.promise_detector_enabled is False
-        assert s.cheap_inference_model == ""
 
     def test_env_overrides(self, monkeypatch):
         monkeypatch.setenv("IMPROVEMENT__PROMISE_DETECTOR_ENABLED", "true")
-        monkeypatch.setenv("IMPROVEMENT__CHEAP_INFERENCE_MODEL", "openai/gpt-4o-mini")
         s = Settings()
         assert s.improvement.promise_detector_enabled is True
-        assert s.improvement.cheap_inference_model == "openai/gpt-4o-mini"
 
 
 class TestCodexSettings:

@@ -30,6 +30,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
 from utils.json_cache import JsonCache, get_or_compute_async
 
 logger = logging.getLogger(__name__)
@@ -164,9 +165,20 @@ class IntentClassification(BaseModel):
     reasoning: str
 
 
+# Fail-safe: any error answers intent="work" with confidence 0.0 (dev-session).
+INTENT = LLMTask(
+    site="intent_classifier.intent",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.ANTHROPIC,
+    error_cost=ErrorCost.HIGH,
+)
+
+
 async def classify_intent(
     message: str,
     context: dict | None = None,
+    *,
+    project_key: str | None = None,
 ) -> IntentResult:
     """Classify a message into one of four intents using Haiku.
 
@@ -178,6 +190,9 @@ async def classify_intent(
         message: The incoming user message text.
         context: Optional dict with keys like 'sender_name', 'recent_messages'
                  for additional classification context.
+        project_key: The message's project, read by the router for charter
+                     §7 eligibility (#3410); ``None`` fails closed to the
+                     subscription backend.
 
     Returns:
         IntentResult with intent, confidence, and reasoning.
@@ -210,7 +225,13 @@ async def classify_intent(
         prompt = f"{CLASSIFIER_PROMPT}\n\n{user_content}"
 
         async def _call_and_serialize() -> dict:
-            parsed = await run_typed(prompt, IntentClassification, model=MODEL_FAST)
+            parsed = await run_typed(
+                prompt,
+                IntentClassification,
+                task=INTENT,
+                project_key=project_key,
+                model=MODEL_FAST,
+            )
             # #1925: parsed is a pydantic BaseModel (IntentClassification), not
             # the old IntentResult dataclass -- dataclasses.asdict would raise
             # TypeError on it. model_dump() is the pydantic equivalent and

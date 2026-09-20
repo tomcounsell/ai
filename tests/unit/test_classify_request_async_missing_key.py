@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
+from agent.llm import LLMCallError
+from tests.helpers.llm_fakes import failing
 from tools.classifier import classify_request_async
 
 
@@ -52,17 +54,17 @@ async def test_missing_key_empty_string_also_handled(caplog):
 
 @pytest.mark.asyncio
 async def test_real_api_error_still_logs_error(caplog):
-    """A genuine API failure (key present) keeps ERROR-level visibility.
+    """A genuine leg failure (key present) keeps ERROR-level visibility.
 
     The missing-key downgrade must not swallow real failures: with a valid key,
-    an exception from the Anthropic client still hits the outer handler and logs
+    an ``LLMCallError`` from ``run_typed`` still hits the outer handler and logs
     at ERROR (feeding Sentry), then re-raises. This is the counterpart to the
     quiet missing-key path (#1899).
     """
     with patch("tools.classifier.get_anthropic_api_key", return_value="sk-ant-real"):
-        with patch("tools.classifier.anthropic_slot", side_effect=RuntimeError("boom")):
+        with patch("tools.classifier.run_typed", failing("transport", "boom")):
             with caplog.at_level(logging.DEBUG, logger="tools.classifier"):
-                with pytest.raises(RuntimeError):
+                with pytest.raises(LLMCallError):
                     await classify_request_async("Fix the login bug")
 
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]

@@ -10,16 +10,20 @@ import pytest
 
 from agent.health_check import (
     CHECK_INTERVAL,
+    HEALTH_JUDGE,
     JUDGE_PROMPT,
+    HealthDecision,
     _compute_activity_stats,
     _extract_gh_commands,
     _get_session_context,
+    _judge_health,
     _read_recent_activity,
     _summarize_input,
     _tool_counts,
     _write_activity_stream,
     watchdog_hook,
 )
+from tests.helpers.llm_fakes import FakeRunTyped, failing
 from tests.unit.session_lookup_mock import wire_session_lookup
 
 
@@ -222,6 +226,48 @@ class TestWatchdogHook:
             result = await watchdog_hook(input_data, None, None)
 
         assert result["continue_"] is True
+
+
+class TestJudgeHealth:
+    """``_judge_health`` runs on ``run_typed`` with ``HEALTH_JUDGE`` (C11, #3410)."""
+
+    @pytest.mark.asyncio
+    async def test_verdict_comes_back_as_the_dict_the_hook_reads(self, monkeypatch):
+        fake = FakeRunTyped(result=HealthDecision(healthy=False, reason="same Bash loop"))
+        monkeypatch.setattr("agent.health_check.run_typed", fake)
+        monkeypatch.setattr("agent.health_check._get_api_key", lambda: "test-key")
+
+        result = await _judge_health("1. Bash: ls\n2. Bash: ls", project_key="valor")
+
+        assert result == {"healthy": False, "reason": "same Bash loop"}
+        assert fake.last.task is HEALTH_JUDGE
+        assert fake.last.project_key == "valor"
+        assert "1. Bash: ls" in fake.last.prompt
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_is_healthy_with_a_warning(self, monkeypatch, caplog):
+        """Fail-safe: any ``LLMCallError`` reads as healthy so the watchdog never
+        kills a session over its own judge being down."""
+        monkeypatch.setattr("agent.health_check.run_typed", failing("validation"))
+        monkeypatch.setattr("agent.health_check._get_api_key", lambda: "test-key")
+
+        with caplog.at_level("WARNING", logger="agent.health_check"):
+            result = await _judge_health("activity")
+
+        assert result["healthy"] is True
+        assert "judge" in result["reason"]
+        assert any("Health check: judge call failed" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_is_healthy_without_a_call(self, monkeypatch):
+        fake = FakeRunTyped(result=HealthDecision(healthy=False, reason="never"))
+        monkeypatch.setattr("agent.health_check.run_typed", fake)
+        monkeypatch.setattr("agent.health_check._get_api_key", lambda: None)
+
+        result = await _judge_health("activity")
+
+        assert result == {"healthy": True, "reason": "no API key for health check"}
+        assert fake.calls == []
 
 
 class TestActivityStream:

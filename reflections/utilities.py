@@ -20,7 +20,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.settings import settings
+
+# Thinking: extracts structured reflections from a log excerpt (raw Anthropic).
+# Fail-safe: ``[]`` (no reflections) on any error, logged.
+LOG_REFLECTION = LLMTask(
+    site="reflections.log_analysis",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger("reflections.utilities")
 

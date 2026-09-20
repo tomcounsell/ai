@@ -16,6 +16,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from reflections.memory.memory_quality_audit import (
+    GEMMA_CALL_TIMEOUT_SEC,
+    MEMORY_AUDIT,
+    MemoryAuditDecision,
+)
+from tests.helpers.llm_fakes import FakeRunTyped, failing
+
 
 def _popoto_has_sweep_stale_tempfiles() -> bool:
     """Probe whether popoto>=1.6.0 EmbeddingField is installed."""
@@ -270,6 +277,7 @@ def _make_memory(
     created_at=None,
     confidence=0.5,
     metadata=None,
+    project_key="test-audit",
 ):
     """Build a MagicMock Memory record matching the production field shape."""
     if created_at is None:
@@ -287,6 +295,7 @@ def _make_memory(
     m.created_at = created_at
     m.confidence = confidence
     m.metadata = metadata if metadata is not None else {}
+    m.project_key = project_key
     # save() returns truthy by default; tests override to False to simulate WriteFilter veto
     m.save.return_value = True
     return m
@@ -929,10 +938,11 @@ class TestMemoryHealthAuditLayer2:
 
 
 class TestMemoryHealthAuditLayer3:
-    """Layer 3 — Gemma classification with wallclock budget and fail-soft."""
+    """Layer 3 — granite classification through ``run_typed`` (``memory_audit.classify``,
+    #3410) with wallclock budget and fail-soft."""
 
     def test_ollama_unavailable_fails_soft(self):
-        """When ollama.chat raises ConnectionRefusedError, audit completes layers 0+1+2 cleanly."""
+        """When the leg raises LLMCallError, audit completes layers 0+1+2 cleanly."""
         from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
@@ -944,9 +954,6 @@ class TestMemoryHealthAuditLayer3:
             )
         ]
 
-        def raise_connection_refused(*a, **kw):
-            raise ConnectionRefusedError("ollama daemon down")
-
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
@@ -955,8 +962,8 @@ class TestMemoryHealthAuditLayer3:
                 return_value=False,
             ),
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                side_effect=raise_connection_refused,
+                "reflections.memory.memory_quality_audit.run_typed",
+                failing("transport", "ollama daemon down"),
             ),
         ):
             mock_model.query.all.return_value = records
@@ -978,6 +985,7 @@ class TestMemoryHealthAuditLayer3:
                 content=f"some weird content {i}",
                 importance=4.0,
                 metadata={"category": "correction"},
+                project_key="test-audit-project",
             )
             for i in range(5)
         ]
@@ -989,13 +997,13 @@ class TestMemoryHealthAuditLayer3:
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value={
-                    "is_junk": True,
-                    "anomaly_signal": "json-key-as-content",
-                    "why": "test",
-                },
-            ),
+                "reflections.memory.memory_quality_audit.run_typed",
+                FakeRunTyped(
+                    result=MemoryAuditDecision(
+                        is_junk=True, anomaly_signal="json-key-as-content", why="test"
+                    )
+                ),
+            ) as fake,
         ):
             mock_file.return_value = True
             mock_model.query.all.return_value = records
@@ -1003,6 +1011,15 @@ class TestMemoryHealthAuditLayer3:
 
         signals_filed = [c.kwargs.get("signal_name") for c in mock_file.call_args_list]
         assert "gemma-json-key-as-content" in signals_filed
+        # Every call carries the site's declaration, the memory row's project,
+        # the per-record SDK timer and no coroutine-level cap (hotfix #1055).
+        assert fake.call_count == 5
+        for call in fake.calls:
+            assert call.task is MEMORY_AUDIT
+            assert call.project_key == "test-audit-project"
+            assert call.kwargs["sdk_timeout"] == GEMMA_CALL_TIMEOUT_SEC
+            assert call.kwargs["hard_timeout"] is None
+            assert "some weird content" in call.prompt
 
     def test_ollama_classifies_clean_no_issue(self):
         """When all gemma verdicts say is_junk=False, no Layer 3 issue is filed."""
@@ -1018,8 +1035,6 @@ class TestMemoryHealthAuditLayer3:
             for i in range(5)
         ]
 
-        verdicts = [{"is_junk": False, "anomaly_signal": None, "why": "clean"}] * 5
-
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
@@ -1027,8 +1042,10 @@ class TestMemoryHealthAuditLayer3:
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                side_effect=verdicts,
+                "reflections.memory.memory_quality_audit.run_typed",
+                FakeRunTyped(
+                    result=MemoryAuditDecision(is_junk=False, anomaly_signal=None, why="clean")
+                ),
             ),
         ):
             mock_file.return_value = True
@@ -1061,8 +1078,8 @@ class TestMemoryHealthAuditLayer3:
                 return_value=False,
             ),
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value=None,  # all calls fail
+                "reflections.memory.memory_quality_audit.run_typed",
+                failing("transport"),  # all calls fail
             ),
         ):
             mock_model.query.all.return_value = records
@@ -1103,8 +1120,10 @@ class TestMemoryHealthAuditLayer3:
                 return_value=False,
             ),
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value={"is_junk": False, "anomaly_signal": None, "why": "ok"},
+                "reflections.memory.memory_quality_audit.run_typed",
+                FakeRunTyped(
+                    result=MemoryAuditDecision(is_junk=False, anomaly_signal=None, why="ok")
+                ),
             ),
             patch(
                 "reflections.memory.memory_quality_audit._time.monotonic",
@@ -1121,8 +1140,9 @@ class TestMemoryHealthAuditLayer3:
         ]
         assert len(budget_findings) >= 1
 
-    def test_per_call_timeout_treated_as_unavailable(self):
-        """A gemma call returning None via TimeoutError is counted as unavailable."""
+    def test_per_call_timeout_treated_as_unavailable(self, caplog):
+        """A per-record SDK timeout (``LLMCallError(reason="timeout")``) is a
+        ``None`` verdict counted as unavailable, logged at DEBUG, never a raise."""
         from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
@@ -1135,8 +1155,8 @@ class TestMemoryHealthAuditLayer3:
             for i in range(3)
         ]
 
-        # All calls return None (whether due to timeout, ollama down, etc.)
         with (
+            caplog.at_level("DEBUG", logger="reflections.memory_management"),
             patch("models.memory.Memory") as mock_model,
             patch(
                 "reflections.memory.memory_quality_audit._file_anomaly_issue",
@@ -1144,9 +1164,9 @@ class TestMemoryHealthAuditLayer3:
                 return_value=False,
             ),
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value=None,
-            ),
+                "reflections.memory.memory_quality_audit.run_typed",
+                failing("timeout", "granite took too long"),
+            ) as fake,
         ):
             mock_model.query.all.return_value = records
             result = run_async(run_memory_quality_audit())
@@ -1154,6 +1174,9 @@ class TestMemoryHealthAuditLayer3:
         assert_valid_result(result)
         # Status must be ok — Layer 3 unavailability doesn't break the audit.
         assert result["status"] == "ok"
+        assert fake.call_count == 3
+        assert any("unavailable for all 3 records" in f for f in result["findings"])
+        assert any("layer3 gemma classify failed" in r.message for r in caplog.records)
 
 
 # ----------- Duplicate-issue detection -----------
@@ -1418,8 +1441,10 @@ class TestAuditQuiescence:
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value={"is_junk": False, "anomaly_signal": None, "why": "clean"},
+                "reflections.memory.memory_quality_audit.run_typed",
+                FakeRunTyped(
+                    result=MemoryAuditDecision(is_junk=False, anomaly_signal=None, why="clean")
+                ),
             ),
             patch("models.memory_corpus_baseline.CorpusSizeBaseline") as mock_baseline_model,
         ):
@@ -1473,8 +1498,8 @@ class TestAuditQuiescence:
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory.memory_quality_audit._gemma_classify",
-                return_value=None,  # Layer 3 unavailable, so no Layer-3 issues
+                "reflections.memory.memory_quality_audit.run_typed",
+                failing("transport"),  # Layer 3 unavailable, so no Layer-3 issues
             ),
         ):
             mock_file.return_value = True
@@ -1523,13 +1548,6 @@ class TestPublicSeam:
         assert not hasattr(mm, "_extract_json_payload"), (
             "Legacy underscore name still present — public-seam rename incomplete"
         )
-
-    def test_reflections_imports_public_name(self):
-        """memory_quality_audit imports extract_json_payload from the public seam."""
-        import reflections.memory.memory_quality_audit as mm
-        from agent.memory_extraction import extract_json_payload
-
-        assert mm.extract_json_payload is extract_json_payload
 
 
 # ============================================================

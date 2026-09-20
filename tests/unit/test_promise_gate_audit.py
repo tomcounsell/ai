@@ -196,7 +196,7 @@ class TestDrafterPathAudit:
         log_path = tmp_path / "audit.jsonl"
         monkeypatch.setattr(promise_gate, "_AUDIT_LOG_PATH", log_path)
 
-        async def _fake_llm(text):
+        async def _fake_llm(text, project_key=None):
             return PromiseVerdict(
                 action="block",
                 reason="Forward-deferral without verifiable scheduled-delivery reference",

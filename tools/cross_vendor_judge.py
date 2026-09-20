@@ -20,7 +20,16 @@ import sys
 
 import tiktoken
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.settings import settings
+
+# Thinking: a cross-vendor diff review (raw OpenAI-compatible client).
+# Fail-safe: a skipped-verdict envelope naming the reason.
+CROSS_VENDOR_REVIEW = LLMTask(
+    site="cross_vendor_judge.review",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger(__name__)
 

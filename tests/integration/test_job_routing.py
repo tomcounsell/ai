@@ -50,7 +50,7 @@ class TestInboundFlow:
         async def exploding(prompt, output_type, **kwargs):
             raise AssertionError("model must not be called in this flow")
 
-        monkeypatch.setattr("bridge.job_router.run_typed_local", exploding)
+        monkeypatch.setattr("bridge.job_router.run_typed", exploding)
 
         chat_id = 7
         first_key = telegram_message_key(chat_id, 101)
@@ -81,7 +81,7 @@ class TestInboundFlow:
         async def exploding(prompt, output_type, **kwargs):
             raise AssertionError("model must not be called in this flow")
 
-        monkeypatch.setattr("bridge.job_router.run_typed_local", exploding)
+        monkeypatch.setattr("bridge.job_router.run_typed", exploding)
 
         chat_id = 7
         first_key = telegram_message_key(chat_id, 201)

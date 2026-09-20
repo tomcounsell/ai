@@ -33,7 +33,7 @@ The breaker and the Haiku judge write the same single, latching `unhealthy_reaso
 4. **At CHECK_INTERVAL**: `_read_recent_activity()` reads last 20 entries from the transcript
 5. **`_get_session_context()`** queries AgentSession for metadata + computes activity statistics
 6. **`JUDGE_PROMPT`** formats context + activity + pattern guidance into a prompt
-7. **`_judge_health()`** sends to Haiku, parses JSON verdict
+7. **`_judge_health()`** sends the prompt through `run_typed(task=HEALTH_JUDGE)` (site `health_check.judge`, Haiku) and reads a typed `HealthDecision`; any `LLMCallError` reads as healthy
 8. **Output**: If unhealthy, flags session and injects stop directive
 
 ## Context Enrichment
@@ -83,7 +83,7 @@ The hook also checks a Redis steering queue on every tool call (lightweight LPOP
 | `_write_activity_stream()` | Append JSONL activity entry |
 | `_get_session_context()` | Build context preamble with stats |
 | `_compute_activity_stats()` | Tool distribution + commit count from JSONL |
-| `_judge_health()` | Send prompt to Haiku, parse verdict |
+| `_judge_health()` | `run_typed(task=HEALTH_JUDGE)` on Haiku, typed `HealthDecision` verdict; fails open to healthy |
 | `_set_unhealthy()` | Flag session on AgentSession model |
 | `is_session_unhealthy()` | Check flag (called by nudge loop) |
 | `clear_unhealthy()` | Clear flag on session restart |

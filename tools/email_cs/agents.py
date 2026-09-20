@@ -23,10 +23,22 @@ import logging
 from dataclasses import dataclass, field
 
 from agent.anthropic_client import anthropic_slot
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_FAST
 
 from .schema import Category, Disposition, Triage
 from .tools import VERB_ARGV, tools_for_category
+
+# Thinking: the Tier 2 action agent's forced tool choice (raw AsyncAnthropic
+# under ``anthropic_slot``). client_only: Cuttlefish customer email is client
+# work; charter §7 keeps it on the subscription backend for every project key.
+# Fail-safe: an ``ActionResult`` that escalates to a human.
+EMAIL_ACTION = LLMTask(
+    site="email_cs.action",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+    client_only=True,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -31,7 +31,12 @@ import sentry_sdk
 
 from agent.llm import compat
 from agent.llm import wrapper as wrapper_mod
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from agent.llm.wrapper import LLMCallError, LLMStackIncompatible
+
+# Ollama-routed and Anthropic-routed declarations for the two-axis tests.
+LOCAL = LLMTask(site="test.local", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA)
+REMOTE = LLMTask(site="test.remote", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -403,7 +408,7 @@ async def test_alert_fires_while_run_typed_raises(predicate, captures, caplog):
     assert compat._DEGRADED is None, "the no-startup-hook path: nothing resolved yet"
 
     with pytest.raises(LLMStackIncompatible):
-        await wrapper_mod.run_typed("hello", Out)
+        await wrapper_mod.run_typed("hello", Out, task=REMOTE)
 
     assert len(captures) == 1
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
@@ -412,22 +417,25 @@ async def test_alert_fires_while_run_typed_raises(predicate, captures, caplog):
 async def test_two_axis_split_leaves_the_local_leg_running(predicate, captures):
     """A signature break must not fall the granite classifiers over.
 
-    ``run_typed_local`` talks to localhost Ollama and never touches
-    ``anthropic``, so gating it on the Anthropic create signature would
-    re-collapse two domains spike-5 deliberately separated.
+    An Ollama-routed ``run_typed`` talks to localhost Ollama and never
+    touches ``anthropic``, so gating it on the Anthropic create signature
+    would re-collapse two domains spike-5 deliberately separated. The
+    wrapper picks the guard axis from the route (#3410).
     """
     import dataclasses
+    import unittest.mock
 
     from pydantic import BaseModel
-    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.messages import ModelResponse, TextPart
     from pydantic_ai.models.function import AgentInfo, FunctionModel
 
     class Decision(BaseModel):
         decision: str
 
     def _respond(messages, info: AgentInfo) -> ModelResponse:
-        tool_name = info.output_tools[0].name if info.output_tools else None
-        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"decision": "ok"})])
+        # The Ollama leg asks for native JSON-schema output, so the answer is
+        # the object as message text, never a tool call.
+        return ModelResponse(parts=[TextPart(content='{"decision": "ok"}')])
 
     real = wrapper_mod._load_stack()
     fake = dataclasses.replace(
@@ -435,17 +443,113 @@ async def test_two_axis_split_leaves_the_local_leg_running(predicate, captures):
         OpenAIChatModel=lambda model_name, *, provider: FunctionModel(
             _respond, model_name=model_name
         ),
+        OllamaProvider=lambda *, openai_client: object(),
+        AsyncOpenAI=_FakeAsyncOpenAI,
     )
     predicate(_signature_break())
 
-    with pytest.raises(LLMStackIncompatible):
-        await wrapper_mod.run_typed("hello", Decision)
+    with unittest.mock.patch.object(wrapper_mod, "_load_stack", lambda: fake):
+        with pytest.raises(LLMStackIncompatible):
+            await wrapper_mod.run_typed("hello", Decision, task=REMOTE)
 
+        result = await wrapper_mod.run_typed("hello", Decision, task=LOCAL, project_key="valor")
+    assert result.decision == "ok"
+
+
+async def test_fallback_under_a_signature_break_raises_typed_not_provider_error(
+    predicate, captures
+):
+    """The fallback leg runs the Anthropic guard before it runs Anthropic.
+
+    An Ollama-routed ``valor`` call passes the primary guard (loader axis
+    only). When granite fails and the route falls back to Anthropic, the
+    wrapper runs ``_guard_stack("run_typed:fallback", signature_axis=True)``
+    first, so a signature-broken pair surfaces as ``LLMStackIncompatible``
+    (an ``LLMCallError`` every fail-safe already catches) rather than as a
+    provider ``TypeError`` from inside pydantic_ai (#3410).
+    """
+    import dataclasses
     import unittest.mock
 
+    from pydantic import BaseModel
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    class Decision(BaseModel):
+        decision: str
+
+    def _granite_down(messages, info: AgentInfo):
+        raise RuntimeError("connection refused")
+
+    def _never_anthropic(model_name, *, provider):
+        raise AssertionError("the Anthropic leg must not be reached past a failed guard")
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(
+        real,
+        OpenAIChatModel=lambda model_name, *, provider: FunctionModel(
+            _granite_down, model_name=model_name
+        ),
+        OllamaProvider=lambda *, openai_client: object(),
+        AsyncOpenAI=_FakeAsyncOpenAI,
+        AnthropicModel=_never_anthropic,
+    )
+    predicate(_signature_break())
+
     with unittest.mock.patch.object(wrapper_mod, "_load_stack", lambda: fake):
-        result = await wrapper_mod.run_typed_local("hello", Decision)
-    assert result.decision == "ok"
+        with pytest.raises(LLMStackIncompatible, match="run_typed:fallback"):
+            await wrapper_mod.run_typed("hello", Decision, task=LOCAL, project_key="valor")
+    assert len(captures) == 1, "the fallback guard's resolution fires the alert"
+
+
+def test_skip_guard_reaches_neither_guard(monkeypatch, captures):
+    """``_skip_guard=True`` (the compat probe's one call site) never resolves the flag.
+
+    Driven through the real caller, ``compat._check_network``: with the
+    process already memoized as signature-degraded, a guarded call would
+    raise ``LLMStackIncompatible``; the probe returns ``None`` (success)
+    because it skips both guard calls, and the memo is untouched.
+    """
+    import dataclasses
+
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    import utils.api_keys as api_keys_mod
+    from agent.llm.backends import anthropic as anthropic_leg
+
+    def _respond(messages, info: AgentInfo) -> ModelResponse:
+        tool_name = info.output_tools[0].name if info.output_tools else None
+        return ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args={"answer": "hi"})])
+
+    real = wrapper_mod._load_stack()
+    fake = dataclasses.replace(
+        real,
+        AnthropicModel=lambda model_name, *, provider: FunctionModel(
+            _respond, model_name=model_name
+        ),
+    )
+    monkeypatch.setattr(wrapper_mod, "_load_stack", lambda: fake)
+    monkeypatch.setattr(anthropic_leg, "get_anthropic_api_key", lambda: "fake-test-key")
+    monkeypatch.setattr(api_keys_mod, "get_anthropic_api_key", lambda: "fake-test-key")
+    monkeypatch.setattr(compat, "_DEGRADED", True)
+    monkeypatch.setattr(compat, "_COMPATIBLE", False)
+
+    assert compat._check_network("0.0.0", "9.9.9") is None
+    assert compat._DEGRADED is True and compat._COMPATIBLE is False
+    assert captures == []
+
+
+class _FakeAsyncOpenAI:
+    """An ``AsyncOpenAI`` stand-in that only supports ``async with``."""
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
 
 
 class _RaisingFinder:
@@ -487,7 +591,7 @@ async def test_anthropic_import_error_local_path(monkeypatch):
 
         compat._DEGRADED = None
         with pytest.raises(LLMStackIncompatible):
-            await wrapper_mod.run_typed_local("hello", Decision)
+            await wrapper_mod.run_typed("hello", Decision, task=LOCAL, project_key="valor")
     finally:
         anthropic_client._load_stack.cache_clear()
 
@@ -605,7 +709,7 @@ def test_marker_channel_failure_costs_only_the_marker_channel(
     `resolve_degraded_flag`'s outer handler and emit a *second*
     `level="fatal"` capture for one degradation event — and, worse, the
     outer handler's fall-closed `_LOADER_OK = False` would knock the
-    Ollama-only `run_typed_local` leg out fleet-wide over a filesystem
+    Ollama-routed `run_typed` leg out fleet-wide over a filesystem
     problem. Contained here, the resolved axes stay exactly what the
     predicate said.
     """

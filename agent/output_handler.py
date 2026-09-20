@@ -809,7 +809,10 @@ class TelegramRelayOutputHandler:
                     check_outbound_context_recall,
                 )
 
-                ctx_verdict = await check_outbound_context_recall(delivery_text)
+                ctx_verdict = await check_outbound_context_recall(
+                    delivery_text,
+                    project_key=getattr(session, "project_key", None) if session else None,
+                )
                 ctx_verdict_advised = bool(ctx_verdict.advised)
                 if ctx_verdict_advised:
                     ctx_advisory = build_context_recall_advisory(

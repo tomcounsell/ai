@@ -6,7 +6,8 @@ halves: the durable row (``ImprovementEvidence.record_once`` and its dedup), and
 the five observer adapters the reflection tick calls. Lane 5 (#3217) adds the
 ``lesson`` adapter (merged PR bodies through an injectable ``gh`` runner) and
 the ``promise`` adapter (sampled outbound chat entries through an injectable
-judge transport, metered under ``purpose="promise_detector"``).
+async judge transport; the default is ``run_typed`` with ``PROMISE_JUDGE``,
+#3410).
 
 They are deliberately unkind to the classifier. A regex cannot tell an
 architectural rescue from a preference most of the time, and the honest answer
@@ -22,16 +23,20 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent.llm import DEFAULT_HARD_TIMEOUT
+from agent.reflection_scheduler import DEFAULT_FUNCTION_TIMEOUT
 from models.improvement_evidence import (
     EVIDENCE_CLASSIFICATIONS,
     EVIDENCE_KINDS,
     ImprovementEvidence,
 )
 from reflections import improvement_collect
+from reflections.improvement_collect import PROMISE_JUDGE, PromiseJudgeDecision
+from tests.helpers.llm_fakes import FakeRunTyped, failing
 
 PK = "test-3177-evidence"
 
@@ -237,6 +242,15 @@ class _FakeSession:
             {"direction": "out", "sender": "valor", "content": t, "message_id": None, "ts": 2.0}
             for t in outbound
         ]
+
+
+def _ref(session) -> str:
+    """The ``source_ref`` of a session's single outbound entry."""
+    import hashlib
+
+    (entry,) = [e for e in session.chat_message_log if e["direction"] == "out"]
+    digest = hashlib.sha256(f"{session.session_id}\n{entry['content']}".encode()).hexdigest()[:16]
+    return f"promise:{session.session_id}:{digest}"
 
 
 def _session(name, turns=(), outbound=(), created_at=None):
@@ -623,7 +637,7 @@ class TestKillSwitch:
     reads "off" while a 15-minute writer runs against production Redis.
     """
 
-    def test_disabled_writes_nothing(self):
+    async def test_disabled_writes_nothing(self):
         session = _session("sess-killswitch", turns=["that's wrong"])
         with (
             _improvement_enabled(False),
@@ -633,7 +647,7 @@ class TestKillSwitch:
             patch("models.job.Job.with_open_expectations", return_value=[]),
         ):
             before = len(list(ImprovementEvidence.query.filter(project_key=PK)))
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
             after = len(list(ImprovementEvidence.query.filter(project_key=PK)))
 
         assert result["status"] == "skipped"
@@ -641,7 +655,7 @@ class TestKillSwitch:
         assert "disabled" in result["summary"]
         assert after == before
 
-    def test_enabled_writes(self):
+    async def test_enabled_writes(self):
         session = _session("sess-killswitch-on", turns=["that's wrong"])
         with (
             _improvement_enabled(True),
@@ -651,7 +665,7 @@ class TestKillSwitch:
             patch("models.job.Job.with_open_expectations", return_value=[]),
         ):
             before = len(list(ImprovementEvidence.query.filter(project_key=PK)))
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
             after = len(list(ImprovementEvidence.query.filter(project_key=PK)))
 
         assert result["status"] == "success"
@@ -696,14 +710,17 @@ def _adapters(real=(), **outcomes):
                 kwargs = {"side_effect": outcome}
             else:
                 kwargs = {"return_value": outcome}
-            stack.enter_context(patch.object(improvement_collect, func, **kwargs))
+            # The tick awaits the promise adapter and runs the four sync
+            # adapters through asyncio.to_thread, so the fakes must match.
+            mock_cls = AsyncMock if name == "promises" else MagicMock
+            stack.enter_context(patch.object(improvement_collect, func, mock_cls(**kwargs)))
         yield
 
 
 class TestRunImprovementCollect:
-    def test_returns_a_reflection_result_dict(self):
+    async def test_returns_a_reflection_result_dict(self):
         with _adapters(corrections=2, inspirations=1, expectation_coverage=1, lessons=1):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["counts"] == {
@@ -722,22 +739,22 @@ class TestRunImprovementCollect:
     def test_the_tick_runs_exactly_five_adapters(self):
         assert improvement_collect.ADAPTER_NAMES == ADAPTER_NAMES
 
-    def test_the_memory_partition_is_enumerated_once_per_tick(self):
+    async def test_the_memory_partition_is_enumerated_once_per_tick(self):
         """Both adapters read the same partition; two fetches would double the cost."""
         with (
             _improvement_enabled(True),
             patch.object(improvement_collect, "human_memories", return_value=[]) as fetch,
             patch.object(improvement_collect, "collect_expectation_coverage", return_value=0),
             patch.object(improvement_collect, "collect_lessons", return_value=0),
-            patch.object(improvement_collect, "collect_promises", return_value=0),
+            patch.object(improvement_collect, "collect_promises", AsyncMock(return_value=0)),
             patch.object(improvement_collect, "_recent_sessions", return_value=[]),
         ):
-            improvement_collect.run_improvement_collect()
+            await improvement_collect.run_improvement_collect()
         assert fetch.call_count == 1
 
-    def test_one_broken_adapter_degrades_the_tick_rather_than_ending_it(self):
+    async def test_one_broken_adapter_degrades_the_tick_rather_than_ending_it(self):
         with _adapters(corrections=RuntimeError("boom"), inspirations=3):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["counts"]["corrections"] == 0
@@ -745,16 +762,16 @@ class TestRunImprovementCollect:
         assert any("corrections-failed" in f for f in result["findings"])
         assert result["failed"] == ["corrections"]
 
-    def test_all_failed_is_error(self):
+    async def test_all_failed_is_error(self):
         """Every adapter failing is the one shape that is an error."""
         with _adapters(**{name: RuntimeError(name) for name in ADAPTER_NAMES}):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "error"
         assert sorted(result["failed"]) == sorted(ADAPTER_NAMES)
         assert len(result["findings"]) == len(ADAPTER_NAMES)
 
-    def test_all_skipped_is_success(self):
+    async def test_all_skipped_is_success(self):
         """A skip is a rule declining, never a failure: five skips is a healthy tick."""
 
         def _skip(name):
@@ -767,19 +784,19 @@ class TestRunImprovementCollect:
             return adapter
 
         with _adapters(**{name: _skip(name) for name in ADAPTER_NAMES}):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["failed"] == []
         assert len(result["skipped"]) == len(ADAPTER_NAMES)
 
-    def test_a_detector_that_is_off_is_a_skip_not_a_failure(self):
+    async def test_a_detector_that_is_off_is_a_skip_not_a_failure(self):
         """The promise detector defaults off; the tick must read that as a skip."""
         with (
             _adapters(real=("promises",)),
             _promise_detector_enabled(False),
         ):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["failed"] == []
@@ -941,7 +958,7 @@ class TestCollectLessons:
         assert improvement_collect.collect_lessons(PK, runner=lambda a: _completed("not json")) == 0
         assert improvement_collect.collect_lessons(PK, runner=lambda a: None) == 0
 
-    def test_a_raising_runner_leaves_the_other_adapters_untouched_in_the_tick(self):
+    async def test_a_raising_runner_leaves_the_other_adapters_untouched_in_the_tick(self):
         def runner(args):
             raise RuntimeError("gh exploded")
 
@@ -949,7 +966,7 @@ class TestCollectLessons:
             _adapters(real=("lessons",), inspirations=2),
             patch.object(improvement_collect, "_default_gh_runner", return_value=runner),
         ):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["counts"]["inspirations"] == 2
@@ -984,35 +1001,23 @@ class TestCollectLessons:
 
 
 @contextmanager
-def _promise_detector_enabled(flag: bool, model: str | None = None):
+def _promise_detector_enabled(flag: bool):
     from config.settings import settings
 
-    previous = (
-        settings.improvement.promise_detector_enabled,
-        settings.improvement.cheap_inference_model,
-    )
+    previous = settings.improvement.promise_detector_enabled
     settings.improvement.promise_detector_enabled = flag
-    if model is not None:
-        settings.improvement.cheap_inference_model = model
     try:
         yield
     finally:
-        (
-            settings.improvement.promise_detector_enabled,
-            settings.improvement.cheap_inference_model,
-        ) = previous
+        settings.improvement.promise_detector_enabled = previous
 
 
 def _yes(span="I will have it done by Friday", confidence=0.9):
-    import json
-
-    return json.dumps({"answer": "yes", "span": span, "confidence": confidence})
+    return PromiseJudgeDecision(answer=True, span=span, confidence=confidence)
 
 
 def _no():
-    import json
-
-    return json.dumps({"answer": "no", "span": "", "confidence": 0.8})
+    return PromiseJudgeDecision(answer=False, span="", confidence=0.8)
 
 
 def _transport(replies):
@@ -1020,7 +1025,7 @@ def _transport(replies):
     replies = list(replies)
     prompts: list[str] = []
 
-    def transport(prompt):
+    async def transport(prompt):
         prompts.append(prompt)
         return replies.pop(0)
 
@@ -1030,29 +1035,20 @@ def _transport(replies):
 
 @pytest.fixture
 def promise_env():
-    """Detector on, meter patched to accept, judged-set cleared, sessions patched by the test."""
-    from tools import paid_inference_meter as meter
-
-    reservation = meter.Reservation("res-1", PK, 1, "promise_detector", None, "2026-09-15")
-    with (
-        _improvement_enabled(True),
-        _promise_detector_enabled(True),
-        patch.object(meter, "reserve", return_value=reservation) as reserve,
-        patch.object(meter, "settle") as settle,
-        patch.object(meter, "release") as release,
-    ):
+    """Detector on, judged-set cleared, sessions patched by the test."""
+    with _improvement_enabled(True), _promise_detector_enabled(True):
         improvement_collect._clear_judged(PK)
-        yield {"reserve": reserve, "settle": settle, "release": release}
+        yield
 
 
 class TestCollectPromises:
-    """Sampled outbound entries, one cheap yes/no judge call each, metered."""
+    """Sampled outbound entries, one yes/no judge call each through ``run_typed``."""
 
-    def test_a_yes_writes_a_promise_row_with_span_and_confidence(self, promise_env):
+    async def test_a_yes_writes_a_promise_row_with_span_and_confidence(self, promise_env):
         session = _session("sess-p1", outbound=["I will have it done by Friday, guaranteed."])
         transport = _transport([_yes()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            written = improvement_collect.collect_promises(PK, transport=transport)
+            written = await improvement_collect.collect_promises(PK, transport=transport)
 
         assert written == 1
         rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
@@ -1062,11 +1058,11 @@ class TestCollectPromises:
         assert rows[0].source_session_id == "sess-p1"
         assert rows[0].source_ref.startswith("promise:sess-p1:")
 
-    def test_the_prompt_quotes_the_charter_paragraph_and_the_question(self, promise_env):
+    async def test_the_prompt_quotes_the_charter_paragraph_and_the_question(self, promise_env):
         session = _session("sess-p2", outbound=["Working on it now."])
         transport = _transport([_no()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            improvement_collect.collect_promises(PK, transport=transport)
+            await improvement_collect.collect_promises(PK, transport=transport)
 
         (prompt,) = transport.prompts
         assert "Valor makes no promises." in prompt
@@ -1077,7 +1073,7 @@ class TestCollectPromises:
         ) in prompt
         assert "Working on it now." in prompt
 
-    def test_a_no_writes_nothing_and_is_not_rejudged_next_tick(self, promise_env):
+    async def test_a_no_writes_nothing_and_is_not_rejudged_next_tick(self, promise_env):
         """The judged set is a control-namespace key declared in
         ``tools.improvement_control.keys`` and carries the 30-day TTL."""
         from tools.improvement_control.keys import promise_judged_key
@@ -1086,65 +1082,69 @@ class TestCollectPromises:
         session = _session("sess-p3", outbound=["Working on it now."])
         transport = _transport([_no(), _no()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            assert improvement_collect.collect_promises(PK, transport=transport) == 0
-            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+            assert await improvement_collect.collect_promises(PK, transport=transport) == 0
+            assert await improvement_collect.collect_promises(PK, transport=transport) == 0
         assert len(transport.prompts) == 1
         judged_key = promise_judged_key(PK)
         assert judged_key == f"improve:{PK}:_ns:promise_judged"
         assert text_redis().scard(judged_key) == 1
         assert 0 < text_redis().ttl(judged_key) <= improvement_collect.PROMISE_JUDGED_EXPIRY_SECONDS
 
-    def test_inbound_entries_are_never_judged(self, promise_env):
+    async def test_inbound_entries_are_never_judged(self, promise_env):
         session = _session("sess-p4", turns=["can you promise me it ships?"])
         transport = _transport([_yes()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+            assert await improvement_collect.collect_promises(PK, transport=transport) == 0
         assert transport.prompts == []
-        promise_env["reserve"].assert_not_called()
 
-    def test_empty_log_and_empty_content_yield_zero_rows_and_no_spend(self, promise_env):
+    async def test_empty_log_and_empty_content_yield_zero_rows_and_no_call(self, promise_env):
         empty = _session("sess-p5")
         empty.chat_message_log = None
         blank = _session("sess-p6", outbound=["", "   "])
         transport = _transport([])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[empty, blank]):
-            assert improvement_collect.collect_promises(PK, transport=transport) == 0
+            assert await improvement_collect.collect_promises(PK, transport=transport) == 0
         assert transport.prompts == []
-        promise_env["reserve"].assert_not_called()
 
-    def test_samples_at_most_the_cap_newest_first(self, promise_env):
+    async def test_samples_at_most_the_cap_newest_first(self, promise_env):
         cap = improvement_collect.PROMISE_SAMPLE_PER_TICK
         session = _session("sess-p7", outbound=[f"msg {i}" for i in range(cap + 5)])
         for i, entry in enumerate(e for e in session.chat_message_log if e["direction"] == "out"):
             entry["ts"] = float(i)
         transport = _transport([_no()] * cap)
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            improvement_collect.collect_promises(PK, transport=transport)
+            await improvement_collect.collect_promises(PK, transport=transport)
 
         assert len(transport.prompts) == cap
         assert f"msg {cap + 4}" in transport.prompts[0]
         assert not any("msg 0" in p for p in transport.prompts)
 
-    def test_unparseable_judge_output_is_zero_rows_plus_a_findings_entry(self, promise_env):
+    async def test_no_verdict_is_zero_rows_plus_a_findings_entry_and_stays_unjudged(
+        self, promise_env
+    ):
+        """A transport that answers ``None`` (the default's shape on ``LLMCallError``)
+        ends the sample with a ``promises-judge-failed`` finding; the entry is not
+        marked judged, so the next tick asks again."""
         session = _session("sess-p8", outbound=["I promise."])
-        transport = _transport(["definitely maybe"])
+        transport = _transport([None, _yes()])
         findings: list[str] = []
         with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            written = improvement_collect.collect_promises(
+            written = await improvement_collect.collect_promises(
                 PK, transport=transport, findings=findings
             )
+            assert written == 0
+            assert findings == [f"promises-judge-failed: no verdict for {_ref(session)}"]
+            assert not list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
 
-        assert written == 0
-        assert len(findings) == 1
-        assert findings[0].startswith("promises-judge-unparseable")
-        assert not list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
+            assert await improvement_collect.collect_promises(PK, transport=transport) == 1
+        assert len(transport.prompts) == 2
 
-    def test_a_raising_transport_is_a_warning_and_a_findings_entry_never_a_raise(
+    async def test_a_raising_transport_is_a_warning_and_a_findings_entry_never_a_raise(
         self, promise_env, caplog
     ):
         session = _session("sess-p9", outbound=["I promise."])
 
-        def transport(prompt):
+        async def transport(prompt):
             raise RuntimeError("judge exploded")
 
         findings: list[str] = []
@@ -1152,29 +1152,25 @@ class TestCollectPromises:
             caplog.at_level("WARNING", logger="reflections.improvement_collect"),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
         ):
-            written = improvement_collect.collect_promises(
+            written = await improvement_collect.collect_promises(
                 PK, transport=transport, findings=findings
             )
 
         assert written == 0
         assert findings == ["promises-judge-failed: judge exploded"]
         assert any("judge exploded" in rec.getMessage() for rec in caplog.records)
-        # The reservation is not left dangling.
-        assert promise_env["settle"].called or promise_env["release"].called
 
-    def test_a_raising_transport_leaves_the_other_adapters_untouched_in_the_tick(self, promise_env):
+    async def test_a_raising_transport_leaves_the_other_adapters_untouched_in_the_tick(
+        self, promise_env
+    ):
         session = _session("sess-p10", outbound=["I promise."])
-
-        def transport(prompt):
-            raise RuntimeError("judge exploded")
 
         with (
             _adapters(real=("promises",), corrections=4),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
-            patch("tools.improvement_eligibility.is_open_source", return_value=True),
-            patch.object(improvement_collect, "_openrouter_judge", return_value=transport),
+            patch.object(improvement_collect, "run_typed", failing("transport", "judge exploded")),
         ):
-            result = improvement_collect.run_improvement_collect()
+            result = await improvement_collect.run_improvement_collect()
 
         assert result["status"] == "success"
         assert result["counts"]["corrections"] == 4
@@ -1182,38 +1178,8 @@ class TestCollectPromises:
         assert any("promises-judge-failed" in f for f in result["findings"])
         assert result["failed"] == []
 
-    def test_the_meter_is_reserved_under_the_promise_detector_purpose_and_settled(
-        self, promise_env
-    ):
-        session = _session("sess-p11", outbound=["I promise."])
-        transport = _transport([_no()])
-        with patch.object(improvement_collect, "_recent_sessions", return_value=[session]):
-            improvement_collect.collect_promises(PK, transport=transport)
-
-        promise_env["reserve"].assert_called_once()
-        _, kwargs = promise_env["reserve"].call_args
-        assert kwargs["purpose"] == "promise_detector"
-        promise_env["settle"].assert_called_once()
-        assert promise_env["settle"].call_args.kwargs["metering"] == "unknown"
-
-    def test_a_meter_refusal_writes_nothing_and_records_a_skip(self, promise_env):
-        from tools import paid_inference_meter as meter
-
-        session = _session("sess-p12", outbound=["I promise."])
-        transport = _transport([_yes()])
-        skipped: list[str] = []
-        with (
-            patch.object(meter, "reserve", return_value=meter.Refusal(meter.REFUSAL_EXHAUSTED)),
-            patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
-        ):
-            written = improvement_collect.collect_promises(PK, transport=transport, skipped=skipped)
-
-        assert written == 0
-        assert skipped == ["promises-skipped: unit 2 unavailable"]
-        assert transport.prompts == []
-
     @pytest.mark.parametrize("enabled, detector", [(False, True), (True, False)])
-    def test_either_gate_off_is_a_skip_never_a_failure(self, enabled, detector):
+    async def test_either_gate_off_is_a_skip_never_a_failure(self, enabled, detector):
         session = _session("sess-p13", outbound=["I promise."])
         transport = _transport([_yes()])
         skipped: list[str] = []
@@ -1222,43 +1188,71 @@ class TestCollectPromises:
             _promise_detector_enabled(detector),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
         ):
-            written = improvement_collect.collect_promises(PK, transport=transport, skipped=skipped)
+            written = await improvement_collect.collect_promises(
+                PK, transport=transport, skipped=skipped
+            )
 
         assert written == 0
         assert len(skipped) == 1 and skipped[0].startswith("promises-skipped")
         assert transport.prompts == []
 
-    def test_the_default_transport_is_refused_on_a_client_project(self, promise_env):
-        """Charter §7: the judge leaves the machine, so eligibility is checked at the call site."""
-        session = _session("sess-p14", outbound=["I promise."])
-        skipped: list[str] = []
+    async def test_the_default_transport_is_run_typed_with_the_site_and_the_project_key(
+        self, promise_env, caplog
+    ):
+        """The default transport awaits ``run_typed`` with ``PROMISE_JUDGE``, the
+        project key and the explicit SDK timer; a ``yes`` writes the row. On
+        ``LLMCallError`` the fail-safe is a warning, a ``promises-judge-failed``
+        finding and no row."""
+        session = _session("sess-p14", outbound=["I promise it ships Friday."])
+        fake = FakeRunTyped(result=_yes(span="I promise it ships Friday", confidence=0.7))
         with (
-            patch("tools.improvement_eligibility.is_open_source", return_value=False),
             patch.object(improvement_collect, "_recent_sessions", return_value=[session]),
-            patch.object(improvement_collect, "_openrouter_judge") as judge,
+            patch.object(improvement_collect, "run_typed", fake),
         ):
-            written = improvement_collect.collect_promises(PK, skipped=skipped)
+            written = await improvement_collect.collect_promises(PK)
+
+        assert written == 1
+        assert fake.call_count == 1
+        assert fake.last.task is PROMISE_JUDGE
+        assert fake.last.project_key == PK
+        assert fake.last.kwargs["sdk_timeout"] == improvement_collect.PROMISE_JUDGE_SDK_TIMEOUT_S
+        assert "Valor makes no promises." in fake.last.prompt
+        rows = list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))
+        assert rows[0].detail == "I promise it ships Friday"
+        assert float(rows[0].confidence) == 0.7
+
+        improvement_collect._clear_judged(PK)
+        other = _session("sess-p14b", outbound=["I guarantee it."])
+        findings: list[str] = []
+        with (
+            caplog.at_level("WARNING", logger="reflections.improvement_collect"),
+            patch.object(improvement_collect, "_recent_sessions", return_value=[other]),
+            patch.object(improvement_collect, "run_typed", failing("timeout", "leg timed out")),
+        ):
+            written = await improvement_collect.collect_promises(PK, findings=findings)
 
         assert written == 0
-        assert skipped == ["promises-skipped: project is not open source (charter §7)"]
-        judge.assert_not_called()
-        promise_env["reserve"].assert_not_called()
+        assert findings == [f"promises-judge-failed: no verdict for {_ref(other)}"]
+        assert any("promise judge call failed (timeout)" in r.getMessage() for r in caplog.records)
+        assert len(list(ImprovementEvidence.query.filter(project_key=PK, kind="promise"))) == 1
 
-    def test_the_default_model_falls_back_to_the_free_gemma(self, promise_env):
-        from config.models import OPENROUTER_GEMMA4_FREE
+    def test_the_judge_budget_fits_inside_the_reflection_timeout(self):
+        """Ten sequential judge calls at the wrapper's outer cap must fit inside the
+        scheduler's ``DEFAULT_FUNCTION_TIMEOUT``, which now cancels the coroutine
+        mid-request rather than merely reporting on a sync callable."""
+        assert improvement_collect.PROMISE_JUDGE_SDK_TIMEOUT_S < DEFAULT_HARD_TIMEOUT
+        assert (
+            improvement_collect.PROMISE_SAMPLE_PER_TICK * DEFAULT_HARD_TIMEOUT
+            < DEFAULT_FUNCTION_TIMEOUT
+        )
 
-        with _promise_detector_enabled(True, model=""):
-            assert improvement_collect._judge_model() == OPENROUTER_GEMMA4_FREE
-        with _promise_detector_enabled(True, model="meta/muse-spark-1.3"):
-            assert improvement_collect._judge_model() == "meta/muse-spark-1.3"
-
-    def test_dedup_is_per_session_and_entry_hash(self, promise_env):
+    async def test_dedup_is_per_session_and_entry_hash(self, promise_env):
         """The same words in two sessions are two observations; a repeat in one is one."""
         a = _session("sess-p15a", outbound=["I promise.", "I promise."])
         b = _session("sess-p15b", outbound=["I promise."])
         transport = _transport([_yes(), _yes(), _yes()])
         with patch.object(improvement_collect, "_recent_sessions", return_value=[a, b]):
-            written = improvement_collect.collect_promises(PK, transport=transport)
+            written = await improvement_collect.collect_promises(PK, transport=transport)
 
         assert written == 2
         assert len(transport.prompts) == 2

@@ -1,6 +1,6 @@
 # Intake Classifier
 
-The intake classifier runs intent classification on every incoming non-reply message before routing, on the **local granite model via PydanticAI** (`agent.llm.run_typed_local`, durability plan #2494). It determines whether a message is a follow-up to an active session (`interjection`) or a new work request (`new_work`).
+The intake classifier runs intent classification on every incoming non-reply message before routing, on the **local granite model via PydanticAI** (`agent.llm.run_typed` with `INTAKE_INTENT`, declared `backend=OLLAMA`; durability plan #2494, taxonomy #3410). It determines whether a message is a follow-up to an active session (`interjection`) or a new work request (`new_work`).
 
 The former third class, `acknowledgment`, retired with the `AgentSession.expectations` field: Jobs — never hard-closed, revived by any reply — replace session-level acknowledgment semantics (see [`durability-model.md`](durability-model.md)). The taxonomy is two-class.
 
@@ -27,7 +27,7 @@ Reply-to fast path (preserved)
     |  [returns early if matched]
     |
     v
-INTAKE CLASSIFIER (#320, granite via run_typed_local)
+INTAKE CLASSIFIER (#320, granite via run_typed(task=INTAKE_INTENT))
     |  find active/running/dormant sessions in same chat
     |  call classify_message_intent_async() with session context
     |
@@ -52,9 +52,9 @@ enqueue_agent_session() (existing path)
 
 ## Key Design Decisions
 
-### Local granite via `run_typed_local`
+### Local granite via `run_typed`
 
-The call goes through the non-harness LLM wrapper's Ollama leg (`agent.llm.run_typed_local`) with the strict `IntentDecision` Pydantic output model (`intent: Literal["interjection", "new_work"]`, `confidence`, `reason`) — schema-validated by PydanticAI, no hand-rolled JSON parsing. See [`nonharness-llm-wrapper.md`](nonharness-llm-wrapper.md). Spike-3 measured 84.2% raw / ~95% behavioral agreement vs the prior Haiku classifier on replayed real traffic.
+The call is `run_typed(prompt, IntentDecision, task=INTAKE_INTENT, project_key=project_key)`. `INTAKE_INTENT` declares `kind=CLASSIFICATION, backend=OLLAMA`, so for eligible context (`valor`, or a cached-public project key) the router runs the wrapper's Ollama leg on granite with the Anthropic leg as a one-shot fallback, and for client context it runs the Anthropic leg (charter §7, fail-closed). The strict `IntentDecision` Pydantic output model (`intent: Literal["interjection", "new_work"]`, `confidence`, `reason`) is schema-validated by PydanticAI with no hand-rolled JSON parsing. See [`nonharness-llm-wrapper.md`](nonharness-llm-wrapper.md) and [`llm-task-taxonomy.md`](llm-task-taxonomy.md); the site's latency-only comparison record is in the taxonomy table. Spike-3 measured 84.2% raw / ~95% behavioral agreement vs the prior Haiku classifier on replayed real traffic.
 
 ### Confidence Threshold (`INTENT_CONFIDENCE_THRESHOLD`, provisional 0.80, env-overridable)
 
@@ -99,7 +99,7 @@ Inbound scope is Telegram only. The intake classifier has no email caller — `b
 
 | Function | Location | Purpose |
 |----------|----------|---------|
-| `classify_message_intent_async()` | `tools/classifier.py` | Granite intent classification via `run_typed_local` (async only) |
+| `classify_message_intent_async()` | `tools/classifier.py` | Granite intent classification via `run_typed(task=INTAKE_INTENT)` (async only) |
 | `IntentDecision` | `tools/classifier.py` | Strict Pydantic output model for the classifier call |
 | `IntentDecisionWithRecall` | `tools/classifier.py` | `IntentDecision` plus `context_recall_advised` / `context_recall_reason`; used only when `CONTEXT_RECALL_INBOUND_ENABLED` is on, paired with the extended prompt (#2694) |
 | `build_context_recall_advisory()` | `bridge/context_recall.py` | Composes the advisory text with the real chat id interpolated, or returns `None` (#2694) |
@@ -111,13 +111,13 @@ Inbound scope is Telegram only. The intake classifier has no email caller — `b
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
 | `agent/steering.py` | `push_steering_message()` buffers interjections and pushes them to the Redis steering list |
 | `agent/session_executor.py` | Turn-boundary drain (`pop_all_steering_messages()`) consumes messages populated by the intake classifier |
-| `bridge/job_router.py` | The Job bind-or-mint router runs on the same granite/`run_typed_local` substrate at the Room-inbox seam |
+| `bridge/job_router.py` | The Job bind-or-mint router (`JOB_ROUTE`, `backend=OLLAMA`) runs on the same granite substrate at the Room-inbox seam |
 
 ## Testing
 
 `tests/unit/test_intake_classifier.py`:
 
-- **Fast path**: empty messages and missing session context classify as `new_work` with no model call (a monkeypatched `run_typed_local` explodes if reached)
+- **Fast path**: empty messages and missing session context classify as `new_work` with no model call (a monkeypatched `tools.classifier.run_typed` explodes if reached)
 - **Mocked verdicts**: both intents, threshold behavior (below/at), invalid confidence and model failure fail open to `new_work`
 - **Prompt validation**: both intents present, context placeholders, `acknowledgment` asserted absent
 - **Live granite** (skipped unless Ollama with granite is reachable): accuracy smoke on a clear interjection

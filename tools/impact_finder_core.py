@@ -17,8 +17,18 @@ from pathlib import Path
 
 import numpy as np
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import HAIKU
 from tools.knowledge.chunking import truncate_to_tokens
+
+# Thinking: scores one candidate chunk with a reason (raw Anthropic; the
+# embeddings call in this module is outside the taxonomy).
+# Fail-safe: the candidate is dropped on a malformed response.
+IMPACT_RERANK = LLMTask(
+    site="impact_finder.rerank",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger(__name__)
 

@@ -99,7 +99,7 @@ class TestSessionEventsConditionalDuringEvaluatePromise:
         # blanks it out, but that fixture is module-scoped to that file).
         # We don't import that fixture here.
 
-        async def _llm(text):
+        async def _llm(text, project_key=None):
             return PromiseVerdict(
                 action="block", reason="forward-deferral", class_="forward_deferral"
             )
@@ -128,7 +128,7 @@ class TestSessionEventsConditionalDuringEvaluatePromise:
         fake_session.session_events = []
         fake_session.save = lambda: None
 
-        async def _llm(text):
+        async def _llm(text, project_key=None):
             return PromiseVerdict(
                 action="block", reason="forward-deferral", class_="forward_deferral"
             )

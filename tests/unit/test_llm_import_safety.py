@@ -1,6 +1,6 @@
 """The import-safety contract on ``agent/llm/`` (#3001).
 
-The invariant: with the third-party LLM stack (``anthropic``,
+The invariant: with the third-party LLM stack (``anthropic``, ``openai``,
 ``pydantic_ai``) broken at import time, ``import agent.llm`` **and**
 ``import bridge.telegram_bridge`` still succeed. A machine whose installed
 stack is missing or incompatible keeps its Telegram intake running; the
@@ -19,10 +19,12 @@ form: ``tests/unit/test_bridge_api_id_parse.py:112`` pops only
 full transitive closure whose completeness nothing enforces. A fresh
 interpreter has no cache to be wrong about.
 
-The shim is a directory placed first on ``PYTHONPATH`` holding an
-``anthropic`` module and a ``pydantic_ai`` package whose bodies raise
-``ImportError``. ``PYTHONPATH`` entries precede site-packages, so the child
-resolves the raising stubs rather than the installed distributions.
+The shim is a directory placed first on ``PYTHONPATH`` holding
+``anthropic`` and ``openai`` modules and a ``pydantic_ai`` package whose
+bodies raise ``ImportError`` (``openai`` joined when the Ollama leg's
+``AsyncOpenAI`` entered the loader, #3410). ``PYTHONPATH`` entries precede
+site-packages, so the child resolves the raising stubs rather than the
+installed distributions.
 
 The alert / typed-exception half of the contract stays **in process** and
 lives at the bottom of this file: with the loader raising, ``run_typed``
@@ -51,10 +53,11 @@ RAISE_ON_IMPORT = 'raise ImportError("stubbed by test_llm_import_safety")\n'
 
 @pytest.fixture
 def raising_stack_shim(tmp_path: Path) -> Path:
-    """A ``PYTHONPATH`` entry whose ``anthropic``/``pydantic_ai`` raise."""
+    """A ``PYTHONPATH`` entry whose ``anthropic``/``openai``/``pydantic_ai`` raise."""
     shim = tmp_path / "shim"
     shim.mkdir()
     (shim / "anthropic.py").write_text(RAISE_ON_IMPORT)
+    (shim / "openai.py").write_text(RAISE_ON_IMPORT)
     pydantic_ai = shim / "pydantic_ai"
     pydantic_ai.mkdir()
     (pydantic_ai / "__init__.py").write_text(RAISE_ON_IMPORT)
@@ -85,6 +88,10 @@ def test_shim_actually_shadows_the_real_stack(raising_stack_shim: Path) -> None:
 
     proc = _run_child(raising_stack_shim, "import pydantic_ai")
     assert proc.returncode != 0, f"shim did not shadow pydantic_ai\n{proc.stdout}"
+    assert "stubbed by test_llm_import_safety" in proc.stderr, proc.stderr
+
+    proc = _run_child(raising_stack_shim, "import openai")
+    assert proc.returncode != 0, f"shim did not shadow openai\n{proc.stdout}"
     assert "stubbed by test_llm_import_safety" in proc.stderr, proc.stderr
 
 
@@ -183,17 +190,19 @@ async def test_run_typed_raises_typed_and_fires_all_channels(broken_loader, capt
     from pydantic import BaseModel
 
     from agent.llm import run_typed
+    from agent.llm.tasks import Backend, LLMTask, TaskKind
     from agent.llm.wrapper import LLMCallError, LLMStackIncompatible
 
     class Out(BaseModel):
         answer: str
 
+    task = LLMTask(site="test.import_safety", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC)
     compat = broken_loader
     assert compat._DEGRADED is None, "no startup hook has run in this process"
     caplog.set_level(logging.DEBUG, logger="agent.llm.compat")
 
     with pytest.raises(LLMStackIncompatible) as excinfo:
-        await run_typed("hello", Out)
+        await run_typed("hello", Out, task=task)
 
     # Subclassing is what keeps every existing fail-safe working unchanged.
     assert isinstance(excinfo.value, LLMCallError)

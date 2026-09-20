@@ -3,11 +3,12 @@
 Tests ``classify_message_intent_async``, which decides whether a message is
 an interjection into an active session or a new work request. Durability
 plan #2494 Task 13 moved the classifier onto the LOCAL granite model via
-PydanticAI (``agent.llm.run_typed_local``); the ``acknowledgment`` class
-retired with ``AgentSession.expectations``.
+PydanticAI (``agent.llm.run_typed`` with ``INTAKE_INTENT``, #3410); the
+``acknowledgment`` class retired with ``AgentSession.expectations``.
 
-Unit tests monkeypatch ``run_typed_local`` (no model call). A small live
-class runs against the real granite daemon when Ollama is reachable.
+Unit tests monkeypatch ``tools.classifier.run_typed`` (no model call). A
+small live class runs against the real granite daemon when Ollama is
+reachable.
 """
 
 import pytest
@@ -23,17 +24,17 @@ from tools.classifier import (
 
 
 def _fake_decision(monkeypatch, decision: IntentDecision):
-    async def fake_run_typed_local(prompt, output_type, **kwargs):
+    async def fake_run_typed(prompt, output_type, **kwargs):
         return decision
 
-    monkeypatch.setattr("agent.llm.run_typed_local", fake_run_typed_local)
+    monkeypatch.setattr("tools.classifier.run_typed", fake_run_typed)
 
 
 def _forbid_model_call(monkeypatch):
     async def exploding(prompt, output_type, **kwargs):
         raise AssertionError("granite must not be called on this path")
 
-    monkeypatch.setattr("agent.llm.run_typed_local", exploding)
+    monkeypatch.setattr("tools.classifier.run_typed", exploding)
 
 
 class TestFastPathNoModelCall:
@@ -147,7 +148,7 @@ class TestMockedClassification:
         async def unreachable(prompt, output_type, **kwargs):
             raise LLMCallError("ollama unreachable")
 
-        monkeypatch.setattr("agent.llm.run_typed_local", unreachable)
+        monkeypatch.setattr("tools.classifier.run_typed", unreachable)
 
         result = await classify_message_intent_async(
             "Actually make it blue",

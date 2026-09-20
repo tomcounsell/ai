@@ -10,6 +10,7 @@ import os
 import pytest
 
 from bridge.routing import classify_work_request
+from tests.helpers.llm_fakes import FakeRunTyped, failing
 
 
 class TestFastPathPassthrough:
@@ -149,34 +150,47 @@ class TestLlmClassification:
 class TestClassifierSdlcType:
     """Tests for tools/classifier.py accepting 'sdlc' as a valid classification type.
 
-    These are unit tests that mock the Anthropic API to verify the classifier
-    accepts and validates 'sdlc' responses (fixes issue #276, Bug 1).
+    The classifier runs on ``agent.llm.run_typed`` (#3410); the fake answers
+    with a ``WorkTypeDecision`` so the dict the bridge reads is exercised
+    without a model (fixes issue #276, Bug 1).
     """
 
-    def test_sdlc_type_accepted_by_validator(self):
-        """The classifier validation logic accepts 'sdlc' as a valid type."""
-        from unittest.mock import MagicMock, patch
+    async def test_sdlc_type_accepted_by_validator(self, monkeypatch):
+        """An ``sdlc`` decision comes back as the same dict shape the bridge reads."""
+        import tools.classifier as classifier
+        from tools.classifier import WORK_TYPE, WorkTypeDecision, classify_request_async
 
-        # Mock the Anthropic API to return an sdlc classification
-        mock_response = MagicMock()
-        mock_response.content = [
-            MagicMock(
-                text='{"type": "sdlc", "confidence": 0.95, "reason": "SDLC pipeline reference"}'
-            )
-        ]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
+        fake = FakeRunTyped(
+            result=WorkTypeDecision(type="sdlc", confidence=0.95, reason="SDLC pipeline reference")
+        )
+        monkeypatch.setattr(classifier, "run_typed", fake)
+        monkeypatch.setattr(classifier, "get_anthropic_api_key", lambda: "test-key")
 
-        with (
-            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
-            patch("tools.classifier.get_anthropic_api_key", return_value="test-key"),
-        ):
-            from tools.classifier import classify_request
+        result = await classify_request_async("SDLC issue 274")
 
-            result = classify_request("SDLC issue 274")
+        assert result == {
+            "type": "sdlc",
+            "confidence": 0.95,
+            "reason": "SDLC pipeline reference",
+        }
+        assert fake.last.task is WORK_TYPE
+        assert "SDLC issue 274" in fake.last.prompt
 
-        assert result["type"] == "sdlc"
-        assert result["confidence"] == 0.95
+    async def test_llm_failure_logs_and_reraises(self, monkeypatch, caplog):
+        """The fail-safe is the caller's: ``classify_work_type`` in the bridge
+        swallows to ``{}``, so the classifier logs at ERROR and re-raises."""
+        import tools.classifier as classifier
+        from agent.llm import LLMCallError
+        from tools.classifier import classify_request_async
+
+        monkeypatch.setattr(classifier, "run_typed", failing("transport"))
+        monkeypatch.setattr(classifier, "get_anthropic_api_key", lambda: "test-key")
+
+        with caplog.at_level("ERROR", logger="tools.classifier"):
+            with pytest.raises(LLMCallError):
+                await classify_request_async("Fix the login bug")
+
+        assert any("Classification failed (async)" in r.message for r in caplog.records)
 
     def test_sdlc_prompt_includes_sdlc_category(self):
         """The classification prompt includes the 'sdlc' category."""

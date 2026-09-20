@@ -83,9 +83,10 @@ On **no**: skip everything. Don't write the sentinel; `/update` will leave bcu a
 ## Step 8.6: Generation Model Selection (RAM-based)
 
 Free-text generation (memory titles, the test AI judge, knowledge-doc
-summarization) runs on a larger `gemma4:31b` model. Classification (bridge
-routing, memory-audit, email triage) runs on the resident `granite4.1:3b` and
-needs no choice here. Pick the generation variant from this machine's RAM:
+summarization) runs on a larger `gemma4:31b` model. The classification sites
+declared `backend=OLLAMA` (Job bind-or-mint, intake intent, memory audit; see
+`docs/features/llm-task-taxonomy.md`) run on the resident `granite4.1:3b` and
+need no choice here. Pick the generation variant from this machine's RAM:
 
 - **RAM ≥ `MIN_LOCAL_GEN_RAM_GB` (48 GB)** → local Apple-Silicon MLX variant
   `gemma4:31b-mlx` (the ~18-20 GB MLX 32B coexists with granite + nomic-embed + OS).

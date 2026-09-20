@@ -67,8 +67,10 @@ fresh session.
   at the relay's send-success site, so a user reply to Valor's own message
   lands on the same Job.
 - **Bind-or-mint** runs on the **local granite model via PydanticAI**
-  (`agent.llm.run_typed_local`, strict `JobRouteDecision` JSON output), as
-  does the intake intent classifier (`tools/classifier.py`). Structure:
+  (`agent.llm.run_typed` with `JOB_ROUTE`, declared `backend=OLLAMA`, strict
+  `JobRouteDecision` JSON output; the router falls back to Haiku once when
+  the local leg raises, see [`llm-task-taxonomy.md`](llm-task-taxonomy.md)),
+  as does the intake intent classifier (`tools/classifier.py`). Structure:
   zero-candidate short-circuit, top-5 recency cap (`Job.recent_for_room`,
   §Bounded recency read below), post-hoc `valid_ids` membership check,
   confidence threshold (`JOB_ROUTER_CONFIDENCE_THRESHOLD`, provisional

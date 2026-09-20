@@ -1,124 +1,197 @@
 # Non-Harness LLM Wrapper
 
-A single PydanticAI-based call point for every LLM call that is not a `claude -p` harness session. Classification, extraction, and judgment calls declare a typed output model and get a schema-validated result back, with model choice as one config edit instead of N hand-rolled clients.
+A single PydanticAI-based call point for every LLM call that is not a `claude -p` harness session. Classification, extraction, and judgment calls declare a typed output model and an `LLMTask`, and get a schema-validated result back from whichever backend leg the router picks. The site declarations, the router rules, eligibility, and the acceptance bar are in [LLM Task Taxonomy](llm-task-taxonomy.md); this page is the transport underneath them.
 
 ## Two Ways to Call an LLM
 
 The system makes two categories of LLM calls, and they stay deliberately separate:
 
-- **Harness calls** are Claude Code sessions — skills, hooks, tools, resume — driven through `claude -p` via the headless session runner (`agent/session_runner/`). See [Headless Session Runner](headless-session-runner.md).
-- **Non-harness calls** classify, extract, judge, or refine text outside a harness session: routing decisions, memory extraction, session-route matching, catch-up judging, email triage, intent classification.
+- **Harness calls** are Claude Code sessions (skills, hooks, tools, resume) driven through `claude -p` via the headless session runner (`agent/session_runner/`). See [Headless Session Runner](headless-session-runner.md).
+- **Non-harness calls** classify, extract, judge, or refine text outside a harness session: routing decisions, memory extraction, the promise gate, read-the-room, catch-up judging, email triage, intent classification.
 
-Before this wrapper, every non-harness call site hand-rolled its own provider client: most constructed `anthropic.Anthropic` / `AsyncAnthropic` inline and pinned Haiku directly; three sites called `ollama.chat()` with a Haiku fallback. There was no shared structured-output contract and no single point to swap models. `agent/llm/` closes that gap for the non-harness half only — it does not touch the harness transport.
+`agent/llm/` is the one call point for the non-harness half. Every site goes through it, so the provider client, the timers, the semaphore, the routing, and the fallback are written once. The harness transport is untouched.
 
 ## The Wrapper
 
 `agent/llm/wrapper.py` exposes one async function:
 
 ```python
-from agent.llm import run_typed, LLMCallError
+from agent.llm import run_typed, LLMCallError, LLMTask
 
 async def run_typed(
     prompt: str,
     output_type: type[BaseModel],
     *,
-    model: str = MODEL_FAST,
-    sdk_timeout: float = DEFAULT_SDK_TIMEOUT,      # 30.0s
-    hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,  # 35.0s
-    _skip_guard: bool = False,  # internal (#3001), compat gate only
+    task: LLMTask,                        # required: the call site's declaration
+    project_key: str | None = None,       # the router's eligibility input
+    model: str = MODEL_FAST,              # the Anthropic model on every Anthropic route
+    system: str | None = None,            # system prompt for the PydanticAI Agent
+    sdk_timeout: float | None = None,     # None: the leg's default from settings.timeouts
+    slot_timeout: float | None = None,    # bounds the Anthropic semaphore wait
+    hard_timeout: float | None = DEFAULT_HARD_TIMEOUT,  # 35.0 s outer cap, outside the leg
+    max_retries: int | None = None,       # SDK retry count on the primary Anthropic client
+    _skip_guard: bool = False,            # internal (#3001), compat gate only
 ) -> BaseModel:
     ...
 ```
 
-`_skip_guard` is internal: it bypasses the `_guard_stack` -> `stack_axes()` -> `resolve_degraded_flag()` check and exists solely so the LLM-stack compat gate's `_check_network` probe (see [LLM Stack Compat Gate](llm-stack-compat-gate.md)) can make one real `run_typed` call without mutating the resolver's memoized globals. No other caller should pass it.
+Call it with a prompt, a `pydantic.BaseModel` subclass describing the desired output shape, and the site's `LLMTask`. PydanticAI validates the model's response against the schema and auto-retries once on mismatch. A validated instance of `output_type` comes back, or the call raises `LLMCallError`. A call without `task=` raises `TypeError` naming the kwarg, so a site the taxonomy missed fails loudly.
 
-Call it with a prompt and a `pydantic.BaseModel` subclass describing the desired output shape. PydanticAI validates the model's response against that schema and auto-retries once on mismatch. A validated instance of `output_type` comes back, or the call raises `LLMCallError`.
+`model` defaults to `config.models.MODEL_FAST` (Haiku) and names the model on every Anthropic route, the fallback included; the Ollama leg always runs `config.models.OLLAMA_CLASSIFIER_MODEL` (`granite4.1:3b`).
 
-`DEFAULT_SDK_TIMEOUT`/`DEFAULT_HARD_TIMEOUT` are sourced from `settings.timeouts.anthropic_sdk_s`/`anthropic_hard_s` (issue #1968) — the same paired fields backing `agent/memory_extraction.py`'s identical double-timeout constants — so both default to 30.0s/35.0s but are `.env`-overridable via `TIMEOUTS__ANTHROPIC_SDK_S`/`TIMEOUTS__ANTHROPIC_HARD_S`. See [Config Timeout Catalog](config-timeout-catalog.md).
+`sdk_timeout` is the leg's SDK-level request timer. `None` means the leg's default, read from `settings.timeouts` at call time: `anthropic_sdk_s` (30 s) for the Anthropic leg, `local_typed_hard_s` (20 s) for the Ollama leg, through `agent.llm.backends.default_sdk_timeout(backend)`. An explicit value always wins on whichever leg the router picks, and it is also the fallback budget. The wrapper owns no SDK timeout constant of its own. `DEFAULT_HARD_TIMEOUT` is `settings.timeouts.anthropic_hard_s` (35 s). See [Config Timeout Catalog](config-timeout-catalog.md).
 
-`model` defaults to `config.models.MODEL_FAST` (Haiku), so a single config edit swaps the model for every non-harness call. Per-call overrides are supported — a high-frequency hot path can pin a cheaper or local model without touching its own call site.
+`_skip_guard` is internal: it skips both `_guard_stack` calls (primary and fallback) and nothing else, so the call never reaches `stack_axes()` -> `resolve_degraded_flag()`. Its one caller is `agent/llm/compat.py::_check_network`, the auto-bump `llm` gate's live probe, which declares `NETWORK_PROBE = LLMTask(site="compat.network_probe", kind=THINKING, backend=ANTHROPIC)` and must stay pure (never touch the memoized degraded flag) while still getting the shared `semaphore_slot()` and both timers. `tests/unit/test_llm_wrapper.py` pins that it is the only caller. See [LLM Stack Compat Gate](llm-stack-compat-gate.md).
 
-### Per-call slot pattern (event-loop safety)
+### What the wrapper does, in order
 
-`agent/anthropic_client.py` holds no long-lived shared client — `semaphore_slot()` only gates concurrency; each caller has always constructed its own client (hotfix #1055/#1111). `run_typed` follows that same pattern on every invocation instead of inventing a shared client that doesn't exist:
+1. Validates the prompt. An empty, `None`, or whitespace-only `prompt` raises `ValueError` before any routing or network work.
+2. Resolves the route: `agent/llm/router.py::resolve(task, project_key, model=model)` returns `Route(backend, model, fallback)` by the four rules in the [taxonomy page](llm-task-taxonomy.md#router-rules).
+3. Runs the degraded-stack guard with the axis the route needs (below).
+4. Loads the stack through `agent/anthropic_client.py::_load_stack` and hands it to the leg.
+5. Runs the primary leg. On `LLMCallError` with a `fallback` on the route, runs the fallback leg once inside the caller's remaining budget (below).
+6. Logs `llm_route` after whichever leg answered and returns the validated instance. The result carries no marker of which leg answered; the log line does.
 
-1. `async with semaphore_slot():` holds the shared semaphore for the *entire* `Agent.run()` call, not just client construction.
-2. Inside the slot, it constructs a fresh `async with anthropic.AsyncAnthropic(api_key=..., timeout=sdk_timeout)` — per-call, per-site timeout, with `async with` preserving hotfix #1055's httpx cleanup.
-3. That client is injected into PydanticAI: `AnthropicProvider(anthropic_client=client)` → `AnthropicModel(model, provider=...)` → `Agent(model, output_type=output_type)`.
-4. When `hard_timeout` is not `None`, `await agent.run(prompt)` is wrapped in `asyncio.wait_for(..., timeout=hard_timeout)` — an outer wall-clock cap that fires even when the SDK-level timer doesn't (for example, a half-open TCP socket with no event to fire on).
+When `hard_timeout` is not `None`, steps 5 and 6 run under one `asyncio.wait_for(..., timeout=hard_timeout)`: the one coroutine-level cap, wrapping the legs from outside and never the live request.
+
+## The Backend Legs
+
+`agent/llm/backends/` holds one leg per `Backend`, each a module exposing:
+
+```python
+async def call(
+    prompt, output_type, route, *,
+    system, sdk_timeout, slot_timeout, max_retries, deadline=None, stack,
+) -> BaseModel
+```
+
+The leg protocol:
+
+- A leg returns a validated instance of `output_type` or raises `LLMCallError` with a `reason` in `timeout`, `slot_timeout`, `transport`, `validation`. It never invents a default; the call site's fail-safe does that.
+- `sdk_timeout` is a required float and the only timer around the live request: an SDK-level client timeout, never a coroutine-level `asyncio.wait_for`. The wrapper applies `hard_timeout` outside the leg, and only when the caller passes one.
+- `slot_timeout` bounds the wait for the shared Anthropic semaphore; a leg with no semaphore accepts and ignores it. `max_retries` is the SDK retry count, `None` meaning the SDK default; the Ollama leg pins 0.
+- `deadline` is an absolute `time.monotonic()` instant the wrapper passes on the fallback leg only. A leg re-checks it once, after any queue wait and before constructing its client: under `MIN_REMAINDER_S` (0.5 s) of remainder raises `LLMCallError(reason="timeout")` with no client ever built; otherwise the request timer shrinks to the remainder. `None` means no check.
+- `stack` is the `LLMStack` the wrapper resolved through its `_load_stack` seam. A leg takes every third-party symbol from it and imports none at module scope (#3001), so `dataclasses.replace(real_stack, <Symbol>=Fake)` on that seam is the network-isolation point for every test.
+- `CancelledError` (the wrapper's `hard_timeout`, a caller going away) is never caught: the `async with` blocks release the slot and close the client on the way out.
+
+### The Anthropic leg (`backends/anthropic.py`)
+
+The hotfix #1055 / #1111 invariant lives here: `agent/anthropic_client.py` holds no long-lived shared client, `semaphore_slot()` only gates concurrency, and the leg builds its own client per call.
+
+1. `async with semaphore_slot(timeout=slot_timeout):` holds the shared slot for the entire `Agent.run()` call. A slot wait that outlives `slot_timeout` raises `LLMCallError(reason="slot_timeout")` before any client exists.
+2. Inside the slot, the deadline re-check (fallback calls only).
+3. A fresh `async with stack.anthropic.AsyncAnthropic(api_key=..., timeout=sdk_timeout, max_retries=...)`: the SDK-level timer is the only timer around the live request, and `async with` preserves the httpx cleanup. `max_retries=None` leaves the SDK default (2 on anthropic 1.7.0); the fallback leg passes 0 so one timer bounds one attempt.
+4. That client is injected into PydanticAI: `AnthropicProvider(anthropic_client=client)` -> `AnthropicModel(route.model, provider=...)` -> `Agent(model, output_type=output_type, system_prompt=system)`.
 5. The slot releases on `__aexit__`.
 
-### Fail-safe posture
+The leg publishes how long it waited for the slot through `slot_wait_ms`, a `ContextVar` set the moment the slot is held, so a caller that audits queue time (`bridge/promise_gate.py`'s `queue_wait_ms` audit column) resets it before `run_typed` and reads it after. It stays at whatever the caller set when the slot was never acquired.
 
-`run_typed` does not pick a fail-safe default. Provider errors and exhausted schema-validation retries are logged, then raised as `LLMCallError` (the original exception is chained via `__cause__`). Each call site keeps its own conservative default on failure — routing defaults to respond, email triage escalates, memory extraction skips — because the right default is site-specific, not something the wrapper can decide for every caller.
+### The Ollama leg (`backends/ollama.py`)
 
-An empty, `None`, or whitespace-only `prompt` raises `ValueError` before any client is built or network call made, so a bad prompt fails fast instead of hanging.
+Runs against the local daemon's OpenAI-compatible surface (`settings.models.ollama_host` + `/v1`) on `route.model`. It differs from the Anthropic leg in three deliberate ways: no Anthropic client and no shared Anthropic semaphore (the call never leaves this machine, so `slot_timeout` is accepted and unused); a per-call `async with stack.AsyncOpenAI(base_url=..., api_key="ollama", timeout=sdk_timeout, max_retries=0)` client with `stack.OllamaProvider(openai_client=client)` inside the block, so no call leaves an unclosed httpx client; and native JSON-schema output (`stack.NativeOutput(output_type)`, Ollama's `response_format`), because PydanticAI's tool-mode default fails validation on about a third of granite calls through llama-server, which emits the tool call as message content. The deadline re-check runs once before the client is built.
 
-### `run_typed_local` — the granite-on-Ollama leg (durability M3, #2494)
+### The hotfix #1055 invariant as the legs carry it
 
-`agent/llm/wrapper.py` also exposes `run_typed_local(prompt, output_type, *, model=OLLAMA_CLASSIFIER_MODEL, hard_timeout=None)` for calls that run on the **local granite model** via Ollama — the two hot-path classifiers (intake intent in `tools/classifier.py`, Job bind-or-mint in `bridge/job_router.py`) route through it. Same typed-output contract and `LLMCallError` surface as `run_typed`, with three deliberate differences: no Anthropic client and no shared Anthropic semaphore (the call never leaves the machine), an `OllamaProvider` against `settings.models.ollama_host`'s `/v1` surface, and a single wall-clock cap instead of the WAN double-timeout pattern. Call sites keep their own conservative failure defaults (intake → `new_work`, router → NEW Job).
+No `asyncio.wait_for` appears in `agent/llm/backends/`. The only timers around a live request are the SDK-level client timeouts, and the queue wait is bounded separately by `semaphore_slot(timeout=slot_timeout)`, which the Anthropic leg enters before constructing the client. The wrapper's `hard_timeout` wraps the legs from outside and is the one coroutine-level cap; the three 3 s hot-path sites (the promise gate, read-the-room, the completion judge) pass `hard_timeout=None` and rely on `sdk_timeout=3.0, slot_timeout=3.0, max_retries=0` alone. `tests/unit/test_llm_task_taxonomy.py` check 6 pins both halves by function body: no `wait_for` inside the four named hot-path bodies or any backend function, and `hard_timeout=None` on every `run_typed` call in those bodies.
 
-The cap is `settings.timeouts.local_typed_hard_s` (default 20.0s, env key `TIMEOUTS__LOCAL_TYPED_HARD_S`), read **inside** `run_typed_local` on each call rather than at module scope, so an override takes effect without a code change. See [Config Timeout Catalog](config-timeout-catalog.md).
+## The Degraded-Stack Guard, by Route Axis
 
-### Import safety and the degraded-stack guard
+`_guard_stack(caller, *, signature_axis)` forces resolution of the memoized degraded flag and raises `LLMStackIncompatible` on a bad stack. It subclasses `LLMCallError`, so every existing `except LLMCallError` fail-safe applies unchanged. The gate is two-axis and the wrapper picks the axis from the route:
 
-Module scope in `agent/llm/wrapper.py`, `agent/llm/compat.py`, and `agent/anthropic_client.py` holds **stdlib and our own code only**. Every third-party symbol (`anthropic`, `pydantic_ai.*`) is resolved through `agent/anthropic_client.py::_load_stack`, one `functools.cache`-memoized whole-stack loader, called only from inside the call paths. A machine whose installed stack is broken can still `import agent.llm` — and therefore `import bridge.telegram_bridge` — with the failure surfacing at the call, where it can be reported. `tests/unit/test_llm_import_safety.py` enforces this out-of-process.
-
-`_load_stack` is imported into `wrapper.py`'s namespace, so `monkeypatch.setattr(wrapper_mod, "_load_stack", ...)` is the network-isolation seam for tests.
-
-Both entry points first call `_guard_stack`, which forces resolution of the memoized degraded flag and raises **`LLMStackIncompatible`** on a bad stack. It subclasses `LLMCallError`, so every existing `except LLMCallError` fail-safe applies unchanged and each call site keeps its own conservative default.
-
-The gate is two-axis and the axes are applied differently:
-
-| Entry point | Blocked by a stack that fails to import | Blocked by an `anthropic`/`pydantic-ai` signature mismatch |
+| Route | Blocked by a stack that fails to import | Blocked by an `anthropic`/`pydantic-ai` signature mismatch |
 |---|---|---|
-| `run_typed` | yes | yes |
-| `run_typed_local` | yes | **no** |
+| Anthropic-routed `run_typed` | yes | yes |
+| Ollama-routed `run_typed` | yes | no |
 
-`run_typed_local` never touches `anthropic`, so an Anthropic create-signature break must not fall the two hot-path classifiers back to their conservative defaults fleet-wide. Full design in [LLM Stack Compat Gate](llm-stack-compat-gate.md).
+The wrapper calls `_guard_stack("run_typed", signature_axis=(route.backend is Backend.ANTHROPIC))` between `resolve()` and the primary leg. An Ollama-routed call never touches `anthropic`, so an Anthropic create-signature break must not fall the hot-path classifiers on granite back to their conservative defaults fleet-wide. Before an Anthropic fallback leg the wrapper runs `_guard_stack("run_typed:fallback", signature_axis=True)`, so a signature-broken fallback raises `LLMStackIncompatible` and the caller's fail-safe applies. Full design in [LLM Stack Compat Gate](llm-stack-compat-gate.md).
 
-## Adding a New Classifier
+## The Fallback Budget
 
-1. Define a `pydantic.BaseModel` describing the decision shape (mirror the existing per-call models below for the level of detail to include — usually a label field plus a confidence or reasoning field).
-2. Build a prompt string.
-3. Call `await run_typed(prompt, YourDecisionModel, model=MODEL_FAST)` inside a `try/except LLMCallError`.
-4. On `LLMCallError`, apply your site's own conservative default and log it.
+A route with a `fallback` (an `OLLAMA` site for eligible context) gets one Anthropic attempt when the Ollama leg raises `LLMCallError`, inside the caller's budget and never the primary leg's default timer:
 
-No new client construction, no `json.loads`-shape parsing, no ollama fallback plumbing.
+- `budget = sdk_timeout if sdk_timeout is not None else hard_timeout` (both `None` means uncapped); `start = monotonic()` before the primary; `deadline = start + budget`.
+- On failure, `elapsed = monotonic() - start`. When `budget - elapsed < MIN_REMAINDER_S` (0.5 s) the fallback is skipped, the wrapper logs `llm_no_fallback`, and the primary's error propagates.
+- `fb_timeout = default_sdk_timeout(fallback.backend)` when `budget is None`, else `min(default_sdk_timeout(fallback.backend), budget - elapsed)`; `fb_slot = fb_timeout if slot_timeout is None else min(slot_timeout, fb_timeout)`.
+- The fallback leg runs with `sdk_timeout=fb_timeout, slot_timeout=fb_slot, max_retries=0, deadline=deadline`. `max_retries=0` is load-bearing: on anthropic 1.7.0 the SDK default retries `APITimeoutError` twice, so one timer could otherwise bound three attempts. `deadline` is load-bearing too: `fb_slot` and `fb_timeout` bound two sequential phases (the slot wait, then the request), so the leg re-checks the deadline after the slot is acquired and shrinks the request timer to what is left.
+
+So a routing classifier with no `sdk_timeout` whose granite call times out at 20 s gets one Haiku attempt whose slot wait plus request fit inside the 15 s left under the 35 s `hard_timeout`; a 3 s site's explicit `sdk_timeout` is its budget. The primary leg always runs with `deadline=None` and the caller's `max_retries`.
+
+## Log Lines
+
+Three fixed-prefix lines are the operator's evidence of which backend served a site; `docs/infra/llm-task-routing.md` has the greps.
+
+| Line | Level | When |
+|------|-------|------|
+| `llm_route site=<site> backend=<backend> elapsed_ms=<int>` | INFO | After whichever leg answered (the primary on the normal path, the fallback on the degraded one). |
+| `llm_fallback site=<site> primary=<backend> fallback=<backend> reason=<reason> elapsed_ms=<int>` | WARNING | Ahead of a fallback leg. `reason` is the primary's `LLMCallError.reason`: `timeout` for a slow daemon, `transport` for a stopped one. |
+| `llm_no_fallback site=<site> primary=<backend> reason=<reason> elapsed_ms=<int> budget_s=<float>` | WARNING | The primary failed with under 0.5 s of budget left, so no fallback ran. Distinct from `llm_fallback`, so `grep -c llm_fallback` counts real fallbacks only. |
+
+## Fail-Safe Posture
+
+`run_typed` does not pick a fail-safe default. Provider errors, slot starvation, exhausted schema-validation retries, and the outer hard timeout are logged, then raised as `LLMCallError` with a `reason` (the original exception is chained via `__cause__`). Each call site keeps its own conservative default on failure, named in the one-line comment above its `LLMTask` declaration: routing defaults to respond, email triage escalates, memory extraction skips, the job router mints NEW. The right default is site-specific, and the wrapper cannot decide it for every caller.
+
+## Import Safety
+
+Module scope in `agent/llm/wrapper.py`, `agent/llm/backends/*.py`, `agent/llm/compat.py`, and `agent/anthropic_client.py` holds stdlib and our own code only. Every third-party symbol (`anthropic`, `openai.AsyncOpenAI`, `pydantic_ai.*`) is resolved through `agent/anthropic_client.py::_load_stack`, one `functools.cache`-memoized whole-stack loader, called only from inside `run_typed` and handed to the leg as `stack`. A machine whose installed stack is broken can still `import agent.llm`, and therefore `import bridge.telegram_bridge`, with the failure surfacing at the call. `tests/unit/test_llm_import_safety.py` enforces this out-of-process, with `openai` in its raising shim.
+
+`_load_stack` is imported into `wrapper.py`'s namespace, so `monkeypatch.setattr(wrapper_mod, "_load_stack", ...)` is the network-isolation seam for tests on either leg.
+
+## Adding a New Site
+
+1. Define a `pydantic.BaseModel` describing the decision shape (a label field plus a confidence or reasoning field; `Literal` fields for a closed set).
+2. Declare the site beside it: `NAME = LLMTask(site="module.decision", kind=..., backend=..., error_cost=...)`, literal values only, with a one-line comment naming the fail-safe. A classification site enters on `backend=Backend.ANTHROPIC`; a local landing needs a comparison record (see the [acceptance bar](llm-task-taxonomy.md#acceptance-bar)).
+3. Build a prompt string.
+4. Call `await run_typed(prompt, YourDecisionModel, task=NAME, project_key=project_key)` inside a `try/except LLMCallError`, passing the project key the site can know. A hot-path site with a budget passes `sdk_timeout`, `slot_timeout`, `max_retries=0`, and `hard_timeout=None`.
+5. On `LLMCallError`, apply the site's conservative default and log it.
+6. Add the site's row to the [taxonomy table](llm-task-taxonomy.md#site-table); the parity test fails until it is there.
+
+No new client construction, no `json.loads`-shape parsing, no fallback plumbing.
 
 ## Migrated Call Sites
 
-Every site below moved from a hand-rolled client (or `ollama.chat()`) to `run_typed` with a dedicated output model, keeping its original conservative default on failure.
+Every classification and wrapper-served thinking site goes through `run_typed` with a dedicated output model, keeping its own conservative default on failure. Every raw Anthropic, Ollama, and OpenRouter client is gone from these modules.
 
-| Site | Output model | Was | Now |
-|------|--------------|-----|-----|
-| `agent/intent_classifier.py` | `IntentClassification` | sync `anthropic.Anthropic` (Haiku), hand-rolled text parse | `run_typed`; `parsed.model_dump()` replaces `dataclasses.asdict(parsed)` to keep the function's dict-returning cached contract |
-| `agent/memory_extraction.py` (`_llm_call`) | `ExtractionResult` | `AsyncAnthropic` (Haiku), hand-rolled `json.loads`-shape repair | `run_typed`, shared by four call sites in the module; the merged LLM refusal-detector stays in place |
-| `bridge/routing.py` (`classify_needs_response`) | `NeedsResponseDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
-| `bridge/routing.py` (`classify_conversation_terminus`) | `TerminusDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
-| `bridge/routing.py` (`classify_work_request`) | `RoutingDecision` | `ollama.chat()` + Haiku fallback | `run_typed` |
-| `bridge/agent_catchup.py` (`judge_message`) | `CatchupJudgeVerdict` | `ollama.chat()` + Haiku fallback | `run_typed` |
-| `tools/email_cs/triage.py` | `EmailTriageDecision` | `ollama_client.chat()` + tolerant post-hoc JSON extraction | `run_typed` |
+| Id | Site | Module (function) | Output model | Call shape |
+|----|------|-------------------|--------------|------------|
+| C1 | `routing.needs_response` | `bridge/routing.py` (`classify_needs_response`) | `NeedsResponseDecision` | `project_key` from `should_respond_async` |
+| C2 | `routing.terminus` | `bridge/routing.py` (`classify_conversation_terminus`) | `TerminusDecision` | `project_key` from `should_respond_async` |
+| C3 | `routing.work_request` | `bridge/routing.py` (`classify_work_request`) | `RoutingDecision` | `project_key` from `should_respond_async` |
+| C4 | `intent_classifier.intent` | `agent/intent_classifier.py` | `IntentClassification` | `parsed.model_dump()` keeps the dict-returning cached contract |
+| C5 | `classifier.work_type` | `tools/classifier.py` (`classify_request_async`) | `WorkTypeDecision` | returns the same dict shape as before; the sync `classify_request` is deleted |
+| C6 | `agent_catchup.judge` | `bridge/agent_catchup.py` (`judge_message`) | `CatchupJudgeVerdict` | `project_key` threaded through `sweep_chat` |
+| C7 | `injection_inspection.risk` | `bridge/injection_inspection.py` | `_InjectionJudgment` (`risk: Literal["suspected", "none"]`) | `sdk_timeout` and `hard_timeout` at `INJECTION_INSPECT_TIMEOUT_S` |
+| C8 | `context_recall.advised` | `bridge/context_recall.py` | `ContextRecallVerdict` | `sdk_timeout=3.0` |
+| C9 | `promise_gate.verdict` | `bridge/promise_gate.py` (`_evaluate_promise_async`) | `PromiseVerdictDecision` | `system=PROMISE_GATE_SYSTEM_PROMPT`, `sdk_timeout=slot_timeout=RTR_SDK_TIMEOUT` (3.0), `max_retries=0`, `hard_timeout=None`; `project_key` from `session_id` and from the drafter's `session` |
+| C10 | `session_completion.novelty` | `agent/session_completion.py` (`_judge_completion_novelty`) | `CompletionNoveltyDecision` | `system=`, 3 s `sdk_timeout` and `slot_timeout`, `max_retries=0`, `hard_timeout=None` |
+| C11 | `health_check.judge` | `agent/health_check.py` | `HealthDecision` | `project_key` from `AgentSession.project_key` |
+| C12 | `job_router.route` | `bridge/job_router.py` | `JobRouteDecision` | `backend=OLLAMA`; total fail-open to NEW |
+| C13 | `classifier.intake_intent` | `tools/classifier.py` (`classify_message_intent_async`) | `IntentDecision` / `IntentDecisionWithRecall` | `backend=OLLAMA`; fails open to `new_work` |
+| C14 | `memory_audit.classify` | `reflections/memory/memory_quality_audit.py` (`_gemma_classify`) | `MemoryAuditDecision` | `backend=OLLAMA`; `sdk_timeout=GEMMA_CALL_TIMEOUT_SEC`, `hard_timeout=None`, awaited directly from `_layer3_classify` |
+| C15 | `improvement_collect.promise_judge` | `reflections/improvement_collect.py` (`collect_promises`) | `PromiseJudgeDecision` | `sdk_timeout=PROMISE_JUDGE_SDK_TIMEOUT_S` (30 s); `collect_promises` and `run_improvement_collect` are coroutines the reflection scheduler awaits; unmetered |
+| C16 | `email_cs.triage` | `tools/email_cs/triage.py` | `EmailTriageDecision` | `client_only` |
+| RTR | `read_the_room.verdict` | `bridge/read_the_room.py` (`read_the_room`) | `RoomVerdict` (`action: Literal["send", "trim", "suppress"]`) | one thinking call for action and rewrite; `system=READ_THE_ROOM_SYSTEM_PROMPT`, `sdk_timeout=slot_timeout=RTR_SDK_TIMEOUT`, `max_retries=0`, `hard_timeout=None`; `project_key` from `session` |
+| | `memory_extraction.extract` | `agent/memory_extraction.py` (`_llm_call`) | `ExtractionResult` | shared by four call sites in the module; `_EXTRACTION_SDK_TIMEOUT` / `_EXTRACTION_HARD_TIMEOUT` |
+| | `memory_eval.query_generation`, `memory_eval.relevance_grading` | `tools/memory_eval/query_set.py` | `GeneratedQuery`, `RelevanceGrade` | thinking |
+| | `compat.network_probe` | `agent/llm/compat.py` (`_check_network`) | `_Probe` | `_skip_guard=True` |
 
-`bridge/routing.py` and `bridge/agent_catchup.py` no longer import `ollama`; `tools/email_cs/triage.py` no longer imports `tools.ollama_client`.
-
-### Skipped: `bridge/read_the_room.py`
-
-`read_the_room.py:429` already forces `tool_choice={"type": "tool", "name": "room_verdict"}` on its Anthropic call — that is already schema-validated structured output via tool-calling. Re-wrapping it through `run_typed` would churn working code for no gain, so it keeps its own `RoomVerdict` type and its own client construction, unchanged by this migration.
+Thinking sites on a raw transport for a reason (vision, audio, streaming, a cross-vendor client, the harness) declare a `THINKING` task at module level and keep their transport; the taxonomy page's [site table](llm-task-taxonomy.md#site-table) lists them.
 
 ### Out of scope
 
-- `agent/sdk_client.py` and the harness transport — that is the `claude -p` path, not a non-harness call.
-- The ollama *embedding* path (`agent/embedding_provider.py`, `reflections/memory/*embedding*`) — this wrapper standardizes LLM/chat calls, not embeddings.
-- Removing the ollama runtime or machine-level provisioning — that stays an operator action.
+- `agent/sdk_client.py` and the harness transport: the `claude -p` path.
+- The ollama embedding path (`agent/embedding_provider.py`, `reflections/memory/*embedding*`): this wrapper standardizes LLM/chat calls, not embeddings.
+- The Ollama runtime and machine-level provisioning: an operator action, recorded in [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md).
 
 ## Tests
 
-`tests/unit/test_llm_wrapper.py` covers structured-output success, the single auto-retry on schema mismatch, error surfacing as `LLMCallError`, per-call semaphore-slot acquisition, that the injected client is the one PydanticAI actually uses, and the outer `asyncio.wait_for` hard-timeout bound. Each migrated call site's own test file asserts its typed output model and preserved fail-safe default.
+`tests/unit/test_llm_wrapper.py` covers structured-output success, the single auto-retry on schema mismatch, error surfacing as `LLMCallError`, the required `task=`, the per-backend SDK timer, the fallback budget (the C1 remainder case, the capped slot wait, an explicit `sdk_timeout` as the budget, the spent-budget skip, `max_retries=0`, one `llm_route` line and no fallback on the normal path, `hard_timeout` capping both legs together), the `_skip_guard` single-caller pin, and the outer `asyncio.wait_for` hard-timeout bound. `tests/unit/test_llm_stack_degraded_start.py` pins the guard axis per route (a signature break leaves an Ollama-routed call running; a signature-broken fallback raises the typed error). `tests/unit/test_llm_backend_anthropic.py` covers slot starvation raising before any client exists and inside the budget, cancellation releasing the slot and closing the client, the post-slot deadline re-check, `slot_wait_ms`, client construction, and the failure reasons; `tests/unit/test_llm_backend_ollama.py` covers the native output request, the explicit timer, the fresh client closed once per call, the deadline re-check, and the failure reasons. Both leg files assert no third-party import at module scope and no `wait_for` inside the leg. `tests/helpers/llm_fakes.py` is the one shared fake implementing the leg protocol, used by every migrated site's test. Each migrated call site's own test file asserts its typed output model and preserved fail-safe default.
 
 ## See Also
 
-- `agent/llm/wrapper.py` — the wrapper implementation and its full per-call invariant docstring
-- [LLM Stack Compat Gate](llm-stack-compat-gate.md) — the import-safety contract, the compat predicate, degraded posture, and coupled-set auto-bumping
-- [Headless Session Runner](headless-session-runner.md) — the harness half of LLM calls
-- `docs/plans/pydantic-ai-nonharness-llm-standardization.md` — design spikes and the full call-site inventory audit
+- [LLM Task Taxonomy](llm-task-taxonomy.md): the declarations, the router rules, eligibility, the acceptance bar, every site's landed backend.
+- [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md): Ollama service settings, the log greps, rollback levers.
+- [LLM Stack Compat Gate](llm-stack-compat-gate.md): the import-safety contract, the compat predicate, degraded posture, and coupled-set auto-bumping.
+- [Config Timeout Catalog](config-timeout-catalog.md): `anthropic_sdk_s`, `anthropic_hard_s`, `local_typed_hard_s`.
+- [Headless Session Runner](headless-session-runner.md): the harness half of LLM calls.
+- `agent/llm/wrapper.py`, `agent/llm/backends/__init__.py`: the implementation and its full invariant docstrings.
+- `docs/plans/pydantic-ai-nonharness-llm-standardization.md`, `docs/plans/llm-task-taxonomy-routing-layer.md`: the two plans behind this page.

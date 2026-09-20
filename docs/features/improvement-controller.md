@@ -150,7 +150,7 @@ rather than ending it. The tick keeps `failed` (an adapter raised) and
 | `collect_inspirations` | `Memory` rows with `source="human"` (the links Tom sends) | One `inspiration` row per memory, preserving the text, its reference, and its date |
 | `collect_expectation_coverage` | Open outbound expectations on Jobs | One `owner_liveness` row per gone owner, plus one coverage row per tick |
 | `collect_lessons` | Merged PR bodies over the last 14 days through `gh pr list`, the seven `LESSON_PREFIXES` lines (`- lesson:`, `- pattern:`, `- note:`, `- convention:`, `- learning:`, `- reminder:`, `- caveat:`) | One `lesson` row per flagged line, `source_ref="pr:{number}:{sha256(line)[:16]}"`, with the PR title and a `stage_guess` in `detail` |
-| `collect_promises` | Outbound `AgentSession.chat_message_log` entries (`bridge/telegram_relay.py::_append_outbound_chat_log`), up to 10 newest unjudged per tick, judged by a cheap model under the charter §10 paragraph | One `promise` row per `yes`, with the judge's quoted span and confidence. Metered under `purpose="promise_detector"`; gated by `promise_detector_enabled`, off by default |
+| `collect_promises` | Outbound `AgentSession.chat_message_log` entries (`bridge/telegram_relay.py::_append_outbound_chat_log`), up to 10 newest unjudged per tick, judged through `run_typed(task=PROMISE_JUDGE)` under the charter §10 paragraph (#3410) | One `promise` row per `yes`, with the judge's quoted span and confidence. Unmetered; gated by `promise_detector_enabled`, off by default |
 
 `expectation_reconciler` additionally records its shipped-work signal at the
 point it computes it, so "how often did a lane ship without discharging its
@@ -242,8 +242,7 @@ Turning it back off is the same edit in reverse; no hand edit of the vault
 | `lease_ttl_seconds` | `90` | TTL of the interim case lease; the reconcile pass's staleness threshold is four times it |
 | `journal_max_entries` | `1000` | Entries the per-case journal list retains |
 | `max_dispatch_attempts` | `3` | Stale sweeps an `admitted`/`materialized` intent survives before `reconciliation_required` |
-| `promise_detector_enabled` | `False` | Whether the `promise` adapter runs; off because each sampled message costs a judge call. `IMPROVEMENT__PROMISE_DETECTOR_ENABLED` |
-| `cheap_inference_model` | `""` | The OpenRouter model id the promise judge runs on; empty falls back to `config.models.OPENROUTER_GEMMA4_FREE`. `IMPROVEMENT__CHEAP_INFERENCE_MODEL` |
+| `promise_detector_enabled` | `False` | Whether the `promise` adapter runs; off because it samples outbound messages and writes rows. Each sampled message is one judge call through `run_typed(task=PROMISE_JUDGE)` on whichever backend `improvement_collect.promise_judge` landed on (#3410), unmetered; `promise_detector` remains the purpose the comparison runner's gemma reference arm meters under. `IMPROVEMENT__PROMISE_DETECTOR_ENABLED` |
 
 Three budget units, reserved separately, and one of them is not money: Claude
 work runs on the subscription and is budgeted as lane concurrency. The window

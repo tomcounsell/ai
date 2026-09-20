@@ -31,7 +31,8 @@ import time
 
 from pydantic import BaseModel
 
-from agent.llm import LLMCallError, run_typed
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, TaskKind
 from config.models import MODEL_FAST
 from config.settings import settings
 
@@ -49,10 +50,10 @@ logger = logging.getLogger(__name__)
 #
 # Sourced from settings.timeouts.anthropic_sdk_s / anthropic_hard_s (issue
 # #1968) -- these two fields are the single source of truth for BOTH these
-# constants and agent/llm/wrapper.py's `DEFAULT_SDK_TIMEOUT` /
-# `DEFAULT_HARD_TIMEOUT`, which previously duplicated the same 30.0/35.0
-# pair verbatim. Preserve the two-timer structure -- never collapse to one
-# value.
+# constants and the run_typed pair (the Anthropic leg's default SDK timer in
+# agent/llm/backends/ and agent/llm/wrapper.py's `DEFAULT_HARD_TIMEOUT`),
+# which previously duplicated the same 30.0/35.0 pair verbatim. Preserve the
+# two-timer structure -- never collapse to one value.
 _EXTRACTION_SDK_TIMEOUT = settings.timeouts.anthropic_sdk_s
 _EXTRACTION_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 
@@ -325,6 +326,14 @@ class ExtractionResult(BaseModel):
     text: str
 
 
+# Thinking: prose and JSON extraction, subscription backend only. Fail-safe:
+# none here; ``_llm_call`` re-raises and each caller's broad ``except`` records
+# the error and yields nothing for that pass.
+MEMORY_EXTRACTION = LLMTask(
+    site="memory_extraction.extract", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC
+)
+
+
 async def _llm_call(
     model: str,
     max_tokens: int,
@@ -371,6 +380,7 @@ async def _llm_call(
         result = await run_typed(
             prompt,
             ExtractionResult,
+            task=MEMORY_EXTRACTION,
             model=model,
             sdk_timeout=_EXTRACTION_SDK_TIMEOUT,
             hard_timeout=_EXTRACTION_HARD_TIMEOUT,

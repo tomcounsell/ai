@@ -5,7 +5,8 @@ What it does: Reads the full Memory corpus via Popoto and runs four layers —
     Layer 1 (deterministic supersede of extraction-* refusal/shrapnel records
     via _looks_like_refusal; mutates superseded_by + rationale),
     Layer 2 (heuristic anomaly detection across 4 signals), and
-    Layer 3 (fail-soft Gemma/ollama classification, wallclock-budgeted). Layer 2/3
+    Layer 3 (fail-soft granite classification through ``agent.llm.run_typed``
+    with :data:`MEMORY_AUDIT`, ``backend=OLLAMA``; wallclock-budgeted). Layer 2/3
     anomalies are surfaced as GitHub issues via the `gh` CLI (deduped by title prefix).
     A cross-run corpus-size anomaly detector (issue #2438) also runs every
     invocation: it persists the durable corpus size (records where
@@ -18,7 +19,7 @@ Cadence: 86400s (daily)
 Failure modes:
     - Memory.query.all() raises -> return {"status": "error", ...}
     - Layer 1 per-record save raises -> logged, skipped, layer continues
-    - Layer 3 ollama unavailable / per-call timeout -> fail-soft, layer skipped
+    - Layer 3 leg unavailable / per-call SDK timeout (LLMCallError) -> fail-soft, layer skipped
     - gh dup-check fails -> -1 sentinel suppresses filing for that signal this run
     - gh issue create fails -> logged warning, finding recorded, run continues
 Related reflections:
@@ -40,11 +41,13 @@ import logging
 import os
 import re as _re
 import time as _time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
-from agent.memory_extraction import _looks_like_refusal, extract_json_payload
-from config.models import OLLAMA_CLASSIFIER_MODEL
+from pydantic import BaseModel
+
+from agent.llm import LLMCallError, LLMTask, run_typed
+from agent.llm.tasks import Backend, ErrorCost, TaskKind
+from agent.memory_extraction import _looks_like_refusal
 from config.settings import settings
 
 logger = logging.getLogger("reflections.memory_management")
@@ -94,7 +97,7 @@ CORPUS_BASELINE_RING_SIZE = int(
 # anything and the very next daily run re-filed a fresh one.
 CLUSTER_REFILE_SUPPRESSION_DAYS = 14
 LAYER3_WALLCLOCK_BUDGET_S = 30  # hard cap; abort remaining records past this
-GEMMA_CALL_TIMEOUT_SEC = 10  # per-record asyncio.wait_for timeout (resolves critique C3)
+GEMMA_CALL_TIMEOUT_SEC = 10  # per-record SDK-level timer on the leg (resolves critique C3)
 
 # Layer 3 — Gemma classification prompt (two-example few-shot, JSON output)
 GEMMA_AUDIT_PROMPT = """You are auditing memory records produced by an automated extraction pipeline. Each record is supposed to be a one-sentence observation about an agent session. Some are valid; some are extractor failures (raw JSON output, refusal prose, error text).
@@ -113,6 +116,23 @@ Now audit this record. Respond with ONLY a JSON object: {{"is_junk": bool, "anom
 
 Record: {content}
 Verdict:"""  # noqa: E501
+
+
+class MemoryAuditDecision(BaseModel):
+    """Structured output for the layer-3 junk classifier (C14, #3410)."""
+
+    is_junk: bool
+    anomaly_signal: str | None = None
+    why: str = ""
+
+
+# Fail-safe: any LLMCallError is a None verdict, counted as unavailable (layer stays fail-soft).
+MEMORY_AUDIT = LLMTask(
+    site="memory_audit.classify",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.OLLAMA,
+    error_cost=ErrorCost.MEDIUM,
+)
 
 # Issue body template for Layer 2/3 anomalies
 ISSUE_BODY_TEMPLATE = """## Memory Health Audit Anomaly
@@ -434,25 +454,26 @@ def _layer2_signals(
     return candidates
 
 
-def _gemma_classify(content: str) -> dict | None:
-    """Classify a single record via Gemma. Returns None on any failure (fail-soft)."""
-    try:
-        import ollama
+async def _gemma_classify(
+    content: str, *, project_key: str | None = None
+) -> MemoryAuditDecision | None:
+    """Classify a single record on the leg the router picks for ``MEMORY_AUDIT``.
 
-        response = ollama.chat(
-            model=OLLAMA_CLASSIFIER_MODEL,
-            messages=[
-                {"role": "user", "content": GEMMA_AUDIT_PROMPT.format(content=content[:1000])}
-            ],
-            options={"temperature": 0},
+    Returns ``None`` on any ``LLMCallError`` (fail-soft: the caller counts it
+    as unavailable). ``sdk_timeout`` is the per-record timer on the leg and
+    ``hard_timeout=None`` keeps every coroutine-level timeout off the LLM
+    call path (hotfix #1055).
+    """
+    try:
+        return await run_typed(
+            GEMMA_AUDIT_PROMPT.format(content=content[:1000]),
+            MemoryAuditDecision,
+            task=MEMORY_AUDIT,
+            project_key=project_key,
+            sdk_timeout=GEMMA_CALL_TIMEOUT_SEC,
+            hard_timeout=None,
         )
-        raw = response["message"]["content"].strip()
-        # Tolerant JSON parse (handles fenced output, preamble) — same helper
-        # the extractor uses for the same model family. Imported at module top
-        # via the public name (resolves critique C2).
-        payload = extract_json_payload(raw) or raw
-        return json.loads(payload)
-    except Exception as e:
+    except LLMCallError as e:
         logger.debug(f"layer3 gemma classify failed (non-fatal): {e}")
         return None
 
@@ -463,8 +484,9 @@ async def _layer3_classify(extraction_records: list) -> tuple[list[dict], list[s
     Returns (anomaly_candidates, layer3_findings). On any top-level failure,
     returns ([], [...]) — the audit completes without Layer 3.
 
-    Wallclock budget enforced via deadline check + per-call asyncio.wait_for.
-    Dedicated single-thread executor per invocation, shut down in finally.
+    Wallclock budget enforced via the deadline check between records; each
+    record's call is bounded by the leg's SDK-level timer
+    (``GEMMA_CALL_TIMEOUT_SEC``), never a coroutine-level timeout.
     """
     candidates: list[dict] = []
     findings: list[str] = []
@@ -485,84 +507,68 @@ async def _layer3_classify(extraction_records: list) -> tuple[list[dict], list[s
             findings.append("layer-3: no last-24h extraction-* records to classify")
             return candidates, findings
 
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory-audit-l3")
-        try:
-            deadline = _time.monotonic() + LAYER3_WALLCLOCK_BUDGET_S
-            verdicts: list[tuple[str, dict]] = []  # (memory_id, verdict)
-            unavailable_count = 0
-            processed = 0
+        deadline = _time.monotonic() + LAYER3_WALLCLOCK_BUDGET_S
+        verdicts: list[tuple[str, MemoryAuditDecision]] = []  # (memory_id, verdict)
+        unavailable_count = 0
+        processed = 0
 
-            for record in sample:
-                if _time.monotonic() >= deadline:
-                    findings.append(
-                        f"layer-3: wallclock budget {LAYER3_WALLCLOCK_BUDGET_S}s exceeded "
-                        f"after {processed}/{len(sample)} records — skipping rest"
-                    )
-                    break
+        for record in sample:
+            if _time.monotonic() >= deadline:
+                findings.append(
+                    f"layer-3: wallclock budget {LAYER3_WALLCLOCK_BUDGET_S}s exceeded "
+                    f"after {processed}/{len(sample)} records — skipping rest"
+                )
+                break
 
-                content = record.content or ""
-                if not content:
-                    processed += 1
-                    continue
-
-                try:
-                    # Resolves critique C3: use asyncio.get_running_loop()
-                    # (not the deprecated asyncio loop accessor) and bound
-                    # each call by GEMMA_CALL_TIMEOUT_SEC.
-                    loop = asyncio.get_running_loop()
-                    verdict = await asyncio.wait_for(
-                        loop.run_in_executor(executor, _gemma_classify, content),
-                        timeout=GEMMA_CALL_TIMEOUT_SEC,
-                    )
-                except TimeoutError:
-                    verdict = None
-                except Exception as e:
-                    logger.debug(f"layer3 record dispatch failed: {e}")
-                    verdict = None
-
+            content = record.content or ""
+            if not content:
                 processed += 1
+                continue
 
-                if verdict is None:
-                    unavailable_count += 1
-                    continue
+            verdict = await _gemma_classify(
+                content, project_key=getattr(record, "project_key", None) or None
+            )
 
-                if verdict.get("is_junk") is True:
-                    mid = str(getattr(record, "memory_id", "") or "")
-                    if mid:
-                        verdicts.append((mid, verdict))
+            processed += 1
 
-            # Group by anomaly_signal
-            if processed > 0 and unavailable_count == processed:
-                findings.append(f"layer-3 skipped: ollama unavailable for all {processed} records")
+            if verdict is None:
+                unavailable_count += 1
+                continue
 
-            if verdicts:
-                from collections import defaultdict
+            if verdict.is_junk:
+                mid = str(getattr(record, "memory_id", "") or "")
+                if mid:
+                    verdicts.append((mid, verdict))
 
-                signal_groups: dict[str, list[tuple[str, dict]]] = defaultdict(list)
-                for mid, v in verdicts:
-                    sig = v.get("anomaly_signal")
-                    if sig:
-                        signal_groups[sig].append((mid, v))
+        # Group by anomaly_signal
+        if processed > 0 and unavailable_count == processed:
+            findings.append(f"layer-3 skipped: ollama unavailable for all {processed} records")
 
-                for sig, members in signal_groups.items():
-                    if len(members) >= LAYER3_MIN_SIGNAL_CLUSTER:
-                        sample_ids = [mid for mid, _ in members[:5]]
-                        whys = [v.get("why", "") for _, v in members[:3]]
-                        candidates.append(
-                            {
-                                "signal_name": f"gemma-{sig}",
-                                "observed": f"{len(members)} records flagged by gemma",
-                                "threshold": f">= {LAYER3_MIN_SIGNAL_CLUSTER}",
-                                "sample_ids": sample_ids,
-                                "evidence": (
-                                    f"Gemma classified {len(members)}/{processed} "
-                                    f"sampled records as junk with signal '{sig}'.\n\n"
-                                    f"Sample whys:\n" + "\n".join(f"- {w}" for w in whys if w)
-                                ),
-                            }
-                        )
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        if verdicts:
+            from collections import defaultdict
+
+            signal_groups: dict[str, list[tuple[str, MemoryAuditDecision]]] = defaultdict(list)
+            for mid, v in verdicts:
+                if v.anomaly_signal:
+                    signal_groups[v.anomaly_signal].append((mid, v))
+
+            for sig, members in signal_groups.items():
+                if len(members) >= LAYER3_MIN_SIGNAL_CLUSTER:
+                    sample_ids = [mid for mid, _ in members[:5]]
+                    whys = [v.why for _, v in members[:3]]
+                    candidates.append(
+                        {
+                            "signal_name": f"gemma-{sig}",
+                            "observed": f"{len(members)} records flagged by gemma",
+                            "threshold": f">= {LAYER3_MIN_SIGNAL_CLUSTER}",
+                            "sample_ids": sample_ids,
+                            "evidence": (
+                                f"Gemma classified {len(members)}/{processed} "
+                                f"sampled records as junk with signal '{sig}'.\n\n"
+                                f"Sample whys:\n" + "\n".join(f"- {w}" for w in whys if w)
+                            ),
+                        }
+                    )
     except Exception as e:
         logger.debug(f"layer3 outer wrapper failed (non-fatal): {e}")
         findings.append(f"layer-3 skipped: {e}")

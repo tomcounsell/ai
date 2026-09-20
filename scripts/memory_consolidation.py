@@ -47,7 +47,16 @@ import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
+from agent.llm.tasks import Backend, LLMTask, TaskKind
 from reflections.utilities import resolve_host_eng_chat
+
+# Thinking: proposes memory merges as JSON (raw Anthropic client).
+# Fail-safe: ``None`` (no merges applied) on invalid JSON or any error.
+MEMORY_CONSOLIDATION = LLMTask(
+    site="memory_consolidation.merge_plan",
+    kind=TaskKind.THINKING,
+    backend=Backend.ANTHROPIC,
+)
 
 logger = logging.getLogger(__name__)
 
