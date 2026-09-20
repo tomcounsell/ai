@@ -248,12 +248,50 @@ def _rebase_in_progress(repo_root: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+def _only_our_migration_commit_ahead(repo_root: Path, expected_subject: str) -> bool:
+    """True if HEAD is exactly one commit ahead of ``origin/main`` and that one
+    commit is the migration commit this call authored (matched by subject).
+
+    Guards the rollback in ``_rollback_migration_commit``: this shared main
+    checkout can pick up another session's commit in the window between our
+    `git commit` and our failed push, and a bare `reset --hard origin/main`
+    would silently destroy that commit along with ours (#3530 follow-up).
+    """
+    count_result = _run_git(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_root)
+    if count_result.returncode != 0 or count_result.stdout.strip() != "1":
+        return False
+    subject_result = _run_git(["log", "-1", "--format=%s", "HEAD"], cwd=repo_root)
+    return subject_result.returncode == 0 and subject_result.stdout.strip() == expected_subject
+
+
+def _rollback_migration_commit(repo_root: Path, plan_name: str, expected_subject: str) -> str:
+    """Drop the migration commit this call authored -- and only that commit.
+
+    Refuses to mutate `main` (leaving it as-is for manual recovery) if HEAD
+    carries anything beyond our own single migration commit ahead of
+    `origin/main`: that shape means another session landed a commit on this
+    shared checkout before our push failed, and a hard reset would destroy
+    it alongside ours.
+    """
+    if not _only_our_migration_commit_ahead(repo_root, expected_subject):
+        print(
+            f"[ERROR] Refusing to roll back local main for {plan_name}: HEAD is not "
+            "exactly our own migration commit ahead of origin/main (another session may "
+            "have committed here); leaving main as-is for manual recovery"
+        )
+        return "rollback-refused-skip"
+    _run_git(["reset", "--hard", "origin/main"], cwd=repo_root)
+    print(f"[ERROR] Rolled back local main to origin/main for {plan_name}")
+    return "rolled-back-skip"
+
+
 def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     """Guarded git-mv of a root plan into the completed-plan archive.
 
     Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
-    "stale-main-skip", "rolled-back-skip". Never raises -- all failure modes
-    return a verdict string and log the reason.
+    "fetch-failed-skip", "stale-main-skip", "rolled-back-skip",
+    "rollback-refused-skip". Never raises -- all failure modes return a
+    verdict string and log the reason.
 
     Freshness precondition (issue #3530): before mutating, local ``main`` must
     already match ``origin/main`` or be cleanly fast-forwardable to it. A
@@ -261,14 +299,22 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     refused outright (``"stale-main-skip"``) rather than stacking another
     migration commit on top of it -- a machine that can never win the push
     race would otherwise accumulate unpushed commits on ``main`` forever,
-    breaking every subsequent ``/update`` fast-forward on that machine.
+    breaking every subsequent ``/update`` fast-forward on that machine. A
+    remote-side precondition failure (fetch/compare/fast-forward against
+    `origin` all fail) is reported separately as ``"fetch-failed-skip"`` --
+    it means the remote couldn't be reached, not that the tree is dirty.
 
     Rollback on failure to land (issue #3530): if the eventual push can't
     land -- either a genuine rebase conflict, or exhausting the retry budget
     on a plain non-fast-forward rejection -- the local migration commit is
-    dropped via ``git reset --hard origin/main`` before returning. The commit
-    is a pure rename with no unique content, so nothing is lost; the next
-    ``--sweep``/``--issue`` invocation just redoes it from a clean base.
+    dropped via a scoped ``git reset --hard origin/main``, gated on HEAD
+    being exactly that one commit (see ``_rollback_migration_commit``), before
+    returning ``"rolled-back-skip"``. The commit is a pure rename with no
+    unique content, so nothing is lost; the next ``--sweep``/``--issue``
+    invocation just redoes it from a clean base. If HEAD carries more than
+    our own commit -- another session landed work on this shared checkout in
+    the interim -- the reset is refused rather than risking that session's
+    commit, and ``"rollback-refused-skip"`` is returned instead.
     """
     plan_path = Path(plan_path)
 
@@ -336,7 +382,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
                 f"[ERROR] git fetch origin main failed for {plan_path.name}: "
                 f"{fetch_result.stderr.strip()}"
             )
-            return "dirty-tree-skip"
+            return "fetch-failed-skip"
 
         ahead_behind = _run_git(
             ["rev-list", "--left-right", "--count", "main...origin/main"], cwd=repo_root
@@ -346,10 +392,17 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
                 f"[ERROR] Could not compare main to origin/main for {plan_path.name}: "
                 f"{ahead_behind.stderr.strip()}"
             )
-            return "dirty-tree-skip"
+            return "fetch-failed-skip"
 
         ahead_str, _, _behind_str = ahead_behind.stdout.strip().partition("\t")
-        ahead = int(ahead_str or "0")
+        try:
+            ahead = int(ahead_str or "0")
+        except ValueError:
+            print(
+                f"[ERROR] Unexpected `git rev-list` output comparing main to origin/main "
+                f"for {plan_path.name}: {ahead_behind.stdout.strip()!r}"
+            )
+            return "fetch-failed-skip"
         if ahead > 0:
             print(
                 f"[SKIP] local main is {ahead} commit(s) ahead of origin/main; refusing to "
@@ -363,7 +416,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
                 f"[ERROR] fast-forward to origin/main failed for {plan_path.name}: "
                 f"{ff_result.stderr.strip()}"
             )
-            return "dirty-tree-skip"
+            return "fetch-failed-skip"
 
     completed_path.parent.mkdir(parents=True, exist_ok=True)
     mv_result = _run_git(["mv", str(plan_path), str(completed_path)], cwd=repo_root)
@@ -384,6 +437,8 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     if not has_origin:
         print(f"[MIGRATED] {plan_path.name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
         return "migrated"
+
+    migration_subject = f"Migrate completed plan: {plan_path.stem}"
 
     # Rebase-retry loop: a losing push replays atop the winner. Distinguish a
     # genuine textual conflict (abort, roll back, never resolve unattended)
@@ -414,22 +469,17 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
             # Drop the stranded local commit (#3530) rather than leaving main
             # permanently ahead of origin/main: it's a pure rename with no
             # unique content, so the next sweep/--issue run just redoes it.
-            _run_git(["reset", "--hard", "origin/main"], cwd=repo_root)
-            print(
-                f"[ERROR] Rebase conflict migrating {plan_path.name}; rolled back local main "
-                "to origin/main"
-            )
-            return "rolled-back-skip"
+            # Scoped to only our own commit (#3530 follow-up) -- see
+            # _rollback_migration_commit.
+            print(f"[ERROR] Rebase conflict migrating {plan_path.name}")
+            return _rollback_migration_commit(repo_root, plan_path.name, migration_subject)
 
     # Exhausted the retry budget without a conflict (e.g. repeatedly losing
     # the push race, or a transient network/gh failure). Same rollback as the
-    # conflict path (#3530): never return leaving local main ahead of origin.
-    _run_git(["reset", "--hard", "origin/main"], cwd=repo_root)
-    print(
-        f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts; "
-        "rolled back local main to origin/main"
-    )
-    return "rolled-back-skip"
+    # conflict path (#3530): never return leaving local main ahead of origin,
+    # scoped to only our own commit (#3530 follow-up).
+    print(f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts")
+    return _rollback_migration_commit(repo_root, plan_path.name, migration_subject)
 
 
 def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) -> Path | None:

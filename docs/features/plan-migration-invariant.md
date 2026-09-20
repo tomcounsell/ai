@@ -48,17 +48,31 @@ is the **only** code that moves a plan out of root. It:
   12 permanently-unpushed commits on `main`, breaking that machine's
   `/update` fast-forward on every subsequent run. If local `main` is simply
   behind, it's fast-forwarded first (`git merge --ff-only origin/main`).
+- If the remote-side freshness check itself fails — `git fetch`, the
+  `rev-list` ahead/behind compare (including its output not parsing as the
+  expected integer), or the fast-forward merge — the primitive returns
+  `"fetch-failed-skip"` rather than `"dirty-tree-skip"`: the tree is clean
+  and `HEAD == main`, but `origin` couldn't be reached or compared, which is
+  a distinct signal for an operator (network/remote issue, not a checkout in
+  use).
 - On a real move, commits and pushes with a bounded rebase-retry loop: a
   losing push (another process won the race to `main`) replays via
   `git fetch && git rebase origin/main && git push`, retried up to 3 times.
   If that push can't land — a genuine textual rebase conflict, or exhausting
   all 3 attempts on a plain non-fast-forward rejection — the primitive drops
-  the stranded local commit with `git reset --hard origin/main` and returns
-  `"rolled-back-skip"`. This is safe because the commit is a pure rename with
-  no unique content: nothing is lost, and the next `--sweep`/`--issue`
-  invocation simply redoes the migration from a clean base. The primitive
-  never returns leaving local `main` ahead of `origin/main`, and it never
-  resolves a genuine conflict unattended.
+  the stranded local commit, but only if it can confirm HEAD is *exactly*
+  that one commit ahead of `origin/main` (matched by commit subject): this
+  shared checkout can pick up another session's commit in the window between
+  our commit and the failed push, and an unconditional `git reset --hard
+  origin/main` would silently destroy that commit along with ours. When the
+  check passes, it resets and returns `"rolled-back-skip"` — safe because the
+  commit is a pure rename with no unique content: nothing is lost, and the
+  next `--sweep`/`--issue` invocation simply redoes the migration from a
+  clean base. When the check fails (HEAD carries more than our commit), it
+  refuses to reset and returns `"rollback-refused-skip"` instead, leaving
+  `main` for manual recovery rather than risking another session's work. The
+  primitive never blindly resets a shared checkout, and it never resolves a
+  genuine conflict unattended.
 
 ### Why the archive sits outside `docs/plans/`
 
