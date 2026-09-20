@@ -148,7 +148,7 @@ To enable: set log level to DEBUG for the `bridge.routing` logger.
 
 When no fast-path fires, a single `run_typed(prompt, TerminusDecision, task=TERMINUS, project_key=...)` call on the Anthropic leg (Haiku) returns a typed RESPOND/REACT/SILENT verdict; the `Literal` schema makes a garbage verdict structurally impossible. The prompt (`terminus_prompt`) describes the semantics and injects sender and thread context.
 
-**Conservative default:** If the call raises, returns `"RESPOND"` — genuine questions are never silently dropped due to classifier error.
+**Conservative default:** If the call raises, returns `"RESPOND"`, so a genuine question is never silently dropped by a classifier error.
 
 **REACT collapse for bots:** When `sender_is_bot=True` and the LLM returns `REACT`, the result is collapsed to `SILENT`. REACT (emoji acknowledgment) is reserved for human-sender threads winding down naturally — not bot loops.
 

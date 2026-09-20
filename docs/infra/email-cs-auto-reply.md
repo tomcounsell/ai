@@ -13,7 +13,7 @@ Operational reference for the Cuttlefish email customer-service triage layer
 | **Cuttlefish `manage.py`** | Subprocess capability surface (`customer show/checkout-url/note/email draft`, `episode provision`). Runs in `~/src/cuttlefish/.venv`. | Timeout / non-zero exit / bad JSON → **escalate** + audit note recording the failure. |
 | **Redis** | `email:outbox:{session_id}` (auto replies), `telegram:outbox:{session_id}` (pings). | Write failure logged; ping/reply best-effort. |
 
-No new Python packages — `anthropic` is already in use. No new CLI
+No new Python packages: `anthropic` is already in use. No new CLI
 entry point: the layer is bridge-internal (imported directly by
 `bridge/email_bridge.py`).
 
