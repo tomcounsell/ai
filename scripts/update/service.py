@@ -8,6 +8,7 @@ import plistlib
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1159,10 +1160,16 @@ WORKER_RELEVANT_PATHS = [
 ]
 
 # Single registry of the per-process knobs both the release verifier and the
-# restart gate need (#3528): the relevant path set and how to find the PID.
+# restart gate need (#3528): the relevant path set, and how to find the PID.
+# The PID getters are wrapped in lambdas so both callers resolve the module
+# attribute at call time and can never observe different probes.
 PROCESS_RELEVANT_PATHS: dict[str, list[str]] = {
     "bridge": BRIDGE_RELEVANT_PATHS,
     "worker": WORKER_RELEVANT_PATHS,
+}
+PROCESS_PID_GETTERS: dict[str, Callable[[], int | None]] = {
+    "bridge": lambda: get_bridge_pid(),
+    "worker": lambda: get_worker_pid(),
 }
 
 # Bridge eligibility uses the same on-disk plist signal as the restart gate in
@@ -1327,10 +1334,18 @@ def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict
     results: dict = {}
     if machine_check.get("bridge_projects") and BRIDGE_PLIST_PATH.exists():
         results["bridge"] = classify_process(
-            project_dir, head_sha, "bridge", get_bridge_pid(), BRIDGE_RELEVANT_PATHS
+            project_dir,
+            head_sha,
+            "bridge",
+            PROCESS_PID_GETTERS["bridge"](),
+            PROCESS_RELEVANT_PATHS["bridge"],
         )
     if machine_check.get("projects"):
         results["worker"] = classify_process(
-            project_dir, head_sha, "worker", get_worker_pid(), WORKER_RELEVANT_PATHS
+            project_dir,
+            head_sha,
+            "worker",
+            PROCESS_PID_GETTERS["worker"](),
+            PROCESS_RELEVANT_PATHS["worker"],
         )
     return results

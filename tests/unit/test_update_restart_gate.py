@@ -216,6 +216,19 @@ def test_unresolvable_fallback_shas_do_not_restart(repo, live_processes):
     assert _run_gate(repo, "worker", before="deadbee", after="cafebab") == 1
 
 
+def test_unexpected_failure_prints_a_distinct_gate_error(repo, live_processes, monkeypatch, capsys):
+    """A crashing gate must never read as a confident "no relevant changes"."""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("everything is on fire")
+
+    monkeypatch.setattr(restart_gate, "decide", boom)
+    assert _run_gate(repo, "worker", before="a", after="b") == 1
+    out = capsys.readouterr().out
+    assert "GATE ERROR" in out
+    assert "not restarting" in out
+
+
 def test_classification_failure_degrades_to_pull_delta(repo, live_processes, monkeypatch):
     """Any probe blowing up must not wedge the gate shut."""
 
@@ -234,11 +247,17 @@ def test_classification_failure_degrades_to_pull_delta(repo, live_processes, mon
 # ---------------------------------------------------------------------------
 
 
-def test_gate_and_verifier_share_the_relevant_path_lists():
-    """No second copy of the path sets can exist (#3528)."""
+def test_gate_and_verifier_share_their_per_process_registry():
+    """No second copy of the path sets or the PID probes can exist (#3528)."""
     assert service.PROCESS_RELEVANT_PATHS["worker"] is service.WORKER_RELEVANT_PATHS
     assert service.PROCESS_RELEVANT_PATHS["bridge"] is service.BRIDGE_RELEVANT_PATHS
-    assert set(restart_gate.PID_GETTERS) == set(service.PROCESS_RELEVANT_PATHS)
+    assert set(service.PROCESS_PID_GETTERS) == set(service.PROCESS_RELEVANT_PATHS)
+
+
+def test_pid_getters_resolve_through_the_module_at_call_time(monkeypatch):
+    """Both callers must observe the same probe even when it is swapped out."""
+    monkeypatch.setattr(service, "get_worker_pid", lambda: 777)
+    assert service.PROCESS_PID_GETTERS["worker"]() == 777
 
 
 def test_shell_gates_call_the_module_and_hand_roll_no_diff():

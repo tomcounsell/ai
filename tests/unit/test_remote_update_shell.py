@@ -29,7 +29,8 @@ And the #3528 restart-gate wiring:
 - a no-op cron cycle (nothing pulled) still restarts a process the gate calls
   stale — the wedge that made a deferred restart permanent;
 - a no-op cycle with nothing stale restarts nothing;
-- the bridge plist check still short-circuits ahead of the gate.
+- the bridge plist check still short-circuits ahead of the gate;
+- any non-zero gate exit, including a crash, is treated as "do not restart".
 """
 
 from __future__ import annotations
@@ -126,6 +127,7 @@ case " $* " in
                 *) shift ;;
             esac
         done
+        if [ -n "${GATE_CRASH:-}" ]; then exit 3; fi
         if [ "$PROC" = "worker" ]; then
             if [ -n "${GATE_WORKER_STALE:-}" ]; then exit 0; fi
             PATHS="worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml"
@@ -326,6 +328,15 @@ def test_noop_cycle_restarts_a_stale_bridge(harness):
         calls
     )
     assert "--skip-bridge" in harness.verify_lines()[0]
+    assert result.returncode == 0
+
+
+def test_crashing_gate_restarts_nothing(harness):
+    """Any non-zero gate exit is a skip — a bad probe never kills sessions."""
+    harness.push_upstream_commit("worker/mod.py", "worker-relevant")
+    result = harness.run(extra_env={"GATE_CRASH": "1"})
+    calls = harness.calls()
+    assert not any("kickstart" in line for line in calls.splitlines()), calls
     assert result.returncode == 0
 
 

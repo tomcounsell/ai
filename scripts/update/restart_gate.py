@@ -8,7 +8,10 @@ Usage::
 Exit codes:
 
 - ``0`` — restart this process now.
-- ``1`` — do not restart.
+- ``1`` — do not restart. An unexpected failure also exits 1 (skipping is the
+  safe verdict — never SIGKILL a live worker's sessions on a bad probe) but
+  prints a distinct ``GATE ERROR:`` line so it is never mistaken for a
+  confident "no relevant changes".
 
 Answers exactly one question — "is the running process behind HEAD on the code
 it actually loads?" — through the SAME classifier the terminal release verify
@@ -44,14 +47,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.update import git, service  # noqa: E402
 
-# Resolved through the module at call time, never bound at import: the gate
-# must observe the same `service.get_*_pid` the release verifier does, even
-# when one of them is swapped out (tests, future probe changes).
-PID_GETTERS = {
-    "bridge": lambda: service.get_bridge_pid(),
-    "worker": lambda: service.get_worker_pid(),
-}
-
 
 def pull_delta_touches_paths(
     project_dir: Path, before: str, after: str, relevant_paths: list[str]
@@ -63,10 +58,14 @@ def pull_delta_touches_paths(
     """
     if not before or not after or before == after:
         return False
-    result = service.run_cmd(
-        ["git", "diff", "--name-only", before, after, "--", *relevant_paths],
-        cwd=project_dir,
-    )
+    try:
+        result = service.run_cmd(
+            ["git", "diff", "--name-only", before, after, "--", *relevant_paths],
+            cwd=project_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 - a hung/broken git must not decide a restart
+        print(f"[restart-gate] pull-delta diff failed ({exc})", file=sys.stderr)
+        return False
     if result.returncode != 0:
         # Unresolvable SHAs (shallow clone, history rewrite) — inconclusive,
         # and inconclusive must not kill a live worker's in-flight sessions.
@@ -81,13 +80,15 @@ def decide(project_dir: Path, process_name: str, before: str, after: str) -> tup
     try:
         head_sha = git.get_short_sha(project_dir)
         info = service.classify_process(
-            project_dir, head_sha, process_name, PID_GETTERS[process_name](), relevant_paths
+            project_dir,
+            head_sha,
+            process_name,
+            service.PROCESS_PID_GETTERS[process_name](),
+            relevant_paths,
         )
         classification = info["classification"]
     except Exception as exc:  # noqa: BLE001 - any probe failure degrades to the pull delta
         classification = "unknown"
-        head_sha = "unknown"
-        info = {"boot_sha": None}
         print(f"[restart-gate] {process_name}: classification failed ({exc})", file=sys.stderr)
 
     if classification == "stale":
@@ -109,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m scripts.update.restart_gate",
         description="Decide whether remote-update.sh should restart a service (#3528).",
     )
-    parser.add_argument("--process", required=True, choices=sorted(PID_GETTERS))
+    parser.add_argument("--process", required=True, choices=sorted(service.PROCESS_RELEVANT_PATHS))
     parser.add_argument(
         "--before", default="", help="SHA before this cycle's pull (fallback diff base)."
     )
@@ -119,7 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", type=Path, default=PROJECT_ROOT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    restart_needed, reason = decide(args.project_dir, args.process, args.before, args.after)
+    try:
+        restart_needed, reason = decide(args.project_dir, args.process, args.before, args.after)
+    except Exception as exc:  # noqa: BLE001 - see the GATE ERROR note below
+        # Exit 1 is the shell's "skip", and an uncaught traceback would exit 1
+        # too — the caller would then print its confident "no relevant changes
+        # detected" line for what was actually a crash. That silent-wrong-verdict
+        # shape is the #3528 bug itself, so name the failure explicitly. Skipping
+        # remains the right verdict: an inconclusive gate must never SIGKILL a
+        # live worker's in-flight sessions, and the terminal release verify
+        # still escalates a genuinely stale process on the same cycle.
+        print(f"GATE ERROR: {args.process} restart gate failed ({exc}) — not restarting")
+        return 1
     print(f"[restart-gate] {'RESTART' if restart_needed else 'SKIP'}: {reason}")
     return 0 if restart_needed else 1
 
