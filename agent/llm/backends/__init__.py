@@ -55,12 +55,16 @@ def default_sdk_timeout(backend: Backend) -> float:
     ``TIMEOUTS__ANTHROPIC_SDK_S``); ``OLLAMA`` reads
     ``settings.timeouts.local_typed_hard_s`` (20 s, env
     ``TIMEOUTS__LOCAL_TYPED_HARD_S``, operator lever 2 for a degraded
-    daemon). Read per call, never cached at module scope.
+    daemon); ``DECISIONS`` reads ``settings.timeouts.decisions_sdk_s`` (3 s,
+    env ``TIMEOUTS__DECISIONS_SDK_S``). Read per call, never cached at
+    module scope.
     """
     if backend is Backend.ANTHROPIC:
         return settings.timeouts.anthropic_sdk_s
     if backend is Backend.OLLAMA:
         return settings.timeouts.local_typed_hard_s
+    if backend is Backend.DECISIONS:
+        return settings.timeouts.decisions_sdk_s
     raise ValueError(f"no default SDK timeout for backend {backend!r}")
 
 
