@@ -7,29 +7,33 @@ fallback leg (if any) to try once when the primary raises
 context eligibility, and it reads model names from ``config.models`` and
 nothing from per-site settings, because there are none.
 
-The four rules, in order:
+The five rules, in order:
 
 1. ``kind == THINKING`` or ``task.client_only`` -> Anthropic with the
    call's model. Thinking sites never leave the subscription backend under
    this taxonomy; ``client_only`` sites never leave it for any key.
 2. ``task.backend == ANTHROPIC`` -> Anthropic with the call's model.
+5. ``task.backend == DECISIONS`` (#3421): ``is_eligible(project_key)`` ->
+   the decisions leg on ``JEV`` with an Ollama fallback on
+   ``OLLAMA_CLASSIFIER_MODEL`` (no third leg: eligible context never
+   reaches Anthropic from a decisions site); otherwise Anthropic with the
+   call's model and no fallback, exactly rule 4's route.
 3. ``task.backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama on
    ``OLLAMA_CLASSIFIER_MODEL`` with an Anthropic fallback on the call's
    model.
 4. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
 
-Fail-closed rule (charter §7): rule 3 fires only for context the router can
-prove eligible. ``tools.improvement_eligibility.is_eligible`` pins
-``valor`` ``True`` in code, reads the process-local cache for every other
-key, and treats a ``None`` key or a cache miss as ineligible, so client
-context and unknown context both land on the subscription backend. The
-eligibility import is late, inside :func:`resolve` (the same shape as
+Fail-closed rule (charter §7): rules 3 and 5 fire only for context the
+router can prove eligible. ``tools.improvement_eligibility.is_eligible``
+pins ``valor`` ``True`` in code, reads the process-local cache for every
+other key, and treats a ``None`` key or a cache miss as ineligible, so
+client context and unknown context both land on the subscription backend.
+The eligibility import is late, inside :func:`resolve` (the same shape as
 ``tools/improvement_eval/judges/serves_charter.py``), so importing
 ``agent.llm`` never pulls ``bridge.routing`` in through the eligibility
 module's config reader.
 
-#3421 adds a fifth rule ahead of rule 3 for ``backend == DECISIONS`` and
-#3420 adds ``LOCAL_ZERO_SHOT`` the same way, each with a local fallback.
+#3420 adds ``LOCAL_ZERO_SHOT`` the same way, with a local fallback.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
+from config.models import JEV, MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 
 
 @dataclass(frozen=True)
@@ -54,17 +58,22 @@ def resolve(task: LLMTask, project_key: str | None, *, model: str = MODEL_FAST) 
 
     ``model`` is the call's ``model=`` kwarg and names the Anthropic model
     on every Anthropic route, the fallback included; the Ollama leg always
-    runs ``config.models.OLLAMA_CLASSIFIER_MODEL``.
+    runs ``config.models.OLLAMA_CLASSIFIER_MODEL`` and the decisions leg
+    always runs ``config.models.JEV``.
     """
     anthropic = Route(Backend.ANTHROPIC, model)
     if task.kind is TaskKind.THINKING or task.client_only:
         return anthropic
     if task.backend is Backend.ANTHROPIC:
         return anthropic
-    if task.backend is Backend.OLLAMA:
+    if task.backend in (Backend.DECISIONS, Backend.OLLAMA):
         from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
 
-        if is_eligible(project_key):
-            return Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=anthropic)
-        return anthropic
+        if not is_eligible(project_key):
+            return anthropic
+        if task.backend is Backend.DECISIONS:
+            return Route(
+                Backend.DECISIONS, JEV, fallback=Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL)
+            )
+        return Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=anthropic)
     raise ValueError(f"no routing rule for backend {task.backend!r} (site {task.site})")

@@ -1,10 +1,12 @@
 """The routing point (#3410): ``agent/llm/router.py::resolve`` and the site registry.
 
-``resolve(task, project_key)`` is a pure function with four rules, in order
-(plan, Data Flow step 4):
+``resolve(task, project_key)`` is a pure function with five rules, in order
+(plan, Data Flow step 4; #3421 rule 5):
 
 1. ``kind == THINKING`` or ``client_only`` -> Anthropic with the call's model.
 2. ``backend == ANTHROPIC`` -> Anthropic with the call's model.
+5. ``backend == DECISIONS`` -> Jev (``JEV``) with an Ollama fallback when
+   ``is_eligible(project_key)``, else Anthropic with no fallback.
 3. ``backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama with an
    Anthropic fallback.
 4. ``backend == OLLAMA`` and not eligible -> Anthropic (charter §7, fail
@@ -34,13 +36,22 @@ from agent.llm.tasks import (
     TaskKind,
     declared_sites,
 )
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
+from config.models import JEV, MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from tools import improvement_eligibility
 
 THINK = LLMTask(site="t.think", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC)
 THINK_ON_OLLAMA = LLMTask(site="t.think_ollama", kind=TaskKind.THINKING, backend=Backend.OLLAMA)
+THINK_ON_DECISIONS = LLMTask(
+    site="t.think_decisions", kind=TaskKind.THINKING, backend=Backend.DECISIONS
+)
 CLIENT_ONLY = LLMTask(
     site="t.client_only", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA, client_only=True
+)
+CLIENT_ONLY_ON_DECISIONS = LLMTask(
+    site="t.client_only_decisions",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.DECISIONS,
+    client_only=True,
 )
 CLASSIFY_ANTHROPIC = LLMTask(
     site="t.classify_anthropic", kind=TaskKind.CLASSIFICATION, backend=Backend.ANTHROPIC
@@ -48,12 +59,18 @@ CLASSIFY_ANTHROPIC = LLMTask(
 CLASSIFY_OLLAMA = LLMTask(
     site="t.classify_ollama", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA
 )
+CLASSIFY_DECISIONS = LLMTask(
+    site="t.classify_decisions", kind=TaskKind.CLASSIFICATION, backend=Backend.DECISIONS
+)
 
 #: Captured before the autouse fixture patches ``subprocess.run`` module-wide.
 _REAL_RUN = subprocess.run
 
 ANTHROPIC_ROUTE = Route(Backend.ANTHROPIC, MODEL_FAST)
 OLLAMA_ROUTE = Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=ANTHROPIC_ROUTE)
+DECISIONS_ROUTE = Route(
+    Backend.DECISIONS, JEV, fallback=Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL)
+)
 
 
 @pytest.fixture(autouse=True)
@@ -69,15 +86,17 @@ def _gh_unavailable(monkeypatch):
     improvement_eligibility._clear_cache()
 
 
-class TestFourRules:
+class TestFiveRules:
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_1_thinking_never_leaves_anthropic(self, key):
         assert resolve(THINK, key) == ANTHROPIC_ROUTE
         assert resolve(THINK_ON_OLLAMA, key) == ANTHROPIC_ROUTE
+        assert resolve(THINK_ON_DECISIONS, key) == ANTHROPIC_ROUTE
 
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_1_client_only_never_leaves_anthropic(self, key):
         assert resolve(CLIENT_ONLY, key) == ANTHROPIC_ROUTE
+        assert resolve(CLIENT_ONLY_ON_DECISIONS, key) == ANTHROPIC_ROUTE
 
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_2_declared_anthropic(self, key):
@@ -92,15 +111,33 @@ class TestFourRules:
     def test_rule_4_ineligible_ollama_fails_closed_to_anthropic(self, key):
         assert resolve(CLASSIFY_OLLAMA, key) == ANTHROPIC_ROUTE
 
+    def test_rule_5_eligible_decisions_carries_an_ollama_fallback(self):
+        route = resolve(CLASSIFY_DECISIONS, "valor")
+        assert route == DECISIONS_ROUTE
+        assert (route.backend, route.model) == (Backend.DECISIONS, JEV)
+        assert route.fallback.backend is Backend.OLLAMA
+        assert route.fallback.model == OLLAMA_CLASSIFIER_MODEL
+        assert route.fallback.fallback is None, "no third leg: Anthropic is never reached"
+
+    @pytest.mark.parametrize("key", ["acme", None, ""])
+    def test_rule_5_ineligible_decisions_fails_closed_to_anthropic(self, key):
+        route = resolve(CLASSIFY_DECISIONS, key)
+        assert route == ANTHROPIC_ROUTE
+        assert route.fallback is None
+
     def test_the_calls_model_rides_the_anthropic_route_and_the_fallback(self):
         assert resolve(THINK, "valor", model="claude-x").model == "claude-x"
         assert resolve(CLASSIFY_OLLAMA, "valor", model="claude-x").fallback.model == "claude-x"
         assert resolve(CLASSIFY_OLLAMA, "acme", model="claude-x").model == "claude-x"
+        assert resolve(CLASSIFY_DECISIONS, "acme", model="claude-x").model == "claude-x"
+        # The decisions route never names the call's model: Jev primary, granite fallback.
+        assert resolve(CLASSIFY_DECISIONS, "valor", model="claude-x") == DECISIONS_ROUTE
 
     def test_resolve_is_pure_for_the_same_inputs(self):
         assert resolve(CLASSIFY_OLLAMA, "valor") == resolve(CLASSIFY_OLLAMA, "valor")
+        assert resolve(CLASSIFY_DECISIONS, "valor") == resolve(CLASSIFY_DECISIONS, "valor")
 
-    def test_only_the_ollama_rule_consults_eligibility(self, monkeypatch):
+    def test_only_the_local_rules_consult_eligibility(self, monkeypatch):
         calls: list[str | None] = []
 
         def _spy(key):
@@ -109,17 +146,23 @@ class TestFourRules:
 
         monkeypatch.setattr(improvement_eligibility, "is_eligible", _spy)
         resolve(THINK, "acme")
+        resolve(THINK_ON_DECISIONS, "acme")
         resolve(CLIENT_ONLY, "acme")
+        resolve(CLIENT_ONLY_ON_DECISIONS, "acme")
         resolve(CLASSIFY_ANTHROPIC, "acme")
         assert calls == []
         resolve(CLASSIFY_OLLAMA, "acme")
         assert calls == ["acme"]
+        resolve(CLASSIFY_DECISIONS, "acme")
+        assert calls == ["acme", "acme"]
 
 
 def _expected(task: LLMTask, key: str | None) -> Route:
     """The plan's Success Criteria row, as a function of the declaration."""
     if task.kind is TaskKind.THINKING or task.client_only or task.backend is Backend.ANTHROPIC:
         return ANTHROPIC_ROUTE
+    if task.backend is Backend.DECISIONS:
+        return DECISIONS_ROUTE if key == "valor" else ANTHROPIC_ROUTE
     return OLLAMA_ROUTE if key == "valor" else ANTHROPIC_ROUTE
 
 
