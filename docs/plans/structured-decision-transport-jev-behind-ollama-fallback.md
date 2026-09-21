@@ -12,19 +12,97 @@ last_comment_id: 5745559079
 
 ## Problem
 
-Placeholder.
+Lane A (#3410, PR #3524, merged as `4703bce23`) gave every non-harness LLM call a declared `LLMTask`, one routing point, two backend legs (Anthropic, Ollama), and a comparison runner whose records are the argument for a site's backend. It also measured that granite (`granite4.1:3b` via Ollama) clears the agreement bar on four comparison sites (C7 0.981, C8 0.923, C11 0.900, C15 0.885) and misses it on eight, and that on the build machine every inbound-shaped site fails `n_real` because the memory store holds 12 real `valor` messages. No comparison site moved off Anthropic.
+
+TypeSafe's Jev 1.13 is a structured-decision model: it takes a `state` and typed `questions` and answers with per-option probabilities in about half a second for two hundred-thousandths of a dollar. It answers only on `POST https://openrouter.ai/api/alpha/decisions`; chat/completions returns HTTP 400 for the slug, so neither lane-A leg can reach it. Tom's ordering (2026-09-18): local first, an external structured-decision provider only behind a local fallback. His delivery shape (2026-09-19, #3410 comment 5737918683): no transition phase, no switches; the builder iterates on the comparison until the PR is approved, and PR approval is the gate.
+
+**Current behavior:**
+
+Verified on `main` at `149f0d0da` (Freshness Check):
+
+- `agent/llm/tasks.py::Backend` has `ANTHROPIC` and `OLLAMA`; `agent/llm/router.py::resolve` raises `ValueError` for any other backend (`:70`); `agent/llm/wrapper.py::_LEGS` (`:95`) maps the two legs; `agent/llm/backends/__init__.py::default_sdk_timeout` (`:51`) knows two timers.
+- `tools/classification_eval/__main__.py::CANDIDATE_BACKENDS` (`:47`) is derived from the enum, but `_candidate_arms` (`:115`) builds only `ollama` and `anthropic` arms, so `--candidate decisions` would raise `KeyError` after passing the vocabulary check.
+- `tools/classification_eval/core.py::evaluate_bar` (`:411`) applies six criteria; there is no cost criterion, because the only paid candidate so far (Haiku) was the reference.
+- `tools/classification_eval/records.py::_audit_row` (`:126`) knows `OLLAMA` and `ANTHROPIC` landings and reads the newest record per site regardless of which arms it carries.
+- `config/models.py` has `OPENROUTER_URL` (`:56`, chat/completions) and no decisions URL, no `JEV`, no `MODEL_INFO` entry for it.
+- `tools/paid_inference_meter.py` meters in integer cents (`_valid_amount`, `:149`): a per-call reservation at Jev's 32k-context bound (32000 × 0.000000042 = 0.001344 USD) rounds to 0 cents, and every `settle` writes one `spend_receipt` `ImprovementEvidence` row (`:256`). Per-call reserve/settle on the C1 hot path would write one evidence row per inbound message and meter nothing.
+- `settings.api.openrouter_api_key` is `None` on this machine although the vault `.env` carries `OPENROUTER_API_KEY`: the field lives under the `api` group, so only `API__OPENROUTER_API_KEY` would populate it. Every reader in the repo (`tools/emoji_embedding.py:270`, `tools/improvement_eval/arm_worker.py:297`, the gemma arm at `tools/classification_eval/arms.py:271` via its `or os.environ.get(...)`) reads the flat environment variable.
+- The site walk (`agent/llm/tasks.py::_literal_field`, `:142`) accepts exactly five `LLMTask` fields with literal values; any new keyword on a declaration raises `ValueError` unless the walk learns it.
+
+**Desired outcome:**
+
+1. A third backend leg, `agent/llm/backends/decisions.py`, implementing lane A's leg protocol as it landed (`call(prompt, output_type, route, *, system, sdk_timeout, slot_timeout, max_retries, deadline=None, stack) -> BaseModel`): one `httpx` POST per call to the decisions endpoint, questions built from the output type's `Literal` and `bool` fields, `noul` to `bool` at a per-field threshold, `confidence` from the answer, reason fields empty, validated with `output_type.model_validate`, `LLMCallError` on every failure class, metered under purpose `structured_decision` without a Redis write per call.
+2. Router rule 5, `task.backend == DECISIONS and is_eligible(project_key)` → `Route(DECISIONS, JEV, fallback=Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL))`, ahead of rule 3; the ineligible case resolves to `Route(ANTHROPIC, model)` (charter §7). `Backend.DECISIONS`, `JEV`, `OPENROUTER_DECISIONS_URL`, `MODEL_INFO[JEV]`, `TimeoutSettings.decisions_sdk_s`.
+3. The comparison runner grows a `decisions` candidate arm, a `cost` criterion (at Haiku-backed sites the candidate costs at most one tenth of a Haiku call), and an audit branch for `DECISIONS` landings that also checks the Ollama fallback is a passing backend.
+4. A comparison record for every eligible classification site (C1 through C15; C16 is `client_only`) with `--candidate decisions,ollama`, so one record carries both the candidate and its fallback on the same inputs. Sites land on `DECISIONS` one word at a time on a passing record; a miss stays where lane A landed it and the record names the failing criterion; Jev is rejected as a backend, and the case records it, if it returns non-200 on more than 2% of comparison calls, agreement is below 80% at every Haiku-backed site, or C12's threshold cannot be set without raising the wrong-bind rate.
+5. `tests/unit/test_models.py::test_openrouter_jev_endpoint_is_listed` against the per-model endpoint listing, fail-closed like its sibling.
+6. The C15 pre-screen cascade (Jev `noul` on every draft, an Anthropic call for the `span` on positives) only if C15's decisions record clears its bar.
 
 ## Freshness Check
 
-Placeholder.
+**Baseline commit:** `149f0d0da` (`main`, 2026-09-21)
+**Issue filed at:** 2026-09-18T13:08:37Z
+**Disposition:** Minor drift
+
+The issue was written against the parent plan before lane A landed, so most of its references are to interfaces that now exist in a slightly different shape. Every claim below was re-read on the baseline.
+
+**File:line references and interface claims re-verified:**
+
+| Issue claim | On `main` at `149f0d0da` | Status |
+|---|---|---|
+| Leg protocol `call(prompt, output_type, route, *, system, sdk_timeout, slot_timeout, max_retries) -> BaseModel` | `agent/llm/backends/__init__.py:5-8`: the protocol also takes `deadline: float \| None = None` and `stack: LLMStack`; `ollama.py:52-63` and `anthropic.py:70-81` implement it | drifted: two extra keywords; this lane's leg takes both, and the Ollama fallback receives `deadline` from the wrapper (`wrapper.py:295`) |
+| `LLMTask` fields `question`, `noul_threshold`, `thresholds`, `decision_options` land here with defaults | `agent/llm/tasks.py:86-98`: five fields; the static walk (`:142-184`) accepts only those five, each as a literal; the leg never receives the task (`wrapper.py:244-254` passes `prompt, output_type, route` and keywords) | drifted: the four fields cannot reach the leg through the protocol and one `question` cannot describe a type with two decision fields (`IntentDecisionWithRecall`); replaced by a per-field `Decision` marker (Technical Approach) |
+| "Comparison through lane A's runner, unchanged: `--candidate decisions`" | `tools/classification_eval/__main__.py:47` derives the vocabulary from `Backend` (so the new member is accepted at parse time) but `_candidate_arms` at `:115-122` builds only two arms | drifted: the runner needs an arm builder, a `cost` criterion, and an audit branch |
+| "Metered via `paid_inference_meter.reserve(..., purpose="structured_decision")` reserving the 32k-context bound and `settle_from_response`" | `tools/paid_inference_meter.py:149-163` rounds to cents (the bound is 0 cents); `settle` (`:234-266`) writes one `ImprovementEvidence` row per settlement | drifted: per-call reserve/settle would write an evidence row per inbound message and reserve nothing; replaced by a one-cent envelope per process (Technical Approach) |
+| `OPENROUTER_API_KEY` exists as `settings.api.openrouter_api_key` | `config/settings.py:34-36`; the flat env key does not populate the nested field (spike-1: `settings.api.openrouter_api_key is None` while `os.environ["OPENROUTER_API_KEY"]` is set); every repo reader uses `os.environ.get("OPENROUTER_API_KEY")` | drifted: the leg reads the flat variable, with a `# env-scope-guard: allow` marker if the read must sit at module scope (it will not; the read is inside `call`) |
+| `httpx` is a dependency | `pyproject.toml:16` `httpx>=0.27.0` | holds |
+| Router docstring reserves rule 5 for this lane | `agent/llm/router.py:31-32` | holds |
+| Live probe: HTTP 200, typed answers, `usage.cost`; chat/completions 400 | re-run 2026-09-21 from this venv (spike-1): HTTP 200 in 517 to 925 ms, `usage.cost` 1.96e-5 to 2.35e-5, response `model` `typesafe/jev-1.13-20260917` | holds |
+| Endpoint listing needs no auth: prompt `0.000000042`, completion `0`, context 32000, `supported_parameters: []` | `GET /api/v1/models/typesafe/jev-1.13/endpoints` on 2026-09-21: HTTP 200, `data.endpoints[0]` carries exactly those values and `status: 0`; the top-level `data.context_length` is `null`, so the probe test reads the endpoint entry | holds, with the field location noted |
+| C16 email triage is `client_only` | `tools/email_cs/triage.py:100`, `client_only=True` | holds |
+| "A site may declare `backend=DECISIONS` only if its lane-A record shows granite clearing the bar" | `docs/features/llm-task-taxonomy.md:171-194`: no comparison site's granite arm cleared all six criteria; the misses were `n_real` (12 real messages on the build machine) and `p95_c4` (the build machine's GPU serialised at concurrency 4), plus `agreement` on eight sites; granite's agreement cleared the tier bar on C7, C8, C11, C15; C12 to C14 hold latency-only records that pass | drifted: read literally the landable set is empty; the plan reads the rule as "the Ollama fallback clears the bar on the same record as the decisions arm, or on the site's latency-only record" (Technical Approach, landing rule), which is what the rule is for (no single external provider on a hot path, and a fallback that is itself a passing backend) |
+
+**Cited sibling issues/PRs re-checked:**
+- #3410: closed 2026-09-20 by PR #3524 (merged as `4703bce23`); its plan was archived to `docs/archive/plans-completed/llm-task-taxonomy-routing-layer.md` in `1ab8d429e`. Everything this lane builds on is on `main`.
+- #3420 (lane B): open; its `/do-plan` is in progress in parallel (ledger slug `sdlc-3420`, no plan doc on `main` yet). Both lanes append to `Backend`, `_LEGS`, `default_sdk_timeout`, `resolve`, `_candidate_arms`, `test_llm_router.py::_expected`, `test_llm_tasks.py`'s enum pin, and the two doc tables. The additions are disjoint members and rows, so the second lane to merge rebases through a small mechanical conflict.
+- #3422 (emoji as a classification site): open, untouched by this lane.
+- #3338 / PR #3381: the live-listing probe pattern this lane's `test_openrouter_jev_endpoint_is_listed` mirrors; `tests/unit/test_models.py:62-70`.
+- #3177 (RSI): owns `tools/paid_inference_meter.py`; this lane consumes it and adds no controller logic.
+
+**Commits on main since issue was filed (touching referenced files):**
+- `4703bce23` LLM task taxonomy and routing layer (lane A) (#3524): created every file this lane extends. Read in full; the drift rows above are its effect.
+- `1ab8d429e` Migrate completed plan: the parent plan moved to `docs/archive/plans-completed/`; this plan cites it there.
+
+**Active plans in `docs/plans/` overlapping this area:** none on `main`. `recursive-self-improvement.md` (#3177) owns the meter and the case substrate this lane writes records to; coordination, not conflict. Lane B's plan (#3420) will overlap on the enum and the router and is being written in parallel.
+
+**Notes:** Four drifts change the plan's mechanism but none its outcome: the leg signature gains `deadline` and `stack`; the question metadata moves from `LLMTask` to a per-field `Decision` marker; metering moves from per-call reserve/settle to a one-cent envelope; the key is read from the flat environment variable. The fifth drift (the landing rule) is a scoping decision recorded in Technical Approach and raised in Open Questions only for the real-input sample it depends on.
 
 ## Prior Art
 
-Placeholder.
+- **#3410 / PR #3524** (merged 2026-09-20): lane A. Everything this lane plugs into: `LLMTask`, `resolve`, the leg protocol with its `deadline` re-check and `stack` seam, `run_typed`'s one-shot fallback inside the caller's budget, the comparison runner with its six-criterion bar, the `classifier_comparison` evidence kind on case `1ec40086ca1d422e90ef747775ff7f64`, the taxonomy doc's parity test. Its outcome table (no site moved to granite; `n_real` short on the build machine) is the starting state.
+- **#3338 / PR #3381** (merged 2026-09-17): the live-listing probe pattern in `tests/unit/test_models.py`, fail-closed on network error, with the `_configured_openrouter_ids()` sweep that warns on other `OPENROUTER_*` ids. This lane's Jev probe mirrors the first and stays out of the second (the slug is absent from the public catalog by design and the constant is named `JEV`).
+- **#3215 / PR #3337 and PR #3350** (merged 2026-09-15/16): `tools/paid_inference_meter.py` (reserve/settle in cents, `spend_receipt` rows, the reconcile sweep) and the metered `OpenRouterGemmaArm` in the runner (one reservation per run, settled from accumulated `usage.cost`, `metering="unknown"` the moment a response carries no cost). The runner arm pattern is reused; the per-run reservation is the model for this lane's envelope.
+- **#3001**: the import-safety contract (`LLMStack`, `_load_stack`, no third-party symbol at module scope in `agent/llm`). The decisions leg gets its HTTP client from the stack for the same reason and the same test seam.
+- **#1055 / #1111**: the hotfix invariant every leg carries (an SDK-level timer around the live request, no `asyncio.wait_for`). `httpx.AsyncClient(timeout=...)` is that timer here.
+- **pydantic/pydantic-ai#8552** (open upstream, found in Research): a request to route Jev through PydanticAI. Nothing shipped; this lane keeps the transport as one `httpx` POST and does not wait for it.
 
 ## Research
 
-Placeholder.
+**Queries used:**
+- `OpenRouter "api/alpha/decisions" TypeSafe Jev decisions endpoint instructions criteria noul` (WebSearch, 2026-09-21)
+- The live probe from this venv (Spike Results, spike-1) against the endpoint and the per-model listing; the parent plan's Research finding 1 (verbatim probe of 2026-09-18) re-read.
+
+**Key findings:**
+
+1. **The wire shape holds and `instructions` is required.** `POST https://openrouter.ai/api/alpha/decisions` with `{"model": "typesafe/jev-1.13", "state": <str>, "questions": {<id>: {"type": "choice"|"noul", "instructions": {"question": <str>, "focus"?: <str>}, "criteria": {<option>: {"what": <str>, "examples"?: [...]}}}}}` answers `{"model": "typesafe/jev-1.13-20260917", "answers": {<id>: {"type": "choice", "choice": <option>, "probabilities": {<option>: <float>}, "confidence": <float>} | {"type": "noul", "noul": <float>}}, "usage": {"input_tokens", "output_tokens", "cost"}, "id", "provider": "TypeSafe"}`. A question without `instructions` is refused with HTTP 400 and a zod-style error body `{"error": {"message": <json-encoded issue list>, "code": 400}}`. A `noul` question's `criteria` carry both `true` and `false` (the integrations found by the search normalise to that shape too). *Informs:* the question builder always emits `instructions.question` (from the `Decision` marker or a generated default) and both `noul` criteria; the leg treats any non-200 as `LLMCallError(reason="transport")` with the body's `error.message` in the message, truncated. Sources: live probe; https://openrouter.ai/docs/client-sdks/python/sdks/decisions/README.md; https://docs.typesafe.ai/concepts/system-one; https://github.com/lahfir/agent-desktop/pull/208 (noul normalisation).
+2. **A prompt-shaped `state` works.** Posting C3's reference prompt verbatim (753 characters of instructions plus the message) as `state` returned a typed answer in 517 ms. *Informs:* the leg sends `system + "\n\n" + prompt` (or `prompt` alone) as `state`, so a site's production prompt is usable unchanged; the builder trims a site's `candidate_prompt` toward a bare state while iterating, exactly as lane A's rows already do for granite, and the site's production prompt becomes whatever the passing record measured.
+3. **Dynamic options work as `choice` criteria keyed by id.** Two job ids as `criteria` keys plus a `bind`/`new` question answered `bind` / `job_a1` with confidence 0.99 / 1.0. *Informs:* C12's per-call output type carries the candidate job ids as a `Literal`, and the leg needs no special case for dynamic options.
+4. **Pricing and listing.** `GET /api/v1/models/typesafe/jev-1.13/endpoints` (no auth): `data.endpoints[0]` has `context_length 32000`, `pricing.prompt "0.000000042"`, `pricing.completion "0"`, `supported_parameters []`, `status 0`; `data.context_length` at the top level is `null`. The slug is absent from `GET /api/v1/models`. *Informs:* the probe test asserts the endpoint entry, not the top-level field; `MODEL_INFO[JEV]` records `context_window: 32000` and the price with retrieval date 2026-09-21; the per-call cost bound used for the metering headroom check is 32000 × 4.2e-8 = 0.001344 USD.
+5. **The usage block is Anthropic-style (`input_tokens`/`output_tokens`).** *Informs:* `settle_from_response`'s token estimate path (`prompt_tokens`/`completion_tokens`) would find nothing; the leg settles from `usage.cost` only and marks the envelope `metering="unknown"` when a 200 carries no `cost` (charter §8: uncertain metering is not zero cost).
+6. **No published deprecation policy for `/api/alpha/*`** (unchanged from the parent plan; the search found several third-party integrations making the endpoint path configurable for exactly this reason). *Informs:* `OPENROUTER_DECISIONS_URL` is one constant with an env override in the shape of `OPENROUTER_URL`, the model slug is pinned, and the listing probe fails by name.
+7. **Quality prior** (parent plan finding 2): TypeSafe's own 67.8% agreement figure sits under every tier bar, and the probe answered `other` (0.72) for "thanks, that looks great" on C3's prompt where the reference says `question`. *Informs:* the expected outcome is a leg, a rule, a runner arm, and records, with landings on few sites or none; the plan's success criteria are written so that a zero-landing result with complete records is a pass.
+
+A `tools.memory_search save` of findings 1, 4, and 5 is attempted at plan time; this section is the capture point.
 
 ## Spike Results
 
