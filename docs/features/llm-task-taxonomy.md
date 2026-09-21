@@ -1,10 +1,10 @@
 # LLM Task Taxonomy
 
-**Status:** Shipped (issue #3410, lane A)
+**Status:** Shipped (issue #3410, lane A; #3420, lane B)
 
 Every non-harness LLM call site in `agent/ bridge/ worker/ tools/ reflections/ scripts/` declares one `LLMTask` (`agent/llm/tasks.py`) as a module constant beside its output type and passes it as `task=` to `run_typed`. The declaration names the site, its kind (`classification` or `thinking`), the backend it lands on, its error-cost tier, and whether charter §7 pins it to the subscription backend (`client_only`). The router (`agent/llm/router.py::resolve`) reads the declaration with the call's project key and picks the leg. The declaration is the only per-site backend choice in the repo: moving a site between backends is a one-word diff, and the comparison record in the site's row below is the argument for the word.
 
-The transport underneath (the wrapper, the backend legs, the fallback budget, the hotfix #1055 invariant) is documented in [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md). The operator side (Ollama service settings, the log lines, rollback levers) is in [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md).
+The transport underneath (the wrapper, the backend legs, the fallback budget, the hotfix #1055 invariant) is documented in [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md). The local encoder backend (the embedding model, the per-site head, the fit protocol) is in [Local Encoder Classifier](local-encoder-classifier.md). The operator side (Ollama service settings, the encoder weights, the log lines, rollback levers) is in [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md).
 
 ## The Two Kinds
 
@@ -33,7 +33,7 @@ NEEDS_RESPONSE = LLMTask(
 |-------|---------|
 | `site` | A stable dotted id (`routing.needs_response`, `promise_gate.verdict`). Keys the comparison records, the doctor rows, and the table below. |
 | `kind` | `TaskKind.CLASSIFICATION` or `TaskKind.THINKING`. |
-| `backend` | `Backend.ANTHROPIC` or `Backend.OLLAMA`: the backend the site lands on for eligible context. #3420 and #3421 append their own members. |
+| `backend` | `Backend.ANTHROPIC`, `Backend.OLLAMA`, or `Backend.LOCAL_ENCODER`: the backend the site lands on for eligible context. `LOCAL_ENCODER` is the per-site linear head on the local embedding model ([Local Encoder Classifier](local-encoder-classifier.md)); the site's committed head `agent/llm/backends/heads/<site>.json` is its model. #3421 appends its own member. |
 | `error_cost` | `ErrorCost.LOW`, `MEDIUM` (default), or `HIGH`: what a wrong answer costs at the site. Sets the acceptance-bar tier. |
 | `client_only` | `True` pins the site to the subscription backend for every project key (charter §7). |
 
@@ -105,10 +105,12 @@ One row per declared site, read by `tests/unit/test_llm_task_taxonomy.py` (doc/c
 |------|-----------|-------|
 | 1 | `kind == THINKING` or `client_only` | `Route(ANTHROPIC, model)`. `model` is the call's `model=` kwarg (default `MODEL_FAST`, Haiku). |
 | 2 | `backend == ANTHROPIC` | `Route(ANTHROPIC, model)`. |
-| 3 | `backend == OLLAMA` and `is_eligible(project_key)` | `Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=Route(ANTHROPIC, model))`. |
-| 4 | `backend == OLLAMA` otherwise | `Route(ANTHROPIC, model)`. |
+| 3 | `backend == LOCAL_ENCODER` and `is_eligible(project_key)` | `Route(LOCAL_ENCODER, task.site, fallback=Route(ANTHROPIC, model))`. The route's `model` is the site id, which names the committed head. |
+| 4 | `backend == LOCAL_ENCODER` otherwise | `Route(ANTHROPIC, model)`. |
+| 5 | `backend == OLLAMA` and `is_eligible(project_key)` | `Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=Route(ANTHROPIC, model))`. |
+| 6 | `backend == OLLAMA` otherwise | `Route(ANTHROPIC, model)`. |
 
-A route with a `fallback` is the only route that can log `llm_fallback`: when the Ollama leg raises `LLMCallError`, the wrapper runs the Anthropic leg once inside the caller's remaining budget. #3421 adds a fifth rule ahead of rule 3 for `backend == DECISIONS` and #3420 adds `LOCAL_ZERO_SHOT` the same way, each with a local fallback. There are no per-site settings switches and no shadow routes.
+A route with a `fallback` is the only route that can log `llm_fallback`: when the local leg (encoder or Ollama) raises `LLMCallError`, the wrapper runs the Anthropic leg once inside the caller's remaining budget. The local rules (3 and 5) are the only rules that consult eligibility. #3421 adds its own rule ahead of the Ollama rules for `backend == DECISIONS` the same way, with a local fallback. There are no per-site settings switches and no shadow routes.
 
 ## Eligibility
 
@@ -126,7 +128,7 @@ Project key threading: `should_respond_async` passes `project["_key"]` to the th
 
 ## Acceptance Bar
 
-A classification site lands on a local backend only with a `classifier_comparison` record that clears every criterion below. The PR reviewer applies the bar per site from the landing summary in the PR body, and `python -m tools.classification_eval --audit` applies the same criteria mechanically, exiting 1 on any `OLLAMA` landing whose record misses one, on any site without a record, and on any `ANTHROPIC` landing whose record has no Anthropic arm.
+A classification site lands on a local backend only with a `classifier_comparison` record that clears every criterion below. The PR reviewer applies the bar per site from the landing summary in the PR body, and `python -m tools.classification_eval --audit` applies the same criteria mechanically, exiting 1 on any local landing (every backend other than `ANTHROPIC`) whose judged record misses one, on any site without a record, and on any `ANTHROPIC` landing whose record has no Anthropic arm.
 
 ### Tiers
 
@@ -153,7 +155,17 @@ The record names the failing criteria by these keys, and the audit prints them p
 
 C12, C13, and C14 stay on granite by design and carry latency-only records: the runner measures no agreement for them, so `agreement` and `n_real` are outside their criteria, while `n`, `error_rate`, `contended`, and any site budget still apply.
 
-A site that misses the bar after the builder's iteration lands with `backend=ANTHROPIC`, its record attached and naming the failing criterion. The same bar governs #3420 and #3421.
+A site that misses the bar after the builder's iteration lands with `backend=ANTHROPIC`, its record attached and naming the failing criterion. The same bar governs #3421.
+
+### A fitted head
+
+A `LOCAL_ENCODER` landing is a head fit on the reference arm's labels, so the bar applies with three additions that keep the training data out of the claim ([Local Encoder Classifier](local-encoder-classifier.md#the-fit-protocol)):
+
+- **Held-out split only.** `python -m tools.classification_eval --site <id> --fit --candidate local_encoder,anthropic` splits the draw by content digest before any label exists (`split_by_digest`: the site minimum, at least half real), labels the training split with the reference arm, fits the head, and runs `compare` on the held-out split alone. The criteria above (`agreement`, `p95_c4`, `contended`, `error_rate`, `n`, `n_real`) are read off that held-out record; the training-split agreement is a printed sanity line and never a claim.
+- **The `fit` block.** The record carries `fit: {head_run_id, n_train, n_train_real, split: "digest", landed, miss_arms, miss_criteria}`. `landed` is `true` only for a run that was allowed to write the served head (`--land`) and did; a measure-only run on a landed site writes a record with `landed: false` and leaves the serving head alone.
+- **Both arms.** `--land` requires the `anthropic` candidate (the restructured `system` + text shape a landed site's fallback serves) and the runner copies the staged head to `agent/llm/backends/heads/<site>.json` only when `evaluate_bar` is empty for both the `local_encoder` and the `anthropic` arm on the same held-out record; a miss on either arm deletes any served head and names the arm in `fit.miss_arms`. The runner holds the rule, so a fallback that disagrees with the verbatim prompt cannot land.
+
+The audit's head-provenance rule: for a `LOCAL_ENCODER` site, `--audit` judges the latest record whose `fit.landed` is `true` (measure-only records are skipped), requires both its `local_encoder` and its `anthropic` arm to clear the bar, and requires the committed head's `run_id` to equal that record's `fit.head_run_id`. No head file, a mismatched `run_id`, or no landed record is a MISS. `tests/unit/test_classifier_heads.py` ties the committed head's `classes` to the site's output type in the same direction.
 
 ## Comparison Records
 
@@ -166,7 +178,7 @@ python -m tools.classification_eval --audit
 python -m tools.classification_eval --list-sites
 ```
 
-A record carries, per arm: agreement with the reference arm and its bootstrap CI, p50/p95 at concurrency 1 and 4, cost per call with the price's retrieval date, error rate; and per record: `n` with its `n_real`/`n_fixture` split, the site minimum, `budget_s`, `contended`, and `latency_only`.
+A record carries, per arm: agreement with the reference arm and its bootstrap CI, p50/p95 at concurrency 1 and 4, cost per call with the price's retrieval date, error rate; and per record: `n` with its `n_real`/`n_fixture` split, the site minimum, `budget_s`, `contended`, `latency_only`, and, for a fit run, the `fit` block above.
 
 ## Lane A Outcome
 
@@ -193,13 +205,38 @@ Lane A shipped the taxonomy, the router, the two legs, the comparison runner, an
 
 Every record has `contended: false` and a candidate error rate of 0.000. Agreement is against the reference arm (Haiku with the site's prompt verbatim; gemma-4-26b via OpenRouter for C15, on the paid route of the same weights because the free route was throttled upstream, 104 calls for 0.0025 USD settled under `promise_detector`). C15's reference is gemma, so both its arms are candidates and the Haiku number is the landed backend's; the audit accepts an `ANTHROPIC` landing whose record carries an Anthropic arm.
 
-The records are the evidence the two follow-up lanes target. #3420 (lane B) adds a `LOCAL_ZERO_SHOT` backend (GLiClass ONNX) behind the same router and runs it through this runner on the sites granite missed first, landing per site by the same bar. #3421 (lane C) adds a `DECISIONS` backend (OpenRouter's structured-decision endpoint) with the Ollama leg as its fallback, never on a site whose local backend missed the bar. Both are one-word landings on the declaration once their record clears the bar; a site's `n_real` shortfall is cleared by running the comparison on a machine whose memory store holds enough real `valor` traffic. #3422 is the emoji reaction choice as a new classification site.
+The records are the evidence the follow-up lanes target. #3420 (lane B, below) adds the `LOCAL_ENCODER` backend behind the same router and fits a per-site head on each record's reference labels, landing per site by the same bar on a held-out split. #3421 (lane C) adds a `DECISIONS` backend (OpenRouter's structured-decision endpoint) with the Ollama leg as its fallback, never on a site whose local backend missed the bar. Both are one-word landings on the declaration once their record clears the bar; a site's `n_real` shortfall is cleared by running the comparison on a machine whose memory store holds enough real `valor` traffic. #3422 is the emoji reaction choice as a new classification site.
+
+## Lane B Outcome
+
+Lane B shipped `Backend.LOCAL_ENCODER`, the encoder leg, the runner's fit path (`--fit`, `--land`, `--preflight`, `--precheck`), the weights step, and the doctor row, and recorded the zero-shot GLiClass candidate as rejected on the case (investigation `4c0d6b44b9c942a5999637afbe22e8a9`: under the majority-class baseline on five of six measured sites). The lane's own numbers come in two tables.
+
+The precheck is free and fixture-only: each site's lane A reference labels paired with its fixtures, embedded through the leg, scored five-fold through the same `fit_head` a landing fits with. A site under `bar - 0.10` skips the fit (`precheck_below_bar`); the rest are fit in this order, highest agreement relative to its bar first. On the build machine (the MacBook Air), 8.1 s wall-clock, zero spend:
+
+| Id | Site | n | CV agreement | Majority | Bar | Gate | Mark |
+|----|------|---|--------------|----------|-----|------|------|
+| C15 | `improvement_collect.promise_judge` | 40 | 0.850 | 0.825 | 0.85 | 0.75 | fit |
+| C7 | `injection_inspection.risk` | 40 | 0.875 | 0.625 | 0.90 | 0.80 | fit |
+| C8 | `context_recall.advised` | 40 | 0.850 | 0.800 | 0.90 | 0.80 | fit |
+| C1 | `routing.needs_response` | 188 | 0.883 | 0.793 | 0.95 | 0.85 | fit |
+| C11 | `health_check.judge` | 40 | 0.825 | 0.800 | 0.90 | 0.80 | fit |
+| C9 | `promise_gate.verdict` | 40 | 0.750 | 0.575 | 0.85 | 0.75 | fit |
+| C2 | `routing.terminus` | 188 | 0.809 | 0.809 | 0.95 | 0.85 | precheck_below_bar |
+| C4 | `intent_classifier.intent` | 188 | 0.654 | 0.335 | 0.95 | 0.85 | precheck_below_bar |
+| C10 | `session_completion.novelty` | 40 | 0.600 | 0.675 | 0.90 | 0.80 | precheck_below_bar |
+| C3 | `routing.work_request` | 188 | 0.564 | 0.346 | 0.95 | 0.85 | precheck_below_bar |
+| C6 | `agent_catchup.judge` | 40 | 0.400 | 0.450 | 0.85 | 0.75 | precheck_below_bar |
+| C5 | `classifier.work_type` | 40 | 0.450 | 0.500 | 0.90 | 0.80 | precheck_below_bar |
+
+C13 and C14 are skipped (latency-only records, no reference labels); C12 is excluded by rule (its `job_id` answer is an open set); C16 is `client_only`. C2 sits at its majority baseline because the embedded text carries no thread context; the message-first composition function the landing step adds for context-bearing sites supplies it. The precheck is re-run on the landing host before the landing loop, so the gate reads that host's records.
+
+The landing numbers (both candidate arms' held-out agreement, `p95_c4`, `n`, `n_real`, `n_train`, `n_train_real`, head run id, record id, failing criterion if any, per site) come from the landing run on the Valor host that owns the `valor` bridge, whose memory store holds the real inbound messages the `n_real` criterion demands; that table lands here and in [Local Encoder Classifier](local-encoder-classifier.md#landing-outcome) once the run has happened. Until then no site declares `Backend.LOCAL_ENCODER` and the site table above is unchanged.
 
 ## Tooling
 
 | Command | What it shows |
 |---------|---------------|
-| `python -m tools.doctor` (full run) | The "LLM routing" section: one row per declared site (kind, backend, tier, the route `resolve` returns for `valor` and for a client key, the declaring `path:line`), the per-process eligibility cache state, and the Ollama daemon row (model pulled and loaded, its `expires_at` as keep-alive evidence, `local_typed_hard_s`). The daemon row fails when a declared `OLLAMA` site would fall back to Anthropic on every call on this machine. |
+| `python -m tools.doctor` (full run) | The "LLM routing" section: one row per declared site (kind, backend, tier, the route `resolve` returns for `valor` and for a client key, the declaring `path:line`), the per-process eligibility cache state, the Ollama daemon row (model pulled and loaded, its `expires_at` as keep-alive evidence, `local_typed_hard_s`), and the `local_encoder` row (the `classification-local` extra importable, every pinned weights file present with its sha256, one head per declared `LOCAL_ENCODER` site). Each local row fails when a declared site on that backend would fall back to Anthropic on every call on this machine, naming the fix. |
 | `python -m tools.classification_eval --audit` | Every classification site's declared backend, record id, and bar result; exit 1 on any miss. |
 | `grep "llm_route site=" logs/bridge.log` | Which backend answered each call. The line fields and the greps are in the [infra doc](../infra/llm-task-routing.md). |
 
@@ -207,13 +244,14 @@ The records are the evidence the two follow-up lanes target. #3420 (lane B) adds
 
 `tests/unit/test_llm_task_taxonomy.py` is a pure AST walk (it imports only `agent.llm.tasks`) with six checks: every `run_typed(` call carries `task=`; the wrapper is the only entry point (no second, backend-specific one exists anywhere); every module with an LLM call token declares an `LLMTask` unless allowlisted; site ids are unique and every classification task is reached through `run_typed`; the site table above lists every declared site with the declaration's kind, backend, tier, and §7 class (this page's parity check); and the hotfix #1055 invariant holds by function body (no `asyncio.wait_for` inside `_evaluate_promise_async`, `read_the_room`, `_judge_completion_novelty`, `_gemma_classify`, or any function in `agent/llm/backends/`, and every `run_typed` call in those four bodies passes `hard_timeout=None`).
 
-`tests/unit/test_llm_router.py` is the table-driven route test over every declaration; `tests/unit/test_llm_router_eligibility.py` feeds a client-mapped message through every `OLLAMA` site and asserts the Anthropic leg, feeds a `valor` message through the same sites with `gh` unavailable and asserts the Ollama leg, and pins `email_cs.triage` to Anthropic for every key; `tests/unit/test_worker_startup_warm_cache.py` pins the held warm-up task; `tests/unit/test_classification_eval.py` covers the runner's math, the minimum-n refusal, the bar, contention, and the audit exit codes.
+`tests/unit/test_llm_router.py` is the table-driven route test over every declaration; `tests/unit/test_llm_router_eligibility.py` feeds a client-mapped message through every local site (`OLLAMA` and `LOCAL_ENCODER`) and asserts the Anthropic leg, feeds a `valor` message through the same sites with `gh` unavailable and asserts the leg the declaration names, and pins `email_cs.triage` to Anthropic for every key; `tests/unit/test_worker_startup_warm_cache.py` pins the held warm-up task; `tests/unit/test_classification_eval.py` covers the runner's math, the minimum-n refusal, the bar, contention, the fit path (the digest split, the both-arms landing gate, served-head protection, the precheck gate, preflight), and the audit exit codes including head provenance; `tests/unit/test_classifier_heads.py` checks every committed head against its site.
 
 ## See Also
 
 - [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md): `run_typed`, the leg protocol, the fallback budget, every migrated call site.
-- [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md): Ollama service settings, log lines, reference-arm spend, rollback levers.
-- [Local Ollama Model Policy](local-model-policy.md): which Ollama models run on each machine.
+- [Local Encoder Classifier](local-encoder-classifier.md): the `LOCAL_ENCODER` leg, the head file, the fit protocol, the precheck gate.
+- [`docs/infra/llm-task-routing.md`](../infra/llm-task-routing.md): Ollama service settings, the encoder weights, log lines, reference-arm spend, rollback levers.
+- [Local Ollama Model Policy](local-model-policy.md): which local models run on each machine.
 - [Config Timeout Catalog](config-timeout-catalog.md): `local_typed_hard_s` and the Anthropic pair.
 - [Improvement Research Cycle](improvement-research-cycle.md): the case, the evidence model, and the promise judge.
 - `docs/improvement-charter.md` §7: the eligibility line the router enforces.
