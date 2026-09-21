@@ -177,6 +177,10 @@ def load_head(path: Path) -> Head:
 
 
 _LOCK = threading.Lock()
+"""Guards the one-time runtime build (Race 1); taken inside ``asyncio.to_thread``."""
+_HEADS_LOCK = threading.Lock()
+"""Guards the head cache; its own lock so ``_load_head`` (event-loop thread, a small
+JSON read) never waits behind a runtime build in progress on a worker thread."""
 _RUNTIME: Runtime | None = None
 _HEADS: dict[str, Head] = {}
 
@@ -192,7 +196,7 @@ def _load_head(site: str) -> Head:
             f"{LEG} leg: no head for site {site} at agent/llm/backends/heads/{site}.json",
             reason="transport",
         )
-    with _LOCK:
+    with _HEADS_LOCK:
         if site not in _HEADS:
             _HEADS[site] = load_head(path)
     return _HEADS[site]
@@ -287,6 +291,7 @@ def _reset_for_tests() -> None:
     global _RUNTIME
     with _LOCK:
         _RUNTIME = None
+    with _HEADS_LOCK:
         _HEADS.clear()
 
 
