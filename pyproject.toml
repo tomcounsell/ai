@@ -73,6 +73,15 @@ tts = [
     "soundfile>=0.12.0",
     "onnxruntime>=1.25.0",
 ]
+# Local encoder classification backend (Backend.LOCAL_ENCODER, #3420): a
+# pinned sentence-embedding model through onnxruntime plus a per-site linear
+# head. numpy is a base dependency. Installed fleet-wide by /update's
+# `uv sync --all-extras`; the weights come from
+# `python scripts/download_local_encoder_models.py` (also run at /update).
+classification-local = [
+    "onnxruntime>=1.25.0",
+    "tokenizers>=0.21",
+]
 
 [project.scripts]
 critique-roster-check = "tools.critique_roster_check:main"

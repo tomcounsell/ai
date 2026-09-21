@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,44 @@ OLLAMA_SUPERSEDED_MODELS = [
     "qwen3:4b",
     "gemma4:e2b",
 ]
+
+
+# =============================================================================
+# LOCAL ENCODER (Backend.LOCAL_ENCODER, #3420)
+# A pinned sentence-embedding model served in-process through onnxruntime
+# (the `classification-local` extra) with one committed linear head per
+# landed site under agent/llm/backends/heads/. The leg never downloads:
+# `scripts/download_local_encoder_models.py` fetches and checksum-verifies
+# these files at /update, and `python -m tools.doctor` reports their state.
+# =============================================================================
+
+# Hugging Face repo and the exact revision the checksums below were taken from.
+LOCAL_ENCODER_MODEL = "Xenova/bge-small-en-v1.5"
+LOCAL_ENCODER_REVISION = "ea104dacec62c0de699686887e3f920caeb4f3e3"
+
+# Repo-relative file name -> sha256 of its content at LOCAL_ENCODER_REVISION.
+# Files are stored under local_encoder_models_dir() with the same relative
+# path (so the int8 model sits at ``<dir>/onnx/model_int8.onnx``); the
+# download script, the leg's loader, and the doctor row all read this dict.
+LOCAL_ENCODER_FILES: dict[str, str] = {
+    "onnx/model_int8.onnx": "bf64d05457cb391fa88d045faf5927a15ea36d96228ddf23ea970087afdc1197",
+    "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+}
+
+# Width of the CLS vector the model emits; every head's ``W`` has this many rows.
+LOCAL_ENCODER_DIM = 384
+
+
+def local_encoder_models_dir() -> Path:
+    """Where the pinned encoder files live on this machine.
+
+    ``LOCAL_ENCODER_MODELS_DIR`` overrides the default ``~/.cache/valor-encoder/``
+    (read like ``KOKORO_MODELS_DIR``: an ambient env var, no settings field, no
+    ``.env.example`` entry). The cache is shared across every worktree.
+    """
+    return Path(
+        os.environ.get("LOCAL_ENCODER_MODELS_DIR", os.path.expanduser("~/.cache/valor-encoder"))
+    )
 
 
 def _host_ram_gb() -> float:
