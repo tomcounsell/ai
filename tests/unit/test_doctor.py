@@ -1022,7 +1022,7 @@ class TestLocalEncoderRow:
         assert by_name["ollama_daemon"].category == "LLM routing"
         return by_name["local_encoder"]
 
-    def test_passes_as_info_when_no_site_declares_the_backend(
+    def test_local_encoder_passes_as_info_when_no_site_declares_the_backend(
         self, fake_weights, fake_heads, monkeypatch
     ):
         from tools import doctor
@@ -1035,7 +1035,7 @@ class TestLocalEncoderRow:
         assert "LOCAL_ENCODER sites: none" in row.message
         assert row.fix is None
 
-    def test_passes_with_extra_weights_and_a_head_per_site(
+    def test_local_encoder_passes_with_extra_weights_and_a_head_per_site(
         self, fake_weights, fake_heads, monkeypatch
     ):
         from tools import doctor
@@ -1051,7 +1051,9 @@ class TestLocalEncoderRow:
         assert "heads=ok (2)" in row.message
         assert "LOCAL_ENCODER sites: fake.a, fake.b" in row.message
 
-    def test_missing_extra_fails_naming_uv_sync(self, fake_weights, fake_heads, monkeypatch):
+    def test_local_encoder_missing_extra_fails_naming_uv_sync(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
         from tools import doctor
 
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
@@ -1062,7 +1064,7 @@ class TestLocalEncoderRow:
         assert "fall back to Anthropic on every call" in row.message
         assert "uv sync --all-extras" in row.fix
 
-    def test_missing_weights_file_fails_naming_the_script(
+    def test_local_encoder_missing_weights_file_fails_naming_the_script(
         self, fake_weights, fake_heads, monkeypatch
     ):
         from tools import doctor
@@ -1077,7 +1079,7 @@ class TestLocalEncoderRow:
         assert "weights=missing: tokenizer.json" in row.message
         assert "scripts/download_local_encoder_models.py" in row.fix
 
-    def test_mismatched_weights_file_fails_naming_the_script(
+    def test_local_encoder_mismatched_weights_file_fails_naming_the_script(
         self, fake_weights, fake_heads, monkeypatch
     ):
         from tools import doctor
@@ -1094,7 +1096,9 @@ class TestLocalEncoderRow:
         assert "weights=mismatch: onnx/model_int8.onnx" in row.message
         assert "scripts/download_local_encoder_models.py" in row.fix
 
-    def test_missing_head_fails_naming_the_head(self, fake_weights, fake_heads, monkeypatch):
+    def test_local_encoder_missing_head_fails_naming_the_head(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
         from tools import doctor
 
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
@@ -1105,7 +1109,7 @@ class TestLocalEncoderRow:
         assert "heads=missing: fake.b" in row.message
         assert "agent/llm/backends/heads/fake.b.json" in row.fix
 
-    def test_ollama_daemon_row_is_untouched_by_the_encoder_state(
+    def test_local_encoder_ollama_daemon_row_is_untouched_by_the_encoder_state(
         self, fake_weights, fake_heads, monkeypatch
     ):
         from agent.llm.tasks import Backend, declared_sites

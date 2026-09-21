@@ -2070,7 +2070,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
         _append_warning(result, f"Redis replication: unexpected error: {_rr_exc}")
 
-    # Step 3.15: Local encoder weights (Backend.LOCAL_ENCODER, #3420).
+    # Step 3.15: local encoder weights (Backend.LOCAL_ENCODER, #3420).
     # Idempotent: skipped when every pinned file in config.models
     # .LOCAL_ENCODER_FILES is present under $LOCAL_ENCODER_MODELS_DIR
     # (default ~/.cache/valor-encoder/) with a matching sha256; a missing or
