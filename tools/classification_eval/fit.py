@@ -258,6 +258,7 @@ def cv_agreement(
     n = len(labels)
     order = np.random.default_rng(seed).permutation(n)
     agreed = 0
+    scored = 0
     for fold in range(folds):
         held = order[fold::folds]
         if len(held) == 0:
@@ -270,7 +271,8 @@ def cv_agreement(
         weights = fit_head(vectors[mask], train_labels, classes)
         predicted = predict(vectors[held], weights, classes)
         agreed += sum(1 for i, p in zip(held, predicted, strict=True) if labels[i] == p)
-    return agreed / n if n else 0.0
+        scored += len(held)
+    return agreed / scored if scored else 0.0
 
 
 def majority_baseline(labels: Sequence[str]) -> float:
@@ -650,8 +652,9 @@ def precheck_rows(
         fixtures = site.fixtures()
         labels = list(record["reference"]["labels"][: int(record["n_fixture"])])
         if len(labels) != len(fixtures):
+            n_fixture = record["n_fixture"]
             skipped.append(
-                f"{site_id}: record n_fixture {len(labels)} != {len(fixtures)} fixtures today"
+                f"{site_id}: record n_fixture {n_fixture} != {len(fixtures)} fixtures today"
             )
             continue
         pairs = [(inp, label) for inp, label in zip(fixtures, labels, strict=True) if label]

@@ -719,6 +719,24 @@ def test_fit_head_is_deterministic_and_learns_the_labels():
     assert cv_agreement(vectors, labels, ["no", "yes"], seed=1) == 1.0
 
 
+def test_cv_agreement_denominator_excludes_a_degenerate_folds_held_items():
+    """A single minority-class example forces exactly one fold's training
+    split down to one class (skipped via ``continue``), whichever fold holds
+    it. That fold's held-out items must not count in the denominator: the
+    remaining folds are perfectly learnable, so the ratio must be exactly
+    1.0, not deflated by the skipped fold's uncounted items."""
+    import numpy as np
+
+    from tools.classification_eval.fit import cv_agreement
+
+    texts = [f"text {i}" for i in range(20)] + ["text 20?"]
+    vectors = np.stack([_fake_embed(t) for t in texts])
+    labels = ["yes" if "?" in t else "no" for t in texts]
+
+    assert cv_agreement(vectors, labels, ["no", "yes"]) == 1.0
+    assert cv_agreement(vectors, labels, ["no", "yes"], seed=7) == 1.0
+
+
 # --- the fit path: run_fit, the landing gate, the audit's head provenance -------------
 
 

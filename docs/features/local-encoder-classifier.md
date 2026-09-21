@@ -186,7 +186,7 @@ The softmax distributions sit near uniform (0.25 to 0.45 on the winning label of
 
 ## Follow-up
 
-A scheduled measure-only re-comparison of each landed site against fresh real messages (`--site <id> --fit` without `--land`, on a timer, with its reference spend) is its own issue. It needs reference spend and a timer, neither built here; the `confidence=` grep above is the live signal until it exists.
+A scheduled measure-only re-comparison of each landed site against fresh real messages (`--site <id> --fit` without `--land`, on a timer, with its reference spend) is tracked under #3542. It needs reference spend and a timer, neither built here; the `confidence=` grep above is the live signal until it exists.
 
 ## Tests
 
