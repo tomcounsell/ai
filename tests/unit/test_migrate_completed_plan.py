@@ -605,16 +605,6 @@ class TestMigrationRollbackSafety:
         _git(racer, "config", "user.name", "Racer")
         return origin, repo, plan
 
-    @staticmethod
-    def _origin_tip(origin: Path) -> str:
-        return subprocess.run(
-            ["git", "log", "--oneline", "-1", "main"],
-            cwd=str(origin),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout.strip()
-
     def test_peer_uncommitted_edits_survive_the_rollback(self, tmp_path, monkeypatch):
         """A peer's uncommitted tracked edit must survive a rolled-back migration.
 
@@ -875,6 +865,79 @@ class TestMigrationRollbackSafety:
 
         assert result.returncode != 0
         assert "timed out" in result.stderr
+
+    def test_landed_but_timed_out_commit_is_rolled_back_not_reverse_renamed(
+        self, tmp_path, monkeypatch
+    ):
+        """A `git commit` that LANDS but blows its timeout must not be treated as a no-op.
+
+        The hook chain can push a commit past the timeout, and a kill after
+        git's ref update but before process exit reports non-zero for a commit
+        that exists. Reverse-renaming there strands the migration commit on the
+        shared main AND leaves its index dirty with a staged reverse-rename --
+        strictly worse than #3530. Real git throughout: the commit really runs
+        and really succeeds; only its reported returncode is replaced.
+        """
+        from scripts.migrate_completed_plan import GIT_TIMEOUT_RETURNCODE
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "timeout-commit-plan.md")
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args and args[0] == "commit":
+                # The commit really happened; git was killed before it could say so.
+                return subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=GIT_TIMEOUT_RETURNCODE,
+                    stdout=result.stdout,
+                    stderr=result.stderr + "git commit timed out after 30s",
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip", (
+            "a landed-but-timed-out commit was reported as a no-op; "
+            "the migration commit is stranded on the shared main"
+        )
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0", (
+            "the migration commit was left stranded ahead of origin/main"
+        )
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the shared checkout was left dirty (staged reverse-rename), which breaks "
+            "the clean-tree precondition for every peer session"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "timeout-commit-plan.md").exists()
+
+    def test_genuinely_failed_commit_undoes_only_its_own_rename(self, tmp_path):
+        """A commit git really refused leaves no stranded commit and no staged rename.
+
+        Real refusal via a real failing pre-commit hook -- no mocking of git
+        semantics. This is the other half of the landed/not-landed fork, and
+        the only coverage of the `mutation-failed-skip` undo path.
+        """
+        origin, repo, plan = self._setup(tmp_path, "refused-commit-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "mutation-failed-skip"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the rename was not undone; the shared checkout is left dirty"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "refused-commit-plan.md").exists()
 
     def test_hanging_push_still_rolls_back(self, tmp_path, monkeypatch):
         """A git push that blows its timeout must not strand the commit."""

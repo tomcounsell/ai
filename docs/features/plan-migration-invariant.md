@@ -41,7 +41,11 @@ is the **only** code that moves a plan out of root. It:
   never mutates a checkout another session is using. A `git mv` or `git
   commit` that fails *after* those preconditions passed is a different
   signal — the primitive was already mid-mutation — and returns
-  `"mutation-failed-skip"` after undoing its own rename.
+  `"mutation-failed-skip"` after undoing its own rename. A failed `git commit`
+  is never assumed to be a no-op: the primitive reads `HEAD` first, and if the
+  migration commit actually landed (a blown timeout after git's ref update, for
+  example) it routes to the rollback below instead of reverse-renaming, which
+  would otherwise strand the commit *and* leave the shared index dirty.
 - Requires local `main` to already match `origin/main`, or be cleanly
   fast-forwardable to it, before doing any `git mv`/commit (issue #3530). If
   local `main` already carries commits `origin/main` lacks, the primitive
@@ -86,7 +90,10 @@ a fresh fetch:
 | ours plus a peer's commit | `git rebase --onto <ours>^ <ours>` — drops only ours, replays theirs | `rolled-back-skip` |
 
 `--keep` and `--onto` both **abort** rather than overwrite a locally-modified
-file, so a peer's uncommitted work is never destroyed. Whenever git declines,
+file, so a peer's uncommitted tracked *content* is never destroyed. One
+caveat: `reset --keep` clears the index, so a peer's *staged* changes come back
+as unstaged — the file contents survive intact, the staging state does not.
+Whenever git declines,
 the ahead-set has an unrecognised shape, or the drop's exit status is non-zero
 for any other reason (a contended `.git/index.lock`, say), the primitive
 returns `"rollback-refused-skip"` with `main` left exactly as it was for manual

@@ -276,6 +276,24 @@ def _rebase_in_progress(repo_root: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+def _head_sha_and_subject(repo_root: Path) -> tuple[str | None, str | None]:
+    """``(sha, subject)`` of the commit at ``HEAD``; ``(None, None)`` if git can't say.
+
+    Used to tell "the commit did not happen" apart from "the commit landed but
+    git reported failure" (a blown timeout after the ref update, most often).
+    ``None`` is deliberately never equal to a real sha or migration subject, so
+    an undeterminable HEAD falls through to the did-not-happen branch, which
+    only reverse-renames -- it never drops a commit.
+    """
+    result = _run_git(["log", "-1", "--format=%H%x00%s"], cwd=repo_root)
+    if result.returncode != 0:
+        return None, None
+    sha, sep, subject = result.stdout.strip().partition("\0")
+    if not sep or not sha:
+        return None, None
+    return sha, (subject or None)
+
+
 def _commits_ahead_of_origin(
     repo_root: Path, expected_subject: str
 ) -> tuple[int | None, str | None]:
@@ -544,14 +562,36 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     # otherwise be swept onto main under our subject. Scoping to the rename's
     # two paths is also what makes "a pure rename, nothing else" true, which is
     # the premise the rollback rests on.
+    head_before_commit, _ = _head_sha_and_subject(repo_root)
     commit_result = _run_git(
         ["commit", "-m", migration_subject, "--", str(plan_path), str(completed_path)],
         cwd=repo_root,
     )
     if commit_result.returncode != 0:
         print(f"[ERROR] git commit failed for {plan_path.name}: {commit_result.stderr.strip()}")
-        # Undo only our own rename. A `reset --hard HEAD` here would discard
-        # whatever else a peer has staged or modified in this shared checkout.
+        # A failed `git commit` does not prove the commit did not land. The
+        # hook chain (`core.hooksPath=.githooks`) can push a commit past the
+        # timeout in ``_run_git``, and a kill after git's ref update but before
+        # process exit reports non-zero for a commit that exists. Reverse-
+        # renaming in that state would strand the migration commit on the
+        # shared main AND leave its index dirty -- worse than #3530 itself.
+        # Ask HEAD what actually happened before compensating.
+        head_sha, head_subject = _head_sha_and_subject(repo_root)
+        if (
+            head_sha is not None
+            and head_sha != head_before_commit
+            and head_subject == migration_subject
+        ):
+            print(
+                f"[WARN] git commit reported failure for {plan_path.name} but the commit "
+                "landed; rolling it back instead of undoing the rename"
+            )
+            return _rollback_migration_commit(
+                repo_root, plan_path.name, migration_subject, completed_path
+            )
+        # The commit genuinely did not happen. Undo only our own rename. A
+        # `reset --hard HEAD` here would discard whatever else a peer has
+        # staged or modified in this shared checkout.
         revert = _run_git(["mv", str(completed_path), str(plan_path)], cwd=repo_root)
         if revert.returncode != 0:
             print(

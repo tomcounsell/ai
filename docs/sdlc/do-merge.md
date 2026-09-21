@@ -199,9 +199,12 @@ moving the plan. Do not silently retry or swallow this — surface it in the
 merge report so a human knows the primary path did not migrate this plan and
 the daily reflection backstop is the only thing that will (within its next
 cycle, not immediately). `rollback-refused-skip` in particular needs a human to
-look at the shared `main` checkout directly — it means git refused to drop the
-migration commit (a peer's uncommitted edits or commit are in the way, or the
-index was locked), so that commit is still stranded on local `main`.
+look at the shared `main` checkout directly. It covers three shapes: git
+refused to drop the migration commit (a peer's uncommitted edits or commit are
+in the way, or the index was locked) and that commit is still stranded on local
+`main`; the ahead-set could not be determined at all; or nothing is ahead yet
+the migration is absent on `origin/main`. In the last shape nothing is
+stranded, but the state is still unexplained and left untouched.
 
 ## Post-Merge Memory Extraction
 
