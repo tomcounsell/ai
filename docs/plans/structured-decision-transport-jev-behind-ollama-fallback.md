@@ -106,23 +106,82 @@ A `tools.memory_search save` of findings 1, 4, and 5 is attempted at plan time; 
 
 ## Spike Results
 
-Placeholder.
+### spike-1: Does the decisions endpoint still accept the pinned body, and does it tolerate a prompt-shaped state and dynamic options?
+- **Assumption**: "The parent plan's verbatim probe is still the wire shape, `state` can be a site's full prompt, and per-call options can be `choice` criteria."
+- **Method**: prototype (four live POSTs and one GET from this venv, about 6e-5 USD; script in the session scratchpad, never printed the key)
+- **Finding**: Yes on all three. HTTP 200 in 925 ms (first call), 517 ms, 555 ms; `usage.cost` 2.03e-5, 2.35e-5, 1.96e-5; response `model` `typesafe/jev-1.13-20260917`. A question with no `instructions` is refused with HTTP 400 and a zod-style body. The listing GET needs no auth and carries the pricing on `data.endpoints[0]`. Also found on the way: `settings.api.openrouter_api_key` is `None` on this machine while the flat `OPENROUTER_API_KEY` is set.
+- **Confidence**: high
+- **Impact on plan**: the leg is one `httpx` POST with the body in Research finding 1; `instructions.question` is always emitted; the key is read from the flat environment variable; the probe test reads the endpoint entry; the C12 per-call `Literal` type needs no special casing in the leg.
+
+### spike-2: How many real `valor` messages does this machine's memory store hold?
+- **Assumption**: "The build machine has enough real inbound traffic for the routing sites' `n_real` minimum (100) and the others' (25)."
+- **Method**: code-read plus one ORM read (`tools.classification_eval.arms.real_messages(5000)`)
+- **Finding**: 12. The same number lane A's outcome table records, so this is the lane-A build machine and nothing has been added since.
+- **Confidence**: high
+- **Impact on plan**: on this machine every inbound-shaped site (C1 to C10, C12, C13, C15) fails `n_real` again unless the comparison replays a sample drawn elsewhere (`--inputs` with a file written by `--save-inputs` on a machine that holds the traffic, or the comparison runs on that machine). C11 (transcript windows, 40 real) and C14 (memory rows, 30 real) have real inputs of their own shape. Open Question 1.
+
+### spike-3: Can per-field decision metadata ride on the output type without reaching the JSON schema?
+- **Assumption**: "`Annotated[<type>, Decision(...)]` is retrievable from `FieldInfo.metadata` and absent from `model_json_schema()`, so the Anthropic and Ollama legs are unaffected."
+- **Method**: prototype (in-venv, no network)
+- **Finding**: Yes. `M.model_fields["verdict"].metadata == [Decision(...)]`; the schema for `verdict` is `{"enum": ["a", "b"], "type": "string"}` with no trace of the marker. A `Literal` field, a `bool` field and an unannotated `str` field coexist.
+- **Confidence**: high
+- **Impact on plan**: the `Decision` marker replaces the issue's four `LLMTask` fields; the leg reads it from `output_type.model_fields`; the site walk is untouched.
+
+### spike-4: What does the meter do with a sub-cent per-call reservation?
+- **Assumption**: "`reserve(valor, 0.001344, purpose="structured_decision")` per call meters the spend."
+- **Method**: code-read (`_valid_amount`, `reserve`, `settle`, `record_receipt`) plus `_valid_amount(32000 * 4.2e-8) == 0`
+- **Finding**: The bound rounds to 0 cents, so the reservation admits unconditionally and reserves nothing; each `settle` writes one `spend_receipt` `ImprovementEvidence` row and three Redis round trips. Per call on C1 that is one evidence row per inbound message.
+- **Confidence**: high
+- **Impact on plan**: the leg meters through a one-cent envelope per process (reserve 0.01 USD once, accumulate exact `usage.cost`, settle and re-reserve when the next call's 0.001344 bound would not fit), so the hot path does no Redis I/O on a typical call and the case sees one receipt per cent of spend; the runner arm uses the same envelope class with a per-run reservation like the gemma arm.
 
 ## Data Flow
 
-Placeholder.
+Inbound Telegram message crossing a site declared `backend=DECISIONS` (C1 shown; the same frame for every site that lands):
+
+1. **Entry point**: `bridge/telegram_bridge.py` resolves `project` and calls `should_respond_async(..., project, ...)`, which passes `project_key` to `classify_needs_response` (lane A, unchanged).
+2. **Call site**: `await run_typed(prompt, NeedsResponseDecision, task=NEEDS_RESPONSE, project_key=project_key)` with `NEEDS_RESPONSE = LLMTask(site="routing.needs_response", kind=TaskKind.CLASSIFICATION, backend=Backend.DECISIONS, error_cost=ErrorCost.HIGH)`. `NeedsResponseDecision.needs_response` is `Annotated[bool, Decision("Does this message need a reply or action?", criteria={"true": "...", "false": "..."}, threshold=0.5)]`.
+3. **`agent/llm/wrapper.py::run_typed`** calls `resolve(task, project_key)`. Rule 5: `backend is DECISIONS and is_eligible(project_key)` → `Route(DECISIONS, JEV, fallback=Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL))`; otherwise `Route(ANTHROPIC, model)`. The degraded-stack guard runs with `signature_axis=False` (the route never touches `anthropic`; `loader_ok` is still required). `effective = sdk_timeout or default_sdk_timeout(DECISIONS)` (3.0 s from `settings.timeouts.decisions_sdk_s`); `budget = sdk_timeout or hard_timeout`.
+4. **`agent/llm/backends/decisions.py::call`**: `bound_to_deadline` (a no-op on the primary leg); read `OPENROUTER_API_KEY` from the environment (absent → `LLMCallError(reason="transport")` before any I/O); build the questions from `output_type.model_fields` (`Literal[...]` and `Literal[...] | None` → `choice` with the literal values as criteria keys; `bool` → `noul` with `true`/`false` criteria; every other field is filled with its default, `""` for a required `str`, `None` for a required `X | None`, and `confidence: float` from the answer); `state = prompt` or `system + "\n\n" + prompt`; the envelope's headroom check (`accumulated + 0.001344 <= envelope` else settle and re-reserve; a `Refusal` → `LLMCallError(reason="transport")`); `async with stack.AsyncHTTPClient(timeout=sdk_timeout) as client: response = await client.post(OPENROUTER_DECISIONS_URL, headers=..., json=body)`; non-200 → `transport`; JSON decode failure → `transport`; a question id missing from `answers` → `validation`; a `choice` not among the options → `validation`; `noul` → `bool` at the field's threshold; `confidence` (when the type has that field) = the minimum `confidence` over the `choice` answers, else the probability of the chosen `noul` answer (`noul` for `True`, `1 - noul` for `False`); `output_type.model_validate(values)` (a `ValidationError` → `validation`); `usage.cost` added to the envelope (missing → the envelope is marked `unknown`); return the instance. `httpx.TimeoutException` → `timeout`; any other `httpx` error → `transport`. `CancelledError` passes through: the `async with` closes the client, the envelope is untouched (no cost was read), and nothing is settled twice.
+5. **Fallback**: on `LLMCallError` from the decisions leg the wrapper runs the Ollama leg once inside the remaining budget with `deadline=start + budget` (lane A's Data Flow step 6, unchanged), logging `llm_fallback site=routing.needs_response primary=decisions fallback=ollama reason=<reason> elapsed_ms=<int>`. If the Ollama leg fails too, the primary error propagates and the site's fail-safe applies (C1: respond). There is no third leg: a `DECISIONS` site never reaches Anthropic for eligible context, which is the "no single external provider on a hot path" rule with a local backend as the second provider.
+6. **Output**: the caller receives a `NeedsResponseDecision` with no marker of which leg answered; `llm_route site=routing.needs_response backend=decisions elapsed_ms=<int>` is the evidence.
+
+Comparison flow (`python -m tools.classification_eval --site routing.needs_response --candidate decisions,ollama`): `_run_site` builds the reference arm from the site's `reference` (Haiku for C1 to C11; gemma for C15; the new `"ollama"` value for C12, C13, and C14, whose landed backend is granite); `_candidate_arms` builds `decisions_arm(site_id)` (the decisions leg called directly with a per-run `SpendEnvelope` reserved for `max(0.01, 0.001344 * 2 * n)` and settled once in `finally`, so a leg failure is the arm's own error and never a fallback answer) and `ollama_arm(site_id)`; `compare` runs every arm on the same inputs; `evaluate_bar` applies the six criteria plus `cost` when the reference is on Anthropic; the record is written and its claims attached to case `1ec40086`. The landing decision reads that record: the `decisions` candidate passes and the `ollama` candidate passes (or, for a site whose reference is the ollama arm, the site's latency-only ollama record passes) → the builder edits `backend=Backend.DECISIONS` on the declaration and the doc row, and commits with the record id.
+
+The worker-side sites (C10, C11) and the reflection sites (C14, C15) run in processes with no shared Anthropic semaphore involvement on this route; the envelope is per process, so each of the bridge, worker, and reflection worker holds at most one open one-cent reservation at a time.
 
 ## Architectural Impact
 
-Placeholder.
+- **New dependencies**: none. `httpx` is already a dependency (`pyproject.toml:16`); the `openrouter` SDK is not added (alpha endpoint, no verified async client, a dependency outside the coupled anthropic + pydantic-ai-slim pin set). The coupled pin set is untouched.
+- **Interface changes**: `Backend` gains `DECISIONS`; `LLMStack` gains `AsyncHTTPClient: Any` (`httpx.AsyncClient`, imported inside `_load_stack`) so the leg gets its client through the same seam as the other two; `Route` is unchanged; the leg protocol is unchanged (the new leg implements it as it stands); `agent/llm/tasks.py` gains the `Decision` marker (a frozen dataclass used as `Annotated` metadata) and `agent/llm/__init__.py` exports it; `LLMTask` gains no field; `TimeoutSettings` gains `decisions_sdk_s`; `config/models.py` gains `JEV`, `OPENROUTER_DECISIONS_URL`, `MODEL_INFO[JEV]`; `tools/classification_eval/core.py::Site.reference` gains the `"ollama"` value and `evaluate_bar` a seventh criterion (`cost`, conditional); `records.py` gains `landing_record(site_id, backend)` and the audit's `DECISIONS` branch; `agent/llm/backends/decisions.py` is new. Sites that land change one word on their declaration plus the `Decision` markers on their output type; C12 additionally builds a per-call output type; C15 additionally gains a second declared task for the span cascade.
+- **Coupling**: the decisions leg couples the hot path to one more external service, always with a local leg behind it; the router is the only place that knows about the coupling; the meter is consumed through its public functions only.
+- **Data ownership**: comparison records and receipts stay on case `1ec40086` in the runner machine's Redis (lane A's convention); the envelope's reservation rows are the meter's own plain Redis keys, one per process per cent of spend.
+- **Reversibility**: one-word revert per site (`backend=Backend.OLLAMA` or `ANTHROPIC`) with the record saying why; unsetting `OPENROUTER_API_KEY` on a machine turns every decisions call into an immediate fallback to granite without a code change; removing the leg is deleting one module and three enum/table entries.
 
 ## Appetite
 
-Placeholder.
+**Size:** Medium
+
+**Team:** Solo dev (one builder iterating on the leg and the per-site comparisons), plan critic, PR reviewer applying the per-site bar.
+
+**Interactions:**
+- PM check-ins: 1-2 (the real-input sample, Open Question 1; the landing summary before review)
+- Review rounds: 1-2 (the reviewer reads the per-site landing summary in the PR body against the bar)
+
+The code is bounded (one leg of about 200 lines, a rule, an arm, a criterion, an audit branch, a probe test, docs). The appetite is in the iteration: fifteen comparison runs, each a few minutes of granite time plus about 0.01 USD of Jev, repeated per site while the builder tunes `Decision` markers and candidate prompts, and the landings that follow. Two build days; a third only if C15's cascade or C12's per-call type is reached.
 
 ## Prerequisites
 
-Placeholder.
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Lane A on `main` | `git merge-base --is-ancestor 4703bce23 HEAD` | the router, legs, runner, and records this lane extends |
+| `OPENROUTER_API_KEY` in the vault `.env` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('OPENROUTER_API_KEY')"` | the decisions leg and the runner's decisions arm |
+| Decisions endpoint reachable | `curl -sf https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints \| python -c "import json,sys; d=json.load(sys.stdin)['data']; assert d['endpoints'][0]['context_length']==32000"` | the probe test and every comparison run |
+| Ollama daemon with granite pulled | `curl -sf http://localhost:11434/api/tags \| grep -q granite4.1:3b` | the Ollama fallback arm on every comparison and the fallback leg in production |
+| Redis reachable | `redis-cli -u "$REDIS_URL" ping` | the meter envelope, the comparison records, the audit |
+| `httpx` importable in the venv | `.venv/bin/python -c "import httpx"` | the leg's client |
+| Services stopped for a latency run | `launchctl list \| grep -c com.valor \|\| true` | `contended: false` on every record (Race 3 of the parent plan); the runner stamps `contended: true` otherwise |
+
+Run all checks via `python scripts/check_prerequisites.py docs/plans/structured-decision-transport-jev-behind-ollama-fallback.md`.
 
 ## Solution
 
