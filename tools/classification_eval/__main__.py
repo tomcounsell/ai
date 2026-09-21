@@ -27,6 +27,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from agent.llm.tasks import Backend, LLMTask
 from tools.classification_eval import (
@@ -75,7 +76,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="BACKEND",
-        help="candidate arm: ollama or anthropic; repeat or comma-separate",
+        help="candidate arm: ollama, anthropic, or decisions; repeat or comma-separate",
     )
     parser.add_argument(
         "--latency-only",
@@ -113,13 +114,28 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
-    from tools.classification_eval.arms import anthropic_arm, ollama_arm
+    """The candidate arms for ``names`` at ``site_id``, in order.
+
+    Where the site's reference arm is granite (``reference="ollama"``, C12
+    to C14) the ``ollama`` candidate is dropped with a printed note: the
+    reference is that same call under the same default name, and a second
+    copy would be a granite-against-granite self-comparison whose agreement
+    means nothing (and whose name would collide with the reference's in the
+    record). The audit judges the reference slot as the fallback instead.
+    """
+    from tools.classification_eval import arms as live
+    from tools.classification_eval.sites import site_for
 
     builders = {
-        Backend.OLLAMA.value: lambda: ollama_arm(site_id),
-        Backend.ANTHROPIC.value: lambda: anthropic_arm(site_id),
+        Backend.OLLAMA.value: lambda: live.ollama_arm(site_id),
+        Backend.ANTHROPIC.value: lambda: live.anthropic_arm(site_id),
+        Backend.DECISIONS.value: lambda: live.decisions_arm(site_id),
     }
-    return [builders[name]() for name in names]
+    wanted = list(names)
+    if Backend.OLLAMA.value in wanted and site_for(site_id).reference == "ollama":
+        wanted.remove(Backend.OLLAMA.value)
+        print(f"ollama candidate dropped: the reference arm at {site_id} is granite")
+    return [builders[name]() for name in wanted]
 
 
 async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
@@ -148,25 +164,35 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
             file=sys.stderr,
         )
 
-    transport = None
+    candidate_arms = _candidate_arms(site.id, candidates)
+    # Every input crosses each arm twice (the agreement pass and the latency
+    # pass); the metered transports reserve for that many calls and settle
+    # once, whatever happens in between.
+    metered: list[Any] = [
+        arm.call for arm in candidate_arms if isinstance(arm.call, live.DecisionsArm)
+    ]
     reference = None
     if not args.latency_only:
         if site.reference == "openrouter_gemma":
             reference, transport = live.openrouter_gemma_arm(paid=args.reference_model == "paid")
-            transport.reserve(len(inputs) * 2, project_key=args.project_key)
+            metered.append(transport)
+        elif site.reference == "ollama":
+            reference = live.ollama_arm(site.id, name="ollama")
         else:
             reference = live.anthropic_arm(site.id, model=site.model, name="anthropic")
+    for transport in metered:
+        transport.reserve(len(inputs) * 2, project_key=args.project_key)
 
     try:
         record = await compare(
             site,
             inputs,
             reference=reference,
-            candidates=_candidate_arms(site.id, candidates),
+            candidates=candidate_arms,
             contended=contended,
         )
     finally:
-        if transport is not None:
+        for transport in metered:
             transport.settle(project_key=args.project_key)
 
     payload = record.as_dict()

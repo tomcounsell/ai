@@ -73,6 +73,30 @@ def latest_record(
     return None if newest is None else (newest[1], newest[2])
 
 
+def landing_record(
+    site_id: str, backend: str, *, project_key: str = PROJECT_KEY
+) -> tuple[str, dict[str, Any]] | None:
+    """``(evidence id, record)`` for the newest record of ``site_id`` in which
+    ``backend`` is a candidate arm: a comparison that measured it against a
+    reference, or the latency-only record whose measurement is that backend
+    (both keep the landed arm under ``candidates``). A record that carries the
+    backend only as its reference arm proves nothing about a landing, so a
+    later decisions comparison whose reference is granite never displaces a
+    granite site's landing evidence (#3421). ``None`` when no record carries it.
+    """
+    newest: tuple[datetime, str, dict[str, Any]] | None = None
+    for row, payload in _records(project_key):
+        if payload.get("site") != site_id:
+            continue
+        candidates = payload.get("candidates") or {}
+        if not any(arm.get("backend") == backend for arm in candidates.values()):
+            continue
+        stamp = getattr(row, "created_at", None) or datetime.min.replace(tzinfo=UTC)
+        if newest is None or stamp > newest[0]:
+            newest = (stamp, row.id, payload)
+    return None if newest is None else (newest[1], newest[2])
+
+
 def claims_for(record: ComparisonRecord, evidence_id: str) -> list[dict[str, str]]:
     """The claims the CLI records on the case investigation: one per candidate arm."""
     payload = record.as_dict()

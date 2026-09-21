@@ -235,11 +235,25 @@ def _record_dict(
     latency_only: bool = False,
     candidates: tuple[str, ...] = ("ollama",),
     site: str = "test.site",
+    cost: float = 0.0,
+    reference_cost: float = 0.0,
+    reference_backend: str = "anthropic",
+    reference_name: str | None = None,
+    reference_error_rate: float = 0.0,
+    run_id: str = "run-1",
+    created_at: str = "2026-09-19T00:00:00+00:00",
 ) -> dict:
-    def arm(name):
+    """A record dict in the shape ``ComparisonRecord.as_dict()`` writes.
+
+    Every candidate arm is named after its backend and carries ``cost``;
+    the reference arm is on ``reference_backend`` (named after it unless
+    ``reference_name`` says otherwise) and carries ``reference_cost``.
+    """
+
+    def arm(name, backend=None):
         return {
             "name": name,
-            "backend": name,
+            "backend": backend or name,
             "model": f"{name}-model",
             "calls": n * 2,
             "errors": int(error_rate * n * 2),
@@ -248,7 +262,7 @@ def _record_dict(
             "p95_c1": 0.9,
             "p50_c4": 0.7,
             "p95_c4": p95_c4,
-            "cost_per_call_usd": 0.0,
+            "cost_per_call_usd": cost,
             "cost_metering": "local",
             "price": {},
             "agreement": None
@@ -256,7 +270,17 @@ def _record_dict(
             else {"mean": agreement, "lower": agreement - 0.03, "upper": 1.0, "n": n},
         }
 
-    reference = None if latency_only else dict(arm("anthropic"), p95_c4=reference_p95_c4)
+    reference = (
+        None
+        if latency_only
+        else dict(
+            arm(reference_name or reference_backend, reference_backend),
+            p95_c4=reference_p95_c4,
+            cost_per_call_usd=reference_cost,
+            error_rate=reference_error_rate,
+            errors=int(reference_error_rate * n * 2),
+        )
+    )
     return {
         "site": site,
         "tier": tier,
@@ -269,8 +293,8 @@ def _record_dict(
         "latency_only": latency_only,
         "reference": reference,
         "candidates": {name: arm(name) for name in candidates},
-        "run_id": "run-1",
-        "created_at": "2026-09-19T00:00:00+00:00",
+        "run_id": run_id,
+        "created_at": created_at,
     }
 
 
@@ -311,6 +335,87 @@ def test_miss_report_names_the_failing_criterion():
 
     passing = render_report(_record_dict())
     assert "PASS" in passing and "MISS" not in passing
+
+
+# --- the cost criterion (#3421) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        # Haiku reference: the candidate pays at most one tenth of the reference.
+        ({"reference_cost": 0.001, "cost": 0.0001}, []),
+        ({"reference_cost": 0.001, "cost": 0.00011}, ["cost"]),
+        ({"reference_cost": 0.001, "cost": 0.0}, []),
+        # A reference on granite or gemma carries no price to compare against.
+        ({"reference_backend": "ollama", "reference_cost": 0.001, "cost": 0.5}, []),
+        ({"reference_backend": "openrouter", "reference_cost": 0.001, "cost": 0.5}, []),
+        # A Haiku reference whose cost is 0.0 skips the criterion: never a division.
+        ({"reference_cost": 0.0, "cost": 0.5}, []),
+    ],
+)
+def test_evaluate_bar_cost_criterion_applies_only_against_an_anthropic_reference(kwargs, expected):
+    assert evaluate_bar(_record_dict(candidates=("decisions",), **kwargs), "decisions") == expected
+
+
+def test_evaluate_bar_cost_skips_a_reference_without_a_cost_field():
+    record = _record_dict(candidates=("decisions",), cost=0.5)
+    del record["reference"]["cost_per_call_usd"]
+    assert evaluate_bar(record, "decisions") == []
+
+
+def test_miss_report_prints_the_cost_threshold_line():
+    report = render_report(
+        _record_dict(candidates=("decisions",), reference_cost=0.001, cost=0.0005)
+    )
+    assert "MISS on cost" in report
+    assert "cost/call $0.000500 > one tenth of reference $0.001000" in report
+
+
+# --- evaluate_reference: the fallback proof on a granite reference (#3421) ---------
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({}, []),
+        ({"reference_p95_c4": 2.9, "budget_s": 3.0}, []),
+        ({"reference_p95_c4": 3.1, "budget_s": 3.0}, ["p95_c4"]),
+        # No site budget: a reference arm has no reference of its own to be
+        # relative to, so latency is unjudged.
+        ({"reference_p95_c4": 9.0}, []),
+        ({"contended": True}, ["contended"]),
+        ({"reference_error_rate": 0.03}, ["error_rate"]),
+        ({"n": 150, "n_real": 100}, ["n"]),
+        # The reference arm's own criteria, never the candidates': a candidate
+        # error rate and a thin real share leave the reference verdict alone.
+        ({"error_rate": 0.5, "n_real": 1}, []),
+        (
+            {
+                "reference_p95_c4": 4.0,
+                "budget_s": 3.0,
+                "contended": True,
+                "reference_error_rate": 0.1,
+                "n": 10,
+            },
+            ["p95_c4", "contended", "error_rate", "n"],
+        ),
+    ],
+)
+def test_evaluate_reference_applies_the_latency_only_criteria_to_the_reference_arm(
+    kwargs, expected
+):
+    from tools.classification_eval import evaluate_reference
+
+    record = _record_dict(reference_backend="ollama", candidates=("decisions",), **kwargs)
+    assert evaluate_reference(record) == expected
+
+
+def test_evaluate_reference_needs_a_reference_arm():
+    from tools.classification_eval import evaluate_reference
+
+    with pytest.raises(ValueError, match="reference"):
+        evaluate_reference(_record_dict(latency_only=True))
 
 
 # --- contention (Race 3) --------------------------------------------------------
@@ -435,10 +540,177 @@ def test_declared_classification_tasks_are_discovered_from_source():
         (["anthropic,ollama"], ["anthropic", "ollama"]),
         (["anthropic", "ollama"], ["anthropic", "ollama"]),
         (["ollama", "ollama"], ["ollama"]),
+        (["decisions,ollama"], ["decisions", "ollama"]),
     ],
 )
 def test_parse_candidates_accepts_repeats_and_comma_lists(raw, expected):
     assert parse_candidates(raw) == expected
+
+
+def _fake_arm_builders(monkeypatch) -> list[str]:
+    """Replace the live arm constructors with fakes that record which were
+    built, so ``_candidate_arms`` touches no network, Redis, or key."""
+    from tools.classification_eval import arms
+
+    built: list[str] = []
+
+    def builder(backend: str):
+        def build(site_id: str, **kw) -> Arm:
+            built.append(backend)
+            return _arm(kw.get("name", backend), backend)
+
+        return build
+
+    monkeypatch.setattr(arms, "anthropic_arm", builder("anthropic"))
+    monkeypatch.setattr(arms, "ollama_arm", builder("ollama"))
+    monkeypatch.setattr(arms, "decisions_arm", builder("decisions"))
+    return built
+
+
+def test_candidate_arms_builds_the_decisions_arm(monkeypatch):
+    from tools.classification_eval.__main__ import _candidate_arms
+
+    built = _fake_arm_builders(monkeypatch)
+    arms = _candidate_arms("routing.needs_response", ["decisions", "ollama", "anthropic"])
+    assert [arm.backend for arm in arms] == ["decisions", "ollama", "anthropic"]
+    assert built == ["decisions", "ollama", "anthropic"]
+
+
+def test_candidate_arms_drops_ollama_when_reference_is_ollama(monkeypatch, capsys):
+    """A C12 to C14 record carries granite exactly once, as the reference
+    arm; a second copy under the same default name would be a
+    granite-against-granite self-comparison (critique round 2)."""
+    from tools.classification_eval.__main__ import _candidate_arms
+
+    built = _fake_arm_builders(monkeypatch)
+    arms = _candidate_arms("job_router.route", ["decisions", "ollama"])
+    assert [arm.backend for arm in arms] == ["decisions"]
+    assert built == ["decisions"]
+    assert "ollama candidate dropped: the reference arm at job_router.route is granite" in (
+        capsys.readouterr().out
+    )
+
+    built.clear()
+    arms = _candidate_arms("routing.needs_response", ["decisions", "ollama"])
+    assert [arm.backend for arm in arms] == ["decisions", "ollama"]
+    assert built == ["decisions", "ollama"]
+
+
+@pytest.mark.parametrize(
+    "site_id", ["job_router.route", "classifier.intake_intent", "memory_audit.classify"]
+)
+def test_granite_sites_declare_the_ollama_reference(site_id):
+    from tools.classification_eval.sites import site_for
+
+    assert site_for(site_id).reference == "ollama"
+
+
+def test_candidate_help_names_the_decisions_arm():
+    from tools.classification_eval.__main__ import _build_parser
+
+    assert "decisions" in _build_parser().format_help()
+
+
+async def test_run_site_builds_the_ollama_reference_and_meters_the_decisions_arm(monkeypatch):
+    """At a granite-reference site ``_run_site`` measures granite as the
+    reference (``ollama_arm(site.id, name="ollama")``) and brackets the run
+    with the decisions arm's per-run reservation: one reserve before
+    ``compare`` for ``max(0.01, CALL_BOUND_USD * 2 * n)``, one settle after."""
+    import argparse
+
+    from agent.llm.backends import decisions as leg
+    from tools.classification_eval import __main__ as cli
+    from tools.classification_eval import arms as live
+
+    seen: dict[str, object] = {}
+    meter_calls: list[tuple[str, object]] = []
+
+    def fake_reserve(project_key, usd, *, purpose, case_id=None, **_):
+        from tools import paid_inference_meter as meter
+
+        meter_calls.append(("reserve", (project_key, usd, purpose, case_id)))
+        return meter.Reservation("res-1", project_key, round(usd * 100), purpose, case_id, "d")
+
+    def fake_settle(project_key, reservation_id, usd, *, metering):
+        meter_calls.append(("settle", (project_key, reservation_id, usd, metering)))
+
+    monkeypatch.setattr(leg.meter, "reserve", fake_reserve)
+    monkeypatch.setattr(leg.meter, "settle", fake_settle)
+    monkeypatch.setattr(live, "ollama_arm", lambda site_id, **kw: _arm(kw["name"], "ollama"))
+    monkeypatch.setattr(live, "site_inputs", lambda site, limit, **kw: _inputs(300, 0))
+    monkeypatch.setattr(cli, "is_contended", lambda: False)
+
+    async def fake_compare(site, inputs, *, reference, candidates, contended):
+        seen["reference"] = reference
+        seen["candidates"] = candidates
+        seen["meter_at_compare"] = list(meter_calls)
+        raise RuntimeError("stop before any record is written")
+
+    monkeypatch.setattr(cli, "compare", fake_compare)
+    args = argparse.Namespace(
+        site="job_router.route",
+        inputs=None,
+        save_inputs=None,
+        real_limit=0,
+        project_key="test-3421",
+        latency_only=False,
+        reference_model="free",
+        no_attach=True,
+    )
+    with pytest.raises(RuntimeError, match="stop before"):
+        await cli._run_site(args, ["decisions"])
+
+    assert seen["reference"].backend == "ollama" and seen["reference"].name == "ollama"
+    assert [arm.backend for arm in seen["candidates"]] == ["decisions"]
+    assert isinstance(seen["candidates"][0].call, live.DecisionsArm)
+    expected_usd = max(0.01, leg.CALL_BOUND_USD * 2 * 300)
+    assert seen["meter_at_compare"] == [
+        ("reserve", ("test-3421", expected_usd, leg.METER_PURPOSE, leg.CASE_ID))
+    ]
+    assert meter_calls[-1] == ("settle", ("test-3421", "res-1", 0.0, "exact"))
+    assert len(meter_calls) == 2
+
+
+async def test_decisions_arm_prices_each_call_from_its_input_tokens(monkeypatch):
+    """The arm calls the leg directly with its own envelope; a call's cost is
+    ``input_tokens × JEV price / 1e6``, and a response with no ``input_tokens``
+    returns ``None`` (the runner estimates) and marks the envelope unknown."""
+    from agent.llm.backends import decisions as leg
+    from config.models import JEV, JEV_PRICE_USD_PER_MTOKEN
+    from tools.classification_eval import arms as live
+
+    tokens = iter([400, None, 250])
+    seen: list[dict] = []
+
+    async def fake_call(prompt, output_type, route, *, envelope, **kw):
+        seen.append({"prompt": prompt, "route": route, "envelope": envelope, **kw})
+        count = next(tokens)
+        if count is None:
+            envelope.mark_unknown()
+        else:
+            envelope.add_tokens(count)
+        return Verdict(answer="yes")
+
+    monkeypatch.setattr(leg, "call", fake_call)
+    arm = live.decisions_arm("routing.needs_response")
+    assert (arm.name, arm.backend, arm.model) == ("decisions", "decisions", JEV)
+    assert arm.price.model == JEV and arm.price.retrieved_at == "2026-09-21"
+    assert arm.price.usd_per_mtoken_in == JEV_PRICE_USD_PER_MTOKEN
+    assert arm.price.usd_per_mtoken_out == 0.0
+
+    transport = arm.call
+    assert isinstance(transport, live.DecisionsArm)
+    first = await transport("p1", None, Verdict)
+    second = await transport("p2", "sys", Verdict)
+    third = await transport("p3", None, Verdict)
+    assert first[0].answer == "yes"
+    assert first[1] == pytest.approx(400 * JEV_PRICE_USD_PER_MTOKEN / 1e6)
+    assert second[1] is None
+    assert third[1] == pytest.approx(250 * JEV_PRICE_USD_PER_MTOKEN / 1e6)
+    assert transport.metering == "unknown"
+    assert all(s["envelope"] is transport.envelope for s in seen)
+    assert seen[1]["system"] == "sys" and seen[1]["route"].model == JEV
+    assert seen[0]["route"].backend is Backend.DECISIONS
 
 
 def test_parse_candidates_rejects_an_unknown_backend():
