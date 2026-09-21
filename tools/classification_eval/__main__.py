@@ -113,12 +113,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
-    from tools.classification_eval.arms import anthropic_arm, ollama_arm
+    from tools.classification_eval.arms import arm_builders
 
-    builders = {
-        Backend.OLLAMA.value: lambda: ollama_arm(site_id),
-        Backend.ANTHROPIC.value: lambda: anthropic_arm(site_id),
-    }
+    builders = arm_builders(site_id)
     return [builders[name]() for name in names]
 
 

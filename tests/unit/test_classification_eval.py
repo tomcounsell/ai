@@ -446,6 +446,19 @@ def test_parse_candidates_rejects_an_unknown_backend():
         parse_candidates(["gliclass"])
 
 
+def test_candidate_arm_builders_cover_every_backend():
+    """A ``Backend`` member without a runner arm builder fails here by name,
+    so ``--candidate <member>`` (accepted by derivation from the enum) can
+    never reach a ``KeyError`` in the builders dict."""
+    from tools.classification_eval.arms import arm_builders
+
+    builders = arm_builders("test.site")
+    missing = sorted(b.value for b in Backend if b.value not in builders)
+    assert not missing, f"Backend members without an arm builder: {missing}"
+    assert set(builders) == {b.value for b in Backend}
+    assert "local_encoder" in parse_candidates(["local_encoder"])
+
+
 def test_cli_audit_exit_code_is_the_audit_result(capsys):
     task = _task("cli.site", Backend.OLLAMA)
     assert main(["--audit", "--project-key", PK], tasks=[task]) == 1
