@@ -276,22 +276,46 @@ def _rebase_in_progress(repo_root: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
-def _head_sha_and_subject(repo_root: Path) -> tuple[str | None, str | None]:
-    """``(sha, subject)`` of the commit at ``HEAD``; ``(None, None)`` if git can't say.
+def _head_sha(repo_root: Path) -> str | None:
+    """Sha at ``HEAD``, or ``None`` if git can't say.
 
-    Used to tell "the commit did not happen" apart from "the commit landed but
-    git reported failure" (a blown timeout after the ref update, most often).
-    ``None`` is deliberately never equal to a real sha or migration subject, so
-    an undeterminable HEAD falls through to the did-not-happen branch, which
-    only reverse-renames -- it never drops a commit.
+    Read before ``git commit`` to anchor the range that
+    ``_migration_commit_may_have_landed`` later searches. ``None`` means no
+    usable range, which that helper treats as "cannot prove the commit is
+    absent" rather than as proof it never happened.
     """
-    result = _run_git(["log", "-1", "--format=%H%x00%s"], cwd=repo_root)
+    result = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
     if result.returncode != 0:
-        return None, None
-    sha, sep, subject = result.stdout.strip().partition("\0")
-    if not sep or not sha:
-        return None, None
-    return sha, (subject or None)
+        return None
+    return result.stdout.strip() or None
+
+
+def _migration_commit_may_have_landed(
+    repo_root: Path, head_before_commit: str | None, expected_subject: str
+) -> bool:
+    """Did our migration commit land, despite ``git commit`` reporting failure?
+
+    Matches the subject across the whole ``head_before_commit..HEAD`` range,
+    not just the tip. This is the *shared* ``main`` checkout: a peer session
+    can land its own commit on top of ours between our ``git commit`` and this
+    read, leaving ours one below the tip. A tip-only check would then see the
+    peer's subject, conclude "the commit did not happen", and reverse-rename --
+    stranding our migration commit on ``main`` (#3530's end state) with a dirty
+    index on top of it.
+
+    Returns ``True`` whenever the commit cannot be *proven* absent: an
+    unreadable pre-commit HEAD (no usable range) or a failing ``git log`` both
+    mean "unknown", and the safe disposition for unknown is the rollback path.
+    ``_rollback_migration_commit`` independently re-verifies that our commit is
+    in ``origin/main..HEAD`` and refuses to touch ``main`` otherwise, so a
+    false ``True`` costs a refusal; a false ``False`` costs a stranded commit.
+    """
+    if head_before_commit is None:
+        return True
+    log_result = _run_git(["log", "--format=%s", f"{head_before_commit}..HEAD"], cwd=repo_root)
+    if log_result.returncode != 0:
+        return True
+    return any(line == expected_subject for line in log_result.stdout.splitlines())
 
 
 def _commits_ahead_of_origin(
@@ -442,7 +466,12 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
 
     A failed ``git mv``/``git commit`` returns ``"mutation-failed-skip"``: the
     preconditions passed and the primitive was mid-mutation, which is a
-    distinct operator signal from the report-only ``"dirty-tree-skip"``.
+    distinct operator signal from the report-only ``"dirty-tree-skip"``. One
+    exception: a failed ``git commit`` whose commit is found anywhere in
+    ``HEAD_before..HEAD`` -- or whose absence can't be proven at all -- is
+    treated as landed (see ``_migration_commit_may_have_landed``) and routed
+    into the rollback above instead, so the verdict is whatever that rollback
+    returns.
     """
     plan_path = Path(plan_path)
 
@@ -562,7 +591,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     # otherwise be swept onto main under our subject. Scoping to the rename's
     # two paths is also what makes "a pure rename, nothing else" true, which is
     # the premise the rollback rests on.
-    head_before_commit, _ = _head_sha_and_subject(repo_root)
+    head_before_commit = _head_sha(repo_root)
     commit_result = _run_git(
         ["commit", "-m", migration_subject, "--", str(plan_path), str(completed_path)],
         cwd=repo_root,
@@ -575,16 +604,12 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
         # process exit reports non-zero for a commit that exists. Reverse-
         # renaming in that state would strand the migration commit on the
         # shared main AND leave its index dirty -- worse than #3530 itself.
-        # Ask HEAD what actually happened before compensating.
-        head_sha, head_subject = _head_sha_and_subject(repo_root)
-        if (
-            head_sha is not None
-            and head_sha != head_before_commit
-            and head_subject == migration_subject
-        ):
+        # Ask the commit range -- not just the tip, a peer can be on top of
+        # ours by now -- what actually happened before compensating.
+        if _migration_commit_may_have_landed(repo_root, head_before_commit, migration_subject):
             print(
                 f"[WARN] git commit reported failure for {plan_path.name} but the commit "
-                "landed; rolling it back instead of undoing the rename"
+                "may have landed; rolling it back instead of undoing the rename"
             )
             return _rollback_migration_commit(
                 repo_root, plan_path.name, migration_subject, completed_path

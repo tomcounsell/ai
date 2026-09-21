@@ -915,6 +915,66 @@ class TestMigrationRollbackSafety:
         assert plan.exists()
         assert not (repo / COMPLETED_PLANS_DIR / "timeout-commit-plan.md").exists()
 
+    def test_landed_commit_under_a_peer_commit_is_not_reverse_renamed(self, tmp_path, monkeypatch):
+        """Our commit landing BELOW a peer's commit must still be detected as landed.
+
+        The shared `main` checkout has one HEAD for every session on the
+        machine. Between our `git commit` and the re-read that decides whether
+        it landed, a peer session can land its own commit on top of ours --
+        leaving ours one below the tip. A tip-only `git log -1` check then sees
+        the peer's subject, concludes "the commit did not happen", and reverse-
+        renames: our migration commit is stranded on the shared main (#3530's
+        end state, breaking every later `/update` fast-forward) AND the index
+        is left dirty with a staged reverse-rename, all reported as a silent
+        `mutation-failed-skip` no-op.
+
+        Real git throughout -- real bare origin, real clone, a real peer
+        commit. Only the returncode of our own `git commit` is replaced.
+        """
+        from scripts.migrate_completed_plan import GIT_TIMEOUT_RETURNCODE
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "peer-on-top-plan.md")
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args and args[0] == "commit":
+                # Our commit really happened. Now a peer session on this same
+                # shared checkout lands its own commit on top of ours, before
+                # we get to ask HEAD what happened.
+                (repo / "peer.txt").write_text("peer hotfix\n")
+                _git(repo, "add", "peer.txt")
+                _git(repo, "commit", "-q", "-m", "Peer hotfix on shared main")
+                # ...and git was killed before it could report our success.
+                return subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=GIT_TIMEOUT_RETURNCODE,
+                    stdout=result.stdout,
+                    stderr=result.stderr + "git commit timed out after 30s",
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip", (
+            "a landed commit sitting one below a peer's commit was reported as a no-op; "
+            "the migration commit is stranded on the shared main"
+        )
+        log = _git(repo, "log", "--format=%s", "origin/main..HEAD").stdout
+        assert "Migrate completed plan: peer-on-top-plan" not in log, (
+            "our migration commit was left stranded ahead of origin/main"
+        )
+        assert "Peer hotfix on shared main" in log, "the peer's commit was destroyed"
+        assert (repo / "peer.txt").read_text() == "peer hotfix\n"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the shared checkout was left dirty (staged reverse-rename), which breaks "
+            "the clean-tree precondition for every peer session"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "peer-on-top-plan.md").exists()
+
     def test_genuinely_failed_commit_undoes_only_its_own_rename(self, tmp_path):
         """A commit git really refused leaves no stranded commit and no staged rename.
 
