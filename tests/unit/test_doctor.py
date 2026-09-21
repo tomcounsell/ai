@@ -900,8 +900,9 @@ class TestCheckLLMRouting:
             assert f"kind={declared.task.kind.value}" in row.message
             assert f"backend={declared.task.backend.value}" in row.message
             assert "client->anthropic" in row.message
-            if declared.task.backend is Backend.OLLAMA and declared.task.kind.value != "thinking":
-                assert "valor->ollama (fallback anthropic)" in row.message
+            local = declared.task.backend is not Backend.ANTHROPIC
+            if local and declared.task.kind.value != "thinking" and not declared.task.client_only:
+                assert f"valor->{declared.task.backend.value} (fallback anthropic)" in row.message
             else:
                 assert "valor->anthropic" in row.message
 
@@ -947,3 +948,173 @@ class TestCheckLLMRouting:
 
         assert _check_llm_routing in get_checks(quick=False)
         assert _check_llm_routing not in get_checks(quick=True)
+
+
+class TestLocalEncoderRow:
+    """The ``local_encoder`` row (#3420): extra, weights by sha256, one head per site."""
+
+    @pytest.fixture(autouse=True)
+    def _cold_and_offline(self, monkeypatch):
+        from tools import doctor, improvement_eligibility
+
+        improvement_eligibility._clear_cache()
+
+        def _no_gh(*args, **kwargs):
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr(improvement_eligibility.subprocess, "run", _no_gh)
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        yield
+        improvement_eligibility._clear_cache()
+
+    @pytest.fixture
+    def fake_weights(self, tmp_path, monkeypatch):
+        """A temp models dir whose files match patched pins; returns ``(dir, contents)``."""
+        import hashlib
+
+        from config import models as models_mod
+
+        root = tmp_path / "encoder"
+        contents = {name: name.encode() * 2 for name in models_mod.LOCAL_ENCODER_FILES}
+        for name, data in contents.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(data)
+        pins = {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+        monkeypatch.setattr(models_mod, "LOCAL_ENCODER_FILES", pins)
+        monkeypatch.setenv("LOCAL_ENCODER_MODELS_DIR", str(root))
+        return root, contents
+
+    @pytest.fixture
+    def fake_heads(self, tmp_path, monkeypatch):
+        from agent.llm.backends import local_encoder
+
+        heads = tmp_path / "heads"
+        heads.mkdir()
+        monkeypatch.setattr(local_encoder, "HEADS_DIR", heads)
+        return heads
+
+    @staticmethod
+    def _declare(monkeypatch, *sites: str):
+        """Pretend ``sites`` are declared ``LOCAL_ENCODER`` classification sites."""
+        from agent.llm.tasks import Backend, DeclaredSite, LLMTask, TaskKind
+        from tools import doctor
+
+        real = doctor.declared_sites_for_routing()
+        extra = [
+            DeclaredSite(
+                task=LLMTask(
+                    site=site, kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+                ),
+                path="tests/fake.py",
+                name="FAKE",
+                lineno=1,
+            )
+            for site in sites
+        ]
+        monkeypatch.setattr(doctor, "declared_sites_for_routing", lambda: real + extra)
+
+    @staticmethod
+    def _row(client_key="client-thing"):
+        from tools import doctor
+
+        results = doctor._check_llm_routing(client_key=client_key)
+        by_name = {r.name: r for r in results}
+        assert by_name["ollama_daemon"].category == "LLM routing"
+        return by_name["local_encoder"]
+
+    def test_passes_as_info_when_no_site_declares_the_backend(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        row = self._row()
+        assert row.passed is True
+        assert row.category == "LLM routing"
+        assert "extra=missing" in row.message
+        assert "LOCAL_ENCODER sites: none" in row.message
+        assert row.fix is None
+
+    def test_passes_with_extra_weights_and_a_head_per_site(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        (fake_heads / "fake.a.json").write_text("{}")
+        (fake_heads / "fake.b.json").write_text("{}")
+        row = self._row()
+        assert row.passed is True, row.message
+        assert "extra=installed" in row.message
+        assert "weights=ok (2 files verified" in row.message
+        assert "heads=ok (2)" in row.message
+        assert "LOCAL_ENCODER sites: fake.a, fake.b" in row.message
+
+    def test_missing_extra_fails_naming_uv_sync(self, fake_weights, fake_heads, monkeypatch):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        self._declare(monkeypatch, "fake.a")
+        (fake_heads / "fake.a.json").write_text("{}")
+        row = self._row()
+        assert row.passed is False
+        assert "fall back to Anthropic on every call" in row.message
+        assert "uv sync --all-extras" in row.fix
+
+    def test_missing_weights_file_fails_naming_the_script(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        root, _ = fake_weights
+        (root / "tokenizer.json").unlink()
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a")
+        (fake_heads / "fake.a.json").write_text("{}")
+        row = self._row()
+        assert row.passed is False
+        assert "weights=missing: tokenizer.json" in row.message
+        assert "scripts/download_local_encoder_models.py" in row.fix
+
+    def test_mismatched_weights_file_fails_naming_the_script(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        root, contents = fake_weights
+        flipped = bytearray(contents["onnx/model_int8.onnx"])
+        flipped[0] ^= 0x01
+        (root / "onnx/model_int8.onnx").write_bytes(bytes(flipped))
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a")
+        (fake_heads / "fake.a.json").write_text("{}")
+        row = self._row()
+        assert row.passed is False
+        assert "weights=mismatch: onnx/model_int8.onnx" in row.message
+        assert "scripts/download_local_encoder_models.py" in row.fix
+
+    def test_missing_head_fails_naming_the_head(self, fake_weights, fake_heads, monkeypatch):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        (fake_heads / "fake.a.json").write_text("{}")
+        row = self._row()
+        assert row.passed is False
+        assert "heads=missing: fake.b" in row.message
+        assert "agent/llm/backends/heads/fake.b.json" in row.fix
+
+    def test_ollama_daemon_row_is_untouched_by_the_encoder_state(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from agent.llm.tasks import Backend, declared_sites
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        self._declare(monkeypatch, "fake.a")
+        results = doctor._check_llm_routing(client_key="client-thing")
+        daemon = {r.name: r for r in results}["ollama_daemon"]
+        ollama_sites = [d.task.site for d in declared_sites() if d.task.backend is Backend.OLLAMA]
+        assert daemon.passed is (not ollama_sites)
+        assert "fake.a" not in daemon.message
