@@ -58,8 +58,14 @@ class Harness:
             "runner",
             f"""
             echo "runner $*" >> "{self.log}"
+            # The sleep child exists before the marker appears, so a SIGINT sent
+            # the instant the marker lands always finds a runner in `wait`. An
+            # asynchronous child ignores SIGINT, so the trap ends it explicitly.
+            sleeper=
+            trap 'kill "$sleeper" 2>/dev/null; exit 130' INT
+            if [ "${{RUNNER_SLEEP:-0}}" != 0 ]; then sleep "$RUNNER_SLEEP" & sleeper=$!; fi
             touch "{self.started}"
-            if [ "${{RUNNER_SLEEP:-0}}" != 0 ]; then sleep "$RUNNER_SLEEP"; fi
+            wait
             exit "${{RUNNER_EXIT:-0}}"
             """,
         )
