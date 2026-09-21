@@ -364,6 +364,27 @@ def test_evaluate_bar_cost_skips_a_reference_without_a_cost_field():
     assert evaluate_bar(record, "decisions") == []
 
 
+async def test_claims_carry_the_cost_and_its_verdict():
+    """One claim per candidate names its per-call cost and, against a priced
+    Anthropic reference, the ``cost`` criterion in its bar verdict."""
+    from tools.classification_eval import claims_for
+
+    async def priced(prompt: str, system: str | None, output_type: type[BaseModel]):
+        return _truth(prompt), 0.002
+
+    reference = Arm(name="anthropic", backend="anthropic", model="m", price=PRICE, call=priced)
+    record = await compare(
+        _site(minimum_n=2),
+        _inputs(2, 0),
+        reference=reference,
+        candidates=[_arm("decisions", "decisions")],
+        contended=False,
+    )
+    (claim,) = claims_for(record, "ev-1")
+    assert "cost_per_call_usd=0.001000" in claim["claim"]
+    assert "bar=MISS cost" in claim["claim"]
+
+
 def test_miss_report_prints_the_cost_threshold_line():
     report = render_report(
         _record_dict(candidates=("decisions",), reference_cost=0.001, cost=0.0005)
@@ -467,6 +488,10 @@ async def test_write_record_and_latest_record_round_trip_through_the_orm():
 
 
 def _seed(record: dict) -> str:
+    """Write ``record`` as an evidence row whose ``created_at`` (the recency
+    the audit orders by) is the record's own ``created_at`` stamp."""
+    from datetime import datetime
+
     row = ImprovementEvidence.record_once(
         PK,
         EVIDENCE_KIND,
@@ -475,6 +500,8 @@ def _seed(record: dict) -> str:
         detail=json.dumps(record),
     )
     assert row is not None
+    row.created_at = datetime.fromisoformat(record["created_at"])
+    row.save()
     return row.id
 
 
@@ -520,6 +547,151 @@ def test_audit_over_two_sites_fails_when_either_misses():
     missing = _task("b.site", Backend.OLLAMA)
     assert audit([passing], project_key=PK) == 0
     assert audit([passing, missing], project_key=PK) == 1
+
+
+# --- --audit: the DECISIONS branch (#3421) --------------------------------------------
+
+
+def _decisions_record(**kw) -> dict:
+    """A decisions comparison: Haiku reference, ``decisions`` and ``ollama``
+    candidates, everything passing unless ``kw`` says otherwise."""
+    kw.setdefault("candidates", ("decisions", "ollama"))
+    return _record_dict(**kw)
+
+
+def _granite_reference_record(**kw) -> dict:
+    """A decisions comparison at a granite-reference site (C12 to C14): the
+    ollama arm is the reference, ``decisions`` the one candidate."""
+    kw.setdefault("candidates", ("decisions",))
+    kw.setdefault("reference_backend", "ollama")
+    return _record_dict(**kw)
+
+
+@pytest.mark.parametrize(
+    ("record", "expected_exit", "markers"),
+    [
+        (_decisions_record(), 0, ["PASS", "fallback=ollama PASS"]),
+        (_decisions_record(candidates=("ollama", "decisions")), 0, ["fallback=ollama PASS"]),
+        # The ollama candidate misses: its own criteria are named as the fallback's.
+        (
+            _decisions_record(agreement=0.90),
+            1,
+            ["decisions=MISS agreement", "MISS fallback agreement"],
+        ),
+        # The decisions candidate misses while granite passes: still a miss.
+        (_decisions_record(contended=True), 1, ["decisions=MISS contended"]),
+        (
+            _granite_reference_record(budget_s=3.0, reference_p95_c4=2.5),
+            0,
+            ["PASS", "fallback=ollama PASS"],
+        ),
+        (
+            _granite_reference_record(budget_s=3.0, reference_p95_c4=3.5),
+            1,
+            ["MISS fallback p95_c4"],
+        ),
+        (
+            _granite_reference_record(reference_error_rate=0.05),
+            1,
+            ["MISS fallback error_rate"],
+        ),
+        # No ollama arm anywhere in the record: the row fails naming the absence.
+        (_decisions_record(candidates=("decisions",)), 1, ["no ollama arm in the record"]),
+        (
+            _decisions_record(candidates=("decisions", "anthropic")),
+            1,
+            ["no ollama arm in the record"],
+        ),
+    ],
+)
+def test_audit_decisions_branch_judges_the_ollama_arm_of_the_same_record(
+    record, expected_exit, markers, capsys
+):
+    task = _task("test.site", Backend.DECISIONS)
+    _seed(record)
+    code = audit([task], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == expected_exit, out
+    for marker in markers:
+        assert marker in out, out
+
+
+def test_audit_decisions_reads_the_reference_slot_on_a_name_collision(capsys):
+    """A record carrying granite in both slots under the same name: the
+    reference arm (judged by ``evaluate_reference``) misses ``p95_c4`` while a
+    same-named ``candidates["ollama"]`` clears ``evaluate_bar``. The branch
+    selects the reference slot explicitly; a by-name lookup from the merged
+    arms dict would read the candidate's inflated self-agreement as the
+    fallback PASS (critique round 2)."""
+    record = _record_dict(
+        candidates=("decisions", "ollama"),
+        reference_backend="ollama",
+        reference_name="ollama",
+        budget_s=3.0,
+        reference_p95_c4=3.5,
+        p95_c4=1.0,
+        agreement=0.99,
+    )
+    assert evaluate_bar(record, "ollama") == []
+    _seed(record)
+    code = audit([_task("test.site", Backend.DECISIONS)], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "MISS fallback p95_c4" in out and "fallback=ollama" in out
+
+
+def test_audit_decisions_never_rescues_the_landing_record_from_an_older_one(capsys):
+    """A passing ollama arm in an older record never stands in for a failing
+    one in the landing record: the audit judges one record and substitutes none."""
+    _seed(_decisions_record(run_id="older", created_at="2026-09-19T00:00:00+00:00"))
+    _seed(
+        _decisions_record(run_id="newest", created_at="2026-09-20T00:00:00+00:00", error_rate=0.05)
+    )
+    code = audit([_task("test.site", Backend.DECISIONS)], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "MISS fallback error_rate" in out
+
+
+def test_audit_decisions_has_no_record_with_a_decisions_arm(capsys):
+    _seed(_record_dict())
+    code = audit([_task("test.site", Backend.DECISIONS)], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == 1 and "no decisions arm in the record" in out
+
+
+def test_audit_ollama_branch_keeps_its_landing_record_under_a_newer_decisions_comparison(
+    capsys,
+):
+    """A granite site's landing evidence is the newest record carrying granite
+    as a candidate (a comparison or a latency-only measurement); a later
+    decisions comparison whose reference is the ollama arm never displaces it."""
+    _seed(_record_dict(latency_only=True, run_id="landing", created_at="2026-09-19T00:00:00+00:00"))
+    _seed(
+        _granite_reference_record(
+            run_id="later", created_at="2026-09-20T00:00:00+00:00", contended=True
+        )
+    )
+    code = audit([_task("test.site", Backend.OLLAMA)], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "latency-only" in out and "PASS" in out
+
+
+def test_landing_record_prefers_the_newest_record_carrying_the_backend_as_a_candidate():
+    from tools.classification_eval import landing_record
+
+    older = _seed(_decisions_record(run_id="older", created_at="2026-09-19T00:00:00+00:00"))
+    newest = _seed(_decisions_record(run_id="newest", created_at="2026-09-20T00:00:00+00:00"))
+    reference_only = _seed(
+        _granite_reference_record(run_id="ref", created_at="2026-09-21T00:00:00+00:00")
+    )
+    found = landing_record("test.site", "ollama", project_key=PK)
+    assert found is not None and found[0] == newest and found[0] != older
+    found = landing_record("test.site", "decisions", project_key=PK)
+    assert found is not None and found[0] == reference_only
+    assert landing_record("test.site", "anthropic", project_key=PK) is None
+    assert landing_record("other.site", "ollama", project_key=PK) is None
 
 
 # --- declared sites and the CLI ----------------------------------------------------
