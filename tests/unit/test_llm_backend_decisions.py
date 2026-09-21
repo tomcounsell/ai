@@ -716,6 +716,24 @@ class TestFailureReasons:
         assert "bad key *** for this account" in str(exc_info.value)
         _assert_no_key_fragment(caplog.text, str(exc_info.value))
 
+    async def test_key_straddling_the_detail_boundary_is_scrubbed(
+        self, stack_for, fake_meter, caplog
+    ):
+        """A key that crosses the DETAIL_CHARS cut must be scrubbed before the
+        cut: truncating first leaves a prefix the whole-key scrub cannot match."""
+        echo = {"detail": {"message": "x" * 180 + FAKE_KEY + " tail"}}
+
+        with caplog.at_level(logging.ERROR, logger="agent.llm.backends.decisions"):
+            with pytest.raises(LLMCallError) as exc_info:
+                await _call(stack_for(Transport(_json(401, echo))))
+
+        records = _error_records(caplog)
+        assert len(records) == 1
+        for text in (str(exc_info.value), records[0].getMessage()):
+            for start in range(len(FAKE_KEY) - 7):
+                window = FAKE_KEY[start : start + 8]
+                assert window not in text, f"key window {window!r} leaked"
+
     async def test_error_body_detail_is_truncated(self, stack_for, fake_meter):
         long = {"detail": {"message": "x" * 1000}}
 

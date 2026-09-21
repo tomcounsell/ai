@@ -416,13 +416,15 @@ def _detail(response: Any, key: str) -> str:
     """The first :data:`DETAIL_CHARS` of the body's ``detail.message``, else ``""``.
 
     Scrubbed here, before any exception carries it, so a body that quotes the
-    bearer back never reaches a traceback either.
+    bearer back never reaches a traceback either. The scrub runs on the whole
+    message and the cut comes after: cutting first would leave a key prefix
+    that straddles the boundary, which a whole-key replace cannot match.
     """
     try:
         message = response.json()["detail"]["message"]
     except (ValueError, KeyError, TypeError):
         return ""
-    return _scrub(message[:DETAIL_CHARS], key) if isinstance(message, str) else ""
+    return _scrub(message, key)[:DETAIL_CHARS] if isinstance(message, str) else ""
 
 
 def _record_usage(envelope: SpendEnvelope, payload: Any) -> None:
