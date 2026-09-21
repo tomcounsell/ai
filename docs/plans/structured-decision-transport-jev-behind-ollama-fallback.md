@@ -175,11 +175,11 @@ The code is bounded (one leg of about 200 lines, a rule, an arm, a criterion, an
 |-------------|---------------|---------|
 | Lane A on `main` | `git merge-base --is-ancestor 4703bce23 HEAD` | the router, legs, runner, and records this lane extends |
 | `OPENROUTER_API_KEY` in the vault `.env` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('OPENROUTER_API_KEY')"` | the decisions leg and the runner's decisions arm |
-| Decisions endpoint reachable | `curl -sf https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints \| python -c "import json,sys; d=json.load(sys.stdin)['data']; assert d['endpoints'][0]['context_length']==32000"` | the probe test and every comparison run |
-| Ollama daemon with granite pulled | `curl -sf http://localhost:11434/api/tags \| grep -q granite4.1:3b` | the Ollama fallback arm on every comparison and the fallback leg in production |
-| Redis reachable | `redis-cli -u "$REDIS_URL" ping` | the meter envelope, the comparison records, the audit |
+| Decisions endpoint reachable | `.venv/bin/python -c "import httpx; d=httpx.get('https://openrouter.ai/api/v1/models/typesafe/jev-1.13/endpoints', timeout=15).json()['data']; assert d['endpoints'][0]['context_length']==32000"` | the probe test and every comparison run |
+| Ollama daemon with granite pulled | `.venv/bin/python -c "import httpx; from config.settings import settings; from config.models import OLLAMA_CLASSIFIER_MODEL; tags=httpx.get(settings.models.ollama_host.rstrip('/')+'/api/tags', timeout=5).json(); assert any(m['name']==OLLAMA_CLASSIFIER_MODEL for m in tags['models'])"` | the Ollama fallback arm on every comparison and the fallback leg in production |
+| Redis reachable | `.venv/bin/python -c "from utils.redis_client import text_redis; assert text_redis().ping()"` | the meter envelope, the comparison records, the audit |
 | `httpx` importable in the venv | `.venv/bin/python -c "import httpx"` | the leg's client |
-| Services stopped for a latency run | `launchctl list \| grep -c com.valor \|\| true` | `contended: false` on every record (Race 3 of the parent plan); the runner stamps `contended: true` otherwise |
+| Contention check runs | `.venv/bin/python -c "from tools.classification_eval import is_contended; print(is_contended())"` | prints `True` while `com.valor.*` services are loaded; stop them (`./scripts/valor-service.sh stop`) before a latency run so the record carries `contended: false` (Race 3 of the parent plan) |
 
 Run all checks via `python scripts/check_prerequisites.py docs/plans/structured-decision-transport-jev-behind-ollama-fallback.md`.
 
@@ -380,15 +380,162 @@ No new CLI entry point in `pyproject.toml [project.scripts]`: the runner stays `
 
 ## Success Criteria
 
-Placeholder.
+- [ ] `agent/llm/backends/decisions.py` implements the landed leg protocol; `tests/unit/test_llm_backend_decisions.py` covers the success path with a recorded response, the seven failure classes plus the missing key (each with its `reason` and one ERROR log line), the question builder over every classification output type on `main`, the decoder's edge cases, and the envelope (one settle per reservation across a cancelled call, a failed call, a headroom roll, a day rollover, four concurrent callers).
+- [ ] `resolve` has rule 5; `tests/unit/test_llm_router.py` covers the eligible route with its Ollama fallback and the ineligible route to Anthropic; the table-driven test passes over every declaration; `tests/unit/test_llm_router_eligibility.py` proves client context never reaches the decisions leg.
+- [ ] `default_sdk_timeout(Backend.DECISIONS)` reads `settings.timeouts.decisions_sdk_s` (3.0); `.env.example` and the timeout catalog carry the key.
+- [ ] `tests/unit/test_models.py::test_openrouter_jev_endpoint_is_listed` passes live and fails by name on a delisting or a pricing change (`integration` marker, fail-closed on network error).
+- [ ] `python -m tools.classification_eval --site <id> --candidate decisions,ollama` runs for every eligible site (C1 through C15); each record carries agreement with CI, p50/p95 at concurrency 1 and 4, cost per call with the price's retrieval date, error rate, `n`/`n_real`, `contended: false`; every record's claims are on case `1ec40086ca1d422e90ef747775ff7f64`; the per-site landing summary is in the PR body.
+- [ ] Every site declaring `backend=Backend.DECISIONS` has a landing record whose decisions arm clears all seven criteria and whose Ollama fallback is a passing backend; its route for `valor` carries `fallback.backend is Backend.OLLAMA`; its doc row says `decisions`; `python -m tools.classification_eval --audit` exits 0.
+- [ ] Every site that holds names its failing criteria in its record and in the Lane C Outcome table; a rejection verdict, if earned, is a claim on the case with the numbers.
+- [ ] The C15 cascade ships only with a passing C15 record; the C12 per-call type ships only with a passing C12 record.
+- [ ] No `MODELS__*` switch, no shadow route, no `openrouter` SDK, no new `LLMTask` field, no `asyncio.wait_for` in the leg, no third-party import at module scope in `agent/llm`.
+- [ ] Tests pass (`/do-test`), lint and format clean.
+- [ ] Documentation updated (`/do-docs`): the four pages in Documentation.
 
 ## Team Orchestration
 
-Placeholder.
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead never builds directly; it deploys team members and coordinates.
+
+### Team Members
+
+- **Builder (leg and router)**
+  - Name: decisions-builder
+  - Role: `Backend.DECISIONS`, constants, timer, the `Decision` marker, the leg with its envelope, the wrapper entry, the router rule, the doctor row, the probe test, and their unit tests
+  - Agent Type: builder
+  - Domain: async/concurrency (the envelope's roll, `CancelledError` pass-through), untrusted-input (the endpoint's error bodies are data)
+  - Resume: true
+
+- **Builder (runner and landings)**
+  - Name: comparison-builder
+  - Role: the decisions arm, `Site.reference = "ollama"`, the `cost` criterion, `landing_record`, the audit branch, the fifteen comparison runs, the per-site landings with their `Decision` markers and candidate prompts, the C15 cascade and C12 per-call type when reached, the rejection verdict if earned
+  - Agent Type: builder
+  - Domain: Redis/Popoto data (records and claims through the ORM and the meter's public functions only)
+  - Resume: true
+
+- **Validator (lane C)**
+  - Name: decisions-validator
+  - Role: runs the Verification table, re-derives every landing from its record with `evaluate_bar` and the fallback rule, checks each `DECISIONS` declaration's doc row and route, confirms the anti-criteria
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: decisions-documentarian
+  - Role: the four pages in Documentation plus the module docstrings
+  - Agent Type: documentarian
+  - Resume: true
+
+### Available Agent Types
+
+**Tier 1 (default choices):** `builder`, `validator`, `code-reviewer`, `test-engineer`, `documentarian`, `plan-maker`, `frontend-tester`.
+
+**Domain expertise:** no standing specialist pool. The `Domain:` lines above name the rules to paste from `DOMAIN_FRAMING.md` into each builder's assignment.
 
 ## Step by Step Tasks
 
-Placeholder.
+Commit early on `session/sdlc-3421`: one commit per task below at minimum, one per landed site in task 6.
+
+### 1. Enum, constants, timer, marker
+- **Task ID**: build-taxonomy-additions
+- **Depends On**: none
+- **Validates**: `tests/unit/test_llm_tasks.py`, `tests/unit/test_settings.py`, `tests/unit/test_llm_task_taxonomy.py`
+- **Informed By**: spike-3 (the marker stays out of the JSON schema), Research finding 4 (pricing and context)
+- **Assigned To**: decisions-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `Backend.DECISIONS = "decisions"`; update the docstring's lane sentence; update the enum pin test.
+- Add `Decision` (frozen dataclass: `question`, `criteria`, `threshold=0.5`, `focus=None`) to `agent/llm/tasks.py` with its contract in the module docstring; export from `agent/llm/__init__.py`.
+- Add `JEV`, `OPENROUTER_DECISIONS_URL` (env override like `OPENROUTER_URL`), and `MODEL_INFO[JEV]` to `config/models.py`.
+- Add `TimeoutSettings.decisions_sdk_s` (3.0, `ge=0.5`, `le=60.0`, description naming the leg and the env key), the commented `TIMEOUTS__DECISIONS_SDK_S` in `.env.example`, and the catalog row; `default_sdk_timeout` gains the branch.
+- Add `AsyncHTTPClient` to `LLMStack` and `_load_stack`.
+
+### 2. The decisions leg and its envelope
+- **Task ID**: build-decisions-leg
+- **Depends On**: build-taxonomy-additions
+- **Validates**: `tests/unit/test_llm_backend_decisions.py` (create), `tests/unit/test_llm_import_safety.py`
+- **Informed By**: spike-1 (wire shape, `instructions` required, 400 body, prompt-shaped state, dynamic options), spike-4 (the cent floor), Research finding 5 (usage block shape)
+- **Assigned To**: decisions-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Write `agent/llm/backends/decisions.py`: `questions_for`, `decode_answers`, `SpendEnvelope`, `call`, per the Technical Approach table and failure table; the module docstring in `ollama.py`'s shape.
+- Recorded-response fixtures from spike-1 (verbatim bodies, retrieval date in a comment).
+- Tests: success; each failure class with `reason` and one ERROR line; missing key; `questions_for` over every classification output type on `main` (AST-located) and the three `ValueError` shapes; `decode_answers` edge cases; the envelope's five invariants (Success Criteria) with a fake meter; four concurrent callers roll once.
+
+### 3. Router rule 5, wrapper entry, doctor row
+- **Task ID**: build-router-rule
+- **Depends On**: build-decisions-leg
+- **Validates**: `tests/unit/test_llm_router.py`, `tests/unit/test_llm_router_eligibility.py`, `tests/unit/test_llm_wrapper.py`, the doctor test that covers `_check_llm_routing`
+- **Informed By**: parent plan Data Flow step 4 (rule order), Risk 4
+- **Assigned To**: decisions-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Rule 5 in `resolve` ahead of rule 3; docstring to five rules.
+- `_LEGS[Backend.DECISIONS]`; `test_legs_table_covers_every_backend`; the decisions → ollama fallback case and the `llm_no_fallback` case.
+- `_expected` in the router test gains the branch; the eligibility test's local list includes `DECISIONS`.
+- `_check_llm_routing` gains the `decisions_endpoint` row (no network).
+
+### 4. Jev listing probe test
+- **Task ID**: build-probe-test
+- **Depends On**: build-taxonomy-additions
+- **Validates**: `tests/unit/test_models.py`
+- **Informed By**: Research finding 4 (`data.endpoints[0]`, top-level `context_length` is null)
+- **Assigned To**: decisions-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `test_openrouter_jev_endpoint_is_listed` beside the gemma probe, same fail-closed shape, asserting the endpoint entry's `context_length`, `status`, and `pricing.completion`; confirm `_configured_openrouter_ids()` stays quiet about `JEV`.
+
+### 5. Runner: arm, reference, criterion, landing record, audit
+- **Task ID**: build-runner-arm
+- **Depends On**: build-decisions-leg
+- **Validates**: `tests/unit/test_classification_eval.py`
+- **Informed By**: spike-4 (per-run envelope like the gemma arm), Technical Approach (landing rule)
+- **Assigned To**: comparison-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- `decisions_arm(site_id)` with `JEV_PRICE` and a per-run `SpendEnvelope` reserved for `max(0.01, CALL_BOUND_USD * 2 * n)` and settled in `finally`; `_candidate_arms` entry; `--candidate` help text.
+- `Site.reference` accepts `"ollama"`; `_run_site` builds the ollama reference; C12, C13, C14 rows set it; C12's label applies the site threshold as in Technical Approach (only if C12 is reached; otherwise the label stays `decision`).
+- `evaluate_bar` gains `cost` (reference on `anthropic` only); `render_report`, `claims_for` print it; `TIER_BAR` untouched.
+- `landing_record(site_id, backend)`; `_audit_row` reads it and gains the `DECISIONS` branch (`MISS fallback` naming the ollama arm's failures); the `OLLAMA` branch keeps its latency-only reading.
+- Tests for each of the above through the existing fixtures.
+
+### 6. Comparisons and landings
+- **Task ID**: build-landings
+- **Depends On**: build-router-rule, build-runner-arm, build-probe-test
+- **Validates**: `python -m tools.classification_eval --audit`, `tests/unit/test_llm_task_taxonomy.py` (doc parity), the site tests named in Test Impact for any site that lands
+- **Informed By**: spike-2 (12 real messages here; Open Question 1), Research finding 7 (the quality prior), Risk 1, Risk 2
+- **Assigned To**: comparison-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Stop services (`./scripts/valor-service.sh stop`); confirm granite warm and the key present.
+- For each of C1 through C15 in the order C11, C14, C7, C8, C15, C12, C13, C9, C10, C5, C6, C1, C2, C3, C4 (the sites with real inputs of their own shape first, then granite's passing-agreement sites, then the rest): add `Decision` markers to the site's output type (question, criteria with `what` from the site's prompt text, examples where the prompt has them); run `--candidate decisions,ollama` (with `--inputs <sample>` when Open Question 1 provides one); read the report; iterate on markers and `candidate_prompt` within reason; keep the last record.
+- On a passing record: set `backend=Backend.DECISIONS`, make the measured candidate prompt the production prompt if it differs, edit the doc row, commit `Land <site> on decisions (record <id>)`.
+- On a miss: leave the declaration, commit `Hold <site> (record <id>: <failing criteria>)`.
+- C15 cascade only on a passing C15 record; C12 per-call type only when C12's run is reached (build it before C12's run so the record measures it).
+- If the rejection criteria are met, record the verdict claim on the case and stop landing.
+- Write the per-site landing summary (the Lane C Outcome table) into the PR body.
+
+### 7. Validate lane C
+- **Task ID**: validate-lane-c
+- **Depends On**: build-landings
+- **Assigned To**: decisions-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row; re-derive each landing from its record with `evaluate_bar` and the fallback rule; confirm each `DECISIONS` declaration's route and doc row; confirm the anti-criteria; report per site.
+
+### 8. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-lane-c
+- **Assigned To**: decisions-documentarian
+- **Agent Type**: documentarian
+- **Parallel**: false
+- The four pages and the docstrings in Documentation; the Lane C Outcome table from the records.
+
+### 9. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: decisions-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Rebase on `main` (lane B may have merged); re-run the Verification table; confirm the docs greps; final report.
 
 ## Verification
 
@@ -401,7 +548,7 @@ Placeholder.
 | `Backend.DECISIONS` exists and the wrapper's leg table covers every backend | `.venv/bin/python -c "from agent.llm.tasks import Backend; from agent.llm.wrapper import _LEGS; assert Backend.DECISIONS.value == 'decisions'; assert set(_LEGS) == set(Backend); print('ok')"` | output contains ok |
 | Rule 5 routes an eligible DECISIONS task to Jev with an Ollama fallback and a client key to Anthropic | `.venv/bin/python -c "from agent.llm.tasks import *; from agent.llm.router import resolve; from config.models import JEV; t=LLMTask('x.y', TaskKind.CLASSIFICATION, Backend.DECISIONS); r=resolve(t,'valor'); assert (r.backend, r.model, r.fallback.backend) == (Backend.DECISIONS, JEV, Backend.OLLAMA) and r.fallback.fallback is None; c=resolve(t,'acme'); assert c.backend is Backend.ANTHROPIC and c.fallback is None; print('ok')"` | output contains ok |
 | The decisions leg reads its timer from `TimeoutSettings` | `.venv/bin/python -c "from agent.llm.backends import default_sdk_timeout; from agent.llm.tasks import Backend; from config.settings import settings; assert default_sdk_timeout(Backend.DECISIONS) == settings.timeouts.decisions_sdk_s == 3.0; print('ok')"` | output contains ok |
-| The leg holds no third-party import at module scope (#3001) | `.venv/bin/python -c "import ast,sys; t=ast.parse(open('agent/llm/backends/decisions.py').read()); names=[n.names[0].name.split('.')[0] for n in t.body if isinstance(n,(ast.Import,ast.ImportFrom)) for _ in [0]] + [n.module.split('.')[0] for n in t.body if isinstance(n,ast.ImportFrom) and n.module]; bad=[n for n in names if n in ('httpx','anthropic','openai','pydantic_ai')]; print(bad)"` | output contains [] |
+| The leg holds no third-party import at module scope (#3001) | `.venv/bin/python -c "import ast; t=ast.parse(open('agent/llm/backends/decisions.py').read()); names=[a.name.split('.')[0] for n in t.body if isinstance(n,ast.Import) for a in n.names]+[n.module.split('.')[0] for n in t.body if isinstance(n,ast.ImportFrom) and n.module]; bad=[n for n in names if n in ('httpx','anthropic','openai','pydantic_ai')]; print(bad)"` | output contains [] |
 | No `asyncio.wait_for` inside the decisions leg (hotfix #1055) | `grep -c "wait_for" agent/llm/backends/decisions.py` | match count == 0 |
 | No `openrouter` SDK dependency was added | `grep -c '"openrouter' pyproject.toml` | match count == 0 |
 | No per-call `spend_receipt` row: the leg never calls `record_receipt` and never settles per call | `grep -c "record_receipt\|settle_from_response" agent/llm/backends/decisions.py` | match count == 0 |
@@ -425,4 +572,6 @@ Placeholder.
 
 ## Open Questions
 
-Placeholder.
+1. **Real-input sample (blocks the inbound sites' landings, not the build).** The build machine holds 12 real `valor` human messages (spike-2), so C1 to C10, C12, C13, and C15 fail `n_real` here exactly as in lane A, whatever Jev scores. Which do you prefer: (a) run `python -m tools.classification_eval --site routing.needs_response --save-inputs <file> --candidate ollama --latency-only` (or any site; the draw is the same inbound set) on the bridge machine and hand the JSON-lines file to the builder for `--inputs` (the file stays out of git); (b) run the comparisons on the bridge machine from the lane branch with services stopped; or (c) proceed on this machine and let those sites hold with `n_real` named, landing only what C11 and C14 can carry. The plan proceeds under (c) until told otherwise; (a) is the cheapest unlock.
+2. **Departures from the issue body.** The four `LLMTask` fields become a per-field `Decision` marker and per-backend `thresholds` are dropped; per-call metering becomes a one-cent envelope; the key is read from the flat environment variable (Reconciliation 1 to 6, each with its reason). The plan proceeds on these unless you object.
+3. **Observation, no action requested.** `settings.api.openrouter_api_key` is never populated by the vault's flat `OPENROUTER_API_KEY` (the field needs `API__OPENROUTER_API_KEY`), so the settings field is dead and every reader uses the environment variable directly. A one-line chore issue could rename the field's env source or delete it; this lane leaves it alone.
