@@ -28,7 +28,9 @@ each spend the whole remainder), or is skipped under
 
 Two fixed-prefix log lines are the operator's evidence of which backend
 served a site: ``llm_route site=<site> backend=<backend> elapsed_ms=<int>``
-at INFO after whichever leg answered, and ``llm_fallback site=<site>
+at INFO after whichever leg answered (with `` confidence=<score>`` appended,
+``%.3f``, whenever the returned instance carries a ``confidence`` attribute
+that is not ``None``, on either leg), and ``llm_fallback site=<site>
 primary=<backend> fallback=<backend> reason=<reason> elapsed_ms=<int>`` at
 WARNING ahead of a fallback leg. ``docs/infra/llm-task-routing.md`` greps
 for both.
@@ -65,6 +67,7 @@ from typing import TYPE_CHECKING
 from agent.anthropic_client import _load_stack
 from agent.llm.backends import MIN_REMAINDER_S, default_sdk_timeout
 from agent.llm.backends import anthropic as anthropic_leg
+from agent.llm.backends import local_encoder as local_encoder_leg
 from agent.llm.backends import ollama as ollama_leg
 from agent.llm.errors import LLMCallError, LLMStackIncompatible
 from agent.llm.router import resolve
@@ -95,6 +98,7 @@ DEFAULT_HARD_TIMEOUT = settings.timeouts.anthropic_hard_s
 _LEGS = {
     Backend.ANTHROPIC: anthropic_leg.call,
     Backend.OLLAMA: ollama_leg.call,
+    Backend.LOCAL_ENCODER: local_encoder_leg.call,
 }
 
 
@@ -165,13 +169,16 @@ async def run_typed(
         model: the Anthropic model id. Defaults to
             ``config.models.MODEL_FAST`` (Haiku). Names the model on every
             Anthropic route, the fallback included; the Ollama leg always
-            runs ``config.models.OLLAMA_CLASSIFIER_MODEL``.
+            runs ``config.models.OLLAMA_CLASSIFIER_MODEL`` and the local
+            encoder leg runs the site's committed head.
         system: an optional system prompt for the PydanticAI ``Agent``.
+            The local encoder leg ignores it (the head was fit on the text
+            alone); it is carried for the Anthropic fallback.
         sdk_timeout: the leg's SDK-level request timer (seconds). ``None``
             means the leg's default from ``settings.timeouts``
             (``anthropic_sdk_s`` for Anthropic, ``local_typed_hard_s`` for
-            Ollama), read at call time; an explicit value always wins and
-            is also the fallback budget.
+            Ollama and the local encoder), read at call time; an explicit
+            value always wins and is also the fallback budget.
         slot_timeout: bounds the Anthropic leg's wait for the shared
             semaphore; ``None`` waits unbounded on the primary leg (the
             fallback's wait is bounded by its timer). A slot wait that
@@ -296,12 +303,24 @@ async def run_typed(
                 stack=stack,
             )
             answered = fallback.backend
-        logger.info(
-            "llm_route site=%s backend=%s elapsed_ms=%d",
-            task.site,
-            answered.value,
-            int((monotonic() - start) * 1000),
-        )
+        elapsed_ms = int((monotonic() - start) * 1000)
+        confidence = getattr(result, "confidence", None)
+        if confidence is None:
+            logger.info(
+                "llm_route site=%s backend=%s elapsed_ms=%d", task.site, answered.value, elapsed_ms
+            )
+        else:
+            # Backend-neutral: any result carrying a ``confidence`` attribute logs
+            # it, so one grep compares the two legs' score distributions per site
+            # after deploy (#3420, Risk 2). Without the attribute the lane A line
+            # is logged byte-for-byte.
+            logger.info(
+                "llm_route site=%s backend=%s elapsed_ms=%d confidence=%.3f",
+                task.site,
+                answered.value,
+                elapsed_ms,
+                confidence,
+            )
         return result
 
     if hard_timeout is None:
