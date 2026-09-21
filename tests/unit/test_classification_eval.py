@@ -768,6 +768,33 @@ def test_candidate_arms_drops_ollama_when_reference_is_ollama(monkeypatch, capsy
     assert built == ["decisions", "ollama"]
 
 
+def test_candidate_arms_keeps_the_only_ollama_candidate_at_a_granite_reference_site(
+    monkeypatch, capsys
+):
+    """Regression (#3421 review blocker 2): ``--latency-only`` with no
+    ``--candidate`` defaults ``candidates`` to ``["ollama"]``; at a C12 to
+    C14 site that used to be unconditionally dropped, leaving ``compare()``
+    zero candidate arms and a bare ``ValueError`` from
+    ``core.py::compare``. A latency-only run never builds a reference arm,
+    so there is no self-comparison to avoid and the candidate must survive."""
+    from tools.classification_eval.__main__ import _candidate_arms
+
+    built = _fake_arm_builders(monkeypatch)
+    arms = _candidate_arms("classifier.intake_intent", ["ollama"], latency_only=True)
+    assert [arm.backend for arm in arms] == ["ollama"]
+    assert built == ["ollama"]
+    assert capsys.readouterr().out == ""
+
+    # Non-latency-only with ollama as the *only* requested candidate at a
+    # granite-reference site must also survive: dropping it here would be
+    # the same empty-arms crash, just reached through an explicit
+    # ``--candidate ollama`` instead of the ``--latency-only`` default.
+    built.clear()
+    arms = _candidate_arms("classifier.intake_intent", ["ollama"], latency_only=False)
+    assert [arm.backend for arm in arms] == ["ollama"]
+    assert built == ["ollama"]
+
+
 @pytest.mark.parametrize(
     "site_id", ["job_router.route", "classifier.intake_intent", "memory_audit.classify"]
 )

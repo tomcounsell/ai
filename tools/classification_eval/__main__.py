@@ -113,15 +113,25 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
+def _candidate_arms(site_id: str, names: Sequence[str], *, latency_only: bool = False) -> list[Arm]:
     """The candidate arms for ``names`` at ``site_id``, in order.
 
     Where the site's reference arm is granite (``reference="ollama"``, C12
-    to C14) the ``ollama`` candidate is dropped with a printed note: the
-    reference is that same call under the same default name, and a second
-    copy would be a granite-against-granite self-comparison whose agreement
-    means nothing (and whose name would collide with the reference's in the
-    record). The audit judges the reference slot as the fallback instead.
+    to C14) *and* the run also builds a reference arm (``latency_only`` is
+    False, so ``main`` will call ``ollama_arm`` again for the reference) the
+    ``ollama`` candidate is dropped with a printed note: the reference is
+    that same call under the same default name, and a second copy would be
+    a granite-against-granite self-comparison whose agreement means nothing
+    (and whose name would collide with the reference's in the record). The
+    audit judges the reference slot as the fallback instead.
+
+    The drop never empties ``wanted``: it requires at least one other
+    candidate to survive it. A latency-only run builds no reference arm at
+    all (``main`` skips that block when ``latency_only`` is set), so an
+    ``ollama``-only candidate list there is never a self-comparison and is
+    kept — dropping it would leave ``compare()`` with zero candidate arms
+    and no way to regenerate the granite landing evidence at these sites
+    (#3421 review blocker 2).
     """
     from tools.classification_eval import arms as live
     from tools.classification_eval.sites import site_for
@@ -132,7 +142,12 @@ def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
         Backend.DECISIONS.value: lambda: live.decisions_arm(site_id),
     }
     wanted = list(names)
-    if Backend.OLLAMA.value in wanted and site_for(site_id).reference == "ollama":
+    if (
+        not latency_only
+        and len(wanted) > 1
+        and Backend.OLLAMA.value in wanted
+        and site_for(site_id).reference == "ollama"
+    ):
         wanted.remove(Backend.OLLAMA.value)
         print(f"ollama candidate dropped: the reference arm at {site_id} is granite")
     return [builders[name]() for name in wanted]
@@ -164,7 +179,7 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
             file=sys.stderr,
         )
 
-    candidate_arms = _candidate_arms(site.id, candidates)
+    candidate_arms = _candidate_arms(site.id, candidates, latency_only=args.latency_only)
     # Every input crosses each arm twice (the agreement pass and the latency
     # pass); the metered transports reserve for that many calls and settle
     # once, whatever happens in between.
