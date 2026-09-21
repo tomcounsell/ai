@@ -247,7 +247,23 @@ A type with no `Literal` and no `bool` field raises `ValueError` at build time (
 
 ## Failure Path Test Strategy
 
-Placeholder.
+### Exception Handling Coverage
+- [ ] The decisions leg has exactly one `except Exception` (around the POST and decode, mapped through the failure table) and it never swallows: every branch logs once at ERROR and raises `LLMCallError` with a `reason`. `tests/unit/test_llm_backend_decisions.py` drives each of the seven failure classes (non-200, invalid JSON, missing answer id, unknown choice, `model_validate` failure, `httpx.ReadTimeout`, meter `Refusal`) plus the missing-key case through the `AsyncHTTPClient` seam and asserts the `reason`, the one ERROR log line via `caplog`, and that no client outlived the call.
+- [ ] `SpendEnvelope.settle()` is the only place a meter write can fail; a Redis error there is caught, logged at WARNING, and does not fail the call (the answer was already produced; charter §8 is honored by the reconcile pass receipting the open reservation). Test: a settle whose `paid_inference_meter.settle` raises leaves the call's result intact and logs.
+- [ ] The wrapper's fallback path is lane A's and has its tests; this lane adds the decisions → ollama case to `tests/unit/test_llm_wrapper.py` (primary `transport` error, fallback answers; primary `timeout` with the budget nearly spent, `llm_no_fallback` logged and the primary error propagates).
+- [ ] The C15 cascade's span call failure keeps the positive with `span=""` and logs at WARNING (test in `tests/unit/test_improvement_evidence.py`, only if the cascade ships).
+
+### Empty/Invalid Input Handling
+- [ ] `run_typed` already rejects an empty or whitespace prompt before routing; the leg receives a non-empty prompt. `system=""` is treated as absent (state is the prompt alone). Test both.
+- [ ] `questions_for(output_type)` raises `ValueError` naming the field for: a type with no `Literal` and no `bool` field; a `Literal` with a non-string member; a required field the leg cannot fill. Tests for each, plus the happy shapes of every classification output type on `main` (parametrised over `declared_sites()` filtered to classification, importing each site's output type by the declaration's module and the `run_typed` call's second argument found by AST, so a new site with an unaskable type fails here before any comparison runs).
+- [ ] `decode_answers` handles `answers == {}` (missing id → `validation`), a `noul` exactly at the threshold (`>=` → `True`), a `choice` answer whose `probabilities` are absent (confidence falls back to the answer's `confidence`, else 0.0), and a `usage` block without `cost` (envelope marked unknown, result still returned).
+- [ ] The comparison runner's `parse_candidates` rejects `decisions` only while the enum lacks it (no longer); the `cost` criterion with a reference `cost_per_call_usd` of 0.0 (a gemma or ollama reference) is skipped, never a division.
+
+### Error State Rendering
+- [ ] `render_report` prints `cost` among the failing criteria with the threshold line `cost/call $x > one tenth of reference $y`; test through the existing report fixture.
+- [ ] `--audit` prints, for a `DECISIONS` landing whose fallback misses, `MISS fallback` with the failing criteria of the ollama arm, and exits 1; test through the existing audit fixtures.
+- [ ] `tools/doctor`'s `decisions_endpoint` row renders the missing-key case with the fix text; test with the environment variable removed and one `DECISIONS` declaration injected through the doctor's site list seam.
+- [ ] The probe test's two failure messages ("unreachable" vs "not listed") are distinct strings, as in the sibling.
 
 ## Test Impact
 
@@ -266,27 +282,86 @@ Placeholder.
 
 ## Rabbit Holes
 
-Placeholder.
+- **Routing Jev through PydanticAI** (pydantic/pydantic-ai#8552). A custom `Model` subclass would let the leg reuse `Agent`, at the cost of shoehorning `{state, questions}` into a chat-shaped request. One `httpx` POST is smaller and the wire shape is pinned by probe. Out.
+- **The `openrouter` Python SDK.** An alpha client for an alpha endpoint, one more dependency outside the coupled pin set, and no verified async surface. Out (parent plan).
+- **Jev `score`, `not_for`, `inspect`, JSON-object `state`.** Unexercised by the probe and unneeded by any site. Out (parent plan).
+- **Per-backend confidence thresholds.** Requires the site to know which leg answered, which lane A deliberately hides. A site keeps one threshold; the record shows it working for both arms or the site does not land. Out (Reconciliation 4).
+- **Chaining a third leg (decisions → ollama → anthropic).** The wrapper runs one fallback by design and the budget arithmetic is written for one; a `DECISIONS` site with both legs down takes its fail-safe, exactly as an `OLLAMA` site with both legs down does today. Out.
+- **Fixing `settings.api.openrouter_api_key`.** A real defect (the field is never populated by the flat key) but every reader in the repo already bypasses it; touching the settings group is a separate small chore (Open Question 3). Out of this lane.
+- **Batching several sites' questions into one Jev call** (C1, C2, C3 all read the same message). The sites are called from different places with different fail-safes and budgets; sharing one call couples them. Out.
+- **Warming the envelope or the HTTP connection at startup.** The first call in a process pays one reservation round trip (about a millisecond) and one TLS handshake (spike-1's first call: 925 ms against 517 ms warm); both sit inside a 3 s budget with granite behind them. A persistent client would violate the per-call-client convention every leg follows. Out.
+- **Growing the real-input corpus by any means other than replaying a saved draw.** Synthesising "real" messages defeats Risk 7; the runner's `--inputs` replay of a `--save-inputs` file from a machine that holds the traffic is the sanctioned path. Out.
 
 ## Risks
 
-Placeholder.
+### Risk 1: The comparison cannot clear `n_real` on the build machine
+**Impact:** Every inbound-shaped site holds (as in lane A), whatever Jev's agreement, and the lane's per-site outcome is decided by a sampling artefact rather than by the model.
+**Mitigation:** Open Question 1 asks for a replayable sample (`--save-inputs` on a machine with the traffic, `--inputs` here) or a comparison run on that machine. The plan's success criteria count a complete set of records with named failing criteria as done, so the lane ships either way; C11 and C14 draw real inputs of their own shape and can land on this machine alone.
+
+### Risk 2: Jev's agreement is under the bar everywhere (the 67.8% prior)
+**Impact:** Zero landings; the leg and the rule ship with no declaration using them.
+**Mitigation:** That is an acceptable, recorded outcome (Rejection verdict in Technical Approach). The `Decision` markers give the builder real leverage (criteria descriptions with examples are what the model is built to read; the probe answered the routing bucket at probability 1.0 with them and 0.72 without). The builder iterates on markers and `candidate_prompt` per site within the appetite before recording a miss.
+
+### Risk 3: The external endpoint fails or slows on the hot path
+**Impact:** C1 to C4 sit in the message path; a 3 s stall per message would be felt.
+**Mitigation:** The single SDK-level timer at 3.0 s (`decisions_sdk_s`, an operator lever), the granite fallback inside the remaining budget, and no retry on the leg. The `llm_fallback` grep in the infra doc is the steady-degraded-state signal; lever 0 in the Rollback section (unset the key, or `TIMEOUTS__DECISIONS_SDK_S` at its floor) turns the leg off fleet-wide without a code change.
+
+### Risk 4: Client context reaches OpenRouter
+**Impact:** Charter §7 breach.
+**Mitigation:** Rule 5 fires only for `is_eligible(project_key)`, the same fail-closed read as rule 3 (`valor` pinned, cache-only for every other key, `None` → ineligible). `tests/unit/test_llm_router_eligibility.py` feeds a client-mapped message through every `DECISIONS` site and asserts the Anthropic leg; the runner's `real_messages` refuses a non-public project (lane A).
+
+### Risk 5: The envelope double-counts or leaks spend
+**Impact:** Wrong receipts on the case; charter §8 accounting off by cents.
+**Mitigation:** The meter's Lua CAS makes a second settle of one reservation a no-op; the envelope settles at most once per reservation and the tests assert one `settle` call per envelope across a cancelled call, a failed call, a day rollover, and a headroom-driven roll. An open envelope at process exit is receipted as `unknown` at one cent by the existing reconcile sweep, which is the charter's "uncertain metering is not zero" rule, not a leak.
+
+### Risk 6: Lane B lands first (or second) and the enum, router, and tables conflict
+**Impact:** A rebase with conflicts in `tasks.py`, `router.py`, `wrapper.py`, `backends/__init__.py`, `__main__.py`, two tests, two docs.
+**Mitigation:** Every touch is an added member, branch, row, or dict entry; the builder rebases on `main` before opening the PR and again before merge, and the plan's Verification rows re-run after the rebase. The two plans name the same files so the critique can see the overlap.
+
+### Risk 7: A recorded-response fixture drifts from the live shape
+**Impact:** Unit tests stay green while production decodes fail.
+**Mitigation:** The listing probe is live (fails on delisting or a pricing/context change); the comparison runs are live and every 200 passes through the same decoder the unit tests exercise; the fixtures are the spike-1 bodies verbatim with their retrieval date in a comment.
 
 ## Race Conditions
 
-Placeholder.
+### Race 1: Two concurrent calls in one process roll the envelope at the same time
+**Location:** `agent/llm/backends/decisions.py::SpendEnvelope.ensure_headroom`
+**Trigger:** Concurrency-4 latency pass in the runner, or C1/C2/C3 firing on one message in the bridge, all finding the envelope one call short of its cap.
+**Data prerequisite:** One reservation id per envelope; accumulated cost read and reset atomically with the settle.
+**State prerequisite:** Single event loop per process (true for the bridge, the worker, the reflection worker, and the runner).
+**Mitigation:** The roll is synchronous from the first `await`-free check to the new reservation id (the meter calls are blocking Redis round trips with no `await` in between), so no other coroutine interleaves; the second caller sees the fresh envelope. A test runs four concurrent calls through a fake meter with the envelope one bound short and asserts exactly one settle and one reserve.
+
+### Race 2: The Ollama fallback queues behind the runner's or the bridge's own granite traffic past the budget
+**Location:** `agent/llm/wrapper.py` fallback path, `agent/llm/backends/ollama.py`
+**Trigger:** The decisions leg times out at 3 s, the wrapper computes the remainder, the Ollama leg waits on a busy daemon.
+**Data prerequisite:** `deadline = start + budget` passed to the fallback leg.
+**State prerequisite:** The daemon at `OLLAMA_NUM_PARALLEL=4`.
+**Mitigation:** Lane A's arithmetic unchanged: the fallback leg's timer is `min(local_typed_hard_s, budget - elapsed)`, the deadline re-check refuses to build a client under 0.5 s, and under a 3 s `sdk_timeout` with the primary having spent it all the fallback is skipped with `llm_no_fallback` and the site's fail-safe applies. A `DECISIONS` site with a 3 s budget therefore gets granite only when Jev fails fast (non-200, refusal, missing key), and times out to its fail-safe when Jev stalls; the record's `p95_c4` for the ollama arm tells the builder whether that is acceptable per site.
+
+### Race 3: The comparison's latency pass shares Jev's rate limit with live bridge traffic
+**Location:** `tools/classification_eval/arms.py::decisions_arm`
+**Trigger:** A comparison run on a machine whose bridge is serving `DECISIONS` sites.
+**Data prerequisite:** none
+**State prerequisite:** `is_contended()` false (services stopped), lane A's Race 3 rule.
+**Mitigation:** The runner already stamps `contended: true` when any `com.valor.*` service is loaded and the bar refuses such a record. Jev's endpoint published no rate limit and the probe saw none at concurrency 1; a 429 on the decisions arm is counted as an arm error (it is one), and an error rate over 2% is a miss the record names, which is the correct reading of "the provider throttled us at concurrency 4".
 
 ## No-Gos (Out of Scope)
 
-Placeholder.
+- [SEPARATE-SLUG #3420] Lane B: the `LOCAL_ZERO_SHOT` backend (GLiClass ONNX). This lane adds nothing under that name and touches no `onnxruntime` extra.
+- [SEPARATE-SLUG #3422] The emoji reaction choice as a classification site; the embedding path stays as it is.
+- [SEPARATE-SLUG #3177] Any change to the RSI controller, the meter's pool arithmetic, or the case substrate; this lane consumes `reserve`/`settle`/`record_claims` and adds no controller logic.
+- [EXTERNAL] Drawing a real `valor` input sample on a machine that holds the traffic (`--save-inputs`) and handing the file to the builder, or running the comparisons on that machine. The build machine holds 12 real messages; only a human with access to the bridge machine can produce the sample (Open Question 1).
+- [EXTERNAL] Populating `OPENROUTER_API_KEY` in the vault `.env` of every machine that will run a `DECISIONS` site; the doctor row reports its absence, the leg falls back to granite without it.
+
+Nothing else is deferred: the leg, the rule, the timer, the runner arm, the criterion, the audit branch, the probe test, the doctor row, the comparisons, the landings, the rejection verdict if earned, the C15 cascade and the C12 per-call type when their sites are reached, and the docs are all in scope.
 
 ## Update System
 
-Placeholder.
+No update script or skill changes. `httpx` is already installed on every machine (`uv sync` has carried it since before lane A); no new extra, no new plist key. The one new environment key, `TIMEOUTS__DECISIONS_SDK_S`, is a commented override in `.env.example` with a default in code, so the env completeness check does not require it and the launchd plist merge (`scripts/update/service.py:303`) carries it only where an operator sets it. `OPENROUTER_API_KEY` is an existing key already merged into every service plist from the vault `.env`. No Popoto model changes, so no migration in `scripts/update/migrations.py`. After merge the usual `./scripts/valor-service.sh restart` (or fleet `/update`) picks up the new leg; the taxonomy doc's Lane C Outcome names the deploy step.
 
 ## Agent Integration
 
-Placeholder.
+No new CLI entry point in `pyproject.toml [project.scripts]`: the runner stays `python -m tools.classification_eval` (developer tooling, lane A's decision), and the leg is reached only through `run_typed`. The bridge imports nothing new: `agent/llm/wrapper.py` imports the leg module, and every site keeps its `run_typed` call. Integration tests: `tests/unit/test_llm_router_eligibility.py` drives a `valor` message and a client-mapped message through every `DECISIONS` site's wrapper call with both legs faked at `_LEGS`; `tests/integration/test_bridge_routing_project_key.py` (lane A) keeps pinning the three hot-path `project_key` resolutions, which is what makes rule 5's eligibility read correct at the entry point.
 
 ## Documentation
 
