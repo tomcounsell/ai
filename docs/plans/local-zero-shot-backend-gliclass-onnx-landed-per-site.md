@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor Engels
 created: 2026-09-21
 tracking: https://github.com/tomcounsell/ai/issues/3420
-last_comment_id: 5745559073
+last_comment_id: 5745557381
 ---
 
 # Local Encoder Classification Backend Behind Lane A's Router (Lane B of #3410)
@@ -39,34 +39,34 @@ Verified on `main` at `149f0d0da`:
 ## Freshness Check
 
 **Baseline commit:** `149f0d0da` (HEAD of `main` at plan time; lane A merged at `4703bce23`)
-**Issue filed at:** 2026-09-18T13:07:59Z; body rewritten twice during lane A's critique; the upstream-change notice (comment 5745559073, posted after PR #3524 reached REVIEW) is the authoritative description of the landed interfaces and this plan is written against the merged code, not the issue text.
+**Issue filed at:** 2026-09-18T13:07:59Z; body rewritten twice during lane A's critique; the upstream-change notice (comment 5745557381, posted after PR #3524 reached REVIEW) is the authoritative description of the landed interfaces and this plan is written against the merged code, not the issue text.
 **Disposition:** Major drift on the premise, minor drift on the interfaces, overlap with #3421's plan in progress. The interface drift is folded in below; the premise drift (zero-shot GLiClass measured under the bar) is the reason this plan changes the model and is put to Tom in Open Questions rather than built silently.
 
 **File:line references re-verified** (every claim in the issue body and the notice, read on the baseline):
 
-- `agent/llm/backends/__init__.py:5-8` — leg protocol `call(prompt, output_type, route, *, system, sdk_timeout, slot_timeout, max_retries, deadline=None, stack)` — holds; the issue's outcome 1 omits `deadline` and `stack`, corrected in Solution.
-- `agent/llm/backends/__init__.py:93-109` — `bound_to_deadline(sdk_timeout, deadline, now, *, leg)` — holds; the encoder leg calls it first.
-- `agent/llm/backends/ollama.py:52-96` — the local leg shape (deadline re-check, no `asyncio.wait_for`, third-party symbols from `stack`) — holds; the encoder leg mirrors the structure and takes no symbol from `stack`, since none of its dependencies live there.
-- `agent/llm/router.py:31-32` and `:64-70` — the reserved rule slot ("#3420 adds `LOCAL_ZERO_SHOT` the same way") and the `ValueError` for an unrouted backend — holds; the member is named `LOCAL_ENCODER` here, and the docstring line is rewritten in Task 1.
-- `agent/llm/wrapper.py:95-98` (`_LEGS`), `:223` (`signature_axis=(route.backend is Backend.ANTHROPIC)`), `:237` (`default_sdk_timeout(route.backend)`), `:242-305` (fallback budget and the two log lines) — hold; the encoder route takes the non-Anthropic axis and the Ollama-shaped budget with no wrapper change beyond the `_LEGS` entry.
-- `agent/llm/tasks.py:51-52` — "Lane B (#3420) and lane C (#3421) append their own `Backend` members and their own keyword fields with defaults" — holds; this plan adds a member and no field.
-- `tools/classification_eval/__main__.py:47` (`CANDIDATE_BACKENDS = tuple(b.value for b in Backend)`) and `:115-122` (`_candidate_arms` builders) — holds; the notice's "`--candidate local_zero_shot` is rejected as unknown candidate backend" is true only until the enum member exists, after which the vocabulary is automatic and the builder dict is the one addition.
-- `tools/classification_eval/arms.py:108-137` (`ollama_arm`, the direct-leg pattern) — holds; `local_encoder_arm` follows it.
-- `tools/classification_eval/core.py:97-135` (`Site` with `candidate_prompt`, `candidate_system`, `candidate_output_type`, `real_inputs`), `:289-315` (`_run_arm`: agreement pass at 1, latency pass at 4), `:411-437` (`evaluate_bar`), `:504-520` (`is_contended`) — hold; `Site` gains no field, the fit mode reuses `candidate_prompt` as the text shape and `compare` unchanged on the held-out split.
-- `tools/classification_eval/records.py:126-159` (`_audit_row`: `if backend == Backend.OLLAMA.value`) — holds; generalized to every non-Anthropic backend plus the head-provenance rule.
-- `tools/classification_eval/sites.py:109-117` (minimums 50 / 200, `FIXTURES_PER_SITE = 40`, `ROUTING_FIXTURES = 188`) and `:283-336` in `arms.py` (`real_messages` from the memory store, digest-ordered) — hold; the digest order is what makes the fit split deterministic.
-- `tools/improvement_eligibility.py::is_eligible` — `valor` pinned `True`, cache-only for other keys — holds (`docs/features/llm-task-taxonomy.md:113-121`).
-- `tests/unit/test_llm_task_taxonomy.py` check 5 (doc table parity) and check 6 (no `asyncio.wait_for` in any function under `agent/llm/backends/`) — hold; Test Impact lists what each existing test needs.
-- `pyproject.toml:62-75` — `onnxruntime>=1.25.0` already floors the `knowledge` and `tts` extras; `onnxruntime 1.25.0` is installed in this venv, `tokenizers` is not — holds.
-- `scripts/update/kokoro.py` and `scripts/download_kokoro_models.py` — the weights-at-update pattern (`ensure_models` subprocess, `~/.cache/<name>/`, env override, idempotent) — holds; the encoder weights follow it.
-- `docs/features/llm-task-taxonomy.md:171-196` ("Lane A Outcome", the per-site table) — holds and is the target list.
+- `agent/llm/backends/__init__.py:5-8`: leg protocol `call(prompt, output_type, route, *, system, sdk_timeout, slot_timeout, max_retries, deadline=None, stack)`. Holds; the issue's outcome 1 omits `deadline` and `stack`, corrected in Solution.
+- `agent/llm/backends/__init__.py:93-109`: `bound_to_deadline(sdk_timeout, deadline, now, *, leg)`. Holds; the encoder leg calls it first.
+- `agent/llm/backends/ollama.py:52-96`: the local leg shape (deadline re-check, no `asyncio.wait_for`, third-party symbols from `stack`). Holds; the encoder leg mirrors the structure and takes no symbol from `stack`, since none of its dependencies live there.
+- `agent/llm/router.py:31-32` and `:64-70`: the reserved rule slot ("#3420 adds `LOCAL_ZERO_SHOT` the same way") and the `ValueError` for an unrouted backend. Holds; the member is named `LOCAL_ENCODER` here, and the docstring line is rewritten in Task 1.
+- `agent/llm/wrapper.py:95-98` (`_LEGS`), `:223` (`signature_axis=(route.backend is Backend.ANTHROPIC)`), `:237` (`default_sdk_timeout(route.backend)`), `:242-305` (fallback budget and the two log lines). Hold; the encoder route takes the non-Anthropic axis and the Ollama-shaped budget with no wrapper change beyond the `_LEGS` entry.
+- `agent/llm/tasks.py:51-52`: "Lane B (#3420) and lane C (#3421) append their own `Backend` members and their own keyword fields with defaults". Holds; this plan adds a member and no field.
+- `tools/classification_eval/__main__.py:47` (`CANDIDATE_BACKENDS = tuple(b.value for b in Backend)`) and `:115-122` (`_candidate_arms` builders). Holds; the notice's "`--candidate local_zero_shot` is rejected as unknown candidate backend" is true only until the enum member exists, after which the vocabulary is automatic and the builder dict is the one addition.
+- `tools/classification_eval/arms.py:108-137` (`ollama_arm`, the direct-leg pattern). Holds; `local_encoder_arm` follows it.
+- `tools/classification_eval/core.py:97-135` (`Site` with `candidate_prompt`, `candidate_system`, `candidate_output_type`, `real_inputs`), `:289-315` (`_run_arm`: agreement pass at 1, latency pass at 4), `:411-437` (`evaluate_bar`), `:504-520` (`is_contended`). Hold; `Site` gains no field, the fit mode reuses `candidate_prompt` as the text shape and `compare` unchanged on the held-out split.
+- `tools/classification_eval/records.py:126-159` (`_audit_row`: `if backend == Backend.OLLAMA.value`). Holds; generalized to every non-Anthropic backend plus the head-provenance rule.
+- `tools/classification_eval/sites.py:109-117` (minimums 50 / 200, `FIXTURES_PER_SITE = 40`, `ROUTING_FIXTURES = 188`) and `:283-336` in `arms.py` (`real_messages` from the memory store, digest-ordered). Hold; the digest order is what makes the fit split deterministic.
+- `tools/improvement_eligibility.py::is_eligible`: `valor` pinned `True`, cache-only for other keys. Holds (`docs/features/llm-task-taxonomy.md:113-121`).
+- `tests/unit/test_llm_task_taxonomy.py` check 5 (doc table parity) and check 6 (no `asyncio.wait_for` in any function under `agent/llm/backends/`). Hold; Test Impact lists what each existing test needs.
+- `pyproject.toml:62-75`: `onnxruntime>=1.25.0` already floors the `knowledge` and `tts` extras; `onnxruntime 1.25.0` is installed in this venv, `tokenizers` is not. Holds.
+- `scripts/update/kokoro.py` and `scripts/download_kokoro_models.py`: the weights-at-update pattern (`ensure_models` subprocess, `~/.cache/<name>/`, env override, idempotent). Holds; the encoder weights follow it.
+- `docs/features/llm-task-taxonomy.md:171-196` ("Lane A Outcome", the per-site table). Holds and is the target list.
 
 **Cited sibling issues/PRs re-checked:**
-- #3410 — closed 2026-09-20 by PR #3524 (merged at `4703bce23`); its plan is archived at `docs/archive/plans-completed/llm-task-taxonomy-routing-layer.md` (five critique rounds; the caller-census discipline and the hotfix #1055 rules from its Critique Results apply here).
-- #3421 (lane C, the decisions transport) — open; its plan `docs/plans/structured-decision-transport-jev-behind-ollama-fallback.md` is being written in this same checkout right now (committed at `56674a2d7`, `88cd285bc`). Both lanes add a `Backend` member, a router rule, a `_LEGS` entry, a `default_sdk_timeout` branch, a runner arm builder, doc table rows, and an audit generalization. The audit generalization (landed-arm rule for every non-Anthropic backend) is written once here in a form lane C can reuse; the rest are adjacent one-line additions that rebase cleanly in either order. See Risk 6.
-- #3422 (emoji reaction as a decision site) — open; untouched here (anti-criterion in Verification).
-- #3525 (`agent/__init__.py` eager import chain) — open; the encoder leg keeps module scope stdlib-only and the download script reads its constants from `config/models.py`, so this lane adds nothing to that chain.
-- #3177 (RSI controller; the case substrate) — open; records and claims attach to case `1ec40086ca1d422e90ef747775ff7f64` exactly as lane A's did.
+- #3410: closed 2026-09-20 by PR #3524 (merged at `4703bce23`); its plan is archived at `docs/archive/plans-completed/llm-task-taxonomy-routing-layer.md` (five critique rounds; the caller-census discipline and the hotfix #1055 rules from its Critique Results apply here).
+- #3421 (lane C, the decisions transport): open; its plan `docs/plans/structured-decision-transport-jev-behind-ollama-fallback.md` is being written in this same checkout right now (committed at `56674a2d7`, `88cd285bc`). Both lanes add a `Backend` member, a router rule, a `_LEGS` entry, a `default_sdk_timeout` branch, a runner arm builder, doc table rows, and an audit generalization. The audit generalization (landed-arm rule for every non-Anthropic backend) is written once here in a form lane C can reuse; the rest are adjacent one-line additions that rebase cleanly in either order. See Risk 6.
+- #3422 (emoji reaction as a decision site): open; untouched here (anti-criterion in Verification).
+- #3525 (`agent/__init__.py` eager import chain): open; the encoder leg keeps module scope stdlib-only and the download script reads its constants from `config/models.py`, so this lane adds nothing to that chain.
+- #3177 (RSI controller; the case substrate): open; records and claims attach to case `1ec40086ca1d422e90ef747775ff7f64` exactly as lane A's did.
 
 **Commits on main since issue was filed (touching referenced files):** `4703bce23` (lane A itself, the prerequisite), `7d642f3df` (pydantic-ai-slim 2.46.0), `e61b4f0b0` (claude-agent-sdk), `cb03e33ad` (anthropic 1.7.0): the three bumps are dependency pins the encoder leg does not touch.
 
@@ -209,13 +209,13 @@ The code is a day; the landing loop is where the time goes, and it is bounded pe
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | Lane A merged | `git merge-base --is-ancestor 4703bce23 HEAD` | `LLMTask`, `resolve`, the leg protocol, the runner, the records |
-| `onnxruntime` and `tokenizers` installable on the pinned interpreter | `.venv/bin/python -c "import sys; assert sys.version_info[:2] == (3, 14)"` then `uv pip install --dry-run onnxruntime tokenizers` | Research finding 4 |
+| `onnxruntime` and `tokenizers` installable on the pinned interpreter | `.venv/bin/python -c "import sys; assert sys.version_info[:2] == (3, 14)" && uv pip install --dry-run -p .venv/bin/python onnxruntime tokenizers` | Research finding 4 |
 | Redis reachable for records and heads | `.venv/bin/python -c "from tools.classification_eval.records import latest_record; latest_record('routing.needs_response')"` | The runner reads and writes `ImprovementEvidence` |
 | Anthropic key for the reference arm | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('ANTHROPIC_API_KEY')"` | Haiku labels the training split and is the reference arm |
-| Landing host: real `valor` messages in the memory store | `.venv/bin/python -m tools.classification_eval --preflight` (Task 3 adds it; until then `python -c "from tools.classification_eval.arms import real_messages; print(len(real_messages(2000)))"`) | `n_real` for the held-out split (100 real for the routing sites, 25 elsewhere) plus training real messages |
-| Services stopped for a latency run | `launchctl list \| grep -c com.valor` is 0 | `contended: false` (Race 3 of lane A) |
+| Real `valor` messages in this memory store (informational here; the hard gate is Task 7's `--preflight` on the landing host) | `.venv/bin/python -c "from tools.classification_eval.arms import real_messages; print(len(real_messages(2000)))"` | `n_real` for the held-out split needs 100 real for the routing sites and 25 elsewhere, plus training real messages; this MacBook Air prints 12 |
+| Services state (must print `free` on the landing host before a fit run) | `.venv/bin/python -c "from tools.classification_eval import is_contended; print('contended' if is_contended() else 'free')"` | `contended: false` (Race 3 of lane A); `./scripts/valor-service.sh stop` clears it |
 
-The preflight row is the machine gate: on this MacBook Air it prints 12, which fails every site, so Tasks 7 to 9 run on the Valor host that owns the `valor` bridge (Solution, "Where the landing runs").
+The real-message row is the machine question: this MacBook Air prints 12, which satisfies no site, so Tasks 7 to 9 run on the Valor host that owns the `valor` bridge (Solution, "Where the landing runs"), where Task 7's `--preflight` is the hard gate.
 
 ## Solution
 
@@ -277,18 +277,18 @@ Builder on the landing host → `--preflight` (enough real messages?) → per si
 
 Verified on `main` at `149f0d0da` by reading each file; the router table test, the eligibility test, the wrapper's `_LEGS` tests, the doctor test, and the runner's audit tests all key on the two-member `Backend` enum and on `Backend.OLLAMA` as the only local backend.
 
-- [ ] `tests/unit/test_llm_tasks.py:24` (`{b.value for b in Backend} == {"anthropic", "ollama"}`) — UPDATE: the set gains `"local_encoder"`.
-- [ ] `tests/unit/test_llm_router.py::_expected` (`:120-123`) and `TestEveryDeclaration::test_route_matches_the_declaration` — UPDATE: `_expected` returns `Route(LOCAL_ENCODER, task.site, fallback=ANTHROPIC_ROUTE)` for a `LOCAL_ENCODER` declaration with key `valor`, `ANTHROPIC_ROUTE` otherwise; add `test_rule_3_eligible_local_encoder_carries_an_anthropic_fallback`, `test_rule_4_ineligible_local_encoder_fails_closed`, and extend `test_only_the_ollama_rule_consults_eligibility` (`:103`) to the two local rules (rename to `test_only_the_local_rules_consult_eligibility`).
-- [ ] `tests/unit/test_llm_router_eligibility.py` (`:76-96`, the `OLLAMA`-site parametrization) — UPDATE: parametrize over every declaration whose backend is not `ANTHROPIC`; the "valor message reaches the local leg with `gh` unavailable" case asserts the leg named by the declaration (`legs[task.backend]`), so a `LOCAL_ENCODER` site asserts the encoder leg.
-- [ ] `tests/unit/test_llm_wrapper.py::TestPerBackendSdkTimer` (`:633-656`) — UPDATE: add the `local_encoder` rows (`local_typed_hard_s` default, explicit `sdk_timeout` wins) and a third fake in the `_LEGS` table fixture at `:607-608`; the fallback tests at `:553-708` gain one case: encoder leg raises `LLMCallError` → Anthropic fallback inside the budget, `llm_fallback ... primary=local_encoder` on `caplog`.
-- [ ] `tests/unit/test_llm_backend_ollama.py` — no change; kept as the template for `tests/unit/test_llm_backend_local_encoder.py` (create).
-- [ ] `tests/unit/test_llm_import_safety.py` — UPDATE: the raising shim fixture also writes `onnxruntime.py` and `tokenizers.py`, and the assertion that `import agent.llm` (and `bridge.telegram_bridge`) succeeds with every third-party module broken now covers the encoder leg's module scope.
-- [ ] `tests/unit/test_llm_task_taxonomy.py` (doc/code parity, check 5; hotfix #1055 check 6 over every function in `agent/llm/backends/`) — no test change; the new leg module and the new site-table rows must satisfy both as written. Check 6 is the guard that keeps `asyncio.wait_for` out of the encoder leg.
-- [ ] `tests/unit/test_doctor.py:881-909` (routing section: `Backend.OLLAMA` sites and the `ollama_daemon` row) — UPDATE: add the `local_encoder` row assertions (extra importable, weights present with matching checksum, one head per declared `LOCAL_ENCODER` site) with a fake models dir and a fake heads dir; the `ollama_daemon` assertions are unchanged.
-- [ ] `tests/unit/test_classification_eval.py::test_audit_exit_codes` (`:395`) and `test_audit_over_two_sites_fails_when_either_misses` (`:412`) — UPDATE: parametrize the local-landing cases over `ollama` and `local_encoder` (the audit's landed-arm rule now applies to every backend other than `ANTHROPIC`), and add the head-provenance case: a `LOCAL_ENCODER` landing whose committed head `run_id` differs from the record's `fit.head_run_id` exits 1.
-- [ ] `tests/unit/test_classification_eval.py::test_parse_candidates_rejects_an_unknown_backend` (`:444`) — no change (`CANDIDATE_BACKENDS` is derived from the enum, so `local_encoder` is accepted automatically); add `test_candidate_arm_builders_cover_every_backend` so a member without an arm builder fails by name.
-- [ ] `tests/unit/test_classification_eval.py` — ADD (create alongside the existing runner tests): the `--fit` split is deterministic by digest and refuses under the held-out minimum before any arm runs; the fitted head round-trips through the leg's loader; the record carries the `fit` provenance block; `--preflight` prints the real-message count against each site's need and exits 1 when the routing sites cannot be met.
-- [ ] The landed sites' own test files (for example `tests/unit/test_routing_classifiers.py` for C1, `tests/unit/test_promise_gate.py` for C9) — UPDATE only where a landing restructures the call (`prompt` becomes the text under classification and the instructions move to `system`): any test asserting the prompt string the fake receives is updated to the new `(prompt, system)` split. The fail-safe tests are byte-identical, since the wrapper contract does not change.
+- [ ] `tests/unit/test_llm_tasks.py:24` (`{b.value for b in Backend} == {"anthropic", "ollama"}`): UPDATE: the set gains `"local_encoder"`.
+- [ ] `tests/unit/test_llm_router.py::_expected` (`:120-123`) and `TestEveryDeclaration::test_route_matches_the_declaration`: UPDATE: `_expected` returns `Route(LOCAL_ENCODER, task.site, fallback=ANTHROPIC_ROUTE)` for a `LOCAL_ENCODER` declaration with key `valor`, `ANTHROPIC_ROUTE` otherwise; add `test_rule_3_eligible_local_encoder_carries_an_anthropic_fallback`, `test_rule_4_ineligible_local_encoder_fails_closed`, and extend `test_only_the_ollama_rule_consults_eligibility` (`:103`) to the two local rules (rename to `test_only_the_local_rules_consult_eligibility`).
+- [ ] `tests/unit/test_llm_router_eligibility.py` (`:76-96`, the `OLLAMA`-site parametrization): UPDATE: parametrize over every declaration whose backend is not `ANTHROPIC`; the "valor message reaches the local leg with `gh` unavailable" case asserts the leg named by the declaration (`legs[task.backend]`), so a `LOCAL_ENCODER` site asserts the encoder leg.
+- [ ] `tests/unit/test_llm_wrapper.py::TestPerBackendSdkTimer` (`:633-656`): UPDATE: add the `local_encoder` rows (`local_typed_hard_s` default, explicit `sdk_timeout` wins) and a third fake in the `_LEGS` table fixture at `:607-608`; the fallback tests at `:553-708` gain one case: encoder leg raises `LLMCallError` → Anthropic fallback inside the budget, `llm_fallback ... primary=local_encoder` on `caplog`.
+- [ ] `tests/unit/test_llm_backend_ollama.py`: no change; kept as the template for `tests/unit/test_llm_backend_local_encoder.py` (create).
+- [ ] `tests/unit/test_llm_import_safety.py`: UPDATE: the raising shim fixture also writes `onnxruntime.py` and `tokenizers.py`, and the assertion that `import agent.llm` (and `bridge.telegram_bridge`) succeeds with every third-party module broken now covers the encoder leg's module scope.
+- [ ] `tests/unit/test_llm_task_taxonomy.py` (doc/code parity, check 5; hotfix #1055 check 6 over every function in `agent/llm/backends/`): no test change; the new leg module and the new site-table rows must satisfy both as written. Check 6 is the guard that keeps `asyncio.wait_for` out of the encoder leg.
+- [ ] `tests/unit/test_doctor.py:881-909` (routing section: `Backend.OLLAMA` sites and the `ollama_daemon` row): UPDATE: add the `local_encoder` row assertions (extra importable, weights present with matching checksum, one head per declared `LOCAL_ENCODER` site) with a fake models dir and a fake heads dir; the `ollama_daemon` assertions are unchanged.
+- [ ] `tests/unit/test_classification_eval.py::test_audit_exit_codes` (`:395`) and `test_audit_over_two_sites_fails_when_either_misses` (`:412`): UPDATE: parametrize the local-landing cases over `ollama` and `local_encoder` (the audit's landed-arm rule now applies to every backend other than `ANTHROPIC`), and add the head-provenance case: a `LOCAL_ENCODER` landing whose committed head `run_id` differs from the record's `fit.head_run_id` exits 1.
+- [ ] `tests/unit/test_classification_eval.py::test_parse_candidates_rejects_an_unknown_backend` (`:444`): no change (`CANDIDATE_BACKENDS` is derived from the enum, so `local_encoder` is accepted automatically); add `test_candidate_arm_builders_cover_every_backend` so a member without an arm builder fails by name.
+- [ ] `tests/unit/test_classification_eval.py`: ADD (create alongside the existing runner tests): the `--fit` split is deterministic by digest and refuses under the held-out minimum before any arm runs; the fitted head round-trips through the leg's loader; the record carries the `fit` provenance block; `--preflight` prints the real-message count against each site's need and exits 1 when the routing sites cannot be met.
+- [ ] The landed sites' own test files (for example `tests/unit/test_routing_classifiers.py` for C1, `tests/unit/test_promise_gate.py` for C9): UPDATE only where a landing restructures the call (`prompt` becomes the text under classification and the instructions move to `system`): any test asserting the prompt string the fake receives is updated to the new `(prompt, system)` split. The fail-safe tests are byte-identical, since the wrapper contract does not change.
 
 ## Rabbit Holes
 
@@ -395,15 +395,177 @@ Verified on `main` at `149f0d0da` by reading each file; the router table test, t
 
 ## Success Criteria
 
-Placeholder.
+- [ ] The zero-shot GLiClass candidate is recorded as rejected on case `1ec40086ca1d422e90ef747775ff7f64`: one claim on a `probe` investigation carrying the spike-2 table, the model pin (`knowledgator/gliclass-base-v1.0` at `aa3ac24a…`, int8 sha256 `8eb7db6e…`), and this plan's URL (`valor-improve investigation list --case 1ec40086ca1d422e90ef747775ff7f64` shows it).
+- [ ] `Backend.LOCAL_ENCODER` exists with a leg meeting lane A's protocol; `tests/unit/test_llm_backend_local_encoder.py` covers the success path (bool and `Literal` fields, `confidence` filled), the missing extra, the checksum failure, the missing head, each shape violation, `system` ignored, the deadline re-check, and the single load under concurrency; `tests/unit/test_llm_task_taxonomy.py` check 6 passes over the new leg; `tests/unit/test_llm_import_safety.py` passes with `onnxruntime` and `tokenizers` in the raising shim.
+- [ ] `resolve` returns `Route(LOCAL_ENCODER, task.site, fallback=Route(ANTHROPIC, model))` for every `LOCAL_ENCODER` declaration with key `valor` and the Anthropic route for a client key or `None` (table-driven test over all declarations, `gh` monkeypatched unavailable); `email_cs.triage` still resolves to Anthropic for every key.
+- [ ] `python -m tools.classification_eval --site <id> --fit --candidate local_encoder,anthropic` writes the head and a record with a `fit` block measured on the held-out split only; the split is deterministic by digest and refuses under the minimums before any spend; `--preflight` reports the real-message count against each site's need; `--audit` exits 1 on a `LOCAL_ENCODER` landing whose head `run_id` is not the record's `fit.head_run_id` (mutation-checked in review: edit one head's `run_id`, the audit must go red).
+- [ ] Every landed site: `backend=Backend.LOCAL_ENCODER`, the call restructured to `(text, system=instructions)` with the composition function shared by the runner row, a committed head whose classes equal the output type's closed set (`tests/unit/test_classifier_heads.py`), a record on the case whose `local_encoder` arm clears every criterion with `contended: false` and `n_real` at or above half the minimum, whose `anthropic` arm (restructured shape) also clears the tier's agreement bar, and whose id is in the site's row of `docs/features/llm-task-taxonomy.md` and in the landing commit message. Every site that misses stays where lane A landed it with the new record naming the failing criterion, and has no head file.
+- [ ] Either at least one site is landed by the bar, or the rejection exit ran: no `LOCAL_ENCODER` member, leg, extra, weights script, update step, or doctor row remains, the runner's `--fit` and `--preflight` ship, and each site's MISS is on the case.
+- [ ] `python -m tools.classification_eval --audit` exits 0 at the PR head on the landing host; the PR body carries the per-site landing summary (Key Elements) and the audit output.
+- [ ] `python -m tools.doctor` shows the `local_encoder` row (extra, weights with checksums, heads) and fails it on a machine where a declared site would fall back on every call.
+- [ ] `/update` fetches and verifies the weights (`scripts/update/run.py` step 3.13) and installs the extra through the existing `--all-extras` sync; a fresh machine after `/update` passes the doctor row.
+- [ ] If C13 lands, `INTENT_CONFIDENCE_THRESHOLD` is re-tuned on the record and the commit names the record id; `JOB_ROUTER_CONFIDENCE_THRESHOLD` is untouched.
+- [ ] `tools/emoji_embedding.py` and its callers are untouched; `bridge/job_router.py` declares no `LOCAL_ENCODER`; no `torch`, `transformers`, or `gliclass` appears in `pyproject.toml`; no per-site switch appears in `config/settings.py`; the leg's module scope imports no third-party module and never downloads.
+- [ ] Tests pass (`/do-test`); documentation updated (`/do-docs`); `python -m ruff check` and `python -m ruff format --check` clean.
+- [ ] Open Question 1 is answered before Task 1 starts (the plan's model differs from the issue's).
 
 ## Team Orchestration
 
-Placeholder.
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+- **Builder (leg and runtime)**
+  - Name: encoder-builder
+  - Role: `Backend.LOCAL_ENCODER`, the leg, the head loader and shape rule, `config/models.py` pins, the download script and update step, the doctor row, the extra
+  - Agent Type: builder
+  - Domain: async/concurrency (the `to_thread` boundary, the loader lock, no `wait_for`)
+  - Resume: true
+
+- **Builder (runner)**
+  - Name: runner-builder
+  - Role: `local_encoder_arm`, `--fit`, `--preflight`, the `fit` record block, the audit generalization and head-provenance rule, the offline pre-check
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (landings)**
+  - Name: sites-builder
+  - Role: the per-site loop on the landing host: preflight, fit, land or record the miss, the text composition functions, the call-site restructuring, thresholds
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (leg, router, runner)**
+  - Name: encoder-validator
+  - Role: the mutation checks (checksum byte flip, head `run_id` edit, shape violations, `task=` removal on a restructured site), the "no change expected" list, the Verification table minus the doc rows
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: encoder-docs
+  - Role: the Documentation section; the taxonomy table rows the parity test reads
+  - Agent Type: documentarian
+  - Resume: true
+
+### Available Agent Types
+
+**Tier 1: Core (default choices):** `builder`, `validator`, `code-reviewer`, `test-engineer`, `documentarian`, `plan-maker`, `frontend-tester`. Domain expertise is a `Domain:` line plus the matching rules from `DOMAIN_FRAMING.md`; `Explore` / `general-purpose` for recon.
 
 ## Step by Step Tasks
 
-Placeholder.
+### 0. Record the GLiClass rejection and answer Open Question 1
+- **Task ID**: record-rejection
+- **Depends On**: none
+- **Validates**: `valor-improve investigation list --case 1ec40086ca1d422e90ef747775ff7f64` shows the claim
+- **Informed By**: spike-1 (the ONNX path runs), spike-2 (agreement under the majority baseline on every site but C9)
+- **Assigned To**: runner-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Open a `probe` investigation on the case through `tools.improvement_investigations.open_investigation` (uncertainty: "does zero-shot GLiClass clear any site's tier bar", decision affected: "the model behind Backend.LOCAL_ENCODER") and record one claim per spike-2 row plus the pin (model, revision, int8 sha256, tokenizer sha256, license Apache-2.0, retrieval date 2026-09-21), `url` this plan's GitHub path. No GLiClass code.
+- Confirm Open Question 1 is answered (the PM relays Tom's answer). If the answer is "close", stop here: the claim is the deliverable, the PM closes #3420 with the plan link, and Tasks 1 to 10 do not run.
+
+### 1. Backend member, leg, pins, weights script, update step, extra
+- **Task ID**: build-encoder-leg
+- **Depends On**: record-rejection
+- **Validates**: `tests/unit/test_llm_backend_local_encoder.py` (create), `tests/unit/test_llm_tasks.py`, `tests/unit/test_llm_import_safety.py`, `tests/unit/test_llm_task_taxonomy.py -k hotfix_1055`
+- **Informed By**: spike-3 (I/O names, CLS pooling, L2 norm, 0.05 s load, 512 truncation), Research finding 3 (pins and checksums), finding 4 (wheels)
+- **Assigned To**: encoder-builder
+- **Agent Type**: builder
+- **Parallel**: true (with Task 2)
+- `Backend.LOCAL_ENCODER = "local_encoder"`; rewrite the router docstring's reserved line and `tasks.py`'s "Lane B" line for the member that landed.
+- `config/models.py`: `LOCAL_ENCODER_MODEL`, `LOCAL_ENCODER_REVISION`, `LOCAL_ENCODER_FILES` (name → sha256), `LOCAL_ENCODER_DIM`, `LOCAL_ENCODER_MODELS_DIR` resolution (env override, default `~/.cache/valor-encoder/`).
+- `agent/llm/backends/local_encoder.py` per Data Flow step 5 and Key Elements: `_load_runtime()` (memoized, `threading.Lock`, imports inside, checksum verification, `intra_op_num_threads=4`, `enable_truncation(512)`), `_load_head(site)` (memoized, shape and dimension checks), `_shape(output_type, head)` (the one-closed-set-field rule; bool ↔ `"True"`/`"False"`), `_embed(text)`, `_classify(text, head)`, and `call(...)` with `bound_to_deadline` first and `asyncio.to_thread` around the CPU work. Module scope stdlib only.
+- `agent/llm/backends/__init__.py::default_sdk_timeout`: the `LOCAL_ENCODER` branch (`local_typed_hard_s`); docstring updated. `agent/llm/wrapper.py::_LEGS` entry.
+- `scripts/download_local_encoder_models.py` (the kokoro script's shape, plus sha256 verification and `.part` cleanup on mismatch) and `scripts/update/local_encoder.py::ensure_models`, wired as step 3.13 in `scripts/update/run.py` after kokoro; `pyproject.toml` extra `classification-local`; `uv lock`.
+- Tests: the shared fake runtime (`tests/helpers/llm_fakes.py` gains `FakeEncoderRuntime` with a call counter and a scripted vector), every Failure Path row for the leg, the concurrent-load test, a test that the wrapper's fallback runs on the leg's `LLMCallError` with both log lines.
+
+### 2. Runner: arm, fit, preflight, record block, audit rule
+- **Task ID**: build-runner-fit
+- **Depends On**: record-rejection
+- **Validates**: `tests/unit/test_classification_eval.py` (the rows in Test Impact and Failure Path)
+- **Informed By**: spike-3 (the fit settings and the CV numbers), Research finding 5 (the audit log is not a corpus)
+- **Assigned To**: runner-builder
+- **Agent Type**: builder
+- **Parallel**: true (with Task 1; the arm imports the leg by name, so the two builders agree the module path up front)
+- `arms.py::local_encoder_arm(site_id)`; the builders dict in `__main__.py` and the every-member test.
+- `tools/classification_eval/fit.py`: `split_by_digest(inputs, minimum_n) -> (held_out, train)` (pure; the rule in Data Flow fit step 2), `label_training_split(reference, train, site) -> list[tuple[Input, str]]`, `fit_head(vectors, labels, classes) -> Head` (numpy, the spike's settings, deterministic), `write_head(path, head)` (atomic), and `run_fit(...)` that refuses under the minimums, refuses when `is_contended()`, labels, embeds through the leg's `_embed`, fits, writes, prints the training-split sanity line, then calls `compare` on the held-out split and stamps `fit` on the record.
+- `--fit`, `--preflight` (the real-message count from `real_messages(2000)` against each site's need: half-minimum real for the held-out split; exit 1 when the routing sites cannot be met), `ComparisonRecord.fit`, `render_report`'s `fit` line, `_audit_row` generalized to every non-Anthropic backend plus the head-provenance rule.
+- Tests per Test Impact; the split test seeds two different draws and asserts the held-out set is a function of the inputs alone; the fit test asserts bit-identical `W` on a re-run.
+
+### 3. Doctor row
+- **Task ID**: build-doctor-row
+- **Depends On**: build-encoder-leg
+- **Validates**: `tests/unit/test_doctor.py -k local_encoder`
+- **Assigned To**: encoder-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- `tools/doctor.py::_check_llm_routing`: the `local_encoder` row (extra importable; each pinned file present with a matching sha256; one head per declared `LOCAL_ENCODER` site) with the `fix` naming `uv sync --all-extras` or the download script; passes when no site declares the backend.
+
+### 4. Validate the leg and the runner
+- **Task ID**: validate-leg-runner
+- **Depends On**: build-encoder-leg, build-runner-fit, build-doctor-row
+- **Validates**: the Verification rows for tests, lint, format, module scope, `wait_for`, import safety, runner, doctor
+- **Assigned To**: encoder-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the "no change expected" list (every lane A test file in Test Impact that says "no change") and `scripts/pytest-clean.sh tests/unit/`; mutation-check: flip one byte of a weights file under a temp dir (the leg must refuse), edit a head's `run_id` (the audit must go red), remove `deadline` handling (the fallback deadline test must go red), add an `asyncio.wait_for` in the leg (check 6 must go red). Paste the four red outputs into the PR.
+
+### 5. Offline pre-check on lane A's records (free)
+- **Task ID**: precheck-sites
+- **Depends On**: build-runner-fit
+- **Validates**: a table in the PR body (site, CV agreement, majority baseline, bar) for every site with a lane A record on the build machine
+- **Informed By**: spike-3 (the same procedure, now through the repo's own `fit_head` and `_embed`)
+- **Assigned To**: runner-builder
+- **Agent Type**: builder
+- **Parallel**: true (with Task 4)
+- `python -m tools.classification_eval --precheck` (a fit-module subcommand that reads each site's latest record, pairs `reference.labels[:n_fixture]` with `site.fixtures()`, and prints five-fold CV agreement through the real `_embed` and `fit_head`): zero spend, runs on any machine with the lane A records. Its output orders the landing loop in Task 8 and is the first evidence in the PR body.
+
+### 6. Documentation skeleton
+- **Task ID**: document-skeleton
+- **Depends On**: validate-leg-runner
+- **Validates**: `scripts/pytest-clean.sh tests/unit/test_llm_task_taxonomy.py -q -k parity`
+- **Assigned To**: encoder-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Every Documentation item except the per-site rows and the outcome table, which Task 9 fills.
+
+### 7. Preflight on the landing host
+- **Task ID**: preflight-host
+- **Depends On**: validate-leg-runner
+- **Validates**: `python -m tools.classification_eval --preflight` exit 0 for at least the 50-minimum sites
+- **Assigned To**: sites-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- On the Valor host owning the `valor` bridge, after `/update` (extra and weights present; doctor row green), stop the services (`./scripts/valor-service.sh stop`) and run the preflight. Paste the output into the PR. If the routing sites cannot be met, say so in the PR and run Task 8 on the sites the store supports.
+
+### 8. Fit and land, per site
+- **Task ID**: build-land-sites
+- **Depends On**: preflight-host, precheck-sites
+- **Validates**: per site, the runner's report (PASS for `local_encoder` and the tier agreement for `anthropic`), `tests/unit/test_classifier_heads.py`, the site's own test file, `python -m tools.classification_eval --audit`
+- **Informed By**: spike-3 (order: C1, C9, C2, C15, C8, C10, C7, C14, C11, C13, then C3, C4, C5, C6), Task 5's table
+- **Assigned To**: sites-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- For each site in order, boxed at half a build day: add the text composition function beside the declaration if the site carries context and point the row's `candidate_prompt` at it; `python -m tools.classification_eval --site <id> --fit --candidate local_encoder,anthropic --save-inputs data/classification_eval/<id>.jsonl` (`--reference-model paid` for C15 when the free route is throttled, as lane A did); on PASS for `local_encoder` with the `anthropic` arm at or above the tier bar: set `backend=Backend.LOCAL_ENCODER`, restructure the call to `(text, system=instructions)`, keep the fail-safe byte-identical, update the site's tests per Test Impact, commit the head with the record id and head run id in the message; on MISS: delete the head, leave the declaration, and note the failing criterion for the PR. Iterate only on the three levers (composition, `real_limit`, the one model swap); a swap re-pins the embedding in `config/models.py` and refits every landed head in the same commit.
+- If C13 lands, re-tune `INTENT_CONFIDENCE_THRESHOLD` on the held-out softmax scores and commit with the record id.
+- If no site lands, run the rejection exit (Technical Approach): delete the backend end to end in one commit, keep `--fit`, `--preflight`, `--precheck`, and record each MISS on the case.
+
+### 9. Documentation: per-site rows and the outcome table
+- **Task ID**: document-outcome
+- **Depends On**: build-land-sites, document-skeleton
+- **Validates**: `scripts/pytest-clean.sh tests/unit/test_llm_task_taxonomy.py -q -k parity`, the three doc rows in Verification
+- **Assigned To**: encoder-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- The site table rows, the "Lane B Outcome" section with the per-site numbers (both candidate arms, `n_train`, `n_train_real`, head run id, record id), and the rejection paragraph for GLiClass.
+
+### 10. Final validation
+- **Task ID**: validate-all
+- **Depends On**: document-outcome
+- **Validates**: the full Verification table and every Success Criteria checkbox
+- **Assigned To**: encoder-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the Verification table on the landing host (the audit reads that host's Redis); confirm Success Criteria; the `task=` mutation on one restructured site (check 1 of the taxonomy test must go red); generate the report and the PR body's landing summary.
 
 ## Verification
 
@@ -450,4 +612,6 @@ Placeholder.
 
 ## Open Questions
 
-Placeholder.
+1. **The model behind lane B changes on evidence: confirm or close.** The issue's zero-shot GLiClass candidate measures under the majority-class baseline on every site but C9 (Spike 2), so the issue's own rejection exit fires at plan time. This plan builds the local backend the evidence supports instead: a pinned local embedding model plus a per-site linear head fit on the reference arm's labels, measured on a held-out split by the same bar (Spike 3: C1 0.894 and C9 0.825 from fixtures alone, 1.4 ms per call). Same enum member shape, same leg protocol, same one-word landing, same runner, no `torch`, no daemon. The alternatives are to close #3420 with the rejection claim recorded (Task 0 alone), or to file the encoder fine-tuning lane instead (Rabbit Holes). Recommendation: build this plan; the high-tier sites may still miss 95% and that is a recorded result either way.
+2. **Reference spend for training labels.** Each fit labels the training split with Haiku (about 700 calls per routing site, 300 per 50-minimum site, under one dollar per site at list price) in addition to lane A's held-out reference calls. This is inside the $10/day inference line and metered where lane A metered; confirm that labeling a training split is an acceptable use of the reference arm under charter §6 (it is a comparison against the current workflow, on more inputs).
+3. **The landing host.** The plan names "the Valor host that owns the `valor` bridge" as the machine whose memory store can satisfy `n_real`, and puts a preflight in front of every spend. Is there a host whose store holds at least 100 real inbound `valor` messages (the routing sites' held-out need)? If none does, the routing sites are out of reach for this lane by the bar's own rule, and the lane lands the 50-minimum sites only.
