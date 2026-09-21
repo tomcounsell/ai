@@ -377,10 +377,6 @@ def _seed(record: dict) -> str:
     ("backend", "record_kwargs", "expected_exit", "marker"),
     [
         (Backend.OLLAMA, None, 1, "no record"),
-        (Backend.OLLAMA, {"contended": True}, 1, "contended"),
-        (Backend.OLLAMA, {"n_real": 50}, 1, "n_real"),
-        (Backend.OLLAMA, {"agreement": 0.9}, 1, "agreement"),
-        (Backend.OLLAMA, {}, 0, "PASS"),
         (Backend.OLLAMA, {"latency_only": True}, 0, "PASS"),
         (Backend.ANTHROPIC, None, 1, "no record"),
         (Backend.ANTHROPIC, {"agreement": 0.5}, 0, "agreement"),
@@ -393,6 +389,8 @@ def _seed(record: dict) -> str:
     ],
 )
 def test_audit_exit_codes(backend, record_kwargs, expected_exit, marker, capsys):
+    """The no-record, latency-only, and ``ANTHROPIC`` rows; the local-landing
+    rows are parametrized over every local backend further down."""
     task = _task("test.site", backend)
     if record_kwargs is not None:
         _seed(_record_dict(site="test.site", **record_kwargs))
@@ -719,3 +717,563 @@ def test_fit_head_is_deterministic_and_learns_the_labels():
     assert predict(vectors, first, ["no", "yes"]) == labels
     assert cv_agreement(vectors, labels, ["no", "yes"]) == 1.0
     assert cv_agreement(vectors, labels, ["no", "yes"], seed=1) == 1.0
+
+
+# --- the fit path: run_fit, the landing gate, the audit's head provenance -------------
+
+
+@pytest.fixture
+def fit_env(monkeypatch, tmp_path):
+    """The fit path with no network and no ONNX: the leg's ``_embed`` is the
+    deterministic fake, the staged and served head directories are temp
+    dirs, and case claims are recorded on a list instead of the substrate."""
+    from types import SimpleNamespace
+
+    leg = pytest.importorskip("agent.llm.backends.local_encoder")
+    from tools.classification_eval import fit, records
+
+    served_dir = tmp_path / "served"
+    monkeypatch.setattr(leg, "_embed", _fake_embed)
+    monkeypatch.setattr(fit, "STAGED_HEADS_DIR", tmp_path / "staged")
+    monkeypatch.setattr(fit, "served_head_path", lambda site: served_dir / f"{site}.json")
+    claims: list[tuple[str, tuple]] = []
+    monkeypatch.setattr(
+        records, "attach_claims", lambda record, evidence_id, **kw: claims.append(("run", ()))
+    )
+    monkeypatch.setattr(
+        records,
+        "attach_precheck_claim",
+        lambda site_id, agreement, bar, **kw: claims.append(("precheck", (site_id, agreement))),
+    )
+    return SimpleNamespace(leg=leg, fit=fit, served_dir=served_dir, claims=claims)
+
+
+def _counting_reference(**kw) -> tuple[Arm, dict]:
+    """The fake reference arm with a visible call counter (the spend gauge)."""
+    calls = {"n": 0}
+    inner = _arm("reference", "anthropic", **kw)
+
+    async def call(prompt, system, output_type):
+        calls["n"] += 1
+        return await inner.call(prompt, system, output_type)
+
+    return Arm(name="reference", backend="anthropic", model="haiku", price=PRICE, call=call), calls
+
+
+def _builder(*, encoder_flip: int = 0, anthropic_flip: int = 0):
+    """``build_arm`` for :func:`run_fit`: the real ``local_encoder`` arm on
+    the staged head (a scripted flipper when ``encoder_flip``), and a fake
+    ``anthropic`` arm that misses the bar when ``anthropic_flip``."""
+    from tools.classification_eval.arms import local_encoder_arm
+
+    def build(name, staged):
+        if name == "anthropic":
+            return _arm("anthropic", "anthropic", flip_every=anthropic_flip)
+        if encoder_flip:
+            return _arm("local_encoder", "local_encoder", flip_every=encoder_flip)
+        return local_encoder_arm("test.site", head_path=staged)
+
+    return build
+
+
+async def _fit(
+    fit_env, *, land=False, inputs=None, reference=None, build=None, contended=False, **kw
+):
+    from tools.classification_eval.fit import run_fit
+
+    reference = reference or _counting_reference()[0]
+    return await run_fit(
+        _site(minimum_n=50),
+        inputs if inputs is not None else _inputs(40, 40),
+        reference=reference,
+        candidates=["local_encoder", "anthropic"],
+        build_arm=build or _builder(),
+        contended=contended,
+        land=land,
+        project_key=PK,
+        out=lambda line: None,
+        **kw,
+    )
+
+
+def _sha256(path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+async def test_fit_measures_on_the_held_out_split_and_the_head_round_trips(fit_env, capsys):
+    """A measure-only run: the staged head is written and loads through the
+    leg's validating loader, the record is measured on the held-out split only
+    (n = minimum), carries the ``fit`` block with ``landed: false``, and the
+    served path is never written."""
+    from tools.classification_eval.fit import run_fit
+
+    reference, calls = _counting_reference()
+    lines: list[str] = []
+    outcome = await run_fit(
+        _site(minimum_n=50),
+        _inputs(40, 40),
+        reference=reference,
+        candidates=["local_encoder", "anthropic"],
+        build_arm=_builder(),
+        contended=False,
+        project_key=PK,
+        out=lines.append,
+    )
+    record = outcome.record.as_dict()
+    assert record["n"] == 50 and record["n_real"] >= 25
+    n_train_real = 40 - record["n_real"]
+    assert record["fit"] == {
+        "head_run_id": outcome.run_id,
+        "n_train": 30,
+        "n_train_real": n_train_real,
+        "split": "digest",
+        "landed": False,
+        "miss_arms": [],
+        "miss_criteria": {},
+    }
+    assert record["run_id"] == outcome.run_id
+    assert evaluate_bar(record, "local_encoder") == [] and evaluate_bar(record, "anthropic") == []
+    # Training labels once (30), then the two passes over the 50 held-out inputs.
+    assert calls["n"] == 30 + 100
+    assert any("training-split agreement 1.000" in line for line in lines)
+
+    head = fit_env.leg.load_head(outcome.staged_path)
+    assert head.run_id == outcome.run_id and head.site == "test.site"
+    assert head.classes == ["no", "yes"] and head.n_train == 30
+    assert head.n_train_real == n_train_real
+    assert head.fit_settings == {"epochs": 300, "lr": 0.5, "l2": 0.001, "normalized": True}
+    assert not fit_env.served_dir.exists()
+    assert latest_record("test.site", project_key=PK)[1]["fit"]["landed"] is False
+    assert fit_env.claims == [("run", ())]
+    assert f"fit: n_train=30 n_train_real={n_train_real}" in render_report(record)
+
+
+async def test_fit_refuses_under_the_minimums_before_any_arm_call(fit_env):
+    reference, calls = _counting_reference()
+    with pytest.raises(ShortfallError):
+        await _fit(fit_env, inputs=_inputs(10, 100), reference=reference)
+    assert calls["n"] == 0
+    assert latest_record("test.site", project_key=PK) is None
+
+
+async def test_fit_refuses_when_contended_before_any_arm_call(fit_env):
+    from tools.classification_eval.fit import FitRefusalError
+
+    reference, calls = _counting_reference()
+    with pytest.raises(FitRefusalError, match="services are loaded"):
+        await _fit(fit_env, reference=reference, contended=True)
+    assert calls["n"] == 0
+
+
+async def test_land_without_the_anthropic_candidate_refuses_before_any_spend(fit_env):
+    from tools.classification_eval.fit import FitRefusalError, run_fit
+
+    reference, calls = _counting_reference()
+    with pytest.raises(FitRefusalError, match="anthropic"):
+        await run_fit(
+            _site(minimum_n=50),
+            _inputs(40, 40),
+            reference=reference,
+            candidates=["local_encoder"],
+            build_arm=_builder(),
+            contended=False,
+            land=True,
+            project_key=PK,
+            out=lambda line: None,
+        )
+    assert calls["n"] == 0 and not fit_env.served_dir.exists()
+
+
+def test_cli_land_without_anthropic_exits_2_with_no_spend(fit_env, monkeypatch):
+    """The CLI shape of the same refusal: ``--fit --land --candidate
+    local_encoder`` exits 2 before the reference arm is built."""
+    from tools.classification_eval import arms
+
+    built = {"reference": 0}
+
+    def anthropic_arm(site_id, **kw):
+        built["reference"] += 1
+        return _arm("anthropic", "anthropic")
+
+    monkeypatch.setattr(arms, "anthropic_arm", anthropic_arm)
+    monkeypatch.setattr(arms, "site_inputs", lambda site, limit, **kw: _inputs(40, 40))
+    monkeypatch.setattr(
+        "tools.classification_eval.sites.site_for", lambda site_id: _site(minimum_n=50)
+    )
+    monkeypatch.setattr("tools.classification_eval.__main__.is_contended", lambda: False)
+    code = main(
+        [
+            "--site",
+            "test.site",
+            "--fit",
+            "--land",
+            "--candidate",
+            "local_encoder",
+            "--project-key",
+            PK,
+        ]
+    )
+    assert code == 2
+    assert latest_record("test.site", project_key=PK) is None
+
+
+async def test_precheck_gate_skips_with_zero_reference_calls_and_one_claim(fit_env):
+    reference, calls = _counting_reference()
+    outcome = await _fit(fit_env, reference=reference, precheck_agreement=0.84)
+    assert outcome.skipped == "precheck_below_bar" and outcome.record is None
+    assert calls["n"] == 0
+    assert latest_record("test.site", project_key=PK) is None
+    assert fit_env.claims == [("precheck", ("test.site", 0.84))]
+
+    # Inside the margin (bar 0.95 - 0.10 = 0.85) the fit runs.
+    fit_env.claims.clear()
+    outcome = await _fit(fit_env, reference=reference, precheck_agreement=0.85)
+    assert outcome.skipped is None and outcome.record is not None and calls["n"] > 0
+
+
+async def test_training_error_rate_over_the_limit_aborts_with_no_head(fit_env):
+    from tools.classification_eval.fit import FitError
+
+    reference, _ = _counting_reference(error_every=10)
+    with pytest.raises(FitError, match="error rate"):
+        await _fit(fit_env, reference=reference)
+    assert not (fit_env.fit.STAGED_HEADS_DIR).exists() and not fit_env.served_dir.exists()
+    assert latest_record("test.site", project_key=PK) is None
+
+
+async def test_one_class_training_labels_write_no_head(fit_env):
+    from tools.classification_eval.fit import FitError
+
+    async def always_no(prompt, system, output_type):
+        return Verdict(answer="no"), 0.0
+
+    reference = Arm(name="reference", backend="anthropic", model="m", price=PRICE, call=always_no)
+    with pytest.raises(FitError, match="one class"):
+        await _fit(fit_env, reference=reference)
+    assert not (fit_env.fit.STAGED_HEADS_DIR).exists()
+
+
+async def test_land_copies_the_head_only_when_both_arms_clear_the_bar(fit_env):
+    outcome = await _fit(fit_env, land=True)
+    served = fit_env.served_dir / "test.site.json"
+    assert outcome.landed is True and outcome.miss_arms == []
+    assert served.exists() and _sha256(served) == _sha256(outcome.staged_path)
+    record = latest_record("test.site", project_key=PK)[1]
+    assert record["fit"]["landed"] is True and record["fit"]["head_run_id"] == outcome.run_id
+    assert fit_env.leg.load_head(served).run_id == outcome.run_id
+
+
+@pytest.mark.parametrize(
+    ("builder_kwargs", "expected_miss"),
+    [({"anthropic_flip": 3}, ["anthropic"]), ({"encoder_flip": 3}, ["local_encoder"])],
+)
+async def test_land_miss_on_either_arm_leaves_no_served_head(
+    fit_env, builder_kwargs, expected_miss
+):
+    """An Anthropic-arm miss (the restructured-shape fallback under the bar,
+    Risk 3) or an encoder-arm miss is a landing MISS: a pre-existing served
+    head is deleted, ``fit.landed`` is false, ``fit.miss_arms`` names the arm,
+    and the report prints the arm and criterion."""
+    landed = await _fit(fit_env, land=True)
+    served = fit_env.served_dir / "test.site.json"
+    assert served.exists() and landed.landed
+
+    outcome = await _fit(fit_env, land=True, build=_builder(**builder_kwargs))
+    assert outcome.landed is False and outcome.miss_arms == expected_miss
+    assert not served.exists()
+    record = outcome.record.as_dict()
+    assert record["fit"]["landed"] is False
+    assert record["fit"]["miss_arms"] == expected_miss
+    assert record["fit"]["miss_criteria"] == {expected_miss[0]: ["agreement"]}
+    report = render_report(record)
+    assert f"landing MISS: {expected_miss[0]} on agreement" in report
+    assert "landed=false" in report
+
+
+async def test_measure_only_runs_never_touch_the_served_head(fit_env, capsys):
+    """Served-head protection: land once, then two measure-only runs with a
+    scripted MISS leave the served file byte-identical, write their records
+    with ``fit.landed: false``, and the audit still judges the landed record."""
+    import time
+
+    landed = await _fit(fit_env, land=True)
+    served = fit_env.served_dir / "test.site.json"
+    before = _sha256(served)
+
+    for _ in range(2):
+        time.sleep(0.002)
+        outcome = await _fit(fit_env, build=_builder(anthropic_flip=3, encoder_flip=3))
+        assert outcome.landed is False and outcome.record.fit["landed"] is False
+        assert evaluate_bar(outcome.record.as_dict(), "local_encoder") == ["agreement"]
+        assert served.exists() and _sha256(served) == before
+
+    newest = latest_record("test.site", project_key=PK)[1]
+    assert newest["fit"]["landed"] is False and newest["run_id"] != landed.run_id
+    assert audit([_task("test.site", Backend.LOCAL_ENCODER)], project_key=PK) == 0
+    out = capsys.readouterr().out
+    assert f"head={landed.run_id}" in out and "PASS" in out
+
+
+async def test_audit_head_provenance_for_a_local_encoder_landing(fit_env, capsys):
+    """The audit ties the committed head to the latest landed record: a head
+    whose ``run_id`` differs exits 1; no head file exits 1; only measure-only
+    records exit 1; no record at all exits 1."""
+    import json as json_module
+
+    task = _task("test.site", Backend.LOCAL_ENCODER)
+    assert audit([task], project_key=PK) == 1
+    assert "no landed record" in capsys.readouterr().out
+
+    outcome = await _fit(fit_env)  # measure-only: a record, no head
+    assert audit([task], project_key=PK) == 1
+    assert "no landed record" in capsys.readouterr().out
+
+    landed = await _fit(fit_env, land=True)
+    assert audit([task], project_key=PK) == 0
+    assert f"head={landed.run_id}" in capsys.readouterr().out
+
+    served = fit_env.served_dir / "test.site.json"
+    payload = json_module.loads(served.read_text())
+    payload["run_id"] = "someone-elses-fit"
+    served.write_text(json_module.dumps(payload))
+    assert audit([task], project_key=PK) == 1
+    assert f"head run_id someone-elses-fit != record fit.head_run_id {landed.run_id}" in (
+        capsys.readouterr().out
+    )
+
+    served.unlink()
+    assert audit([task], project_key=PK) == 1
+    assert "no head file" in capsys.readouterr().out
+    assert outcome.run_id != landed.run_id
+
+
+@pytest.mark.parametrize("anthropic_arm", ["missing", "under_the_bar"])
+def test_audit_local_encoder_landed_record_needs_the_anthropic_arm_clear(
+    anthropic_arm, monkeypatch, capsys
+):
+    """A landed record whose ``anthropic`` arm misses the bar, or carries no
+    ``anthropic`` candidate arm at all, is a MISS even with the encoder arm
+    clear and the head in place (Risk 3)."""
+    from tools.classification_eval import records
+
+    monkeypatch.setattr(records, "committed_head_run_id", lambda site: "head-1")
+    candidates = (
+        ("local_encoder",) if anthropic_arm == "missing" else ("local_encoder", "anthropic")
+    )
+    record = _record_dict(candidates=candidates)
+    if anthropic_arm == "under_the_bar":
+        record["candidates"]["anthropic"]["agreement"]["mean"] = 0.5
+    record["fit"] = {"head_run_id": "head-1", "landed": True}
+    _seed(record)
+    assert audit([_task("test.site", Backend.LOCAL_ENCODER)], project_key=PK) == 1
+    assert "anthropic fallback arm must clear" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("backend", [Backend.OLLAMA, Backend.LOCAL_ENCODER])
+@pytest.mark.parametrize(
+    ("record_kwargs", "expected_exit", "marker"),
+    [
+        ({"contended": True}, 1, "contended"),
+        ({"n_real": 50}, 1, "n_real"),
+        ({"agreement": 0.9}, 1, "agreement"),
+        ({}, 0, "PASS"),
+    ],
+)
+def test_audit_landed_arm_rule_applies_to_every_local_backend(
+    backend, record_kwargs, expected_exit, marker, capsys, monkeypatch
+):
+    """The landed-arm rule (a candidate on the declared backend clears the
+    bar) applies to every backend other than ``ANTHROPIC``; for
+    ``LOCAL_ENCODER`` the record must also be landed with the head in place."""
+    from tools.classification_eval import records
+
+    record = _record_dict(candidates=(backend.value, "anthropic"), **record_kwargs)
+    record["fit"] = {"head_run_id": "run-1", "landed": True}
+    _seed(record)
+    monkeypatch.setattr(records, "committed_head_run_id", lambda site: "run-1")
+    code = audit([_task("test.site", backend)], project_key=PK)
+    out = capsys.readouterr().out
+    assert code == expected_exit and marker in out and backend.value in out
+
+
+def test_precheck_scores_every_site_with_a_record_through_fit_head(fit_env, monkeypatch, capsys):
+    """``--precheck`` pairs the record's fixture-prefix reference labels with
+    ``site.fixtures()``, scores them five-fold through the one ``fit_head``,
+    excludes C12 and client-only sites, and prints a markdown table ordered
+    by agreement relative to the bar. Zero spend."""
+    from dataclasses import replace
+
+    from tools.classification_eval import fit
+
+    fixtures = [Input(f"fx {i}{'?' if i % 2 else ''}", "fixture") for i in range(24)]
+    labels = ["yes" if "?" in inp.text else "no" for inp in fixtures]
+    rows = {
+        "a.site": replace(_site("a.site"), fixtures=lambda: fixtures),
+        "b.site": replace(
+            _site("b.site"),
+            task=_task("b.site", Backend.ANTHROPIC, ErrorCost.LOW),
+            fixtures=lambda: fixtures,
+        ),
+        "job_router.route": replace(_site("job_router.route"), fixtures=lambda: fixtures),
+        "email_cs.triage": replace(
+            _site("email_cs.triage"),
+            task=_task("email_cs.triage", Backend.ANTHROPIC, client_only=True),
+            fixtures=lambda: fixtures,
+        ),
+        "c.site": _site("c.site"),
+    }
+    # b.site's reference disagrees with the fake embedding's structure on a third.
+    noisy = [("no" if i % 3 == 0 else label) for i, label in enumerate(labels)]
+    for site_id in ("a.site", "b.site", "job_router.route", "email_cs.triage"):
+        record = _record_dict(site=site_id, n=30, n_real=6, minimum_n=30)
+        record["reference"]["labels"] = (noisy if site_id == "b.site" else labels) + ["yes"] * 6
+        _seed(record)
+
+    calls = {"n": 0}
+    real_fit_head = fit.fit_head
+
+    def spy(vectors, labels, classes):
+        calls["n"] += 1
+        return real_fit_head(vectors, labels, classes)
+
+    monkeypatch.setattr(fit, "fit_head", spy)
+    assert fit.precheck(sites=rows, project_key=PK) == 0
+    out = capsys.readouterr().out
+    assert calls["n"] == 10  # five folds per scored site, two sites scored
+    lines = out.splitlines()
+    assert lines[0].startswith("| site |") and lines[1].startswith("|---")
+    a_cells = [cell.strip() for cell in lines[2].strip("|").split("|")]
+    b_cells = [cell.strip() for cell in lines[3].strip("|").split("|")]
+    assert a_cells[0] == "a.site" and a_cells[1] == "24" and float(a_cells[2]) >= 0.9
+    assert a_cells[3:] == ["0.500", "0.95", "0.85", "fit"]
+    assert b_cells[0] == "b.site" and float(b_cells[2]) < float(a_cells[2])
+    assert b_cells[4:6] == ["0.85", "0.75"]
+    assert b_cells[6] == ("fit" if float(b_cells[2]) >= 0.75 else "precheck_below_bar")
+    assert "job_router.route" not in out and "email_cs.triage" not in out
+    assert "skipped: c.site: no lane A record" in out
+
+    # run_fit fits through the same fit_head (the gate reads the head that serves).
+    import asyncio
+
+    calls["n"] = 0
+    asyncio.run(_fit(fit_env))
+    assert calls["n"] == 1
+
+
+def test_precheck_marks_a_site_under_the_gate(monkeypatch):
+    from tools.classification_eval.fit import PrecheckRow, render_precheck
+
+    row = PrecheckRow(site="routing.terminus", n=188, agreement=0.824, majority=0.809, bar=0.95)
+    assert row.gate == pytest.approx(0.85) and row.mark == "precheck_below_bar"
+    table = render_precheck([row], ["x.site: no lane A record with a reference arm"])
+    assert "| routing.terminus | 188 | 0.824 | 0.809 | 0.95 | 0.85 | precheck_below_bar |" in table
+    assert table.endswith("skipped: x.site: no lane A record with a reference arm")
+
+
+@pytest.mark.parametrize(
+    ("n_real", "expected_exit", "routing_line", "small_line"),
+    [
+        (
+            12,
+            1,
+            "this store has 12: short by 88",
+            "this store has 12: short by 13",
+        ),
+        (
+            100,
+            0,
+            "this store has 100: ok; n_train = 88 (188 fixtures + 100 real - 200);"
+            " n_train_real = 0",
+            "this store has 100: ok; n_train = 90 (40 fixtures + 100 real - 50); n_train_real = ",
+        ),
+    ],
+)
+def test_preflight_reports_the_real_count_against_each_site_s_need(
+    n_real, expected_exit, routing_line, small_line, capsys
+):
+    """``--preflight`` prints the real-message count, each site's held-out
+    need, and the training arithmetic from ``split_by_digest`` on the actual
+    draw; exit 1 under the routing sites' need. At exactly 100 real a routing
+    site trains on 88 fixtures and no real message (Risk 1)."""
+    from dataclasses import replace
+
+    from tools.classification_eval.fit import preflight
+
+    real = [Input(f"real {i}{'?' if i % 2 else ''}", "real") for i in range(n_real)]
+    sites = {
+        "routing.site": replace(
+            _site("routing.site", minimum_n=200),
+            fixtures=lambda: [Input(f"fx {i}", "fixture") for i in range(188)],
+        ),
+        "small.site": replace(
+            _site("small.site", minimum_n=50),
+            fixtures=lambda: [Input(f"fx {i}", "fixture") for i in range(40)],
+        ),
+        "client.site": replace(
+            _site("client.site"), task=_task("client.site", Backend.ANTHROPIC, client_only=True)
+        ),
+    }
+    code = preflight(2000, sites=sites, real=lambda limit, *, project_key: real[:limit])
+    out = capsys.readouterr().out
+    assert code == expected_exit
+    assert out.splitlines()[0] == f"real messages available: {n_real}"
+    assert "routing.site" in out and "needs >= 100 real in the held-out split" in out
+    assert routing_line in out and small_line in out
+    assert "needs >= 25 real" in out and "client.site" not in out
+    if n_real == 100:
+        from tools.classification_eval.fit import split_by_digest
+
+        _, train = split_by_digest(sites["small.site"].fixtures() + real, 50)
+        n_train_real = sum(1 for inp in train if inp.source == "real")
+        assert f"n_train_real = {n_train_real}\n" in out and 25 <= n_train_real <= 75
+    if expected_exit:
+        assert "routing sites need >= 100 real in the held-out split; this store has 12" in out
+    else:
+        assert out.rstrip().endswith("preflight: PASS")
+
+
+def test_miss_report_with_a_fit_block_prints_the_fit_line_and_the_landing_miss():
+    record = _record_dict(candidates=("local_encoder", "anthropic"), agreement=0.80)
+    record["fit"] = {
+        "head_run_id": "run-9",
+        "n_train": 120,
+        "n_train_real": 30,
+        "split": "digest",
+        "landed": False,
+        "miss_arms": ["local_encoder", "anthropic"],
+        "miss_criteria": {"local_encoder": ["agreement"], "anthropic": ["agreement", "p95_c4"]},
+    }
+    report = render_report(record)
+    assert "fit: n_train=120 n_train_real=30 head=run-9 landed=false" in report
+    assert "landing MISS: local_encoder on agreement" in report
+    assert "landing MISS: anthropic on agreement, p95_c4" in report
+    assert "local_encoder: MISS on agreement" in report
+
+
+def test_precheck_claim_goes_through_the_case_investigation_path(monkeypatch):
+    """The ``precheck_below_bar`` claim takes the same ``open_investigation`` +
+    ``record_claims`` path the run claims take."""
+    from types import SimpleNamespace
+
+    from tools.classification_eval.records import attach_precheck_claim
+
+    seen: dict[str, object] = {}
+
+    def open_investigation(project_key, **kw):
+        seen["open"] = (project_key, kw)
+        return SimpleNamespace(accepted=True, investigation_id="inv-1", reason="", message="")
+
+    def record_claims(investigation_id, claims, sources=None):
+        seen["claims"] = (investigation_id, claims)
+        return len(claims)
+
+    monkeypatch.setattr("tools.improvement_investigations.open_investigation", open_investigation)
+    monkeypatch.setattr("tools.improvement_investigations.record_claims", record_claims)
+    assert attach_precheck_claim("routing.terminus", 0.824, 0.95, project_key=PK) == "inv-1"
+    assert seen["open"][0] == PK and seen["open"][1]["kind"] == "probe"
+    investigation_id, claims = seen["claims"]
+    assert investigation_id == "inv-1" and len(claims) == 1
+    assert "precheck_below_bar" in claims[0]["claim"] and "0.824" in claims[0]["claim"]
+    assert "gate=0.85" in claims[0]["claim"] and claims[0]["url"].endswith("/3420")
