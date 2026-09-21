@@ -211,7 +211,7 @@ The records are the evidence the follow-up lanes target. #3420 (lane B, below) a
 
 Lane B shipped `Backend.LOCAL_ENCODER`, the encoder leg, the runner's fit path (`--fit`, `--land`, `--preflight`, `--precheck`), the weights step, and the doctor row, and recorded the zero-shot GLiClass candidate as rejected on the case (investigation `4c0d6b44b9c942a5999637afbe22e8a9`: under the majority-class baseline on five of six measured sites). The lane's own numbers come in two tables.
 
-The precheck is free and fixture-only: each site's lane A reference labels paired with its fixtures, embedded through the leg, scored five-fold through the same `fit_head` a landing fits with. A site under `bar - 0.10` skips the fit (`precheck_below_bar`); the rest are fit in this order, highest agreement relative to its bar first. On the build machine (the MacBook Air), 8.1 s wall-clock, zero spend:
+The precheck is free and fixture-only: each site's lane A reference labels paired with its fixtures, embedded through the leg, scored five-fold through the same `fit_head` a landing fits with. A site under `bar - 0.10` skips the fit (`precheck_below_bar`); the rest are fit in this order, highest agreement relative to its bar first. On the build machine (the MacBook Air), 8 to 20 s of wall clock on a quiet machine, zero spend:
 
 | Id | Site | n | CV agreement | Majority | Bar | Gate | Mark |
 |----|------|---|--------------|----------|-----|------|------|

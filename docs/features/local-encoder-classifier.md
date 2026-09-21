@@ -134,7 +134,7 @@ Without `--land` a run measures, prints the report, leaves the staged head in pl
 
 ## Precheck (build machine, Air)
 
-`python -m tools.classification_eval --precheck` on the MacBook Air, against lane A's records in its Redis: 8.1 s wall-clock, zero spend.
+`python -m tools.classification_eval --precheck` on the MacBook Air, against lane A's records in its Redis: 8 to 20 s of wall clock on a quiet machine (about 65 s of CPU across the ONNX threads; the same run took 95 s under a load average of 88), zero spend.
 
 | site | n | cv_agreement | majority | bar | gate | mark |
 |------|---|--------------|----------|-----|------|------|
@@ -156,6 +156,18 @@ Skipped: `classifier.intake_intent` (C13) and `memory_audit.classify` (C14), lat
 ## Landing Outcome
 
 The landing run (preflight, fit, land per site) happens on the Valor host that owns the `valor` bridge, whose memory store holds the real inbound messages the bar's `n_real` criterion demands; this section carries its per-site table (both candidate arms' held-out agreement, `p95_c4`, `n`, `n_real`, `n_train`, `n_train_real`, head run id, record id, failing criterion if any) once that run has happened.
+
+### The landing run, in order
+
+Run from a checkout of the lane branch on that host. In a worktree, export `PYTHONPATH=$PWD` first: the venv's flush-guard `.pth` imports `tools` during `site` processing, before `-m` puts the cwd on `sys.path`, so a bare `python -m tools.classification_eval` in a worktree resolves to the primary checkout (`scripts/pytest-clean.sh` pins the same variable for the same reason).
+
+1. `uv sync --all-extras --frozen`, then `python scripts/download_local_encoder_models.py` and `python -m tools.doctor | grep local_encoder` (must read `PASS`).
+2. `./scripts/valor-service.sh stop` (and `worker-disable` if launchd would relaunch the worker), then `python -m tools.classification_eval --preflight`. Exit 1 means the routing sites are out of reach on this host by the bar's own rule; the 50-minimum sites can still run.
+3. `python -m tools.classification_eval --precheck` on this host's records. Its `fit` rows, highest agreement relative to bar first, are the order; each `precheck_below_bar` row gets one claim on the case and no fit.
+4. Per fit site, boxed at half a build day: the caller census (`grep -ln "<site function>" tests/unit/*.py`); for a context-bearing site, the message-first composition function beside the declaration, pointed at by the row's `candidate_prompt`; then `python -m tools.classification_eval --site <id> --fit --land --candidate local_encoder,anthropic --save-inputs data/classification_eval/<id>.jsonl` (`--reference-model paid` for C15 when the free route is throttled). On `landed=true` the runner has installed the head: set `backend=Backend.LOCAL_ENCODER`, restructure the call to `(text, system=instructions)`, keep the fail-safe byte-identical, update the site's tests, and commit the head with the record id and head run id in the message. On `landed=false` the runner has removed any served head; the site stays on `ANTHROPIC` and the report's `miss_arms` line goes in the outcome table.
+5. `python -m tools.classification_eval --audit` (exit 0), `scripts/pytest-clean.sh tests/unit/test_classifier_heads.py -q`, the per-site table into this section and [LLM Task Taxonomy](llm-task-taxonomy.md#lane-b-outcome), then `./scripts/valor-service.sh restart`.
+
+If no site lands, the rejection exit applies: the backend member, leg, extra, weights script, update step, and doctor row go in one commit; `--fit`, `--precheck`, and `--preflight` stay; each MISS is on the case.
 
 ## Zero-Shot GLiClass: Rejected
 
