@@ -11,7 +11,7 @@ imports no bridge module.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,17 +60,28 @@ def _records(project_key: str) -> Iterable[tuple[Any, dict[str, Any]]]:
 
 
 def latest_record(
-    site_id: str, *, project_key: str = PROJECT_KEY
+    site_id: str,
+    *,
+    project_key: str = PROJECT_KEY,
+    where: Callable[[dict[str, Any]], bool] | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """``(evidence id, record)`` for the newest record of ``site_id``, or ``None``."""
+    """``(evidence id, record)`` for the newest record of ``site_id`` that
+    satisfies ``where`` (every record when ``None``), or ``None``."""
     newest: tuple[datetime, str, dict[str, Any]] | None = None
     for row, payload in _records(project_key):
         if payload.get("site") != site_id:
+            continue
+        if where is not None and not where(payload):
             continue
         stamp = getattr(row, "created_at", None) or datetime.min.replace(tzinfo=UTC)
         if newest is None or stamp > newest[0]:
             newest = (stamp, row.id, payload)
     return None if newest is None else (newest[1], newest[2])
+
+
+def is_landed(record: Mapping[str, Any]) -> bool:
+    """True for a fit record whose run was allowed to touch the served head and did."""
+    return bool((record.get("fit") or {}).get("landed"))
 
 
 def claims_for(record: ComparisonRecord, evidence_id: str) -> list[dict[str, str]]:
@@ -99,37 +110,97 @@ def claims_for(record: ComparisonRecord, evidence_id: str) -> list[dict[str, str
     return claims
 
 
-def attach_claims(
-    record: ComparisonRecord, evidence_id: str, *, project_key: str = PROJECT_KEY
+def _record_on_case(
+    site_id: str, query: str, claims: list[dict[str, str]], *, project_key: str
 ) -> str:
-    """Open a ``probe`` investigation on :data:`CASE_ID` and record the run's claims."""
+    """Open a ``probe`` investigation on :data:`CASE_ID` and record ``claims``
+    on it; the one path every runner claim takes."""
     from tools.improvement_investigations import open_investigation, record_claims
 
     outcome = open_investigation(
         project_key,
         kind="probe",
         case_id=CASE_ID,
-        uncertainty=f"does {record.site} clear its tier bar on a local backend",
-        query=f"classification_eval {record.site} run {record.run_id}",
-        decision_affected=f"declared backend of {record.site}",
+        uncertainty=f"does {site_id} clear its tier bar on a local backend",
+        query=query,
+        decision_affected=f"declared backend of {site_id}",
         expected_information_value="the per-site landing decision and the PR body row",
     )
     if not outcome.accepted or outcome.investigation_id is None:
         raise RuntimeError(f"could not open investigation: {outcome.reason} {outcome.message}")
-    record_claims(outcome.investigation_id, claims_for(record, evidence_id))
+    record_claims(outcome.investigation_id, claims)
     return outcome.investigation_id
+
+
+def attach_claims(
+    record: ComparisonRecord, evidence_id: str, *, project_key: str = PROJECT_KEY
+) -> str:
+    """Record the run's claims (one per candidate arm) on the case investigation."""
+    return _record_on_case(
+        record.site,
+        f"classification_eval {record.site} run {record.run_id}",
+        claims_for(record, evidence_id),
+        project_key=project_key,
+    )
+
+
+def attach_precheck_claim(
+    site_id: str, agreement: float, bar: float, *, project_key: str = PROJECT_KEY
+) -> str:
+    """Record a ``precheck_below_bar`` skip on the case (#3420): the site's
+    five-fold agreement on lane A's fixtures sat more than the margin under
+    its bar, so the fit ran no reference call and wrote no record."""
+    from tools.classification_eval.fit import FIT_ISSUE_URL, PRECHECK_MARGIN
+
+    claim = {
+        "claim": (
+            f"{site_id} candidate=local_encoder precheck_below_bar"
+            f" precheck_agreement={agreement:.3f} bar={bar:.2f}"
+            f" gate={bar - PRECHECK_MARGIN:.2f}; fit skipped, zero reference calls, no record"
+        ),
+        "url": FIT_ISSUE_URL,
+        "retrieved_at": datetime.now(UTC).isoformat(),
+        "title": f"classification_eval {site_id} precheck",
+    }
+    return _record_on_case(
+        site_id, f"classification_eval {site_id} precheck", [claim], project_key=project_key
+    )
 
 
 # --- --audit -----------------------------------------------------------------------------
 
 
+def committed_head_run_id(site_id: str) -> str | None:
+    """The ``run_id`` of the served head file for ``site_id``, or ``None``
+    when no head is committed; read uncached through the leg's validating
+    loader so the audit judges the bytes on disk."""
+    from agent.llm.backends import local_encoder as leg
+    from tools.classification_eval.fit import served_head_path
+
+    path = served_head_path(site_id)
+    if not path.exists():
+        return None
+    return str(leg.load_head(path).run_id)
+
+
 def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple[bool, str]:
-    """``(ok, line)`` for one declared classification site."""
+    """``(ok, line)`` for one declared classification site.
+
+    Every backend other than ``ANTHROPIC`` is a local landing: the record
+    must carry a candidate arm on the declared backend that clears the bar
+    (a reference arm on the same backend proves nothing about the landing).
+    A ``LOCAL_ENCODER`` landing is judged on its latest *landed* record
+    (``found`` is that record; measure-only records are skipped by
+    :func:`audit`), needs both its ``local_encoder`` and its ``anthropic``
+    arm clear, and needs the committed head's ``run_id`` to equal the
+    record's ``fit.head_run_id``.
+    """
     backend = task.backend.value
+    encoder = task.backend is Backend.LOCAL_ENCODER
     if task.client_only:
         return True, f"{task.site:<36} {backend:<10} client_only, no record required"
     if found is None:
-        return False, f"{task.site:<36} {backend:<10} no record"
+        return False, f"{task.site:<36} {backend:<10} no {'landed ' if encoder else ''}record"
     evidence_id, record = found
     prefix = (
         f"{task.site:<36} {backend:<10} record={evidence_id}"
@@ -149,23 +220,40 @@ def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple
     landed = [name for name, arm in arms.items() if arm.get("backend") == backend]
     if not landed:
         return False, f"{prefix} no {backend} arm in the record; {summary}"
-    if backend == Backend.OLLAMA.value:
-        # The landed arm must be a candidate that clears the bar; a reference
-        # arm on the same backend proves nothing about the landing.
-        ok = any(name in verdicts and not verdicts[name] for name in landed)
+    if task.backend is Backend.ANTHROPIC:
+        # An ANTHROPIC landing needs an Anthropic arm measured (reference or
+        # candidate); the candidates' misses are the reason it sits there.
+        return True, f"{prefix} anthropic arm present; {summary}"
+    ok = any(name in verdicts and not verdicts[name] for name in landed)
+    if not encoder:
         return ok, f"{prefix} {'PASS' if ok else 'MISS'} {summary}"
-    # An ANTHROPIC landing needs an Anthropic arm measured (reference or
-    # candidate); the candidates' misses are the reason it sits there.
-    return True, f"{prefix} anthropic arm present; {summary}"
+    fallback = verdicts.get(Backend.ANTHROPIC.value)
+    if fallback is None or fallback:
+        ok = False
+        summary += " (the anthropic fallback arm must clear the bar on the landed record)"
+    head_run_id = (record.get("fit") or {}).get("head_run_id")
+    committed = committed_head_run_id(task.site)
+    if committed is None:
+        ok = False
+        summary += " no head file"
+    elif committed != head_run_id:
+        ok = False
+        summary += f" head run_id {committed} != record fit.head_run_id {head_run_id}"
+    else:
+        summary += f" head={committed}"
+    return ok, f"{prefix} {'PASS' if ok else 'MISS'} {summary}"
 
 
 def audit(tasks: Sequence[LLMTask], *, project_key: str = PROJECT_KEY) -> int:
     """Print one row per classification site; exit 1 on any site without a
-    record, any ``OLLAMA`` landing whose latest record misses a criterion,
-    and any ``ANTHROPIC`` landing whose record has no Anthropic arm."""
+    record, any local landing whose judged record misses a criterion (the
+    latest record for ``OLLAMA``, the latest *landed* record for
+    ``LOCAL_ENCODER``, whose committed head must also match it), and any
+    ``ANTHROPIC`` landing whose record has no Anthropic arm."""
     exit_code = 0
     for task in sorted(tasks, key=lambda t: t.site):
-        ok, line = _audit_row(task, latest_record(task.site, project_key=project_key))
+        where = is_landed if task.backend is Backend.LOCAL_ENCODER else None
+        ok, line = _audit_row(task, latest_record(task.site, project_key=project_key, where=where))
         print(line)
         if not ok:
             exit_code = 1

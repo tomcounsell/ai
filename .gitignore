@@ -500,3 +500,6 @@ PROGRESS.md
 
 # Codex skill conversion inventory (source hashes and resource coverage)
 !.agents/skills-manifest.json
+
+# Fit-path staged heads (#3420): data/ is ignored above; named here so the intent is explicit
+data/classification_eval/heads/

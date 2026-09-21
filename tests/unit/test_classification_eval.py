@@ -641,3 +641,81 @@ def test_gemma_arm_paid_route_carries_its_own_model_and_price(monkeypatch):
     assert free_arm.model.endswith(":free") and free_arm.price.usd_per_mtoken_in == 0.0
     assert paid_arm.model == free_arm.model.removesuffix(":free") == transport.model
     assert paid_arm.price.usd_per_mtoken_in > 0.0 and paid_arm.price.retrieved_at
+
+
+# --- the fit path (#3420 lane B): split, fit, head files -------------------------------
+
+
+def _fake_embed(text: str):
+    """A deterministic 384-d unit vector per text with class-correlated
+    structure (the ``?`` that decides the truth pushes along one axis), so a
+    linear head can learn the reference labels from it."""
+    import hashlib
+
+    import numpy as np
+
+    from config.models import LOCAL_ENCODER_DIM
+
+    seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
+    vector = np.random.default_rng(seed).standard_normal(LOCAL_ENCODER_DIM)
+    vector[0] += 4.0 if "?" in text else -4.0
+    return (vector / np.linalg.norm(vector)).astype(np.float32)
+
+
+def test_split_by_digest_is_a_function_of_the_inputs_alone():
+    """Two draws of the same input set in different orders give the same
+    held-out set; the held-out split takes real inputs first (up to half the
+    minimum), then fills to the minimum by digest; the rest is training."""
+    import random
+
+    from tools.classification_eval.fit import split_by_digest
+
+    inputs = _inputs(30, 40)
+    shuffled = list(inputs)
+    random.Random(7).shuffle(shuffled)
+    held_a, train_a = split_by_digest(inputs, 50)
+    held_b, train_b = split_by_digest(shuffled, 50)
+    assert held_a == held_b and train_a == train_b
+    assert len(held_a) == 50 and len(train_a) == 20
+    assert sum(1 for i in held_a if i.source == "real") >= 25
+    assert {i.text for i in held_a}.isdisjoint({i.text for i in train_a})
+    assert {i.text for i in held_a} | {i.text for i in train_a} == {i.text for i in inputs}
+
+
+def test_split_by_digest_at_the_routing_boundary_trains_on_fixtures_only():
+    """A routing site at exactly 100 real (188 fixtures, minimum 200): the
+    held-out split takes all 100 real and 100 fixtures, so training is 88
+    fixtures and no real message (Risk 1)."""
+    from tools.classification_eval.fit import split_by_digest
+
+    held, train = split_by_digest(_inputs(100, 188), 200)
+    assert len(held) == 200 and sum(1 for i in held if i.source == "real") == 100
+    assert len(train) == 88 and sum(1 for i in train if i.source == "real") == 0
+
+
+@pytest.mark.parametrize(
+    ("n_real", "n_fixture", "minimum_n"),
+    [(10, 100, 50), (24, 100, 50), (30, 10, 50)],
+)
+def test_split_by_digest_refuses_under_the_minimums(n_real, n_fixture, minimum_n):
+    from tools.classification_eval.fit import split_by_digest
+
+    with pytest.raises(ShortfallError):
+        split_by_digest(_inputs(n_real, n_fixture), minimum_n)
+
+
+def test_fit_head_is_deterministic_and_learns_the_labels():
+    import numpy as np
+
+    from tools.classification_eval.fit import cv_agreement, fit_head, predict
+
+    texts = [f"text {i}{'?' if i % 2 else ''}" for i in range(60)]
+    vectors = np.stack([_fake_embed(t) for t in texts])
+    labels = ["yes" if "?" in t else "no" for t in texts]
+    first = fit_head(vectors, labels, ["no", "yes"])
+    second = fit_head(vectors, labels, ["no", "yes"])
+    assert first.W.tobytes() == second.W.tobytes() and first.b.tobytes() == second.b.tobytes()
+    assert first.W.shape == (vectors.shape[1], 2) and first.b.shape == (2,)
+    assert predict(vectors, first, ["no", "yes"]) == labels
+    assert cv_agreement(vectors, labels, ["no", "yes"]) == 1.0
+    assert cv_agreement(vectors, labels, ["no", "yes"], seed=1) == 1.0

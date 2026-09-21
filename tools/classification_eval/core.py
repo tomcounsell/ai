@@ -223,6 +223,11 @@ class ComparisonRecord:
     candidates: dict[str, ArmResult]
     run_id: str
     created_at: str
+    fit: dict[str, Any] | None = None
+    """The fit path's provenance (#3420): ``head_run_id``, ``n_train``,
+    ``n_train_real``, ``split``, ``landed`` (whether this run was allowed to
+    touch the served head and did), ``miss_arms`` and ``miss_criteria`` on a
+    landing MISS. ``None`` on a plain comparison run."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -239,6 +244,7 @@ class ComparisonRecord:
             "candidates": {name: arm.as_dict() for name, arm in self.candidates.items()},
             "run_id": self.run_id,
             "created_at": self.created_at,
+            "fit": None if self.fit is None else dict(self.fit),
         }
 
 
@@ -471,6 +477,15 @@ def render_report(record: Mapping[str, Any]) -> str:
         f" run={record['run_id']}"
     )
     lines = [header]
+    fit = record.get("fit")
+    if fit:
+        lines.append(
+            f"  fit: n_train={fit.get('n_train')} n_train_real={fit.get('n_train_real')}"
+            f" head={fit.get('head_run_id')} landed={str(bool(fit.get('landed'))).lower()}"
+        )
+        for arm_name in fit.get("miss_arms") or []:
+            criteria = (fit.get("miss_criteria") or {}).get(arm_name) or []
+            lines.append(f"  landing MISS: {arm_name} on {', '.join(criteria) or 'the bar'}")
     reference = record.get("reference")
     if reference:
         lines.append(f"  reference {reference['name']} ({reference['model']}):")

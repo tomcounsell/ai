@@ -14,8 +14,25 @@ Two modes:
   loaded bridge, worker, or reflection-worker stamps ``contended: true``
   and the record cannot clear the bar (Race 3).
 * ``--audit`` walks every declared classification site and applies the
-  acceptance bar to its latest record; exit 1 on any miss, any site without
-  a record, and any ``ANTHROPIC`` landing with no Anthropic arm.
+  acceptance bar to its latest record (the latest *landed* record for a
+  ``LOCAL_ENCODER`` site, whose committed head must match it); exit 1 on
+  any miss, any site without a record, and any ``ANTHROPIC`` landing with
+  no Anthropic arm.
+
+The fit path (#3420, ``tools/classification_eval/fit.py``):
+
+* ``--site <id> --fit --candidate local_encoder,anthropic`` splits the draw
+  by digest, labels the training split with the reference arm, fits the
+  per-site head, writes it to the staging path, and measures it on the
+  held-out split; the record carries a ``fit`` block. ``--land`` is the only
+  flag under which the served head ``agent/llm/backends/heads/<site>.json``
+  is written (both arms clear the bar) or deleted (either misses), and it
+  needs the ``anthropic`` candidate. ``--precheck-agreement`` applies the
+  precheck gate before any spend.
+* ``--preflight`` says whether this machine's memory store can meet each
+  site's held-out real need (exit 1 under the routing sites' 100).
+* ``--precheck`` scores every site with a lane A record five-fold on its
+  fixtures through the same ``fit_head`` the fit uses; zero spend.
 
 Developer tooling; no ``[project.scripts]`` entry.
 """
@@ -75,7 +92,39 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="BACKEND",
-        help="candidate arm: ollama or anthropic; repeat or comma-separate",
+        help=f"candidate arm: one of {', '.join(CANDIDATE_BACKENDS)}; repeat or comma-separate",
+    )
+    parser.add_argument(
+        "--fit",
+        action="store_true",
+        help="fit the site's local_encoder head on the training split and measure it on"
+        " the held-out split (needs --candidate local_encoder)",
+    )
+    parser.add_argument(
+        "--land",
+        action="store_true",
+        help="with --fit: install the staged head as the served head when both the"
+        " local_encoder and the anthropic arm clear the bar; delete it when either misses",
+    )
+    parser.add_argument(
+        "--precheck-agreement",
+        type=float,
+        default=None,
+        metavar="AGREEMENT",
+        help="with --fit: the site's --precheck number; under bar - 0.10 the fit is skipped"
+        " before any reference call and one precheck_below_bar claim is recorded",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="report the real messages this machine's memory store holds against each"
+        " site's held-out need; exit 1 under the routing sites' need",
+    )
+    parser.add_argument(
+        "--precheck",
+        action="store_true",
+        help="five-fold agreement of the local_encoder head on every site with a lane A"
+        " record, beside the majority baseline and the bar; zero spend",
     )
     parser.add_argument(
         "--latency-only",
@@ -119,17 +168,78 @@ def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
     return [builders[name]() for name in names]
 
 
-async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
+def _draw_inputs(args: argparse.Namespace, site):
     from tools.classification_eval import arms as live
-    from tools.classification_eval.sites import site_for
 
-    site = site_for(args.site)
     if args.inputs:
         inputs = live.load_inputs(args.inputs.read_text(encoding="utf-8"))
     else:
         inputs = live.site_inputs(site, args.real_limit, project_key=args.project_key)
     if args.save_inputs:
         args.save_inputs.write_text(live.dump_inputs(inputs), encoding="utf-8")
+    return inputs
+
+
+def _reference_arm(args: argparse.Namespace, site, reserve_calls: int):
+    """``(reference arm, gemma transport or None)``; the caller settles the transport."""
+    from tools.classification_eval import arms as live
+
+    if site.reference == "openrouter_gemma":
+        reference, transport = live.openrouter_gemma_arm(paid=args.reference_model == "paid")
+        transport.reserve(reserve_calls, project_key=args.project_key)
+        return reference, transport
+    return live.anthropic_arm(site.id, model=site.model, name="anthropic"), None
+
+
+async def _run_fit(args: argparse.Namespace, candidates: list[str]) -> int:
+    from tools.classification_eval.arms import arm_builders
+    from tools.classification_eval.fit import FitError, FitRefusalError, run_fit
+    from tools.classification_eval.sites import site_for
+
+    site = site_for(args.site)
+    inputs = _draw_inputs(args, site)
+    contended = is_contended()
+    transport = None
+    try:
+        # Training labels once, plus the two passes over the held-out split.
+        reference, transport = _reference_arm(args, site, len(inputs) * 3)
+        outcome = await run_fit(
+            site,
+            inputs,
+            reference=reference,
+            candidates=candidates,
+            build_arm=lambda name, staged: arm_builders(site.id, head_path=staged)[name](),
+            contended=contended,
+            land=args.land,
+            precheck_agreement=args.precheck_agreement,
+            project_key=args.project_key,
+            attach=not args.no_attach,
+        )
+    except (ShortfallError, FitRefusalError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except FitError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    finally:
+        if transport is not None:
+            transport.settle(project_key=args.project_key)
+    if outcome.skipped:
+        return 0
+    assert outcome.record is not None
+    print(render_report(outcome.record.as_dict()))
+    print(
+        f"record: {outcome.evidence_id} (ImprovementEvidence kind=classifier_comparison,"
+        f" case {CASE_ID})"
+    )
+    return 0
+
+
+async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
+    from tools.classification_eval.sites import site_for
+
+    site = site_for(args.site)
+    inputs = _draw_inputs(args, site)
 
     try:
         require_minimum(site, inputs)
@@ -148,11 +258,7 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
     transport = None
     reference = None
     if not args.latency_only:
-        if site.reference == "openrouter_gemma":
-            reference, transport = live.openrouter_gemma_arm(paid=args.reference_model == "paid")
-            transport.reserve(len(inputs) * 2, project_key=args.project_key)
-        else:
-            reference = live.anthropic_arm(site.id, model=site.model, name="anthropic")
+        reference, transport = _reference_arm(args, site, len(inputs) * 2)
 
     try:
         record = await compare(
@@ -197,9 +303,27 @@ def main(argv: Sequence[str] | None = None, *, tasks: Sequence[LLMTask] | None =
             project_key=args.project_key,
         )
 
+    if args.preflight:
+        from tools.classification_eval.fit import preflight
+
+        return preflight(args.real_limit, project_key=args.project_key)
+
+    if args.precheck:
+        from tools.classification_eval.fit import precheck
+
+        return precheck(project_key=args.project_key)
+
     if not args.site:
-        parser.error("one of --site, --audit, or --list-sites is required")
+        parser.error("one of --site, --audit, --preflight, --precheck, or --list-sites is required")
     candidates = parse_candidates(args.candidate)
+    if args.fit:
+        if args.latency_only:
+            parser.error("--fit measures agreement; drop --latency-only")
+        if not candidates:
+            parser.error("--fit needs --candidate local_encoder,anthropic")
+        return asyncio.run(_run_fit(args, candidates))
+    if args.land:
+        parser.error("--land needs --fit")
     if not candidates:
         if not args.latency_only:
             parser.error("--site needs at least one --candidate (or --latency-only)")
