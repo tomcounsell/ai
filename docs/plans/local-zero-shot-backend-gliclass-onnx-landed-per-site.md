@@ -253,7 +253,25 @@ Builder on the landing host → `--preflight` (enough real messages?) → per si
 
 ## Failure Path Test Strategy
 
-Placeholder.
+### Exception Handling Coverage
+- [ ] The leg's `except Exception` around the ONNX run (the only broad handler this plan adds) re-raises as `LLMCallError(reason="transport")` with the cause chained and one `logger.error` line; a test injects a raising fake session and asserts the `LLMCallError`, its `reason`, the `__cause__`, and the log line on `caplog`. No swallowed exception anywhere in the leg.
+- [ ] Missing extra: `_load_runtime` catches `ImportError` on `onnxruntime` or `tokenizers` and raises `LLMCallError("classification-local extra not installed", reason="transport")`; tested with the raising shim from `tests/unit/test_llm_import_safety.py`, and the wrapper-level test asserts the Anthropic fallback then answers with `llm_fallback ... primary=local_encoder reason=transport`.
+- [ ] Missing or mismatched weights: `_load_runtime` verifies each file's sha256 against `LOCAL_ENCODER_FILES` and raises `LLMCallError(reason="transport")` naming the file and the download script; tested with a temp models dir holding a wrong-content file (mutation: flip one byte, the leg must refuse).
+- [ ] Missing head: `LLMCallError(reason="transport")` naming `heads/<site>.json`; tested with a fake site id.
+- [ ] Output-type shape violations (two closed-set fields; a required string field with no default; classes that differ from the head's): `LLMCallError(reason="validation")`, one test per violation, each asserting no ONNX run happened (the fake session's call count is 0).
+- [ ] Runner: `--fit` refuses under the held-out minimum or half-minimum real with `ShortfallError` before any arm call (test counts reference-arm calls: 0); a reference-arm error on a training input drops that input and is counted in the report; a reference-arm error rate above `MAX_ERROR_RATE` on the training split aborts the fit (no head written).
+- [ ] `scripts/download_local_encoder_models.py`: a checksum mismatch after download deletes the `.part` file and exits 1 with the expected and actual digests; the update step surfaces that as a warning (non-fatal), tested through `ensure_models` with a fake script exit.
+
+### Empty/Invalid Input Handling
+- [ ] `run_typed` already rejects an empty or whitespace prompt before routing (lane A); the leg never sees one. A test on the leg directly with `prompt=""` asserts `LLMCallError(reason="validation")` so the leg is safe when called by the runner's arm, which bypasses the wrapper.
+- [ ] A text longer than 512 tokens is truncated by the tokenizer (`enable_truncation(512)`); a test embeds a 2,000-word input and asserts a 384-d result and a call that finishes.
+- [ ] A head with `classes` of length 1 or with a `W` of the wrong shape is refused at load (`LLMCallError(reason="validation")`), and `tests/unit/test_classifier_heads.py` refuses to let one be committed.
+- [ ] `--fit` with a training split whose labels collapse to one class writes no head and reports it (a one-class head would answer that class for everything and the held-out record would say so, but refusing earlier saves the reference spend).
+
+### Error State Rendering
+- [ ] The runner's report renders MISS with the failing criteria named (lane A) and the new `fit` line (`fit: n_train=… n_train_real=… head=<run_id>`); a rendering test covers a MISS record with a `fit` block.
+- [ ] `--preflight` prints the shortfall per site in words a human acts on (`routing sites need ≥ 100 real in the held-out split; this store has 12`) and exits 1; tested with a fake store.
+- [ ] Doctor's `local_encoder` row fails with a `fix` naming the script or the extra when a declared site would fall back on every call; tested with the routing-section fixtures in `tests/unit/test_doctor.py`.
 
 ## Test Impact
 
@@ -274,27 +292,90 @@ Verified on `main` at `149f0d0da` by reading each file; the router table test, t
 
 ## Rabbit Holes
 
-Placeholder.
+- **Tuning GLiClass label wording.** Spike 2 tried three phrasings per site and moved the numbers by a few points against gaps of 15 to 75. The rejection stands on that evidence; the build spends no time on it.
+- **Fine-tuning the encoder** (GLiClass or BGE with `torch` in a throwaway env, ONNX re-export, hosting per-site 100 MB+ weights). It would likely beat a frozen-embedding head, and it is a different lane: a training environment, weight hosting, and a held-out protocol of its own. If the linear head plateaus under the bar on the high-tier sites, that is the follow-up to file, with this lane's records as its baseline.
+- **Active learning or more labels than the reference arm gives for free.** The training set is whatever the draw holds; buying more Haiku labels to chase a bar is a budget question for Tom, not a builder loop.
+- **Re-scoring the reference.** The reference is Haiku with the verbatim prompt, by lane A's definition. Agreement with it is the claim; whether Haiku is right is a different experiment.
+- **Making the leg download weights on a miss.** A 34 MB fetch inside a 3 s hot-path call is a timeout with extra steps; `/update` fetches, the leg refuses, the router falls back.
+- **A generic "trainable backend" abstraction.** One head format, one fit function, one embedding model. Lane C's decisions transport shares the leg protocol and nothing else.
+- **C12.** Its answer is a job id from a per-call list; that is retrieval, not classification. Out.
+- **Serving the embedding through Ollama or an embedding endpoint.** The whole point is a process-local CPU call with no daemon.
 
 ## Risks
 
-Placeholder.
+### Risk 1: The learning curve flattens under the bar on real traffic
+**Impact:** The high-tier sites (C1 to C4, 95%) stay on Anthropic; the lane lands only medium and low tiers, or nothing.
+**Mitigation:** The plan-time numbers (C1 0.894 and C9 0.825 from 150 and 32 fixtures) rank the sites so the likeliest landings run first; each site is boxed at half a day with three levers (text composition, `real_limit`, the one model swap); a MISS is a recorded result with the failing criterion, and the rejection exit for the whole backend is written into the Technical Approach so a lane that lands nothing still ships the runner's fit mode and the claims. The Success Criteria count "either landed by the bar or recorded as rejected" as done, exactly as the issue does.
+
+### Risk 2: The head overfits the fixtures and the record flatters it
+**Impact:** A site clears the bar on the held-out split and misbehaves on live traffic.
+**Mitigation:** The held-out split is chosen by content digest before any label exists, carries at least half real inputs (the bar's `n_real` rule applies to it), and the fit never sees it (no early stopping, no model selection on it). The training-split agreement is printed as a sanity line and is never a claim. The record's `fit` block makes the split visible to the reviewer, and the audit ties the committed head to that record. Live evidence after deploy is the `llm_route` grep in Verification.
+
+### Risk 3: The restructured call changes what the Anthropic fallback answers
+**Impact:** A landed site's fallback (Haiku on `system` + text) disagrees with the verbatim prompt Haiku was measured on, so the degraded state is silently worse than lane A's.
+**Mitigation:** Every fit run carries `--candidate local_encoder,anthropic`, so the record measures Haiku on the restructured shape against the verbatim reference on the same held-out inputs; the PR body shows both arms' agreement per site, and a site whose Anthropic arm misses the tier bar does not land (the reviewer's rule, stated in the taxonomy doc). The fixture-only shape in the runner and the served shape share one function (Text-first composition).
+
+### Risk 4: The landing host cannot satisfy `n_real`
+**Impact:** The same `n_real` miss lane A recorded, again, on every site.
+**Mitigation:** `--preflight` prints the real-message count against each site's need before any spend and the plan names the host (the one owning the `valor` bridge). If no host holds 100 real inbound messages for the routing sites, those sites are out of reach for this lane by the bar's own rule and the plan says so in the PR; the 50-minimum sites need 25 real in the held-out split plus training real messages, which is the first number the preflight reports.
+
+### Risk 5: The first call in a process pays the model load inside a 3 s budget
+**Impact:** A hot-path site's first call after a restart falls back to Anthropic once.
+**Mitigation:** Load is 0.05 s on the Air for the 34 MB model (Spike 3), well inside every budget, and the loader lock means a burst pays it once. No warm-up code; the number is the argument, and the doc records it.
+
+### Risk 6: Merge conflicts with lane C (#3421) on the same seams
+**Impact:** Two PRs each add an enum member, a router rule, a `_LEGS` entry, a timer branch, an arm builder, doc rows, and touch `_audit_row`.
+**Mitigation:** Each addition is one adjacent line; whichever lane merges second rebases. The audit generalization is written here as "every backend other than `ANTHROPIC`" so lane C needs no change to it; the doc table rows are per site and disjoint. Both plans name the other in Freshness Check.
+
+### Risk 7: The extra or the weights are missing on a fleet machine after deploy
+**Impact:** A landed site falls back to Anthropic on every call on that machine.
+**Mitigation:** `/update` installs all extras and runs the weights step; doctor's `local_encoder` row fails and names the fix; the `llm_fallback ... primary=local_encoder reason=transport` line is the log signature (one per call, each fast); the fail direction is the safe one (Haiku answers).
 
 ## Race Conditions
 
-Placeholder.
+### Race 1: Two first calls load the ONNX session at once
+**Location:** `agent/llm/backends/local_encoder.py::_load_runtime`
+**Trigger:** A burst of messages on a freshly restarted bridge.
+**Data prerequisite:** none
+**State prerequisite:** Exactly one `InferenceSession` per process.
+**Mitigation:** A module-level `threading.Lock` around the memoized load (the loader runs inside `asyncio.to_thread`, so an `asyncio.Lock` would be the wrong primitive); a test fires 20 concurrent calls on a fresh module and asserts one load.
+
+### Race 2: Fit and serve on the same head file
+**Location:** `tools/classification_eval/fit.py` writing `heads/<site>.json` while a bridge process on the same machine has the head memoized
+**Trigger:** A builder re-fits a landed site on the landing host with services running.
+**Data prerequisite:** none
+**State prerequisite:** A served head is the committed head.
+**Mitigation:** The fit path writes atomically (temp file, rename) and the runner refuses to fit while `is_contended()` is true (the same services check lane A uses for latency), so the bridge is stopped when a head changes; the memoized head is reloaded at process start only, which `/update`'s restart provides.
+
+### Race 3: Comparison arms interleave with live traffic
+**Location:** `tools/classification_eval/`
+**Trigger:** A latency run while the bridge serves messages.
+**Mitigation:** Lane A's `contended` stamp and refusal to clear the bar, unchanged; the encoder arm has no daemon to share, but the reference arm and the Anthropic candidate share the semaphore, so the rule stays.
 
 ## No-Gos (Out of Scope)
 
-Placeholder.
+- [EXTERNAL] Running Tasks 7 to 9 on the Valor host that owns the `valor` bridge. This MacBook Air cannot reach that host and its own memory store holds 12 real messages; the preflight is the gate and the hand-off is described in Technical Approach.
+- [SEPARATE-SLUG #3421] The decisions transport (lane C); its Ollama fallback and its own rule. Coordination in Risk 6.
+- [SEPARATE-SLUG #3422] The emoji reaction as a decision site; `tools/emoji_embedding.py` and its callers are untouched (anti-criterion in Verification).
+- [SEPARATE-SLUG #3525] Deferring `agent/__init__.py`'s eager import chain; this lane adds nothing to it (anti-criteria on the leg's module scope in Verification).
+- [SEPARATE-SLUG #2494] C12 `job_router.route`: excluded from this backend (its `job_id` is not a closed set); stays on granite with its latency-only record. Anti-criterion in Verification.
+- [EXTERNAL] Any change to the charter's §7 line or the unit-2 budget. Tom-owned.
+- [EXTERNAL] Fine-tuning the encoder (Rabbit Holes). If the linear head plateaus, the builder files the follow-up issue from the PR with this lane's records as the baseline; nothing in this lane depends on it.
 
 ## Update System
 
-Placeholder.
+- `pyproject.toml`: optional extra `classification-local = ["onnxruntime>=1.25.0", "tokenizers>=0.21"]`; `uv lock` regenerated in the same commit. `/update` runs `uv sync --all-extras --frozen` (`scripts/update/deps.py:136`), so every fleet machine installs it at its next update; no `/update` skill change for the dependency.
+- Weights: `scripts/download_local_encoder_models.py` and `scripts/update/local_encoder.py::ensure_models`, wired as step 3.13 in `scripts/update/run.py` after the kokoro step, idempotent (skips present files whose sha256 matches, re-fetches on mismatch), non-fatal (warning in the update result). Cache dir `~/.cache/valor-encoder/` shared across worktrees; `LOCAL_ENCODER_MODELS_DIR` overrides it, read in code like `KOKORO_MODELS_DIR` (no `.env.example` entry, no settings field).
+- Heads ship in the repo under `agent/llm/backends/heads/`, so a `git pull` is the propagation; no migration, no Popoto change, no new env key.
+- Services: `./scripts/valor-service.sh restart` after merge (the bridge and worker import the wrapper); `/update` already does this. Doctor's `local_encoder` row is the post-update check.
+- If the lane ends in the rejection exit, none of the above ships and the update system is unchanged.
 
 ## Agent Integration
 
-Placeholder.
+- No new `[project.scripts]` entry. The runner stays `python -m tools.classification_eval` (developer tooling); records reach the agent through `valor-improve case show 1ec40086ca1d422e90ef747775ff7f64` and `valor-improve investigation list --case …`, which exist.
+- The bridge, the worker, and the reflection jobs reach the leg through `agent.llm.run_typed` and the router; no direct import of the leg anywhere outside `agent/llm/wrapper.py` and the runner's arm.
+- Integration tests: `tests/unit/test_llm_router_eligibility.py` (a client-keyed message through every `LOCAL_ENCODER` site reaches the Anthropic leg; a `valor` message with `gh` unavailable reaches the encoder leg); `tests/unit/test_llm_wrapper.py` (encoder leg error → Anthropic fallback inside the budget with both log lines); `tests/integration/test_bridge_routing_project_key.py` is unchanged and still proves the key reaches the routing classifiers.
+- Live evidence: after `/update` on the landing host and one inbound `valor` message, `logs/bridge.log` carries `llm_route site=<landed site> backend=local_encoder` (Verification, manual row).
 
 ## Documentation
 
