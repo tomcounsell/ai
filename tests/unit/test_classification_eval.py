@@ -1292,3 +1292,39 @@ def test_cli_precheck_reports_a_leg_refusal_as_exit_1(monkeypatch, capsys):
     monkeypatch.setattr(fit, "precheck", refuse)
     assert main(["--precheck", "--project-key", PK]) == 1
     assert "extra not installed" in capsys.readouterr().err
+
+
+async def test_encoder_embeds_and_is_measured_on_the_message_text_not_the_reference_prompt(
+    fit_env, monkeypatch
+):
+    """Without a row ``candidate_prompt`` (Task 8's composition function) the
+    encoder embeds the message text, never the reference prompt's instruction
+    block (which would dominate a CLS embedding and truncate the message), and
+    ``compare`` hands the ``local_encoder`` arm that same text."""
+    from tools.classification_eval.fit import encoder_text
+
+    embedded: list[str] = []
+
+    def spy(text):
+        embedded.append(text)
+        return _fake_embed(text)
+
+    monkeypatch.setattr(fit_env.leg, "_embed", spy)
+    site = _site(minimum_n=50)
+    assert encoder_text(site, Input("hello?", "real")) == "hello?"
+    seen: list[str] = []
+
+    def build(name, staged):
+        arm = _builder()(name, staged)
+
+        async def call(prompt, system, output_type):
+            seen.append(prompt)
+            return await arm.call(prompt, system, output_type)
+
+        return Arm(name=arm.name, backend=arm.backend, model=arm.model, price=PRICE, call=call)
+
+    outcome = await _fit(fit_env, build=build)
+    texts = {inp.text for inp in _inputs(40, 40)}
+    assert embedded and set(embedded) <= texts, "the fit embedded a prompt, not the message"
+    assert seen and set(seen) <= texts, "compare handed the arms a prompt, not the message"
+    assert evaluate_bar(outcome.record.as_dict(), "local_encoder") == []

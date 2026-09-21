@@ -48,8 +48,9 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from math import ceil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -316,11 +317,25 @@ def _install_served_head(staged: Path, served: Path) -> None:
 
 
 def encoder_text(site: Site, inp: Input) -> str:
-    """The text the encoder embeds for ``inp``: the row's candidate prompt
-    shape, which is also what ``compare`` hands the ``local_encoder`` arm, so
-    the fit embeds byte-for-byte what the measurement (and the landed call
-    site, through the shared composition function) embeds."""
-    return (site.candidate_prompt or site.prompt)(inp)
+    """The text the encoder embeds for ``inp``: the row's ``candidate_prompt``
+    when the landing builder set one (the message-first composition function
+    a context-bearing site shares with its call site), else the message text
+    itself. Never the reference prompt: its instruction block would dominate
+    a CLS embedding and push the message past the 512-token window (the
+    spike embedded the bare text). :func:`run_fit` hands ``compare`` the same
+    function as the row's candidate prompt, so the measurement embeds
+    byte-for-byte what the fit embedded."""
+    if site.candidate_prompt is not None:
+        return site.candidate_prompt(inp)
+    return inp.text
+
+
+def measured_site(site: Site) -> Site:
+    """``site`` with ``candidate_prompt`` pinned to :func:`encoder_text`, so
+    the candidate arms in ``compare`` receive the text the head was fit on."""
+    if site.candidate_prompt is not None:
+        return site
+    return replace(site, candidate_prompt=partial(encoder_text, site))
 
 
 def _embed_all(site: Site, inputs: Sequence[Input]) -> np.ndarray:
@@ -493,7 +508,7 @@ async def run_fit(
     out(f"staged head: {staged}")
 
     record = await compare(
-        site,
+        measured_site(site),
         held_out,
         reference=reference,
         candidates=[build_arm(name, staged) for name in candidates],
