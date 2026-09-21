@@ -20,8 +20,8 @@ class TestEnums:
     def test_kind_values_are_the_two_populations(self):
         assert {k.value for k in TaskKind} == {"classification", "thinking"}
 
-    def test_lane_a_backends_are_anthropic_and_ollama(self):
-        assert {b.value for b in Backend} == {"anthropic", "ollama"}
+    def test_backends_are_anthropic_ollama_and_local_encoder(self):
+        assert {b.value for b in Backend} == {"anthropic", "ollama", "local_encoder"}
 
     def test_error_cost_tiers(self):
         assert {c.value for c in ErrorCost} == {"low", "medium", "high"}

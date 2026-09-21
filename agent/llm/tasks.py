@@ -48,8 +48,10 @@ is the declaration convention:
   the file and line, so a declaration the walk cannot read fails loudly in
   doctor, in the audit and in the test rather than going unlisted.
 
-Lane B (#3420) and lane C (#3421) append their own :class:`Backend` members
-and their own keyword fields with defaults; nothing for them lives here.
+Lane B (#3420) contributes ``Backend.LOCAL_ENCODER``, the local embedding model
+plus per-site linear head; its leg, router rule, and keyword fields live in
+their own modules. Lane C (#3421) appends its own :class:`Backend` member and
+keyword fields with defaults; nothing for it lives here.
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ class Backend(StrEnum):
 
     ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
+    LOCAL_ENCODER = "local_encoder"
 
 
 class ErrorCost(StrEnum):
