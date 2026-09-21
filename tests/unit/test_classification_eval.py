@@ -785,14 +785,52 @@ def test_candidate_arms_keeps_the_only_ollama_candidate_at_a_granite_reference_s
     assert built == ["ollama"]
     assert capsys.readouterr().out == ""
 
-    # Non-latency-only with ollama as the *only* requested candidate at a
-    # granite-reference site must also survive: dropping it here would be
-    # the same empty-arms crash, just reached through an explicit
-    # ``--candidate ollama`` instead of the ``--latency-only`` default.
+    # With a reference arm in play the same list is a self-comparison and
+    # is refused loudly rather than built: keeping it would put granite in
+    # both record slots under one name, which the audit's OLLAMA branch
+    # reads as passing landing evidence (#3421 review, tech debt 1).
     built.clear()
-    arms = _candidate_arms("classifier.intake_intent", ["ollama"], latency_only=False)
-    assert [arm.backend for arm in arms] == ["ollama"]
-    assert built == ["ollama"]
+    with pytest.raises(ValueError, match="compares granite against itself"):
+        _candidate_arms("classifier.intake_intent", ["ollama"], latency_only=False)
+    assert built == []
+
+
+@pytest.mark.parametrize("extra", [[], ["--candidate", "ollama"]])
+def test_cli_refuses_ollama_alone_at_a_granite_reference_site_without_latency_only(
+    monkeypatch, capsys, extra
+):
+    """An explicit ``--candidate ollama`` (or the same list spelled twice) at
+    C12 to C14 without ``--latency-only`` is a parser error naming the two
+    commands that make sense; no input is drawn and no arm is built."""
+    from tools.classification_eval import __main__ as cli
+
+    def boom(*a, **kw):
+        raise AssertionError("_run_site must not run")
+
+    monkeypatch.setattr(cli, "_run_site", boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["--site", "classifier.intake_intent", "--candidate", "ollama", *extra])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "compares granite against itself" in err
+    assert "use --latency-only, or add a second candidate" in err
+
+
+def test_cli_lets_ollama_alone_through_at_a_granite_site_with_latency_only(monkeypatch):
+    from tools.classification_eval import __main__ as cli
+
+    seen: dict[str, object] = {}
+
+    async def fake_run_site(args, candidates):
+        seen["candidates"] = candidates
+        return 0
+
+    monkeypatch.setattr(cli, "_run_site", fake_run_site)
+    assert (
+        main(["--site", "classifier.intake_intent", "--candidate", "ollama", "--latency-only"]) == 0
+    )
+    assert seen["candidates"] == ["ollama"]
+    assert main(["--site", "routing.needs_response", "--candidate", "ollama"]) == 0
 
 
 @pytest.mark.parametrize(
@@ -910,6 +948,17 @@ async def test_decisions_arm_prices_each_call_from_its_input_tokens(monkeypatch)
     assert all(s["envelope"] is transport.envelope for s in seen)
     assert seen[1]["system"] == "sys" and seen[1]["route"].model == JEV
     assert seen[0]["route"].backend is Backend.DECISIONS
+
+
+def test_decisions_arm_refuses_to_build_without_a_known_price(monkeypatch):
+    """A ``None`` price constant means unknown, never zero: the record's
+    ``price`` block and cost estimate must not read 0.0 beside an envelope
+    that settles ``unknown``."""
+    from tools.classification_eval import arms as live
+
+    monkeypatch.setattr(live, "JEV_PRICE_USD_PER_MTOKEN", None)
+    with pytest.raises(ValueError, match="JEV_PRICE_USD_PER_MTOKEN is None"):
+        live.decisions_arm("routing.needs_response")
 
 
 def test_parse_candidates_rejects_an_unknown_backend():

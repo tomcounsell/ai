@@ -678,6 +678,56 @@ class TestFailureReasons:
         assert len(_error_records(caplog)) == 1
         _assert_no_key_fragment(caplog.text, str(exc_info.value))
 
+    async def test_meter_error_at_reserve_is_transport_before_any_request(
+        self, stack_for, fake_meter, clients, caplog, monkeypatch
+    ):
+        """A raw exception from ``meter.reserve`` (a Redis connection error
+        under the meter's unguarded ``eval`` / ``hset``) is an
+        ``LLMCallError(reason="transport")`` like a refusal, so the wrapper's
+        ``except LLMCallError`` runs the granite fallback; escaping as itself
+        would skip the fallback and leave the site on its fail-safe."""
+
+        class RedisDownError(ConnectionError):
+            pass
+
+        def reserve(*a, **kw):
+            raise RedisDownError("Error 61 connecting to localhost:6379. Connection refused.")
+
+        monkeypatch.setattr(meter, "reserve", reserve)
+        transport = Transport(_json(200, OK_TERMINUS))
+
+        with caplog.at_level(logging.ERROR, logger="agent.llm.backends.decisions"):
+            with pytest.raises(LLMCallError) as exc_info:
+                await _call(stack_for(transport))
+
+        assert exc_info.value.reason == "transport"
+        assert "Error 61 connecting" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, RedisDownError)
+        assert transport.requests == [] and clients == []
+        assert len(_error_records(caplog)) == 1
+
+    async def test_key_echoed_in_a_choice_reaches_no_log_surface(
+        self, stack_for, fake_meter, caplog
+    ):
+        """A 200 whose ``choice`` is the bearer: ``decode_answers`` echoes the
+        value in its ``AnswerError``, and the ERROR line prints the traceback
+        (``exc_info``), which renders every exception in the chain from its
+        args. Neither the message, the traceback, ``str(exc)`` nor
+        ``str(exc.__cause__)`` may carry a fragment of the key."""
+        body = {"answers": {"verdict": {"type": "choice", "choice": FAKE_KEY, "confidence": 0.9}}}
+
+        with caplog.at_level(logging.ERROR, logger="agent.llm.backends.decisions"):
+            with pytest.raises(LLMCallError) as exc_info:
+                await _call(stack_for(Transport(_json(200, body))))
+
+        assert exc_info.value.reason == "validation"
+        records = _error_records(caplog)
+        assert len(records) == 1 and records[0].exc_info is not None
+        assert "Traceback" in caplog.text and "AnswerError" in caplog.text
+        assert "choice '***' is not one of" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, leg.AnswerError)
+        _assert_no_key_fragment(caplog.text, str(exc_info.value), str(exc_info.value.__cause__))
+
     async def test_missing_key_is_transport_before_any_io(
         self, stack_for, fake_meter, clients, caplog, monkeypatch
     ):

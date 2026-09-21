@@ -553,10 +553,13 @@ def render_report(record: Mapping[str, Any]) -> str:
             "n": f"n {record['n']} < minimum {record['minimum_n']}",
             "n_real": f"n_real {record['n_real']} < half the minimum"
             f" ({int(record['minimum_n']) / 2:g})",
-            "cost": f"cost/call ${float(arm.get('cost_per_call_usd') or 0.0):.6f}"
-            f" > one tenth of reference ${reference_cost:.6f}"
-            f" ({cost_bound if cost_bound is None else f'${cost_bound:.6f}'})",
         }
+        # ``cost`` is in ``failed`` only when the bound exists (evaluate_bar).
+        if cost_bound is not None:
+            thresholds["cost"] = (
+                f"cost/call ${float(arm.get('cost_per_call_usd') or 0.0):.6f}"
+                f" > one tenth of reference ${reference_cost:.6f} (${cost_bound:.6f})"
+            )
         lines.extend(f"    {criterion}: {thresholds[criterion]}" for criterion in failed)
     return "\n".join(lines)
 

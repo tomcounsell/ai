@@ -33,9 +33,12 @@ what it sends and how it pays:
   ``choice`` under ``min_confidence``, and a ``model_validate`` failure (all
   ``validation``), ``httpx.TimeoutException`` (``timeout``), any other
   ``httpx.HTTPError`` such as a ``ConnectError`` (``transport``), a meter
-  ``Refusal`` (``transport``, before any request), and a missing key
-  (``transport``, before any I/O). The bearer value is scrubbed from every
-  message. The endpoint's error bodies are untrusted data: truncated, never
+  ``Refusal`` or a meter error raised at reserve (``transport``, before any
+  request), and a missing key (``transport``, before any I/O). The bearer
+  value is scrubbed from every message, from the traceback the ERROR line
+  appends, and from the chained ``__cause__`` (:func:`_scrub_exception`
+  rewrites the args of every exception in the chain before anything logs
+  it). The endpoint's error bodies are untrusted data: truncated, never
   evaluated. One POST is one attempt: no retry, no semaphore (``slot_timeout``
   and ``max_retries`` are accepted for the leg protocol and unused), so a
   429 or 529 is a fast fall to granite inside the caller's budget.
@@ -412,6 +415,29 @@ def _scrub(text: str, key: str) -> str:
     return text.replace(key, "***") if key else text
 
 
+def _scrub_exception(exc: BaseException, key: str) -> None:
+    """Scrub ``key`` from the string args of ``exc`` and every exception it chains.
+
+    A traceback printed with ``exc_info`` renders each exception in the
+    chain from its args, and ``str(e)`` reads the same args, so this is the
+    one place a body value that reached an exception message (a ``choice``
+    quoting the bearer back, echoed by :func:`decode_answers`) is cut before
+    any log line or the raised :class:`LLMCallError`'s ``__cause__`` can
+    carry it. Runs on the whole value, so a key never straddles a cut.
+    """
+    if not key:
+        return
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if any(isinstance(arg, str) and key in arg for arg in current.args):
+            current.args = tuple(
+                _scrub(arg, key) if isinstance(arg, str) else arg for arg in current.args
+            )
+        current = current.__cause__ or current.__context__
+
+
 def _detail(response: Any, key: str) -> str:
     """The first :data:`DETAIL_CHARS` of the body's ``detail.message``, else ``""``.
 
@@ -436,8 +462,15 @@ def _record_usage(envelope: SpendEnvelope, payload: Any) -> None:
         envelope.mark_unknown()
 
 
-def _failure(reason: Reason, model: str, detail: str) -> LLMCallError:
-    logger.error("[agent.llm] decisions leg %s for model=%s: %s", reason, model, detail)
+def _failure(reason: Reason, model: str, detail: str, *, exc_info: bool = False) -> LLMCallError:
+    """The leg's one ERROR line and the :class:`LLMCallError` to raise.
+
+    ``exc_info`` appends the exception being handled (call it from inside
+    the ``except`` block that scrubbed the chain first).
+    """
+    logger.error(
+        "[agent.llm] decisions leg %s for model=%s: %s", reason, model, detail, exc_info=exc_info
+    )
     return LLMCallError(
         f"decisions leg failed ({reason}) for model={model}: {detail}", reason=reason
     )
@@ -474,13 +507,14 @@ async def call(
     questions = questions_for(output_type)
     state = prompt if not system else f"{system}\n\n{prompt}"
     envelope = _ENVELOPE if envelope is None else envelope
-    refused = envelope.ensure_headroom()
-    if refused is not None:
-        raise _failure(
-            "transport", route.model, f"paid-inference meter refused the envelope: {refused}"
-        )
     body = {"model": route.model, "state": state, "questions": questions}
     try:
+        # Inside the try so a meter error at reserve (a raw Redis exception
+        # from ``meter.reserve``) is a ``transport`` failure like a refusal:
+        # no request without a reservation, and the wrapper falls to granite.
+        refused = envelope.ensure_headroom()
+        if refused is not None:
+            raise _ResponseError(f"paid-inference meter refused the envelope: {refused}")
         async with stack.AsyncHTTPClient(timeout=sdk_timeout) as client:
             response = await client.post(
                 TYPESAFE_DECISIONS_URL, headers={"Authorization": f"Bearer {key}"}, json=body
@@ -498,15 +532,6 @@ async def call(
         result = output_type.model_validate(values)
     except Exception as e:
         reason = _reason_for(e)
-        detail = _scrub(str(e), key)
-        logger.error(
-            "[agent.llm] decisions leg %s for model=%s: %s",
-            reason,
-            route.model,
-            detail,
-            exc_info=reason != "timeout",
-        )
-        raise LLMCallError(
-            f"decisions leg failed ({reason}) for model={route.model}: {detail}", reason=reason
-        ) from e
+        _scrub_exception(e, key)
+        raise _failure(reason, route.model, str(e), exc_info=reason != "timeout") from e
     return result

@@ -105,11 +105,11 @@ One row per declared site, read by `tests/unit/test_llm_task_taxonomy.py` (doc/c
 |------|-----------|-------|
 | 1 | `kind == THINKING` or `client_only` | `Route(ANTHROPIC, model)`. `model` is the call's `model=` kwarg (default `MODEL_FAST`, Haiku). |
 | 2 | `backend == ANTHROPIC` | `Route(ANTHROPIC, model)`. |
-| 5 | `backend == DECISIONS` and `is_eligible(project_key)` | `Route(DECISIONS, JEV, fallback=Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL))`. No third leg: eligible context never reaches Anthropic from a decisions site. Ineligible context takes rule 4's route, `Route(ANTHROPIC, model)` with no fallback. |
 | 3 | `backend == OLLAMA` and `is_eligible(project_key)` | `Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=Route(ANTHROPIC, model))`. |
 | 4 | `backend == OLLAMA` otherwise | `Route(ANTHROPIC, model)`. |
+| 5 | `backend == DECISIONS` and `is_eligible(project_key)` | `Route(DECISIONS, JEV, fallback=Route(OLLAMA, OLLAMA_CLASSIFIER_MODEL))`. No third leg: eligible context never reaches Anthropic from a decisions site. Ineligible context takes rule 4's route, `Route(ANTHROPIC, model)` with no fallback. |
 
-Rule 5 is numbered after the lane that added it and sits ahead of rule 3 in evaluation order; the router docstring lists the rules in the same order. Rules 3 and 5 share one late `is_eligible` import and the same fail-closed read.
+Rule 5 (#3421) is its own block in `resolve` after the untouched Ollama block, with its own late `is_eligible` import and the same fail-closed read; a lane adding a backend adds a block and leaves the others byte-identical. The backends are mutually exclusive, so block order carries no behavior.
 
 A route with a `fallback` is the only route that can log `llm_fallback`: when the primary leg raises `LLMCallError`, the wrapper runs the fallback leg once inside the caller's remaining budget (Ollama falls to Anthropic; decisions falls to Ollama). #3420 adds `LOCAL_ZERO_SHOT` the same way, with a local fallback. There are no per-site settings switches and no shadow routes.
 

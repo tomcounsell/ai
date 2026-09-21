@@ -5,12 +5,12 @@
 
 1. ``kind == THINKING`` or ``client_only`` -> Anthropic with the call's model.
 2. ``backend == ANTHROPIC`` -> Anthropic with the call's model.
-5. ``backend == DECISIONS`` -> Jev (``JEV``) with an Ollama fallback when
-   ``is_eligible(project_key)``, else Anthropic with no fallback.
 3. ``backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama with an
    Anthropic fallback.
 4. ``backend == OLLAMA`` and not eligible -> Anthropic (charter §7, fail
    closed: a ``None`` key, a cache miss, and a client key all land here).
+5. ``backend == DECISIONS`` -> Jev (``JEV``) with an Ollama fallback when
+   ``is_eligible(project_key)``, else Anthropic with no fallback.
 
 The table-driven cases run over every declaration the repo carries
 (``agent.llm.tasks.declared_sites``), so a site added later is covered

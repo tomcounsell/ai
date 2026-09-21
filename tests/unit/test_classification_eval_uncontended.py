@@ -31,7 +31,14 @@ CONNECTED = "Connected to Telegram"
 class Harness:
     """Fake executables plus the env that points the wrapper at them."""
 
-    def __init__(self, tmp_path: Path, *, launchctl_list: str, connect_on_restart: bool):
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        launchctl_list: str,
+        connect_on_restart: bool,
+        failing_service_commands: tuple[str, ...] = (),
+    ):
         self.dir = tmp_path
         self.log = tmp_path / "calls.log"
         self.bridge_log = tmp_path / "bridge.log"
@@ -39,11 +46,15 @@ class Harness:
         self.runs_dir.mkdir()
         self.started = tmp_path / "runner.started"
         connect = f"echo '{CONNECTED}' >> \"$BRIDGE_LOG\"" if connect_on_restart else ":"
+        failing = " ".join(failing_service_commands)
         self._fake(
             "valor-service.sh",
             f"""
             echo "valor-service $*" >> "{self.log}"
-            if [ "$1" = restart ]; then {connect}; fi
+            for failing in {failing}; do
+                if [ "$1" = "$failing" ]; then echo "fake $1 failed" >&2; exit 1; fi
+            done
+            if [ "$1" = start ]; then {connect}; fi
             """,
         )
         self._fake("install_reflection_worker.sh", f'echo "install-reflection $*" >> "{self.log}"')
@@ -63,6 +74,7 @@ class Harness:
             # asynchronous child ignores SIGINT, so the trap ends it explicitly.
             sleeper=
             trap 'kill "$sleeper" 2>/dev/null; exit 130' INT
+            trap 'kill "$sleeper" 2>/dev/null; exit 143' TERM
             if [ "${{RUNNER_SLEEP:-0}}" != 0 ]; then sleep "$RUNNER_SLEEP" & sleeper=$!; fi
             touch "{self.started}"
             wait
@@ -97,6 +109,9 @@ class Harness:
     def counter(self) -> Path:
         return self.runs_dir / f"classification_eval_runs.{datetime.now(UTC):%Y-%m-%d}"
 
+    def lock(self) -> Path:
+        return self.runs_dir / ".classification_eval_uncontended.lock"
+
     def run(self, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(SCRIPT), *args],
@@ -113,8 +128,11 @@ def harness(tmp_path):
     return Harness(tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=True)
 
 
+RESTORE_ALL = ["valor-service start", "valor-service worker-start", "install-reflection "]
+
+
 def _restore_index(calls: list[str]) -> int:
-    return next(i for i, line in enumerate(calls) if line == "valor-service restart")
+    return next(i for i, line in enumerate(calls) if line == "valor-service start")
 
 
 @pytest.mark.parametrize("runner_exit", ["0", "2"])
@@ -130,10 +148,10 @@ def test_restores_every_loaded_label_after_the_runner_exits(harness, runner_exit
         "valor-service worker-disable",
         f"launchctl bootout gui/{os.getuid()}/com.valor.reflection-worker",
         "runner --site x.y --candidate decisions",
-        "valor-service restart",
-        "install-reflection ",
+        *RESTORE_ALL,
     ]
     assert harness.counter().read_text().strip() == "1"
+    assert not harness.lock().exists()
 
 
 def test_restores_after_the_runner_is_interrupted(harness):
@@ -159,15 +177,22 @@ def test_restores_after_the_runner_is_interrupted(harness):
     calls = harness.calls()
     assert proc.returncode != 0
     assert "valor-service stop" in calls and "runner --site x.y" in calls
-    assert calls[_restore_index(calls) :] == ["valor-service restart", "install-reflection "]
+    assert calls[_restore_index(calls) :] == RESTORE_ALL
+    assert not harness.lock().exists()
 
 
 @pytest.mark.parametrize(
     ("loaded", "expected_unload", "expected_restore"),
     [
         ("", [], []),
-        ("-\t0\tcom.valor.bridge\n", ["valor-service stop"], ["valor-service restart"]),
-        ("9\t0\tcom.valor.worker\n", ["valor-service worker-disable"], ["valor-service restart"]),
+        ("-\t0\tcom.valor.bridge\n", ["valor-service stop"], ["valor-service start"]),
+        # A worker-only host (a machine that deliberately runs no bridge)
+        # gets its worker back and never a bridge started.
+        (
+            "9\t0\tcom.valor.worker\n",
+            ["valor-service worker-disable"],
+            ["valor-service worker-start"],
+        ),
         (
             "9\t0\tcom.valor.reflection-worker\n",
             [f"launchctl bootout gui/{os.getuid()}/com.valor.reflection-worker"],
@@ -179,7 +204,7 @@ def test_restores_after_the_runner_is_interrupted(harness):
                 "valor-service stop",
                 f"launchctl bootout gui/{os.getuid()}/com.valor.reflection-worker",
             ],
-            ["valor-service restart", "install-reflection "],
+            ["valor-service start", "install-reflection "],
         ),
     ],
 )
@@ -197,13 +222,72 @@ def test_fails_naming_the_bridge_when_it_never_reconnects(tmp_path):
     result = harness.run("--site", "x.y", BRIDGE_WAIT_S="1")
     assert result.returncode != 0
     assert "bridge" in result.stderr and CONNECTED in result.stderr
-    assert harness.calls()[-2:] == ["valor-service restart", "install-reflection "]
+    assert "failed to return:" in result.stderr
+    assert harness.calls()[-3:] == RESTORE_ALL
+
+
+def test_a_marker_logged_before_the_stop_does_not_count_as_a_reconnect(tmp_path):
+    """The bridge logs the marker once per connect and the log rotates only
+    when oversized, so on a quiet bridge the previous run's marker is still
+    in the tail; a restore whose bridge never comes up must still fail."""
+    harness = Harness(tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=False)
+    harness.bridge_log.write_text(f"boot\n{CONNECTED}\nSIGTERM received\n")
+    result = harness.run("--site", "x.y", BRIDGE_WAIT_S="1")
+    assert result.returncode != 0, (result.stdout, result.stderr)
+    assert "bridge" in result.stderr and CONNECTED in result.stderr
+    assert "bridge reconnected" not in result.stdout
+
+    (tmp_path / "b").mkdir()
+    connecting = Harness(tmp_path / "b", launchctl_list=ALL_LOADED, connect_on_restart=True)
+    connecting.bridge_log.write_text(f"boot\n{CONNECTED}\n")
+    result = connecting.run("--site", "x.y", BRIDGE_WAIT_S="2")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "bridge reconnected" in result.stdout
+
+
+def test_a_failed_bridge_start_never_skips_the_worker_and_names_the_bridge(tmp_path):
+    """Each label is restored by its own command: when the bridge's start
+    fails, the worker's sticky launchctl disable is still undone, and the
+    exit names the service that failed to return."""
+    harness = Harness(
+        tmp_path,
+        launchctl_list=ALL_LOADED,
+        connect_on_restart=False,
+        failing_service_commands=("start",),
+    )
+    result = harness.run("--site", "x.y", BRIDGE_WAIT_S="1")
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert harness.calls()[-3:] == RESTORE_ALL
+    assert "failed to return: bridge" in result.stderr
+
+
+def test_a_runner_over_run_timeout_is_terminated_and_the_services_restored(harness):
+    result = harness.run("--site", "x.y", RUNNER_SLEEP="30", RUN_TIMEOUT_S="1")
+    assert result.returncode == 124, (result.stdout, result.stderr)
+    assert "RUN_TIMEOUT_S=1" in result.stderr
+    calls = harness.calls()
+    assert "runner --site x.y" in calls
+    assert calls[_restore_index(calls) :] == RESTORE_ALL
+    assert not harness.lock().exists()
+
+
+def test_a_second_invocation_is_refused_while_the_lock_is_held(harness):
+    harness.lock().mkdir()
+    result = harness.run("--site", "x.y")
+    assert result.returncode == 4
+    assert "another uncontended run" in result.stderr and "Nothing was stopped" in result.stderr
+    assert harness.calls() == []
+    assert not harness.counter().exists()
+    harness.lock().rmdir()
+    result = harness.run("--site", "x.y")
+    assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 def test_bridge_check_is_skipped_when_the_bridge_was_not_loaded(tmp_path):
     harness = Harness(tmp_path, launchctl_list="9\t0\tcom.valor.worker\n", connect_on_restart=False)
     result = harness.run("--site", "x.y", BRIDGE_WAIT_S="1")
     assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "valor-service start" not in harness.calls()
 
 
 def test_refuses_a_thirteenth_run_in_one_utc_day_without_stopping_anything(harness):

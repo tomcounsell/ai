@@ -32,7 +32,8 @@ Candidate arms:
   arm's transport), and prices each call at ``input_tokens × JEV price /
   1e6`` from the envelope's own accounting; a 200 with no ``input_tokens``
   returns ``None`` (the runner estimates) and marks the envelope
-  ``unknown``. :data:`JEV_PRICE` is the list price with its retrieval date.
+  ``unknown``. :func:`jev_price` is the list price with its retrieval date,
+  and refuses to build the arm while the price constant is ``None``.
 
 Every arm has the :data:`~tools.classification_eval.ArmCall` shape and is
 built lazily so importing this module touches no network client.
@@ -104,13 +105,28 @@ GRANITE_PRICE = Price(
     retrieved_at="2026-09-19",
     note="local Ollama; no per-token price",
 )
-JEV_PRICE = Price(
-    model=JEV,
-    usd_per_mtoken_in=JEV_PRICE_USD_PER_MTOKEN or 0.0,
-    usd_per_mtoken_out=0.0,
-    retrieved_at="2026-09-21",
-    note="TypeSafe list price (https://docs.typesafe.ai/models): input tokens only, output free",
-)
+
+
+def jev_price() -> Price:
+    """Jev's list price for the record; refuses while the constant is ``None``.
+
+    ``None`` means unknown, never zero (charter §8): a record stamped with a
+    zero price would put a free-looking cost estimate beside an envelope that
+    settled ``unknown``, so the arm is not built until the price is known.
+    """
+    if JEV_PRICE_USD_PER_MTOKEN is None:
+        raise ValueError(
+            "config.models.JEV_PRICE_USD_PER_MTOKEN is None: the decisions arm cannot price"
+            " its record; set it from https://docs.typesafe.ai/models before a comparison"
+        )
+    return Price(
+        model=JEV,
+        usd_per_mtoken_in=JEV_PRICE_USD_PER_MTOKEN,
+        usd_per_mtoken_out=0.0,
+        retrieved_at="2026-09-21",
+        note="TypeSafe list price (https://docs.typesafe.ai/models): input tokens only,"
+        " output free",
+    )
 
 
 def _pinned_task(site_id: str, backend: Backend) -> LLMTask:
@@ -253,7 +269,11 @@ def decisions_arm(site_id: str, *, name: str = "decisions") -> Arm:
     ``site_id`` is accepted for the builder-table shape; the leg carries no
     task, so nothing is pinned by site."""
     return Arm(
-        name=name, backend=Backend.DECISIONS.value, model=JEV, price=JEV_PRICE, call=DecisionsArm()
+        name=name,
+        backend=Backend.DECISIONS.value,
+        model=JEV,
+        price=jev_price(),
+        call=DecisionsArm(),
     )
 
 

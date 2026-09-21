@@ -13,15 +13,19 @@ The five rules, in order:
    call's model. Thinking sites never leave the subscription backend under
    this taxonomy; ``client_only`` sites never leave it for any key.
 2. ``task.backend == ANTHROPIC`` -> Anthropic with the call's model.
+3. ``task.backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama on
+   ``OLLAMA_CLASSIFIER_MODEL`` with an Anthropic fallback on the call's
+   model.
+4. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
 5. ``task.backend == DECISIONS`` (#3421): ``is_eligible(project_key)`` ->
    the decisions leg on ``JEV`` with an Ollama fallback on
    ``OLLAMA_CLASSIFIER_MODEL`` (no third leg: eligible context never
    reaches Anthropic from a decisions site); otherwise Anthropic with the
    call's model and no fallback, exactly rule 4's route.
-3. ``task.backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama on
-   ``OLLAMA_CLASSIFIER_MODEL`` with an Anthropic fallback on the call's
-   model.
-4. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
+
+Each backend rule is its own block in :func:`resolve` with its own late
+import, so a sibling lane adding a backend adds a block and leaves the
+others byte-identical (plan Risk 6).
 
 Fail-closed rule (charter §7): rules 3 and 5 fire only for context the
 router can prove eligible. ``tools.improvement_eligibility.is_eligible``
@@ -66,14 +70,18 @@ def resolve(task: LLMTask, project_key: str | None, *, model: str = MODEL_FAST) 
         return anthropic
     if task.backend is Backend.ANTHROPIC:
         return anthropic
-    if task.backend in (Backend.DECISIONS, Backend.OLLAMA):
+    if task.backend is Backend.OLLAMA:
         from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
 
-        if not is_eligible(project_key):
-            return anthropic
-        if task.backend is Backend.DECISIONS:
+        if is_eligible(project_key):
+            return Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=anthropic)
+        return anthropic
+    if task.backend is Backend.DECISIONS:
+        from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
+
+        if is_eligible(project_key):
             return Route(
                 Backend.DECISIONS, JEV, fallback=Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL)
             )
-        return Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=anthropic)
+        return anthropic
     raise ValueError(f"no routing rule for backend {task.backend!r} (site {task.site})")
