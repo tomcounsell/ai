@@ -29,6 +29,7 @@ listing check.
 """
 
 import json
+import urllib.error
 import urllib.request
 import warnings
 
@@ -144,10 +145,13 @@ def test_typesafe_jev_pinned_model_answers():
             status = response.status
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
+        # The exception class and HTTP status only: never the body or the request.
+        status_note = f" HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else ""
         pytest.fail(
             f"TypeSafe decisions endpoint unreachable ({models.TYPESAFE_DECISIONS_URL}): "
-            f"{type(exc).__name__}. This is an endpoint/network/auth failure, not a model "
-            "problem: retry before treating it as a withdrawn pin."
+            f"{type(exc).__name__}{status_note}. This is an endpoint/network/auth failure "
+            "(a 529 is upstream overload), not a model problem: retry before treating it "
+            "as a withdrawn pin."
         )
 
     assert status == 200, f"TypeSafe decisions endpoint answered HTTP {status}, not 200"

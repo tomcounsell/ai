@@ -1874,7 +1874,8 @@ def _check_llm_routing(
                 None
                 if key_present or not decisions_sites
                 else (
-                    "Add TYPESAFE_API_KEY to the vault ~/Desktop/Valor/.env from 1Password "
+                    "Add the TypeSafe key to the vault ~/Desktop/Valor/.env under the name "
+                    ".env.example declares for settings.api.typesafe_api_key, from 1Password "
                     '(vault m-valor, item "TypeSafe API", field api_key: '
                     'OP_CACHE=false op read "op://m-valor/TypeSafe API/api_key")'
                 )

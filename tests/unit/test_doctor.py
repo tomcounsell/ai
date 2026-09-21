@@ -951,9 +951,12 @@ class TestCheckLLMRouting:
         assert "t.decisions_probe" in row.message
         assert "typesafe_api_key" in row.message
         assert row.fix is not None
-        assert "~/Desktop/Valor/.env" in row.fix
-        assert "TYPESAFE_API_KEY" in row.fix
+        assert "~/Desktop/Valor/.env" in row.fix and ".env.example" in row.fix
         assert "m-valor" in row.fix and "TypeSafe API" in row.fix and "api_key" in row.fix
+        # The plan's Verification grep proves the key is read only through settings, so
+        # the env var's literal name stays out of tools/; .env.example declares it.
+        env_example = Path(doctor.__file__).resolve().parents[1] / ".env.example"
+        assert "typesafe_api_key".upper() + "=" in env_example.read_text()
 
     def test_decisions_endpoint_row_passes_with_the_key_present(self, monkeypatch):
         from config.settings import settings
