@@ -1,13 +1,16 @@
 """The routing point (#3410): ``agent/llm/router.py::resolve`` and the site registry.
 
-``resolve(task, project_key)`` is a pure function with four rules, in order
-(plan, Data Flow step 4):
+``resolve(task, project_key)`` is a pure function with six rules, in order
+(lane A's Data Flow step 4 plus lane B's local encoder rule, #3420):
 
 1. ``kind == THINKING`` or ``client_only`` -> Anthropic with the call's model.
 2. ``backend == ANTHROPIC`` -> Anthropic with the call's model.
-3. ``backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama with an
+3. ``backend == LOCAL_ENCODER`` and ``is_eligible(project_key)`` -> the
+   local encoder leg on ``task.site`` with an Anthropic fallback.
+4. ``backend == LOCAL_ENCODER`` and not eligible -> Anthropic.
+5. ``backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama with an
    Anthropic fallback.
-4. ``backend == OLLAMA`` and not eligible -> Anthropic (charter §7, fail
+6. ``backend == OLLAMA`` and not eligible -> Anthropic (charter §7, fail
    closed: a ``None`` key, a cache miss, and a client key all land here).
 
 The table-driven cases run over every declaration the repo carries
@@ -48,12 +51,19 @@ CLASSIFY_ANTHROPIC = LLMTask(
 CLASSIFY_OLLAMA = LLMTask(
     site="t.classify_ollama", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA
 )
+CLASSIFY_ENCODER = LLMTask(
+    site="t.classify_encoder", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+)
 
 #: Captured before the autouse fixture patches ``subprocess.run`` module-wide.
 _REAL_RUN = subprocess.run
 
 ANTHROPIC_ROUTE = Route(Backend.ANTHROPIC, MODEL_FAST)
 OLLAMA_ROUTE = Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=ANTHROPIC_ROUTE)
+
+
+def _encoder_route(site: str) -> Route:
+    return Route(Backend.LOCAL_ENCODER, site, fallback=ANTHROPIC_ROUTE)
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +79,7 @@ def _gh_unavailable(monkeypatch):
     improvement_eligibility._clear_cache()
 
 
-class TestFourRules:
+class TestSixRules:
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_1_thinking_never_leaves_anthropic(self, key):
         assert resolve(THINK, key) == ANTHROPIC_ROUTE
@@ -83,24 +93,37 @@ class TestFourRules:
     def test_rule_2_declared_anthropic(self, key):
         assert resolve(CLASSIFY_ANTHROPIC, key) == ANTHROPIC_ROUTE
 
-    def test_rule_3_eligible_ollama_carries_an_anthropic_fallback(self):
+    def test_rule_3_eligible_local_encoder_carries_an_anthropic_fallback(self):
+        """The route's model is the site id: the head ``heads/<site>.json`` is the model."""
+        route = resolve(CLASSIFY_ENCODER, "valor")
+        assert route == _encoder_route("t.classify_encoder")
+        assert route.model == CLASSIFY_ENCODER.site
+        assert route.fallback is not None and route.fallback.fallback is None
+
+    @pytest.mark.parametrize("key", ["acme", None, ""])
+    def test_rule_4_ineligible_local_encoder_fails_closed(self, key):
+        assert resolve(CLASSIFY_ENCODER, key) == ANTHROPIC_ROUTE
+
+    def test_rule_5_eligible_ollama_carries_an_anthropic_fallback(self):
         route = resolve(CLASSIFY_OLLAMA, "valor")
         assert route == OLLAMA_ROUTE
         assert route.fallback is not None and route.fallback.fallback is None
 
     @pytest.mark.parametrize("key", ["acme", None, ""])
-    def test_rule_4_ineligible_ollama_fails_closed_to_anthropic(self, key):
+    def test_rule_6_ineligible_ollama_fails_closed_to_anthropic(self, key):
         assert resolve(CLASSIFY_OLLAMA, key) == ANTHROPIC_ROUTE
 
-    def test_the_calls_model_rides_the_anthropic_route_and_the_fallback(self):
+    @pytest.mark.parametrize("task", [CLASSIFY_OLLAMA, CLASSIFY_ENCODER], ids=["ollama", "encoder"])
+    def test_the_calls_model_rides_the_anthropic_route_and_the_fallback(self, task):
         assert resolve(THINK, "valor", model="claude-x").model == "claude-x"
-        assert resolve(CLASSIFY_OLLAMA, "valor", model="claude-x").fallback.model == "claude-x"
-        assert resolve(CLASSIFY_OLLAMA, "acme", model="claude-x").model == "claude-x"
+        assert resolve(task, "valor", model="claude-x").fallback.model == "claude-x"
+        assert resolve(task, "acme", model="claude-x").model == "claude-x"
 
-    def test_resolve_is_pure_for_the_same_inputs(self):
-        assert resolve(CLASSIFY_OLLAMA, "valor") == resolve(CLASSIFY_OLLAMA, "valor")
+    @pytest.mark.parametrize("task", [CLASSIFY_OLLAMA, CLASSIFY_ENCODER], ids=["ollama", "encoder"])
+    def test_resolve_is_pure_for_the_same_inputs(self, task):
+        assert resolve(task, "valor") == resolve(task, "valor")
 
-    def test_only_the_ollama_rule_consults_eligibility(self, monkeypatch):
+    def test_only_the_local_rules_consult_eligibility(self, monkeypatch):
         calls: list[str | None] = []
 
         def _spy(key):
@@ -114,13 +137,19 @@ class TestFourRules:
         assert calls == []
         resolve(CLASSIFY_OLLAMA, "acme")
         assert calls == ["acme"]
+        resolve(CLASSIFY_ENCODER, "acme")
+        assert calls == ["acme", "acme"]
 
 
 def _expected(task: LLMTask, key: str | None) -> Route:
     """The plan's Success Criteria row, as a function of the declaration."""
     if task.kind is TaskKind.THINKING or task.client_only or task.backend is Backend.ANTHROPIC:
         return ANTHROPIC_ROUTE
-    return OLLAMA_ROUTE if key == "valor" else ANTHROPIC_ROUTE
+    if key != "valor":
+        return ANTHROPIC_ROUTE
+    if task.backend is Backend.LOCAL_ENCODER:
+        return _encoder_route(task.site)
+    return OLLAMA_ROUTE
 
 
 SITES = declared_sites()

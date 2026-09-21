@@ -1,13 +1,16 @@
 """Eligibility drives the leg (#3410): client keys stay on Anthropic, ``valor`` runs local.
 
-Drives ``run_typed`` end to end with both legs faked at the ``_LEGS``
-table, over every declared site (``agent.llm.tasks.declared_sites``) so a
-site added later is covered without touching this file:
+Drives ``run_typed`` end to end with every leg faked at the ``_LEGS``
+table, over every declared site (``agent.llm.tasks.declared_sites``) whose
+backend is not ``ANTHROPIC``, so a site added later is covered without
+touching this file, plus one synthetic ``LOCAL_ENCODER`` task so the
+encoder leg path is exercised before any site lands on it (#3420):
 
-* a message mapped to a client project through every ``OLLAMA``-backed
+* a message mapped to a client project through every local-backed
   classification site reaches the Anthropic leg;
 * a ``valor`` message through the same sites, with ``gh`` unavailable and
-  the cache cold, reaches the Ollama leg (the code pin, not the cache);
+  the cache cold, reaches the leg the declaration names
+  (``legs[task.backend]``: the code pin, not the cache);
 * every ``client_only`` site (the two ``email_cs.*`` declarations) reaches
   the Anthropic leg for every project key, ``valor`` included.
 
@@ -28,13 +31,16 @@ from agent.llm.tasks import Backend, LLMTask, TaskKind, declared_sites
 from tools import improvement_eligibility
 
 SITES = declared_sites()
-OLLAMA_CLASSIFICATION = [
+SYNTHETIC_ENCODER = LLMTask(
+    site="test.synthetic_encoder", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+)
+LOCAL_CLASSIFICATION = [
     d.task
     for d in SITES
-    if d.task.backend is Backend.OLLAMA
+    if d.task.backend is not Backend.ANTHROPIC
     and d.task.kind is TaskKind.CLASSIFICATION
     and not d.task.client_only
-]
+] + [SYNTHETIC_ENCODER]
 CLIENT_ONLY = [d.task for d in SITES if d.task.client_only]
 EMAIL_CS_SITES = ("email_cs.triage", "email_cs.action")
 
@@ -54,17 +60,18 @@ class _Leg:
 
 
 @pytest.fixture
-def legs(monkeypatch):
+def legs(monkeypatch) -> dict[Backend, _Leg]:
+    """Every backend's leg faked; keyed by ``Backend`` so a test asserts ``legs[task.backend]``."""
     improvement_eligibility._clear_cache()
 
     def _no_gh(*args, **kwargs):
         raise FileNotFoundError("gh")
 
     monkeypatch.setattr(improvement_eligibility.subprocess, "run", _no_gh)
-    ollama, anthropic = _Leg("ollama"), _Leg("anthropic")
-    monkeypatch.setitem(wrapper_mod._LEGS, Backend.OLLAMA, ollama)
-    monkeypatch.setitem(wrapper_mod._LEGS, Backend.ANTHROPIC, anthropic)
-    yield ollama, anthropic
+    fakes = {backend: _Leg(backend.value) for backend in Backend}
+    for backend, fake in fakes.items():
+        monkeypatch.setitem(wrapper_mod._LEGS, backend, fake)
+    yield fakes
     improvement_eligibility._clear_cache()
 
 
@@ -72,40 +79,53 @@ def _ids(tasks: list[LLMTask]) -> list[str]:
     return [t.site for t in tasks]
 
 
-class TestOllamaSitesByKey:
-    def test_the_repo_declares_ollama_classification_sites(self):
-        assert OLLAMA_CLASSIFICATION, "no OLLAMA classification site declared"
+def _others(legs: dict[Backend, _Leg], *used: Backend) -> list[_Leg]:
+    return [leg for backend, leg in legs.items() if backend not in used]
 
-    @pytest.mark.parametrize("task", OLLAMA_CLASSIFICATION, ids=_ids(OLLAMA_CLASSIFICATION))
+
+class TestLocalSitesByKey:
+    def test_the_repo_declares_local_classification_sites(self):
+        assert [t for t in LOCAL_CLASSIFICATION if t is not SYNTHETIC_ENCODER], (
+            "no local-backed classification site declared"
+        )
+
+    def test_the_fake_table_covers_every_backend(self, legs):
+        assert set(legs) == set(Backend)
+
+    @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
     async def test_a_client_message_reaches_the_anthropic_leg(self, legs, task):
-        ollama, anthropic = legs
+        anthropic = legs[Backend.ANTHROPIC]
         result = await run_typed("fix the login bug", Decision, task=task, project_key="acme")
         assert result.label == "anthropic"
-        assert ollama.calls == [] and len(anthropic.calls) == 1
+        assert len(anthropic.calls) == 1
+        assert all(leg.calls == [] for leg in _others(legs, Backend.ANTHROPIC))
         assert anthropic.calls[0]["route"].fallback is None
 
-    @pytest.mark.parametrize("task", OLLAMA_CLASSIFICATION, ids=_ids(OLLAMA_CLASSIFICATION))
-    async def test_a_valor_message_reaches_the_ollama_leg_with_gh_unavailable(self, legs, task):
-        ollama, anthropic = legs
+    @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
+    async def test_a_valor_message_reaches_the_declared_leg_with_gh_unavailable(self, legs, task):
+        local = legs[task.backend]
         result = await run_typed("fix the login bug", Decision, task=task, project_key="valor")
-        assert result.label == "ollama"
-        assert anthropic.calls == [] and len(ollama.calls) == 1
-        assert ollama.calls[0]["route"].fallback.backend is Backend.ANTHROPIC
+        assert result.label == task.backend.value
+        assert len(local.calls) == 1
+        assert all(leg.calls == [] for leg in _others(legs, task.backend))
+        assert local.calls[0]["route"].fallback.backend is Backend.ANTHROPIC
+        if task.backend is Backend.LOCAL_ENCODER:
+            assert local.calls[0]["route"].model == task.site
 
-    @pytest.mark.parametrize("task", OLLAMA_CLASSIFICATION, ids=_ids(OLLAMA_CLASSIFICATION))
+    @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
     async def test_a_keyless_message_fails_closed_to_anthropic(self, legs, task):
-        ollama, anthropic = legs
         await run_typed("fix the login bug", Decision, task=task, project_key=None)
-        assert ollama.calls == [] and len(anthropic.calls) == 1
+        assert len(legs[Backend.ANTHROPIC].calls) == 1
+        assert all(leg.calls == [] for leg in _others(legs, Backend.ANTHROPIC))
 
 
 class TestClientOnlySites:
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     @pytest.mark.parametrize("task", CLIENT_ONLY, ids=_ids(CLIENT_ONLY))
     async def test_client_only_never_leaves_anthropic(self, legs, task, key):
-        ollama, anthropic = legs
         await run_typed("triage this email", Decision, task=task, project_key=key)
-        assert ollama.calls == [] and len(anthropic.calls) == 1
+        assert len(legs[Backend.ANTHROPIC].calls) == 1
+        assert all(leg.calls == [] for leg in _others(legs, Backend.ANTHROPIC))
 
     @pytest.mark.parametrize("site", EMAIL_CS_SITES)
     def test_email_cs_sites_are_declared_client_only(self, site):

@@ -7,29 +7,36 @@ fallback leg (if any) to try once when the primary raises
 context eligibility, and it reads model names from ``config.models`` and
 nothing from per-site settings, because there are none.
 
-The four rules, in order:
+The rules, in order:
 
 1. ``kind == THINKING`` or ``task.client_only`` -> Anthropic with the
    call's model. Thinking sites never leave the subscription backend under
    this taxonomy; ``client_only`` sites never leave it for any key.
 2. ``task.backend == ANTHROPIC`` -> Anthropic with the call's model.
-3. ``task.backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama on
+3. ``task.backend == LOCAL_ENCODER`` and ``is_eligible(project_key)`` ->
+   the local encoder leg on ``task.site`` (the route's ``model`` names the
+   site's committed head, ``agent/llm/backends/heads/<site>.json``) with an
+   Anthropic fallback on the call's model (#3420).
+4. ``task.backend == LOCAL_ENCODER`` otherwise -> Anthropic with the
+   call's model.
+5. ``task.backend == OLLAMA`` and ``is_eligible(project_key)`` -> Ollama on
    ``OLLAMA_CLASSIFIER_MODEL`` with an Anthropic fallback on the call's
    model.
-4. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
+6. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
 
-Fail-closed rule (charter §7): rule 3 fires only for context the router can
-prove eligible. ``tools.improvement_eligibility.is_eligible`` pins
-``valor`` ``True`` in code, reads the process-local cache for every other
-key, and treats a ``None`` key or a cache miss as ineligible, so client
-context and unknown context both land on the subscription backend. The
-eligibility import is late, inside :func:`resolve` (the same shape as
+Fail-closed rule (charter §7): the local rules (3 and 5) fire only for
+context the router can prove eligible.
+``tools.improvement_eligibility.is_eligible`` pins ``valor`` ``True`` in
+code, reads the process-local cache for every other key, and treats a
+``None`` key or a cache miss as ineligible, so client context and unknown
+context both land on the subscription backend. The eligibility import is
+late, inside :func:`resolve` (the same shape as
 ``tools/improvement_eval/judges/serves_charter.py``), so importing
 ``agent.llm`` never pulls ``bridge.routing`` in through the eligibility
 module's config reader.
 
-#3421 adds a fifth rule ahead of rule 3 for ``backend == DECISIONS`` and
-#3420 adds ``LOCAL_ZERO_SHOT`` the same way, each with a local fallback.
+#3421 adds its own rule ahead of the Ollama rules for ``backend ==
+DECISIONS`` the same way, with a local fallback.
 """
 
 from __future__ import annotations
@@ -54,12 +61,19 @@ def resolve(task: LLMTask, project_key: str | None, *, model: str = MODEL_FAST) 
 
     ``model`` is the call's ``model=`` kwarg and names the Anthropic model
     on every Anthropic route, the fallback included; the Ollama leg always
-    runs ``config.models.OLLAMA_CLASSIFIER_MODEL``.
+    runs ``config.models.OLLAMA_CLASSIFIER_MODEL`` and the local encoder
+    leg runs the head named by ``task.site``.
     """
     anthropic = Route(Backend.ANTHROPIC, model)
     if task.kind is TaskKind.THINKING or task.client_only:
         return anthropic
     if task.backend is Backend.ANTHROPIC:
+        return anthropic
+    if task.backend is Backend.LOCAL_ENCODER:
+        from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
+
+        if is_eligible(project_key):
+            return Route(Backend.LOCAL_ENCODER, task.site, fallback=anthropic)
         return anthropic
     if task.backend is Backend.OLLAMA:
         from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
