@@ -1277,3 +1277,18 @@ def test_precheck_claim_goes_through_the_case_investigation_path(monkeypatch):
     assert investigation_id == "inv-1" and len(claims) == 1
     assert "precheck_below_bar" in claims[0]["claim"] and "0.824" in claims[0]["claim"]
     assert "gate=0.85" in claims[0]["claim"] and claims[0]["url"].endswith("/3420")
+
+
+def test_cli_precheck_reports_a_leg_refusal_as_exit_1(monkeypatch, capsys):
+    """Without the extra or the weights the leg refuses to embed with an
+    ``LLMCallError`` naming the fix; ``--precheck`` prints it and exits 1
+    instead of a traceback."""
+    from agent.llm.errors import LLMCallError
+    from tools.classification_eval import fit
+
+    def refuse(**kw):
+        raise LLMCallError("classification-local extra not installed", reason="transport")
+
+    monkeypatch.setattr(fit, "precheck", refuse)
+    assert main(["--precheck", "--project-key", PK]) == 1
+    assert "extra not installed" in capsys.readouterr().err

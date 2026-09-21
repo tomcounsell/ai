@@ -192,6 +192,7 @@ def _reference_arm(args: argparse.Namespace, site, reserve_calls: int):
 
 
 async def _run_fit(args: argparse.Namespace, candidates: list[str]) -> int:
+    from agent.llm.errors import LLMCallError
     from tools.classification_eval.arms import arm_builders
     from tools.classification_eval.fit import FitError, FitRefusalError, run_fit
     from tools.classification_eval.sites import site_for
@@ -218,7 +219,9 @@ async def _run_fit(args: argparse.Namespace, candidates: list[str]) -> int:
     except (ShortfallError, FitRefusalError) as e:
         print(str(e), file=sys.stderr)
         return 2
-    except FitError as e:
+    except (FitError, LLMCallError) as e:
+        # A FitError is the post-labeling abort; an LLMCallError here is the
+        # encoder leg refusing to embed (extra, weights), named by the leg.
         print(str(e), file=sys.stderr)
         return 1
     finally:
@@ -309,9 +312,14 @@ def main(argv: Sequence[str] | None = None, *, tasks: Sequence[LLMTask] | None =
         return preflight(args.real_limit, project_key=args.project_key)
 
     if args.precheck:
+        from agent.llm.errors import LLMCallError
         from tools.classification_eval.fit import precheck
 
-        return precheck(project_key=args.project_key)
+        try:
+            return precheck(project_key=args.project_key)
+        except LLMCallError as e:
+            print(str(e), file=sys.stderr)
+            return 1
 
     if not args.site:
         parser.error("one of --site, --audit, --preflight, --precheck, or --list-sites is required")
