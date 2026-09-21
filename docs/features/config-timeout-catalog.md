@@ -41,8 +41,9 @@ the outer cap exists to guard against a half-open connection that never
 trips the inner timer. No leg carries a coroutine-level timeout of its own
 (hotfix #1055): the wrapper's `sdk_timeout` defaults to `None` and resolves
 per leg, so a site that passes nothing gets `anthropic_sdk_s` on the
-Anthropic leg or `local_typed_hard_s` on the Ollama leg, and an explicit
-value wins on either. See [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md).
+Anthropic leg, `local_typed_hard_s` on the Ollama leg, or `decisions_sdk_s`
+on the decisions leg, and an explicit value wins on any of them. See
+[Non-Harness LLM Wrapper](nonharness-llm-wrapper.md).
 
 ### Session-lifecycle TTLs may be month-scale
 

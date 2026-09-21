@@ -1,6 +1,6 @@
-# LLM Task Routing: Ollama Service, Log Evidence, and Rollback
+# LLM Task Routing: Ollama Service, Decisions Endpoint, Log Evidence, and Rollback
 
-Operator notes for the routing layer under `agent.llm.run_typed` (#3410). The design is in [LLM Task Taxonomy](../features/llm-task-taxonomy.md) and the transport in [Non-Harness LLM Wrapper](../features/nonharness-llm-wrapper.md); this page is what a machine needs, what the logs prove, what the comparison runner spends, and how to back a landing out without a deploy.
+Operator notes for the routing layer under `agent.llm.run_typed` (#3410, #3421). The design is in [LLM Task Taxonomy](../features/llm-task-taxonomy.md) and the transport in [Non-Harness LLM Wrapper](../features/nonharness-llm-wrapper.md); this page is what a machine needs (the Ollama daemon, the TypeSafe key), what the logs prove, what the comparison runner spends, how a comparison runs on a host that serves live traffic, and how to back a landing out without a deploy.
 
 ## Ollama Service Requirements
 
@@ -52,14 +52,63 @@ grep -m1 OLLAMA_NUM_PARALLEL ~/.ollama/logs/server.log   # the daemon's startup 
 
 Doctor's `ollama_daemon` row reports whether `granite4.1:3b` is pulled, whether it is loaded and its `expires_at` (the keep-alive evidence), the current `local_typed_hard_s`, and the declared `OLLAMA` sites. The daemon's own startup log is the only readout of `OLLAMA_NUM_PARALLEL`.
 
+## Decisions Endpoint
+
+Every classification site declared `backend=DECISIONS` runs on TypeSafe's Jev, a structured-decision model that takes a `state` and typed `questions` and answers with per-option probabilities in about a second, through the decisions leg (`agent/llm/backends/decisions.py`), with the local Ollama leg (granite) as the route's fallback. The daemon requirements above therefore apply to a `DECISIONS` site as well: granite is what answers when Jev does not.
+
+| Item | Value | Why |
+|------|-------|-----|
+| Endpoint | `POST https://api.typesafe.ai/v1/systemone` (`config.models.TYPESAFE_DECISIONS_URL`, a plain constant) | TypeSafe's native API, reached directly with the TypeSafe key. One transport, no proxy in the path. |
+| Model | `jev-1.13.0` (`config.models.JEV`) | Pinned to the version. The `jev-latest` and `jev-preview` aliases move with releases and would silently re-point the thresholds each site's record was tuned against; the live probe test fails by name on a re-point. |
+| Pricing | 0.042 USD per million input tokens, output tokens free, 32k-token `state` (64k per request) | https://docs.typesafe.ai/models, retrieved 2026-09-21, recorded in `MODEL_INFO[JEV]` with `price_retrieved_at`. The metering constant is `JEV_PRICE_USD_PER_MTOKEN`; setting it to `None` (the price withdrawn at a re-read) makes every envelope settle `unknown`, never zero. |
+| Timer | `decisions_sdk_s`, 3.0 s (`TIMEOUTS__DECISIONS_SDK_S`, floor 0.5 s) | The leg's single SDK-level timer; the endpoint answered in 1.0 to 1.5 s on every probe. See [Config Timeout Catalog](../features/config-timeout-catalog.md). |
+
+### The key
+
+`TYPESAFE_API_KEY` is a required credential in `.env.example`, read only through `settings.api.typesafe_api_key` (a `default_factory` read of the flat key, since the `API__` nested source never sees it). Every machine that runs a process serving a `DECISIONS` site (the bridge for C1 to C9, C12, and C13; the worker for C10 and C11; the reflection worker for C14 and C15) needs it in its vault `.env` (`~/Desktop/Valor/.env`). The fleet key lives in 1Password, vault `m-valor`, item "TypeSafe API", field `api_key`, through the service account:
+
+```bash
+OP_CACHE=false op read "op://m-valor/TypeSafe API/api_key"
+```
+
+Two keys exist by design: the Valor hosts carry the fleet key; Tom's own machine carries his own. Receipts live in the Redis of the machine that made the calls, so Jev spend attributes per machine and per key by construction. Never echo the value; the leg scrubs it from every log line and error message, and the doctor row never renders it.
+
+Without the key, nothing breaks: the leg raises `LLMCallError(reason="transport")` before any I/O on every call and the wrapper runs granite on the same inputs, so every `DECISIONS` site answers from its fallback and the log reads `llm_fallback ... primary=decisions fallback=ollama reason=transport` once per call. `python -m tools.doctor` (full run) fails its `decisions_endpoint` row in that state, naming the sites and the fix (no network call is made), and the env completeness check reports the missing declaration on every machine whose vault `.env` lacks it.
+
+### Metering
+
+Jev calls are metered on the paid-inference meter (`tools/paid_inference_meter.py`) under purpose `structured_decision`, on RSI case `1ec40086ca1d422e90ef747775ff7f64`. The meter counts whole cents and writes one `spend_receipt` row per settlement, and one Jev call costs about 0.00002 USD, so the leg amortises through a one-cent envelope per process (`SpendEnvelope` in the leg): reserve 0.01 USD once, add `usage.input_tokens × 0.042 / 1e6` per answered call (output tokens are free), settle and re-reserve when the next call's 32k-state bound (0.001344 USD) would not fit or the UTC day rolls over. A typical call does no Redis I/O, and the case sees one receipt per cent of spend; at the observed 300 to 600 input tokens per call that is one receipt per roughly 500 calls. A response without `input_tokens` marks the envelope `unknown` (charter §8: uncertain metering is not zero cost), and a process that exits with an open envelope leaves a reservation the reconcile sweep receipts as `unknown` at one cent. `structured_decision` is not the `rsi` purpose, so it never counts against the RSI pool; it is visible in `valor-improve budget` receipts like `sdlc_review`. The comparison runner's decisions arm uses the same envelope class with a per-run reservation (below).
+
+### The greps
+
+Positive evidence that a `DECISIONS` landing is serving live traffic, per site:
+
+```bash
+grep -c "llm_route site=routing.needs_response backend=decisions" logs/bridge.log
+```
+
+The degraded state, per site and by reason:
+
+```bash
+grep -c "llm_route site=routing.needs_response backend=" logs/bridge.log
+grep -c "llm_fallback site=routing.needs_response primary=decisions" logs/bridge.log
+grep "llm_fallback .* primary=decisions" logs/bridge.log | grep -o "reason=[a-z_]*" | sort | uniq -c
+```
+
+The fallback share for a site over a window is the `llm_fallback` count over the `llm_route` count: `llm_route` is every answered call whichever leg answered (a fallback that granite answered reads `backend=ollama`), and `llm_fallback` is every call that left Jev for granite. After deploy, each landed hot-path site (C1 to C6) gets one observation window of at least one host day with both counts recorded beside its record id in the taxonomy page's [Lane C Outcome](../features/llm-task-taxonomy.md#lane-c-outcome) table; a share over 2% in the window is reported with the `reason=` split before the lane closes. `reason=timeout` on the lines is a stalled endpoint (the 3 s timer fired); `reason=transport` is a non-200 (a 429 or 529 falls to granite with no retry), a connection failure, or a missing key; `reason=validation` is a `choice` the leg abstained on (`min_confidence`) or an answer that failed the type.
+
+### Deploy
+
+After merge, `./scripts/valor-service.sh restart` (or fleet `/update`) picks up the leg: `agent/llm/wrapper.py` imports it and the router's rule 5 routes to it, with no new service, plist, or dependency (`httpx` is already installed everywhere). A machine that still needs the key takes it from the 1Password item above into its vault `.env` before the restart; the service plist merge carries it from there into every service process like its sibling keys.
+
 ## Log Lines and the Greps
 
 The wrapper emits three fixed-prefix lines into the process log (`logs/bridge.log` for the bridge, the worker's and reflection worker's logs for the session-side and reflection sites).
 
 | Line | Level | Fields |
 |------|-------|--------|
-| `llm_route site=<site> backend=<backend> elapsed_ms=<int>` | INFO | One per answered call, after whichever leg answered. `backend` is `ollama` or `anthropic`; on a fallback it is the fallback's backend. `elapsed_ms` is the whole call, both legs included. |
-| `llm_fallback site=<site> primary=<backend> fallback=<backend> reason=<reason> elapsed_ms=<int>` | WARNING | Ahead of a fallback leg. `reason` is the primary's `LLMCallError.reason`: `timeout` (the daemon is up but slow), `transport` (the daemon refused or errored), `validation` (granite's answer failed the schema twice), `slot_timeout` (Anthropic legs only). `elapsed_ms` is the primary's spend. |
+| `llm_route site=<site> backend=<backend> elapsed_ms=<int>` | INFO | One per answered call, after whichever leg answered. `backend` is `ollama`, `anthropic`, or `decisions`; on a fallback it is the fallback's backend. `elapsed_ms` is the whole call, both legs included. |
+| `llm_fallback site=<site> primary=<backend> fallback=<backend> reason=<reason> elapsed_ms=<int>` | WARNING | Ahead of a fallback leg (`primary=ollama fallback=anthropic` on an `OLLAMA` site, `primary=decisions fallback=ollama` on a `DECISIONS` site). `reason` is the primary's `LLMCallError.reason`: `timeout` (the daemon or the endpoint is up but slow), `transport` (the daemon refused or errored; a non-200, a connection failure, or a missing key on the decisions leg), `validation` (granite's answer failed the schema twice; a Jev `choice` under `min_confidence` or outside the options), `slot_timeout` (Anthropic legs only). `elapsed_ms` is the primary's spend. |
 | `llm_no_fallback site=<site> primary=<backend> reason=<reason> elapsed_ms=<int> budget_s=<float>` | WARNING | The primary failed with under 0.5 s of the caller's budget left, so no fallback ran and the site's fail-safe applied. |
 | `eligibility warm-up done keys=<n> public=<n> failed=<n>` | INFO | Once per process start, when the eligibility cache warm-up finished. |
 
@@ -90,15 +139,17 @@ A process whose log has no such line after startup has a lost or failed warm-up;
 
 ## Comparison Runner Spend
 
-`python -m tools.classification_eval --site <id> --candidate <backend>` runs a reference arm against candidate arms and writes the record the acceptance bar reads. The reference arm is paid inference; the candidate granite arm is free.
+`python -m tools.classification_eval --site <id> --candidate <backend>[,<backend>]` runs a reference arm against candidate arms and writes the record the acceptance bar reads. The Haiku reference and the decisions candidate are paid inference; the granite arm is free.
 
 | Arm | Transport | Spend |
 |-----|-----------|-------|
 | Haiku reference (C1 to C11) | `run_typed` on the Anthropic leg with the site's prompt verbatim | Subscription. Per-call cost is recorded on the record from the Haiku price with its retrieval date. |
 | gemma reference (C15 only) | `google/gemma-4-26b-a4b-it:free` via OpenRouter chat/completions, paced to the free tier's rate (3.2 s between requests, four retries on 429) | Metered under purpose `promise_detector` on the paid-inference meter: one reservation per run (`0.002 USD` per planned call, floor `0.01`), settled from the accumulated `usage.cost`. |
 | gemma reference, paid route (`--reference-model paid`) | Same weights without the `:free` suffix | For a run made while the free route is throttled upstream. Metered the same way; lane A's C15 run made 104 paid calls for 0.0025 USD. |
-| granite candidate | The Ollama leg | Free. |
+| granite reference (C12, C13, C14; `reference="ollama"`) | The Ollama leg, called directly | Free. These sites' landed backend is granite, so a decisions comparison there measures granite once, as the reference, and the audit judges that slot as the fallback. |
+| granite candidate | The Ollama leg | Free. Dropped with a printed note at a granite-referenced site, so a record carries granite exactly once. |
 | Haiku candidate (`--candidate anthropic`) | The Anthropic leg | Subscription. |
+| decisions candidate (`--candidate decisions`) | The decisions leg, called directly with its own per-run `SpendEnvelope` (a leg failure is the arm's own error, never a fallback answer) | Metered under purpose `structured_decision`: one reservation per run of `max(0.01, 0.001344 × 2 × n)` USD (the 32k-state bound per planned call at two latency passes), settled once in `finally` from `input_tokens × 0.042 / 1e6` per call; a 200 without `input_tokens` marks it `unknown`. At the observed 300 to 600 input tokens a call costs 0.000013 to 0.000025 USD, so a 300-call run is about a cent and the full fifteen-site comparison at three iterations each about 0.30 USD. |
 
 The runner refuses to spend on a site whose inputs miss the minimum (50, or 200 for the routing sites): the shortfall prints and no reference call is made.
 
@@ -112,7 +163,22 @@ The promise judge itself (C15 in production, `reflections/improvement_collect.py
 
 ## Rollback
 
-For a steady degraded Ollama daemon (every call paying the 20 s timer before Haiku answers, or every call failing fast to Haiku), three levers in order, each usable without a deploy and each with the log signature that confirms it took effect. Measure first: `grep -c llm_fallback logs/bridge.log` over the window, and the `reason=` split.
+For a steady degraded backend, the levers below in order, each usable without a deploy (the last one excepted) and each with the log signature that confirms it took effect. Measure first: `grep -c llm_fallback logs/bridge.log` over the window, and the `reason=` split. Lever 0 is for the decisions leg (every `DECISIONS` call paying the 3 s timer before granite answers, or the endpoint answering non-200 on a share of calls); levers 1 to 3 are for a degraded Ollama daemon.
+
+### Lever 0: turn the decisions leg off
+
+Either of two settings in the vault `.env` (`~/Desktop/Valor/.env`), then `./scripts/valor-service.sh restart`:
+
+```
+# remove or comment out TYPESAFE_API_KEY, or
+TIMEOUTS__DECISIONS_SDK_S=0.5
+```
+
+Unsetting the key makes the leg raise `reason=transport` before any I/O on every call at every site. The floor timer (0.5 s, under the endpoint's probed 1.0 to 1.5 s answer) makes the call raise `reason=timeout` at 0.5 s, but only at a site that passes no `sdk_timeout` (an explicit `sdk_timeout` always wins over the settings default, so C7 to C10, C14, and C15 keep their own timer under this lever). Either way the affected sites answer from granite on the same inputs, inside their budget: a site with no `sdk_timeout` keeps granite's full 20 s timer under the 35 s cap, and a site that passes `sdk_timeout=3.0` keeps about 3 s for granite with the key unset. The key edit is therefore the fleet-wide lever, and the doctor's `decisions_endpoint` row goes red naming the sites, which is the intended readout; the timer floor is the lever for a half-broken endpoint (answering, slowly) when the key should stay in place.
+
+Expected signature: one `llm_fallback site=<site> primary=decisions fallback=ollama reason=transport` (key unset, a few milliseconds of `elapsed_ms`) or `reason=timeout` (floor timer, about 500 ms) per call on every `DECISIONS` site, followed by `llm_route ... backend=ollama`. Revert by restoring the line and restarting.
+
+The code rollback for a `DECISIONS` site is the same one-word edit as lever 3: `backend=Backend.OLLAMA` on the declaration (its record's ollama arm is the passing fallback proof) or `backend=Backend.ANTHROPIC`, committed with the reason, then fleet `/update`.
 
 ### Lever 1: stop the Ollama daemon
 
@@ -150,6 +216,6 @@ A landing is reinstated the same way: `backend=Backend.OLLAMA` on the declaratio
 - [LLM Task Taxonomy](../features/llm-task-taxonomy.md): the declarations, router rules, eligibility, and acceptance bar.
 - [Non-Harness LLM Wrapper](../features/nonharness-llm-wrapper.md): the legs, the fallback budget, and the log lines' source.
 - [Local Ollama Model Policy](../features/local-model-policy.md): which Ollama models each machine runs and how `/setup` and `/update` check them.
-- [Config Timeout Catalog](../features/config-timeout-catalog.md): `local_typed_hard_s` and the Anthropic pair.
+- [Config Timeout Catalog](../features/config-timeout-catalog.md): `local_typed_hard_s`, `decisions_sdk_s`, and the Anthropic pair.
 - [Local Doctor](../features/local-doctor.md): the "LLM routing" section.
-- #3421 adds the decisions endpoint section to this page when lane C lands.
+- `docs/plans/structured-decision-transport-jev-behind-ollama-fallback.md`: lane C's plan (the decisions leg, the landing rule, the uncontended-run wrapper).
