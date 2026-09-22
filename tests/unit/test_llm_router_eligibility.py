@@ -106,9 +106,13 @@ def _only(fakes: dict[Backend, _Leg], backend: Backend) -> None:
 
 
 class TestLocalSitesByKey:
-    def test_the_repo_declares_local_classification_sites(self):
-        assert [t for t in LOCAL_CLASSIFICATION if t not in SYNTHETIC], (
-            "no local-backed classification site declared"
+    def test_the_repo_declares_an_ollama_classification_site(self):
+        """The registry sanity check: the rows below run over real
+        declarations, not only the two synthetic tasks, and the OLLAMA leg
+        (the one local backend a site declares today) is among them."""
+        declared = [t for t in LOCAL_CLASSIFICATION if t not in SYNTHETIC]
+        assert any(t.backend is Backend.OLLAMA for t in declared), (
+            "no OLLAMA classification site declared"
         )
 
     def test_the_fake_table_covers_every_backend(self, legs):
