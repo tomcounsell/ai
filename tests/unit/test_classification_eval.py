@@ -1505,6 +1505,35 @@ def test_cli_land_without_anthropic_exits_2_with_no_spend(fit_env, monkeypatch):
     assert latest_record("test.site", project_key=PK) is None
 
 
+def test_cli_fit_refuses_the_decisions_candidate_before_any_spend(fit_env, monkeypatch, capsys):
+    """``--fit --candidate decisions`` (alone or alongside the fit arms) is a
+    parser error, exit 2, naming the ``--site`` path the decisions arm belongs
+    to: ``_run_fit`` never starts, no reference arm is built, no record is
+    written, and no head is staged."""
+    from tools.classification_eval import __main__ as cli
+    from tools.classification_eval import arms
+
+    def boom(*a, **kw):
+        raise AssertionError("_run_fit must not run")
+
+    monkeypatch.setattr(cli, "_run_fit", boom)
+    monkeypatch.setattr(arms, "anthropic_arm", boom)
+    monkeypatch.setattr(
+        "tools.classification_eval.sites.site_for", lambda site_id: _site(minimum_n=50)
+    )
+    monkeypatch.setattr("tools.classification_eval.__main__.is_contended", lambda: False)
+    for candidate in ("decisions", "local_encoder,anthropic,decisions"):
+        with pytest.raises(SystemExit) as exc:
+            main(["--site", "test.site", "--fit", "--candidate", candidate, "--project-key", PK])
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "--fit measures the local_encoder head" in err
+        assert "compared through --site without --fit" in err
+    assert latest_record("test.site", project_key=PK) is None
+    assert fit_env.runtime_loads["n"] == 0
+    assert not (fit_env.fit.STAGED_HEADS_DIR).exists() and not fit_env.served_dir.exists()
+
+
 def test_a_served_head_path_is_not_gitignored():
     """The broad ``*.json`` rule in ``.gitignore`` would swallow the head a
     landing commits (#3544 step "commit the head"); the negation for
