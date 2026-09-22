@@ -176,6 +176,13 @@ HEARTBEAT_MAX_TICKS = 9
 # HEARTBEAT_FALLBACK_ARC — which is the same degradation path taken when the
 # pack is uninstalled or the account loses Premium, so the feature is correct
 # either way; it simply shows an alternating arc instead of digits.
+#
+# STAYS EMPTY. #2837 was closed will-not-fix on 2026-09-22: reading the ids
+# needs a second authenticated Telethon client against the live Premium auth
+# key, which risks AUTH_KEY_DUPLICATED and takes down all chat I/O. Do not
+# spin one up to pin these — a production comms outage is not an acceptable
+# price for digit glyphs. Populate this table only as a side effect of work
+# that already holds a safely authenticated client.
 PREMIUM_DIGIT_REACTIONS: dict[int, int] = {}
 
 # Standard-glyph fallback, used both when a digit is unpinned and when Telegram
