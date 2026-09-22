@@ -93,6 +93,14 @@ and the survivors are named here so the claim stays checkable:
   nothing downstream can tell the fallback from a true answer. Not on the
   identity path today; routing it through here is tracked, not done.
 - ``tools/valor_calendar.py`` -- :231, path-scoped but outside lane identity.
+- ``agent/sdk_client.py`` -- :1253, path-scoped via ``cwd=str(repo_root)`` and
+  compares the answer to ``"main"``. The most worth naming of these three:
+  same shape as ``get_current_branch``, path-parameterized and lane-reachable.
+  Not on the identity path.
+- ``reflections/docs_auditor.py`` -- ``_current_ref`` at :1927, path-scoped via
+  ``cwd=str(repo_root)``. Not on the identity path.
+- ``scripts/migrate_completed_plan.py`` -- :290, path-scoped via
+  ``cwd=repo_root``. Not on the identity path.
 
 It also owns the one piece of git trivia this whole area turns on -- a detached
 worktree answers with the literal string ``"HEAD"``, which is *not* a branch

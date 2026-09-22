@@ -105,7 +105,11 @@ needs the raw `"HEAD"` literal as a gate). One is a live hazard:
 on any failure, so a failed read reports a lane as being on the default
 branch — worse than storing `"HEAD"`, because `"main"` is a real branch and
 nothing downstream can tell the fallback from a true answer. It is not on the
-identity path today.
+identity path today. Three more path-scoped spellings are named in the same
+docstring: `agent/sdk_client.py:1253` (compares the answer to `"main"`, same
+shape as `get_current_branch`), `reflections/docs_auditor.py:1927`
+(`_current_ref`), and `scripts/migrate_completed_plan.py:290` — none on the
+identity path.
 
 When a worktree is detached, `checkpoint_branch_state` clears `branch_name` rather
 than storing `"HEAD"`, and the end-of-turn cleanup path skips branch cleanup

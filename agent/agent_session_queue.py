@@ -612,11 +612,12 @@ def checkpoint_branch_state(session: AgentSession) -> None:
         )
 
         if commit.returncode == 0:
-            # `read_worktree_branch` is the one lane-scoped spelling of the HEAD
-            # read (#3411), and it answers None for a detached worktree rather
-            # than the literal "HEAD" that raw git returns for a symbolic-name
-            # lookup. "HEAD" is not a branch name, and recording it as one is
-            # what let a lane's identity name a ref no delete could ever match.
+            # `read_worktree_branch` is the one spelling on the lane-identity
+            # path of the HEAD read (#3411), and it answers None for a
+            # detached worktree rather than the literal "HEAD" that raw git
+            # returns for a symbolic-name lookup. "HEAD" is not a branch name,
+            # and recording it as one is what let a lane's identity name a
+            # ref no delete could ever match.
             branch_name = read_worktree_branch(working_dir)
             commit_sha = commit.stdout.strip()
             # `read_worktree_branch`'s None is ambiguous: it collapses a

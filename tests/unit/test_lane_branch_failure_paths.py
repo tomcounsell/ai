@@ -751,3 +751,79 @@ class TestBranchMismatchRefusalIsAttributable:
         joined = " ".join(r.message for r in refusals)
         assert slug in joined, "the refusal log does not name the lane"
         assert "session/some-other-lane" in joined, "the refusal log does not name the expectation"
+
+
+class TestCleanupBlockScopedToLanes:
+    """PR #3547 review, TD1: the end-of-turn cleanup block must not run for a
+    slug-less ad-hoc turn whose ``working_dir`` is the shared project checkout,
+    not a lane worktree. Before the fix, the leading ``refresh_lane_branch``
+    read whatever that checkout's live HEAD happened to be and could hand it to
+    ``safe_delete_branch`` — a non-lane branch never meant to be touched by this
+    block. The gate added to the ``if`` at session_executor.py:2808 (``slug and
+    WORKTREES_DIR in str(working_dir)``) is what this test exercises.
+    """
+
+    @pytest.mark.asyncio
+    async def test_adhoc_slugless_session_in_main_checkout_deletes_nothing(
+        self, tmp_path, lane_rows, monkeypatch
+    ):
+        # A real repo standing in for the shared project checkout — no
+        # `.worktrees/` in its path, unlike every lane fixture above.
+        repo = _make_repo(tmp_path)
+        assert WORKTREES_DIR not in str(repo)
+
+        # `validate_workspace` pins workspaces to `~/src`; neutralise it here
+        # for the same reason `TestBranchMismatchRefusalIsAttributable` does —
+        # so a tmp_path checkout reaches the code under test instead of being
+        # silently redirected to the real `~/src` allowed_root.
+        monkeypatch.setattr(
+            "agent.session_executor.validate_workspace",
+            lambda working_dir, allowed_root, is_worktree=False: working_dir,
+        )
+
+        class _FakeRunner:
+            """Stands in for SessionRunner so no real `claude -p` subprocess
+            launches; only the cleanup block's gating is under test here."""
+
+            def __init__(self, **kwargs):
+                pass
+
+            async def run(self, user_message):
+                from agent.session_runner import RunSummary
+
+                return RunSummary(exit_reason="pm_complete", turn_count=1)
+
+        monkeypatch.setattr("agent.session_runner.SessionRunner", _FakeRunner)
+
+        cleanup_calls: list[str] = []
+        monkeypatch.setattr(
+            "agent.session_executor.refresh_lane_branch",
+            lambda *a, **k: cleanup_calls.append("refresh_lane_branch"),
+        )
+        monkeypatch.setattr(
+            "agent.branch_manager.mark_work_done",
+            lambda *a, **k: cleanup_calls.append("mark_work_done"),
+        )
+        monkeypatch.setattr(
+            "agent.worktree_manager.safe_delete_branch",
+            lambda *a, **k: cleanup_calls.append("safe_delete_branch"),
+        )
+
+        # Ad-hoc: no slug, and a non-eng session type so the executor's
+        # synthetic-slug synthesis (which only fires for session_type=="eng")
+        # does not manufacture one and force worktree provisioning.
+        session = _make_session(
+            repo,
+            slug=None,
+            session_type="teammate",
+            session_id="lane-fp-3411-adhoc",
+            status="pending",
+        )
+
+        await _execute_agent_session(session)
+
+        assert cleanup_calls == [], (
+            "end-of-turn cleanup ran for a slug-less session outside a lane "
+            f"worktree (#3411 TD1): {cleanup_calls}"
+        )
+        assert _branch_exists(repo, "main"), "main branch was deleted"

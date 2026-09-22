@@ -2809,6 +2809,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
             not task.error
             and not _is_non_clean_runner_exit(agent_session)
             and not chat_state.defer_reaction
+            and slug
+            and WORKTREES_DIR in str(working_dir)
         ):
             try:
                 from agent.branch_manager import mark_work_done

@@ -775,7 +775,7 @@ def _init_repo(path):
 
 
 class TestReadWorktreeBranch:
-    """The one lane-scoped spelling of ``rev-parse --abbrev-ref HEAD``."""
+    """The one spelling on the lane-identity path of ``rev-parse --abbrev-ref HEAD``."""
 
     def test_reads_the_live_branch(self, tmp_path):
         from tools.lane_identity import read_worktree_branch
