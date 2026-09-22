@@ -22,16 +22,15 @@ code and so certify nothing:
   code. Every assertion below is instead about the **target name** cleanup
   chose and about whether the next turn launches.
 
-Two divergence shapes get a test each, because they strand the lane for
-different reasons and are fixed by different halves of the change:
-
-* ``test_diverged_lane_second_turn_launches`` — the worktree sits on a
-  differently-named branch. The incident shape, and 2 of the 7 divergent lanes
-  measured in plan spike-3.
-* ``test_detached_lane_second_turn_launches`` — the worktree is detached, so
-  ``git rev-parse --abbrev-ref HEAD`` returns the literal string ``"HEAD"``
-  (plan spike-2) and there is no branch to name at all. 5 of those 7 lanes are
-  in this state, making it the dominant shape rather than a corner case.
+This file covers the incident shape: the worktree sits on a differently-named
+branch (2 of the 7 divergent lanes measured in plan spike-3). The other five
+are detached, so ``git rev-parse --abbrev-ref HEAD`` returns the literal string
+``"HEAD"`` (plan spike-2) and there is no branch to name at all — making
+detached the dominant shape rather than a corner case. That end-to-end case
+(cleanup skipped, record cleared, next turn launches) lands with the
+failure-path suite, because the skip decision it asserts is owned by
+``refresh_lane_branch`` returning ``None``; asserting it here would mean this
+test performing the skip itself, and so testing itself.
 """
 
 from __future__ import annotations
@@ -108,28 +107,36 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
-@pytest.fixture
-def diverged_lane(tmp_path):
-    """Stage a lane whose worktree moved off ``session/{slug}`` mid-turn.
+def _add_lane_worktree(repo: Path) -> Path:
+    """Add ``.worktrees/{slug}/`` as a real *linked* worktree on the lane branch.
 
-    This is the incident shape: the worktree is created on the slug-derived
-    branch, then the agent checks out a differently-named branch and commits
-    its work there. 7 of 31 live lanes were measured in this state
-    (plan spike-3), so it is the normal case, not an exotic one.
+    Linked is what production uses, and it matters here: ``return_to_main``
+    deliberately no-ops for a linked worktree (issue #1647), because ``main``
+    is already checked out by the primary working tree. So the worktree stays
+    on whatever the agent left it on — exactly the state the next turn's guard
+    walks into.
     """
-    repo = _make_repo(tmp_path)
     worktree = repo / WORKTREES_DIR / SLUG
     _git(repo, "worktree", "add", str(worktree), "-b", LANE_BRANCH)
+    _git(worktree, "config", "user.email", "test@test.com")
+    _git(worktree, "config", "user.name", "Test")
+    return worktree
 
-    # Mid-turn: the agent moves off the lane branch and commits real work.
-    _git(worktree, "checkout", "-b", WORK_BRANCH)
+
+def _commit_work(worktree: Path) -> None:
     (worktree / "feature.py").write_text("# shipped work\n")
     _git(worktree, "add", "feature.py")
     _git(worktree, "commit", "-m", "feat: the work the turn actually did")
 
-    assert _head_branch(worktree) == WORK_BRANCH
-    assert _branch_exists(repo, LANE_BRANCH)
 
+def _write_active_plan(worktree: Path) -> None:
+    """Give ``mark_work_done`` an ACTIVE plan to archive, as a real turn has."""
+    (worktree / "docs" / "plans" / f"ACTIVE-{SLUG}.md").write_text(
+        "# plan\n\n**Status**: IN_PROGRESS\n"
+    )
+
+
+def _make_session(worktree: Path) -> AgentSession:
     session = AgentSession(
         session_id="tg_valor_-1003449100931_1473",
         project_key=PROJECT_KEY,
@@ -139,6 +146,59 @@ def diverged_lane(tmp_path):
         working_dir=str(worktree),
     )
     session.save()
+    return session
+
+
+@pytest.fixture
+def diverged_lane(tmp_path):
+    """Stage a lane whose worktree moved off ``session/{slug}`` mid-turn.
+
+    This is the incident shape: the worktree is created on the slug-derived
+    branch, then the agent checks out a differently-named branch and commits
+    its work there. 7 of 31 live lanes were measured in some form of this state
+    (plan spike-3), so it is the normal case, not an exotic one.
+    """
+    repo = _make_repo(tmp_path)
+    worktree = _add_lane_worktree(repo)
+
+    # Mid-turn: the agent moves off the lane branch and commits real work.
+    _git(worktree, "checkout", "-b", WORK_BRANCH)
+    _commit_work(worktree)
+    _write_active_plan(worktree)
+
+    assert _head_branch(worktree) == WORK_BRANCH
+    assert _branch_exists(repo, LANE_BRANCH)
+
+    session = _make_session(worktree)
+    try:
+        yield repo, worktree, session
+    finally:
+        for row in AgentSession.query.filter(project_key=PROJECT_KEY):
+            row.delete()
+
+
+@pytest.fixture
+def detached_lane(tmp_path):
+    """Stage a lane whose worktree is detached while holding unmerged commits.
+
+    ``git rev-parse --abbrev-ref HEAD`` returns the literal string ``"HEAD"``
+    here (plan spike-2), so there is no branch name to hand
+    ``merged_via_ancestor`` — and inventing one, which is what deriving
+    ``session/{slug}`` amounts to, is how the incident happened.
+    """
+    repo = _make_repo(tmp_path)
+    worktree = _add_lane_worktree(repo)
+
+    # The turn's work lands on the lane branch, then the agent detaches (a
+    # review checkout, a bisect, an explicit `git checkout <sha>`).
+    _commit_work(worktree)
+    _git(worktree, "checkout", "--detach")
+    _write_active_plan(worktree)
+
+    assert _head_branch(worktree) == "HEAD", "fixture did not actually detach"
+    assert _branch_exists(repo, LANE_BRANCH)
+
+    session = _make_session(worktree)
     try:
         yield repo, worktree, session
     finally:
@@ -147,7 +207,7 @@ def diverged_lane(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The regression test
+# The regression tests
 # ---------------------------------------------------------------------------
 
 
@@ -185,6 +245,10 @@ def test_diverged_lane_second_turn_launches(diverged_lane):
         force=False,
     )
 
+    # No trailing refresh here on purpose. Plan Risk 1 puts that refresh inside
+    # the executor's cleanup block, as production code the build must add; a
+    # test that performs it itself passes post-fix even when the build omits it.
+
     # --- Turn 2: the assertion -------------------------------------------
     # A fresh turn re-reads the row and runs the #1377 launch guard. Whether
     # this launches is the whole test; everything below it is corroboration
@@ -217,4 +281,65 @@ def test_diverged_lane_second_turn_launches(diverged_lane):
     )
     assert _branch_exists(repo, WORK_BRANCH), (
         f"cleanup deleted {WORK_BRANCH!r}, which carries unmerged work"
+    )
+
+
+def test_detached_lane_second_turn_launches(detached_lane):
+    """A detached lane stays resumable too.
+
+    RED on baseline ``bbe5dc7a1``: the checkpoint records the literal string
+    ``"HEAD"``, the slug-derived name wins the read anyway, and the unguarded
+    ``git branch -d`` inside ``mark_work_done`` destroys ``session/{slug}`` —
+    the branch that actually holds this lane's unmerged commits — before the
+    merge predicate is ever consulted. Turn 2 then has nothing to launch
+    against.
+    """
+    repo, worktree, session = detached_lane
+
+    # --- Turn 1 ---------------------------------------------------------
+    checkpoint_branch_state(session)
+
+    cleanup_target = session.derived_branch_name
+    predicate_targets: list[str] = []
+
+    def recording_predicate(repo_root: str, branch: str, base: str) -> bool:
+        predicate_targets.append(branch)
+        return merged_via_ancestor(repo_root, branch, base)
+
+    if cleanup_target and cleanup_target.strip():
+        # A detached lane has no nameable branch, so cleanup should skip rather
+        # than guess. Deriving one from the slug is the guess this test forbids.
+        mark_work_done(worktree, cleanup_target)
+        safe_delete_branch(
+            str(worktree),
+            cleanup_target,
+            predicate=recording_predicate,
+            force=False,
+        )
+
+    checkpoint_branch_state(session)
+
+    # --- Turn 2: the assertion -------------------------------------------
+    rows = list(AgentSession.query.filter(project_key=PROJECT_KEY))
+    assert len(rows) == 1, f"expected one lane row, got {len(rows)}"
+    expected_branch = rows[0].derived_branch_name
+    assert expected_branch, "the next turn has no branch to launch against"
+
+    try:
+        verify_worktree_branch(worktree, expected_branch)
+    except WorktreeBranchMismatchError as exc:
+        pytest.fail(
+            "second turn refused to launch (issue #3411): "
+            f"expected={exc.expected_branch!r} actual={exc.actual_branch!r} "
+            f"-- {exc}"
+        )
+
+    # --- Why it launched --------------------------------------------------
+    assert _branch_exists(repo, LANE_BRANCH), (
+        f"cleanup deleted {LANE_BRANCH!r}, which holds this lane's unmerged "
+        f"commits; the merge predicate was asked about {predicate_targets}"
+    )
+    assert rows[0].branch_name.strip() != "HEAD", (
+        "the literal 'HEAD' was recorded as a branch name; a detached lane has "
+        "no branch, and the record must say so"
     )
