@@ -13,15 +13,16 @@ import dataclasses
 import pytest
 
 from agent.llm import LLMCallError, LLMStackIncompatible
-from agent.llm.tasks import Backend, ErrorCost, LLMTask, TaskKind
+from agent.llm.tasks import Backend, Decision, ErrorCost, LLMTask, TaskKind
 
 
 class TestEnums:
     def test_kind_values_are_the_two_populations(self):
         assert {k.value for k in TaskKind} == {"classification", "thinking"}
 
-    def test_lane_a_backends_are_anthropic_and_ollama(self):
-        assert {b.value for b in Backend} == {"anthropic", "ollama"}
+    def test_backends_are_anthropic_ollama_and_decisions(self):
+        """Lane A's two legs plus lane C's decisions leg (#3421)."""
+        assert {b.value for b in Backend} == {"anthropic", "ollama", "decisions"}
 
     def test_error_cost_tiers(self):
         assert {c.value for c in ErrorCost} == {"low", "medium", "high"}
@@ -52,9 +53,54 @@ class TestLLMTask:
         assert landed.site == task.site
 
     def test_no_question_builder_fields(self):
-        """#3421 adds its own fields; lane A declares none of them."""
+        """#3421's question metadata is the per-field ``Decision`` marker, never
+        a task field: the site walk keeps reading exactly these five."""
         names = {f.name for f in dataclasses.fields(LLMTask)}
         assert names == {"site", "kind", "backend", "error_cost", "client_only"}
+
+
+class TestDecisionMarker:
+    """``Decision`` rides on an output type's field as ``Annotated`` metadata
+    (#3421): the decisions leg reads it from ``model_fields``; the other legs
+    never see it because pydantic keeps it out of the JSON schema."""
+
+    def test_defaults(self):
+        marker = Decision("Does this need a reply?")
+        assert marker.criteria is None
+        assert marker.threshold == 0.5
+        assert marker.min_confidence == 0.0
+
+    def test_is_frozen(self):
+        marker = Decision("q")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            marker.threshold = 0.9  # type: ignore[misc]
+
+    def test_exported_from_the_package(self):
+        import agent.llm
+
+        assert agent.llm.Decision is Decision
+
+    def test_retrievable_from_field_metadata_and_absent_from_the_schema(self):
+        from typing import Annotated, Literal
+
+        from pydantic import BaseModel
+
+        marker = Decision("Which bucket?", criteria={"a": "first", "b": "second"})
+
+        class Out(BaseModel):
+            verdict: Annotated[Literal["a", "b"], marker]
+            flag: Annotated[bool, Decision("Is it?", threshold=0.7)]
+            reason: str = ""
+
+        assert Out.model_fields["verdict"].metadata == [marker]
+        assert Out.model_fields["flag"].metadata[0].threshold == 0.7
+        schema = Out.model_json_schema()
+        assert schema["properties"]["verdict"] == {
+            "enum": ["a", "b"],
+            "title": "Verdict",
+            "type": "string",
+        }
+        assert "Decision" not in str(schema)
 
 
 class TestLLMCallErrorReason:

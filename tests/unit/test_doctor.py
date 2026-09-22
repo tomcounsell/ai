@@ -900,8 +900,12 @@ class TestCheckLLMRouting:
             assert f"kind={declared.task.kind.value}" in row.message
             assert f"backend={declared.task.backend.value}" in row.message
             assert "client->anthropic" in row.message
-            if declared.task.backend is Backend.OLLAMA and declared.task.kind.value != "thinking":
+            if declared.task.kind.value == "thinking" or declared.task.client_only:
+                assert "valor->anthropic" in row.message
+            elif declared.task.backend is Backend.OLLAMA:
                 assert "valor->ollama (fallback anthropic)" in row.message
+            elif declared.task.backend is Backend.DECISIONS:
+                assert "valor->decisions (fallback ollama)" in row.message
             else:
                 assert "valor->anthropic" in row.message
 
@@ -911,6 +915,78 @@ class TestCheckLLMRouting:
         assert "local_typed_hard_s=" in daemon.message
         for site in ollama_sites:
             assert site in daemon.message
+
+        assert set(by_name) == {d.task.site for d in sites} | {
+            "eligibility_cache",
+            "decisions_endpoint",
+            "ollama_daemon",
+        }
+
+    @staticmethod
+    def _decisions_site():
+        from agent.llm.tasks import Backend, DeclaredSite, LLMTask, TaskKind
+
+        task = LLMTask(
+            site="t.decisions_probe", kind=TaskKind.CLASSIFICATION, backend=Backend.DECISIONS
+        )
+        return DeclaredSite(task=task, path="t/probe.py", lineno=1, name="DECISIONS_PROBE")
+
+    def test_decisions_endpoint_row_fails_when_a_decisions_site_has_no_key(self, monkeypatch):
+        """#3421: a declared DECISIONS site with no key falls to granite on every call."""
+        from config.settings import settings
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        monkeypatch.setattr(settings.api, "typesafe_api_key", None)
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        declared = self._decisions_site()
+
+        results = doctor._check_llm_routing(client_key="client-thing", sites=[declared])
+        by_name = {r.name: r for r in results}
+
+        assert "valor->decisions (fallback ollama)" in by_name["t.decisions_probe"].message
+        assert "client->anthropic" in by_name["t.decisions_probe"].message
+        row = by_name["decisions_endpoint"]
+        assert row.passed is False
+        assert "t.decisions_probe" in row.message
+        assert "typesafe_api_key" in row.message
+        assert row.fix is not None
+        assert "~/Desktop/Valor/.env" in row.fix and ".env.example" in row.fix
+        assert "m-valor" in row.fix and "TypeSafe API" in row.fix and "api_key" in row.fix
+        # The plan's Verification grep proves the key is read only through settings, so
+        # the env var's literal name stays out of tools/; .env.example declares it.
+        env_example = Path(doctor.__file__).resolve().parents[1] / ".env.example"
+        assert "typesafe_api_key".upper() + "=" in env_example.read_text()
+
+    def test_decisions_endpoint_row_passes_with_the_key_present(self, monkeypatch):
+        from config.settings import settings
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        monkeypatch.setattr(settings.api, "typesafe_api_key", "ts-0123456789abcdef")
+        declared = self._decisions_site()
+
+        results = doctor._check_llm_routing(client_key="client-thing", sites=[declared])
+        row = {r.name: r for r in results}["decisions_endpoint"]
+
+        assert row.passed is True
+        assert "1 declared DECISIONS site" in row.message
+        assert row.fix is None
+        assert "ts-0123456789abcdef" not in row.message, "the key never renders"
+
+    def test_decisions_endpoint_row_passes_without_a_decisions_site(self, monkeypatch):
+        from config.settings import settings
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        monkeypatch.setattr(settings.api, "typesafe_api_key", None)
+
+        results = doctor._check_llm_routing(client_key="client-thing", sites=[])
+        row = {r.name: r for r in results}["decisions_endpoint"]
+
+        assert row.passed is True
+        assert "no declared DECISIONS site" in row.message
+        assert row.fix is None
 
     def test_daemon_row_reports_the_loaded_model_and_keep_alive(self, monkeypatch):
         from config.models import OLLAMA_CLASSIFIER_MODEL

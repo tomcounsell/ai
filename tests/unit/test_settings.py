@@ -10,7 +10,13 @@ every call site that migrated to `settings.timeouts.<field>` changes too.
 import pytest
 from pydantic import ValidationError
 
-from config.settings import CodexSettings, ImprovementSettings, Settings, TimeoutSettings
+from config.settings import (
+    APISettings,
+    CodexSettings,
+    ImprovementSettings,
+    Settings,
+    TimeoutSettings,
+)
 
 
 class TestTimeoutSettingsDefaults:
@@ -48,6 +54,10 @@ class TestTimeoutSettingsDefaults:
         """The hard cap must stay strictly above the inner SDK timer by default."""
         s = TimeoutSettings()
         assert s.anthropic_hard_s > s.anthropic_sdk_s
+
+    def test_decisions_sdk_default(self):
+        """The decisions leg's single SDK-level timer (agent/llm/backends/decisions.py, #3421)."""
+        assert TimeoutSettings().decisions_sdk_s == 3.0
 
     def test_agent_session_retain_ttl_default(self):
         """Must match models/agent_session.py's retain_for_resume Meta.ttl."""
@@ -88,6 +98,8 @@ class TestTimeoutSettingsBounds:
             ("agent_session_retain_ttl_s", 99_999_999),
             ("last_processed_ttl_s", -1),
             ("last_processed_ttl_s", 99_999_999),
+            ("decisions_sdk_s", 0.1),
+            ("decisions_sdk_s", 61),
         ],
     )
     def test_out_of_bounds_value_raises(self, field, bad_value):
@@ -128,6 +140,35 @@ class TestTimeoutSettingsEnvOverride:
 
         with pytest.raises(ValidationError):
             Settings()
+
+    def test_decisions_sdk_env_override(self, monkeypatch):
+        monkeypatch.setenv("VALOR_LAUNCHD", "1")
+        monkeypatch.setenv("TIMEOUTS__DECISIONS_SDK_S", "1.5")
+
+        assert Settings().timeouts.decisions_sdk_s == 1.5
+
+
+class TestAPISettingsTypesafeKey:
+    """``APISettings.typesafe_api_key`` reads the flat ``TYPESAFE_API_KEY`` through
+    a ``default_factory`` (#3421). ``validate_default=True`` is what lets the shared
+    ``validate_api_keys`` validator see the factory value; without it the
+    short-key rejection below could never fire."""
+
+    def test_unset_env_var_yields_none(self, monkeypatch):
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+        assert APISettings().typesafe_api_key is None
+
+    def test_value_is_read_from_the_flat_env_var(self, monkeypatch):
+        monkeypatch.setenv("TYPESAFE_API_KEY", "ts-" + "k" * 20 + "  ")
+
+        assert APISettings().typesafe_api_key == "ts-" + "k" * 20
+
+    def test_short_value_is_rejected_like_the_sibling_keys(self, monkeypatch):
+        monkeypatch.setenv("TYPESAFE_API_KEY", "ts-short")
+
+        with pytest.raises(ValidationError, match="at least 10 characters"):
+            APISettings()
 
 
 class TestImprovementSettingsBudgetUnits:

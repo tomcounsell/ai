@@ -18,6 +18,11 @@ with the real-message share at least half. Budgets: the 3 s sites (C8, C9,
 C10) carry ``budget_s=3.0``; every other site is measured against the
 reference arm's p95 plus one second.
 
+References: Haiku for C1 to C11, gemma for C15, and granite
+(``reference="ollama"``) for C12, C13, and C14, whose landed backend is
+granite (#3421): a decisions comparison there measures granite once, as the
+reference, and the audit judges that slot as the fallback.
+
 Real inputs by shape: the inbound sites (C1 to C5, C7, C12, C13, and the
 message half of C6) draw real inbound ``valor`` messages through the default
 loader; the outbound sites (C8, C9, C10, C15) have no real outbound sample in
@@ -642,7 +647,7 @@ _site(
 )
 
 
-# --- C12: job_router.route (stays on granite; latency-only record) --------------------
+# --- C12: job_router.route (landed on granite; the granite reference arm) -------------
 
 _JOB_CANDIDATES = [
     {"job_id": "job-ui-redesign", "goal": "Redesign the settings UI"},
@@ -685,7 +690,7 @@ _site(
         prompt=_job_route_prompt,
         output_type=JobRouteDecision,
         label=lambda out: out.decision,
-        reference="anthropic",
+        reference="ollama",
         minimum_n=DEFAULT_MINIMUM_N,
         budget_s=None,
         fixtures=_job_route_fixtures,
@@ -693,7 +698,7 @@ _site(
 )
 
 
-# --- C13: classifier.intake_intent (stays on granite; latency-only record) -------------
+# --- C13: classifier.intake_intent (landed on granite; the granite reference arm) ------
 
 _INTAKE_SESSION_CONTEXT = "Working on UI redesign"
 _INTAKE_TEST_EXAMPLES = [
@@ -736,7 +741,7 @@ _site(
         prompt=_intake_prompt,
         output_type=IntentDecision,
         label=lambda out: out.intent,
-        reference="anthropic",
+        reference="ollama",
         minimum_n=DEFAULT_MINIMUM_N,
         budget_s=None,
         fixtures=_intake_fixtures,
@@ -744,7 +749,7 @@ _site(
 )
 
 
-# --- C14: memory_audit.classify (stays on granite; latency-only record) ----------------
+# --- C14: memory_audit.classify (landed on granite; the granite reference arm) ---------
 # Input shape: one memory record's content, clamped as the audit clamps it. Real
 # inputs: this machine's ``valor`` memory rows of every source, since a memory
 # row is exactly the layer-3 input.
@@ -769,7 +774,7 @@ _site(
         prompt=lambda inp: GEMMA_AUDIT_PROMPT.format(content=inp.text[:1000]),
         output_type=MemoryAuditDecision,
         label=lambda out: str(out.is_junk),
-        reference="anthropic",
+        reference="ollama",
         minimum_n=DEFAULT_MINIMUM_N,
         budget_s=None,
         fixtures=lambda: _fixtures(MEMORY_ROWS, FIXTURES_PER_SITE),

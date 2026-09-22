@@ -10,9 +10,10 @@ Two modes:
   comma list. Inputs are the row's fixtures plus real inbound ``valor``
   messages from the memory store (``--real-limit``); under the site minimum
   the run refuses and prints the shortfall, and no reference spend happens.
-  Stop the local services first (``./scripts/valor-service.sh stop``): a
-  loaded bridge, worker, or reflection-worker stamps ``contended: true``
-  and the record cannot clear the bar (Race 3).
+  Run it through ``scripts/classification-eval-uncontended.sh``, which
+  stops the bridge, worker, and reflection-worker for the run and restores
+  them on every exit: a loaded service stamps ``contended: true`` and the
+  record cannot clear the bar (Race 3).
 * ``--audit`` walks every declared classification site and applies the
   acceptance bar to its latest record; exit 1 on any miss, any site without
   a record, and any ``ANTHROPIC`` landing with no Anthropic arm.
@@ -27,6 +28,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from agent.llm.tasks import Backend, LLMTask
 from tools.classification_eval import (
@@ -75,7 +77,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="BACKEND",
-        help="candidate arm: ollama or anthropic; repeat or comma-separate",
+        help="candidate arm: ollama, anthropic, or decisions; repeat or comma-separate",
     )
     parser.add_argument(
         "--latency-only",
@@ -112,14 +114,56 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _candidate_arms(site_id: str, names: Sequence[str]) -> list[Arm]:
-    from tools.classification_eval.arms import anthropic_arm, ollama_arm
+def _candidate_arms(site_id: str, names: Sequence[str], *, latency_only: bool = False) -> list[Arm]:
+    """The candidate arms for ``names`` at ``site_id``, in order.
+
+    Where the site's reference arm is granite (``reference="ollama"``, C12
+    to C14) *and* the run also builds a reference arm (``latency_only`` is
+    False, so ``_run_site`` will call ``ollama_arm`` again for the reference)
+    the ``ollama`` candidate is dropped with a printed note: the reference is
+    that same call under the same default name, and a second copy would be
+    a granite-against-granite self-comparison whose agreement means nothing
+    (and whose name would collide with the reference's in the record, where
+    the audit's OLLAMA branch would read it as passing landing evidence).
+    The audit judges the reference slot as the fallback instead.
+
+    A latency-only run builds no reference arm at all (``_run_site`` skips
+    that block when ``latency_only`` is set), so an ``ollama``-only
+    candidate list there is never a self-comparison and is kept: dropping
+    it would leave ``compare()`` with zero candidate arms and no way to
+    regenerate the granite landing evidence at these sites (#3421 review
+    blocker 2). When the drop would empty the list (an explicit
+    ``--candidate ollama`` alone at a granite-reference site without
+    ``--latency-only``) this raises :class:`ValueError` naming the two
+    commands that make sense; ``main`` refuses the same shape as a parser
+    error before any input is drawn.
+    """
+    from tools.classification_eval import arms as live
 
     builders = {
-        Backend.OLLAMA.value: lambda: ollama_arm(site_id),
-        Backend.ANTHROPIC.value: lambda: anthropic_arm(site_id),
+        Backend.OLLAMA.value: lambda: live.ollama_arm(site_id),
+        Backend.ANTHROPIC.value: lambda: live.anthropic_arm(site_id),
+        Backend.DECISIONS.value: lambda: live.decisions_arm(site_id),
     }
-    return [builders[name]() for name in names]
+    wanted = list(names)
+    if not latency_only and Backend.OLLAMA.value in wanted and _reference_is_granite(site_id):
+        wanted.remove(Backend.OLLAMA.value)
+        if not wanted:
+            raise ValueError(_SELF_COMPARISON_REFUSAL.format(site_id=site_id))
+        print(f"ollama candidate dropped: the reference arm at {site_id} is granite")
+    return [builders[name]() for name in wanted]
+
+
+_SELF_COMPARISON_REFUSAL = (
+    "--candidate ollama alone at {site_id} compares granite against itself (the reference"
+    " arm there is granite); use --latency-only, or add a second candidate"
+)
+
+
+def _reference_is_granite(site_id: str) -> bool:
+    from tools.classification_eval.sites import site_for
+
+    return site_for(site_id).reference == "ollama"
 
 
 async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
@@ -144,29 +188,39 @@ async def _run_site(args: argparse.Namespace, candidates: list[str]) -> int:
     if contended:
         print(
             "WARNING: com.valor services are loaded; the record will carry contended: true"
-            " (stop them with ./scripts/valor-service.sh stop for a latency run)",
+            " (run through scripts/classification-eval-uncontended.sh for a latency run)",
             file=sys.stderr,
         )
 
-    transport = None
+    candidate_arms = _candidate_arms(site.id, candidates, latency_only=args.latency_only)
+    # Every input crosses each arm twice (the agreement pass and the latency
+    # pass); the metered transports reserve for that many calls and settle
+    # once, whatever happens in between.
+    metered: list[Any] = [
+        arm.call for arm in candidate_arms if isinstance(arm.call, live.DecisionsArm)
+    ]
     reference = None
     if not args.latency_only:
         if site.reference == "openrouter_gemma":
             reference, transport = live.openrouter_gemma_arm(paid=args.reference_model == "paid")
-            transport.reserve(len(inputs) * 2, project_key=args.project_key)
+            metered.append(transport)
+        elif site.reference == "ollama":
+            reference = live.ollama_arm(site.id, name="ollama")
         else:
             reference = live.anthropic_arm(site.id, model=site.model, name="anthropic")
+    for transport in metered:
+        transport.reserve(len(inputs) * 2, project_key=args.project_key)
 
     try:
         record = await compare(
             site,
             inputs,
             reference=reference,
-            candidates=_candidate_arms(site.id, candidates),
+            candidates=candidate_arms,
             contended=contended,
         )
     finally:
-        if transport is not None:
+        for transport in metered:
             transport.settle(project_key=args.project_key)
 
     payload = record.as_dict()
@@ -202,11 +256,21 @@ def main(argv: Sequence[str] | None = None, *, tasks: Sequence[LLMTask] | None =
 
     if not args.site:
         parser.error("one of --site, --audit, or --list-sites is required")
+    from tools.classification_eval.sites import SITES
+
+    if args.site not in SITES:
+        parser.error(f"unknown --site {args.site!r}; known rows: {', '.join(sorted(SITES))}")
     candidates = parse_candidates(args.candidate)
     if not candidates:
         if not args.latency_only:
             parser.error("--site needs at least one --candidate (or --latency-only)")
         candidates = [Backend.OLLAMA.value]
+    if (
+        candidates == [Backend.OLLAMA.value]
+        and not args.latency_only
+        and _reference_is_granite(args.site)
+    ):
+        parser.error(_SELF_COMPARISON_REFUSAL.format(site_id=args.site))
     return asyncio.run(_run_site(args, candidates))
 
 

@@ -300,7 +300,7 @@ Do not read this coupling as an argument for relaxing the whole-stack loader or 
 | `agent/anthropic_client.py` | `_load_stack`, the one memoized whole-stack loader |
 | `agent/llm/wrapper.py` | `_guard_stack`, `run_typed` (the axis chosen per route) |
 | `agent/llm/errors.py` | `LLMCallError`, `LLMStackIncompatible` |
-| `agent/llm/backends/` | the Anthropic and Ollama legs; every third-party symbol comes from the resolved stack |
+| `agent/llm/backends/` | the Anthropic, Ollama, and decisions legs; every third-party symbol comes from the resolved stack (the decisions leg's `httpx` client is `stack.AsyncHTTPClient`) |
 | `bridge/telegram_bridge.py` | startup resolution, `_sentry_before_send` sentinel exemption |
 | `worker/__main__.py` | startup resolution |
 | `ui/app.py` | `_get_llm_stack_health`, the marker glob into `/dashboard.json` |
@@ -314,7 +314,7 @@ Do not read this coupling as an argument for relaxing the whole-stack loader or 
 
 ## See Also
 
-- [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md): `run_typed`, its two backend legs, and every call site that uses it.
+- [Non-Harness LLM Wrapper](nonharness-llm-wrapper.md): `run_typed`, its three backend legs, and every call site that uses it.
 - [Remote Update](remote-update.md) — the `/update` orchestrator this gate runs inside.
 - [/update Warning Channel](update-warning-channel.md) — how a failed `ToolCheck` reaches chat.
 - [Config Timeout Catalog](config-timeout-catalog.md) — `TIMEOUTS__*` fields, including `local_typed_hard_s`.

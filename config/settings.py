@@ -40,6 +40,23 @@ class APISettings(BaseModel):
     notion_api_key: str | None = Field(
         default=None, description="Notion API key for workspace integration"
     )
+    # A flat key on a nested group: the ``API__`` nested-delimiter source never
+    # sees the vault's bare ``TYPESAFE_API_KEY``, so the field reads it through
+    # ``default_factory`` (the ``HybridEvalSettings`` pattern below).
+    # ``validate_default=True`` is load-bearing: pydantic v2 skips an ``after``
+    # field validator for a default, a ``default_factory`` value included,
+    # unless the field opts in, and without it the shared validator below
+    # would never see the factory value (#3421).
+    typesafe_api_key: str | None = Field(
+        default_factory=lambda: os.getenv("TYPESAFE_API_KEY"),
+        validate_default=True,
+        description=(
+            "TypeSafe API key for the decisions leg of run_typed "
+            "(agent/llm/backends/decisions.py, Jev structured decisions). "
+            "Read only through settings.api.typesafe_api_key; None means every "
+            "decisions call falls back to the local Ollama leg. Env: TYPESAFE_API_KEY."
+        ),
+    )
 
     @field_validator(
         "claude_api_key",
@@ -47,6 +64,7 @@ class APISettings(BaseModel):
         "openrouter_api_key",
         "perplexity_api_key",
         "notion_api_key",
+        "typesafe_api_key",
     )
     @classmethod
     def validate_api_keys(cls, v):
@@ -392,6 +410,24 @@ class TimeoutSettings(BaseModel):
             "to the Anthropic leg), so a timeout here costs a conservative "
             "default, never a lost message; a low value is the operator's "
             "lever for a degraded daemon. Env: TIMEOUTS__LOCAL_TYPED_HARD_S."
+        ),
+    )
+    decisions_sdk_s: float = Field(
+        default=3.0,
+        ge=0.5,
+        le=60.0,
+        description=(
+            "The decisions leg's single SDK-level request timer (seconds): "
+            "`AsyncHTTPClient(timeout=...)` in agent/llm/backends/decisions.py, "
+            "the leg's default when the caller passes no `sdk_timeout`, read "
+            "at call time so a bump takes effect without a reload. One timer "
+            "around one POST to TypeSafe's structured-decision endpoint, no "
+            "retry: the endpoint answered in 1.0 to 1.5 s on every probe "
+            "(#3421 spike-1), so 3 s is about 2x headroom, and a timeout "
+            'raises `LLMCallError(reason="timeout")` so the Ollama fallback '
+            "runs inside the caller's remaining budget. The floor (0.5 s) is "
+            "the operator's off switch: every call then falls to granite. "
+            "Env: TIMEOUTS__DECISIONS_SDK_S."
         ),
     )
 

@@ -10,6 +10,10 @@ Reference arms (the site's backend on ``main`` before the taxonomy):
   ``promise_detector`` purpose (``tools/paid_inference_meter``: one
   reservation per run, settled from the accumulated ``usage.cost``).
 
+* :func:`ollama_arm` as the reference at C12, C13, and C14 (#3421), whose
+  landed backend is granite: a decisions comparison there measures granite
+  once, as the reference, and the audit judges that slot as the fallback.
+
 Candidate arms:
 
 * :func:`ollama_arm`: granite through the Ollama leg, called directly rather
@@ -17,6 +21,19 @@ Candidate arms:
   Anthropic fallback and a fallback answer would count as granite agreement.
 * :func:`anthropic_arm` again, for a site whose landing backend is Haiku and
   needs a measured number (C15).
+* :func:`decisions_arm` (#3421): TypeSafe's Jev through the decisions leg
+  (``agent/llm/backends/decisions.py::call``), called directly for the same
+  reason as granite (a ``DECISIONS`` route falls back to granite, and a
+  fallback answer would count as Jev agreement). The arm is a
+  :class:`DecisionsArm`: it carries its own per-run
+  :class:`~agent.llm.backends.decisions.SpendEnvelope` under purpose
+  ``structured_decision`` (reserved once for ``max(0.01, CALL_BOUND_USD × 2
+  × n)`` before the run and settled once in ``finally``, like the gemma
+  arm's transport), and prices each call at ``input_tokens × JEV price /
+  1e6`` from the envelope's own accounting; a 200 with no ``input_tokens``
+  returns ``None`` (the runner estimates) and marks the envelope
+  ``unknown``. :func:`jev_price` is the list price with its retrieval date,
+  and refuses to build the arm while the price constant is ``None``.
 
 Every arm has the :data:`~tools.classification_eval.ArmCall` shape and is
 built lazily so importing this module touches no network client.
@@ -35,8 +52,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from agent.llm.backends import decisions as decisions_leg
+from agent.llm.backends.decisions import CALL_BOUND_USD, SpendEnvelope
 from agent.llm.tasks import Backend, LLMTask, TaskKind
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL, OPENROUTER_GEMMA4_FREE
+from config.models import (
+    JEV,
+    JEV_PRICE_USD_PER_MTOKEN,
+    MODEL_FAST,
+    OLLAMA_CLASSIFIER_MODEL,
+    OPENROUTER_GEMMA4_FREE,
+)
 from tools.classification_eval import CASE_ID, PROJECT_KEY, Arm, Input, Price, Site
 
 logger = logging.getLogger(__name__)
@@ -80,6 +105,28 @@ GRANITE_PRICE = Price(
     retrieved_at="2026-09-19",
     note="local Ollama; no per-token price",
 )
+
+
+def jev_price() -> Price:
+    """Jev's list price for the record; refuses while the constant is ``None``.
+
+    ``None`` means unknown, never zero (charter §8): a record stamped with a
+    zero price would put a free-looking cost estimate beside an envelope that
+    settled ``unknown``, so the arm is not built until the price is known.
+    """
+    if JEV_PRICE_USD_PER_MTOKEN is None:
+        raise ValueError(
+            "config.models.JEV_PRICE_USD_PER_MTOKEN is None: the decisions arm cannot price"
+            " its record; set it from https://docs.typesafe.ai/models before a comparison"
+        )
+    return Price(
+        model=JEV,
+        usd_per_mtoken_in=JEV_PRICE_USD_PER_MTOKEN,
+        usd_per_mtoken_out=0.0,
+        retrieved_at="2026-09-21",
+        note="TypeSafe list price (https://docs.typesafe.ai/models): input tokens only,"
+        " output free",
+    )
 
 
 def _pinned_task(site_id: str, backend: Backend) -> LLMTask:
@@ -134,6 +181,99 @@ def ollama_arm(site_id: str, *, name: str = "ollama") -> Arm:
         model=OLLAMA_CLASSIFIER_MODEL,
         price=GRANITE_PRICE,
         call=call,
+    )
+
+
+class PricedEnvelope(SpendEnvelope):
+    """A :class:`~agent.llm.backends.decisions.SpendEnvelope` that also
+    remembers what the last priced response cost (``None`` when the leg
+    could not price it), for the arm's per-call cost."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.last_call_usd: float | None = None
+
+    def add_tokens(self, input_tokens: int) -> None:
+        before = self.accumulated_usd
+        super().add_tokens(input_tokens)
+        # A ``None`` price constant makes the base mark the envelope unknown
+        # and add nothing; a priced response after an unpriced one is still
+        # priced on its own.
+        self.last_call_usd = (
+            None if JEV_PRICE_USD_PER_MTOKEN is None else self.accumulated_usd - before
+        )
+
+    def mark_unknown(self) -> None:
+        super().mark_unknown()
+        self.last_call_usd = None
+
+
+class DecisionsArm:
+    """The decisions leg as a runner arm with its own per-run envelope (#3421).
+
+    ``reserve(calls)`` opens the run's reservation for ``max(0.01,
+    CALL_BOUND_USD × calls)`` (``calls`` is ``2 × n``: every input crosses the
+    arm in the agreement pass and the latency pass) and ``settle()`` closes
+    it once; the caller brackets ``compare`` with them in a ``finally``, the
+    shape of :class:`OpenRouterGemmaArm`. Each call goes to
+    ``agent.llm.backends.decisions.call`` directly with this envelope, so a
+    leg failure is the arm's own error and never a fallback answer. The
+    call's cost is what the leg added to the envelope for it (``input_tokens
+    × JEV price / 1e6``); a response the leg could not price returns
+    ``None`` and drops ``metering`` to ``"unknown"`` (charter §8).
+    """
+
+    def __init__(self) -> None:
+        self.envelope = PricedEnvelope()
+        self.model = JEV
+
+    @property
+    def metering(self) -> str:
+        return self.envelope.metering
+
+    def reserve(self, calls: int, *, project_key: str = PROJECT_KEY) -> None:
+        self.envelope.project_key = project_key
+        refused = self.envelope.reserve(max(0.01, CALL_BOUND_USD * calls))
+        if refused is not None:
+            raise RuntimeError(f"paid-inference meter refused the decisions arm: {refused}")
+
+    def settle(self, *, project_key: str = PROJECT_KEY) -> None:
+        self.envelope.project_key = project_key
+        self.envelope.settle()
+
+    async def __call__(self, prompt: str, system: str | None, output_type: type[BaseModel]):
+        from agent.anthropic_client import _load_stack
+        from agent.llm.backends import default_sdk_timeout
+        from agent.llm.router import Route
+
+        output = await decisions_leg.call(
+            prompt,
+            output_type,
+            Route(Backend.DECISIONS, self.model),
+            system=system,
+            sdk_timeout=default_sdk_timeout(Backend.DECISIONS),
+            slot_timeout=None,
+            max_retries=0,
+            deadline=None,
+            stack=_load_stack(),
+            envelope=self.envelope,
+        )
+        # The leg prices the response synchronously before returning, so the
+        # envelope's last entry is this call's even under the concurrency-4 pass.
+        return output, self.envelope.last_call_usd
+
+
+def decisions_arm(site_id: str, *, name: str = "decisions") -> Arm:
+    """Jev through the decisions leg, directly, with a per-run envelope; the
+    caller reserves and settles the returned arm's :class:`DecisionsArm`.
+    ``site_id`` is accepted for the builder-table shape; the leg carries no
+    task, so nothing is pinned by site."""
+    return Arm(
+        name=name,
+        backend=Backend.DECISIONS.value,
+        model=JEV,
+        price=jev_price(),
+        call=DecisionsArm(),
     )
 
 
