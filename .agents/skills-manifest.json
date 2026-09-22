@@ -49,7 +49,7 @@
         ".claude/skills-global/audit-skills/references/anthropic-skills-docs.txt": "416956fd4a823b16f7db50feeeb2889a18591762356f9ef1bcb36c886c3d7d0a",
         ".claude/skills-global/audit-skills/references/rubric.md": "119f1fba4ccf6e8f2374d60366314f3fad02a4034490f7fe117758946139aa27",
         ".claude/skills-global/audit-skills/scripts/sync_best_practices.py": "bea8ec72535e7c4257a8deb38e002efc67735c585c969af46ef7bf42deb9a27e",
-        ".claude/skills-global/audit-skills/scripts/audit_skills.py": "757e8f792b61cd36b593e20c079d88f1a9d287bbee3d96869271aa2b72d71b69"
+        ".claude/skills-global/audit-skills/scripts/audit_skills.py": "410919514e129155a1f99b75b08df666dbd8c121f1313b7ce2240a2afb913210"
       },
       "target": ".agents/skills-global/audit-skills",
       "resources": [
