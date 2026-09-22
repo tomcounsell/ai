@@ -461,3 +461,153 @@ class TestIncidentRegression:
         )
         assert result["deleted"] is True, "Merged branch should be deleted"
         assert not _branch_exists(repo, "session/sdlc-merged")
+
+
+# ---------------------------------------------------------------------------
+# Checked-out-in-a-worktree pre-check (#3411)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckedOutPreCheck:
+    """A branch checked out by a worktree must be preserved, and say so.
+
+    Git already refuses ``git branch -d`` for a branch another worktree holds,
+    so the branch survived before this pre-check too — but it survived with
+    ``deleted: False, skipped_unmerged: False`` and a stderr string, which is
+    indistinguishable from "the delete blew up". Naming the outcome is what
+    lets a caller log it as preservation rather than failure, and what stops a
+    caller escalating to ``force=True`` in the belief the refusal was about
+    merge state.
+
+    The check sits between the predicate and the delete, not ahead of the
+    predicate: a lane's own worktree always holds its branch, so an
+    ahead-of-predicate check would make the #3411 regression net's
+    "the predicate was asked about the branch holding the work" observable
+    unreachable. The precedence that buys is pinned below.
+    """
+
+    def test_branch_held_by_a_worktree_is_preserved_and_named(self, tmp_path, caplog):
+        """The merged case: only the pre-check can preserve this branch."""
+        repo = _make_repo(tmp_path)
+        _git(repo, "branch", "session/held")
+        # Merged by construction — the predicate would say "delete it".
+        wt = tmp_path / "wt"
+        _git(repo, "worktree", "add", str(wt), "session/held")
+
+        with caplog.at_level(logging.WARNING, logger="agent.worktree_manager"):
+            result = safe_delete_branch(
+                str(repo), "session/held", predicate=merged_via_ancestor, force=False
+            )
+
+        assert result["deleted"] is False
+        assert result["skipped_checked_out"] is True
+        assert result["skipped_unmerged"] is False, (
+            "a checked-out branch is not an unmerged one; conflating them "
+            "sends callers looking at the wrong thing"
+        )
+        assert _branch_exists(repo, "session/held")
+
+    def test_unmerged_and_checked_out_reports_unmerged(self, tmp_path):
+        """Precedence, pinned: the predicate runs first, so unmerged wins.
+
+        Both outcomes preserve, so nothing is at risk either way — but a caller
+        reading ``skipped_checked_out`` to mean "merge state was never
+        consulted" would be wrong, and this is where that is written down.
+        """
+        repo = _make_repo(tmp_path)
+        _git(repo, "checkout", "-b", "session/both")
+        (repo / "w.txt").write_text("unmerged\n")
+        _git(repo, "add", "w.txt")
+        _git(repo, "commit", "-m", "unmerged work")
+        _git(repo, "checkout", "main")
+        wt = tmp_path / "wt-both"
+        _git(repo, "worktree", "add", str(wt), "session/both")
+
+        result = safe_delete_branch(
+            str(repo), "session/both", predicate=merged_via_ancestor, force=False
+        )
+
+        assert result["deleted"] is False
+        assert result["skipped_unmerged"] is True
+        assert result["skipped_checked_out"] is False
+        assert _branch_exists(repo, "session/both")
+
+    def test_force_does_not_override_the_pre_check(self, tmp_path):
+        """``force=True`` escalates ``-d`` to ``-D``; it does not make this safe."""
+        repo = _make_repo(tmp_path)
+        _git(repo, "branch", "session/held-force")
+        wt = tmp_path / "wt-force"
+        _git(repo, "worktree", "add", str(wt), "session/held-force")
+
+        result = safe_delete_branch(
+            str(repo), "session/held-force", predicate=merged_via_ancestor, force=True
+        )
+
+        assert result["deleted"] is False
+        assert result["skipped_checked_out"] is True
+        assert _branch_exists(repo, "session/held-force")
+
+    def test_key_is_present_and_false_on_every_other_path(self, tmp_path):
+        """Callers read ``result["skipped_checked_out"]``; a missing key is a KeyError.
+
+        Covers all four non-pre-check returns: unresolvable base, raising
+        predicate, unmerged, and the successful delete.
+        """
+        repo = _make_repo(tmp_path)
+        _git(repo, "checkout", "-b", "session/other-paths")
+        (repo / "w.txt").write_text("work\n")
+        _git(repo, "add", "w.txt")
+        _git(repo, "commit", "-m", "work")
+        _git(repo, "checkout", "main")
+
+        def _raises(*_args):
+            raise RuntimeError("predicate exploded")
+
+        unresolvable_base = safe_delete_branch(
+            str(repo), "session/other-paths", base="no-such-base", predicate=merged_via_ancestor
+        )
+        raising_predicate = safe_delete_branch(str(repo), "session/other-paths", predicate=_raises)
+        unmerged = safe_delete_branch(
+            str(repo), "session/other-paths", predicate=merged_via_ancestor
+        )
+
+        _git(repo, "merge", "session/other-paths", "--no-ff", "-m", "merge")
+        deleted = safe_delete_branch(
+            str(repo), "session/other-paths", predicate=merged_via_ancestor
+        )
+
+        assert deleted["deleted"] is True, "fixture: the merged branch should delete"
+        for name, result in (
+            ("unresolvable_base", unresolvable_base),
+            ("raising_predicate", raising_predicate),
+            ("unmerged", unmerged),
+            ("deleted", deleted),
+        ):
+            assert result["skipped_checked_out"] is False, (
+                f"{name} must carry the key present-and-False, got {result!r}"
+            )
+
+    def test_scan_failure_fails_safe_to_preserving(self, tmp_path, monkeypatch):
+        """An unreadable worktree list must not be read as 'not checked out'.
+
+        ``_find_worktree_for_branch`` returns ``None`` on a git error, which
+        reads identically to "no worktree holds it" — so the pre-check cannot
+        be built on it. A scan that could not answer preserves.
+        """
+        import agent.worktree_manager as wm
+
+        repo = _make_repo(tmp_path)
+        _git(repo, "branch", "session/scan-fail")
+
+        def _boom(*_args, **_kwargs):
+            raise OSError("git worktree list unavailable")
+
+        monkeypatch.setattr(wm, "_scan_checked_out_worktree", _boom)
+
+        result = safe_delete_branch(
+            str(repo), "session/scan-fail", predicate=merged_via_ancestor, force=False
+        )
+
+        assert result["deleted"] is False
+        assert result["skipped_checked_out"] is True
+        assert _branch_exists(repo, "session/scan-fail")

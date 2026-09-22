@@ -245,7 +245,7 @@ Or directly via `AgentSession.create(session_type="eng", ...)`.
 - `is_eng`, `is_teammate` -- type checks
 - `is_sdlc` -- derived from stage_states (not a stored flag)
 - `current_stage` -- first stage with status "in_progress"
-- `derived_branch_name` -- `session/{slug}` if slug exists
+- `derived_branch_name` -- the recorded branch (`branch_name`) if set, else `session/{slug}` if slug exists; see [Lane Branch Identity](lane-branch-identity.md)
 - `plan_path` -- `docs/plans/{slug}.md` if slug exists
 - `summary`, `result_text`, `stage_states`, `last_commit_sha` -- derived from `session_events`
 - `scheduling_depth` -- derived from parent chain walk (max depth 5)

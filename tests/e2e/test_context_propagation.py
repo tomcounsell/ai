@@ -139,7 +139,15 @@ class TestChildParentLinkage:
 class TestDerivedPaths:
     """Verify slug-derived branch names and plan paths."""
 
-    def test_slug_derives_branch_name(self):
+    def test_slug_seeds_branch_name_when_nothing_is_recorded(self):
+        """A lane with no recorded branch falls back to the ``session/{slug}`` seed.
+
+        This is a context-propagation test, so the *seed* is the point: a child
+        that has never been checkpointed must still name the branch its worktree
+        will be created on. ``branch_name`` is cleared explicitly because a
+        Popoto-unset field reads as ``""``, and only an empty record reaches the
+        seed rung (#3411).
+        """
         ts = int(time.time())
         child = AgentSession.create_child(
             session_id=f"slug_{ts}",
@@ -149,8 +157,66 @@ class TestDerivedPaths:
             message_text="build",
             slug="my-cool-feature",
         )
+        child.branch_name = ""
         assert child.derived_branch_name == "session/my-cool-feature"
         assert child.plan_path == "docs/plans/my-cool-feature.md"
+
+    def test_recorded_branch_wins_over_the_slug_seed(self):
+        """Once a lane is checkpointed, the record outranks the seed (#3411).
+
+        The lane that moved off ``session/{slug}`` is the one the old precedence
+        mis-reported, and the report was what the launch guard demanded.
+        """
+        ts = int(time.time())
+        child = AgentSession.create_child(
+            session_id=f"slugrec_{ts}",
+            project_key="valor",
+            working_dir="/tmp/test",
+            parent_agent_session_id="parent_x",
+            message_text="build",
+            slug="my-cool-feature",
+        )
+        child.branch_name = "session/actually-here"
+        child.save()
+
+        reloaded = list(AgentSession.query.filter(session_id=child.session_id))[0]
+        assert reloaded.derived_branch_name == "session/actually-here"
+        assert reloaded.plan_path == "docs/plans/my-cool-feature.md"
+
+    def test_detached_head_record_falls_back_to_the_seed(self):
+        """``"HEAD"`` is git's detached sentinel, never a branch name (#3411 spike-2).
+
+        Handing it on would make the launch guard demand a branch that cannot
+        exist, so the accessor and this property both normalise it away.
+        """
+        ts = int(time.time())
+        child = AgentSession.create_child(
+            session_id=f"slugdet_{ts}",
+            project_key="valor",
+            working_dir="/tmp/test",
+            parent_agent_session_id="parent_x",
+            message_text="build",
+            slug="my-cool-feature",
+        )
+        child.branch_name = "HEAD"
+        assert child.derived_branch_name == "session/my-cool-feature"
+
+        child.branch_name = "   "
+        assert child.derived_branch_name == "session/my-cool-feature"
+
+    def test_no_slug_and_no_record_resolves_to_none(self):
+        """Neither rung available means ``None``, not a guessed name."""
+        ts = int(time.time())
+        session = AgentSession.create_eng(
+            session_id=f"noneither_{ts}",
+            project_key="valor",
+            working_dir="/tmp/test",
+            chat_id="fb_chat",
+            telegram_message_id=1,
+            message_text="quick question",
+        )
+        session.branch_name = ""
+        assert session.derived_branch_name is None
 
     def test_no_slug_falls_back_to_branch_name(self):
         ts = int(time.time())

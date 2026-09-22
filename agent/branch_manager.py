@@ -439,19 +439,18 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
         # Return to main
         switched = return_to_main(working_dir)
 
-        # Delete the session branch locally so it doesn't re-trigger revival
-        if switched and branch_name.startswith("session/"):
-            try:
-                subprocess.run(
-                    ["git", "branch", "-d", branch_name],
-                    cwd=working_dir,
-                    capture_output=True,
-                    timeout=settings.timeouts.git_subprocess_s,
-                )
-                logger.info(f"Deleted local branch: {branch_name}")
-            except Exception as e:
-                logger.warning(f"Failed to delete branch {branch_name}: {e}")
-
+        # This function does NOT delete branches (#3411). It used to, gated
+        # only on a `session/` prefix — no worktree check, no merge predicate —
+        # and it ran one line BEFORE `safe_delete_branch` could evaluate
+        # anything, so the #1646 unmerged-branch guard was bypassed by
+        # *ordering* rather than by an override. The bypass hid because
+        # `merged_via_ancestor` returns False for a branch that no longer
+        # exists, making the second delete attempt silent. On 2026-09-16 that
+        # deletion removed a lane's branch 646 ms before the #1377 launch guard
+        # demanded it, and the user-visible symptom was silence. The log line
+        # it emitted claimed success unconditionally: no `check=True`, no
+        # returncode inspection. `safe_delete_branch` is now the repo's only
+        # deletion site; every caller that needs one calls it with a predicate.
         return switched
 
     except Exception as e:

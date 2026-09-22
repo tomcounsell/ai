@@ -171,6 +171,81 @@ from config.enums import PersonaType  # noqa: E402
 PENDING_MERGE_WINDOW_SECONDS = 8
 
 
+def retire_revival_branch(working_dir_str: str, branch_name: str, project_name: str) -> dict | None:
+    """Make a prompted-but-stale branch dormant. Returns the deletion result.
+
+    Called right after a revival prompt is sent, so the same branch does not
+    prompt again on the next message. Dormancy here **requires a deletion**:
+    archiving, committing and returning to ``main`` leave the branch in
+    ``git branch --list``, and ``check_revival``'s branch-existence check is
+    what drops a candidate from the prompt list. With no deletion at all the
+    lane re-fires every ``REVIVAL_COOLDOWN_SECONDS``, and because that cooldown
+    is per-chat, each false revival also suppresses genuine ones for 24h.
+
+    The deletion therefore stayed, but it moved behind the #1646 guard
+    (#3411). ``mark_work_done`` used to delete the branch itself with an
+    unguarded, unverified ``git branch -d``: on this path that destroyed
+    unmerged work to achieve dormancy. Now an unmerged branch is **preserved**
+    and its prompt may re-fire once per 24h per chat, which is the designed
+    cadence for work that is genuinely unfinished. The case that nagged
+    pointlessly — merged but still on disk — is the one that goes away.
+
+    ``working_dir_str`` is the shared project checkout
+    (``project["working_directory"]``), never a ``.worktrees/{slug}/`` lane, so
+    nothing lane-scoped applies here.
+
+    Every outcome is logged distinguishably and downstream of a checked
+    ``returncode``; ``None`` means the attempt raised and was swallowed, since
+    this runs inline in the message handler and must never break intake.
+    """
+    try:
+        from agent.branch_manager import mark_work_done
+        from agent.worktree_manager import merged_via_ancestor, safe_delete_branch
+
+        mark_work_done(Path(working_dir_str), branch_name)
+
+        result = safe_delete_branch(
+            working_dir_str,
+            branch_name,
+            predicate=merged_via_ancestor,
+            force=False,
+        )
+    except Exception as e:
+        logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
+        return None
+
+    if result["deleted"]:
+        logger.info(
+            f"[{project_name}] Retired dormant branch {branch_name} (merged into main — deleted)"
+        )
+    elif result["skipped_unmerged"]:
+        # "not proven merged" rather than "unmerged": safe_delete_branch sets
+        # this flag for an unresolvable base and a raising predicate too, and
+        # all three fail safe to preserving.
+        reason = result.get("error") or "unmerged commits"
+        logger.info(
+            f"[{project_name}] Kept dormant branch {branch_name} "
+            f"(not proven merged: {reason} — preserved; revival may re-prompt "
+            f"once per cooldown)"
+        )
+    elif result["skipped_checked_out"]:
+        if (result.get("error") or "").startswith("worktree scan failed"):
+            logger.warning(
+                f"[{project_name}] Could not scan worktrees for branch {branch_name} "
+                f"— preserving as a fail-safe: {result.get('error')}"
+            )
+        else:
+            logger.info(
+                f"[{project_name}] Kept dormant branch {branch_name} "
+                f"(checked out by a worktree — preserved)"
+            )
+    else:
+        logger.warning(
+            f"[{project_name}] Could not delete dormant branch {branch_name}: {result.get('error')}"
+        )
+    return result
+
+
 def _pending_session_age_seconds(created_at, now_ts: float) -> float:
     """Age in seconds of a session's created_at relative to now_ts.
 
@@ -2461,15 +2536,7 @@ async def main():
 
             # Mark the stale work as dormant so it doesn't re-trigger.
             # A reply to the revival message will re-queue via branch name in the text.
-            try:
-                from agent.branch_manager import mark_work_done
-
-                mark_work_done(Path(working_dir_str), revival_info["branch"])
-                logger.info(
-                    f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant"
-                )
-            except Exception as e:
-                logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
+            retire_revival_branch(working_dir_str, revival_info["branch"], project_name)
 
         # Serialize URL metadata for TelegramMessage storage
         yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
