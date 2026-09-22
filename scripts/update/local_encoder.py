@@ -12,13 +12,12 @@ the router's Anthropic fallback answers until the next update, and
 
 from __future__ import annotations
 
-import hashlib
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from config.models import LOCAL_ENCODER_FILES, local_encoder_models_dir
+from config.models import LOCAL_ENCODER_FILES, local_encoder_models_dir, local_encoder_weights_state
 
 
 @dataclass
@@ -31,22 +30,10 @@ class DownloadResult:
     error: str | None = None
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def weights_verified(models_dir: Path | None = None) -> bool:
     """True when every pinned file is present with its pinned sha256."""
-    root = models_dir or local_encoder_models_dir()
-    for filename, expected in LOCAL_ENCODER_FILES.items():
-        path = root / filename
-        if not path.is_file() or _sha256(path) != expected:
-            return False
-    return True
+    state = local_encoder_weights_state(models_dir, LOCAL_ENCODER_FILES)
+    return all(value == "ok" for value in state.values())
 
 
 def ensure_models(project_dir: Path) -> DownloadResult:

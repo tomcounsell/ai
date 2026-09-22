@@ -26,7 +26,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import ssl
 import sys
 from pathlib import Path
@@ -39,6 +38,7 @@ from config.models import (  # noqa: E402
     LOCAL_ENCODER_MODEL,
     LOCAL_ENCODER_REVISION,
     local_encoder_models_dir,
+    sha256_file,
 )
 
 HF_BASE = f"https://huggingface.co/{LOCAL_ENCODER_MODEL}/resolve/{LOCAL_ENCODER_REVISION}"
@@ -47,14 +47,6 @@ HF_BASE = f"https://huggingface.co/{LOCAL_ENCODER_MODEL}/resolve/{LOCAL_ENCODER_
 def source_url(filename: str) -> str:
     """The pinned-revision download URL for one file in ``LOCAL_ENCODER_FILES``."""
     return f"{HF_BASE}/{filename}"
-
-
-def sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _download(url: str, tmp: Path) -> None:
@@ -100,7 +92,7 @@ def fetch(filename: str, expected: str, models_dir: Path, *, force: bool) -> boo
     """
     dest = models_dir / filename
     if dest.exists() and not force:
-        actual = sha256_of(dest)
+        actual = sha256_file(dest)
         if actual == expected:
             size_mb = dest.stat().st_size / 1_048_576
             print(f"[skip] {filename} present, sha256 verified ({size_mb:.1f} MB)")
@@ -115,7 +107,7 @@ def fetch(filename: str, expected: str, models_dir: Path, *, force: bool) -> boo
         print(f"[fail] {filename}: {e}", file=sys.stderr)
         return False
 
-    actual = sha256_of(tmp)
+    actual = sha256_file(tmp)
     if actual != expected:
         tmp.unlink(missing_ok=True)
         print(
@@ -156,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
             if dest.exists():
                 state = (
                     "(present, verified, would skip)"
-                    if sha256_of(dest) == expected
+                    if sha256_file(dest) == expected
                     else "(present, sha256 mismatch, would re-download)"
                 )
             else:

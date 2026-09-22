@@ -1808,39 +1808,50 @@ def _local_encoder_extra_importable() -> bool:
 
 def _local_encoder_weights_state() -> tuple[Path, dict[str, str]]:
     """``(models_dir, {filename: "ok" | "missing" | "mismatch"})`` for every pinned file."""
-    import hashlib
-
-    from config.models import LOCAL_ENCODER_FILES, local_encoder_models_dir
+    from config.models import (
+        LOCAL_ENCODER_FILES,
+        local_encoder_models_dir,
+        local_encoder_weights_state,
+    )
 
     models_dir = local_encoder_models_dir()
-    state: dict[str, str] = {}
-    for filename, expected in LOCAL_ENCODER_FILES.items():
-        path = models_dir / filename
+    return models_dir, local_encoder_weights_state(models_dir, LOCAL_ENCODER_FILES)
+
+
+def _local_encoder_heads_state(encoder_sites: list[str]) -> dict[str, str]:
+    """``{site: reason}`` for every declared ``LOCAL_ENCODER`` site whose served
+    head is missing or fails the leg's validating loader (a head the leg
+    cannot load falls back to Anthropic on every call exactly like a
+    missing one)."""
+    from agent.llm.backends import local_encoder
+    from agent.llm.errors import LLMCallError
+
+    bad: dict[str, str] = {}
+    for site in encoder_sites:
+        path = local_encoder.served_head_path(site)
         if not path.is_file():
-            state[filename] = "missing"
+            bad[site] = "missing"
             continue
-        digest = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                digest.update(chunk)
-        state[filename] = "ok" if digest.hexdigest() == expected else "mismatch"
-    return models_dir, state
+        try:
+            local_encoder.load_head(path)
+        except LLMCallError as e:
+            bad[site] = f"unreadable ({e})"
+    return bad
 
 
 def _local_encoder_row(category: str, encoder_sites: list[str]) -> CheckResult:
     """The ``local_encoder`` row (#3420), mirroring ``ollama_daemon``.
 
     Extra importable, every pinned weights file present with its sha256,
-    one head per declared ``LOCAL_ENCODER`` site. Fails, naming the fix,
+    one head per declared ``LOCAL_ENCODER`` site that loads through the
+    leg's validating loader. Fails, naming the fix,
     when a declared site would fall back to Anthropic on every call on
     this machine; with no declared site the state is reported as info.
     """
-    from agent.llm.backends import local_encoder
-
     extra_ok = _local_encoder_extra_importable()
     models_dir, weights = _local_encoder_weights_state()
     bad_weights = {name: state for name, state in weights.items() if state != "ok"}
-    missing_heads = [s for s in encoder_sites if not local_encoder.served_head_path(s).is_file()]
+    bad_heads = _local_encoder_heads_state(encoder_sites)
 
     parts = [f"extra={'installed' if extra_ok else 'missing'}"]
     if bad_weights:
@@ -1853,10 +1864,12 @@ def _local_encoder_row(category: str, encoder_sites: list[str]) -> CheckResult:
         )
     else:
         parts.append(f"weights=ok ({len(weights)} files verified under {models_dir})")
-    if missing_heads:
-        parts.append(f"heads=missing: {', '.join(missing_heads)}")
+    if bad_heads:
+        parts.append(
+            "heads=" + "; ".join(f"{reason}: {site}" for site, reason in sorted(bad_heads.items()))
+        )
     else:
-        parts.append(f"heads=ok ({len(encoder_sites)})")
+        parts.append(f"heads=ok ({len(encoder_sites)} verified)")
     parts.append(f"LOCAL_ENCODER sites: {', '.join(encoder_sites) if encoder_sites else 'none'}")
 
     fixes: list[str] = []
@@ -1864,7 +1877,7 @@ def _local_encoder_row(category: str, encoder_sites: list[str]) -> CheckResult:
         fixes.append("uv sync --all-extras")
     if bad_weights:
         fixes.append("python scripts/download_local_encoder_models.py")
-    for site in missing_heads:
+    for site in sorted(bad_heads):
         fixes.append(
             f"commit agent/llm/backends/heads/{site}.json (python -m tools.classification_eval "
             f"--site {site} --fit --land) or move the site back to Backend.ANTHROPIC"

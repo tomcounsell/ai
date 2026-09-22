@@ -33,19 +33,21 @@ Leg protocol (``agent/llm/backends/__init__.py``), as this leg meets it::
 
 Import-safety contract (#3001, #3525): module scope is stdlib and our own
 code only. ``onnxruntime``, ``tokenizers`` and ``numpy`` are imported
-inside :func:`_build_runtime`, :func:`_embed` and :func:`scores`, so
+inside :func:`_build_runtime`, :func:`embed` and :func:`scores`, so
 ``import agent.llm`` succeeds on a machine without the
 ``classification-local`` extra and the failure surfaces at the call.
-:func:`_load_runtime` (memoized once per process under a
+:func:`load_runtime` (memoized once per process under a
 ``threading.Lock``, Race 1) is the test seam:
-``monkeypatch.setattr(local_encoder, "_load_runtime", lambda: fake)`` with
+``monkeypatch.setattr(local_encoder, "load_runtime", lambda: fake)`` with
 ``tests.helpers.llm_fakes.FakeEncoderRuntime``. The leg never downloads:
 ``scripts/download_local_encoder_models.py`` fetches the weights at
 ``/update`` and this module verifies every file's sha256 against
 ``config.models.LOCAL_ENCODER_FILES`` at load and refuses on a mismatch.
 
 Head file format (``agent/llm/backends/heads/<site>.json``, exactly
-:meth:`Head.to_dict` written with ``indent=2, sort_keys=True``):
+:meth:`Head.to_dict` written with ``indent=2, sort_keys=True`` plus one
+trailing newline, as ``tools/classification_eval/fit.py::write_head``
+writes it and ``tests/unit/test_classifier_heads.py`` pins it):
 
 ``site``, ``classes`` (the output field's values as the runner's ``label``
 reducer renders them: ``"True"``/``"False"`` for a ``bool`` field, the
@@ -69,7 +71,6 @@ every other field must have a default. Enforced here at call time
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -81,7 +82,12 @@ from typing import TYPE_CHECKING, Any, Literal, get_args, get_origin
 
 from agent.llm.backends import bound_to_deadline
 from agent.llm.errors import LLMCallError
-from config.models import LOCAL_ENCODER_DIM, LOCAL_ENCODER_FILES, local_encoder_models_dir
+from config.models import (
+    LOCAL_ENCODER_DIM,
+    LOCAL_ENCODER_FILES,
+    local_encoder_models_dir,
+    sha256_file,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy as np
@@ -179,13 +185,13 @@ def load_head(path: Path) -> Head:
 _LOCK = threading.Lock()
 """Guards the one-time runtime build (Race 1); taken inside ``asyncio.to_thread``."""
 _HEADS_LOCK = threading.Lock()
-"""Guards the head cache; its own lock so ``_load_head`` (event-loop thread, a small
+"""Guards the head cache; its own lock so ``served_head`` (event-loop thread, a small
 JSON read) never waits behind a runtime build in progress on a worker thread."""
 _RUNTIME: Runtime | None = None
 _HEADS: dict[str, Head] = {}
 
 
-def _load_head(site: str) -> Head:
+def served_head(site: str) -> Head:
     """The serving head for ``site``, memoized per process. Missing -> ``transport``."""
     head = _HEADS.get(site)
     if head is not None:
@@ -215,14 +221,6 @@ class Runtime:
     tokenizer: Any
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _verified_paths(models_dir: Path) -> dict[str, Path]:
     """Every pinned file, present with its pinned sha256, else ``transport``."""
     paths: dict[str, Path] = {}
@@ -234,7 +232,7 @@ def _verified_paths(models_dir: Path) -> dict[str, Path]:
                 f"run {DOWNLOAD_SCRIPT}",
                 reason="transport",
             )
-        actual = _sha256(path)
+        actual = sha256_file(path)
         if actual != expected:
             raise LLMCallError(
                 f"{LEG} leg: weights file {filename} sha256 {actual[:12]} != pinned "
@@ -271,7 +269,7 @@ def _build_runtime() -> Runtime:
     return Runtime(session=session, tokenizer=tokenizer)
 
 
-def _load_runtime() -> Runtime:
+def load_runtime() -> Runtime:
     """The memoized runtime; a burst of first calls builds it exactly once (Race 1).
 
     Runs inside ``asyncio.to_thread``, so the guard is a ``threading.Lock``.
@@ -300,11 +298,11 @@ def _reset_for_tests() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _embed(text: str) -> np.ndarray:
+def embed(text: str) -> np.ndarray:
     """The L2-normalized CLS vector for ``text`` (float32, ``(LOCAL_ENCODER_DIM,)``)."""
     if not text or not text.strip():
         raise LLMCallError(f"{LEG} leg: empty prompt", reason="validation")
-    runtime = _load_runtime()
+    runtime = load_runtime()
 
     import numpy as np  # noqa: PLC0415
 
@@ -339,7 +337,7 @@ def scores(vector: Any, head: Head) -> dict[str, float]:
 
 
 def _classify_sync(text: str, head: Head) -> dict[str, float]:
-    return scores(_embed(text), head)
+    return scores(embed(text), head)
 
 
 # ---------------------------------------------------------------------------
@@ -423,5 +421,5 @@ async def call(
     the leg protocol and unused here (see the module docstring).
     """
     bound_to_deadline(sdk_timeout, deadline, monotonic(), leg=LEG)
-    head = _load_head(route.model)
+    head = served_head(route.model)
     return await classify(prompt, output_type, head)

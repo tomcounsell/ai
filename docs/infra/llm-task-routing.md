@@ -87,7 +87,7 @@ python -m tools.doctor            # "LLM routing" section: local_encoder row
 ls -la ~/.cache/valor-encoder/onnx/model_int8.onnx ~/.cache/valor-encoder/tokenizer.json
 ```
 
-Doctor's `local_encoder` row reports `extra=installed|missing`, `weights=ok (2 files verified under <dir>)` or the per-file `missing`/`mismatch` state, `heads=ok (<n>)` or the sites whose head is missing, and the declared `LOCAL_ENCODER` sites. With a declared site it fails when any of the three is broken, because that site would fall back to Anthropic on every call on this machine; the `fix` names `uv sync --all-extras`, the download script, or the head to commit (`python -m tools.classification_eval --site <site> --fit --land`). With no declared site the state is reported as info.
+Doctor's `local_encoder` row reports `extra=installed|missing`, `weights=ok (2 files verified under <dir>)` or the per-file `missing`/`mismatch` state, `heads=ok (<n> verified)` or the sites whose head is missing or fails the leg's validating loader (`heads=unreadable (<reason>): <site>`), and the declared `LOCAL_ENCODER` sites. With a declared site it fails when any of the three is broken, because that site would fall back to Anthropic on every call on this machine; the `fix` names `uv sync --all-extras`, the download script, or the head to commit (`python -m tools.classification_eval --site <site> --fit --land`). With no declared site the state is reported as info.
 
 ## Log Lines and the Greps
 
@@ -195,7 +195,7 @@ Expected signature: no `llm_fallback` lines for the site; `llm_route site=<site>
 
 ### Recovering an interrupted `--land` run
 
-A `--land` run that dies between installing the served head and writing its record leaves a head on disk whose `run_id` matches no landed record, so the next `python -m tools.classification_eval --audit` goes red for that site. Re-run the same command replaying the saved draw (`--inputs` in place of `--save-inputs`): the split is a pure function of the draw and the fit is deterministic (zero init, fixed epochs, no randomness), so the re-run fits the same head from the same labels, installs it under its own `run_id`, and writes the record that clears the audit:
+A `--land` run that dies between installing the served head and writing its record leaves a head on disk whose `run_id` matches no landed record, so the next `python -m tools.classification_eval --audit` goes red for that site. Re-run the same command replaying the saved draw (`--inputs` in place of `--save-inputs`): the split is a pure function of the draw and the fit is deterministic (zero init, fixed epochs, no randomness), so the re-run labels the same training split afresh (a new Haiku pass, so a label can differ), fits a head consistent with those labels, installs it under its own `run_id`, and writes the record that clears the audit:
 
 ```bash
 python -m tools.classification_eval --site <site> --fit --land --candidate local_encoder,anthropic \

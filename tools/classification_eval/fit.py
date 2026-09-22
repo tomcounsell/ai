@@ -31,8 +31,17 @@ reference arm and measures it by lane A's bar:
 The precheck gate (:data:`PRECHECK_MARGIN`) skips a site whose five-fold
 agreement on lane A's fixtures sits more than the margin under its bar:
 zero reference calls, no record, one ``precheck_below_bar`` claim on the
-case. :func:`preflight` says whether this machine's memory store can meet
-the held-out real-message need before any spend.
+case. Every refusal, the encoder runtime included
+(:func:`ensure_encoder_runtime`), fires before the first reference call.
+:func:`preflight` says whether this machine's memory store can meet the
+held-out real-message need before any spend.
+
+What the encoder sees: :func:`encoder_text` is the row's ``encoder_text``
+composition or the bare message, and :func:`measured_site` measures both
+landing arms on that text with the row's ``encoder_system`` as the
+``anthropic`` arm's system prompt, the shape the landed call serves. Lane
+A's ``candidate_prompt`` and ``candidate_system`` belong to the generative
+arm and never reach this path.
 
 The encoder leg (``agent/llm/backends/local_encoder.py``) is imported
 inside the functions that need it, so this package imports without the
@@ -95,8 +104,9 @@ PRECHECK_EXCLUDED_SITES = frozenset({"job_router.route"})
 
 
 class FitRefusalError(Exception):
-    """A refusal before any reference spend (exit 2): contention, a landing
-    without the ``anthropic`` candidate, the precheck gate."""
+    """A refusal before any reference spend (exit 2): an empty training
+    split, contention, a landing without the ``anthropic`` candidate, the
+    precheck gate, an encoder runtime this machine cannot load."""
 
 
 class FitError(Exception):
@@ -319,25 +329,37 @@ def _install_served_head(staged: Path, served: Path) -> None:
 
 
 def encoder_text(site: Site, inp: Input) -> str:
-    """The text the encoder embeds for ``inp``: the row's ``candidate_prompt``
+    """The text the encoder embeds for ``inp``: the row's ``encoder_text``
     when the landing builder set one (the message-first composition function
     a context-bearing site shares with its call site), else the message text
-    itself. Never the reference prompt: its instruction block would dominate
+    itself. Never the reference prompt and never the row's
+    ``candidate_prompt``: that is lane A's prompt for a generative arm, and
+    on C2, C6 and C9 it carries the instruction block, which would dominate
     a CLS embedding and push the message past the 512-token window (the
-    spike embedded the bare text). :func:`run_fit` hands ``compare`` the same
-    function as the row's candidate prompt, so the measurement embeds
-    byte-for-byte what the fit embedded."""
-    if site.candidate_prompt is not None:
-        return site.candidate_prompt(inp)
+    spike embedded the bare text). :func:`measured_site` hands ``compare``
+    this same function, so the measurement embeds byte-for-byte what the fit
+    embedded."""
+    if site.encoder_text is not None:
+        return site.encoder_text(inp)
     return inp.text
 
 
 def measured_site(site: Site) -> Site:
-    """``site`` with ``candidate_prompt`` pinned to :func:`encoder_text`, so
-    the candidate arms in ``compare`` receive the text the head was fit on."""
-    if site.candidate_prompt is not None:
-        return site
-    return replace(site, candidate_prompt=partial(encoder_text, site))
+    """``site`` in the shape a ``LOCAL_ENCODER`` landing serves, for
+    ``compare``: the candidate prompt is :func:`encoder_text`, the candidate
+    system is the row's ``encoder_system`` (``None`` falls through to the
+    row's ``system`` in ``compare``), and the candidate output type is the
+    site's own. Both landing arms then receive what the served call passes:
+    the ``local_encoder`` arm the text the head was fit on, the ``anthropic``
+    arm that text with the instruction block as its system prompt, which is
+    the restructured fallback shape. Lane A's ``candidate_*`` fields never
+    reach the encoder lane's measurement."""
+    return replace(
+        site,
+        candidate_prompt=partial(encoder_text, site),
+        candidate_system=site.encoder_system,
+        candidate_output_type=None,
+    )
 
 
 def _embed_all(site: Site, inputs: Sequence[Input]) -> np.ndarray:
@@ -346,8 +368,22 @@ def _embed_all(site: Site, inputs: Sequence[Input]) -> np.ndarray:
     from agent.llm.backends import local_encoder as leg
 
     return np.stack(
-        [np.asarray(leg._embed(encoder_text(site, inp)), dtype=np.float64) for inp in inputs]
+        [np.asarray(leg.embed(encoder_text(site, inp)), dtype=np.float64) for inp in inputs]
     )
+
+
+def ensure_encoder_runtime() -> None:
+    """Load and verify the encoder runtime (extra importable, weights present
+    with their pinned sha256, session built) and raise
+    :class:`FitRefusalError` when the leg refuses, so a fit on a machine that
+    cannot embed stops before its first reference call."""
+    from agent.llm.backends import local_encoder as leg
+    from agent.llm.errors import LLMCallError
+
+    try:
+        leg.load_runtime()
+    except LLMCallError as e:
+        raise FitRefusalError(f"encoder runtime unavailable, no reference call made: {e}") from e
 
 
 def build_head(
@@ -434,10 +470,12 @@ async def run_fit(
     ``build_arm(name, staged_head_path)`` builds each candidate arm named in
     ``candidates`` (the ``local_encoder`` arm reads the staged head by path).
     Refusals before any reference call: the input minimums
-    (:class:`ShortfallError`), ``contended`` (Race 2 and 3), ``land`` without
-    an ``anthropic`` candidate (Risk 3), and the precheck gate when
-    ``precheck_agreement`` is given (one claim on the case, no record).
-    ``land`` is the only way the served head is written or deleted.
+    (:class:`ShortfallError`), an empty training split, ``contended`` (Race 2
+    and 3), ``land`` without an ``anthropic`` candidate (Risk 3), the
+    precheck gate when ``precheck_agreement`` is given (one claim on the
+    case, no record), and an encoder runtime this machine cannot load
+    (:func:`ensure_encoder_runtime`). ``land`` is the only way the served
+    head is written or deleted.
     """
     from tools.classification_eval.records import (
         attach_claims,
@@ -454,6 +492,12 @@ async def run_fit(
     if "local_encoder" not in candidates:
         raise FitRefusalError("--fit measures the local_encoder arm; add --candidate local_encoder")
     held_out, train = split_by_digest(inputs, site.minimum_n)
+    if not train:
+        raise FitRefusalError(
+            f"the draw holds exactly the {site.minimum_n} held-out inputs the minimum needs"
+            " and nothing to train on; draw more (raise --real-limit or add fixtures)."
+            " No arm ran, no record written."
+        )
     if contended:
         raise FitRefusalError(
             "com.valor services are loaded; a fit changes what serves (Race 2) and the"
@@ -472,6 +516,7 @@ async def run_fit(
                 site.id, precheck_agreement, TIER_BAR[site.tier], project_key=project_key
             )
         return FitOutcome(run_id=run_id, skipped="precheck_below_bar")
+    ensure_encoder_runtime()
 
     labeled = await label_training_split(reference, train, site)
     n_train = len(labeled)
@@ -650,6 +695,11 @@ def precheck_rows(
             continue
         record = found[1]
         fixtures = site.fixtures()
+        # NOTE: labels pair with fixtures by position under a count guard, not
+        # by id -- left as-is because lane A's records carry per-input labels
+        # only (no text or digest per label), so position is the only
+        # alignment those records can offer; a fixture edit that keeps the
+        # count is the precheck's known blind spot until records carry digests.
         labels = list(record["reference"]["labels"][: int(record["n_fixture"])])
         if len(labels) != len(fixtures):
             n_fixture = record["n_fixture"]

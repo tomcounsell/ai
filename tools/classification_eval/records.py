@@ -173,7 +173,8 @@ def attach_precheck_claim(
 def committed_head_run_id(site_id: str) -> str | None:
     """The ``run_id`` of the served head file for ``site_id``, or ``None``
     when no head is committed; read uncached through the leg's validating
-    loader so the audit judges the bytes on disk."""
+    loader so the audit judges the bytes on disk. A head the loader refuses
+    raises its ``LLMCallError`` (the audit renders that as a MISS row)."""
     from agent.llm.backends import local_encoder as leg
     from tools.classification_eval.fit import served_head_path
 
@@ -193,7 +194,8 @@ def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple
     (``found`` is that record; measure-only records are skipped by
     :func:`audit`), needs both its ``local_encoder`` and its ``anthropic``
     arm clear, and needs the committed head's ``run_id`` to equal the
-    record's ``fit.head_run_id``.
+    record's ``fit.head_run_id``; a committed head the leg's loader refuses
+    is a MISS row naming the error, and the walk continues to the next site.
     """
     backend = task.backend.value
     encoder = task.backend is Backend.LOCAL_ENCODER
@@ -231,8 +233,13 @@ def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple
     if fallback is None or fallback:
         ok = False
         summary += " (the anthropic fallback arm must clear the bar on the landed record)"
+    from agent.llm.errors import LLMCallError
+
     head_run_id = (record.get("fit") or {}).get("head_run_id")
-    committed = committed_head_run_id(task.site)
+    try:
+        committed = committed_head_run_id(task.site)
+    except LLMCallError as e:
+        return False, f"{prefix} MISS {summary} head unreadable: {e}"
     if committed is None:
         ok = False
         summary += " no head file"

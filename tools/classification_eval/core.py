@@ -103,8 +103,16 @@ class Site:
     call carries one (C9, C10); the candidate side defaults to the same
     prompt, system, and output type, and the landing builder overrides
     ``candidate_prompt``, ``candidate_system``, or ``candidate_output_type``
-    while iterating. ``label`` reduces an output to the one string agreement
-    compares. ``reference`` names the live reference arm: ``"anthropic"``
+    while iterating on a generative (Ollama) arm. The encoder lane (#3420)
+    has its own two fields, so a row can carry lane A's instruction-bearing
+    granite prompt and still be fit on bare text: ``encoder_text`` is the
+    message-first composition the served call passes as ``text`` (``None``
+    is ``inp.text`` itself) and ``encoder_system`` is the instruction block
+    the served call passes as ``system`` for the Anthropic fallback
+    (``None`` is the row's ``system``); ``fit.measured_site`` measures both
+    landing arms on exactly that shape. ``label`` reduces an output to the
+    one string agreement compares. ``reference`` names the live reference
+    arm: ``"anthropic"``
     (Haiku through the Anthropic leg) or ``"openrouter_gemma"`` (C15's
     ``main`` backend). ``budget_s`` is the site's own p95 budget when it has
     one (the 3 s sites), else ``None`` for the reference-relative rule.
@@ -127,6 +135,8 @@ class Site:
     candidate_prompt: Callable[[Input], str] | None = None
     candidate_system: str | None = None
     candidate_output_type: type[BaseModel] | None = None
+    encoder_text: Callable[[Input], str] | None = None
+    encoder_system: str | None = None
     real_inputs: Callable[[int], list[Input]] | None = None
     model: str | None = None
 

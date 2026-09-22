@@ -742,16 +742,25 @@ def test_cv_agreement_denominator_excludes_a_degenerate_folds_held_items():
 
 @pytest.fixture
 def fit_env(monkeypatch, tmp_path):
-    """The fit path with no network and no ONNX: the leg's ``_embed`` is the
-    deterministic fake, the staged and served head directories are temp
-    dirs, and case claims are recorded on a list instead of the substrate."""
+    """The fit path with no network and no ONNX: the leg's ``embed`` is the
+    deterministic fake, its ``load_runtime`` a no-op (``runtime_loads``
+    counts the pre-spend verification), the staged and served head
+    directories are temp dirs, and case claims are recorded on a list
+    instead of the substrate."""
     from types import SimpleNamespace
 
     leg = pytest.importorskip("agent.llm.backends.local_encoder")
     from tools.classification_eval import fit, records
 
     served_dir = tmp_path / "served"
-    monkeypatch.setattr(leg, "_embed", _fake_embed)
+    runtime_loads = {"n": 0}
+
+    def load_runtime():
+        runtime_loads["n"] += 1
+        return object()
+
+    monkeypatch.setattr(leg, "embed", _fake_embed)
+    monkeypatch.setattr(leg, "load_runtime", load_runtime)
     monkeypatch.setattr(fit, "STAGED_HEADS_DIR", tmp_path / "staged")
     monkeypatch.setattr(fit, "served_head_path", lambda site: served_dir / f"{site}.json")
     claims: list[tuple[str, tuple]] = []
@@ -763,7 +772,9 @@ def fit_env(monkeypatch, tmp_path):
         "attach_precheck_claim",
         lambda site_id, agreement, bar, **kw: claims.append(("precheck", (site_id, agreement))),
     )
-    return SimpleNamespace(leg=leg, fit=fit, served_dir=served_dir, claims=claims)
+    return SimpleNamespace(
+        leg=leg, fit=fit, served_dir=served_dir, claims=claims, runtime_loads=runtime_loads
+    )
 
 
 def _counting_reference(**kw) -> tuple[Arm, dict]:
@@ -906,7 +917,8 @@ async def test_land_without_the_anthropic_candidate_refuses_before_any_spend(fit
 
 def test_cli_land_without_anthropic_exits_2_with_no_spend(fit_env, monkeypatch):
     """The CLI shape of the same refusal: ``--fit --land --candidate
-    local_encoder`` exits 2 before the reference arm is built."""
+    local_encoder`` exits 2 with no reference call and no record (the
+    reference arm object is built first; it is never called)."""
     from tools.classification_eval import arms
 
     built = {"reference": 0}
@@ -949,6 +961,81 @@ async def test_precheck_gate_skips_with_zero_reference_calls_and_one_claim(fit_e
     fit_env.claims.clear()
     outcome = await _fit(fit_env, reference=reference, precheck_agreement=0.85)
     assert outcome.skipped is None and outcome.record is not None and calls["n"] > 0
+
+
+async def test_encoder_runtime_is_verified_before_the_first_reference_call(fit_env, monkeypatch):
+    """A machine that cannot load the encoder (extra, weights) refuses the fit
+    with zero reference calls and no record; on a machine that can, the
+    runtime is loaded before labeling starts."""
+    from agent.llm.errors import LLMCallError
+    from tools.classification_eval.fit import FitRefusalError
+
+    reference, calls = _counting_reference()
+    order: list[str] = []
+
+    async def counting_call(prompt, system, output_type):
+        order.append("reference")
+        return await reference.call(prompt, system, output_type)
+
+    counting = Arm(
+        name="reference", backend="anthropic", model="m", price=PRICE, call=counting_call
+    )
+
+    def load_runtime():
+        order.append("runtime")
+        return object()
+
+    monkeypatch.setattr(fit_env.leg, "load_runtime", load_runtime)
+    await _fit(fit_env, reference=counting)
+    assert order[0] == "runtime" and order.count("runtime") == 1 and "reference" in order
+
+    def refuse():
+        raise LLMCallError("weights file onnx/model_int8.onnx missing", reason="transport")
+
+    monkeypatch.setattr(fit_env.leg, "load_runtime", refuse)
+    reference, calls = _counting_reference()
+    fit_env.claims.clear()
+    with pytest.raises(FitRefusalError, match="encoder runtime unavailable.*model_int8"):
+        await _fit(fit_env, reference=reference)
+    assert calls["n"] == 0
+    assert not (fit_env.fit.STAGED_HEADS_DIR / "test.site.json").exists()
+    assert fit_env.claims == []
+
+
+def test_cli_encoder_runtime_refusal_exits_2(fit_env, monkeypatch, capsys):
+    from agent.llm.errors import LLMCallError
+    from tools.classification_eval import arms
+
+    reference, calls = _counting_reference()
+    monkeypatch.setattr(arms, "anthropic_arm", lambda site_id, **kw: reference)
+    monkeypatch.setattr(arms, "site_inputs", lambda site, limit, **kw: _inputs(40, 40))
+    monkeypatch.setattr(
+        "tools.classification_eval.sites.site_for", lambda site_id: _site(minimum_n=50)
+    )
+    monkeypatch.setattr("tools.classification_eval.__main__.is_contended", lambda: False)
+
+    def refuse():
+        raise LLMCallError("classification-local extra not installed", reason="transport")
+
+    monkeypatch.setattr(fit_env.leg, "load_runtime", refuse)
+    argv = ["--site", "test.site", "--fit", "--candidate", "local_encoder,anthropic"]
+    code = main([*argv, "--project-key", PK])
+    assert code == 2 and calls["n"] == 0
+    assert "extra not installed" in capsys.readouterr().err
+    assert latest_record("test.site", project_key=PK) is None
+
+
+async def test_empty_training_split_is_refused_before_any_spend(fit_env):
+    """A draw of exactly ``minimum_n`` inputs passes the held-out rule with
+    nothing left to train on; that is a refusal naming the cause, not a
+    one-class abort after labeling."""
+    from tools.classification_eval.fit import FitRefusalError
+
+    reference, calls = _counting_reference()
+    with pytest.raises(FitRefusalError, match="nothing to train on"):
+        await _fit(fit_env, inputs=_inputs(25, 25), reference=reference)
+    assert calls["n"] == 0
+    assert latest_record("test.site", project_key=PK) is None
 
 
 async def test_training_error_rate_over_the_limit_aborts_with_no_head(fit_env):
@@ -1065,6 +1152,25 @@ async def test_audit_head_provenance_for_a_local_encoder_landing(fit_env, capsys
     assert audit([task], project_key=PK) == 1
     assert "no head file" in capsys.readouterr().out
     assert outcome.run_id != landed.run_id
+
+
+async def test_audit_renders_an_unreadable_committed_head_as_a_miss_row(fit_env, capsys):
+    """A committed head the leg's loader refuses (malformed JSON here, a
+    wrong digest or shape the same way) is a MISS row naming the site and
+    the error, and the walk goes on to the next site's row."""
+    landed = await _fit(fit_env, land=True)
+    served = fit_env.served_dir / "test.site.json"
+    served.write_text("{not json")
+
+    tasks = [_task("test.site", Backend.LOCAL_ENCODER), _task("zz.site", Backend.ANTHROPIC)]
+    assert audit(tasks, project_key=PK) == 1
+    out = capsys.readouterr().out
+    rows = {line.split()[0]: line for line in out.splitlines() if line.strip()}
+    assert "MISS" in rows["test.site"] and "head unreadable" in rows["test.site"]
+    assert str(served) in rows["test.site"] and "unreadable head file" in rows["test.site"]
+    assert rows["zz.site"].endswith("no record")
+    assert out.rstrip().endswith("audit: FAIL")
+    assert landed.run_id not in rows["test.site"].split("head unreadable")[1]
 
 
 @pytest.mark.parametrize("anthropic_arm", ["missing", "under_the_bar"])
@@ -1315,7 +1421,7 @@ def test_cli_precheck_reports_a_leg_refusal_as_exit_1(monkeypatch, capsys):
 async def test_encoder_embeds_and_is_measured_on_the_message_text_not_the_reference_prompt(
     fit_env, monkeypatch
 ):
-    """Without a row ``candidate_prompt`` (Task 8's composition function) the
+    """Without a row ``encoder_text`` (Task 8's composition function) the
     encoder embeds the message text, never the reference prompt's instruction
     block (which would dominate a CLS embedding and truncate the message), and
     ``compare`` hands the ``local_encoder`` arm that same text."""
@@ -1327,7 +1433,7 @@ async def test_encoder_embeds_and_is_measured_on_the_message_text_not_the_refere
         embedded.append(text)
         return _fake_embed(text)
 
-    monkeypatch.setattr(fit_env.leg, "_embed", spy)
+    monkeypatch.setattr(fit_env.leg, "embed", spy)
     site = _site(minimum_n=50)
     assert encoder_text(site, Input("hello?", "real")) == "hello?"
     seen: list[str] = []
@@ -1346,3 +1452,128 @@ async def test_encoder_embeds_and_is_measured_on_the_message_text_not_the_refere
     assert embedded and set(embedded) <= texts, "the fit embedded a prompt, not the message"
     assert seen and set(seen) <= texts, "compare handed the arms a prompt, not the message"
     assert evaluate_bar(outcome.record.as_dict(), "local_encoder") == []
+
+
+_INSTRUCTIONS = "Classify the draft. Reply with only the JSON object."
+
+
+def _lane_a_row(**fields):
+    """A row carrying lane A's instruction-bearing granite prompt and system,
+    the shape ``routing.terminus``, ``agent_catchup.judge`` and
+    ``promise_gate.verdict`` have in ``sites.py``."""
+    from dataclasses import replace
+
+    return replace(
+        _site(minimum_n=50),
+        system="reference system",
+        candidate_prompt=lambda inp: f"{_INSTRUCTIONS}\n<<<\n{inp.text}\n>>>",
+        candidate_system="granite system: " + _INSTRUCTIONS,
+        **fields,
+    )
+
+
+def test_encoder_text_never_returns_a_rows_candidate_prompt():
+    """``encoder_text`` reads the encoder lane's own field, so a row whose
+    ``candidate_prompt`` wraps the message in instructions (lane A's granite
+    prompt) is still embedded as the bare message; with ``encoder_text`` set,
+    the composition is used and the instruction block still never appears."""
+    from dataclasses import replace
+
+    from tools.classification_eval.fit import encoder_text
+
+    inp = Input("hello there?", "real", {"thread": "earlier: hi"})
+    row = _lane_a_row()
+    assert _INSTRUCTIONS in row.candidate_prompt(inp)
+    assert encoder_text(row, inp) == "hello there?"
+
+    composed = replace(row, encoder_text=lambda inp: f"{inp.text}\n{inp.context['thread']}")
+    assert encoder_text(composed, inp) == "hello there?\nearlier: hi"
+    assert _INSTRUCTIONS not in encoder_text(composed, inp)
+
+
+def test_encoder_text_on_every_site_row_is_free_of_its_candidate_prompt_instructions():
+    """Over the real site table: no row sets ``encoder_text`` yet, so the
+    encoder embeds ``inp.text`` on every row, including the three rows whose
+    ``candidate_prompt`` carries instructions; a row whose composition ever
+    re-embedded its ``candidate_prompt`` fails here."""
+    from tools.classification_eval.fit import encoder_text
+    from tools.classification_eval.sites import SITES
+
+    wrapped = 0
+    for row in SITES.values():
+        inp = row.fixtures()[0]
+        text = encoder_text(row, inp)
+        if row.encoder_text is None:
+            assert text == inp.text, row.id
+        if row.candidate_prompt is not None:
+            candidate = row.candidate_prompt(inp)
+            assert text != candidate, f"{row.id}: the encoder embeds lane A's candidate prompt"
+            instructions = candidate.replace(inp.text, "").strip()
+            assert instructions and instructions not in text, row.id
+            wrapped += 1
+    assert wrapped >= 3  # C2, C6, C9 carry an instruction-bearing candidate_prompt
+
+
+async def test_encoder_lane_measures_both_arms_on_the_served_shape(fit_env, monkeypatch):
+    """On a row with lane A's ``candidate_prompt``/``candidate_system``, the fit
+    embeds the bare message, and ``compare`` hands the ``local_encoder`` arm
+    that message and the ``anthropic`` arm that message with the row's
+    ``encoder_system`` (falling back to the row's ``system``) as its system
+    prompt and the site's own output type: the restructured fallback shape a
+    landed site serves. Lane A's prompt and system never reach either arm."""
+    from dataclasses import replace
+
+    from tools.classification_eval.fit import measured_site, run_fit
+
+    class Tighter(BaseModel):
+        answer: Literal["yes", "no"]
+        extra: str = ""
+
+    embedded: list[str] = []
+
+    def spy(text):
+        embedded.append(text)
+        return _fake_embed(text)
+
+    monkeypatch.setattr(fit_env.leg, "embed", spy)
+    seen: dict[str, list[tuple]] = {"local_encoder": [], "anthropic": []}
+
+    def build(name, staged):
+        arm = _builder()(name, staged)
+
+        async def call(prompt, system, output_type):
+            seen[name].append((prompt, system, output_type))
+            return await arm.call(prompt, system, output_type)
+
+        return Arm(name=arm.name, backend=arm.backend, model=arm.model, price=PRICE, call=call)
+
+    texts = {inp.text for inp in _inputs(40, 40)}
+    for row, expected_system in (
+        (_lane_a_row(candidate_output_type=Tighter), "reference system"),
+        (_lane_a_row(encoder_system="served instructions"), "served instructions"),
+    ):
+        embedded.clear()
+        seen = {"local_encoder": [], "anthropic": []}
+        outcome = await run_fit(
+            row,
+            _inputs(40, 40),
+            reference=_counting_reference()[0],
+            candidates=["local_encoder", "anthropic"],
+            build_arm=build,
+            contended=False,
+            project_key=PK,
+            out=lambda line: None,
+        )
+        assert embedded and set(embedded) <= texts
+        assert all(_INSTRUCTIONS not in text for text in embedded)
+        for name in ("local_encoder", "anthropic"):
+            prompts = {prompt for prompt, _, _ in seen[name]}
+            assert prompts and prompts <= texts, name
+            assert {system for _, system, _ in seen[name]} == {expected_system}, name
+            assert {output_type for _, _, output_type in seen[name]} == {Verdict}, name
+        assert evaluate_bar(outcome.record.as_dict(), "local_encoder") == []
+
+    measured = measured_site(_lane_a_row(candidate_output_type=Tighter))
+    assert measured.candidate_output_type is None and measured.candidate_system is None
+    assert measured.candidate_prompt(Input("x?", "real")) == "x?"
+    assert measured_site(replace(_lane_a_row(), encoder_system="s")).candidate_system == "s"

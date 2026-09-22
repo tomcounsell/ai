@@ -3,7 +3,7 @@
 ``agent/llm/backends/local_encoder.py::call`` is the body ``run_typed`` runs
 for a task the router resolves to ``Backend.LOCAL_ENCODER``. These tests
 drive it directly and through ``run_typed`` with the ONNX runtime replaced
-at the leg's one seam, ``_load_runtime`` (``tests.helpers.llm_fakes.
+at the leg's one seam, ``load_runtime`` (``tests.helpers.llm_fakes.
 FakeEncoderRuntime``), and the served head redirected to ``tmp_path``.
 
 What is pinned:
@@ -124,7 +124,7 @@ def _fresh_module(monkeypatch, tmp_path):
 @pytest.fixture
 def runtime(monkeypatch) -> FakeEncoderRuntime:
     fake = FakeEncoderRuntime()
-    monkeypatch.setattr(leg, "_load_runtime", lambda: fake)
+    monkeypatch.setattr(leg, "load_runtime", lambda: fake)
     return fake
 
 
@@ -274,7 +274,7 @@ class TestEmptyAndLongInput:
         assert isinstance(result, BoolOut)
         assert len(runtime.tokenizer.encoded[0]) <= 512
         assert runtime.feeds[0]["input_ids"].shape == (1, 512)
-        vector = leg._embed(prompt)
+        vector = leg.embed(prompt)
         assert vector.shape == (LOCAL_ENCODER_DIM,)
 
 
@@ -347,7 +347,7 @@ class TestRuntimeFailures:
         (models / "onnx/model_int8.onnx").write_bytes(bytes(flipped))
 
         with pytest.raises(LLMCallError) as exc_info:
-            leg._load_runtime()
+            leg.load_runtime()
 
         assert exc_info.value.reason == "transport"
         assert "onnx/model_int8.onnx" in str(exc_info.value)
@@ -359,7 +359,7 @@ class TestRuntimeFailures:
         monkeypatch.setenv("LOCAL_ENCODER_MODELS_DIR", str(tmp_path / "empty"))
 
         with pytest.raises(LLMCallError) as exc_info:
-            leg._load_runtime()
+            leg.load_runtime()
 
         assert exc_info.value.reason == "transport"
         assert "onnx/model_int8.onnx" in str(exc_info.value)
@@ -400,7 +400,7 @@ class TestRuntimeFailures:
         monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
         monkeypatch.setitem(sys.modules, "tokenizers", fake_tok)
 
-        runtime = leg._load_runtime()
+        runtime = leg.load_runtime()
 
         assert runtime.session is not None and runtime.tokenizer is not None
         assert seen["path"] == str(models / "onnx/model_int8.onnx")
@@ -478,7 +478,7 @@ class TestHeads:
 class TestDeadline:
     async def test_expired_deadline_raises_before_any_load(self, monkeypatch, bool_head):
         loads = []
-        monkeypatch.setattr(leg, "_load_runtime", lambda: loads.append(1))
+        monkeypatch.setattr(leg, "load_runtime", lambda: loads.append(1))
         monkeypatch.setattr(leg, "monotonic", lambda: 100.0)
 
         with pytest.raises(LLMCallError) as exc_info:
@@ -525,14 +525,14 @@ class TestRealWeights:
     def test_embed_is_a_unit_vector_of_the_pinned_width(self):
         pytest.importorskip("onnxruntime")
         pytest.importorskip("tokenizers")
-        vector = leg._embed("hello world")
+        vector = leg.embed("hello world")
         assert vector.shape == (LOCAL_ENCODER_DIM,)
         assert float((vector**2).sum()) == pytest.approx(1.0, abs=1e-4)
 
     def test_two_thousand_words_finish(self):
         pytest.importorskip("onnxruntime")
         pytest.importorskip("tokenizers")
-        vector = leg._embed(" ".join(f"word{i}" for i in range(2000)))
+        vector = leg.embed(" ".join(f"word{i}" for i in range(2000)))
         assert vector.shape == (LOCAL_ENCODER_DIM,)
 
 

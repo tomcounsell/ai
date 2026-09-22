@@ -138,9 +138,9 @@ class _FakeSession:
 
 @dataclass
 class FakeEncoderRuntime:
-    """A stand-in for ``agent.llm.backends.local_encoder._load_runtime()``.
+    """A stand-in for ``agent.llm.backends.local_encoder.load_runtime()``.
 
-    Install with ``monkeypatch.setattr(local_encoder, "_load_runtime", lambda:
+    Install with ``monkeypatch.setattr(local_encoder, "load_runtime", lambda:
     fake)``. ``vector`` is the CLS vector the fake session emits (384 wide by
     default: a unit vector on axis 0, so the leg's L2 normalization is a
     no-op and a head's scores are ``W[0] + b``); ``error`` makes every run

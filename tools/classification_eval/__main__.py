@@ -220,8 +220,9 @@ async def _run_fit(args: argparse.Namespace, candidates: list[str]) -> int:
         print(str(e), file=sys.stderr)
         return 2
     except (FitError, LLMCallError) as e:
-        # A FitError is the post-labeling abort; an LLMCallError here is the
-        # encoder leg refusing to embed (extra, weights), named by the leg.
+        # A FitError is the post-labeling abort. The encoder runtime is
+        # verified before the first reference call (exit 2 above); an
+        # LLMCallError reaching here is a leg failure mid-embed, named by it.
         print(str(e), file=sys.stderr)
         return 1
     finally:

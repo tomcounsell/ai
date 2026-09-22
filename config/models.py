@@ -7,10 +7,12 @@ Import model constants from here rather than hardcoding model strings.
 When model versions change, update them in ONE place here.
 """
 
+import hashlib
 import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -216,6 +218,35 @@ def local_encoder_models_dir() -> Path:
     return Path(
         os.environ.get("LOCAL_ENCODER_MODELS_DIR", os.path.expanduser("~/.cache/valor-encoder"))
     )
+
+
+def sha256_file(path: Path) -> str:
+    """The hex sha256 of ``path``, read in 1 MiB chunks: the one digest the
+    leg's loader, the download script, the update step, and the doctor row
+    share."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def local_encoder_weights_state(
+    models_dir: Path | None = None, files: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """``{filename: "ok" | "missing" | "mismatch"}`` for every pinned encoder
+    file under ``models_dir`` (default :func:`local_encoder_models_dir`)
+    against ``files`` (default :data:`LOCAL_ENCODER_FILES`), in pin order."""
+    root = models_dir or local_encoder_models_dir()
+    pins = LOCAL_ENCODER_FILES if files is None else files
+    state: dict[str, str] = {}
+    for filename, expected in pins.items():
+        path = root / filename
+        if not path.is_file():
+            state[filename] = "missing"
+        else:
+            state[filename] = "ok" if sha256_file(path) == expected else "mismatch"
+    return state
 
 
 def _host_ram_gb() -> float:

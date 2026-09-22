@@ -215,28 +215,28 @@ The precheck is free and fixture-only: each site's lane A reference labels paire
 
 | Id | Site | n | CV agreement | Majority | Bar | Gate | Mark |
 |----|------|---|--------------|----------|-----|------|------|
+| C9 | `promise_gate.verdict` | 40 | 0.925 | 0.575 | 0.85 | 0.75 | fit |
 | C15 | `improvement_collect.promise_judge` | 40 | 0.850 | 0.825 | 0.85 | 0.75 | fit |
 | C7 | `injection_inspection.risk` | 40 | 0.875 | 0.625 | 0.90 | 0.80 | fit |
 | C8 | `context_recall.advised` | 40 | 0.850 | 0.800 | 0.90 | 0.80 | fit |
 | C1 | `routing.needs_response` | 188 | 0.883 | 0.793 | 0.95 | 0.85 | fit |
 | C11 | `health_check.judge` | 40 | 0.825 | 0.800 | 0.90 | 0.80 | fit |
-| C9 | `promise_gate.verdict` | 40 | 0.750 | 0.575 | 0.85 | 0.75 | fit |
-| C2 | `routing.terminus` | 188 | 0.809 | 0.809 | 0.95 | 0.85 | precheck_below_bar |
+| C2 | `routing.terminus` | 188 | 0.840 | 0.809 | 0.95 | 0.85 | precheck_below_bar |
 | C4 | `intent_classifier.intent` | 188 | 0.654 | 0.335 | 0.95 | 0.85 | precheck_below_bar |
 | C10 | `session_completion.novelty` | 40 | 0.600 | 0.675 | 0.90 | 0.80 | precheck_below_bar |
 | C3 | `routing.work_request` | 188 | 0.564 | 0.346 | 0.95 | 0.85 | precheck_below_bar |
-| C6 | `agent_catchup.judge` | 40 | 0.400 | 0.450 | 0.85 | 0.75 | precheck_below_bar |
 | C5 | `classifier.work_type` | 40 | 0.450 | 0.500 | 0.90 | 0.80 | precheck_below_bar |
+| C6 | `agent_catchup.judge` | 40 | 0.325 | 0.450 | 0.85 | 0.75 | precheck_below_bar |
 
-C13 and C14 are skipped (latency-only records, no reference labels); C12 is excluded by rule (its `job_id` answer is an open set); C16 is `client_only`. C2 sits at its majority baseline because the embedded text carries no thread context; the message-first composition function the landing step adds for context-bearing sites supplies it. The precheck is re-run on the landing host before the landing loop, so the gate reads that host's records.
+C13 and C14 are skipped (latency-only records, no reference labels); C12 is excluded by rule (its `job_id` answer is an open set); C16 is `client_only`. Every row embeds the bare message text: the encoder lane reads its own `encoder_text` row field, never lane A's `candidate_prompt`. C9, C2, and C6 were re-measured after that separation (C9 0.750 to 0.925, now first in the order; C2 0.809 to 0.840, above its majority baseline and still under the gate because the bare reply carries no thread context; C6 0.400 to 0.325, because the bare message carries none of the transcript the verdict depends on); the message-first `encoder_text` composition the landing step adds for context-bearing sites supplies that context. The precheck is re-run on the landing host before the landing loop, so the gate reads that host's records.
 
-The landing numbers (both candidate arms' held-out agreement, `p95_c4`, `n`, `n_real`, `n_train`, `n_train_real`, head run id, record id, failing criterion if any, per site) come from the landing run on the Valor host that owns the `valor` bridge, whose memory store holds the real inbound messages the `n_real` criterion demands; that table lands here and in [Local Encoder Classifier](local-encoder-classifier.md#landing-outcome) once the run has happened. Until then no site declares `Backend.LOCAL_ENCODER` and the site table above is unchanged.
+The landing numbers (both candidate arms' held-out agreement, `p95_c4`, `n`, `n_real`, `n_train`, `n_train_real`, head run id, record id, failing criterion if any, per site) come from the landing run tracked as [#3544](https://github.com/tomcounsell/ai/issues/3544) on the Valor host that owns the `valor` bridge, whose memory store holds the real inbound messages the `n_real` criterion demands; that table lands here and in [Local Encoder Classifier](local-encoder-classifier.md#landing-outcome) once the run has happened. Until then no site declares `Backend.LOCAL_ENCODER` and the site table above is unchanged.
 
 ## Tooling
 
 | Command | What it shows |
 |---------|---------------|
-| `python -m tools.doctor` (full run) | The "LLM routing" section: one row per declared site (kind, backend, tier, the route `resolve` returns for `valor` and for a client key, the declaring `path:line`), the per-process eligibility cache state, the Ollama daemon row (model pulled and loaded, its `expires_at` as keep-alive evidence, `local_typed_hard_s`), and the `local_encoder` row (the `classification-local` extra importable, every pinned weights file present with its sha256, one head per declared `LOCAL_ENCODER` site). Each local row fails when a declared site on that backend would fall back to Anthropic on every call on this machine, naming the fix. |
+| `python -m tools.doctor` (full run) | The "LLM routing" section: one row per declared site (kind, backend, tier, the route `resolve` returns for `valor` and for a client key, the declaring `path:line`), the per-process eligibility cache state, the Ollama daemon row (model pulled and loaded, its `expires_at` as keep-alive evidence, `local_typed_hard_s`), and the `local_encoder` row (the `classification-local` extra importable, every pinned weights file present with its sha256, one head per declared `LOCAL_ENCODER` site that loads through the leg's validating loader). Each local row fails when a declared site on that backend would fall back to Anthropic on every call on this machine, naming the fix. |
 | `python -m tools.classification_eval --audit` | Every classification site's declared backend, record id, and bar result; exit 1 on any miss. |
 | `grep "llm_route site=" logs/bridge.log` | Which backend answered each call. The line fields and the greps are in the [infra doc](../infra/llm-task-routing.md). |
 

@@ -177,7 +177,7 @@ def local_encoder_arm(
     def head():
         if "head" not in resolved:
             resolved["head"] = (
-                leg._load_head(site_id) if head_path is None else leg.load_head(head_path)
+                leg.served_head(site_id) if head_path is None else leg.load_head(head_path)
             )
         return resolved["head"]
 

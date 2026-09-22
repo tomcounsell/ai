@@ -56,7 +56,7 @@ class TestEveryCommittedHead:
         assert head.site == path.stem
         assert len(head.classes) >= 2
         assert head.embedding_sha256 == LOCAL_ENCODER_FILES["onnx/model_int8.onnx"]
-        assert path.read_text() == json.dumps(head.to_dict(), indent=2, sort_keys=True)
+        assert path.read_text() == json.dumps(head.to_dict(), indent=2, sort_keys=True) + "\n"
 
     def test_site_declares_local_encoder(self, path: Path):
         assert path.stem in LANDED, f"{path.name} has no Backend.LOCAL_ENCODER declaration"
@@ -64,8 +64,10 @@ class TestEveryCommittedHead:
     def test_classes_equal_the_sites_closed_set(self, path: Path):
         from tools.classification_eval.sites import site_for  # noqa: PLC0415
 
+        # The served call passes the site's own output type; lane A's
+        # ``candidate_output_type`` is the granite arm's tighter schema.
         site = site_for(path.stem)
-        output_type = site.candidate_output_type or site.output_type
+        output_type = site.output_type
         head = leg.load_head(path)
         shape = leg._shape(output_type, head)
         assert set(shape.values) == set(head.classes)
@@ -74,6 +76,19 @@ class TestEveryCommittedHead:
 def test_no_orphan_heads_in_either_direction():
     """Head stems and ``LOCAL_ENCODER`` declarations are the same set."""
     assert {p.stem for p in HEADS} == LANDED
+
+
+def test_write_head_output_satisfies_the_committed_head_parity_check(tmp_path):
+    """The bytes ``fit.write_head`` produces (and ``--land`` copies verbatim
+    into the served path) are exactly what the parity check above expects,
+    trailing newline included, so the first committed head passes it."""
+    from tools.classification_eval.fit import write_head  # noqa: PLC0415
+
+    path = tmp_path / "test.site.json"
+    write_head(path, leg.Head.from_dict(_head_dict(["True", "False"])))
+    head = leg.load_head(path)
+    assert path.read_text() == json.dumps(head.to_dict(), indent=2, sort_keys=True) + "\n"
+    assert path.read_text().endswith("}\n")
 
 
 class TestLoaderOnSyntheticHeads:

@@ -994,6 +994,30 @@ class TestLocalEncoderRow:
         return heads
 
     @staticmethod
+    def _write_head(heads, site: str) -> None:
+        """A head that loads through the leg's validating loader."""
+        import json
+
+        from agent.llm.backends import local_encoder
+        from config.models import LOCAL_ENCODER_DIM
+
+        head = local_encoder.Head(
+            site=site,
+            classes=["True", "False"],
+            W=[[0.0, 0.0] for _ in range(LOCAL_ENCODER_DIM)],
+            b=[0.0, 0.0],
+            embedding_model="Xenova/bge-small-en-v1.5",
+            embedding_revision="ea104dacec62c0de699686887e3f920caeb4f3e3",
+            embedding_sha256=local_encoder.LOCAL_ENCODER_FILES["onnx/model_int8.onnx"],
+            run_id="run-doctor",
+            n_train=1,
+            n_train_real=0,
+            reference_model="claude-haiku-test",
+            created_at="2026-09-21T00:00:00Z",
+        )
+        (heads / f"{site}.json").write_text(json.dumps(head.to_dict()))
+
+    @staticmethod
     def _declare(monkeypatch, *sites: str):
         """Pretend ``sites`` are declared ``LOCAL_ENCODER`` classification sites."""
         from agent.llm.tasks import Backend, DeclaredSite, LLMTask, TaskKind
@@ -1042,13 +1066,13 @@ class TestLocalEncoderRow:
 
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
         self._declare(monkeypatch, "fake.a", "fake.b")
-        (fake_heads / "fake.a.json").write_text("{}")
-        (fake_heads / "fake.b.json").write_text("{}")
+        self._write_head(fake_heads, "fake.a")
+        self._write_head(fake_heads, "fake.b")
         row = self._row()
         assert row.passed is True, row.message
         assert "extra=installed" in row.message
         assert "weights=ok (2 files verified" in row.message
-        assert "heads=ok (2)" in row.message
+        assert "heads=ok (2 verified)" in row.message
         assert "LOCAL_ENCODER sites: fake.a, fake.b" in row.message
 
     def test_local_encoder_missing_extra_fails_naming_uv_sync(
@@ -1058,7 +1082,7 @@ class TestLocalEncoderRow:
 
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
         self._declare(monkeypatch, "fake.a")
-        (fake_heads / "fake.a.json").write_text("{}")
+        self._write_head(fake_heads, "fake.a")
         row = self._row()
         assert row.passed is False
         assert "fall back to Anthropic on every call" in row.message
@@ -1073,7 +1097,7 @@ class TestLocalEncoderRow:
         (root / "tokenizer.json").unlink()
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
         self._declare(monkeypatch, "fake.a")
-        (fake_heads / "fake.a.json").write_text("{}")
+        self._write_head(fake_heads, "fake.a")
         row = self._row()
         assert row.passed is False
         assert "weights=missing: tokenizer.json" in row.message
@@ -1090,7 +1114,7 @@ class TestLocalEncoderRow:
         (root / "onnx/model_int8.onnx").write_bytes(bytes(flipped))
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
         self._declare(monkeypatch, "fake.a")
-        (fake_heads / "fake.a.json").write_text("{}")
+        self._write_head(fake_heads, "fake.a")
         row = self._row()
         assert row.passed is False
         assert "weights=mismatch: onnx/model_int8.onnx" in row.message
@@ -1103,10 +1127,34 @@ class TestLocalEncoderRow:
 
         monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
         self._declare(monkeypatch, "fake.a", "fake.b")
-        (fake_heads / "fake.a.json").write_text("{}")
+        self._write_head(fake_heads, "fake.a")
         row = self._row()
         assert row.passed is False
         assert "heads=missing: fake.b" in row.message
+        assert "agent/llm/backends/heads/fake.b.json" in row.fix
+
+    def test_local_encoder_unreadable_head_fails_naming_the_head_and_the_error(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        """A head that exists but fails the leg's loader (a stale embedding
+        digest here) reads as broken, not ``heads=ok``: the leg falls back to
+        Anthropic on every call exactly as it would with no head."""
+        import json
+
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        self._write_head(fake_heads, "fake.a")
+        self._write_head(fake_heads, "fake.b")
+        stale = json.loads((fake_heads / "fake.b.json").read_text())
+        stale["embedding_sha256"] = "0" * 64
+        (fake_heads / "fake.b.json").write_text(json.dumps(stale))
+        row = self._row()
+        assert row.passed is False
+        assert "heads=unreadable (" in row.message and ": fake.b" in row.message
+        heads_part = row.message.split("heads=")[1].split("LOCAL_ENCODER")[0]
+        assert "refit the head" in heads_part and "fake.a" not in heads_part
         assert "agent/llm/backends/heads/fake.b.json" in row.fix
 
     def test_local_encoder_ollama_daemon_row_is_untouched_by_the_encoder_state(
