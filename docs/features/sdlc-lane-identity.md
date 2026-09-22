@@ -1,11 +1,20 @@
 # SDLC Lane Identity: One Recorded Slug, Minted Once
 
-An SDLC lane has exactly one identity: a slug. It names the lane's git branch
-(`session/{slug}`), its worktree (`.worktrees/{slug}/`), and its task list. It
-*usually* also names the lane's plan document — but not always, and the system
-does not require it to. The slug is recorded once, on `PipelineLedger.slug`
-(`agent/pipeline_ledger.py`), by `tools/lane_identity.py`. Every other
-component reads it; nothing else invents it.
+An SDLC lane has a slug identity and a separate branch identity. This
+document covers the slug: it names the lane's worktree (`.worktrees/{slug}/`)
+and its task list, and *usually* also names the lane's plan document — but
+not always, and the system does not require it to. The slug is recorded
+once, on `PipelineLedger.slug` (`agent/pipeline_ledger.py`), by
+`tools/lane_identity.py`. Every other component reads it; nothing else
+invents it.
+
+The slug also **seeds** the lane's branch name, once, as `session/{slug}`,
+at worktree creation. It is never consulted for the branch again after that:
+[Lane Branch Identity](lane-branch-identity.md) covers the branch as its own
+recorded fact (`AgentSession.branch_name`), read through a separate
+accessor. The relationship between the two documents is exactly that
+sentence: the slug seeds the branch once and is never consulted for it
+again.
 
 ## The problem this closes
 
