@@ -729,3 +729,352 @@ class TestSingleMinter:
         assert _issue_number_from_message("Start the pipeline for issue 735") == 735
         assert _issue_number_from_message("do something generic") is None
         assert _issue_number_from_message("") is None
+
+
+# ---------------------------------------------------------------------------
+# Branch identity (#3411): the record is the truth, the slug is only a seed
+# ---------------------------------------------------------------------------
+
+
+class _BranchSessionStub:
+    """Minimal ``AgentSession`` shape the branch accessor reads.
+
+    Popoto stores an unset string field as ``""``, never ``None``, so the
+    default here is ``""`` rather than ``None`` on purpose -- a stub that
+    defaulted to ``None`` would never exercise Risk 4.
+    """
+
+    def __init__(self, branch_name="", slug=None, session_id="", working_dir=""):
+        self.branch_name = branch_name
+        self.slug = slug
+        self.session_id = session_id
+        self.working_dir = working_dir
+        self.commit_sha = ""
+
+
+def _git_stdout(cwd, *args):
+    import subprocess
+
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True).stdout
+
+
+def _init_repo(path):
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["init", "-b", "main"],
+        ["config", "user.email", "t@t.com"],
+        ["config", "user.name", "T"],
+    ):
+        subprocess.run(["git", *args], cwd=path, capture_output=True, check=True)
+    (path / "f.txt").write_text("x\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=path, capture_output=True, check=True)
+    return path
+
+
+class TestReadWorktreeBranch:
+    """The one lane-scoped spelling of ``rev-parse --abbrev-ref HEAD``."""
+
+    def test_reads_the_live_branch(self, tmp_path):
+        from tools.lane_identity import read_worktree_branch
+
+        repo = _init_repo(tmp_path / "repo")
+        assert read_worktree_branch(repo) == "main"
+
+    def test_detached_head_is_not_a_branch_name(self, tmp_path):
+        import subprocess
+
+        from tools.lane_identity import read_worktree_branch
+
+        repo = _init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "--detach"], cwd=repo, capture_output=True, check=True)
+        # Spike-2: git answers with the literal string "HEAD" here.
+        assert read_worktree_branch(repo) is None
+
+    def test_missing_path_returns_none(self, tmp_path):
+        from tools.lane_identity import read_worktree_branch
+
+        assert read_worktree_branch(tmp_path / "nope") is None
+
+    def test_non_repo_path_returns_none(self, tmp_path):
+        from tools.lane_identity import read_worktree_branch
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert read_worktree_branch(plain) is None
+
+    def test_blank_path_returns_none(self):
+        from tools.lane_identity import read_worktree_branch
+
+        assert read_worktree_branch(None) is None
+        assert read_worktree_branch("") is None
+
+    def test_subprocess_timeout_returns_none(self, tmp_path):
+        import subprocess
+
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        with patch.object(
+            lane_identity.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5),
+        ):
+            assert lane_identity.read_worktree_branch(repo) is None
+
+
+class TestResolveLaneBranch:
+    """Precedence: the record, then the seed. Never ``"HEAD"``, never ``""``."""
+
+    def test_recorded_branch_wins_over_the_seed(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        session = _BranchSessionStub(branch_name="eval/code-simplifier", slug="eval-lane")
+        assert resolve_lane_branch(session) == "eval/code-simplifier"
+
+    def test_empty_record_falls_back_to_the_seed(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        # Risk 4: an `is None` test here would read "" as a *set* record and
+        # hand the launch guard an empty expectation, failing every lane.
+        assert resolve_lane_branch(_BranchSessionStub(branch_name="", slug="sdlc-3411")) == (
+            "session/sdlc-3411"
+        )
+
+    def test_whitespace_record_falls_back_to_the_seed(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        assert resolve_lane_branch(_BranchSessionStub(branch_name="   ", slug="sdlc-3411")) == (
+            "session/sdlc-3411"
+        )
+
+    def test_none_record_falls_back_to_the_seed(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        assert resolve_lane_branch(_BranchSessionStub(branch_name=None, slug="sdlc-3411")) == (
+            "session/sdlc-3411"
+        )
+
+    def test_recorded_head_literal_falls_back_to_the_seed(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        assert resolve_lane_branch(_BranchSessionStub(branch_name="HEAD", slug="sdlc-3411")) == (
+            "session/sdlc-3411"
+        )
+
+    def test_recorded_branch_is_stripped(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        assert resolve_lane_branch(_BranchSessionStub(branch_name="  session/x  ")) == "session/x"
+
+    def test_slugless_session_falls_back_to_the_session_id_seed(self):
+        # The session-id seed is git-sanitised by ``_session_branch_name``, which
+        # is asserted here rather than re-spelled: a literal expectation would
+        # make this test a second, drifting copy of that sanitiser.
+        from agent.session_revival import _session_branch_name
+        from tools.lane_identity import resolve_lane_branch
+
+        session = _BranchSessionStub(slug=None, session_id="tg_valor_-100_1473")
+        assert resolve_lane_branch(session) == _session_branch_name("tg_valor_-100_1473")
+        assert resolve_lane_branch(session).startswith("session/")
+
+    def test_nothing_recorded_and_nothing_to_seed_is_none(self):
+        from tools.lane_identity import resolve_lane_branch
+
+        assert resolve_lane_branch(_BranchSessionStub()) is None
+        assert resolve_lane_branch(None) is None
+
+    def test_never_hands_the_guard_an_empty_expectation(self):
+        """The interface contract between the accessor and the #1377 guard.
+
+        ``verify_worktree_branch`` raises ``ValueError`` on an empty
+        ``expected_branch``, so a blank answer would turn every lane's launch
+        into a crash. The accessor answers a real name or ``None``.
+        """
+        from tools.lane_identity import resolve_lane_branch
+
+        for stub in (
+            _BranchSessionStub(),
+            _BranchSessionStub(branch_name=""),
+            _BranchSessionStub(branch_name="  "),
+            _BranchSessionStub(branch_name="HEAD"),
+            _BranchSessionStub(branch_name="HEAD", slug="  "),
+            _BranchSessionStub(slug=""),
+        ):
+            answer = resolve_lane_branch(stub)
+            assert answer is None or answer.strip() == answer != ""
+
+
+class TestRefreshLaneBranch:
+    """Reads the live ``HEAD``; the WRITE belongs to ``checkpoint_branch_state``."""
+
+    def test_delegates_the_write_and_returns_the_record(self, tmp_path):
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        session = _BranchSessionStub(slug="sdlc-3411", working_dir=str(repo))
+
+        def fake_checkpoint(s):
+            s.branch_name = "main"
+
+        with patch.object(
+            lane_identity, "_checkpoint_branch_state", side_effect=fake_checkpoint
+        ) as writer:
+            assert lane_identity.refresh_lane_branch(session, repo) == "main"
+        writer.assert_called_once_with(session)
+
+    def test_detached_worktree_refreshes_to_no_branch(self, tmp_path):
+        import subprocess
+
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "--detach"], cwd=repo, capture_output=True, check=True)
+        session = _BranchSessionStub(working_dir=str(repo))
+
+        with patch.object(lane_identity, "_checkpoint_branch_state") as writer:
+            assert lane_identity.refresh_lane_branch(session, repo) is None
+        writer.assert_called_once_with(session)
+
+    def test_does_not_write_the_record_itself(self, tmp_path):
+        """``checkpoint_branch_state`` is the sole writer -- assert by omission."""
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        session = _BranchSessionStub(branch_name="stale/value", working_dir=str(repo))
+
+        with patch.object(lane_identity, "_checkpoint_branch_state"):
+            lane_identity.refresh_lane_branch(session, repo)
+        assert session.branch_name == "stale/value"
+
+    def test_no_session_or_no_path_is_a_noop(self, tmp_path):
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        with patch.object(lane_identity, "_checkpoint_branch_state") as writer:
+            assert lane_identity.refresh_lane_branch(None, repo) is None
+            assert lane_identity.refresh_lane_branch(_BranchSessionStub(), None) is None
+        writer.assert_not_called()
+
+
+class TestSweep:
+    """Reports divergence; mutates nothing (the [EXTERNAL] No-Go)."""
+
+    def _lane(self, tmp_path, slug, *, branch=None, detach=False, dirty=False):
+        """Build a repo with one linked lane worktree and return the repo root."""
+        import subprocess
+
+        repo = _init_repo(tmp_path / "repo")
+        worktree = repo / ".worktrees" / slug
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree), "-b", f"session/{slug}"],
+            cwd=repo,
+            capture_output=True,
+            check=True,
+        )
+        if branch:
+            subprocess.run(
+                ["git", "checkout", "-b", branch], cwd=worktree, capture_output=True, check=True
+            )
+        if detach:
+            subprocess.run(
+                ["git", "checkout", "--detach"], cwd=worktree, capture_output=True, check=True
+            )
+        if dirty:
+            (worktree / "f.txt").write_text("uncommitted\n")
+        return repo, worktree
+
+    def test_aligned_lane_is_clean(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-1")
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        assert result.exit_code == 0
+        lane = next(x for x in result.lanes if x.slug == "sdlc-1")
+        assert lane.live_branch == "session/sdlc-1"
+        assert lane.diverged is False
+
+    def test_diverged_clean_lane_is_reported_but_not_a_failure(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-2", branch="eval/code-simplifier")
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        lane = next(x for x in result.lanes if x.slug == "sdlc-2")
+        assert lane.diverged is True
+        assert lane.live_branch == "eval/code-simplifier"
+        # The #1377 guard auto-checks-out a clean mismatch, so the next turn
+        # launches -- divergence alone is not a refusal.
+        assert lane.would_refuse is False
+        assert result.exit_code == 0
+
+    def test_diverged_dirty_lane_would_refuse(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-3", branch="eval/x", dirty=True)
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        lane = next(x for x in result.lanes if x.slug == "sdlc-3")
+        assert lane.would_refuse is True
+        assert result.exit_code != 0
+
+    def test_missing_expected_branch_would_refuse(self, tmp_path):
+        """The incident's shape: cleanup deleted the branch the guard demands."""
+        import subprocess
+
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-4", branch="eval/y")
+        subprocess.run(
+            ["git", "branch", "-D", "session/sdlc-4"], cwd=repo, capture_output=True, check=True
+        )
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        lane = next(x for x in result.lanes if x.slug == "sdlc-4")
+        assert lane.expected_branch_exists is False
+        assert lane.would_refuse is True
+        assert result.exit_code != 0
+
+    def test_detached_lane_reports_no_live_branch(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-5", detach=True)
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        lane = next(x for x in result.lanes if x.slug == "sdlc-5")
+        assert lane.live_branch is None
+        assert lane.diverged is True
+
+    def test_recorded_branch_is_the_expectation_not_the_seed(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-6", branch="eval/recorded")
+        session = _BranchSessionStub(branch_name="eval/recorded", slug="sdlc-6")
+        result = sweep(repo_root=repo, sessions_for_slug=lambda slug: [session])
+        lane = next(x for x in result.lanes if x.slug == "sdlc-6")
+        assert lane.expected_branch == "eval/recorded"
+        assert lane.diverged is False
+        assert result.exit_code == 0
+
+    def test_sweep_mutates_nothing(self, tmp_path):
+        from tools.lane_identity import sweep
+
+        repo, worktree = self._lane(tmp_path, "sdlc-7", branch="eval/z", dirty=True)
+
+        def snapshot():
+            return (
+                _git_stdout(worktree, "rev-parse", "--abbrev-ref", "HEAD"),
+                _git_stdout(worktree, "status", "--porcelain"),
+                _git_stdout(repo, "branch", "--list"),
+            )
+
+        before = snapshot()
+        sweep(repo_root=repo, sessions_for_slug=lambda slug: [])
+        assert snapshot() == before
+
+    def test_report_names_every_lane_and_its_state(self, tmp_path):
+        from tools.lane_identity import render_sweep_report, sweep
+
+        repo, _ = self._lane(tmp_path, "sdlc-8", branch="eval/w", dirty=True)
+        report = render_sweep_report(sweep(repo_root=repo, sessions_for_slug=lambda slug: []))
+        assert "sdlc-8" in report
+        assert "eval/w" in report
+        assert "session/sdlc-8" in report

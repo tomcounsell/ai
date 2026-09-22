@@ -41,6 +41,53 @@ no-overwrite a wrong adoption could never be corrected.
 A machine-local ``git worktree list`` rung is deliberately absent for a different
 reason: it would make two hosts reach different answers for the same lane, and a
 per-host identity is not an identity.
+
+**The lane's BRANCH is a second identity, and it is recorded, not derived
+(#3411).**
+
+The slug discipline above stopped one level too early. A lane's *branch* kept
+being re-derived as ``session/{slug}`` by every consumer, and on 2026-09-16 that
+cost a shipped PR its report: the agent had checked out a differently-named
+branch mid-turn, end-of-turn cleanup deleted the slug-derived name (deletable
+precisely because it was *not* where the work was), and 646 ms later the #1377
+launch guard demanded that same deleted name and refused to start. Three
+consumers each knew how to spell the branch, so all three could confidently
+spell it wrong.
+
+The invariant this module now carries:
+
+    At the end of every turn, ``AgentSession.branch_name`` equals the worktree's
+    live ``HEAD`` branch, or is empty if the worktree is detached. Everything
+    that needs a lane's branch reads that record. Nothing re-derives it from the
+    slug except to seed a worktree that has never been checkpointed.
+
+Three roles, deliberately not collapsed into one:
+
+- **The record** -- ``AgentSession.branch_name``, sole source of truth, written
+  by exactly one component (``checkpoint_branch_state``).
+- **The seed** -- ``session/{slug}``, via :func:`lane_branch_name`. It names a
+  branch at worktree creation and answers for a lane that has never been
+  checkpointed. It is *not* a fallback the consumers may reach for casually:
+  seeding is the only job it has left.
+- **The live ``HEAD``** -- read by :func:`read_worktree_branch`, and not a
+  competing source. A guard whose expectation *is* the live ``HEAD`` is
+  tautological and can never fail, which would evaporate #1377's protection
+  entirely. The live ``HEAD`` is the truth about *now*; the record is the truth
+  about *what this lane is*. So ``HEAD`` is the input the record is refreshed
+  from, never an answer handed to a consumer.
+
+:func:`read_worktree_branch` is the only lane-scoped spelling of
+``git rev-parse --abbrev-ref HEAD`` in the repo, for the same reason
+:func:`mint_lane_slug` is the only home of the slug literal: a second spelling
+is a second answer waiting to drift. It also owns the one piece of git trivia
+this whole area turns on -- a detached worktree answers with the literal string
+``"HEAD"``, which is *not* a branch name and must never be stored or compared as
+one.
+
+:func:`sweep` **reports and never mutates.** Repairing a live lane means
+guessing what its worktree should be checked out to, and a wrong guess strands
+exactly the session it meant to save. The report is the handoff to an operator,
+not an instruction to this module.
 """
 
 from __future__ import annotations
@@ -50,9 +97,11 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from agent.pipeline_ledger import PipelineLedger
+from agent.worktree_manager import WORKTREES_DIR
 from tools import _sdlc_utils
 
 logger = logging.getLogger(__name__)
@@ -93,10 +142,18 @@ def mint_lane_slug(issue_number: int) -> str:
 
 
 def lane_branch_name(slug: str | None) -> str | None:
-    """Return the git branch name for ``slug``, or ``None`` when unresolvable.
+    """Return the *seed* branch name for ``slug``, or ``None`` when unresolvable.
 
     The ``session/`` prefix is applied here and nowhere else, so a consumer that
     has no slug gets ``None`` and no-ops rather than probing a guessed name.
+
+    **This spells a name from a slug; it does not answer "what branch is this
+    lane on".** That question is :func:`resolve_lane_branch`, which reads the
+    recorded branch and only falls back to this seed for a lane that has never
+    been checkpointed. Prefer this function at exactly two kinds of site: naming
+    a branch as a worktree is created, and probing origin for a lane-shaped ref.
+    Anywhere a *live* lane's branch is needed, reach for
+    :func:`resolve_lane_branch` -- reaching here instead is the #3411 defect.
     """
     if not slug or not slug.strip():
         return None
@@ -546,3 +603,498 @@ def resolve_lane_slug(
         or mint_lane_slug(issue_number)
     )
     return _record_slug_if_empty(ledger.ledger_key, candidate)
+
+
+# ---------------------------------------------------------------------------
+# Branch identity (#3411): one record, read by the guard, the cleanup and the
+# checkpoint
+# ---------------------------------------------------------------------------
+
+# What ``git rev-parse --abbrev-ref HEAD`` answers for a detached worktree. It
+# is a literal, not a branch: 5 of the 7 divergent lanes measured on this
+# machine were in this state, so treating it as a name is not a corner-case bug
+# but the common one.
+_DETACHED_HEAD_LITERAL = "HEAD"
+
+# Local git one-offs against a worktree already on disk. Provisional/tunable;
+# chosen to match the existing checkpoint reads rather than measured.
+_HEAD_READ_TIMEOUT_S = 5
+_WORKTREE_LIST_TIMEOUT_S = 15
+
+
+def _branch_or_none(value: object) -> str | None:
+    """Normalise a branch-shaped value to a real name, or ``None``.
+
+    Three inputs collapse to "no branch", and each one has cost a lane:
+
+    * ``None`` -- the field was never written.
+    * ``""`` / whitespace -- Popoto stores an unset string field as ``""``, not
+      ``None``, so an ``is None`` test reads an *unset* record as a *set* record
+      holding an empty name. ``verify_worktree_branch`` raises ``ValueError`` on
+      an empty expectation, so that mistake fails every lane at launch, not just
+      the one being debugged.
+    * ``"HEAD"`` -- a detached worktree (see :data:`_DETACHED_HEAD_LITERAL`).
+      Storing or comparing it as a branch name invents an identity.
+    """
+    name = _nonempty(value)
+    if name is None or name == _DETACHED_HEAD_LITERAL:
+        return None
+    return name
+
+
+def read_worktree_branch(worktree_path: object) -> str | None:
+    """Return the worktree's live ``HEAD`` branch, or ``None``.
+
+    **The only lane-scoped spelling of ``git rev-parse --abbrev-ref HEAD`` in
+    this repo.** A second spelling is a second answer waiting to drift, and the
+    normalisation below is the part that drifts first.
+
+    ``None`` means "this worktree is not on a branch", and it is returned rather
+    than raised for every reason that can produce it: a detached ``HEAD`` (git
+    answers with the literal ``"HEAD"``), a path that does not exist, a path
+    that is not a git repository, a non-zero git exit, or a subprocess timeout.
+    Callers are guards and cleanup paths running at turn boundaries; a raise
+    there fails a turn over a diagnostic read, so this function has no failure
+    mode other than ``None``.
+    """
+    path = _nonempty(str(worktree_path)) if worktree_path is not None else None
+    if not path:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_HEAD_READ_TIMEOUT_S,  # timeout-guard: allow (local git one-off)
+        )
+    except Exception as e:
+        logger.debug("lane_identity: HEAD read failed for %r: %s", path, e)
+        return None
+    if proc.returncode != 0:
+        logger.debug(
+            "lane_identity: HEAD read returned %s for %r: %s",
+            proc.returncode,
+            path,
+            (proc.stderr or "").strip(),
+        )
+        return None
+    return _branch_or_none(proc.stdout)
+
+
+def resolve_lane_branch(session: object) -> str | None:
+    """Return the branch this lane is on, or ``None`` when there is none.
+
+    **The accessor.** Every consumer that needs a lane's branch -- the #1377
+    launch guard, the end-of-turn cleanup, the nudge path, the diagnostics --
+    reads it through here, so that a lane has one branch identity rather than
+    one per call site.
+
+    The ladder, and why it is ordered this way:
+
+    1. **The recorded branch** (``AgentSession.branch_name``). The truth about
+       what this lane is, kept equal to the live ``HEAD`` by
+       ``checkpoint_branch_state``. Never re-derive over it.
+    2. **The ``session/{slug}`` seed**, via :func:`lane_branch_name`. Answers
+       for a lane that has never been checkpointed -- which is exactly the
+       #1377 scenario of a fresh session reusing a worktree, so that guard keeps
+       refusing what it always refused. Obtained by *calling*
+       :func:`lane_branch_name`, never by re-spelling the prefix here.
+    3. **The session-id seed**, for a slug-less session (an ad-hoc chat turn
+       with a branch but no lane).
+    4. ``None`` -- nothing recorded and nothing to seed from.
+
+    The return is a real branch name or ``None``; never ``""``, never
+    whitespace, never the literal ``"HEAD"``. That is the interface contract
+    with ``verify_worktree_branch``, which raises ``ValueError`` on an empty
+    expectation: a blank answer here would turn every lane's launch into a
+    crash. See :func:`_branch_or_none` for why truthiness and not ``is None``.
+    """
+    if session is None:
+        return None
+
+    recorded = _branch_or_none(getattr(session, "branch_name", None))
+    if recorded:
+        return recorded
+
+    seeded = lane_branch_name(_nonempty(getattr(session, "slug", None)))
+    if seeded:
+        return seeded
+
+    session_id = _nonempty(getattr(session, "session_id", None))
+    if session_id:
+        from agent.session_revival import _session_branch_name
+
+        return _branch_or_none(_session_branch_name(session_id))
+
+    return None
+
+
+def _checkpoint_branch_state(session: object) -> None:
+    """Indirection over the record's sole writer, so it can be patched.
+
+    Imported lazily and through a module-level name: ``agent.agent_session_queue``
+    pulls in the executor's world, and binding it at import time would make
+    ``tools.lane_identity`` -- a leaf that ``sdlc-tool`` imports on every
+    invocation -- drag that graph along.
+    """
+    from agent.agent_session_queue import checkpoint_branch_state
+
+    checkpoint_branch_state(session)
+
+
+def refresh_lane_branch(session: object, worktree_path: object) -> str | None:
+    """Re-read the worktree's live ``HEAD`` onto the record; return the record.
+
+    Called at both ends of the end-of-turn cleanup: once before, so the
+    destructive act names the branch that actually holds the turn's commits, and
+    once after, so the record follows the worktree back to ``main`` instead of
+    naming a branch cleanup just deleted. Omitting the trailing call re-creates
+    the #3411 failure under a new and more plausible-looking branch name.
+
+    **This function does not write the record.** ``checkpoint_branch_state`` is
+    its sole writer, and staying the sole writer is what makes the invariant
+    checkable; a second writer here is how the field became incoherent in the
+    first place. The read happens through :func:`read_worktree_branch` so the
+    detached case is normalised the same way everywhere.
+
+    Returns the branch now on record, or ``None`` when the lane is on no branch
+    (detached, or the record could not be written).
+    """
+    if session is None:
+        return None
+    path = _nonempty(str(worktree_path)) if worktree_path is not None else None
+    if not path:
+        return None
+
+    live = read_worktree_branch(path)
+    recorded_dir = _nonempty(getattr(session, "working_dir", None))
+    if recorded_dir and Path(recorded_dir).resolve() != Path(path).resolve():
+        # The writer reads `session.working_dir`, so a caller passing some other
+        # path would record the wrong worktree's HEAD. Which directory
+        # `working_dir` resolves to is #3413's question, not this function's.
+        logger.debug(
+            "lane_identity: refresh path %r differs from session.working_dir %r",
+            path,
+            recorded_dir,
+        )
+
+    try:
+        _checkpoint_branch_state(session)
+    except Exception as e:
+        # A turn must not die because a diagnostic write failed.
+        logger.warning("lane_identity: branch checkpoint failed for %r: %s", path, e)
+        return _branch_or_none(getattr(session, "branch_name", None)) or live
+
+    return _branch_or_none(getattr(session, "branch_name", None)) or live
+
+
+# ---------------------------------------------------------------------------
+# The sweep: report divergence, mutate nothing
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LaneBranchState:
+    """One lane's branch identity, as three independently-knowable facts."""
+
+    slug: str
+    path: str
+    live_branch: str | None
+    recorded_branch: str | None
+    expected_branch: str | None
+    expected_branch_exists: bool
+    dirty: bool
+    session_count: int
+    ambiguous_record: bool
+
+    @property
+    def diverged(self) -> bool:
+        """Whether the live ``HEAD`` disagrees with what consumers expect."""
+        return self.live_branch != self.expected_branch
+
+    @property
+    def would_refuse(self) -> bool:
+        """Whether this lane's next turn would be refused at the #1377 guard.
+
+        Divergence alone is not a refusal: the guard auto-checks-out a clean
+        mismatch, which is its operator-friendly recovery path. Three states do
+        refuse -- no expectation to launch against at all, an expectation naming
+        a branch that no longer exists (the #3411 incident's shape), and a
+        mismatch over a dirty worktree, where the guard preserves the
+        uncommitted work and raises.
+        """
+        if not self.expected_branch:
+            return True
+        if not self.diverged:
+            return False
+        return (not self.expected_branch_exists) or self.dirty
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """Every lane worktree on this machine, and whether any is stranded."""
+
+    lanes: list[LaneBranchState]
+
+    @property
+    def refused(self) -> list[LaneBranchState]:
+        return [lane for lane in self.lanes if lane.would_refuse]
+
+    @property
+    def diverged(self) -> list[LaneBranchState]:
+        return [lane for lane in self.lanes if lane.diverged]
+
+    @property
+    def exit_code(self) -> int:
+        """``1`` when a lane's next turn would be refused, else ``0``.
+
+        Divergence is reported but does not fail the sweep -- 23% of live lanes
+        diverge and the guard recovers most of them. The exit code answers the
+        narrower question a deploy check actually needs: is any lane one turn
+        away from the #3411 failure.
+        """
+        return 1 if self.refused else 0
+
+
+def _sweep_repo_root() -> Path | None:
+    """The checkout whose ``.worktrees/`` the sweep walks."""
+    explicit = _target_repo_cwd()
+    if explicit:
+        return Path(explicit)
+    toplevel = _sdlc_utils._git_toplevel()
+    return Path(toplevel) if toplevel else None
+
+
+def _worktree_paths(repo_root: Path) -> list[Path]:
+    """Lane worktrees under ``repo_root/.worktrees/``, from git's own listing.
+
+    Reads the porcelain listing rather than globbing the directory so a stale
+    directory git no longer tracks is not reported as a lane.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=_WORKTREE_LIST_TIMEOUT_S,  # timeout-guard: allow (local git one-off)
+        )
+    except Exception as e:
+        logger.warning("lane_identity: worktree listing failed in %r: %s", str(repo_root), e)
+        return []
+    if proc.returncode != 0:
+        logger.warning(
+            "lane_identity: worktree listing returned %s in %r: %s",
+            proc.returncode,
+            str(repo_root),
+            (proc.stderr or "").strip(),
+        )
+        return []
+
+    worktrees_root = (repo_root / WORKTREES_DIR).resolve()
+    paths: list[Path] = []
+    for line in (proc.stdout or "").splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate = Path(line[len("worktree ") :].strip())
+        try:
+            resolved = candidate.resolve()
+        except Exception as e:
+            logger.debug("lane_identity: unresolvable worktree path %r: %s", str(candidate), e)
+            continue
+        if resolved.parent == worktrees_root:
+            paths.append(resolved)
+    return paths
+
+
+def _worktree_is_dirty(worktree_path: Path) -> bool:
+    """Whether the worktree has uncommitted changes.
+
+    A read failure answers ``True``: the only consumer is the refusal
+    prediction, and over-reporting a lane as stranded costs an operator a look,
+    while under-reporting it is the silence #3411 was about.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=_HEAD_READ_TIMEOUT_S,  # timeout-guard: allow (local git one-off)
+        )
+    except Exception as e:
+        logger.debug("lane_identity: status read failed for %r: %s", str(worktree_path), e)
+        return True
+    if proc.returncode != 0:
+        return True
+    return bool((proc.stdout or "").strip())
+
+
+def _local_branch_exists(repo_root: Path, branch: str | None) -> bool:
+    """Whether ``branch`` resolves as a local head in this checkout."""
+    if not branch:
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{_REF_HEADS_PREFIX}{branch}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_HEAD_READ_TIMEOUT_S,  # timeout-guard: allow (local git one-off)
+        )
+    except Exception as e:
+        logger.debug("lane_identity: branch existence read failed for %r: %s", branch, e)
+        return False
+    return proc.returncode == 0
+
+
+def _sessions_for_slug(slug: str) -> list[object]:
+    """AgentSession rows for a lane slug, newest first.
+
+    ``slug`` is a Popoto ``KeyField``, so this is an indexed lookup. Reads go
+    through the ORM; the sweep never touches Redis directly.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        rows = list(AgentSession.query.filter(slug=slug))
+    except Exception as e:
+        logger.debug("lane_identity: session lookup failed for slug %r: %s", slug, e)
+        return []
+    return sorted(rows, key=lambda r: str(getattr(r, "updated_at", "") or ""), reverse=True)
+
+
+def sweep(
+    repo_root: object = None,
+    sessions_for_slug=None,
+) -> SweepResult:
+    """Report every lane worktree's branch identity. **Mutates nothing.**
+
+    For each ``.worktrees/{slug}/`` this walks git's own worktree listing and
+    compares three facts: the live ``HEAD``, the branch on record, and the
+    expectation :func:`resolve_lane_branch` would hand the launch guard. A lane
+    where those disagree is reported; a lane whose next turn the guard would
+    *refuse* also sets the non-zero exit code.
+
+    Repair is deliberately absent, not unimplemented: deciding what a divergent
+    worktree should be checked out to is an operator judgement with uncommitted
+    work at stake, and a wrong guess strands exactly the lane it meant to save.
+    The report is the handoff.
+
+    Args:
+        repo_root: Checkout to walk. Defaults to ``SDLC_TARGET_REPO`` or the
+            cwd's git toplevel.
+        sessions_for_slug: Row lookup, injectable for tests. Defaults to an
+            indexed ORM query on ``AgentSession.slug``.
+    """
+    root = Path(str(repo_root)) if repo_root else _sweep_repo_root()
+    if root is None:
+        logger.warning("lane_identity: no repo root to sweep")
+        return SweepResult(lanes=[])
+
+    lookup = sessions_for_slug or _sessions_for_slug
+    lanes: list[LaneBranchState] = []
+
+    for path in sorted(_worktree_paths(root)):
+        slug = path.name
+        rows = list(lookup(slug))
+        recorded_names = {
+            name for row in rows if (name := _branch_or_none(getattr(row, "branch_name", None)))
+        }
+        recorded = _branch_or_none(getattr(rows[0], "branch_name", None)) if rows else None
+        expected = resolve_lane_branch(rows[0]) if rows else lane_branch_name(slug)
+        lanes.append(
+            LaneBranchState(
+                slug=slug,
+                path=str(path),
+                live_branch=read_worktree_branch(path),
+                recorded_branch=recorded,
+                expected_branch=expected,
+                expected_branch_exists=_local_branch_exists(root, expected),
+                dirty=_worktree_is_dirty(path),
+                session_count=len(rows),
+                ambiguous_record=len(recorded_names) > 1,
+            )
+        )
+
+    return SweepResult(lanes=lanes)
+
+
+def render_sweep_report(result: SweepResult) -> str:
+    """Render a sweep for a terminal: one line per lane, worst first."""
+    if not result.lanes:
+        return "lane-branch sweep: no lane worktrees found"
+
+    def rank(lane: LaneBranchState) -> tuple[int, str]:
+        return (0 if lane.would_refuse else 1 if lane.diverged else 2, lane.slug)
+
+    lines = [
+        f"lane-branch sweep: {len(result.lanes)} lane(s), "
+        f"{len(result.diverged)} diverged, {len(result.refused)} would refuse the next turn",
+    ]
+    for lane in sorted(result.lanes, key=rank):
+        if lane.would_refuse:
+            mark = "REFUSE"
+        elif lane.diverged:
+            mark = "DIVERGE"
+        else:
+            mark = "ok"
+        lines.append(
+            f"  [{mark}] {lane.slug}: live={lane.live_branch or '(detached)'} "
+            f"expected={lane.expected_branch or '(none)'} "
+            f"recorded={lane.recorded_branch or '(unset)'} "
+            f"exists={lane.expected_branch_exists} dirty={lane.dirty} "
+            f"sessions={lane.session_count}"
+        )
+        if lane.ambiguous_record:
+            lines.append(
+                f"    note: {lane.session_count} sessions share this lane with disagreeing "
+                f"records; the newest row is reported"
+            )
+        lines.append(f"    path: {lane.path}")
+    if result.refused:
+        lines.append(
+            "Lanes marked REFUSE would fail the #1377 launch guard on their next turn. "
+            "This sweep reports only -- repair is an operator decision."
+        )
+    return "\n".join(lines)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """``python -m tools.lane_identity sweep``.
+
+    A module CLI rather than a ``[project.scripts]`` entry: it is reachable from
+    a Bash tool with no wiring, and it runs a handful of times per deploy.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m tools.lane_identity",
+        description="Lane identity diagnostics (read-only).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+    sweep_parser = sub.add_parser(
+        "sweep",
+        help="Report lanes whose live HEAD diverges from their recorded branch.",
+    )
+    sweep_parser.add_argument(
+        "--repo-root",
+        default=None,
+        help="Checkout to walk (default: SDLC_TARGET_REPO, else the cwd's git toplevel).",
+    )
+    args = parser.parse_args(argv)
+
+    result = sweep(repo_root=args.repo_root)
+    print(render_sweep_report(result))
+    return result.exit_code
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())
