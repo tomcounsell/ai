@@ -816,6 +816,21 @@ def test_cli_refuses_ollama_alone_at_a_granite_reference_site_without_latency_on
     assert "use --latency-only, or add a second candidate" in err
 
 
+def test_cli_refuses_an_unknown_site_as_a_parser_error_naming_the_rows(monkeypatch, capsys):
+    from tools.classification_eval import __main__ as cli
+
+    def boom(*a, **kw):
+        raise AssertionError("_run_site must not run")
+
+    monkeypatch.setattr(cli, "_run_site", boom)
+    with pytest.raises(SystemExit) as exc:
+        main(["--site", "no.such_site", "--candidate", "decisions"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "unknown --site 'no.such_site'" in err
+    assert "classifier.intake_intent" in err and "Traceback" not in err
+
+
 def test_cli_lets_ollama_alone_through_at_a_granite_site_with_latency_only(monkeypatch):
     from tools.classification_eval import __main__ as cli
 

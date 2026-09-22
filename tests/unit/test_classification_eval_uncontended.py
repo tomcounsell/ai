@@ -38,6 +38,8 @@ class Harness:
         launchctl_list: str,
         connect_on_restart: bool,
         failing_service_commands: tuple[str, ...] = (),
+        start_sleep_s: int = 0,
+        start_log_burst_lines: int = 0,
     ):
         self.dir = tmp_path
         self.log = tmp_path / "calls.log"
@@ -46,6 +48,12 @@ class Harness:
         self.runs_dir.mkdir()
         self.started = tmp_path / "runner.started"
         connect = f"echo '{CONNECTED}' >> \"$BRIDGE_LOG\"" if connect_on_restart else ":"
+        # A bridge's startup burst: `start_log_burst_lines` 300-byte lines
+        # after the marker, the shape of logs/bridge.log at the log's line size.
+        burst = (
+            f"for _ in $(seq 1 {start_log_burst_lines}); do printf '%0300d\\n' 0; done"
+            f' >> "$BRIDGE_LOG"'
+        )
         failing = " ".join(failing_service_commands)
         self._fake(
             "valor-service.sh",
@@ -54,14 +62,18 @@ class Harness:
             for failing in {failing}; do
                 if [ "$1" = "$failing" ]; then echo "fake $1 failed" >&2; exit 1; fi
             done
-            if [ "$1" = start ]; then {connect}; fi
+            if [ "$1" = start ]; then sleep {start_sleep_s}; {connect}; {burst}; fi
             """,
         )
         self._fake("install_reflection_worker.sh", f'echo "install-reflection $*" >> "{self.log}"')
         self._fake(
             "launchctl",
             f"""
-            if [ "$1" = list ]; then printf '%b' '{launchctl_list}'; exit 0; fi
+            if [ "$1" = list ]; then
+                sleep "${{LAUNCHCTL_LIST_SLEEP:-0}}"
+                printf '%b' '{launchctl_list}'
+                exit 0
+            fi
             echo "launchctl $*" >> "{self.log}"
             """,
         )
@@ -69,6 +81,12 @@ class Harness:
             "runner",
             f"""
             echo "runner $*" >> "{self.log}"
+            # RUNNER_DIES_BY_SIGNAL: the shape of the real Python runner under
+            # SIGTERM, which dies by the signal (no trap, no exit status).
+            if [ -n "${{RUNNER_DIES_BY_SIGNAL:-}}" ]; then
+                touch "{self.started}"
+                exec sleep "$RUNNER_SLEEP"
+            fi
             # The sleep child exists before the marker appears, so a SIGINT sent
             # the instant the marker lands always finds a runner in `wait`. An
             # asynchronous child ignores SIGINT, so the trap ends it explicitly.
@@ -122,6 +140,27 @@ class Harness:
             check=False,
         )
 
+    def spawn(self, *args: str, **extra: str) -> subprocess.Popen[str]:
+        """The wrapper in its own session, as a terminal would run it, so a
+        process-group signal reaches the wrapper and its children together."""
+        return subprocess.Popen(
+            [str(SCRIPT), *args],
+            env=self.env(**extra),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            # An xdist worker ignores SIGINT and a child inherits that; a terminal
+            # hands the wrapper the default disposition, which is what Ctrl-C tests.
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+        )
+
+    def wait_for(self, condition, what: str, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while not condition():
+            assert time.monotonic() < deadline, what
+            time.sleep(0.05)
+
 
 @pytest.fixture
 def harness(tmp_path):
@@ -157,27 +196,57 @@ def test_restores_every_loaded_label_after_the_runner_exits(harness, runner_exit
 def test_restores_after_the_runner_is_interrupted(harness):
     """Ctrl-C reaches the wrapper and the runner together (one process
     group); the runner dies, the wrapper's EXIT trap still restores."""
-    proc = subprocess.Popen(
-        [str(SCRIPT), "--site", "x.y"],
-        env=harness.env(RUNNER_SLEEP="30"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        # An xdist worker ignores SIGINT and a child inherits that; a terminal
-        # hands the wrapper the default disposition, which is what Ctrl-C tests.
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
-    )
-    deadline = time.monotonic() + 10
-    while not harness.started.exists():
-        assert time.monotonic() < deadline, "the fake runner never started"
-        time.sleep(0.05)
+    proc = harness.spawn("--site", "x.y", RUNNER_SLEEP="30")
+    harness.wait_for(harness.started.exists, "the fake runner never started")
     os.killpg(os.getpgid(proc.pid), signal.SIGINT)
     proc.communicate(timeout=20)
     calls = harness.calls()
     assert proc.returncode != 0
     assert "valor-service stop" in calls and "runner --site x.y" in calls
     assert calls[_restore_index(calls) :] == RESTORE_ALL
+    assert not harness.lock().exists()
+
+
+def test_a_group_sigint_during_the_restore_still_restores_every_label(tmp_path):
+    """Ctrl-C after the runner has exited on its own, while the bridge's
+    ``start`` is in flight: the restore ignores INT and TERM (its children
+    inherit that, so ``start`` survives too), the worker's sticky disable
+    is undone, the reflection worker comes back, and the runner's own exit
+    code is the wrapper's."""
+    harness = Harness(tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=True, start_sleep_s=3)
+    proc = harness.spawn("--site", "x.y")
+    harness.wait_for(lambda: "valor-service start" in harness.calls(), "the restore never started")
+    time.sleep(0.5)
+    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+    stdout, stderr = proc.communicate(timeout=20)
+    calls = harness.calls()
+    assert proc.returncode == 0, (stdout, stderr)
+    assert calls[_restore_index(calls) :] == RESTORE_ALL
+    assert "failed to return" not in stderr
+    assert "bridge reconnected" in stdout
+    assert not harness.lock().exists()
+
+
+def test_a_second_invocation_during_the_restore_is_refused(tmp_path):
+    """The lock is held until the restores and the reconnect wait are done:
+    a wrapper started while ``start`` is in flight exits 4 having touched
+    nothing, so it cannot bounce the bridge the first is bringing back."""
+    harness = Harness(tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=True, start_sleep_s=3)
+    proc = harness.spawn("--site", "x.y")
+    harness.wait_for(lambda: "valor-service start" in harness.calls(), "the restore never started")
+    second = harness.run("--site", "second.z")
+    assert second.returncode == 4, (second.stdout, second.stderr)
+    assert "another uncontended run" in second.stderr
+    stdout, stderr = proc.communicate(timeout=20)
+    assert proc.returncode == 0, (stdout, stderr)
+    assert harness.calls() == [
+        "valor-service stop",
+        "valor-service worker-disable",
+        f"launchctl bootout gui/{os.getuid()}/com.valor.reflection-worker",
+        "runner --site x.y",
+        *RESTORE_ALL,
+    ]
+    assert harness.counter().read_text().strip() == "1"
     assert not harness.lock().exists()
 
 
@@ -245,6 +314,21 @@ def test_a_marker_logged_before_the_stop_does_not_count_as_a_reconnect(tmp_path)
     assert "bridge reconnected" in result.stdout
 
 
+def test_a_marker_followed_by_a_startup_burst_past_the_pipe_buffer_still_counts(tmp_path):
+    """The reconnect check reads the bytes appended since the stop through a
+    pipe; the bridge's startup burst can put far more than the 64 KB pipe
+    buffer behind the marker, and under pipefail a reader that quits at the
+    first match would hand ``tail`` a SIGPIPE and report no reconnect."""
+    harness = Harness(
+        tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=True, start_log_burst_lines=1600
+    )
+    result = harness.run("--site", "x.y", BRIDGE_WAIT_S="2")
+    assert harness.bridge_log.stat().st_size > 4 * 64 * 1024
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "bridge reconnected" in result.stdout
+    assert "failed to return" not in result.stderr
+
+
 def test_a_failed_bridge_start_never_skips_the_worker_and_names_the_bridge(tmp_path):
     """Each label is restored by its own command: when the bridge's start
     fails, the worker's sticky launchctl disable is still undone, and the
@@ -261,10 +345,16 @@ def test_a_failed_bridge_start_never_skips_the_worker_and_names_the_bridge(tmp_p
     assert "failed to return: bridge" in result.stderr
 
 
-def test_a_runner_over_run_timeout_is_terminated_and_the_services_restored(harness):
-    result = harness.run("--site", "x.y", RUNNER_SLEEP="30", RUN_TIMEOUT_S="1")
+@pytest.mark.parametrize("dies_by_signal", ["", "1"])
+def test_a_runner_over_run_timeout_is_terminated_and_the_services_restored(harness, dies_by_signal):
+    """A runner that traps SIGTERM and one that dies by it (the Python
+    runner's shape) alike: exit 124, the services restored, and no
+    job-control notification for the signalled runner on stderr."""
+    result = harness.run(
+        "--site", "x.y", RUNNER_SLEEP="30", RUN_TIMEOUT_S="1", RUNNER_DIES_BY_SIGNAL=dies_by_signal
+    )
     assert result.returncode == 124, (result.stdout, result.stderr)
-    assert "RUN_TIMEOUT_S=1" in result.stderr
+    assert result.stderr == "ERROR: the runner exceeded RUN_TIMEOUT_S=1s; sending SIGTERM\n"
     calls = harness.calls()
     assert "runner --site x.y" in calls
     assert calls[_restore_index(calls) :] == RESTORE_ALL
@@ -281,6 +371,20 @@ def test_a_second_invocation_is_refused_while_the_lock_is_held(harness):
     harness.lock().rmdir()
     result = harness.run("--site", "x.y")
     assert result.returncode == 0, (result.stdout, result.stderr)
+
+
+def test_a_signal_between_the_lock_and_the_unload_leaves_no_stale_lock(harness):
+    """Ctrl-C during the `launchctl list` read, after the lock is taken and
+    before anything is unloaded: nothing to restore, and the lock is
+    released rather than left to refuse every later run."""
+    proc = harness.spawn("--site", "x.y", LAUNCHCTL_LIST_SLEEP="3")
+    harness.wait_for(harness.lock().exists, "the lock was never taken")
+    time.sleep(0.3)
+    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+    stdout, stderr = proc.communicate(timeout=20)
+    assert proc.returncode != 0
+    assert harness.calls() == []
+    assert not harness.lock().exists(), (stdout, stderr)
 
 
 def test_bridge_check_is_skipped_when_the_bridge_was_not_loaded(tmp_path):

@@ -11,7 +11,8 @@
 #   1. Refuse a thirteenth run in one UTC day (MAX_UNCONTENDED_RUNS_PER_DAY,
 #      counter file data/classification_eval_runs.<YYYY-MM-DD>, no override)
 #      and refuse to run beside another invocation (a lock directory under
-#      RUNS_DIR, removed on exit) before touching any service.
+#      RUNS_DIR, held until the restore in step 5 is complete) before
+#      touching any service.
 #   2. Record which of the three labels `launchctl list` reports loaded, and
 #      the bridge log's size, so the reconnect check below reads only lines
 #      written after this point.
@@ -26,10 +27,12 @@
 #      command so one failure never skips the next: `valor-service.sh start`
 #      for the bridge, `valor-service.sh worker-start` for the worker
 #      (re-enables and starts it), `install_reflection_worker.sh` for the
-#      reflection worker. Then, when the bridge was loaded, wait up to
-#      BRIDGE_WAIT_S for a "Connected to Telegram" line appended to
-#      logs/bridge.log since step 2. Exit 1 naming every service that failed
-#      to return; otherwise the runner's exit code is propagated.
+#      reflection worker. The restore ignores INT and TERM (a second Ctrl-C
+#      cannot cut it short; its children inherit that), then, when the
+#      bridge was loaded, waits up to BRIDGE_WAIT_S for a "Connected to
+#      Telegram" line appended to logs/bridge.log since step 2, releases the
+#      lock, and exits 1 naming every service that failed to return;
+#      otherwise the runner's exit code is propagated.
 #
 # Every external command is read through an environment variable with the
 # real default, so tests/unit/test_classification_eval_uncontended.py drives
@@ -87,6 +90,12 @@ if ! mkdir "$lock" 2>/dev/null; then
         "(remove the directory only if no wrapper is running). Nothing was stopped." >&2
     exit 4
 fi
+# The lock is released on exit from this line on (restore below takes the
+# trap over and releases it after the restores): a signal during the
+# `launchctl list` or `wc -c` reads leaves no stale lock behind. The trap is
+# installed after the mkdir, never before it: on the refusing path above it
+# would remove the lock the other wrapper holds.
+trap 'rmdir "$lock" 2>/dev/null' EXIT
 rm -f "$timed_out_flag"
 echo $((runs_today + 1)) > "$counter"
 
@@ -120,7 +129,12 @@ bridge_reconnected() {
         # rotated or truncated since the stop: everything in it is new
         bridge_log_offset=0
     fi
-    tail -c +"$((bridge_log_offset + 1))" "$BRIDGE_LOG" 2>/dev/null | grep -q "$CONNECTED_MARKER"
+    # grep reads to EOF (never -q here): under pipefail a reader that quits
+    # at the first match hands tail a SIGPIPE once the bytes behind the
+    # marker exceed the pipe buffer, and the pipeline reports no reconnect
+    # with the marker in the file.
+    tail -c +"$((bridge_log_offset + 1))" "$BRIDGE_LOG" 2>/dev/null \
+        | grep "$CONNECTED_MARKER" >/dev/null
 }
 
 # --- 3. the restore, armed before anything is unloaded --------------------------------
@@ -130,11 +144,16 @@ restored=0
 watchdog_pid=""
 
 restore() {
+    # A process-group SIGINT (a terminal Ctrl-C) after the runner has left
+    # would otherwise kill the restore command in flight and exit through
+    # the INT trap with the later restores never run: the worker left under
+    # its sticky disable, nothing naming it. Ignored here, and inherited as
+    # ignored by every child below, so the restore runs to its end.
+    trap '' INT TERM
     if [ "$restored" -eq 1 ]; then
         exit "$runner_rc"
     fi
     restored=1
-    rmdir "$lock" 2>/dev/null
     if [ -n "$watchdog_pid" ]; then
         kill -TERM "$watchdog_pid" 2>/dev/null
         wait "$watchdog_pid" 2>/dev/null
@@ -173,8 +192,11 @@ restore() {
     fi
     if [ -n "$failed" ]; then
         echo "ERROR: services that failed to return:$failed" >&2
-        exit 1
+        rc=1
     fi
+    # Released last: a wrapper admitted during the restores or the connect
+    # wait would stop the bridge this one is bringing back.
+    rmdir "$lock" 2>/dev/null
     exit "$rc"
 }
 
@@ -231,6 +253,12 @@ watchdog_pid=$!
 # Ctrl-C and SIGTERM go to the runner first; the wrapper waits for it to
 # leave and then exits through restore, so the services come back after the
 # runner is gone rather than beside it.
+# NOTE: a job started under job control can get a "Terminated: 15"
+# notification on stderr when it is reaped after a signal; with these traps
+# installed, bash 3.2.57 prints none on the timeout, Ctrl-C, or SIGTERM
+# path (measured on a pipe and on a pty, the runner dying by the signal;
+# tests/unit/test_classification_eval_uncontended.py pins the timeout
+# path's exact stderr), so the waits keep their stderr for real diagnostics.
 trap 'kill -INT "$runner_pid" 2>/dev/null; wait "$runner_pid"; runner_rc=130; exit 130' INT
 trap 'kill -TERM "$runner_pid" 2>/dev/null; wait "$runner_pid"; runner_rc=143; exit 143' TERM
 wait "$runner_pid"

@@ -256,6 +256,10 @@ def main(argv: Sequence[str] | None = None, *, tasks: Sequence[LLMTask] | None =
 
     if not args.site:
         parser.error("one of --site, --audit, or --list-sites is required")
+    from tools.classification_eval.sites import SITES
+
+    if args.site not in SITES:
+        parser.error(f"unknown --site {args.site!r}; known rows: {', '.join(sorted(SITES))}")
     candidates = parse_candidates(args.candidate)
     if not candidates:
         if not args.latency_only:

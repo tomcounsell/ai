@@ -675,8 +675,34 @@ class TestFailureReasons:
         assert exc_info.value.reason == "transport"
         assert "day_exhausted" in str(exc_info.value)
         assert transport.requests == [] and clients == []
-        assert len(_error_records(caplog)) == 1
+        records = _error_records(caplog)
+        assert len(records) == 1
+        # an expected budget condition: one line per refused call, no traceback
+        assert not records[0].exc_info and "Traceback" not in caplog.text
         _assert_no_key_fragment(caplog.text, str(exc_info.value))
+
+    async def test_a_message_read_outside_the_args_is_scrubbed_from_the_error(
+        self, stack_for, fake_meter, caplog
+    ):
+        """The chain scrub rewrites args; a class whose ``__str__`` ignores
+        them (pydantic's ``ValidationError`` has ``args == ()``) still has
+        ``str(e)`` scrubbed before it becomes the ``LLMCallError`` message
+        and the ERROR line."""
+
+        class BodyEchoError(Exception):
+            def __str__(self) -> str:
+                return f"the endpoint said: {FAKE_KEY}"
+
+        def handler(request):
+            raise BodyEchoError()
+
+        with caplog.at_level(logging.ERROR, logger="agent.llm.backends.decisions"):
+            with pytest.raises(LLMCallError) as exc_info:
+                await _call(stack_for(Transport(handler)))
+
+        assert exc_info.value.reason == "transport"
+        assert "the endpoint said: ***" in str(exc_info.value)
+        _assert_no_key_fragment(str(exc_info.value), _error_records(caplog)[0].getMessage())
 
     async def test_meter_error_at_reserve_is_transport_before_any_request(
         self, stack_for, fake_meter, clients, caplog, monkeypatch

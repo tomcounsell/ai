@@ -121,6 +121,11 @@ class _ResponseError(Exception):
     """A non-200 status or an unparseable body (``reason="transport"``)."""
 
 
+class _MeterRefusalError(_ResponseError):
+    """The meter refused the envelope: an expected budget condition, logged
+    as one line per call without a traceback while the budget is out."""
+
+
 # --------------------------------------------------------------------------
 # Question construction and answer decoding (pure, transport-free)
 # --------------------------------------------------------------------------
@@ -419,11 +424,13 @@ def _scrub_exception(exc: BaseException, key: str) -> None:
     """Scrub ``key`` from the string args of ``exc`` and every exception it chains.
 
     A traceback printed with ``exc_info`` renders each exception in the
-    chain from its args, and ``str(e)`` reads the same args, so this is the
-    one place a body value that reached an exception message (a ``choice``
-    quoting the bearer back, echoed by :func:`decode_answers`) is cut before
-    any log line or the raised :class:`LLMCallError`'s ``__cause__`` can
-    carry it. Runs on the whole value, so a key never straddles a cut.
+    chain from its args, so this is the place a body value that reached an
+    exception message (a ``choice`` quoting the bearer back, echoed by
+    :func:`decode_answers`) is cut before any log line or the raised
+    :class:`LLMCallError`'s ``__cause__`` can carry it. ``str(e)`` reads the
+    same args for every class reachable from :func:`call` today; the caller
+    scrubs that string once more for a class whose ``__str__`` does not.
+    Runs on the whole value, so a key never straddles a cut.
     """
     if not key:
         return
@@ -514,7 +521,7 @@ async def call(
         # no request without a reservation, and the wrapper falls to granite.
         refused = envelope.ensure_headroom()
         if refused is not None:
-            raise _ResponseError(f"paid-inference meter refused the envelope: {refused}")
+            raise _MeterRefusalError(f"paid-inference meter refused the envelope: {refused}")
         async with stack.AsyncHTTPClient(timeout=sdk_timeout) as client:
             response = await client.post(
                 TYPESAFE_DECISIONS_URL, headers={"Authorization": f"Bearer {key}"}, json=body
@@ -533,5 +540,9 @@ async def call(
     except Exception as e:
         reason = _reason_for(e)
         _scrub_exception(e, key)
-        raise _failure(reason, route.model, str(e), exc_info=reason != "timeout") from e
+        # ``str(e)`` is scrubbed once more on its own: the chain scrub covers
+        # a class whose ``__str__`` reads its args, which is every class
+        # reachable here today and not every class in general.
+        traceback = reason != "timeout" and not isinstance(e, _MeterRefusalError)
+        raise _failure(reason, route.model, _scrub(str(e), key), exc_info=traceback) from e
     return result
