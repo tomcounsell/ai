@@ -1,16 +1,17 @@
-"""Lane branch identity: the two-turn regression test for issue #3411.
+"""Lane branch identity: the two-turn regression tests for issue #3411.
 
 The defect: a lane's branch identity is *derived* from the slug
 (``session/{slug}``) instead of read from the record, so the end-of-turn
-cleanup deletes a branch that is not where the turn's commits are, and the
-next turn's #1377 launch guard then demands the branch cleanup just deleted.
-The 2026-09-16 incident had 646 ms between the delete and the refusal, and the
-user-visible symptom was silence: the work had shipped, but the turn that
-would have reported it never launched.
+cleanup targets a branch chosen by derivation rather than the branch holding
+the turn's commits, and the next turn's #1377 launch guard then demands the
+branch cleanup just deleted. The 2026-09-16 incident had 646 ms between the
+delete and the refusal, and the user-visible symptom was silence: the work had
+shipped, but the turn that would have reported it never launched.
 
-**This test runs two turns.** A single-turn assertion passes while the bug
+**Both tests run two turns.** A single-turn assertion passes while the bug
 survives (plan Risk 1): the damage only becomes visible when the *next* turn
-tries to launch. The second turn launching is the assertion.
+tries to launch. The second turn launching is the assertion in each; the
+remaining assertions say why it launched.
 
 Assertion shapes deliberately avoided, because they pass against the unfixed
 code and so certify nothing:
@@ -22,15 +23,24 @@ code and so certify nothing:
   code. Every assertion below is instead about the **target name** cleanup
   chose and about whether the next turn launches.
 
-This file covers the incident shape: the worktree sits on a differently-named
-branch (2 of the 7 divergent lanes measured in plan spike-3). The other five
-are detached, so ``git rev-parse --abbrev-ref HEAD`` returns the literal string
-``"HEAD"`` (plan spike-2) and there is no branch to name at all — making
-detached the dominant shape rather than a corner case. That end-to-end case
-(cleanup skipped, record cleared, next turn launches) lands with the
-failure-path suite, because the skip decision it asserts is owned by
-``refresh_lane_branch`` returning ``None``; asserting it here would mean this
-test performing the skip itself, and so testing itself.
+Two divergence shapes get a test each, because they strand the lane for
+different reasons:
+
+* ``test_diverged_lane_second_turn_launches`` — the worktree sits on a
+  differently-named branch. The incident shape, and 2 of the 7 divergent lanes
+  measured in plan spike-3.
+* ``test_detached_lane_second_turn_launches`` — the worktree is detached, so
+  ``git rev-parse --abbrev-ref HEAD`` returns the literal string ``"HEAD"``
+  (plan spike-2) and there is no branch to name at all. 5 of those 7 lanes are
+  in this state, making it the dominant shape rather than a corner case. Here
+  the lane branch *is* where the commits are, so deriving the cleanup target
+  from the slug happens to name a real branch, and the unguarded
+  ``git branch -d`` inside ``mark_work_done`` destroys unmerged work outright.
+
+Neither test performs a refresh of its own after cleanup. Plan Risk 1 puts
+that trailing refresh inside the executor's cleanup block, as production code
+the build must add; a test that performed it itself would pass post-fix even
+when the build omitted it.
 """
 
 from __future__ import annotations
@@ -306,18 +316,13 @@ def test_detached_lane_second_turn_launches(detached_lane):
         predicate_targets.append(branch)
         return merged_via_ancestor(repo_root, branch, base)
 
-    if cleanup_target and cleanup_target.strip():
-        # A detached lane has no nameable branch, so cleanup should skip rather
-        # than guess. Deriving one from the slug is the guess this test forbids.
-        mark_work_done(worktree, cleanup_target)
-        safe_delete_branch(
-            str(worktree),
-            cleanup_target,
-            predicate=recording_predicate,
-            force=False,
-        )
-
-    checkpoint_branch_state(session)
+    mark_work_done(worktree, cleanup_target)
+    safe_delete_branch(
+        str(worktree),
+        cleanup_target,
+        predicate=recording_predicate,
+        force=False,
+    )
 
     # --- Turn 2: the assertion -------------------------------------------
     rows = list(AgentSession.query.filter(project_key=PROJECT_KEY))
@@ -339,7 +344,8 @@ def test_detached_lane_second_turn_launches(detached_lane):
         f"cleanup deleted {LANE_BRANCH!r}, which holds this lane's unmerged "
         f"commits; the merge predicate was asked about {predicate_targets}"
     )
-    assert rows[0].branch_name.strip() != "HEAD", (
+    # Popoto stores unset strings as "", so normalise before comparing.
+    assert (rows[0].branch_name or "").strip() != "HEAD", (
         "the literal 'HEAD' was recorded as a branch name; a detached lane has "
         "no branch, and the record must say so"
     )
