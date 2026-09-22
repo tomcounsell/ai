@@ -12,7 +12,11 @@ Leg protocol:
 * A leg returns a validated instance of ``output_type`` or raises
   :class:`agent.llm.LLMCallError` with a ``reason`` from
   :data:`agent.llm.errors.Reason`. It never invents a default; the call
-  site's fail-safe does that.
+  site's fail-safe does that. The one deliberate exception is a bare
+  ``ValueError`` for an output type the leg cannot ask at all (the
+  decisions leg's ``questions_for`` on a type with no ``Literal`` or
+  ``bool`` field): a declaration bug, raised before any I/O, which the
+  wrapper does not fall back on, so it fails loudly at the site.
 * ``sdk_timeout`` is a required float and the only timer around the live
   request: an SDK-level client timeout, never a coroutine-level
   ``asyncio.wait_for`` (hotfix #1055: cancelling a coroutine mid-request
@@ -55,14 +59,18 @@ def default_sdk_timeout(backend: Backend) -> float:
     ``TIMEOUTS__ANTHROPIC_SDK_S``); ``OLLAMA`` and ``LOCAL_ENCODER`` read
     ``settings.timeouts.local_typed_hard_s`` (20 s, env
     ``TIMEOUTS__LOCAL_TYPED_HARD_S``, operator lever 2 for a degraded
-    daemon). For the encoder leg, which makes no request, the value only
-    bounds the fallback's deadline arithmetic. Read per call, never cached
-    at module scope.
+    daemon); for the encoder leg, which makes no request, the value only
+    bounds the fallback's deadline arithmetic. ``DECISIONS`` reads
+    ``settings.timeouts.decisions_sdk_s`` (3 s, env
+    ``TIMEOUTS__DECISIONS_SDK_S``). Read per call, never cached at module
+    scope.
     """
     if backend is Backend.ANTHROPIC:
         return settings.timeouts.anthropic_sdk_s
     if backend is Backend.OLLAMA or backend is Backend.LOCAL_ENCODER:
         return settings.timeouts.local_typed_hard_s
+    if backend is Backend.DECISIONS:
+        return settings.timeouts.decisions_sdk_s
     raise ValueError(f"no default SDK timeout for backend {backend!r}")
 
 

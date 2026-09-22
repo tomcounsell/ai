@@ -23,8 +23,17 @@ The rules, in order:
    ``OLLAMA_CLASSIFIER_MODEL`` with an Anthropic fallback on the call's
    model.
 6. ``task.backend == OLLAMA`` otherwise -> Anthropic with the call's model.
+7. ``task.backend == DECISIONS`` (#3421): ``is_eligible(project_key)`` ->
+   the decisions leg on ``JEV`` with an Ollama fallback on
+   ``OLLAMA_CLASSIFIER_MODEL`` (no third leg: eligible context never
+   reaches Anthropic from a decisions site); otherwise Anthropic with the
+   call's model and no fallback, exactly rule 6's route.
 
-Fail-closed rule (charter §7): the local rules (3 and 5) fire only for
+Each backend rule is its own block in :func:`resolve` with its own late
+import, so a lane adding a backend adds a block and leaves the others
+byte-identical (plan Risk 6).
+
+Fail-closed rule (charter §7): the local rules (3, 5 and 7) fire only for
 context the router can prove eligible.
 ``tools.improvement_eligibility.is_eligible`` pins ``valor`` ``True`` in
 code, reads the process-local cache for every other key, and treats a
@@ -34,9 +43,6 @@ late, inside :func:`resolve` (the same shape as
 ``tools/improvement_eval/judges/serves_charter.py``), so importing
 ``agent.llm`` never pulls ``bridge.routing`` in through the eligibility
 module's config reader.
-
-#3421 adds its own rule ahead of the Ollama rules for ``backend ==
-DECISIONS`` the same way, with a local fallback.
 """
 
 from __future__ import annotations
@@ -44,7 +50,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
+from config.models import JEV, MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 
 
 @dataclass(frozen=True)
@@ -61,8 +67,9 @@ def resolve(task: LLMTask, project_key: str | None, *, model: str = MODEL_FAST) 
 
     ``model`` is the call's ``model=`` kwarg and names the Anthropic model
     on every Anthropic route, the fallback included; the Ollama leg always
-    runs ``config.models.OLLAMA_CLASSIFIER_MODEL`` and the local encoder
-    leg runs the head named by ``task.site``.
+    runs ``config.models.OLLAMA_CLASSIFIER_MODEL``, the local encoder leg
+    runs the head named by ``task.site``, and the decisions leg always
+    runs ``config.models.JEV``.
     """
     anthropic = Route(Backend.ANTHROPIC, model)
     if task.kind is TaskKind.THINKING or task.client_only:
@@ -80,5 +87,13 @@ def resolve(task: LLMTask, project_key: str | None, *, model: str = MODEL_FAST) 
 
         if is_eligible(project_key):
             return Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=anthropic)
+        return anthropic
+    if task.backend is Backend.DECISIONS:
+        from tools.improvement_eligibility import is_eligible  # noqa: PLC0415
+
+        if is_eligible(project_key):
+            return Route(
+                Backend.DECISIONS, JEV, fallback=Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL)
+            )
         return anthropic
     raise ValueError(f"no routing rule for backend {task.backend!r} (site {task.site})")

@@ -50,14 +50,28 @@ is the declaration convention:
 
 Lane B (#3420) contributes ``Backend.LOCAL_ENCODER``, the local embedding model
 plus per-site linear head; its leg, router rule, and keyword fields live in
-their own modules. Lane C (#3421) appends its own :class:`Backend` member and
-keyword fields with defaults; nothing for it lives here.
+their own modules.
+
+The :class:`Decision` marker (lane C, #3421): per-field metadata for the
+decisions leg (``agent/llm/backends/decisions.py``), attached to a ``bool``
+or ``Literal`` field of an output type as ``Annotated[<type>, Decision(...)]``.
+``question`` becomes the wire ``instructions``; ``criteria`` maps each
+option (the literal values, or ``"true"`` / ``"false"`` for a ``bool``) to
+its rubric string; ``threshold`` is the ``noul`` cut for a ``bool``;
+``min_confidence`` is the abstain floor for a ``Literal`` (an answer under it
+is a ``validation`` failure and the fallback leg answers instead). Only the
+decisions leg reads it, from ``output_type.model_fields[name].metadata``;
+the Anthropic and Ollama legs never see it because pydantic keeps
+``Annotated`` metadata out of the JSON schema. A ``bool`` or ``Literal``
+field with no marker still becomes a question with default rubrics. The
+marker is metadata on the output type, never a field of :class:`LLMTask`,
+so the site walk below is untouched by it.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, fields
 from enum import StrEnum
 from pathlib import Path
@@ -76,6 +90,7 @@ class Backend(StrEnum):
     ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
     LOCAL_ENCODER = "local_encoder"
+    DECISIONS = "decisions"
 
 
 class ErrorCost(StrEnum):
@@ -99,6 +114,25 @@ class LLMTask:
     backend: Backend
     error_cost: ErrorCost = ErrorCost.MEDIUM
     client_only: bool = False
+
+
+@dataclass(frozen=True)
+class Decision:
+    """Per-field question metadata for the decisions leg (#3421).
+
+    Use as ``Annotated[bool, Decision(...)]`` or
+    ``Annotated[Literal[...], Decision(...)]`` on an output type's field;
+    see the module docstring for the contract.
+    """
+
+    question: str
+    """The wire ``instructions`` for the question."""
+    criteria: Mapping[str, str] | None = None
+    """Option to rubric text (``"true"`` / ``"false"`` for a ``bool``)."""
+    threshold: float = 0.5
+    """A ``bool`` is ``True`` when the ``noul`` probability is at or above this."""
+    min_confidence: float = 0.0
+    """A ``Literal`` answer under this confidence abstains to the fallback leg."""
 
 
 #: The directories the site walk reads, repo-relative. ``tests/`` directories

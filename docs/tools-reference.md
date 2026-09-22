@@ -132,16 +132,20 @@ Fails closed: any exception resolves to degraded and alerts; a missing API key r
 
 ### Classification Comparison Runner (`tools.classification_eval`)
 
-Runs one declared classification site's reference backend against candidate arms (`ollama`, `anthropic`) on real inbound `valor` messages and writes a `classifier_comparison` evidence record with the agreement, latency, and error-rate numbers the landing bar reads. A site's `LLMTask` declaration lands on `backend=OLLAMA` only with a record that clears the bar (`--audit` applies it to every site). Sites, bars, and the record format: [`docs/features/llm-task-taxonomy.md`](features/llm-task-taxonomy.md); operating the Ollama daemon it measures against: [`docs/infra/llm-task-routing.md`](infra/llm-task-routing.md).
+Runs one declared classification site's reference backend against candidate arms (`ollama`, `anthropic`, `local_encoder`, `decisions`) on real inbound `valor` messages and writes a `classifier_comparison` evidence record with the agreement, latency, and error-rate numbers the landing bar reads. A site's `LLMTask` declaration lands on `backend=OLLAMA`, `backend=LOCAL_ENCODER`, or `backend=DECISIONS` only with a record that clears the bar (`--audit` applies it to every site; a `LOCAL_ENCODER` site is judged on its latest landed fit record and its committed head). On a host that serves live traffic, run it through `scripts/classification-eval-uncontended.sh` with the same arguments: the wrapper unloads the bridge, worker, and reflection worker for one bounded window, restores them on every exit path, and refuses a thirteenth run per UTC day. Sites, bars, and the record format: [`docs/features/llm-task-taxonomy.md`](features/llm-task-taxonomy.md); operating the Ollama daemon it measures against: [`docs/infra/llm-task-routing.md`](infra/llm-task-routing.md).
 
 ```bash
 python -m tools.classification_eval --list-sites                                  # the declared site rows
 python -m tools.classification_eval --site routing.terminus --candidate ollama    # reference vs candidate, record written
 python -m tools.classification_eval --site job_router.route --latency-only        # no reference arm (C12, C13, C14)
 python -m tools.classification_eval --audit                                       # bar check for every site; exit 1 on any miss
+python -m tools.classification_eval --site promise_gate.verdict --fit --candidate local_encoder,anthropic --land   # fit the site's head on a held-out split; --land writes the served head
+python -m tools.classification_eval --precheck                                    # five-fold encoder agreement per site on fixtures; zero spend
+python -m tools.classification_eval --preflight                                   # real-message supply against each site's held-out need
+scripts/classification-eval-uncontended.sh --site routing.needs_response --candidate decisions   # same run on a live-traffic host
 ```
 
-`--real-limit N` sizes the sample (default 400); `--save-inputs` / `--inputs` write and replay a JSON-lines sample; `--no-attach` writes the record without claims; `--reference-model paid` (C15 only) meters the gemma reference arm on the paid route under purpose `promise_detector`. Exit 2 when the site's input minimum is unmet.
+`--real-limit N` sizes the sample (default 400); `--save-inputs` / `--inputs` write and replay a JSON-lines sample; `--no-attach` writes the record without claims; `--reference-model paid` (C15 only) meters the gemma reference arm on the paid route under purpose `promise_detector`. Exit 2 when the site's input minimum is unmet, and on a fit refusal (`--land` without the `anthropic` candidate, a contended host, the precheck gate under `--precheck-agreement`, an encoder runtime this machine cannot load). `--fit` refuses the `decisions` candidate; that arm is compared through `--site` without `--fit`. An unknown `--site` (the error names the known rows) and `--candidate ollama` alone at a site whose reference is already granite are usage errors, refused before any arm runs.
 
 ### Doctor (`tools.doctor`)
 

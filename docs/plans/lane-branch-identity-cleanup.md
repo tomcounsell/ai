@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-09-18
 tracking: https://github.com/tomcounsell/ai/issues/3411
-last_comment_id:
+last_comment_id: 5770215370
 revision_applied: true
 revision_applied_at: 2026-09-18T09:41:00Z
 revision_passes: 3
@@ -680,6 +680,8 @@ Run each row from the repo root on the build branch. Test rows use `scripts/pyte
 | **Anti-criterion** — `post_merge_cleanup` untouched ([SEPARATE-SLUG #3301] No-Go) | `git diff origin/main -- agent/ \| grep -o "post_merge_cleanup\|+++ b/agent/"` | output does not contain `post_merge_cleanup` — the diff header is the anchor, so a `git` error or an unmodified path empties stdout and the gate **rejects** rather than certifying absence against a diff it never read. `grep -c` cannot be used behind a pipe: it emits `0` on empty input, so the empty-stdout gate never fires and the row passes vacuously. |
 
 Baseline measurements re-taken on `ba24bfd0c` (`origin/main`, 2026-09-18) so the anti-criteria are known to be meaningful rather than vacuously true: `^ *branch_name = ` in the executor matches **2**; `--abbrev-ref` matches **2** in `agent_session_queue.py` (`:608`, `:667`) and **0** in `session_executor.py`; `f"session/{slug}"` in the executor matches **2** (`:1407` and `:1428`); `safe_delete_branch` in `bridge/telegram_bridge.py` matches **0** (and so do `"branch", "-d"` and `--abbrev-ref` in that file — which is precisely why the bridge caller needs a positive row rather than a sweep); `refresh_lane_branch` matches **0**; `async def checkpoint_branch_state` matches **0** (this row is a guard against regression, not a change to make). None of the files this plan touches changed between `bbe5dc7a1` and `ba24bfd0c`, so the Freshness Check above still holds. Each anti-criterion must be demonstrated FAIL against a deliberately-violating input before the PR, with the FAIL output pasted into the PR description.
+
+**Re-verified at `5c211be24` (`origin/main`, 2026-09-22), pre-build.** All eight figures above are unchanged from the `ba24bfd0c` baseline. Exactly one commit touched a file this plan owns in the interim — `4703bce23` (#3524, LLM task taxonomy lane A) — and it moved none of the measured counts. The plan's premises therefore still hold at build start; Task 8 must still re-take them again after the rebase, because the merge-order sequencing behind #3091 and #2652 is unchanged.
 
 **Re-take every figure in this paragraph before running the Verification table.** These counts are pinned to `ba24bfd0c`, and Prerequisites sequences this lane to merge third, behind #3091 and #2652. Someone else's merged change can turn a RED-today anti-criterion GREEN without this lane doing anything, and a figure that has moved to the expected value means the row is now **vacuous and must be re-anchored, not ticked**. The exposure is not hypothetical: revision 3 corrected `f"session/{slug}"` from a stated `1` to an actual `2`, a pinned figure that was already wrong before any rebase. Task 8 (`validate-all`) carries this as an explicit bullet; the Prerequisites merge-order paragraph keeps it too, but this paragraph — where the figures live — is the operative location.
 

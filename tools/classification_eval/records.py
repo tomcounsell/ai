@@ -23,6 +23,7 @@ from tools.classification_eval.core import (
     PROJECT_KEY,
     ComparisonRecord,
     evaluate_bar,
+    evaluate_reference,
     render_report,
 )
 
@@ -84,6 +85,25 @@ def is_landed(record: Mapping[str, Any]) -> bool:
     return bool((record.get("fit") or {}).get("landed"))
 
 
+def landing_record(
+    site_id: str, backend: str, *, project_key: str = PROJECT_KEY
+) -> tuple[str, dict[str, Any]] | None:
+    """``(evidence id, record)`` for the newest record of ``site_id`` in which
+    ``backend`` is a candidate arm: a comparison that measured it against a
+    reference, or the latency-only record whose measurement is that backend
+    (both keep the landed arm under ``candidates``). A record that carries the
+    backend only as its reference arm proves nothing about a landing, so a
+    later decisions comparison whose reference is granite never displaces a
+    granite site's landing evidence (#3421). ``None`` when no record carries it.
+    """
+
+    def carries(payload: dict[str, Any]) -> bool:
+        candidates = payload.get("candidates") or {}
+        return any(arm.get("backend") == backend for arm in candidates.values())
+
+    return latest_record(site_id, project_key=project_key, where=carries)
+
+
 def claims_for(record: ComparisonRecord, evidence_id: str) -> list[dict[str, str]]:
     """The claims the CLI records on the case investigation: one per candidate arm."""
     payload = record.as_dict()
@@ -99,6 +119,7 @@ def claims_for(record: ComparisonRecord, evidence_id: str) -> list[dict[str, str
                     f"{record.site} candidate={name} evidence={evidence_id}"
                     f" agreement={'n/a' if agreement is None else f'{agreement:.3f}'}"
                     f" p95_c4={arm['p95_c4']:.3f}s error_rate={arm['error_rate']:.3f}"
+                    f" cost_per_call_usd={arm['cost_per_call_usd']:.6f}"
                     f" n={record.n} n_real={record.n_real} contended={record.contended}"
                     f" bar={'PASS' if not failed else 'MISS ' + ','.join(failed)}"
                 ),
@@ -184,18 +205,49 @@ def committed_head_run_id(site_id: str) -> str | None:
     return str(leg.load_head(path).run_id)
 
 
+def _fallback_slot(record: dict[str, Any]) -> tuple[str, str, list[str]] | None:
+    """The ollama arm a ``DECISIONS`` landing is judged against, selected by
+    slot: ``(slot, arm name, failing criteria)``.
+
+    The reference slot wins when the reference arm's backend is ``ollama``
+    (C12 to C14, judged by :func:`evaluate_reference`); else the ``ollama``
+    candidate (judged by :func:`evaluate_bar`). The slot is chosen from the
+    record's own structure, never by name from a merged arms dict: a
+    same-named reference would overwrite the candidate there, and a record
+    carrying granite in both slots is judged on the reference, the slot
+    ``evaluate_reference`` was written for. ``None`` when neither slot holds
+    an ollama arm.
+    """
+    reference = record.get("reference")
+    if reference and reference.get("backend") == Backend.OLLAMA.value:
+        return "reference", str(reference["name"]), evaluate_reference(record)
+    for name, arm in record["candidates"].items():
+        if arm.get("backend") == Backend.OLLAMA.value:
+            return "candidate", name, evaluate_bar(record, name)
+    return None
+
+
 def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple[bool, str]:
     """``(ok, line)`` for one declared classification site.
 
     Every backend other than ``ANTHROPIC`` is a local landing: the record
     must carry a candidate arm on the declared backend that clears the bar
     (a reference arm on the same backend proves nothing about the landing).
-    A ``LOCAL_ENCODER`` landing is judged on its latest *landed* record
-    (``found`` is that record; measure-only records are skipped by
-    :func:`audit`), needs both its ``local_encoder`` and its ``anthropic``
-    arm clear, and needs the committed head's ``run_id`` to equal the
-    record's ``fit.head_run_id``; a committed head the leg's loader refuses
-    is a MISS row naming the error, and the walk continues to the next site.
+    ``found`` is the record :func:`audit` chose for the site: the landing
+    record (:func:`landing_record` for the declared backend, else the newest
+    record) for ``OLLAMA`` and ``DECISIONS``, the latest *landed* record for
+    ``LOCAL_ENCODER`` (measure-only records are skipped).
+
+    The ``DECISIONS`` branch needs the ``decisions`` candidate to clear the
+    bar AND the same record's ollama arm (:func:`_fallback_slot`) to clear
+    its criteria, and prints both verdicts on the row; it judges that one
+    record and substitutes none, so the fallback proof is never older than
+    the decisions measurement. A ``LOCAL_ENCODER`` landing needs both its
+    ``local_encoder`` and its ``anthropic`` arm clear, and needs the
+    committed head's ``run_id`` to equal the record's ``fit.head_run_id``; a
+    committed head the leg's loader refuses is a MISS row naming the error,
+    and the walk continues to the next site. An ``ANTHROPIC`` landing needs
+    an Anthropic arm measured.
     """
     backend = task.backend.value
     encoder = task.backend is Backend.LOCAL_ENCODER
@@ -227,6 +279,18 @@ def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple
         # candidate); the candidates' misses are the reason it sits there.
         return True, f"{prefix} anthropic arm present; {summary}"
     ok = any(name in verdicts and not verdicts[name] for name in landed)
+    if task.backend is Backend.DECISIONS:
+        fallback = _fallback_slot(record)
+        if fallback is None:
+            return False, f"{prefix} MISS {summary} no ollama arm in the record"
+        slot, name, failed = fallback
+        verdict = (
+            f"fallback={name} PASS"
+            if not failed
+            else f"fallback={name} MISS fallback {','.join(failed)}"
+        )
+        ok = ok and not failed
+        return ok, f"{prefix} {'PASS' if ok else 'MISS'} {summary} {verdict} ({slot} arm)"
     if not encoder:
         return ok, f"{prefix} {'PASS' if ok else 'MISS'} {summary}"
     fallback = verdicts.get(Backend.ANTHROPIC.value)
@@ -253,14 +317,22 @@ def _audit_row(task: LLMTask, found: tuple[str, dict[str, Any]] | None) -> tuple
 
 def audit(tasks: Sequence[LLMTask], *, project_key: str = PROJECT_KEY) -> int:
     """Print one row per classification site; exit 1 on any site without a
-    record, any local landing whose judged record misses a criterion (the
-    latest record for ``OLLAMA``, the latest *landed* record for
-    ``LOCAL_ENCODER``, whose committed head must also match it), and any
-    ``ANTHROPIC`` landing whose record has no Anthropic arm."""
+    record, any local landing whose judged record misses a criterion, and
+    any ``ANTHROPIC`` landing whose record has no Anthropic arm. An
+    ``OLLAMA`` or ``DECISIONS`` site is read at its landing record (the
+    newest record carrying the declared backend as a candidate arm), else
+    its newest record; a ``DECISIONS`` landing also needs that record's
+    ollama arm to clear. A ``LOCAL_ENCODER`` site is read at its latest
+    *landed* record, whose committed head must also match it."""
     exit_code = 0
     for task in sorted(tasks, key=lambda t: t.site):
-        where = is_landed if task.backend is Backend.LOCAL_ENCODER else None
-        ok, line = _audit_row(task, latest_record(task.site, project_key=project_key, where=where))
+        if task.backend is Backend.LOCAL_ENCODER:
+            found = latest_record(task.site, project_key=project_key, where=is_landed)
+        else:
+            found = landing_record(
+                task.site, task.backend.value, project_key=project_key
+            ) or latest_record(task.site, project_key=project_key)
+        ok, line = _audit_row(task, found)
         print(line)
         if not ok:
             exit_code = 1

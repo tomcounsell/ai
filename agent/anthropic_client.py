@@ -39,8 +39,9 @@ Design notes:
 Import-safety contract (#3001):
     Module scope here is **stdlib and our own code only**. Every
     third-party LLM-stack symbol (``anthropic``, ``openai.AsyncOpenAI``,
-    ``pydantic_ai.*``) is imported inside :func:`_load_stack`, the single memoized loader for
-    the whole package, so ``import agent.anthropic_client`` and
+    ``httpx.AsyncClient``, ``pydantic_ai.*``) is imported inside
+    :func:`_load_stack`, the single memoized loader for the whole package,
+    so ``import agent.anthropic_client`` and
     ``import agent.llm`` succeed on a machine whose installed stack is
     broken or missing. The failure then surfaces at the call path, where
     it can be reported, instead of felling every importer of
@@ -89,6 +90,8 @@ class LLMStack:
     AnthropicProvider: Any
     OllamaProvider: Any
     AsyncOpenAI: Any
+    AsyncHTTPClient: Any
+    """``httpx.AsyncClient``: the decisions leg's per-call client (#3421)."""
 
 
 @functools.cache
@@ -101,6 +104,7 @@ def _load_stack() -> LLMStack:
     attempt.
     """
     import anthropic
+    from httpx import AsyncClient as AsyncHTTPClient
     from openai import AsyncOpenAI
     from pydantic_ai import Agent, NativeOutput
     from pydantic_ai.models.anthropic import AnthropicModel
@@ -117,6 +121,7 @@ def _load_stack() -> LLMStack:
         AnthropicProvider=AnthropicProvider,
         OllamaProvider=OllamaProvider,
         AsyncOpenAI=AsyncOpenAI,
+        AsyncHTTPClient=AsyncHTTPClient,
     )
 
 

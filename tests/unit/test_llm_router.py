@@ -1,7 +1,8 @@
 """The routing point (#3410): ``agent/llm/router.py::resolve`` and the site registry.
 
-``resolve(task, project_key)`` is a pure function with six rules, in order
-(lane A's Data Flow step 4 plus lane B's local encoder rule, #3420):
+``resolve(task, project_key)`` is a pure function with seven rules, in order
+(lane A's Data Flow step 4, lane B's local encoder rule #3420, lane C's
+decisions rule #3421):
 
 1. ``kind == THINKING`` or ``client_only`` -> Anthropic with the call's model.
 2. ``backend == ANTHROPIC`` -> Anthropic with the call's model.
@@ -12,6 +13,8 @@
    Anthropic fallback.
 6. ``backend == OLLAMA`` and not eligible -> Anthropic (charter §7, fail
    closed: a ``None`` key, a cache miss, and a client key all land here).
+7. ``backend == DECISIONS`` -> Jev (``JEV``) with an Ollama fallback when
+   ``is_eligible(project_key)``, else Anthropic with no fallback.
 
 The table-driven cases run over every declaration the repo carries
 (``agent.llm.tasks.declared_sites``), so a site added later is covered
@@ -37,13 +40,22 @@ from agent.llm.tasks import (
     TaskKind,
     declared_sites,
 )
-from config.models import MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
+from config.models import JEV, MODEL_FAST, OLLAMA_CLASSIFIER_MODEL
 from tools import improvement_eligibility
 
 THINK = LLMTask(site="t.think", kind=TaskKind.THINKING, backend=Backend.ANTHROPIC)
 THINK_ON_OLLAMA = LLMTask(site="t.think_ollama", kind=TaskKind.THINKING, backend=Backend.OLLAMA)
+THINK_ON_DECISIONS = LLMTask(
+    site="t.think_decisions", kind=TaskKind.THINKING, backend=Backend.DECISIONS
+)
 CLIENT_ONLY = LLMTask(
     site="t.client_only", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA, client_only=True
+)
+CLIENT_ONLY_ON_DECISIONS = LLMTask(
+    site="t.client_only_decisions",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.DECISIONS,
+    client_only=True,
 )
 CLASSIFY_ANTHROPIC = LLMTask(
     site="t.classify_anthropic", kind=TaskKind.CLASSIFICATION, backend=Backend.ANTHROPIC
@@ -54,12 +66,18 @@ CLASSIFY_OLLAMA = LLMTask(
 CLASSIFY_ENCODER = LLMTask(
     site="t.classify_encoder", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
 )
+CLASSIFY_DECISIONS = LLMTask(
+    site="t.classify_decisions", kind=TaskKind.CLASSIFICATION, backend=Backend.DECISIONS
+)
 
 #: Captured before the autouse fixture patches ``subprocess.run`` module-wide.
 _REAL_RUN = subprocess.run
 
 ANTHROPIC_ROUTE = Route(Backend.ANTHROPIC, MODEL_FAST)
 OLLAMA_ROUTE = Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL, fallback=ANTHROPIC_ROUTE)
+DECISIONS_ROUTE = Route(
+    Backend.DECISIONS, JEV, fallback=Route(Backend.OLLAMA, OLLAMA_CLASSIFIER_MODEL)
+)
 
 
 def _encoder_route(site: str) -> Route:
@@ -79,15 +97,17 @@ def _gh_unavailable(monkeypatch):
     improvement_eligibility._clear_cache()
 
 
-class TestSixRules:
+class TestSevenRules:
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_1_thinking_never_leaves_anthropic(self, key):
         assert resolve(THINK, key) == ANTHROPIC_ROUTE
         assert resolve(THINK_ON_OLLAMA, key) == ANTHROPIC_ROUTE
+        assert resolve(THINK_ON_DECISIONS, key) == ANTHROPIC_ROUTE
 
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_1_client_only_never_leaves_anthropic(self, key):
         assert resolve(CLIENT_ONLY, key) == ANTHROPIC_ROUTE
+        assert resolve(CLIENT_ONLY_ON_DECISIONS, key) == ANTHROPIC_ROUTE
 
     @pytest.mark.parametrize("key", ["valor", "acme", None])
     def test_rule_2_declared_anthropic(self, key):
@@ -113,13 +133,36 @@ class TestSixRules:
     def test_rule_6_ineligible_ollama_fails_closed_to_anthropic(self, key):
         assert resolve(CLASSIFY_OLLAMA, key) == ANTHROPIC_ROUTE
 
+    def test_rule_7_eligible_decisions_carries_an_ollama_fallback(self):
+        route = resolve(CLASSIFY_DECISIONS, "valor")
+        assert route == DECISIONS_ROUTE
+        assert (route.backend, route.model) == (Backend.DECISIONS, JEV)
+        assert route.fallback.backend is Backend.OLLAMA
+        assert route.fallback.model == OLLAMA_CLASSIFIER_MODEL
+        assert route.fallback.fallback is None, "no third leg: Anthropic is never reached"
+
+    @pytest.mark.parametrize("key", ["acme", None, ""])
+    def test_rule_7_ineligible_decisions_fails_closed_to_anthropic(self, key):
+        route = resolve(CLASSIFY_DECISIONS, key)
+        assert route == ANTHROPIC_ROUTE
+        assert route.fallback is None
+
     @pytest.mark.parametrize("task", [CLASSIFY_OLLAMA, CLASSIFY_ENCODER], ids=["ollama", "encoder"])
     def test_the_calls_model_rides_the_anthropic_route_and_the_fallback(self, task):
         assert resolve(THINK, "valor", model="claude-x").model == "claude-x"
         assert resolve(task, "valor", model="claude-x").fallback.model == "claude-x"
         assert resolve(task, "acme", model="claude-x").model == "claude-x"
 
-    @pytest.mark.parametrize("task", [CLASSIFY_OLLAMA, CLASSIFY_ENCODER], ids=["ollama", "encoder"])
+    def test_the_decisions_route_never_names_the_calls_model(self):
+        assert resolve(CLASSIFY_DECISIONS, "acme", model="claude-x").model == "claude-x"
+        # Jev primary, granite fallback: the call's model rides neither leg.
+        assert resolve(CLASSIFY_DECISIONS, "valor", model="claude-x") == DECISIONS_ROUTE
+
+    @pytest.mark.parametrize(
+        "task",
+        [CLASSIFY_OLLAMA, CLASSIFY_ENCODER, CLASSIFY_DECISIONS],
+        ids=["ollama", "encoder", "decisions"],
+    )
     def test_resolve_is_pure_for_the_same_inputs(self, task):
         assert resolve(task, "valor") == resolve(task, "valor")
 
@@ -132,13 +175,17 @@ class TestSixRules:
 
         monkeypatch.setattr(improvement_eligibility, "is_eligible", _spy)
         resolve(THINK, "acme")
+        resolve(THINK_ON_DECISIONS, "acme")
         resolve(CLIENT_ONLY, "acme")
+        resolve(CLIENT_ONLY_ON_DECISIONS, "acme")
         resolve(CLASSIFY_ANTHROPIC, "acme")
         assert calls == []
         resolve(CLASSIFY_OLLAMA, "acme")
         assert calls == ["acme"]
         resolve(CLASSIFY_ENCODER, "acme")
         assert calls == ["acme", "acme"]
+        resolve(CLASSIFY_DECISIONS, "acme")
+        assert calls == ["acme", "acme", "acme"]
 
 
 def _expected(task: LLMTask, key: str | None) -> Route:
@@ -149,6 +196,8 @@ def _expected(task: LLMTask, key: str | None) -> Route:
         return ANTHROPIC_ROUTE
     if task.backend is Backend.LOCAL_ENCODER:
         return _encoder_route(task.site)
+    if task.backend is Backend.DECISIONS:
+        return DECISIONS_ROUTE
     return OLLAMA_ROUTE
 
 

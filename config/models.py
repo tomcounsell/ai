@@ -60,6 +60,31 @@ OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1/
 
 
 # =============================================================================
+# TYPESAFE STRUCTURED-DECISION ENDPOINT (#3421)
+# The decisions leg of ``agent.llm.run_typed`` (agent/llm/backends/decisions.py)
+# posts ``{model, state, questions}`` here with ``Authorization: Bearer
+# <TYPESAFE_API_KEY>`` (settings.api.typesafe_api_key). A plain constant, not
+# an environment read: new module-scope env reads are blocked by
+# .claude/hooks/validators/validate_no_module_scope_env.py (#2866).
+# =============================================================================
+
+TYPESAFE_DECISIONS_URL = "https://api.typesafe.ai/v1/systemone"
+
+# Jev 1.13 - TypeSafe's structured-decision model: typed ``noul`` / ``choice``
+# questions over a ``state``, answered with probabilities in about a second.
+# Pinned to the version, never the ``jev-latest`` / ``jev-preview`` aliases,
+# which move with releases and would silently re-point tuned thresholds.
+JEV = "jev-1.13.0"
+
+# Input-token price in USD per million tokens; output tokens are free.
+# Source: https://docs.typesafe.ai/models, retrieved 2026-09-21. The decisions
+# leg meters ``usage.input_tokens`` times this per call; ``None`` means the
+# price is unknown and every spend envelope settles ``metering="unknown"``,
+# never zero (charter §8).
+JEV_PRICE_USD_PER_MTOKEN: float | None = 0.042
+
+
+# =============================================================================
 # OPENROUTER MODELS
 # Format: provider/model as used with OpenRouter API
 # Use OpenRouter for: experimenting with new models, non-Anthropic providers
@@ -472,6 +497,26 @@ MODEL_INFO = {
             "Interactive PM and Teammate sessions",
             "Long multi-turn engineering sessions",
             "Ambiguous, judgment-heavy work",
+        ],
+    },
+    JEV: {
+        "name": "TypeSafe Jev 1.13",
+        "tier": "decisions",
+        "vision": False,
+        "provider": "typesafe",
+        "endpoint": "systemone",
+        "context_window": 32_000,
+        "input_cost_per_mtoken": 0.042,
+        "output_cost_per_mtoken": 0.0,
+        "price_retrieved_at": "2026-09-21",
+        "strengths": [
+            "Structured decisions: typed noul / choice questions with probabilities",
+            "About one second per call",
+            "Two hundred-thousandths of a dollar per call at typical state sizes",
+        ],
+        "use_cases": [
+            "Classification sites declared backend=Backend.DECISIONS",
+            "Comparison runner decisions arm",
         ],
     },
     OPENROUTER_KIMI_K2_5: {

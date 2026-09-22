@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING
 from agent.anthropic_client import _load_stack
 from agent.llm.backends import MIN_REMAINDER_S, default_sdk_timeout
 from agent.llm.backends import anthropic as anthropic_leg
+from agent.llm.backends import decisions as decisions_leg
 from agent.llm.backends import local_encoder as local_encoder_leg
 from agent.llm.backends import ollama as ollama_leg
 from agent.llm.errors import LLMCallError, LLMStackIncompatible
@@ -99,6 +100,7 @@ _LEGS = {
     Backend.ANTHROPIC: anthropic_leg.call,
     Backend.OLLAMA: ollama_leg.call,
     Backend.LOCAL_ENCODER: local_encoder_leg.call,
+    Backend.DECISIONS: decisions_leg.call,
 }
 
 
@@ -109,9 +111,10 @@ def _guard_stack(caller: str, *, signature_axis: bool) -> None:
     never ran a startup hook: the first call *is* the first read, and the
     resolver alerts on the transition.
 
-    ``signature_axis`` is ``False`` for an Ollama-routed call, which never
-    touches ``anthropic`` -- an Anthropic create-signature break must not
-    fall the two hot-path classifiers over.
+    ``signature_axis`` is ``False`` for an Ollama- or decisions-routed
+    call, which never touches ``anthropic`` -- an Anthropic create-signature
+    break must not fall the hot-path classifiers over; ``loader_ok`` is
+    still required on every route.
 
     ``stack_axes`` is imported here rather than at module scope so that
     importing the ``agent.llm`` package does not import
@@ -169,16 +172,18 @@ async def run_typed(
         model: the Anthropic model id. Defaults to
             ``config.models.MODEL_FAST`` (Haiku). Names the model on every
             Anthropic route, the fallback included; the Ollama leg always
-            runs ``config.models.OLLAMA_CLASSIFIER_MODEL`` and the local
-            encoder leg runs the site's committed head.
+            runs ``config.models.OLLAMA_CLASSIFIER_MODEL``, the local
+            encoder leg runs the site's committed head, and the decisions
+            leg always runs ``config.models.JEV``.
         system: an optional system prompt for the PydanticAI ``Agent``.
             The local encoder leg ignores it (the head was fit on the text
             alone); it is carried for the Anthropic fallback.
         sdk_timeout: the leg's SDK-level request timer (seconds). ``None``
             means the leg's default from ``settings.timeouts``
             (``anthropic_sdk_s`` for Anthropic, ``local_typed_hard_s`` for
-            Ollama and the local encoder), read at call time; an explicit
-            value always wins and is also the fallback budget.
+            Ollama and the local encoder, ``decisions_sdk_s`` for the
+            decisions leg), read at call time; an explicit value always
+            wins and is also the fallback budget.
         slot_timeout: bounds the Anthropic leg's wait for the shared
             semaphore; ``None`` waits unbounded on the primary leg (the
             fallback's wait is bounded by its timer). A slot wait that

@@ -567,6 +567,12 @@ C1_ON_ANTHROPIC = LLMTask(site="test.c1a", kind=TaskKind.CLASSIFICATION, backend
 C1_ON_ENCODER = LLMTask(
     site="test.c1e", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
 )
+C1_ON_DECISIONS = LLMTask(
+    site="test.c1d",
+    kind=TaskKind.CLASSIFICATION,
+    backend=Backend.DECISIONS,
+    error_cost=ErrorCost.HIGH,
+)
 
 
 class _Clock:
@@ -981,3 +987,91 @@ class TestRouteLineConfidence:
             if r.name == "agent.llm.wrapper" and r.getMessage().startswith("llm_route ")
         ]
         assert route_lines and "confidence" not in route_lines[0]
+
+
+class TestDecisionsRoute:
+    """Rule 5 through the wrapper (#3421): Jev primary, granite fallback, no third leg."""
+
+    def test_legs_table_covers_every_backend(self):
+        assert set(wrapper_mod._LEGS) == set(Backend)
+
+    def test_the_decisions_entry_is_the_decisions_leg(self):
+        from agent.llm.backends import decisions as decisions_leg
+
+        assert wrapper_mod._LEGS[Backend.DECISIONS] is decisions_leg.call
+
+    async def test_decisions_transport_error_falls_to_ollama_inside_the_budget(
+        self, legs, monkeypatch, caplog
+    ):
+        clock = _Clock(start=1000.0)
+        monkeypatch.setattr(wrapper_mod, "monotonic", clock)
+        ollama, anth = legs(_LegFake(clock=clock, advance=1.0), _LegFake())
+        decisions = _LegFake(
+            raise_with=LLMCallError("403", reason="transport"), advance=0.5, clock=clock
+        )
+        monkeypatch.setitem(wrapper_mod._LEGS, Backend.DECISIONS, decisions)
+
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            result = await run_typed(
+                "classify: hello", Classification, task=C1_ON_DECISIONS, project_key="valor"
+            )
+
+        assert result.label == "ok"
+        assert len(decisions.calls) == 1 and len(ollama.calls) == 1 and anth.calls == []
+        primary = decisions.calls[0]
+        assert primary["route"].backend is Backend.DECISIONS
+        assert primary["sdk_timeout"] == settings.timeouts.decisions_sdk_s
+        assert primary["deadline"] is None
+        fb = ollama.calls[0]
+        assert fb["route"].backend is Backend.OLLAMA and fb["route"].fallback is None
+        # budget 35 - 0.5 elapsed = 34.5; min(local_typed_hard_s=20, 34.5) = 20.
+        assert fb["sdk_timeout"] == min(settings.timeouts.local_typed_hard_s, 34.5)
+        assert fb["max_retries"] == 0
+        assert fb["deadline"] == 1000.0 + 35.0
+
+        messages = [r.getMessage() for r in caplog.records if r.name == "agent.llm.wrapper"]
+        assert messages == [
+            "llm_fallback site=test.c1d primary=decisions fallback=ollama reason=transport "
+            "elapsed_ms=500",
+            "llm_route site=test.c1d backend=ollama elapsed_ms=1500 confidence=1.000",
+        ]
+
+    async def test_decisions_timeout_with_the_budget_spent_raises_the_primary_error(
+        self, legs, monkeypatch, caplog
+    ):
+        clock = _Clock(start=1000.0)
+        monkeypatch.setattr(wrapper_mod, "monotonic", clock)
+        ollama, anth = legs(_LegFake(), _LegFake())
+        primary_error = LLMCallError("slow", reason="timeout")
+        decisions = _LegFake(raise_with=primary_error, advance=2.7, clock=clock)
+        monkeypatch.setitem(wrapper_mod._LEGS, Backend.DECISIONS, decisions)
+
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            with pytest.raises(LLMCallError) as exc_info:
+                await run_typed(
+                    "classify: hello",
+                    Classification,
+                    task=C1_ON_DECISIONS,
+                    project_key="valor",
+                    sdk_timeout=3.0,
+                    hard_timeout=None,
+                )
+
+        assert exc_info.value is primary_error
+        assert len(decisions.calls) == 1 and ollama.calls == [] and anth.calls == []
+        messages = [r.getMessage() for r in caplog.records if r.name == "agent.llm.wrapper"]
+        assert messages == [
+            "llm_no_fallback site=test.c1d primary=decisions reason=timeout elapsed_ms=2700 "
+            "budget_s=3.0"
+        ]
+
+    async def test_a_client_key_on_a_decisions_site_runs_anthropic_with_no_fallback(
+        self, legs, monkeypatch
+    ):
+        ollama, anth = legs(_LegFake(), _LegFake())
+        decisions = _LegFake()
+        monkeypatch.setitem(wrapper_mod._LEGS, Backend.DECISIONS, decisions)
+        await run_typed("classify: hello", Classification, task=C1_ON_DECISIONS, project_key="acme")
+        assert decisions.calls == [] and ollama.calls == [] and len(anth.calls) == 1
+        assert anth.calls[0]["route"].fallback is None
+        assert anth.calls[0]["sdk_timeout"] == settings.timeouts.anthropic_sdk_s

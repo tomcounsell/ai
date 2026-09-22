@@ -11,12 +11,13 @@ invariant.
 """
 
 from .errors import LLMCallError, LLMStackIncompatible
-from .tasks import Backend, ErrorCost, LLMTask, TaskKind
+from .tasks import Backend, Decision, ErrorCost, LLMTask, TaskKind
 from .wrapper import DEFAULT_HARD_TIMEOUT, run_typed
 
 __all__ = [
     "run_typed",
     "LLMTask",
+    "Decision",
     "TaskKind",
     "Backend",
     "ErrorCost",

@@ -1899,12 +1899,17 @@ def _local_encoder_row(category: str, encoder_sites: list[str]) -> CheckResult:
     )
 
 
-def _check_llm_routing(*, client_key: str | None = None) -> list[CheckResult]:
-    """The "LLM routing" section (#3410, #3420).
+def _check_llm_routing(
+    *, client_key: str | None = None, sites: list | None = None
+) -> list[CheckResult]:
+    """The "LLM routing" section (#3410, #3420, #3421).
 
     One row per declared ``LLMTask`` site (kind, declared backend, the route
     ``resolve`` returns for ``valor`` and for a client key), one row for the
-    per-process eligibility cache, one for the Ollama daemon (loaded
+    per-process eligibility cache, one for the decisions endpoint credential
+    (fails when a declared ``DECISIONS`` site would fall back to granite on
+    every call because ``settings.api.typesafe_api_key`` is ``None``; no
+    network call, the key never renders), one for the Ollama daemon (loaded
     model, keep-alive, ``local_typed_hard_s``), which fails when a declared
     ``OLLAMA`` site would fall back to Anthropic on every call because no
     daemon answers on this machine, and one for the local encoder (extra,
@@ -1913,6 +1918,9 @@ def _check_llm_routing(*, client_key: str | None = None) -> list[CheckResult]:
     a plain function and the refresh scheduler behind the cache peek is a
     no-op without a running loop, so a cold client key renders as ``miss
     (no loop; refresh not scheduled)``.
+
+    ``sites`` is the test seam for the declared-site list; ``None`` reads
+    :func:`declared_sites_for_routing`.
     """
     category = "LLM routing"
     from agent.llm.router import resolve
@@ -1929,7 +1937,7 @@ def _check_llm_routing(*, client_key: str | None = None) -> list[CheckResult]:
             text += f" (fallback {route.fallback.backend.value})"
         return text
 
-    sites = declared_sites_for_routing()
+    sites = declared_sites_for_routing() if sites is None else sites
     for declared in sites:
         task = declared.task
         message = (
@@ -1952,6 +1960,39 @@ def _check_llm_routing(*, client_key: str | None = None) -> list[CheckResult]:
                 f"{VALOR_PROJECT_KEY}={_eligibility_state(VALOR_PROJECT_KEY)}; "
                 f"{client}={_eligibility_state(client)}; "
                 f"cached entries={len(cached)}" + (f" ({', '.join(cached)})" if cached else "")
+            ),
+        )
+    )
+
+    decisions_sites = [d.task.site for d in sites if d.task.backend is Backend.DECISIONS]
+    key_present = settings.api.typesafe_api_key is not None
+    if not decisions_sites:
+        decisions_message = "no declared DECISIONS site needs the TypeSafe key"
+    elif key_present:
+        decisions_message = (
+            f"settings.api.typesafe_api_key present; {len(decisions_sites)} declared "
+            f"DECISIONS site(s): {', '.join(decisions_sites)}"
+        )
+    else:
+        decisions_message = (
+            f"settings.api.typesafe_api_key is None; {len(decisions_sites)} declared "
+            f"DECISIONS site(s) fall back to Ollama on every call: {', '.join(decisions_sites)}"
+        )
+    results.append(
+        CheckResult(
+            name="decisions_endpoint",
+            category=category,
+            passed=key_present or not decisions_sites,
+            message=decisions_message,
+            fix=(
+                None
+                if key_present or not decisions_sites
+                else (
+                    "Add the TypeSafe key to the vault ~/Desktop/Valor/.env under the name "
+                    ".env.example declares for settings.api.typesafe_api_key, from 1Password "
+                    '(vault m-valor, item "TypeSafe API", field api_key: '
+                    'OP_CACHE=false op read "op://m-valor/TypeSafe API/api_key")'
+                )
             ),
         )
     )
