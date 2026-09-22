@@ -49,10 +49,8 @@ class OvershootScanClient:
 
     def __init__(self, limit: int):
         self.limit = limit
-        self.calls = 0
 
     def scan(self, cursor=0, match=None, count=10):
-        self.calls += 1
         if cursor == 0:
             return 1, [f"email:outbox:{i}" for i in range(self.limit - 1)]
         return 0, [f"email:outbox:overshoot:{i}" for i in range(50)]
@@ -134,9 +132,13 @@ class TestScanKeysIsBounded:
         """
         from config.settings import settings
 
-        limit = int(settings.redis.scan_key_limit)
-        client = OvershootScanClient(limit)
-        keys, truncated = scan_keys(client, "email:outbox:*")
+        # Pinned rather than read live: ``scan_key_limit`` is env-overridable,
+        # and this fixture's two-round shape only expresses the overshoot for a
+        # limit it controls.
+        limit = 100
+        with patch.object(settings.redis, "scan_key_limit", limit):
+            client = OvershootScanClient(limit)
+            keys, truncated = scan_keys(client, "email:outbox:*")
         assert len(keys) > limit
         assert truncated is False
 
