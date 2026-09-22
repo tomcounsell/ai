@@ -1395,15 +1395,15 @@ async def _process_inbound_email(
             )
             if imap_uid is not None and imap_config is not None:
                 await _unmark_seen(imap_config, imap_uid)
-            # Off the loop in one piece. Exactly one of the helper's four
+            # Off the loop in one piece. Exactly one of the helper's three
             # Redis round trips is the blocking-pool hazard:
             # bridge/routing.py::get_resolver_failure_count reaches popoto's
             # BlockingConnectionPool, where a checkout blocks rather than
-            # raising and is not covered by socket_timeout. The other three go
+            # raising and is not covered by socket_timeout. The other two go
             # through text_redis(), a bounded pool that raises on exhaustion
-            # and carries socket_timeout. Wrapping all four anyway is not
+            # and carries socket_timeout. Wrapping all three anyway is not
             # over-wrapping: splitting the wrap to that one leg would leave
-            # three synchronous Redis round trips on the event loop for no
+            # two synchronous Redis round trips on the event loop for no
             # benefit.
             await asyncio.to_thread(
                 _arm_resolver_unavailable_alert_if_persistent, project_key, message_id

@@ -112,10 +112,10 @@ of them — with `truncated` False, and `scan_count` is a hint rather than a
 page-size guarantee, so the overshoot is not bounded to one key. Trimming that
 list would turn a true report of a complete sweep into a silent partial result
 claiming completeness, which is strictly worse than a few extra keys. Keys are
-deduplicated in
-first-seen order, because `SCAN` guarantees at-least-once and not exactly-once
-delivery — a key present for the whole iteration can still come back twice if
-the keyspace rehashes mid-sweep, which `keys(pattern)` never did.
+deduplicated in first-seen order, because `SCAN` guarantees at-least-once and
+not exactly-once delivery — a key present for the whole iteration can still
+come back twice if the keyspace rehashes mid-sweep, which `keys(pattern)`
+never did.
 
 What it does **not** bound is the traversal. The only exits are a completed
 cursor cycle or `scan_key_limit` *matched* keys, so a sweep matching nothing

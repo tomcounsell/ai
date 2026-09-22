@@ -39,6 +39,25 @@ class FakeScanClient:
         return (0 if nxt >= len(self.keys) else nxt), page
 
 
+class OvershootScanClient:
+    """Two rounds only: the first stays under ``limit``, the second's final
+    page carries the total past it in the same round trip that closes the
+    cursor -- the scenario the ``scan_keys`` docstring calls out as
+    "possibly more than ``scan_key_limit``" while still reporting
+    ``truncated=False``.
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.calls = 0
+
+    def scan(self, cursor=0, match=None, count=10):
+        self.calls += 1
+        if cursor == 0:
+            return 1, [f"email:outbox:{i}" for i in range(self.limit - 1)]
+        return 0, [f"email:outbox:overshoot:{i}" for i in range(50)]
+
+
 class TimingOutClient:
     """A client whose key sweep times out, as a real one does on a huge keyspace."""
 
@@ -101,6 +120,24 @@ class TestScanKeysIsBounded:
         client = FakeScanClient(["email:outbox:a", "email:outbox:b", "email:outbox:a"])
         keys, truncated = scan_keys(client, "email:outbox:*")
         assert keys == ["email:outbox:a", "email:outbox:b"]
+        assert truncated is False
+
+    def test_a_sweep_that_closes_the_cursor_while_crossing_the_limit_is_not_truncated(self):
+        """The impossible-looking case the docstring documents four times over:
+
+        ``truncated`` is decided by the cursor, not by the returned length, so
+        a final page that both closes the cursor and pushes the running total
+        past ``scan_key_limit`` still reports ``truncated=False`` with
+        ``len(keys) > limit``. A refactor that checked the limit before the
+        cursor would instead truncate here, silently contradicting the
+        documented contract while every other test in this class kept passing.
+        """
+        from config.settings import settings
+
+        limit = int(settings.redis.scan_key_limit)
+        client = OvershootScanClient(limit)
+        keys, truncated = scan_keys(client, "email:outbox:*")
+        assert len(keys) > limit
         assert truncated is False
 
 
