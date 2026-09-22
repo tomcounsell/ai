@@ -213,8 +213,11 @@ the `dataviz` skill carrying those constraints.
 
 Create the presentation file. Location priority:
 1. If user specifies a path, use that
-2. If a `docs/` directory exists, use `docs/presentations/<slug>.md`
-3. Otherwise, use `<repo-root>/presentations/<slug>.md`
+2. If `~/work-vault/` exists, use `~/work-vault/<Project>/presentations/<slug>/<name>.md`, where
+   `<Project>` is the vault folder for the subject (e.g. `Cyndra`, `Yudame`, `Popoto`). Decks live
+   in the vault, not in the source repo. Each deck gets its own folder holding the `.md` and every
+   export. `~/work-vault/` is a synced folder: commit and push after writing, per `~/.claude/CLAUDE.md`.
+3. Otherwise, use `<repo-root>/presentations/<slug>/<name>.md`
 
 **Marp file structure:**
 ```markdown
