@@ -357,9 +357,7 @@ def _rename_on_origin(repo_root: Path, completed_path: Path) -> bool:
     return _rename_present_at(repo_root, "origin/main", completed_path)
 
 
-def _undo_staged_rename_if_present(
-    repo_root: Path, plan_path: Path, completed_path: Path, plan_name: str
-) -> None:
+def _undo_staged_rename_if_present(repo_root: Path, plan_path: Path, completed_path: Path) -> None:
     """Undo a `git mv` this call staged, only if it's still staged (uncommitted).
 
     `_rollback_migration_commit` is called whenever a `git commit` reports
@@ -379,8 +377,16 @@ def _undo_staged_rename_if_present(
         undo = _run_git(["mv", str(completed_path), str(plan_path)], cwd=repo_root)
         if undo.returncode != 0:
             print(
-                f"[ERROR] Could not undo the staged rename for {plan_name}: {undo.stderr.strip()}"
+                f"[ERROR] Could not undo the staged rename for {plan_path.name}: "
+                f"{undo.stderr.strip()}"
             )
+    elif staged_diff.returncode not in (0, 1):
+        print(
+            f"[ERROR] Could not determine whether a rename for {plan_path.name} is staged "
+            f"(git diff --cached exited {staged_diff.returncode}"
+            + (f": {staged_diff.stderr.strip()}" if staged_diff.stderr else "")
+            + "); leaving the index as-is for manual recovery"
+        )
 
 
 def _rollback_migration_commit(
@@ -395,8 +401,13 @@ def _rollback_migration_commit(
     there is no check-then-act window for a peer to lose work in (a
     ``git status --porcelain`` pre-check could not close that window).
 
-    Three shapes:
+    Four shapes:
 
+    * no ``origin`` remote at all -- the ahead/fetch/reset logic below is
+      entirely origin-relative and cannot run. Checked directly against
+      ``HEAD``'s own tree instead: reported as ``"migrated"`` if the rename is
+      already committed there, or ``"mutation-failed-skip"`` (after undoing
+      any staged rename) if the commit genuinely never landed.
     * nothing ahead of ``origin/main`` -- the push actually landed (server-side
       success the client reported as failure, or a peer carried our commit up).
       Confirmed against ``origin/main`` and reported as ``"migrated"`` rather
@@ -426,7 +437,7 @@ def _rollback_migration_commit(
         if _rename_present_at(repo_root, "HEAD", completed_path):
             print(f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
             return "migrated"
-        _undo_staged_rename_if_present(repo_root, plan_path, completed_path, plan_name)
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
         print(
             f"[ERROR] Commit for {plan_name} did not land locally and there is no 'origin' "
             "to reconcile against; undid the staged rename"
@@ -439,6 +450,7 @@ def _rollback_migration_commit(
 
     ahead, our_sha = _commits_ahead_of_origin(repo_root, expected_subject)
     if ahead is None:
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
         print(
             f"[ERROR] Refusing to roll back local main for {plan_name}: could not determine "
             "what HEAD carries ahead of origin/main; leaving main as-is for manual recovery"
@@ -454,7 +466,7 @@ def _rollback_migration_commit(
         # already matches the index. Only undo when there's a real staged
         # difference to clean up, so a landed migration is never dirtied by
         # an undo it doesn't need.
-        _undo_staged_rename_if_present(repo_root, plan_path, completed_path, plan_name)
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
         if _rename_on_origin(repo_root, completed_path):
             print(
                 f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ "
@@ -469,6 +481,7 @@ def _rollback_migration_commit(
         return "rollback-refused-skip"
 
     if our_sha is None:
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
         print(
             f"[ERROR] Refusing to roll back local main for {plan_name}: none of the "
             f"{ahead} commit(s) ahead of origin/main is our migration commit; leaving main "

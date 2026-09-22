@@ -1098,21 +1098,9 @@ class TestMigrationRollbackSafety:
         the HEAD-tree check must find the rename already committed there and
         report `"migrated"` without touching anything.
         """
-        from scripts.migrate_completed_plan import _run_git as real_run_git
-
         origin, repo, plan = self._setup(tmp_path, "no-origin-landed-plan.md")
         _git(repo, "remote", "remove", "origin")
         head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
-
-        def wrapper(args, cwd, timeout=30):
-            result = real_run_git(args, cwd, timeout)
-            if args and args[0] == "commit":
-                # The commit really happened; only _head_sha (called before
-                # the commit, to anchor head_before_commit) is faked below.
-                return result
-            return result
-
-        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
 
         def fake_head_sha(repo_root):
             return None
