@@ -1839,27 +1839,22 @@ class AgentSession(Model):
 
     @property
     def derived_branch_name(self) -> str | None:
-        """The branch this lane is on: the record first, the slug seed second (#3411).
-
-        The recorded ``branch_name`` is the lane's branch identity; ``session/{slug}``
-        is only the name a worktree is *seeded* with. Answering from the slug while a
-        record existed is what let a lane whose HEAD had moved be reported as still
-        on ``session/{slug}``, and that report is what the #1377 launch guard then
-        demanded -- so a lane whose branch had been deleted refused every subsequent
-        turn, silently.
-
-        Empty, whitespace-only, and the literal ``"HEAD"`` (git's detached sentinel,
-        per spike-2) are all "nothing recorded": Popoto stores an unset string field
-        as ``""``, so testing ``is None`` here would read unset as set and hand the
-        guard an expectation it raises on. Mirrors
-        :func:`tools.lane_identity.resolve_lane_branch`, which is the accessor
-        callers outside this model should reach for.
-        """
+        """The branch this lane is on: the record first, the ``session/{slug}`` seed second."""
         recorded = (self.branch_name or "").strip()
-        if recorded and recorded != "HEAD":
-            return recorded
-        s = self.slug
-        return f"session/{s}" if s else None
+        seed = f"session/{self.slug}" if self.slug else None
+        # #3411: the recorded branch is the lane's branch identity; session/{slug} is
+        # only the name a worktree is *seeded* with. Answering from the slug while a
+        # record existed reported a lane whose HEAD had moved as still on
+        # session/{slug}, and that report is what the #1377 launch guard then demanded
+        # -- so a lane whose branch had been deleted refused every subsequent turn,
+        # silently.
+        #
+        # Empty, whitespace-only, and the literal "HEAD" (git's detached sentinel, per
+        # spike-2) all mean "nothing recorded": Popoto stores an unset string field as
+        # "", so testing `is None` here would read unset as set and hand the guard an
+        # expectation it raises on. Mirrors tools.lane_identity.resolve_lane_branch,
+        # the accessor that callers outside this model should reach for.
+        return seed if (not recorded or recorded == "HEAD") else recorded
 
     @property
     def plan_path(self) -> str | None:
