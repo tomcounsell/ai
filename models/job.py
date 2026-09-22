@@ -493,6 +493,15 @@ class Job(Model):
         annotation; an existing ``pm``/``lane`` annotation superseded by
         anyone; the reconciler repeating its own write) writes normally.
 
+        The bare ``bool`` return deliberately does not discriminate those two
+        refusal reasons. #3414 asked for a widened return type and was closed
+        will-not-fix on 2026-09-22: the refusal itself is correct in both
+        cases and nothing is written in either, so all a caller loses is an
+        explanatory string, which the callers that want it already reconstruct
+        by re-reading the job. Widen this only when a caller needs to *branch*
+        on the reason rather than report it — and file that calling
+        requirement with the change.
+
         Raises :class:`CorruptGoalError` (via ``_mutable_goal_data``) rather
         than silently accepting a block/unblock on a corrupt goal.
         """

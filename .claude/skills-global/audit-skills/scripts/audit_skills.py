@@ -837,6 +837,13 @@ def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
             for p in d.rglob("*")
             if p.is_file() and not _is_husk_artifact(p, d)
         ]
+        # A husk named `logs` containing only hook JSONL is a known stale
+        # artifact, not a live finding: a hook used to write its log path
+        # cwd-relative, so running it with cwd inside a skills root minted one.
+        # Fixed in c1e7de937 (see validate_design_system_sync.py's _LOG_PATH
+        # comment); #3334 closed will-not-fix on 2026-09-22. If this fires on
+        # `logs` again, look for a NEW cwd-relative writer rather than
+        # re-investigating the old one.
         detail = f" (contains: {', '.join(sorted(contents)[:5])})" if contents else " (empty)"
         findings.append(
             Finding(

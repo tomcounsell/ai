@@ -132,6 +132,17 @@ def tool_activity_ts(session_id: str | None) -> float | None:
     Never raises: a missing directory, unreadable file, or malformed payload
     reads as ``None`` (no signal), which leaves the deadline exactly as
     conservative as it was before this signal existed.
+
+    The marker is keyed by ``session_id`` only, never by run or turn, and
+    nothing here unlinks it. That is accepted, not an oversight: #3296 was
+    closed will-not-fix on 2026-09-22. A stale marker can only *lengthen* the
+    computed idle because of the ``min`` above, so the ordinary case is safe by
+    construction. The one adverse case needs three things to coincide — a
+    ``claude`` child escaping the process-group SIGKILL, that orphan still
+    firing ``PreToolUse`` into this directory, and a re-enqueued turn on the
+    same ``session_id`` genuinely wedging — and even then the turn terminates
+    on the absolute ceiling rather than hanging. Do not re-derive this; reopen
+    #3296 only with a production turn that actually reached the ceiling.
     """
     if not session_id:
         return None
