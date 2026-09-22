@@ -999,6 +999,134 @@ class TestMigrationRollbackSafety:
         assert plan.exists()
         assert not (repo / COMPLETED_PLANS_DIR / "refused-commit-plan.md").exists()
 
+    def test_genuinely_failed_commit_misjudged_as_landed_undoes_staged_rename(
+        self, tmp_path, monkeypatch
+    ):
+        """A genuinely-failed commit routed to rollback must not strand a staged rename.
+
+        Forcing `_head_sha` to return None for the pre-commit read makes
+        `_migration_commit_may_have_landed` return the "unknown, may have
+        landed" `True` even though the commit really failed (a real failing
+        pre-commit hook, no mocking of git semantics beyond that one read).
+        The commit never happened, nothing is ahead of origin/main, and the
+        rename is absent from origin/main too -- the decisive
+        `"rollback-refused-skip"` shape -- but the `git mv` this call staged
+        must still be undone so the shared checkout comes back clean.
+        """
+        from scripts.migrate_completed_plan import _head_sha as real_head_sha
+
+        origin, repo, plan = self._setup(tmp_path, "misjudged-refused-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the refusal left a staged rename dirty in the shared index"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "misjudged-refused-plan.md").exists()
+        # Sanity: real_head_sha still works normally outside the monkeypatch.
+        assert real_head_sha(repo) is not None
+
+    def test_ambiguous_commit_failure_with_no_origin_and_no_real_commit_is_honest(
+        self, tmp_path, monkeypatch
+    ):
+        """No 'origin' + a genuinely-failed commit must not fabricate `migrated`.
+
+        There is nothing to fetch or compare against without an `origin`
+        remote, so `_rollback_migration_commit` cannot use the ahead/fetch/
+        reset machinery at all -- but it must still check HEAD's own tree
+        directly (ground truth, independent of origin) rather than blindly
+        reporting `"migrated"`. A real failing pre-commit hook means the
+        commit truly never landed: reporting `"migrated"` here would be a
+        fabricated success over a plan that is still sitting unmigrated with
+        a dirty staged rename in the index.
+        """
+        origin, repo, plan = self._setup(tmp_path, "no-origin-failed-plan.md")
+        _git(repo, "remote", "remove", "origin")
+        remote_check = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert remote_check.returncode != 0, "test setup must actually remove 'origin'"
+
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "mutation-failed-skip", (
+            "a commit that never landed, with no origin to reconcile against, "
+            "was reported as 'migrated' -- a fabricated success"
+        )
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the staged rename from a commit that never landed was left behind"
+        )
+        assert plan.exists(), "the staged rename was not undone"
+        assert not (repo / COMPLETED_PLANS_DIR / "no-origin-failed-plan.md").exists()
+
+    def test_ambiguous_commit_failure_with_no_origin_and_real_landed_commit_is_migrated(
+        self, tmp_path, monkeypatch
+    ):
+        """No 'origin' + a commit that genuinely DID land reports `migrated` cleanly.
+
+        The commit really succeeds (real git, nothing mocked about the commit
+        itself); only the pre-commit `_head_sha` read is forced to fail so
+        `_migration_commit_may_have_landed` takes the "unknown, may have
+        landed" branch and routes into `_rollback_migration_commit` despite
+        the commit having actually worked. With no origin to compare against,
+        the HEAD-tree check must find the rename already committed there and
+        report `"migrated"` without touching anything.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "no-origin-landed-plan.md")
+        _git(repo, "remote", "remove", "origin")
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args and args[0] == "commit":
+                # The commit really happened; only _head_sha (called before
+                # the commit, to anchor head_before_commit) is faked below.
+                return result
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "migrated"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+        assert not plan.exists()
+        assert (repo / COMPLETED_PLANS_DIR / "no-origin-landed-plan.md").exists()
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() != head_before
+
     def test_hanging_push_still_rolls_back(self, tmp_path, monkeypatch):
         """A git push that blows its timeout must not strand the commit."""
         from scripts.migrate_completed_plan import _run_git as real_run_git

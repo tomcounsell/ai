@@ -308,7 +308,9 @@ def _migration_commit_may_have_landed(
     mean "unknown", and the safe disposition for unknown is the rollback path.
     ``_rollback_migration_commit`` independently re-verifies that our commit is
     in ``origin/main..HEAD`` and refuses to touch ``main`` otherwise, so a
-    false ``True`` costs a refusal; a false ``False`` costs a stranded commit.
+    false ``True`` costs a refusal (or a ``"migrated"`` report) with any staged
+    rename cleanly undone rather than left dirty; a false ``False`` costs a
+    stranded commit.
     """
     if head_before_commit is None:
         return True
@@ -341,17 +343,48 @@ def _commits_ahead_of_origin(
     return len(lines), our_sha
 
 
-def _rename_on_origin(repo_root: Path, completed_path: Path) -> bool:
-    """True if the migrated plan already exists at its archive path on ``origin/main``."""
+def _rename_present_at(repo_root: Path, ref: str, completed_path: Path) -> bool:
+    """True if the migrated plan already exists at its archive path in the tree at ``ref``."""
     try:
         rel = completed_path.relative_to(repo_root).as_posix()
     except ValueError:
         return False
-    return _run_git(["cat-file", "-e", f"origin/main:{rel}"], cwd=repo_root).returncode == 0
+    return _run_git(["cat-file", "-e", f"{ref}:{rel}"], cwd=repo_root).returncode == 0
+
+
+def _rename_on_origin(repo_root: Path, completed_path: Path) -> bool:
+    """True if the migrated plan already exists at its archive path on ``origin/main``."""
+    return _rename_present_at(repo_root, "origin/main", completed_path)
+
+
+def _undo_staged_rename_if_present(
+    repo_root: Path, plan_path: Path, completed_path: Path, plan_name: str
+) -> None:
+    """Undo a `git mv` this call staged, only if it's still staged (uncommitted).
+
+    `_rollback_migration_commit` is called whenever a `git commit` reports
+    failure but might have landed anyway (see `_migration_commit_may_have_landed`).
+    When it genuinely did NOT land, the `git mv` from before the failed commit
+    is still sitting in the index -- `git diff --cached` on the rename's own
+    paths is nonzero. When the commit DID land (committed, not staged) there is
+    nothing to undo, and this is a no-op. Never raises; a failure to undo is
+    logged and left for manual recovery, matching every other refusal in this
+    module.
+    """
+    staged_diff = _run_git(
+        ["diff", "--cached", "--quiet", "--", str(plan_path), str(completed_path)],
+        cwd=repo_root,
+    )
+    if staged_diff.returncode == 1:
+        undo = _run_git(["mv", str(completed_path), str(plan_path)], cwd=repo_root)
+        if undo.returncode != 0:
+            print(
+                f"[ERROR] Could not undo the staged rename for {plan_name}: {undo.stderr.strip()}"
+            )
 
 
 def _rollback_migration_commit(
-    repo_root: Path, plan_name: str, expected_subject: str, completed_path: Path
+    repo_root: Path, plan_path: Path, expected_subject: str, completed_path: Path, has_origin: bool
 ) -> str:
     """Drop the migration commit this call authored -- and only that commit.
 
@@ -367,7 +400,10 @@ def _rollback_migration_commit(
     * nothing ahead of ``origin/main`` -- the push actually landed (server-side
       success the client reported as failure, or a peer carried our commit up).
       Confirmed against ``origin/main`` and reported as ``"migrated"`` rather
-      than escalating to a human over a migration that is already done.
+      than escalating to a human over a migration that is already done. The
+      refusal shape below (migration absent everywhere) shares this ``ahead ==
+      0`` branch; both also clean up any staged rename left in the index by a
+      commit that never actually landed, so neither leaves a dirty tree behind.
     * exactly our commit ahead -- ``git reset --keep origin/main``.
     * our commit plus a peer's -- ``git rebase --onto <ours>^ <ours>``, which
       drops only ours and replays theirs.
@@ -376,6 +412,27 @@ def _rollback_migration_commit(
     ``"rollback-refused-skip"`` with ``main`` left untouched for manual
     recovery.
     """
+    plan_name = plan_path.name
+
+    # No 'origin' means there is nothing to fetch or compare against -- the
+    # ahead/fetch/reset logic below is entirely origin-relative and cannot run
+    # at all. But "no origin" is not the same as "the commit landed": check
+    # HEAD's own tree directly, which is ground truth regardless of origin.
+    # If the rename really is committed there, it's already durable locally
+    # (consistent with the no-origin philosophy elsewhere in this file). If
+    # not, the commit genuinely never happened -- undo the staged rename
+    # rather than reporting a false "migrated" over a dirty index.
+    if not has_origin:
+        if _rename_present_at(repo_root, "HEAD", completed_path):
+            print(f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
+            return "migrated"
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path, plan_name)
+        print(
+            f"[ERROR] Commit for {plan_name} did not land locally and there is no 'origin' "
+            "to reconcile against; undid the staged rename"
+        )
+        return "mutation-failed-skip"
+
     # Refresh origin/main first: the ahead-set is only meaningful against the
     # remote's current tip, and a push that landed server-side shows up here.
     _run_git(["fetch", "origin", "main"], cwd=repo_root, timeout=60)
@@ -389,6 +446,15 @@ def _rollback_migration_commit(
         return "rollback-refused-skip"
 
     if ahead == 0:
+        # A commit that never actually landed (the commit-failure call site)
+        # can still leave its own `git mv` staged in the index even though
+        # nothing is ahead of origin/main. A commit that DID land (the other
+        # call sites, reached here only once it's already on origin/main) has
+        # nothing staged -- its rename is committed, not staged, and HEAD
+        # already matches the index. Only undo when there's a real staged
+        # difference to clean up, so a landed migration is never dirtied by
+        # an undo it doesn't need.
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path, plan_name)
         if _rename_on_origin(repo_root, completed_path):
             print(
                 f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ "
@@ -612,7 +678,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
                 "may have landed; rolling it back instead of undoing the rename"
             )
             return _rollback_migration_commit(
-                repo_root, plan_path.name, migration_subject, completed_path
+                repo_root, plan_path, migration_subject, completed_path, has_origin
             )
         # The commit genuinely did not happen. Undo only our own rename. A
         # `reset --hard HEAD` here would discard whatever else a peer has
@@ -664,7 +730,7 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
             # _rollback_migration_commit.
             print(f"[ERROR] Rebase conflict migrating {plan_path.name}")
             return _rollback_migration_commit(
-                repo_root, plan_path.name, migration_subject, completed_path
+                repo_root, plan_path, migration_subject, completed_path, has_origin
             )
 
     # Exhausted the retry budget without a conflict (e.g. repeatedly losing
@@ -672,7 +738,9 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     # conflict path (#3530): never return leaving local main ahead of origin,
     # scoped to only our own commit (#3530 follow-up).
     print(f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts")
-    return _rollback_migration_commit(repo_root, plan_path.name, migration_subject, completed_path)
+    return _rollback_migration_commit(
+        repo_root, plan_path, migration_subject, completed_path, has_origin
+    )
 
 
 def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) -> Path | None:

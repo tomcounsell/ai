@@ -42,10 +42,16 @@ is the **only** code that moves a plan out of root. It:
   commit` that fails *after* those preconditions passed is a different
   signal — the primitive was already mid-mutation — and returns
   `"mutation-failed-skip"` after undoing its own rename. A failed `git commit`
-  is never assumed to be a no-op: the primitive reads `HEAD` first, and if the
-  migration commit actually landed (a blown timeout after git's ref update, for
-  example) it routes to the rollback below instead of reverse-renaming, which
-  would otherwise strand the commit *and* leave the shared index dirty.
+  is never assumed to be a no-op: the primitive anchors a sha *before* the
+  `git commit` call and, on failure, searches the whole
+  `head_before_commit..HEAD` range (not just the tip) for the migration
+  commit's subject — a peer session can land its own commit on top of ours in
+  the shared checkout between our commit and the re-read, so a tip-only check
+  could see the peer's subject and wrongly conclude ours never happened. An
+  unreadable range, or no usable pre-commit sha, is treated as "unknown, may
+  have landed" rather than assumed to be a no-op, and routes to the rollback
+  below instead of reverse-renaming, which would otherwise strand the commit
+  *and* leave the shared index dirty.
 - Requires local `main` to already match `origin/main`, or be cleanly
   fast-forwardable to it, before doing any `git mv`/commit (issue #3530). If
   local `main` already carries commits `origin/main` lacks, the primitive
@@ -97,7 +103,11 @@ Whenever git declines,
 the ahead-set has an unrecognised shape, or the drop's exit status is non-zero
 for any other reason (a contended `.git/index.lock`, say), the primitive
 returns `"rollback-refused-skip"` with `main` left exactly as it was for manual
-recovery — it never reports a rollback it did not perform. It never resolves a
+recovery — it never reports a rollback it did not perform. `main` itself
+(its commit history) is always left untouched by a refusal; separately, if
+the commit that triggered the refusal never actually landed, any rename it
+staged in the index is also cleaned up before returning, so a refusal never
+leaves an uncommitted staged rename behind either. It never resolves a
 genuine conflict unattended.
 
 Every git subcommand runs through `_run_git`, which never raises: a blown
