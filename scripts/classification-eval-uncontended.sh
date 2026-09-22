@@ -27,12 +27,12 @@
 #      command so one failure never skips the next: `valor-service.sh start`
 #      for the bridge, `valor-service.sh worker-start` for the worker
 #      (re-enables and starts it), `install_reflection_worker.sh` for the
-#      reflection worker. The restore ignores INT and TERM (a second Ctrl-C
-#      cannot cut it short; its children inherit that), then, when the
-#      bridge was loaded, waits up to BRIDGE_WAIT_S for a "Connected to
-#      Telegram" line appended to logs/bridge.log since step 2, releases the
-#      lock, and exits 1 naming every service that failed to return;
-#      otherwise the runner's exit code is propagated.
+#      reflection worker. The restore ignores INT, TERM, and HUP (a second
+#      Ctrl-C or an SSH drop cannot cut it short; its children inherit
+#      that), then, when the bridge was loaded, waits up to BRIDGE_WAIT_S
+#      for a "Connected to Telegram" line appended to logs/bridge.log since
+#      step 2, releases the lock, and exits 1 naming every service that
+#      failed to return; otherwise the runner's exit code is propagated.
 #
 # Every external command is read through an environment variable with the
 # real default, so tests/unit/test_classification_eval_uncontended.py drives
@@ -147,9 +147,10 @@ restore() {
     # A process-group SIGINT (a terminal Ctrl-C) after the runner has left
     # would otherwise kill the restore command in flight and exit through
     # the INT trap with the later restores never run: the worker left under
-    # its sticky disable, nothing naming it. Ignored here, and inherited as
-    # ignored by every child below, so the restore runs to its end.
-    trap '' INT TERM
+    # its sticky disable, nothing naming it. HUP is the same event from an
+    # SSH session dropping on the bridge host. Ignored here, and inherited
+    # as ignored by every child below, so the restore runs to its end.
+    trap '' INT TERM HUP
     if [ "$restored" -eq 1 ]; then
         exit "$runner_rc"
     fi

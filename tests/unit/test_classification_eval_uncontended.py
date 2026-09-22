@@ -227,6 +227,25 @@ def test_a_group_sigint_during_the_restore_still_restores_every_label(tmp_path):
     assert not harness.lock().exists()
 
 
+def test_a_group_sighup_during_the_restore_still_restores_every_label(tmp_path):
+    """An SSH session dropping on the bridge host while ``start`` is in
+    flight sends the group a HUP: the restore ignores it the same way it
+    ignores INT and TERM, every label comes back, the lock is released, and
+    the runner's exit code is the wrapper's."""
+    harness = Harness(tmp_path, launchctl_list=ALL_LOADED, connect_on_restart=True, start_sleep_s=3)
+    proc = harness.spawn("--site", "x.y")
+    harness.wait_for(lambda: "valor-service start" in harness.calls(), "the restore never started")
+    time.sleep(0.5)
+    os.killpg(os.getpgid(proc.pid), signal.SIGHUP)
+    stdout, stderr = proc.communicate(timeout=20)
+    calls = harness.calls()
+    assert proc.returncode == 0, (stdout, stderr)
+    assert calls[_restore_index(calls) :] == RESTORE_ALL
+    assert "failed to return" not in stderr
+    assert "bridge reconnected" in stdout
+    assert not harness.lock().exists()
+
+
 def test_a_second_invocation_during_the_restore_is_refused(tmp_path):
     """The lock is held until the restores and the reconnect wait are done:
     a wrapper started while ``start`` is in flight exits 4 having touched
