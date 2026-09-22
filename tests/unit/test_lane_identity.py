@@ -825,6 +825,68 @@ class TestReadWorktreeBranch:
             assert lane_identity.read_worktree_branch(repo) is None
 
 
+class TestWorktreeIsDetached:
+    """The tri-state detachment probe. ``None`` is not ``True`` (#3411).
+
+    ``checkpoint_branch_state`` clears ``branch_name`` on ``True`` alone. Every
+    inconclusive answer must therefore be ``None``, because the obvious
+    "simplification" -- folding any non-zero exit into ``True``, since ``-q``
+    suppresses stderr for the ordinary detached case -- would make a vanished
+    or non-repo path read as confirmed detachment and erase a good record.
+    These tests exist to make that refactor fail.
+    """
+
+    def test_on_a_branch_is_false(self, tmp_path):
+        from tools.lane_identity import worktree_is_detached
+
+        repo = _init_repo(tmp_path / "repo")
+        assert worktree_is_detached(repo) is False
+
+    def test_detached_head_is_true(self, tmp_path):
+        import subprocess
+
+        from tools.lane_identity import worktree_is_detached
+
+        repo = _init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "--detach"], cwd=repo, capture_output=True, check=True)
+        assert worktree_is_detached(repo) is True
+
+    def test_non_repo_path_is_none_not_detached(self, tmp_path):
+        from tools.lane_identity import worktree_is_detached
+
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        # `symbolic-ref` exits 128 here, not 1. Reading that as detachment is
+        # the erasure bug; `is None` is the assertion, `is not True` the point.
+        result = worktree_is_detached(plain)
+        assert result is None
+        assert result is not True
+
+    def test_missing_path_is_none(self, tmp_path):
+        from tools.lane_identity import worktree_is_detached
+
+        assert worktree_is_detached(tmp_path / "nope") is None
+
+    def test_blank_path_is_none(self):
+        from tools.lane_identity import worktree_is_detached
+
+        assert worktree_is_detached(None) is None
+        assert worktree_is_detached("") is None
+
+    def test_subprocess_timeout_is_none(self, tmp_path):
+        import subprocess
+
+        from tools import lane_identity
+
+        repo = _init_repo(tmp_path / "repo")
+        with patch.object(
+            lane_identity.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5),
+        ):
+            assert lane_identity.worktree_is_detached(repo) is None
+
+
 class TestResolveLaneBranch:
     """Precedence: the record, then the seed. Never ``"HEAD"``, never ``""``."""
 

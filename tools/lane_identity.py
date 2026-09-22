@@ -76,16 +76,27 @@ Three roles, deliberately not collapsed into one:
   about *what this lane is*. So ``HEAD`` is the input the record is refreshed
   from, never an answer handed to a consumer.
 
-:func:`read_worktree_branch` is the only lane-scoped spelling outside
-``agent/worktree_manager.py`` of ``git rev-parse --abbrev-ref HEAD`` in the
-repo, for the same reason :func:`mint_lane_slug` is the only home of the slug
-literal: a second spelling is a second answer waiting to drift. (Two survive
-in ``agent/worktree_manager.py``: ``verify_worktree_branch``, which must raise
-rather than return ``None``, at :438; and a WIP-ref path needing the raw
-``"HEAD"`` literal as a gate, at :1892.) It also owns the one piece of git trivia
-this whole area turns on -- a detached worktree answers with the literal string
-``"HEAD"``, which is *not* a branch name and must never be stored or compared as
-one.
+:func:`read_worktree_branch` is the only spelling of ``git rev-parse
+--abbrev-ref HEAD`` **on the lane-identity path** -- every read whose answer
+reaches ``AgentSession.branch_name`` -- for the same reason
+:func:`mint_lane_slug` is the only home of the slug literal: a second spelling
+is a second answer waiting to drift. It is not the only spelling in the repo,
+and the survivors are named here so the claim stays checkable:
+
+- ``agent/worktree_manager.py`` -- ``verify_worktree_branch`` at :438, which
+  must raise rather than return ``None``; and a WIP-ref path at :1892 needing
+  the raw ``"HEAD"`` literal as a gate. Both deliberate.
+- ``agent/branch_manager.py`` -- ``get_current_branch`` at :38, path-scoped via
+  ``cwd``. **It returns the literal ``"main"`` on any failure**, so a failed
+  read reports a lane as being on the default branch. That is the same class of
+  hazard as storing ``"HEAD"``, and a worse one: ``"main"`` is a real branch, so
+  nothing downstream can tell the fallback from a true answer. Not on the
+  identity path today; routing it through here is tracked, not done.
+- ``tools/valor_calendar.py`` -- :231, path-scoped but outside lane identity.
+
+It also owns the one piece of git trivia this whole area turns on -- a detached
+worktree answers with the literal string ``"HEAD"``, which is *not* a branch
+name and must never be stored or compared as one.
 
 :func:`sweep` **reports and never mutates.** Repairing a live lane means
 guessing what its worktree should be checked out to, and a wrong guess strands
@@ -648,13 +659,12 @@ def _branch_or_none(value: object) -> str | None:
 def read_worktree_branch(worktree_path: object) -> str | None:
     """Return the worktree's live ``HEAD`` branch, or ``None``.
 
-    **The only lane-scoped spelling outside `agent/worktree_manager.py` of
-    ``git rev-parse --abbrev-ref HEAD`` in this repo.** A second spelling is a
-    second answer waiting to drift, and the normalisation below is the part
-    that drifts first. Two other lane-scoped spellings survive by necessity:
-    ``verify_worktree_branch`` (must raise rather than return ``None``) and a
-    WIP-ref path (needs the raw ``"HEAD"`` literal as a gate) — see
-    ``agent/worktree_manager.py:438`` and ``:1892``.
+    **The only spelling of ``git rev-parse --abbrev-ref HEAD`` on the
+    lane-identity path** — every read whose answer reaches
+    ``AgentSession.branch_name``. A second spelling is a second answer waiting
+    to drift, and the normalisation below is the part that drifts first. Other
+    path-scoped spellings survive elsewhere in the repo, deliberately or not;
+    the module docstring enumerates them.
 
     ``None`` means "this worktree is not on a branch", and it is returned rather
     than raised for every reason that can produce it: a detached ``HEAD`` (git
