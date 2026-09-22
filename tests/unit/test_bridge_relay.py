@@ -503,7 +503,7 @@ class TestProcessOutbox:
             }
         )
         # First lpop returns message, second returns None (queue empty)
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         mock_sent = MagicMock()
@@ -535,7 +535,7 @@ class TestProcessOutbox:
                 "ack_sent_id": True,
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:upvote-valor-42-1000"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:upvote-valor-42-1000"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -565,7 +565,7 @@ class TestProcessOutbox:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -596,7 +596,7 @@ class TestProcessOutbox:
                 "ack_sent_id": True,
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:upvote-valor-42-1000"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:upvote-valor-42-1000"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -626,7 +626,7 @@ class TestProcessOutbox:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -657,7 +657,7 @@ class TestProcessOutbox:
                 "_relay_attempts": MAX_RELAY_RETRIES - 1,
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -691,7 +691,7 @@ class TestProcessOutbox:
                 "text": "unknown",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -719,7 +719,7 @@ class TestProcessOutbox:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -750,7 +750,7 @@ class TestProcessOutbox:
                 "emoji": "thumbsup",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -779,7 +779,7 @@ class TestProcessOutbox:
                 "emoji": "star",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -807,7 +807,7 @@ class TestProcessOutbox:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -828,7 +828,7 @@ class TestProcessOutbox:
     async def test_skips_malformed_json(self):
         """Should skip queue entries with invalid JSON."""
         mock_redis = MagicMock()
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = ["not valid json", None]
 
         with patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis):
@@ -860,7 +860,7 @@ class TestProcessOutbox:
                 "_relay_attempts": 1,
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -884,7 +884,7 @@ class TestProcessOutbox:
         success_msg = json.dumps({"chat_id": "12345", "text": "good", "session_id": "s1"})
         fail_msg = json.dumps({"chat_id": "12345", "text": "bad", "session_id": "s2"})
         success_msg2 = json.dumps({"chat_id": "12345", "text": "also good", "session_id": "s3"})
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [success_msg, fail_msg, success_msg2, None]
 
         with (
@@ -1116,7 +1116,7 @@ class TestFloodWait:
             "text": "flood target",
             "session_id": "test-session",
         }
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [json.dumps(message_dict), None]
 
         flood_err = FloodWaitError(request=None, capture=10)
@@ -1153,7 +1153,7 @@ class TestFloodWait:
             "session_id": "test-session",
             "_flood_waits": RELAY_FLOOD_WAIT_MAX - 1,
         }
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [json.dumps(message_dict), None]
 
         flood_err = FloodWaitError(request=None, capture=5)
@@ -1328,7 +1328,7 @@ class TestNullMsgIdDedup:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -1365,7 +1365,7 @@ class TestNullMsgIdDedup:
                 "session_id": "test-session",
             }
         )
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [message, None]
 
         with (
@@ -1811,7 +1811,7 @@ class TestDeclinedPollIsDeliveredOnce:
     @staticmethod
     def _run(payload):
         mock_redis = MagicMock()
-        mock_redis.keys.return_value = ["telegram:outbox:sess-1"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:sess-1"])
         # One poll payload, then the queue drains. Anything the relay re-queues
         # lands in `rpush`, which is what the assertions read.
         mock_redis.lpop.side_effect = [json.dumps(payload), None]
@@ -2007,7 +2007,7 @@ class TestOutboxParseDeadLetters:
     @pytest.mark.asyncio
     async def test_outbox_parse_dead_letters_malformed_and_unknown_type(self):
         mock_redis = MagicMock()
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         unknown_type = json.dumps({"chat_id": "1", "text": "x", "type": "nope"})
         mock_redis.lpop.side_effect = ["{not json at all", unknown_type, None]
 
@@ -2042,7 +2042,7 @@ class TestOutboxParseDeadLetters:
         ordinary reply.
         """
         mock_redis = MagicMock()
-        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.scan.return_value = (0, ["telegram:outbox:test-session"])
         mock_redis.lpop.side_effect = [
             json.dumps({"chat_id": "1", "text": "hello", "session_id": "s"}),
             None,

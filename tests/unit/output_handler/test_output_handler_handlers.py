@@ -203,7 +203,6 @@ class TestTelegramRelayOutputHandler:
     def _make_handler(self, mock_redis=None, file_handler=None):
         """Create a handler with a mocked Redis connection."""
         handler = TelegramRelayOutputHandler(
-            redis_url="redis://localhost:6379/0",
             file_handler=file_handler,
         )
         if mock_redis is not None:
@@ -418,7 +417,6 @@ class TestSystemRoomSink:
 
     def _make_handler(self, mock_redis=None, file_handler=None):
         handler = TelegramRelayOutputHandler(
-            redis_url="redis://localhost:6379/0",
             file_handler=file_handler,
         )
         handler._redis = mock_redis if mock_redis is not None else MagicMock()
