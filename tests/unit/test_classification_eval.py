@@ -1505,6 +1505,44 @@ def test_cli_land_without_anthropic_exits_2_with_no_spend(fit_env, monkeypatch):
     assert latest_record("test.site", project_key=PK) is None
 
 
+def test_a_served_head_path_is_not_gitignored():
+    """The broad ``*.json`` rule in ``.gitignore`` would swallow the head a
+    landing commits (#3544 step "commit the head"); the negation for
+    ``agent/llm/backends/heads/*.json`` keeps ``git add -A`` staging it.
+    ``git check-ignore`` exits 1 for a path no rule ignores, and with ``-v``
+    names the negating rule when one matched last."""
+    import subprocess
+    from pathlib import Path
+
+    from agent.llm.backends.local_encoder import served_head_path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    relative = served_head_path("routing.needs_response").relative_to(repo_root).as_posix()
+    assert relative == "agent/llm/backends/heads/routing.needs_response.json"
+
+    def check_ignore(path: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "check-ignore", "-v", path],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # -v prints the last matching rule; a negation there (exit 0) or no rule at
+    # all (exit 1) both mean the head is staged. A plain `*.json` line is the
+    # regression.
+    probe = check_ignore(relative)
+    assert probe.returncode in (0, 1), probe.stderr
+    rule = probe.stdout.split("\t", 1)[0] if probe.stdout else ""
+    assert probe.returncode == 1 or rule.endswith("!agent/llm/backends/heads/*.json"), probe.stdout
+    # The control: a json beside the heads dir is still swallowed by `*.json`.
+    control = check_ignore("agent/llm/backends/scratch.json")
+    assert control.returncode == 0 and control.stdout.split("\t", 1)[0].endswith("*.json"), (
+        control.stdout
+    )
+
+
 async def test_precheck_gate_skips_with_zero_reference_calls_and_one_claim(fit_env):
     reference, calls = _counting_reference()
     outcome = await _fit(fit_env, reference=reference, precheck_agreement=0.84)
