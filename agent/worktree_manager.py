@@ -144,6 +144,7 @@ def safe_delete_branch(
         dict with keys:
           - deleted: bool
           - skipped_unmerged: bool
+          - skipped_checked_out: bool
           - branch: str (the branch name)
           - error: str | None
     """
@@ -162,6 +163,7 @@ def safe_delete_branch(
         return {
             "deleted": False,
             "skipped_unmerged": True,
+            "skipped_checked_out": False,
             "branch": branch_name,
             "error": f"cannot resolve base '{base}'",
         }
@@ -180,6 +182,7 @@ def safe_delete_branch(
         return {
             "deleted": False,
             "skipped_unmerged": True,
+            "skipped_checked_out": False,
             "branch": branch_name,
             "error": str(e),
         }
@@ -198,11 +201,60 @@ def safe_delete_branch(
         return {
             "deleted": False,
             "skipped_unmerged": True,
+            "skipped_checked_out": False,
             "branch": branch_name,
             "error": None,
         }
 
-    # Branch is landed — delete it
+    # Checked-out-in-a-worktree pre-check (#3411), between the predicate and the
+    # delete. Git already refuses `branch -d/-D` for a branch another worktree
+    # holds, so the branch survived this case before too — but it surfaced as
+    # `deleted: False, skipped_unmerged: False` plus a stderr string,
+    # indistinguishable from a delete that blew up. Naming the outcome is what
+    # lets a caller log preservation as preservation, and what stops one
+    # escalating to force=True believing the refusal was about merge state:
+    # `force` reaches this point and is still refused. A scan that cannot
+    # answer preserves.
+    #
+    # ORDERING (deviation from the plan, which says "ahead of the predicate"):
+    # placing it ahead would short-circuit the predicate, and the #3411
+    # regression net asserts the merge predicate is asked about the branch
+    # holding the turn's commits — a lane's own worktree always has that branch
+    # checked out, so an ahead-of-predicate check makes that observable
+    # unreachable and the gate RED. The cost is precedence: a branch that is
+    # both unmerged and checked out reports `skipped_unmerged`, not
+    # `skipped_checked_out`. Both preserve, so no branch is at risk either way.
+    try:
+        held_by = _scan_checked_out_worktree(repo_root, branch_name)
+    except Exception as e:
+        logger.warning(
+            "[unmerged-branch-guard] worktree scan failed for branch '%s': %s"
+            " — refusing deletion (fail-safe)",
+            branch_name,
+            e,
+        )
+        return {
+            "deleted": False,
+            "skipped_unmerged": False,
+            "skipped_checked_out": True,
+            "branch": branch_name,
+            "error": f"worktree scan failed: {e}",
+        }
+    if held_by is not None:
+        logger.info(
+            "[unmerged-branch-guard] branch '%s' is checked out by worktree '%s' — preserving",
+            branch_name,
+            held_by,
+        )
+        return {
+            "deleted": False,
+            "skipped_unmerged": False,
+            "skipped_checked_out": True,
+            "branch": branch_name,
+            "error": f"checked out by worktree '{held_by}'",
+        }
+
+    # Branch is landed and held by no worktree — delete it
     flag = "-D" if force else "-d"
     result = subprocess.run(
         ["git", "branch", flag, branch_name],
@@ -212,13 +264,58 @@ def safe_delete_branch(
         timeout=settings.timeouts.git_subprocess_s,
     )
     if result.returncode == 0:
-        return {"deleted": True, "skipped_unmerged": False, "branch": branch_name, "error": None}
+        return {
+            "deleted": True,
+            "skipped_unmerged": False,
+            "skipped_checked_out": False,
+            "branch": branch_name,
+            "error": None,
+        }
     else:
         err = result.stderr.strip()
         logger.warning(
             "[unmerged-branch-guard] git branch %s '%s' failed: %s", flag, branch_name, err
         )
-        return {"deleted": False, "skipped_unmerged": False, "branch": branch_name, "error": err}
+        return {
+            "deleted": False,
+            "skipped_unmerged": False,
+            "skipped_checked_out": False,
+            "branch": branch_name,
+            "error": err,
+        }
+
+
+def _scan_checked_out_worktree(repo_root: str, branch_name: str) -> str | None:
+    """Return the worktree path holding *branch_name*, or ``None`` if none does.
+
+    Distinct from :func:`_find_worktree_for_branch`, which collapses "the scan
+    failed" into the same ``None`` as "nothing holds it". That collapse is
+    harmless where it is used (worktree creation retries anyway) and unsafe
+    here: it would let an unreadable worktree list read as permission to
+    delete. This function **raises** instead, and ``safe_delete_branch``
+    fails safe to preserving.
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=settings.timeouts.git_subprocess_s,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git worktree list exited {result.returncode}: {result.stderr.strip()}")
+
+    # Porcelain: blank-line-separated blocks, each with a "worktree <path>"
+    # line and, unless detached, a "branch refs/heads/<name>" line.
+    current_path: str | None = None
+    full_ref = f"refs/heads/{branch_name}"
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch ") and current_path is not None:
+            if line.split(" ", 1)[1] == full_ref:
+                return current_path
+    return None
 
 
 def _count_live_session_branches(repo_root: str) -> str:

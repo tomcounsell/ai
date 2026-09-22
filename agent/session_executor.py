@@ -32,7 +32,11 @@ from config.project_key_resolver import resolve_project_key
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
-from tools.lane_identity import lane_branch_name, resolve_lane_branch
+from tools.lane_identity import (
+    lane_branch_name,
+    refresh_lane_branch,
+    resolve_lane_branch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2813,40 +2817,71 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     safe_delete_branch,
                 )
 
-                # The lane's branch, read from the record rather than derived
-                # from the slug (#3411): cleanup must name the branch that
-                # actually holds this turn's commits.
-                lane_branch = resolve_lane_branch(session)
-                mark_work_done(working_dir, lane_branch)
-                # Also delete the session branch to keep git clean — guarded by
-                # the unmerged-branch guard (issue #1646): use merged_via_ancestor
-                # since this path runs at session completion before any PR merge.
-                branch_del = safe_delete_branch(
-                    str(working_dir),
-                    lane_branch,
-                    predicate=merged_via_ancestor,
-                    force=False,
-                )
-                if branch_del["deleted"]:
+                # Leading refresh (#3411): re-read the worktree's live HEAD onto
+                # the record before anything destructive, so cleanup names the
+                # branch that actually holds this turn's commits rather than the
+                # slug-derived name it was seeded with at turn start.
+                lane_branch = refresh_lane_branch(session, working_dir)
+                if lane_branch is None:
+                    # Detached: there is no branch to mark done or delete, and
+                    # inventing one — which deriving `session/{slug}` amounts to
+                    # — is exactly the #3411 defect. Skip cleanup entirely and
+                    # leave the record cleared, so the next turn's guard reads
+                    # "no branch" instead of a name nothing can satisfy.
                     logger.info(
-                        f"[{session.project_key}] Auto-marked session done "
-                        f"and cleaned up branch {lane_branch}"
-                    )
-                elif branch_del["skipped_unmerged"]:
-                    logger.warning(
-                        "[unmerged-branch-guard] branch '%s' preserved"
-                        " — work not yet merged to main",
-                        lane_branch,
-                    )
-                    logger.info(
-                        f"[{session.project_key}] Auto-marked session done "
-                        f"(branch {lane_branch} preserved — unmerged)"
+                        f"[lane-branch] Skipping cleanup for slug {session.slug!r} — "
+                        f"worktree {working_dir} is on no branch (detached HEAD)"
                     )
                 else:
-                    logger.info(
-                        f"[{session.project_key}] Auto-marked session done "
-                        f"(branch {lane_branch} cleanup error: {branch_del.get('error')})"
+                    mark_work_done(working_dir, lane_branch)
+                    # Also delete the session branch to keep git clean — guarded
+                    # by the unmerged-branch guard (issue #1646): use
+                    # merged_via_ancestor since this path runs at session
+                    # completion before any PR merge.
+                    branch_del = safe_delete_branch(
+                        str(working_dir),
+                        lane_branch,
+                        predicate=merged_via_ancestor,
+                        force=False,
                     )
+                    if branch_del["deleted"]:
+                        logger.info(
+                            f"[{session.project_key}] Auto-marked session done "
+                            f"and cleaned up branch {lane_branch}"
+                        )
+                    elif branch_del["skipped_checked_out"]:
+                        logger.info(
+                            f"[{session.project_key}] Auto-marked session done "
+                            f"(branch {lane_branch} preserved — checked out by a worktree)"
+                        )
+                    elif branch_del["skipped_unmerged"]:
+                        logger.warning(
+                            "[unmerged-branch-guard] branch '%s' preserved"
+                            " — work not yet merged to main",
+                            lane_branch,
+                        )
+                        logger.info(
+                            f"[{session.project_key}] Auto-marked session done "
+                            f"(branch {lane_branch} preserved — unmerged)"
+                        )
+                    else:
+                        logger.info(
+                            f"[{session.project_key}] Auto-marked session done "
+                            f"(branch {lane_branch} cleanup error: {branch_del.get('error')})"
+                        )
+
+                    # Trailing refresh (#3411, plan Risk 1) — LOAD-BEARING, not
+                    # a tidy-up. `mark_work_done` returns the worktree to `main`
+                    # and the delete above may have removed `lane_branch`
+                    # outright, so without this the record still names a branch
+                    # that no longer exists and the next turn's #1377 guard
+                    # refuses to launch — the original failure, re-created under
+                    # a more plausible-looking name. Deliberately NOT routed
+                    # through `finalize_session`: the row is already terminal by
+                    # here (finalized via `complete_transcript` earlier in this
+                    # turn), so that call would raise StatusConflictError into a
+                    # DEBUG-level handler and the miss would be invisible.
+                    refresh_lane_branch(session, working_dir)
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
 

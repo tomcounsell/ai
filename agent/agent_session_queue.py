@@ -80,7 +80,7 @@ from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
-from tools.lane_identity import resolve_lane_branch
+from tools.lane_identity import read_worktree_branch, resolve_lane_branch
 
 logger = logging.getLogger(__name__)
 
@@ -604,12 +604,6 @@ def checkpoint_branch_state(session: AgentSession) -> None:
         return
 
     try:
-        branch = subprocess.run(
-            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,  # timeout-guard: allow (local git one-off)
-        )
         commit = subprocess.run(
             ["git", "-C", working_dir, "rev-parse", "HEAD"],
             capture_output=True,
@@ -617,21 +611,35 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             timeout=5,  # timeout-guard: allow (local git one-off)
         )
 
-        if branch.returncode == 0 and commit.returncode == 0:
-            branch_name = branch.stdout.strip()
+        if commit.returncode == 0:
+            # `read_worktree_branch` is the one lane-scoped spelling of the HEAD
+            # read (#3411), and it answers None for a detached worktree rather
+            # than the literal "HEAD" that raw git returns for a symbolic-name
+            # lookup. "HEAD" is not a branch name, and recording it as one is
+            # what let a lane's identity name a ref no delete could ever match.
+            branch_name = read_worktree_branch(working_dir)
             commit_sha = commit.stdout.strip()
-            session.branch_name = branch_name
+            # Clear on detached, never on failure: the SHA read above is the
+            # discriminator. A working repo at a detached HEAD still resolves
+            # HEAD, so reaching here with branch_name None means genuinely no
+            # branch. An unreadable path fails the SHA read instead and leaves
+            # the record untouched, so a transient git error cannot erase a
+            # lane's identity.
+            session.branch_name = branch_name or ""
+            # `commit_sha` is a property over `session_events` (its setter
+            # appends a checkpoint event), not a Popoto field — `session_events`
+            # below is what persists it. Naming "commit_sha" in update_fields
+            # raises ModelException: Unknown field.
             session.commit_sha = commit_sha
             session.save(update_fields=["branch_name", "session_events", "updated_at"])
             logger.info(
-                f"[checkpoint] Saved branch={branch_name} commit={commit_sha[:8]} "
-                f"for session {session.session_id}"
+                f"[checkpoint] Saved branch={branch_name or '(detached)'} "
+                f"commit={commit_sha[:8]} for session {session.session_id}"
             )
         else:
             logger.warning(
                 f"[checkpoint] Failed to read git state for session "
-                f"{session.session_id}: branch={branch.stderr.strip()}, "
-                f"commit={commit.stderr.strip()}"
+                f"{session.session_id}: commit={commit.stderr.strip()}"
             )
     except Exception as e:
         logger.warning(f"[checkpoint] Error checkpointing state for {session.session_id}: {e}")
@@ -662,18 +670,15 @@ def restore_branch_state(session: AgentSession) -> bool:
         return True
 
     try:
-        # Check current branch
-        current = subprocess.run(
-            ["git", "-C", working_dir, "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,  # timeout-guard: allow (local git one-off)
-        )
-        current_branch = current.stdout.strip() if current.returncode == 0 else ""
+        # Check current branch through the single lane-scoped HEAD read (#3411).
+        # None covers detached and every read failure alike, and compares
+        # unequal to the recorded branch — which is the correct reading: a
+        # worktree on no branch is not on the recorded one.
+        current_branch = read_worktree_branch(working_dir)
 
         if current_branch != recorded_branch:
             logger.info(
-                f"[restore] Branch mismatch: current={current_branch}, "
+                f"[restore] Branch mismatch: current={current_branch or '(detached)'}, "
                 f"recorded={recorded_branch} — checking out recorded branch"
             )
             checkout = subprocess.run(
@@ -685,7 +690,8 @@ def restore_branch_state(session: AgentSession) -> bool:
             if checkout.returncode != 0:
                 logger.warning(
                     f"[restore] Failed to checkout {recorded_branch}: "
-                    f"{checkout.stderr.strip()} — proceeding on {current_branch}"
+                    f"{checkout.stderr.strip()} — proceeding on "
+                    f"{current_branch or '(detached)'}"
                 )
                 return False
 
