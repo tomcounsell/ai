@@ -58,7 +58,6 @@ from agent.session_health import (
 )
 from agent.session_logs import save_session_snapshot
 from agent.session_pickup import _pop_agent_session, _pop_agent_session_with_fallback
-from agent.session_revival import _session_branch_name
 from agent.session_runner.liveness import (
     clear_hang_state,
     derive_sdk_ever_output,
@@ -81,6 +80,7 @@ from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
+from tools.lane_identity import resolve_lane_branch
 
 logger = logging.getLogger(__name__)
 
@@ -3004,7 +3004,7 @@ async def _worker_loop(
                             session_id=session.session_id,
                             event=_event,
                             project_key=session.project_key,
-                            branch_name=_session_branch_name(session.session_id),
+                            branch_name=resolve_lane_branch(session),
                             task_summary=(
                                 f"Session {session.agent_session_id} "
                                 f"{'failed' if session_failed else 'terminated'}"

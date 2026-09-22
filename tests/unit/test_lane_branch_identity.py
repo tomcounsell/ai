@@ -52,6 +52,7 @@ import pytest
 
 from agent.agent_session_queue import checkpoint_branch_state
 from agent.branch_manager import mark_work_done
+from agent.session_executor import seed_lane_branch_if_unrecorded
 from agent.worktree_manager import (
     WORKTREES_DIR,
     WorktreeBranchMismatchError,
@@ -348,4 +349,59 @@ def test_detached_lane_second_turn_launches(detached_lane):
     assert (rows[0].branch_name or "").strip() != "HEAD", (
         "the literal 'HEAD' was recorded as a branch name; a detached lane has "
         "no branch, and the record must say so"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The second writer: seed-if-empty at turn start (plan Risk 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [None, "", "   ", "\t\n"],
+    ids=["unset-none", "unset-empty-string", "whitespace", "whitespace-mixed"],
+)
+def test_turn_start_seeds_only_an_unrecorded_branch(recorded):
+    """No branch on record means the seed is written.
+
+    Popoto stores an unset string field as ``""`` rather than ``None``, so an
+    ``is None`` test would read every unset record as a *set* record holding an
+    empty name. Whitespace-only is the same non-identity (plan Risk 4).
+    """
+    session = AgentSession(
+        session_id="tg_valor_-1003449100931_1474",
+        project_key=PROJECT_KEY,
+        session_type="eng",
+        slug=SLUG,
+    )
+    session.branch_name = recorded
+
+    seed_lane_branch_if_unrecorded(session, LANE_BRANCH)
+
+    assert session.branch_name == LANE_BRANCH
+
+
+def test_turn_start_leaves_a_recorded_branch_alone():
+    """A recorded branch survives turn start — the whole of plan Risk 2.
+
+    RED before the fix: turn start wrote the slug-derived seed unconditionally,
+    clobbering the branch ``checkpoint_branch_state`` recorded moments before
+    the #1377 launch guard read it. The fix appears to do nothing while this
+    write survives, because the record the guard reads is the seed again.
+    """
+    session = AgentSession(
+        session_id="tg_valor_-1003449100931_1475",
+        project_key=PROJECT_KEY,
+        session_type="eng",
+        slug=SLUG,
+    )
+    session.branch_name = WORK_BRANCH
+
+    seed_lane_branch_if_unrecorded(session, LANE_BRANCH)
+
+    assert session.branch_name == WORK_BRANCH, (
+        "turn start clobbered the recorded branch with the slug-derived seed "
+        "(issue #3411): the record is the source of truth, the seed only "
+        "answers for a lane that has never been checkpointed"
     )

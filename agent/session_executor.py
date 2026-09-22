@@ -32,8 +32,36 @@ from config.project_key_resolver import resolve_project_key
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
+from tools.lane_identity import lane_branch_name, resolve_lane_branch
 
 logger = logging.getLogger(__name__)
+
+
+def seed_lane_branch_if_unrecorded(agent_session: AgentSession, seed_branch_name: str) -> None:
+    """Write ``seed_branch_name`` onto the row only when nothing is recorded.
+
+    **This is the SECOND writer of ``branch_name``, and the conditional is the
+    whole point of it (#3411).** ``checkpoint_branch_state`` is the only
+    component that *updates* the record; this one only ever seeds a lane that
+    has never been checkpointed.
+
+    Turn start used to write the slug-derived seed here unconditionally, which
+    made the record incoherent: two writers, last-write-wins, neither aware of
+    the other. On 2026-09-16 the record therefore said ``session/{slug}`` while
+    the worktree sat elsewhere, end-of-turn cleanup deleted the record's name
+    (deletable precisely because it held none of the turn's commits), and 646 ms
+    later the #1377 launch guard demanded that same deleted name and refused to
+    start. The user-visible symptom was silence. Restoring an unconditional
+    write here reinstates that failure whole, and does it invisibly: everything
+    downstream reads the record, so the system behaves exactly as it did before
+    the fix while all the new code appears to be running.
+
+    Popoto stores an unset string field as ``""``, not ``None``, so the test is
+    truthiness with ``.strip()`` and never ``is None`` -- an ``is None`` test
+    reads an unset record as a set record holding an empty name.
+    """
+    if not agent_session.branch_name or not str(agent_session.branch_name).strip():
+        agent_session.branch_name = seed_branch_name
 
 
 def merge_steering_turn_input(
@@ -1404,7 +1432,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             # guard below. Force the synthetic case onto a session branch
             # in a worktree so isolation is guaranteed.
             if is_synthetic_slug:
-                resolved_branch = f"session/{slug}"
+                resolved_branch = lane_branch_name(slug)
                 needs_wt = True
             # Stageless eng sessions with a pre-provisioned worktree
             # (typical for /do-todos batch dispatch: a parent eng session creates
@@ -1425,9 +1453,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 and WORKTREES_DIR in str(working_dir)
                 and working_dir.exists()
             ):
-                resolved_branch = f"session/{slug}"
+                resolved_branch = lane_branch_name(slug)
                 needs_wt = True
-            branch_name = resolved_branch
+            # A SEED, not this lane's identity (#3411): it names a branch as a
+            # worktree is provisioned and answers for a lane that has never been
+            # checkpointed. Everything that needs the lane's actual branch reads
+            # `resolve_lane_branch(session)`.
+            seed_branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one,
             # OR the path looks like a worktree but the directory is missing on disk
             # (e.g., enqueued path points at .worktrees/{slug}/ that was never created
@@ -1463,7 +1495,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             f"slug={slug}: {e} — using original working dir"
                         )
         else:
-            branch_name = _session_branch_name(session.session_id)
+            seed_branch_name = _session_branch_name(session.session_id)
 
         # Main-checkout protection guard (issue #887): eng sessions with a slug
         # must NEVER run in the repo root. If worktree provisioning was skipped
@@ -1506,7 +1538,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             )
 
             try:
-                verify_worktree_branch(working_dir, branch_name)
+                verify_worktree_branch(working_dir, resolve_lane_branch(session))
             except WorktreeBranchMismatchError as e:
                 logger.error(
                     f"[worktree-branch-guard] Session {session.session_id} "
@@ -1533,7 +1565,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         logger.info(
             f"{log_prefix} Executing session {session.agent_session_id} "
-            f"(session={session.session_id}, branch={branch_name}, cwd={working_dir})"
+            f"(session={session.session_id}, branch={resolve_lane_branch(session)}, "
+            f"cwd={working_dir})"
         )
 
         # Save session snapshot at session start
@@ -1541,7 +1574,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_id=session.session_id,
             event="resume",
             project_key=session.project_key,
-            branch_name=branch_name,
+            branch_name=resolve_lane_branch(session),
             task_summary=f"Session {session.agent_session_id} starting",
             extra_context={
                 "agent_session_id": session.agent_session_id,
@@ -1563,7 +1596,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     break
             if agent_session:
                 agent_session.updated_at = datetime.now(tz=UTC)
-                agent_session.branch_name = branch_name
+                # Seed-if-empty (#3411, plan Risk 2) — never an unconditional
+                # write. See `seed_lane_branch_if_unrecorded` for why.
+                seed_lane_branch_if_unrecorded(agent_session, seed_branch_name)
                 # Persist task_list_id so hooks can resolve this session
                 agent_session.task_list_id = task_list_id
                 # Stamp the resolved lane onto exec_cwd *before* the harness
@@ -1821,7 +1856,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 await asyncio.sleep(5)
                 await _enqueue_nudge(
                     session,
-                    branch_name,
+                    resolve_lane_branch(session),
                     task_list_id,
                     chat_state.auto_continue_count,
                     msg,
@@ -1838,7 +1873,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 await _enqueue_nudge(
                     session,
-                    branch_name,
+                    resolve_lane_branch(session),
                     task_list_id,
                     chat_state.auto_continue_count,
                     msg,
@@ -1855,7 +1890,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 await _enqueue_nudge(
                     session,
-                    branch_name,
+                    resolve_lane_branch(session),
                     task_list_id,
                     chat_state.auto_continue_count,
                     msg,
@@ -2697,7 +2732,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_id=session.session_id,
                 event="error",
                 project_key=session.project_key,
-                branch_name=branch_name,
+                branch_name=resolve_lane_branch(session),
                 task_summary=f"Session {session.agent_session_id} failed: {task.error}",
                 extra_context={
                     "agent_session_id": session.agent_session_id,
@@ -2778,35 +2813,39 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     safe_delete_branch,
                 )
 
-                mark_work_done(working_dir, branch_name)
+                # The lane's branch, read from the record rather than derived
+                # from the slug (#3411): cleanup must name the branch that
+                # actually holds this turn's commits.
+                lane_branch = resolve_lane_branch(session)
+                mark_work_done(working_dir, lane_branch)
                 # Also delete the session branch to keep git clean — guarded by
                 # the unmerged-branch guard (issue #1646): use merged_via_ancestor
                 # since this path runs at session completion before any PR merge.
                 branch_del = safe_delete_branch(
                     str(working_dir),
-                    branch_name,
+                    lane_branch,
                     predicate=merged_via_ancestor,
                     force=False,
                 )
                 if branch_del["deleted"]:
                     logger.info(
                         f"[{session.project_key}] Auto-marked session done "
-                        f"and cleaned up branch {branch_name}"
+                        f"and cleaned up branch {lane_branch}"
                     )
                 elif branch_del["skipped_unmerged"]:
                     logger.warning(
                         "[unmerged-branch-guard] branch '%s' preserved"
                         " — work not yet merged to main",
-                        branch_name,
+                        lane_branch,
                     )
                     logger.info(
                         f"[{session.project_key}] Auto-marked session done "
-                        f"(branch {branch_name} preserved — unmerged)"
+                        f"(branch {lane_branch} preserved — unmerged)"
                     )
                 else:
                     logger.info(
                         f"[{session.project_key}] Auto-marked session done "
-                        f"(branch {branch_name} cleanup error: {branch_del.get('error')})"
+                        f"(branch {lane_branch} cleanup error: {branch_del.get('error')})"
                     )
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
@@ -2816,7 +2855,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 session_id=session.session_id,
                 event="complete",
                 project_key=session.project_key,
-                branch_name=branch_name,
+                branch_name=resolve_lane_branch(session),
                 task_summary=f"Session {session.agent_session_id} completed successfully",
                 extra_context={
                     "agent_session_id": session.agent_session_id,
