@@ -76,10 +76,13 @@ Three roles, deliberately not collapsed into one:
   about *what this lane is*. So ``HEAD`` is the input the record is refreshed
   from, never an answer handed to a consumer.
 
-:func:`read_worktree_branch` is the only lane-scoped spelling of
-``git rev-parse --abbrev-ref HEAD`` in the repo, for the same reason
-:func:`mint_lane_slug` is the only home of the slug literal: a second spelling
-is a second answer waiting to drift. It also owns the one piece of git trivia
+:func:`read_worktree_branch` is the only lane-scoped spelling outside
+``agent/worktree_manager.py`` of ``git rev-parse --abbrev-ref HEAD`` in the
+repo, for the same reason :func:`mint_lane_slug` is the only home of the slug
+literal: a second spelling is a second answer waiting to drift. (Two survive
+in ``agent/worktree_manager.py``: ``verify_worktree_branch``, which must raise
+rather than return ``None``, at :438; and a WIP-ref path needing the raw
+``"HEAD"`` literal as a gate, at :1892.) It also owns the one piece of git trivia
 this whole area turns on -- a detached worktree answers with the literal string
 ``"HEAD"``, which is *not* a branch name and must never be stored or compared as
 one.
@@ -645,9 +648,13 @@ def _branch_or_none(value: object) -> str | None:
 def read_worktree_branch(worktree_path: object) -> str | None:
     """Return the worktree's live ``HEAD`` branch, or ``None``.
 
-    **The only lane-scoped spelling of ``git rev-parse --abbrev-ref HEAD`` in
-    this repo.** A second spelling is a second answer waiting to drift, and the
-    normalisation below is the part that drifts first.
+    **The only lane-scoped spelling outside `agent/worktree_manager.py` of
+    ``git rev-parse --abbrev-ref HEAD`` in this repo.** A second spelling is a
+    second answer waiting to drift, and the normalisation below is the part
+    that drifts first. Two other lane-scoped spellings survive by necessity:
+    ``verify_worktree_branch`` (must raise rather than return ``None``) and a
+    WIP-ref path (needs the raw ``"HEAD"`` literal as a gate) — see
+    ``agent/worktree_manager.py:438`` and ``:1892``.
 
     ``None`` means "this worktree is not on a branch", and it is returned rather
     than raised for every reason that can produce it: a detached ``HEAD`` (git
@@ -679,6 +686,43 @@ def read_worktree_branch(worktree_path: object) -> str | None:
         )
         return None
     return _branch_or_none(proc.stdout)
+
+
+def worktree_is_detached(worktree_path: object) -> bool | None:
+    """Positively confirm whether *worktree_path* is at a detached ``HEAD``.
+
+    Returns ``True`` when confirmed detached (``git symbolic-ref -q HEAD``
+    exits 1, meaning HEAD holds no symbolic ref), ``False`` when confirmed to
+    be on a branch (exit 0), and ``None`` when the git invocation itself did
+    not produce a confirmed answer -- a missing path, a non-repo path, a
+    non-{0,1} exit, or a subprocess timeout. ``None`` must never be treated as
+    "detached": that conflation is what let a transient read failure erase a
+    good ``branch_name`` record (#3411 tech debt).
+    """
+    path = _nonempty(str(worktree_path)) if worktree_path is not None else None
+    if not path:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", path, "symbolic-ref", "-q", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_HEAD_READ_TIMEOUT_S,  # timeout-guard: allow (local git one-off)
+        )
+    except Exception as e:
+        logger.debug("lane_identity: symbolic-ref read failed for %r: %s", path, e)
+        return None
+    if proc.returncode == 0:
+        return False
+    if proc.returncode == 1:
+        return True
+    logger.debug(
+        "lane_identity: symbolic-ref returned %s for %r: %s",
+        proc.returncode,
+        path,
+        (proc.stderr or "").strip(),
+    )
+    return None
 
 
 def resolve_lane_branch(session: object) -> str | None:

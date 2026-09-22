@@ -228,11 +228,17 @@ def retire_revival_branch(working_dir_str: str, branch_name: str, project_name: 
             f"(not proven merged: {reason} — preserved; revival may re-prompt "
             f"once per cooldown)"
         )
-    elif "checked out" in (result.get("error") or ""):
-        logger.info(
-            f"[{project_name}] Kept dormant branch {branch_name} "
-            f"(checked out by a worktree — preserved)"
-        )
+    elif result["skipped_checked_out"]:
+        if (result.get("error") or "").startswith("worktree scan failed"):
+            logger.warning(
+                f"[{project_name}] Could not scan worktrees for branch {branch_name} "
+                f"— preserving as a fail-safe: {result.get('error')}"
+            )
+        else:
+            logger.info(
+                f"[{project_name}] Kept dormant branch {branch_name} "
+                f"(checked out by a worktree — preserved)"
+            )
     else:
         logger.warning(
             f"[{project_name}] Could not delete dormant branch {branch_name}: {result.get('error')}"

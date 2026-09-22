@@ -271,6 +271,35 @@ class TestCheckpointBranchState:
 
         assert session.branch_name == LANE_BRANCH
 
+    def test_branch_read_only_failure_leaves_a_good_record_untouched(
+        self, tmp_path, lane_rows, monkeypatch
+    ):
+        """Plan: a transient failure of the branch read ALONE (SHA read still
+        succeeds) must not erase a good record either.
+
+        ``test_git_failure_leaves_a_good_record_untouched`` above covers a
+        missing path, which fails both the SHA read and the branch read
+        together. That leaves the "SHA read succeeds, branch read alone
+        fails" case untested -- the read_worktree_branch() call and the
+        `git rev-parse HEAD` call inside checkpoint_branch_state are two
+        independent subprocess.run invocations, and the earlier code treated
+        the SHA read's success as a discriminator for the branch read's
+        failure, which is false. read_worktree_branch is patched directly
+        (the simpler seam) rather than faulting subprocess.run, so the SHA
+        subprocess call underneath still runs for real.
+        """
+        repo = _make_repo(tmp_path)
+        worktree = _add_lane_worktree(repo)
+        _commit(worktree, "a.txt")
+        session = _make_session(worktree, branch_name=LANE_BRANCH)
+
+        monkeypatch.setattr("agent.agent_session_queue.read_worktree_branch", lambda *_: None)
+        monkeypatch.setattr("agent.agent_session_queue.worktree_is_detached", lambda *_: None)
+
+        checkpoint_branch_state(session)
+
+        assert session.branch_name == LANE_BRANCH
+
     def test_commit_sha_round_trips_through_the_orm(self, tmp_path, lane_rows):
         """Plan bullet, corrected: ``commit_sha`` is a property over ``session_events``.
 

@@ -93,8 +93,12 @@ consumes it would raise on an empty expectation.
 `git rev-parse --abbrev-ref HEAD` answers with the literal string `"HEAD"`
 for a detached worktree — not a branch name, and not to be stored or
 compared as one. `read_worktree_branch` is the only lane-scoped spelling of
-that git call in the repo; it normalizes `"HEAD"` (and any git failure,
-missing path, or non-repo path) to `None`, and it never raises. When a
+that git call outside `agent/worktree_manager.py`, whose guard
+(`verify_worktree_branch`, which must raise rather than return `None`) and
+WIP-ref path (which needs the raw `"HEAD"` literal as a gate) read it
+directly — see `agent/worktree_manager.py:438` and `:1892`. It normalizes
+`"HEAD"` (and any git failure, missing path, or non-repo path) to `None`, and
+it never raises. When a
 worktree is detached, `checkpoint_branch_state` clears `branch_name` rather
 than storing `"HEAD"`, and the end-of-turn cleanup path skips branch cleanup
 entirely — there is no branch to mark done or delete, and inventing one from

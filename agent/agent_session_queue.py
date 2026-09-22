@@ -80,7 +80,7 @@ from bridge import wire_schemas
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES
-from tools.lane_identity import read_worktree_branch, resolve_lane_branch
+from tools.lane_identity import read_worktree_branch, resolve_lane_branch, worktree_is_detached
 
 logger = logging.getLogger(__name__)
 
@@ -619,13 +619,24 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             # what let a lane's identity name a ref no delete could ever match.
             branch_name = read_worktree_branch(working_dir)
             commit_sha = commit.stdout.strip()
-            # Clear on detached, never on failure: the SHA read above is the
-            # discriminator. A working repo at a detached HEAD still resolves
-            # HEAD, so reaching here with branch_name None means genuinely no
-            # branch. An unreadable path fails the SHA read instead and leaves
-            # the record untouched, so a transient git error cannot erase a
-            # lane's identity.
-            session.branch_name = branch_name or ""
+            # `read_worktree_branch`'s None is ambiguous: it collapses a
+            # confirmed detached HEAD with a transient failure of its own
+            # independent subprocess call (non-zero exit, timeout). The SHA
+            # read above succeeding is NOT a discriminator for that call —
+            # only `worktree_is_detached`'s positive confirmation is. Clear
+            # only on confirmed detachment; on an inconclusive read, leave the
+            # existing record untouched so a transient git error cannot erase
+            # a lane's identity.
+            if branch_name:
+                session.branch_name = branch_name
+            elif worktree_is_detached(working_dir):
+                session.branch_name = ""
+            else:
+                logger.debug(
+                    f"[checkpoint] Branch read inconclusive for session "
+                    f"{session.session_id}; leaving branch_name="
+                    f"{session.branch_name!r} untouched"
+                )
             # `commit_sha` is a property over `session_events` (its setter
             # appends a checkpoint event), not a Popoto field — `session_events`
             # below is what persists it. Naming "commit_sha" in update_fields
@@ -633,7 +644,7 @@ def checkpoint_branch_state(session: AgentSession) -> None:
             session.commit_sha = commit_sha
             session.save(update_fields=["branch_name", "session_events", "updated_at"])
             logger.info(
-                f"[checkpoint] Saved branch={branch_name or '(detached)'} "
+                f"[checkpoint] Saved branch={session.branch_name or '(unchanged/detached)'} "
                 f"commit={commit_sha[:8]} for session {session.session_id}"
             )
         else:
