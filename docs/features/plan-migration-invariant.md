@@ -106,9 +106,13 @@ returns `"rollback-refused-skip"` with `main` left exactly as it was for manual
 recovery — it never reports a rollback it did not perform. `main` itself
 (its commit history) is always left untouched by a refusal; separately, if
 the commit that triggered the refusal never actually landed, any rename it
-staged in the index is also cleaned up before returning, so a refusal never
-leaves an uncommitted staged rename behind either. It never resolves a
-genuine conflict unattended.
+staged in the index is cleaned up before returning, so a refusal usually
+leaves no uncommitted staged rename behind either — with two honest
+exceptions: git can't tell whether a rename is staged at all (`git diff
+--cached` itself exits with neither "clean" nor "dirty"), or the undo's own
+`git mv` is refused. Both are logged and the index is left exactly as-is for
+manual recovery rather than guessed at. It never resolves a genuine conflict
+unattended.
 
 Every git subcommand runs through `_run_git`, which never raises: a blown
 timeout is reported as a non-zero `CompletedProcess` like any other failure. A
