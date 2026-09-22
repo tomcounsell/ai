@@ -1787,30 +1787,144 @@ def _sample_client_key() -> str:
     return "client-example"
 
 
+def declared_sites_for_routing():
+    """The site registry the routing section reads; a seam for the row tests."""
+    from agent.llm.tasks import declared_sites
+
+    return declared_sites()
+
+
+def _local_encoder_extra_importable() -> bool:
+    """True when the ``classification-local`` extra (onnxruntime + tokenizers) resolves."""
+    import importlib.util
+
+    try:
+        return all(
+            importlib.util.find_spec(name) is not None for name in ("onnxruntime", "tokenizers")
+        )
+    except (ImportError, ValueError):
+        return False
+
+
+def _local_encoder_weights_state() -> tuple[Path, dict[str, str]]:
+    """``(models_dir, {filename: "ok" | "missing" | "mismatch"})`` for every pinned file."""
+    from config.models import (
+        LOCAL_ENCODER_FILES,
+        local_encoder_models_dir,
+        local_encoder_weights_state,
+    )
+
+    models_dir = local_encoder_models_dir()
+    return models_dir, local_encoder_weights_state(models_dir, LOCAL_ENCODER_FILES)
+
+
+def _local_encoder_heads_state(encoder_sites: list[str]) -> dict[str, str]:
+    """``{site: reason}`` for every declared ``LOCAL_ENCODER`` site whose served
+    head is missing or fails the leg's validating loader (a head the leg
+    cannot load falls back to Anthropic on every call exactly like a
+    missing one)."""
+    from agent.llm.backends import local_encoder
+    from agent.llm.errors import LLMCallError
+
+    bad: dict[str, str] = {}
+    for site in encoder_sites:
+        path = local_encoder.served_head_path(site)
+        if not path.is_file():
+            bad[site] = "missing"
+            continue
+        try:
+            local_encoder.load_head(path)
+        except LLMCallError as e:
+            bad[site] = f"unreadable ({e})"
+    return bad
+
+
+def _local_encoder_row(category: str, encoder_sites: list[str]) -> CheckResult:
+    """The ``local_encoder`` row (#3420), mirroring ``ollama_daemon``.
+
+    Extra importable, every pinned weights file present with its sha256,
+    one head per declared ``LOCAL_ENCODER`` site that loads through the
+    leg's validating loader. Fails, naming the fix,
+    when a declared site would fall back to Anthropic on every call on
+    this machine; with no declared site the state is reported as info.
+    """
+    extra_ok = _local_encoder_extra_importable()
+    models_dir, weights = _local_encoder_weights_state()
+    bad_weights = {name: state for name, state in weights.items() if state != "ok"}
+    bad_heads = _local_encoder_heads_state(encoder_sites)
+
+    parts = [f"extra={'installed' if extra_ok else 'missing'}"]
+    if bad_weights:
+        parts.append(
+            "weights="
+            + "; ".join(
+                f"{state}: {name}"
+                for name, state in sorted(bad_weights.items(), key=lambda kv: kv[0])
+            )
+        )
+    else:
+        parts.append(f"weights=ok ({len(weights)} files verified under {models_dir})")
+    if bad_heads:
+        parts.append(
+            "heads=" + "; ".join(f"{reason}: {site}" for site, reason in sorted(bad_heads.items()))
+        )
+    else:
+        parts.append(f"heads=ok ({len(encoder_sites)} verified)")
+    parts.append(f"LOCAL_ENCODER sites: {', '.join(encoder_sites) if encoder_sites else 'none'}")
+
+    fixes: list[str] = []
+    if not extra_ok:
+        fixes.append("uv sync --all-extras")
+    if bad_weights:
+        fixes.append("python scripts/download_local_encoder_models.py")
+    for site in sorted(bad_heads):
+        fixes.append(
+            f"commit agent/llm/backends/heads/{site}.json (python -m tools.classification_eval "
+            f"--site {site} --fit --land) or move the site back to Backend.ANTHROPIC"
+        )
+    broken = bool(fixes)
+    if encoder_sites and broken:
+        return CheckResult(
+            name="local_encoder",
+            category=category,
+            passed=False,
+            message=(
+                f"{len(encoder_sites)} declared LOCAL_ENCODER site(s) fall back to Anthropic "
+                f"on every call: {'; '.join(parts)}"
+            ),
+            fix="; ".join(fixes),
+        )
+    return CheckResult(
+        name="local_encoder", category=category, passed=True, message="; ".join(parts)
+    )
+
+
 def _check_llm_routing(
     *, client_key: str | None = None, sites: list | None = None
 ) -> list[CheckResult]:
-    """The "LLM routing" section (#3410, #3421).
+    """The "LLM routing" section (#3410, #3420, #3421).
 
     One row per declared ``LLMTask`` site (kind, declared backend, the route
     ``resolve`` returns for ``valor`` and for a client key), one row for the
     per-process eligibility cache, one for the decisions endpoint credential
     (fails when a declared ``DECISIONS`` site would fall back to granite on
     every call because ``settings.api.typesafe_api_key`` is ``None``; no
-    network call, the key never renders), and one for the Ollama daemon
-    (loaded model, keep-alive, ``local_typed_hard_s``), which fails when a
-    declared ``OLLAMA`` site would fall back to Anthropic on every call
-    because no daemon answers on this machine. Synchronous like every other
-    check: ``resolve`` is a plain function and the refresh scheduler behind
-    the cache peek is a no-op without a running loop, so a cold client key
-    renders as ``miss (no loop; refresh not scheduled)``.
+    network call, the key never renders), one for the Ollama daemon (loaded
+    model, keep-alive, ``local_typed_hard_s``), which fails when a declared
+    ``OLLAMA`` site would fall back to Anthropic on every call because no
+    daemon answers on this machine, and one for the local encoder (extra,
+    weights by sha256, one head per declared ``LOCAL_ENCODER`` site), which
+    fails the same way. Synchronous like every other check: ``resolve`` is
+    a plain function and the refresh scheduler behind the cache peek is a
+    no-op without a running loop, so a cold client key renders as ``miss
+    (no loop; refresh not scheduled)``.
 
     ``sites`` is the test seam for the declared-site list; ``None`` reads
-    ``agent.llm.tasks.declared_sites()``.
+    :func:`declared_sites_for_routing`.
     """
     category = "LLM routing"
     from agent.llm.router import resolve
-    from agent.llm.tasks import Backend, declared_sites
+    from agent.llm.tasks import Backend
     from config.models import OLLAMA_CLASSIFIER_MODEL
     from tools.improvement_eligibility import _CACHE, VALOR_PROJECT_KEY
 
@@ -1823,7 +1937,7 @@ def _check_llm_routing(
             text += f" (fallback {route.fallback.backend.value})"
         return text
 
-    sites = declared_sites() if sites is None else sites
+    sites = declared_sites_for_routing() if sites is None else sites
     for declared in sites:
         task = declared.task
         message = (
@@ -1884,6 +1998,8 @@ def _check_llm_routing(
     )
 
     ollama_sites = [d.task.site for d in sites if d.task.backend is Backend.OLLAMA]
+    encoder_sites = [d.task.site for d in sites if d.task.backend is Backend.LOCAL_ENCODER]
+    encoder_row = _local_encoder_row(category, encoder_sites)
     timer = f"local_typed_hard_s={settings.timeouts.local_typed_hard_s}"
     status = _ollama_status()
     if status is None:
@@ -1913,6 +2029,7 @@ def _check_llm_routing(
                     message=f"no daemon and no declared OLLAMA site needs one; {timer}",
                 )
             )
+        results.append(encoder_row)
         return results
 
     pulled = OLLAMA_CLASSIFIER_MODEL in status["pulled"]
@@ -1934,6 +2051,7 @@ def _check_llm_routing(
             fix=None if pulled else f"ollama pull {OLLAMA_CLASSIFIER_MODEL}",
         )
     )
+    results.append(encoder_row)
     return results
 
 

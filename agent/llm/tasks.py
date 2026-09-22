@@ -48,6 +48,10 @@ is the declaration convention:
   the file and line, so a declaration the walk cannot read fails loudly in
   doctor, in the audit and in the test rather than going unlisted.
 
+Lane B (#3420) contributes ``Backend.LOCAL_ENCODER``, the local embedding model
+plus per-site linear head; its leg, router rule, and keyword fields live in
+their own modules.
+
 The :class:`Decision` marker (lane C, #3421): per-field metadata for the
 decisions leg (``agent/llm/backends/decisions.py``), attached to a ``bool``
 or ``Literal`` field of an output type as ``Annotated[<type>, Decision(...)]``.
@@ -62,9 +66,6 @@ the Anthropic and Ollama legs never see it because pydantic keeps
 field with no marker still becomes a question with default rubrics. The
 marker is metadata on the output type, never a field of :class:`LLMTask`,
 so the site walk below is untouched by it.
-
-Lane B (#3420) appends its own :class:`Backend` member and its own keyword
-fields with defaults; nothing for it lives here.
 """
 
 from __future__ import annotations
@@ -88,6 +89,7 @@ class Backend(StrEnum):
 
     ANTHROPIC = "anthropic"
     OLLAMA = "ollama"
+    LOCAL_ENCODER = "local_encoder"
     DECISIONS = "decisions"
 
 

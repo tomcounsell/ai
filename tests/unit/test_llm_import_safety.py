@@ -20,11 +20,13 @@ full transitive closure whose completeness nothing enforces. A fresh
 interpreter has no cache to be wrong about.
 
 The shim is a directory placed first on ``PYTHONPATH`` holding
-``anthropic`` and ``openai`` modules and a ``pydantic_ai`` package whose
-bodies raise ``ImportError`` (``openai`` joined when the Ollama leg's
-``AsyncOpenAI`` entered the loader, #3410). ``PYTHONPATH`` entries precede
-site-packages, so the child resolves the raising stubs rather than the
-installed distributions.
+``anthropic``, ``openai``, ``onnxruntime`` and ``tokenizers`` modules and a
+``pydantic_ai`` package whose bodies raise ``ImportError`` (``openai``
+joined when the Ollama leg's ``AsyncOpenAI`` entered the loader, #3410;
+``onnxruntime`` and ``tokenizers`` when the local encoder leg landed,
+#3420, so the assertion now covers that leg's module scope too).
+``PYTHONPATH`` entries precede site-packages, so the child resolves the
+raising stubs rather than the installed distributions.
 
 The alert / typed-exception half of the contract stays **in process** and
 lives at the bottom of this file: with the loader raising, ``run_typed``
@@ -53,11 +55,11 @@ RAISE_ON_IMPORT = 'raise ImportError("stubbed by test_llm_import_safety")\n'
 
 @pytest.fixture
 def raising_stack_shim(tmp_path: Path) -> Path:
-    """A ``PYTHONPATH`` entry whose ``anthropic``/``openai``/``pydantic_ai`` raise."""
+    """A ``PYTHONPATH`` entry whose third-party LLM-stack modules all raise."""
     shim = tmp_path / "shim"
     shim.mkdir()
-    (shim / "anthropic.py").write_text(RAISE_ON_IMPORT)
-    (shim / "openai.py").write_text(RAISE_ON_IMPORT)
+    for name in ("anthropic", "openai", "onnxruntime", "tokenizers"):
+        (shim / f"{name}.py").write_text(RAISE_ON_IMPORT)
     pydantic_ai = shim / "pydantic_ai"
     pydantic_ai.mkdir()
     (pydantic_ai / "__init__.py").write_text(RAISE_ON_IMPORT)
@@ -90,13 +92,15 @@ def test_shim_actually_shadows_the_real_stack(raising_stack_shim: Path) -> None:
     assert proc.returncode != 0, f"shim did not shadow pydantic_ai\n{proc.stdout}"
     assert "stubbed by test_llm_import_safety" in proc.stderr, proc.stderr
 
-    proc = _run_child(raising_stack_shim, "import openai")
-    assert proc.returncode != 0, f"shim did not shadow openai\n{proc.stdout}"
-    assert "stubbed by test_llm_import_safety" in proc.stderr, proc.stderr
+    for name in ("openai", "onnxruntime", "tokenizers"):
+        proc = _run_child(raising_stack_shim, f"import {name}")
+        assert proc.returncode != 0, f"shim did not shadow {name}\n{proc.stdout}"
+        assert "stubbed by test_llm_import_safety" in proc.stderr, proc.stderr
 
 
 def test_agent_llm_imports_with_broken_stack(raising_stack_shim: Path) -> None:
-    proc = _run_child(raising_stack_shim, "import agent.llm")
+    """Covers every leg's module scope, the local encoder leg included (#3420)."""
+    proc = _run_child(raising_stack_shim, "import agent.llm, agent.llm.backends.local_encoder")
     assert proc.returncode == 0, (
         f"import agent.llm failed under a raising stack\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"

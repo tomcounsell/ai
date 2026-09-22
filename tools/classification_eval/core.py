@@ -103,13 +103,21 @@ class Site:
     call carries one (C9, C10); the candidate side defaults to the same
     prompt, system, and output type, and the landing builder overrides
     ``candidate_prompt``, ``candidate_system``, or ``candidate_output_type``
-    while iterating. ``label`` reduces an output to the one string agreement
-    compares. ``reference`` names the live reference arm: ``"anthropic"``
-    (Haiku through the Anthropic leg), ``"openrouter_gemma"`` (C15's
-    ``main`` backend), or ``"ollama"`` (granite, the landed backend of C12,
-    C13, and C14; a decisions comparison there measures granite once, as the
-    reference, and judges it as the fallback through
-    :func:`evaluate_reference`). ``budget_s`` is the site's own p95 budget when it has
+    while iterating on a generative (Ollama) arm. The encoder lane (#3420)
+    has its own two fields, so a row can carry lane A's instruction-bearing
+    granite prompt and still be fit on bare text: ``encoder_text`` is the
+    message-first composition the served call passes as ``text`` (``None``
+    is ``inp.text`` itself) and ``encoder_system`` is the instruction block
+    the served call passes as ``system`` for the Anthropic fallback
+    (``None`` is the row's ``system``); ``fit.measured_site`` measures both
+    landing arms on exactly that shape. ``label`` reduces an output to the
+    one string agreement compares. ``reference`` names the live reference
+    arm: ``"anthropic"`` (Haiku through the Anthropic leg),
+    ``"openrouter_gemma"`` (C15's ``main`` backend), or ``"ollama"``
+    (granite, the landed backend of C12, C13, and C14; a decisions
+    comparison there measures granite once, as the reference, and judges it
+    as the fallback through :func:`evaluate_reference`). ``budget_s`` is the
+    site's own p95 budget when it has
     one (the 3 s sites), else ``None`` for the reference-relative rule.
     ``real_inputs`` is the row's own real-input loader for a site whose
     production input is not an inbound message (C11 reads activity windows
@@ -130,6 +138,8 @@ class Site:
     candidate_prompt: Callable[[Input], str] | None = None
     candidate_system: str | None = None
     candidate_output_type: type[BaseModel] | None = None
+    encoder_text: Callable[[Input], str] | None = None
+    encoder_system: str | None = None
     real_inputs: Callable[[int], list[Input]] | None = None
     model: str | None = None
 
@@ -226,6 +236,11 @@ class ComparisonRecord:
     candidates: dict[str, ArmResult]
     run_id: str
     created_at: str
+    fit: dict[str, Any] | None = None
+    """The fit path's provenance (#3420): ``head_run_id``, ``n_train``,
+    ``n_train_real``, ``split``, ``landed`` (whether this run was allowed to
+    touch the served head and did), ``miss_arms`` and ``miss_criteria`` on a
+    landing MISS. ``None`` on a plain comparison run."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -242,6 +257,7 @@ class ComparisonRecord:
             "candidates": {name: arm.as_dict() for name, arm in self.candidates.items()},
             "run_id": self.run_id,
             "created_at": self.created_at,
+            "fit": None if self.fit is None else dict(self.fit),
         }
 
 
@@ -433,6 +449,18 @@ def reference_cost_bound(record: Mapping[str, Any]) -> float | None:
     return reference_cost * COST_RATIO
 
 
+def cost_bound_for(record: Mapping[str, Any], arm: Mapping[str, Any]) -> float | None:
+    """:func:`reference_cost_bound` for a candidate on another backend than
+    the reference, else ``None``: an arm on the reference's own backend (the
+    ``anthropic`` candidate a ``LOCAL_ENCODER`` landing measures as its
+    restructured-shape fallback, #3420) is priced like the reference by
+    construction and is measured for agreement, never for cost."""
+    bound = reference_cost_bound(record)
+    if bound is None or arm.get("backend") == record["reference"].get("backend"):
+        return None
+    return bound
+
+
 def evaluate_bar(record: Mapping[str, Any], arm_name: str) -> list[str]:
     """The failing criteria for ``arm_name`` in ``record``; empty means it clears the bar.
 
@@ -442,7 +470,8 @@ def evaluate_bar(record: Mapping[str, Any], arm_name: str) -> list[str]:
     input minimum, the error rate, contention, and any site budget still are.
     The ``cost`` criterion (a candidate at or under one tenth of the
     reference's per-call cost) applies only against an Anthropic reference
-    that recorded a cost (:func:`reference_cost_bound`).
+    that recorded a cost, and only to a candidate on another backend
+    (:func:`cost_bound_for`).
     """
     arm = record["candidates"][arm_name]
     latency_only = bool(record.get("latency_only"))
@@ -462,7 +491,7 @@ def evaluate_bar(record: Mapping[str, Any], arm_name: str) -> list[str]:
         failed.append("n")
     if not latency_only and int(record["n_real"]) < int(record["minimum_n"]) / 2:
         failed.append("n_real")
-    cost_bound = reference_cost_bound(record)
+    cost_bound = cost_bound_for(record, arm)
     if cost_bound is not None and float(arm.get("cost_per_call_usd") or 0.0) > cost_bound:
         failed.append("cost")
     return failed
@@ -531,6 +560,15 @@ def render_report(record: Mapping[str, Any]) -> str:
         f" run={record['run_id']}"
     )
     lines = [header]
+    fit = record.get("fit")
+    if fit:
+        lines.append(
+            f"  fit: n_train={fit.get('n_train')} n_train_real={fit.get('n_train_real')}"
+            f" head={fit.get('head_run_id')} landed={str(bool(fit.get('landed'))).lower()}"
+        )
+        for arm_name in fit.get("miss_arms") or []:
+            criteria = (fit.get("miss_criteria") or {}).get(arm_name) or []
+            lines.append(f"  landing MISS: {arm_name} on {', '.join(criteria) or 'the bar'}")
     reference = record.get("reference")
     if reference:
         lines.append(f"  reference {reference['name']} ({reference['model']}):")
@@ -554,8 +592,8 @@ def render_report(record: Mapping[str, Any]) -> str:
             "n_real": f"n_real {record['n_real']} < half the minimum"
             f" ({int(record['minimum_n']) / 2:g})",
         }
-        # ``cost`` is in ``failed`` only when the bound exists (evaluate_bar).
-        if cost_bound is not None:
+        # ``cost`` is in ``failed`` only when the arm's bound exists (evaluate_bar).
+        if cost_bound_for(record, arm) is not None:
             thresholds["cost"] = (
                 f"cost/call ${float(arm.get('cost_per_call_usd') or 0.0):.6f}"
                 f" > one tenth of reference ${reference_cost:.6f} (${cost_bound:.6f})"

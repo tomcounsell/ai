@@ -904,6 +904,8 @@ class TestCheckLLMRouting:
                 assert "valor->anthropic" in row.message
             elif declared.task.backend is Backend.OLLAMA:
                 assert "valor->ollama (fallback anthropic)" in row.message
+            elif declared.task.backend is Backend.LOCAL_ENCODER:
+                assert "valor->local_encoder (fallback anthropic)" in row.message
             elif declared.task.backend is Backend.DECISIONS:
                 assert "valor->decisions (fallback ollama)" in row.message
             else:
@@ -920,6 +922,7 @@ class TestCheckLLMRouting:
             "eligibility_cache",
             "decisions_endpoint",
             "ollama_daemon",
+            "local_encoder",
         }
 
     @staticmethod
@@ -1023,3 +1026,225 @@ class TestCheckLLMRouting:
 
         assert _check_llm_routing in get_checks(quick=False)
         assert _check_llm_routing not in get_checks(quick=True)
+
+
+class TestLocalEncoderRow:
+    """The ``local_encoder`` row (#3420): extra, weights by sha256, one head per site."""
+
+    @pytest.fixture(autouse=True)
+    def _cold_and_offline(self, monkeypatch):
+        from tools import doctor, improvement_eligibility
+
+        improvement_eligibility._clear_cache()
+
+        def _no_gh(*args, **kwargs):
+            raise FileNotFoundError("gh")
+
+        monkeypatch.setattr(improvement_eligibility.subprocess, "run", _no_gh)
+        monkeypatch.setattr(doctor, "_ollama_status", lambda: None)
+        yield
+        improvement_eligibility._clear_cache()
+
+    @pytest.fixture
+    def fake_weights(self, tmp_path, monkeypatch):
+        """A temp models dir whose files match patched pins; returns ``(dir, contents)``."""
+        import hashlib
+
+        from config import models as models_mod
+
+        root = tmp_path / "encoder"
+        contents = {name: name.encode() * 2 for name in models_mod.LOCAL_ENCODER_FILES}
+        for name, data in contents.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(data)
+        pins = {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()}
+        monkeypatch.setattr(models_mod, "LOCAL_ENCODER_FILES", pins)
+        monkeypatch.setenv("LOCAL_ENCODER_MODELS_DIR", str(root))
+        return root, contents
+
+    @pytest.fixture
+    def fake_heads(self, tmp_path, monkeypatch):
+        from agent.llm.backends import local_encoder
+
+        heads = tmp_path / "heads"
+        heads.mkdir()
+        monkeypatch.setattr(local_encoder, "HEADS_DIR", heads)
+        return heads
+
+    @staticmethod
+    def _write_head(heads, site: str) -> None:
+        """A head that loads through the leg's validating loader."""
+        import json
+
+        from agent.llm.backends import local_encoder
+        from config.models import LOCAL_ENCODER_DIM
+
+        head = local_encoder.Head(
+            site=site,
+            classes=["True", "False"],
+            W=[[0.0, 0.0] for _ in range(LOCAL_ENCODER_DIM)],
+            b=[0.0, 0.0],
+            embedding_model="Xenova/bge-small-en-v1.5",
+            embedding_revision="ea104dacec62c0de699686887e3f920caeb4f3e3",
+            embedding_sha256=local_encoder.LOCAL_ENCODER_FILES["onnx/model_int8.onnx"],
+            run_id="run-doctor",
+            n_train=1,
+            n_train_real=0,
+            reference_model="claude-haiku-test",
+            created_at="2026-09-21T00:00:00Z",
+        )
+        (heads / f"{site}.json").write_text(json.dumps(head.to_dict()))
+
+    @staticmethod
+    def _declare(monkeypatch, *sites: str):
+        """Pretend ``sites`` are declared ``LOCAL_ENCODER`` classification sites."""
+        from agent.llm.tasks import Backend, DeclaredSite, LLMTask, TaskKind
+        from tools import doctor
+
+        real = doctor.declared_sites_for_routing()
+        extra = [
+            DeclaredSite(
+                task=LLMTask(
+                    site=site, kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+                ),
+                path="tests/fake.py",
+                name="FAKE",
+                lineno=1,
+            )
+            for site in sites
+        ]
+        monkeypatch.setattr(doctor, "declared_sites_for_routing", lambda: real + extra)
+
+    @staticmethod
+    def _row(client_key="client-thing"):
+        from tools import doctor
+
+        results = doctor._check_llm_routing(client_key=client_key)
+        by_name = {r.name: r for r in results}
+        assert by_name["ollama_daemon"].category == "LLM routing"
+        return by_name["local_encoder"]
+
+    def test_local_encoder_passes_as_info_when_no_site_declares_the_backend(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        row = self._row()
+        assert row.passed is True
+        assert row.category == "LLM routing"
+        assert "extra=missing" in row.message
+        assert "LOCAL_ENCODER sites: none" in row.message
+        assert row.fix is None
+
+    def test_local_encoder_passes_with_extra_weights_and_a_head_per_site(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        self._write_head(fake_heads, "fake.a")
+        self._write_head(fake_heads, "fake.b")
+        row = self._row()
+        assert row.passed is True, row.message
+        assert "extra=installed" in row.message
+        assert "weights=ok (2 files verified" in row.message
+        assert "heads=ok (2 verified)" in row.message
+        assert "LOCAL_ENCODER sites: fake.a, fake.b" in row.message
+
+    def test_local_encoder_missing_extra_fails_naming_uv_sync(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        self._declare(monkeypatch, "fake.a")
+        self._write_head(fake_heads, "fake.a")
+        row = self._row()
+        assert row.passed is False
+        assert "fall back to Anthropic on every call" in row.message
+        assert "uv sync --all-extras" in row.fix
+
+    def test_local_encoder_missing_weights_file_fails_naming_the_script(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        root, _ = fake_weights
+        (root / "tokenizer.json").unlink()
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a")
+        self._write_head(fake_heads, "fake.a")
+        row = self._row()
+        assert row.passed is False
+        assert "weights=missing: tokenizer.json" in row.message
+        assert "scripts/download_local_encoder_models.py" in row.fix
+
+    def test_local_encoder_mismatched_weights_file_fails_naming_the_script(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        root, contents = fake_weights
+        flipped = bytearray(contents["onnx/model_int8.onnx"])
+        flipped[0] ^= 0x01
+        (root / "onnx/model_int8.onnx").write_bytes(bytes(flipped))
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a")
+        self._write_head(fake_heads, "fake.a")
+        row = self._row()
+        assert row.passed is False
+        assert "weights=mismatch: onnx/model_int8.onnx" in row.message
+        assert "scripts/download_local_encoder_models.py" in row.fix
+
+    def test_local_encoder_missing_head_fails_naming_the_head(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        self._write_head(fake_heads, "fake.a")
+        row = self._row()
+        assert row.passed is False
+        assert "heads=missing: fake.b" in row.message
+        assert "agent/llm/backends/heads/fake.b.json" in row.fix
+
+    def test_local_encoder_unreadable_head_fails_naming_the_head_and_the_error(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        """A head that exists but fails the leg's loader (a stale embedding
+        digest here) reads as broken, not ``heads=ok``: the leg falls back to
+        Anthropic on every call exactly as it would with no head."""
+        import json
+
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: True)
+        self._declare(monkeypatch, "fake.a", "fake.b")
+        self._write_head(fake_heads, "fake.a")
+        self._write_head(fake_heads, "fake.b")
+        stale = json.loads((fake_heads / "fake.b.json").read_text())
+        stale["embedding_sha256"] = "0" * 64
+        (fake_heads / "fake.b.json").write_text(json.dumps(stale))
+        row = self._row()
+        assert row.passed is False
+        assert "heads=unreadable (" in row.message and ": fake.b" in row.message
+        heads_part = row.message.split("heads=")[1].split("LOCAL_ENCODER")[0]
+        assert "refit the head" in heads_part and "fake.a" not in heads_part
+        assert "agent/llm/backends/heads/fake.b.json" in row.fix
+
+    def test_local_encoder_ollama_daemon_row_is_untouched_by_the_encoder_state(
+        self, fake_weights, fake_heads, monkeypatch
+    ):
+        from agent.llm.tasks import Backend, declared_sites
+        from tools import doctor
+
+        monkeypatch.setattr(doctor, "_local_encoder_extra_importable", lambda: False)
+        self._declare(monkeypatch, "fake.a")
+        results = doctor._check_llm_routing(client_key="client-thing")
+        daemon = {r.name: r for r in results}["ollama_daemon"]
+        ollama_sites = [d.task.site for d in declared_sites() if d.task.backend is Backend.OLLAMA]
+        assert daemon.passed is (not ollama_sites)
+        assert "fake.a" not in daemon.message

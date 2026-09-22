@@ -300,10 +300,13 @@ tests/
 | unit | `test_llm_task_taxonomy.py` | 13 | AST walk: every `run_typed` carries `task=`, site table parity with `docs/features/llm-task-taxonomy.md`, hotfix #1055 invariant |
 | unit | `test_llm_tasks.py` | 11 | `LLMTask` declaration shape and `declared_sites()` literal-only walk |
 | unit | `test_llm_router.py` | 16 | Table-driven `resolve` over every declaration |
-| unit | `test_llm_router_eligibility.py` | 6 | Client keys land on Anthropic; `valor` lands on Ollama with `gh` unavailable; `email_cs.triage` pinned |
+| unit | `test_llm_router_eligibility.py` | 25 | Client keys land on Anthropic; `valor` lands on the declared local leg (Ollama, local encoder, decisions) with `gh` unavailable; `email_cs.triage` pinned |
 | unit | `test_llm_backend_anthropic.py` | 17 | Anthropic leg: semaphore, timeouts, typed errors |
 | unit | `test_llm_backend_ollama.py` | 16 | Ollama leg: single request timer, `LLMCallError` on transport and timeout |
-| unit | `test_classification_eval.py` | 27 | Comparison runner math, minimum-n refusal, acceptance bar, contention, audit exit codes |
+| unit | `test_llm_backend_local_encoder.py` | 44 | Local encoder leg (#3420): head loader, shape rule, checksum refusal, deadline re-check, one runtime load under concurrency, module-scope and `wait_for` pins |
+| unit | `test_classifier_heads.py` | 10 | Every committed head loads and matches its site; no orphan head or declaration in either direction |
+| unit | `test_update_local_encoder.py` | 8 | `/update` Step 3.15: weights verified, downloaded, or reported non-fatally |
+| unit | `test_classification_eval.py` | 167 | Comparison runner math, minimum-n refusal, acceptance bar (`cost` and its same-backend exemption), contention, the fit path (digest split, both-arms `--land` gate, precheck, preflight), the served-head path clearing `git check-ignore`, audit exit codes |
 | unit | `test_worker_startup_warm_cache.py` | 5 | Eligibility warm-up task is held and never awaited ahead of connect |
 
 ### `validation` — Quality checks and parsing

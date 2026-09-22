@@ -56,16 +56,18 @@ def default_sdk_timeout(backend: Backend) -> float:
     """The leg's SDK-level timer when the caller passes no ``sdk_timeout``.
 
     ``ANTHROPIC`` reads ``settings.timeouts.anthropic_sdk_s`` (30 s, env
-    ``TIMEOUTS__ANTHROPIC_SDK_S``); ``OLLAMA`` reads
+    ``TIMEOUTS__ANTHROPIC_SDK_S``); ``OLLAMA`` and ``LOCAL_ENCODER`` read
     ``settings.timeouts.local_typed_hard_s`` (20 s, env
     ``TIMEOUTS__LOCAL_TYPED_HARD_S``, operator lever 2 for a degraded
-    daemon); ``DECISIONS`` reads ``settings.timeouts.decisions_sdk_s`` (3 s,
-    env ``TIMEOUTS__DECISIONS_SDK_S``). Read per call, never cached at
-    module scope.
+    daemon); for the encoder leg, which makes no request, the value only
+    bounds the fallback's deadline arithmetic. ``DECISIONS`` reads
+    ``settings.timeouts.decisions_sdk_s`` (3 s, env
+    ``TIMEOUTS__DECISIONS_SDK_S``). Read per call, never cached at module
+    scope.
     """
     if backend is Backend.ANTHROPIC:
         return settings.timeouts.anthropic_sdk_s
-    if backend is Backend.OLLAMA:
+    if backend is Backend.OLLAMA or backend is Backend.LOCAL_ENCODER:
         return settings.timeouts.local_typed_hard_s
     if backend is Backend.DECISIONS:
         return settings.timeouts.decisions_sdk_s

@@ -19,8 +19,13 @@ Candidate arms:
 * :func:`ollama_arm`: granite through the Ollama leg, called directly rather
   than through ``run_typed``, because the router gives an ``OLLAMA`` task an
   Anthropic fallback and a fallback answer would count as granite agreement.
+* :func:`local_encoder_arm`: the per-site linear head on the local
+  embedding model through the encoder leg (#3420), called directly for the
+  same reason; ``head_path`` selects the staged head a fit run measures
+  instead of the served one.
 * :func:`anthropic_arm` again, for a site whose landing backend is Haiku and
-  needs a measured number (C15).
+  needs a measured number (C15), and for the restructured-shape fallback a
+  ``LOCAL_ENCODER`` landing serves on every leg error.
 * :func:`decisions_arm` (#3421): TypeSafe's Jev through the decisions leg
   (``agent/llm/backends/decisions.py::call``), called directly for the same
   reason as granite (a ``DECISIONS`` route falls back to granite, and a
@@ -35,6 +40,10 @@ Candidate arms:
   ``unknown``. :func:`jev_price` is the list price with its retrieval date,
   and refuses to build the arm while the price constant is ``None``.
 
+:func:`arm_builders` is the one map from ``Backend`` value to arm builder;
+the CLI and the fit path both read it, and a test asserts every member
+has an entry.
+
 Every arm has the :data:`~tools.classification_eval.ArmCall` shape and is
 built lazily so importing this module touches no network client.
 """
@@ -47,6 +56,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -184,6 +194,54 @@ def ollama_arm(site_id: str, *, name: str = "ollama") -> Arm:
     )
 
 
+LOCAL_ENCODER_PRICE = Price(
+    model="local_encoder",
+    usd_per_mtoken_in=0.0,
+    usd_per_mtoken_out=0.0,
+    retrieved_at="2026-09-21",
+    note="process-local CPU encoder plus a per-site linear head; no per-token price",
+)
+
+
+def local_encoder_arm(
+    site_id: str, *, head_path: Path | None = None, name: str = "local_encoder"
+) -> Arm:
+    """The per-site head on the local embedding model, through the encoder
+    leg directly (``agent/llm/backends/local_encoder.py``), so a leg failure
+    is the arm's own error and never an Anthropic fallback answer.
+
+    ``head_path=None`` reads the served head for ``site_id`` (the audit's and
+    the live path's view, ``agent/llm/backends/heads/<site>.json``); a path
+    reads that file (the fit path's view of its staged head), so a fit
+    measurement never touches what serves. The head is resolved on the first
+    call, not at build time, because the fit path builds the arm before the
+    staged file exists.
+    """
+    from agent.llm.backends import local_encoder as leg
+
+    resolved: dict[str, Any] = {}
+
+    def head():
+        if "head" not in resolved:
+            resolved["head"] = (
+                leg.served_head(site_id) if head_path is None else leg.load_head(head_path)
+            )
+        return resolved["head"]
+
+    async def call(prompt: str, system: str | None, output_type: type[BaseModel]):
+        # ``system`` is the fallback's instruction block; the leg ignores it.
+        output = await leg.classify(prompt, output_type, head())
+        return output, 0.0
+
+    return Arm(
+        name=name,
+        backend=Backend.LOCAL_ENCODER.value,
+        model=site_id if head_path is None else str(head_path),
+        price=LOCAL_ENCODER_PRICE,
+        call=call,
+    )
+
+
 class PricedEnvelope(SpendEnvelope):
     """A :class:`~agent.llm.backends.decisions.SpendEnvelope` that also
     remembers what the last priced response cost (``None`` when the leg
@@ -275,6 +333,18 @@ def decisions_arm(site_id: str, *, name: str = "decisions") -> Arm:
         price=jev_price(),
         call=DecisionsArm(),
     )
+
+
+def arm_builders(site_id: str, *, head_path: Path | None = None) -> dict[str, Callable[[], Arm]]:
+    """One arm builder per ``Backend`` value, keyed by the value ``--candidate``
+    accepts. ``head_path`` is the staged head the ``local_encoder`` arm reads
+    on the fit path; ``None`` is the served head."""
+    return {
+        Backend.OLLAMA.value: lambda: ollama_arm(site_id),
+        Backend.ANTHROPIC.value: lambda: anthropic_arm(site_id),
+        Backend.LOCAL_ENCODER.value: lambda: local_encoder_arm(site_id, head_path=head_path),
+        Backend.DECISIONS.value: lambda: decisions_arm(site_id),
+    }
 
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)

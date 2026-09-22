@@ -33,6 +33,7 @@ from scripts.update import (  # noqa: E402
     hardlinks,
     hooks,
     kokoro,
+    local_encoder,
     log_cleanup,
     mcp_byob,
     mcp_memory,
@@ -183,6 +184,7 @@ class UpdateResult:
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
+    local_encoder_result: local_encoder.DownloadResult | None = None
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     redis_replication_result: redis_replication.RedisReplicationResult | None = None
     # Untyped (`object`, not the concrete dataclass) so `run.py` never needs
@@ -2067,6 +2069,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as _rr_exc:
         log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
         _append_warning(result, f"Redis replication: unexpected error: {_rr_exc}")
+
+    # Step 3.15: local encoder weights (Backend.LOCAL_ENCODER, #3420).
+    # Idempotent: skipped when every pinned file in config.models
+    # .LOCAL_ENCODER_FILES is present under $LOCAL_ENCODER_MODELS_DIR
+    # (default ~/.cache/valor-encoder/) with a matching sha256; a missing or
+    # mismatched file is re-fetched by scripts/download_local_encoder_models.py
+    # at the pinned revision. Non-fatal: without the weights every declared
+    # LOCAL_ENCODER site falls back to Anthropic and doctor reports the row.
+    log("Checking local encoder weights...", v)
+    result.local_encoder_result = local_encoder.ensure_models(project_dir)
+    ler = result.local_encoder_result
+    if ler.success:
+        if ler.action == "skipped":
+            log(f"Local encoder weights OK ({ler.models_dir})", v)
+        else:
+            log(f"Local encoder weights downloaded ({ler.models_dir})", v, always=True)
+    else:
+        log(f"WARN: Local encoder weights: {ler.error}", v)
+        _append_warning(result, f"Local encoder weights: {ler.error}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a

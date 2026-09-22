@@ -7,11 +7,16 @@ give the row a fixture loader (the site's unit-test examples first, then
 the corpora in ``tools/classification_eval/fixtures.py``) and a label
 reducer, and pick the minimum and budget from the constants below.
 
-Fields the landing builder varies while iterating on the local arm:
+Fields the landing builder varies while iterating on the granite arm:
 ``candidate_prompt`` (a prompt shaped for a 3B model), ``candidate_system``,
-and ``candidate_output_type`` (a tighter schema). The reference side is the
-site's prompt verbatim and is never tuned here (Rabbit Holes: re-scoring the
-reference is a different experiment).
+and ``candidate_output_type`` (a tighter schema). The encoder lane (#3420)
+reads none of those: its fit and measurement use ``encoder_text`` (the
+message-first composition a context-bearing site shares with its call
+site; unset means the bare message) and ``encoder_system`` (the instruction
+block the landed call passes as ``system`` for the Anthropic fallback; unset
+means the row's ``system``). The reference side is the site's prompt
+verbatim and is never tuned here (Rabbit Holes: re-scoring the reference is
+a different experiment).
 
 Minimums: 50 inputs per site, 200 for the C1 to C4 routing sites (Risk 7),
 with the real-message share at least half. Budgets: the 3 s sites (C8, C9,

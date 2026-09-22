@@ -31,6 +31,7 @@ python -m tools.doctor --install-hook  # Install git pre-push hook
 | Services | Redis connectivity, bridge running, worker running, Google Workspace CLI (`gws`) auth state | `monitoring/health.py`, `scripts/update/service.py`, `scripts/update/gws_auth.py` |
 | Auth | Telegram session, API keys, SDK auth | `scripts/update/verify.py`, `monitoring/health.py` |
 | Resources | Disk space | `monitoring/health.py` |
+| LLM routing | One row per declared `LLMTask` site (kind, backend, the route for `valor` and for a client key), the eligibility cache, `decisions_endpoint`, `ollama_daemon`, and `local_encoder` (the `classification-local` extra, weights by sha256, one head per declared `LOCAL_ENCODER` site). Each backend row fails when a declared site on it would fall back on every call on this machine. See [LLM Task Taxonomy](llm-task-taxonomy.md#tooling). | `tools/doctor.py::_check_llm_routing` |
 | Quality | Ruff lint, ruff format, pytest (opt-in via `--quality`) | subprocess |
 
 ## Console-Script Resolution and Interpreter Check

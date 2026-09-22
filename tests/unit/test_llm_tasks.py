@@ -20,9 +20,9 @@ class TestEnums:
     def test_kind_values_are_the_two_populations(self):
         assert {k.value for k in TaskKind} == {"classification", "thinking"}
 
-    def test_backends_are_anthropic_ollama_and_decisions(self):
-        """Lane A's two legs plus lane C's decisions leg (#3421)."""
-        assert {b.value for b in Backend} == {"anthropic", "ollama", "decisions"}
+    def test_backends_are_anthropic_ollama_local_encoder_and_decisions(self):
+        """Lane A's two legs plus lane B's encoder (#3420) and lane C's decisions leg (#3421)."""
+        assert {b.value for b in Backend} == {"anthropic", "ollama", "local_encoder", "decisions"}
 
     def test_error_cost_tiers(self):
         assert {c.value for c in ErrorCost} == {"low", "medium", "high"}

@@ -42,6 +42,7 @@ import ast
 import asyncio
 import dataclasses
 import logging
+import re
 import subprocess
 
 import anthropic
@@ -563,6 +564,9 @@ C1 = LLMTask(
     site="test.c1", kind=TaskKind.CLASSIFICATION, backend=Backend.OLLAMA, error_cost=ErrorCost.HIGH
 )
 C1_ON_ANTHROPIC = LLMTask(site="test.c1a", kind=TaskKind.CLASSIFICATION, backend=Backend.ANTHROPIC)
+C1_ON_ENCODER = LLMTask(
+    site="test.c1e", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+)
 C1_ON_DECISIONS = LLMTask(
     site="test.c1d",
     kind=TaskKind.CLASSIFICATION,
@@ -582,13 +586,21 @@ class _Clock:
 
 
 class _LegFake:
-    """Records every call the wrapper makes; raises or returns on demand."""
+    """Records every call the wrapper makes; raises or returns on demand.
 
-    def __init__(self, *, raise_with=None, advance: float = 0.0, clock: _Clock | None = None):
+    ``result`` overrides the default answer (``label="ok", confidence=1.0``
+    on ``output_type``) so a test can return an instance without a
+    ``confidence`` attribute.
+    """
+
+    def __init__(
+        self, *, raise_with=None, advance: float = 0.0, clock: _Clock | None = None, result=None
+    ):
         self.calls: list[dict] = []
         self.raise_with = raise_with
         self.advance = advance
         self.clock = clock
+        self.result = result
 
     async def __call__(self, prompt, output_type, route, **kwargs):
         self.calls.append({"prompt": prompt, "route": route, **kwargs})
@@ -596,12 +608,15 @@ class _LegFake:
             self.clock.now += self.advance
         if self.raise_with is not None:
             raise self.raise_with
+        if self.result is not None:
+            return self.result
         return output_type(label="ok", confidence=1.0)
 
 
 @pytest.fixture
 def legs(monkeypatch):
-    """Both legs faked; returns ``(ollama_fake, anthropic_fake)`` after install."""
+    """Every leg faked; ``_install(ollama, anthropic, encoder=None)`` returns the pair
+    (plus the encoder fake as a third element when one is given)."""
     improvement_eligibility._clear_cache()
 
     def _no_gh(*args, **kwargs):
@@ -609,10 +624,13 @@ def legs(monkeypatch):
 
     monkeypatch.setattr(improvement_eligibility.subprocess, "run", _no_gh)
 
-    def _install(ollama: _LegFake, anthropic_fake):
+    def _install(ollama: _LegFake, anthropic_fake, encoder: _LegFake | None = None):
         monkeypatch.setitem(wrapper_mod._LEGS, Backend.OLLAMA, ollama)
         monkeypatch.setitem(wrapper_mod._LEGS, Backend.ANTHROPIC, anthropic_fake)
-        return ollama, anthropic_fake
+        monkeypatch.setitem(wrapper_mod._LEGS, Backend.LOCAL_ENCODER, encoder or _LegFake())
+        if encoder is None:
+            return ollama, anthropic_fake
+        return ollama, anthropic_fake, encoder
 
     yield _install
     improvement_eligibility._clear_cache()
@@ -650,17 +668,42 @@ class TestPerBackendSdkTimer:
             pytest.param(C1, None, None, Backend.ANTHROPIC, "anthropic_sdk_s", id="no-key"),
             pytest.param(C1, "valor", 3.0, Backend.OLLAMA, None, id="c8-shaped-ollama"),
             pytest.param(C1, "acme", 3.0, Backend.ANTHROPIC, None, id="c8-shaped-anthropic"),
+            pytest.param(
+                C1_ON_ENCODER,
+                "valor",
+                None,
+                Backend.LOCAL_ENCODER,
+                "local_typed_hard_s",
+                id="encoder-default",
+            ),
+            pytest.param(
+                C1_ON_ENCODER, "valor", 3.0, Backend.LOCAL_ENCODER, None, id="encoder-explicit"
+            ),
+            pytest.param(
+                C1_ON_ENCODER,
+                "acme",
+                None,
+                Backend.ANTHROPIC,
+                "anthropic_sdk_s",
+                id="encoder-client",
+            ),
         ],
     )
     async def test_leg_receives_its_timer(
         self, legs, task, key, sdk_timeout, backend, expected_attr
     ):
-        ollama, anth = legs(_LegFake(), _LegFake())
+        fakes = dict(
+            zip(
+                (Backend.OLLAMA, Backend.ANTHROPIC, Backend.LOCAL_ENCODER),
+                legs(_LegFake(), _LegFake(), _LegFake()),
+                strict=True,
+            )
+        )
         await run_typed(
             "classify: hello", Classification, task=task, project_key=key, sdk_timeout=sdk_timeout
         )
-        called, idle = (ollama, anth) if backend is Backend.OLLAMA else (anth, ollama)
-        assert len(called.calls) == 1 and idle.calls == []
+        called = fakes.pop(backend)
+        assert len(called.calls) == 1 and all(idle.calls == [] for idle in fakes.values())
         expected = (
             sdk_timeout if expected_attr is None else getattr(settings.timeouts, expected_attr)
         )
@@ -720,7 +763,10 @@ class TestFallbackBudget:
             "llm_fallback site=test.c1 primary=ollama fallback=anthropic reason=timeout "
             "elapsed_ms=20000"
         ]
-        assert route_lines == ["llm_route site=test.c1 backend=anthropic elapsed_ms=21000"]
+        # ``Classification`` carries ``confidence``, so the route line ends with it (#3420).
+        assert route_lines == [
+            "llm_route site=test.c1 backend=anthropic elapsed_ms=21000 confidence=1.000"
+        ]
         assert messages.index(fallback_lines[0]) < messages.index(route_lines[0])
         warning = next(r for r in caplog.records if r.getMessage() == fallback_lines[0])
         assert warning.levelno == logging.WARNING
@@ -830,6 +876,45 @@ class TestFallbackBudget:
         assert not any(m.startswith("llm_fallback") for m in messages)
         assert anth.calls == []
 
+    async def test_encoder_leg_error_falls_back_to_anthropic_inside_the_budget(
+        self, legs, monkeypatch, caplog
+    ):
+        """Lane B: the encoder leg raises ``transport`` (no extra, no weights, no head) and
+        Haiku answers once in what is left of the budget, with both log lines."""
+        clock = _Clock(start=1000.0)
+        monkeypatch.setattr(wrapper_mod, "monotonic", clock)
+        ollama, anth, encoder = legs(
+            _LegFake(),
+            _LegFake(clock=clock, advance=1.0),
+            _LegFake(
+                raise_with=LLMCallError("no head", reason="transport"), advance=0.5, clock=clock
+            ),
+        )
+
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            result = await run_typed(
+                "classify: hello",
+                Classification,
+                task=C1_ON_ENCODER,
+                project_key="valor",
+                sdk_timeout=3.0,
+                hard_timeout=None,
+            )
+
+        assert result.label == "ok"
+        assert len(encoder.calls) == 1 and len(anth.calls) == 1 and ollama.calls == []
+        assert encoder.calls[0]["route"].model == C1_ON_ENCODER.site
+        fb = anth.calls[0]
+        assert fb["sdk_timeout"] == 2.5
+        assert fb["max_retries"] == 0
+        assert fb["deadline"] == 1000.0 + 3.0
+        messages = [r.getMessage() for r in caplog.records if r.name == "agent.llm.wrapper"]
+        assert messages == [
+            "llm_fallback site=test.c1e primary=local_encoder fallback=anthropic "
+            "reason=transport elapsed_ms=500",
+            "llm_route site=test.c1e backend=anthropic elapsed_ms=1500 confidence=1.000",
+        ]
+
     async def test_hard_timeout_caps_primary_and_fallback_together(self, legs):
         async def slow(prompt, output_type, route, **kwargs):
             await asyncio.sleep(5.0)
@@ -846,6 +931,62 @@ class TestFallbackBudget:
         assert isinstance(exc_info.value.__cause__, TimeoutError)
         assert len(ollama.calls) == 1
         assert loop.time() - started < 3.0, "the outer cap must cover the fallback leg too"
+
+
+class TestRouteLineConfidence:
+    """The ``confidence=`` token on ``llm_route`` (#3420): present only with the attribute."""
+
+    async def test_a_result_with_confidence_logs_it_to_three_decimals(self, legs, caplog):
+        encoder = _LegFake(result=Classification(label="bind", confidence=0.91))
+        legs(_LegFake(), _LegFake(), encoder)
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            await run_typed(
+                "classify: hello", Classification, task=C1_ON_ENCODER, project_key="valor"
+            )
+        route_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "agent.llm.wrapper" and r.getMessage().startswith("llm_route ")
+        ]
+        assert len(route_lines) == 1
+        assert re.fullmatch(
+            r"llm_route site=test\.c1e backend=local_encoder elapsed_ms=\d+ confidence=0\.910",
+            route_lines[0],
+        ), route_lines[0]
+
+    async def test_a_result_without_the_attribute_logs_the_lane_a_line_byte_for_byte(
+        self, legs, caplog
+    ):
+        class Bare(BaseModel):
+            label: str
+
+        legs(_LegFake(result=Bare(label="ok")), _LegFake())
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            await run_typed("classify: hello", Bare, task=C1, project_key="valor")
+        route_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "agent.llm.wrapper" and r.getMessage().startswith("llm_route ")
+        ]
+        assert len(route_lines) == 1
+        assert re.fullmatch(
+            r"llm_route site=test\.c1 backend=ollama elapsed_ms=\d+", route_lines[0]
+        ), route_lines[0]
+
+    async def test_confidence_none_logs_the_lane_a_line(self, legs, caplog):
+        class Maybe(BaseModel):
+            label: str
+            confidence: float | None = None
+
+        legs(_LegFake(result=Maybe(label="ok")), _LegFake())
+        with caplog.at_level(logging.INFO, logger="agent.llm.wrapper"):
+            await run_typed("classify: hello", Maybe, task=C1, project_key="valor")
+        route_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.name == "agent.llm.wrapper" and r.getMessage().startswith("llm_route ")
+        ]
+        assert route_lines and "confidence" not in route_lines[0]
 
 
 class TestDecisionsRoute:
@@ -892,7 +1033,7 @@ class TestDecisionsRoute:
         assert messages == [
             "llm_fallback site=test.c1d primary=decisions fallback=ollama reason=transport "
             "elapsed_ms=500",
-            "llm_route site=test.c1d backend=ollama elapsed_ms=1500",
+            "llm_route site=test.c1d backend=ollama elapsed_ms=1500 confidence=1.000",
         ]
 
     async def test_decisions_timeout_with_the_budget_spent_raises_the_primary_error(

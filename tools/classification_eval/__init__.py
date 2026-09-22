@@ -60,6 +60,13 @@ Shape of the work:
 
 The runner is offline tooling: it never runs on the message hot path and it
 reads eligibility through the blocking ``is_open_source`` (Risk 3).
+
+``tools/classification_eval/fit.py`` (#3420, lane B) is the fit path: it
+distills a per-site linear head for ``Backend.LOCAL_ENCODER`` from the
+reference arm's labels on a training split and measures it through
+:func:`compare` on a digest-chosen held-out split; ``--land`` is the only
+path that writes or deletes the served head, and ``--audit`` ties a
+``LOCAL_ENCODER`` landing's committed head to its latest landed record.
 """
 
 from __future__ import annotations
@@ -91,9 +98,11 @@ from tools.classification_eval.core import (
 )
 from tools.classification_eval.records import (
     attach_claims,
+    attach_precheck_claim,
     audit,
     claims_for,
     declared_classification_tasks,
+    is_landed,
     landing_record,
     latest_record,
     write_record,
@@ -116,6 +125,7 @@ __all__ = [
     "ShortfallError",
     "Site",
     "attach_claims",
+    "attach_precheck_claim",
     "audit",
     "claims_for",
     "compare",
@@ -123,6 +133,7 @@ __all__ = [
     "evaluate_bar",
     "evaluate_reference",
     "is_contended",
+    "is_landed",
     "landing_record",
     "latency_budget_s",
     "latest_record",

@@ -1,16 +1,19 @@
 """Eligibility drives the leg (#3410): client keys stay on Anthropic, ``valor`` runs local.
 
-Drives ``run_typed`` end to end with all three legs faked at the ``_LEGS``
-table, over every declared site (``agent.llm.tasks.declared_sites``) so a
-site added later is covered without touching this file:
+Drives ``run_typed`` end to end with every leg faked at the ``_LEGS``
+table, over every declared site (``agent.llm.tasks.declared_sites``) whose
+backend is not ``ANTHROPIC``, so a site added later is covered without
+touching this file, plus one synthetic ``LOCAL_ENCODER`` task (#3420) and
+one synthetic ``DECISIONS`` task (#3421) so each leg path is exercised
+before any site lands on it:
 
 * a message mapped to a client project through every local-backed
-  (``OLLAMA`` or ``DECISIONS``, #3421) classification site reaches the
-  Anthropic leg with no fallback;
+  classification site reaches the Anthropic leg with no fallback;
 * a ``valor`` message through the same sites, with ``gh`` unavailable and
-  the cache cold, reaches the declared local leg (the code pin, not the
-  cache): the Ollama leg with an Anthropic fallback, or the decisions leg
-  with an Ollama fallback;
+  the cache cold, reaches the leg the declaration names
+  (``legs[task.backend]``: the code pin, not the cache) with the fallback
+  the plan gives that backend: Anthropic behind Ollama and the local
+  encoder, Ollama behind the decisions leg;
 * every ``client_only`` site (the two ``email_cs.*`` declarations) reaches
   the Anthropic leg for every project key, ``valor`` included.
 
@@ -36,19 +39,26 @@ from agent.llm.tasks import Backend, LLMTask, TaskKind, declared_sites
 from tools import improvement_eligibility
 
 SITES = declared_sites()
-LOCAL_BACKENDS = {Backend.OLLAMA, Backend.DECISIONS}
+SYNTHETIC_ENCODER = LLMTask(
+    site="test.synthetic_encoder", kind=TaskKind.CLASSIFICATION, backend=Backend.LOCAL_ENCODER
+)
 SYNTHETIC_DECISIONS = LLMTask(
     site="t.synthetic_decisions", kind=TaskKind.CLASSIFICATION, backend=Backend.DECISIONS
 )
 LOCAL_CLASSIFICATION = [
     d.task
     for d in SITES
-    if d.task.backend in LOCAL_BACKENDS
+    if d.task.backend is not Backend.ANTHROPIC
     and d.task.kind is TaskKind.CLASSIFICATION
     and not d.task.client_only
-] + [SYNTHETIC_DECISIONS]
+] + [SYNTHETIC_ENCODER, SYNTHETIC_DECISIONS]
+SYNTHETIC = (SYNTHETIC_ENCODER, SYNTHETIC_DECISIONS)
 #: The leg each local backend falls back to (plan, Data Flow step 5).
-FALLBACK_OF = {Backend.OLLAMA: Backend.ANTHROPIC, Backend.DECISIONS: Backend.OLLAMA}
+FALLBACK_OF = {
+    Backend.OLLAMA: Backend.ANTHROPIC,
+    Backend.LOCAL_ENCODER: Backend.ANTHROPIC,
+    Backend.DECISIONS: Backend.OLLAMA,
+}
 CLIENT_ONLY = [d.task for d in SITES if d.task.client_only]
 EMAIL_CS_SITES = ("email_cs.triage", "email_cs.action")
 
@@ -68,7 +78,8 @@ class _Leg:
 
 
 @pytest.fixture
-def legs(monkeypatch):
+def legs(monkeypatch) -> dict[Backend, _Leg]:
+    """Every backend's leg faked; keyed by ``Backend`` so a test asserts ``legs[task.backend]``."""
     improvement_eligibility._clear_cache()
 
     def _no_gh(*args, **kwargs):
@@ -95,11 +106,18 @@ def _only(fakes: dict[Backend, _Leg], backend: Backend) -> None:
 
 
 class TestLocalSitesByKey:
-    def test_the_repo_declares_ollama_classification_sites(self):
-        declared = [t for t in LOCAL_CLASSIFICATION if t is not SYNTHETIC_DECISIONS]
+    def test_the_repo_declares_an_ollama_classification_site(self):
+        """The registry sanity check: the rows below run over real
+        declarations, not only the two synthetic tasks, and the OLLAMA leg
+        (the one local backend a site declares today) is among them."""
+        declared = [t for t in LOCAL_CLASSIFICATION if t not in SYNTHETIC]
         assert any(t.backend is Backend.OLLAMA for t in declared), (
             "no OLLAMA classification site declared"
         )
+
+    def test_the_fake_table_covers_every_backend(self, legs):
+        assert set(legs) == set(Backend)
+        assert set(FALLBACK_OF) == set(Backend) - {Backend.ANTHROPIC}
 
     @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
     async def test_a_client_message_reaches_the_anthropic_leg(self, legs, task):
@@ -109,13 +127,15 @@ class TestLocalSitesByKey:
         assert legs[Backend.ANTHROPIC].calls[0]["route"].fallback is None
 
     @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
-    async def test_a_valor_message_reaches_the_local_leg_with_gh_unavailable(self, legs, task):
+    async def test_a_valor_message_reaches_the_declared_leg_with_gh_unavailable(self, legs, task):
         result = await run_typed("fix the login bug", Decision, task=task, project_key="valor")
         assert result.label == task.backend.value
         _only(legs, task.backend)
         route = legs[task.backend].calls[0]["route"]
         assert route.fallback.backend is FALLBACK_OF[task.backend]
         assert route.fallback.fallback is None
+        if task.backend is Backend.LOCAL_ENCODER:
+            assert route.model == task.site
 
     @pytest.mark.parametrize("task", LOCAL_CLASSIFICATION, ids=_ids(LOCAL_CLASSIFICATION))
     async def test_a_keyless_message_fails_closed_to_anthropic(self, legs, task):
