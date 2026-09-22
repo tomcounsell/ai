@@ -155,11 +155,11 @@ The record names the failing criteria by these keys, and the audit prints them p
 | `error_rate` | Candidate error rate at or below 2%. |
 | `n` | At least 50 inputs, 200 for the four routing sites (C1 to C4). |
 | `n_real` | At least half of the minimum is real inbound `valor` messages drawn from the subconscious memory store, so a site cannot clear the bar on test fixtures alone. |
-| `cost` | Against a reference arm on Anthropic that recorded a per-call cost, the candidate's `cost_per_call_usd` at or under one tenth of the reference's (`COST_RATIO = 0.1`). The criterion is skipped, never divided by zero, when the reference is granite or gemma or recorded no cost. It is the criterion a paid candidate (the decisions arm) faces that a free one never did. |
+| `cost` | Against a reference arm on Anthropic that recorded a per-call cost, the candidate's `cost_per_call_usd` at or under one tenth of the reference's (`COST_RATIO = 0.1`). The criterion is skipped, never divided by zero, when the reference is granite or gemma or recorded no cost, and it applies only to a candidate on a different backend than the reference (`cost_bound_for`): the `anthropic` candidate a `LOCAL_ENCODER` landing measures as its restructured-shape fallback is priced like the reference by construction and is judged on agreement and latency, which is what lets the both-arms `--land` gate clear. It is the criterion a paid candidate (the decisions arm) faces that a free one never did. |
 
 C12, C13, and C14 stay on granite by design and carry latency-only records: the runner measures no agreement for them, so `agreement` and `n_real` are outside their criteria, while `n`, `error_rate`, `contended`, and any site budget still apply. Their site rows declare `reference="ollama"`, so a comparison at those sites builds granite as the reference arm and judges it by `evaluate_reference` (the same latency-only criteria: `p95_c4` against the site budget when one exists, `contended`, `error_rate`, `n`).
 
-A site that misses the bar after the builder's iteration lands with `backend=ANTHROPIC`, its record attached and naming the failing criterion. The same bar governs every backend; the two local backends each add a rule below.
+A site that misses the bar after the builder's iteration lands with `backend=ANTHROPIC`, its record attached and naming the failing criterion. The same bar governs every backend; `LOCAL_ENCODER` and `DECISIONS` each add a rule below.
 
 ### A fitted head
 
@@ -223,7 +223,7 @@ The records are the evidence the two follow-up lanes target. #3420 (lane B, belo
 
 Lane B shipped `Backend.LOCAL_ENCODER`, the encoder leg, the runner's fit path (`--fit`, `--land`, `--preflight`, `--precheck`), the weights step, and the doctor row, and recorded the zero-shot GLiClass candidate as rejected on the case (investigation `4c0d6b44b9c942a5999637afbe22e8a9`: under the majority-class baseline on five of six measured sites). The lane's own numbers come in two tables.
 
-The precheck is free and fixture-only: each site's lane A reference labels paired with its fixtures, embedded through the leg, scored five-fold through the same `fit_head` a landing fits with. A site under `bar - 0.10` skips the fit (`precheck_below_bar`); the rest are fit in this order, highest agreement relative to its bar first. On the build machine (the MacBook Air), 8 to 20 s of wall clock on a quiet machine, zero spend:
+The precheck is free and fixture-only: each site's lane A reference labels paired with its fixtures, embedded through the leg, scored five-fold through the same `fit_head` a landing fits with. A site under `bar - 0.10` skips the fit (`precheck_below_bar`); the rest are fit in this order, highest agreement relative to its bar first. On the build machine (the MacBook Air), about 3 s of wall clock on a quiet machine (8 s of CPU across the ONNX threads), zero spend:
 
 | Id | Site | n | CV agreement | Majority | Bar | Gate | Mark |
 |----|------|---|--------------|----------|-----|------|------|

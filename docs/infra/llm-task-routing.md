@@ -64,7 +64,7 @@ Every machine that runs the bridge, the worker, or the reflections jobs serves t
 | `tokenizer.json` | 0.7 MB, sha256 `d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66` |
 | Cache dir | `~/.cache/valor-encoder/`, overridden by the ambient env var `LOCAL_ENCODER_MODELS_DIR` (`config.models.local_encoder_models_dir()`; no settings field, no `.env.example` entry). Shared across every worktree on the machine. Files keep their repo-relative path, so the model sits at `<dir>/onnx/model_int8.onnx`. |
 | Extra | `classification-local` in `pyproject.toml` (`onnxruntime>=1.25.0`, `tokenizers>=0.21`), installed fleet-wide by `/update`'s `uv sync --all-extras`. |
-| Heads | `agent/llm/backends/heads/<site>.json`, committed in the repo; `git pull` is the propagation. |
+| Heads | `agent/llm/backends/heads/<site>.json`, committed in the repo (`.gitignore` un-ignores the directory from its broad `*.json` rule); `git pull` is the propagation. |
 
 The `LOCAL_ENCODER_FILES` dict (file name to sha256) is read by the download script, the leg's loader, and the doctor row, so one pin governs all three.
 
@@ -261,7 +261,7 @@ A landing is reinstated the same way: `backend=Backend.OLLAMA` on the declaratio
 
 ### Rolling back an encoder landing
 
-There is no daemon to stop and no timer to cap: the leg answers from a file in a few milliseconds or raises. The one lever is the code rollback: set the site's declaration to `backend=Backend.ANTHROPIC`, delete `agent/llm/backends/heads/<site>.json` in the same commit (a head without a `LOCAL_ENCODER` declaration fails `tests/unit/test_classifier_heads.py`, and the audit refuses an orphan in either direction), commit with the reason, and run fleet `/update`. Router rule 2 then routes the site to Anthropic for every key.
+There is no daemon to stop and no timer to cap: the leg answers from a file in a few milliseconds or raises. The one lever is the code rollback: set the site's declaration to `backend=Backend.ANTHROPIC`, delete `agent/llm/backends/heads/<site>.json` in the same commit (a head without a `LOCAL_ENCODER` declaration, or a declaration without a head, fails `tests/unit/test_classifier_heads.py`; the audit and the doctor row refuse a declaration whose head is missing), commit with the reason, and run fleet `/update`. Router rule 2 then routes the site to Anthropic for every key.
 
 Expected signature: no `llm_fallback` lines for the site; `llm_route site=<site> backend=anthropic` on every call. The audit still passes because the site's records carry an Anthropic arm. Reinstating is a fresh `--fit --land` run whose record clears the bar on both arms, then `backend=Backend.LOCAL_ENCODER` with the head it installed.
 
