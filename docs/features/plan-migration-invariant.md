@@ -38,13 +38,87 @@ is the **only** code that moves a plan out of root. It:
 - Requires `HEAD == main` and a clean working tree before doing anything. If
   either check fails, it takes a **report-only fallback**: logs which plan it
   *would* migrate, mutates nothing, and returns `"dirty-tree-skip"`. This
-  never mutates a checkout another session is using.
+  never mutates a checkout another session is using. A `git mv` or `git
+  commit` that fails *after* those preconditions passed is a different
+  signal — the primitive was already mid-mutation — and returns
+  `"mutation-failed-skip"` after undoing its own rename. A failed `git commit`
+  is never assumed to be a no-op: the primitive anchors a sha *before* the
+  `git commit` call and, on failure, searches the whole
+  `head_before_commit..HEAD` range (not just the tip) for the migration
+  commit's subject — a peer session can land its own commit on top of ours in
+  the shared checkout between our commit and the re-read, so a tip-only check
+  could see the peer's subject and wrongly conclude ours never happened. An
+  unreadable range, or no usable pre-commit sha, is treated as "unknown, may
+  have landed" rather than assumed to be a no-op, and routes to the rollback
+  below instead of reverse-renaming, which would otherwise strand the commit
+  *and* leave the shared index dirty.
+- Requires local `main` to already match `origin/main`, or be cleanly
+  fast-forwardable to it, before doing any `git mv`/commit (issue #3530). If
+  local `main` already carries commits `origin/main` lacks, the primitive
+  refuses outright and returns `"stale-main-skip"` rather than stacking
+  another migration commit on a diverged `main` — the failure mode that let
+  one machine (which lost every push race for two weeks) silently accumulate
+  12 permanently-unpushed commits on `main`, breaking that machine's
+  `/update` fast-forward on every subsequent run. If local `main` is simply
+  behind, it's fast-forwarded first (`git merge --ff-only origin/main`).
+- If the remote-side freshness check itself fails — `git fetch`, the
+  `rev-list` ahead/behind compare (including its output not parsing as the
+  expected integer), or the fast-forward merge — the primitive returns
+  `"fetch-failed-skip"` rather than `"dirty-tree-skip"`: the tree is clean
+  and `HEAD == main`, but `origin` couldn't be reached or compared, which is
+  a distinct signal for an operator (network/remote issue, not a checkout in
+  use).
 - On a real move, commits and pushes with a bounded rebase-retry loop: a
   losing push (another process won the race to `main`) replays via
-  `git pull --rebase && git push`, retried up to 3 times. A genuine textual
-  rebase conflict (not just a non-fast-forward rejection) aborts the rebase,
-  leaves the tree clean, and returns `"rebase-conflict-skip"` — it never
-  resolves a conflict unattended.
+  `git fetch && git rebase origin/main && git push`, retried up to 3 times.
+  If that push can't land — a genuine textual rebase conflict, or exhausting
+  all 3 attempts on a plain non-fast-forward rejection — the primitive drops
+  its own migration commit and nothing else, and returns
+  `"rolled-back-skip"`. The dropped commit is a pure rename of one file
+  (the commit is pathspec-scoped, so a peer's staged work in this shared
+  index is never swept into it), so the next `--sweep`/`--issue` invocation
+  simply redoes the migration from a clean base.
+
+### Rolling back safely on a shared checkout
+
+The `main` checkout this primitive runs in is shared: another session can hold
+uncommitted tracked edits there, or land its own commit, inside the window
+between our `git commit` and our failed push. The rollback therefore lets
+**git** enforce safety rather than pre-checking it — a `git status --porcelain`
+pre-check leaves a check-then-act window a peer can lose work in, which no
+in-process re-check can close. Three shapes, keyed on `origin/main..HEAD` after
+a fresh fetch:
+
+| Ahead of `origin/main` | Action | Verdict |
+|---|---|---|
+| nothing, rename present on `origin/main` | none — the push landed server-side and the client misreported it | `migrated` |
+| exactly our migration commit | `git reset --keep origin/main` | `rolled-back-skip` |
+| ours plus a peer's commit | `git rebase --onto <ours>^ <ours>` — drops only ours, replays theirs | `rolled-back-skip` |
+
+`--keep` and `--onto` both **abort** rather than overwrite a locally-modified
+file, so a peer's uncommitted tracked *content* is never destroyed. One
+caveat: `reset --keep` clears the index, so a peer's *staged* changes come back
+as unstaged — the file contents survive intact, the staging state does not.
+Whenever git declines,
+the ahead-set has an unrecognised shape, or the drop's exit status is non-zero
+for any other reason (a contended `.git/index.lock`, say), the primitive
+returns `"rollback-refused-skip"` with `main` left exactly as it was for manual
+recovery — it never reports a rollback it did not perform. `main` itself
+(its commit history) is always left untouched by a refusal; separately, if
+the commit that triggered the refusal never actually landed, any rename it
+staged in the index is cleaned up before returning, so a refusal usually
+leaves no uncommitted staged rename behind either — with two honest
+exceptions: git can't tell whether a rename is staged at all (`git diff
+--cached` itself exits with neither "clean" nor "dirty"), or the undo's own
+`git mv` is refused. Both are logged and the index is left exactly as-is for
+manual recovery rather than guessed at. It never resolves a genuine conflict
+unattended.
+
+Every git subcommand runs through `_run_git`, which never raises: a blown
+timeout is reported as a non-zero `CompletedProcess` like any other failure. A
+`subprocess.TimeoutExpired` escaping the primitive would bypass every path
+above, strand the commit on `main`, and abort the reflection sweep that calls
+it.
 
 ### Why the archive sits outside `docs/plans/`
 

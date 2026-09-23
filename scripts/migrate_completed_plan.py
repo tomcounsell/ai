@@ -226,15 +226,43 @@ def delete_plan(plan_path: Path, dry_run: bool) -> tuple[bool, str]:
 COMPLETED_PLANS_DIR = "docs/archive/plans-completed"
 
 
+# Exit code used to report a git subcommand that blew its timeout. 124 is the
+# conventional `timeout(1)` code; nothing here depends on the exact value, only
+# on it being non-zero so every caller's existing returncode check fires.
+GIT_TIMEOUT_RETURNCODE = 124
+
+
 def _run_git(args: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    """Run a git subcommand rooted at ``cwd``. Never raises on non-zero exit."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    """Run a git subcommand rooted at ``cwd``. Never raises.
+
+    A non-zero exit and a blown timeout are reported identically, as a
+    ``CompletedProcess`` with a non-zero ``returncode``. Letting
+    ``subprocess.TimeoutExpired`` escape would bypass every rollback path in
+    ``migrate_plan_to_completed`` (stranding the migration commit on ``main``,
+    the exact #3530 failure) and propagate into the reflection sweep, which has
+    no handler for it.
+    """
+
+    def _text(stream: str | bytes | None) -> str:
+        if stream is None:
+            return ""
+        return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            args=["git", *args],
+            returncode=GIT_TIMEOUT_RETURNCODE,
+            stdout=_text(exc.stdout),
+            stderr=_text(exc.stderr) + f"git {' '.join(args)} timed out after {timeout}s",
+        )
 
 
 def _rebase_in_progress(repo_root: Path) -> bool:
@@ -248,17 +276,281 @@ def _rebase_in_progress(repo_root: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+def _head_sha(repo_root: Path) -> str | None:
+    """Sha at ``HEAD``, or ``None`` if git can't say.
+
+    Read before ``git commit`` to anchor the range that
+    ``_migration_commit_may_have_landed`` later searches. ``None`` means no
+    usable range, which that helper treats as "cannot prove the commit is
+    absent" rather than as proof it never happened.
+    """
+    result = _run_git(["rev-parse", "HEAD"], cwd=repo_root)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _migration_commit_may_have_landed(
+    repo_root: Path, head_before_commit: str | None, expected_subject: str
+) -> bool:
+    """Did our migration commit land, despite ``git commit`` reporting failure?
+
+    Matches the subject across the whole ``head_before_commit..HEAD`` range,
+    not just the tip. This is the *shared* ``main`` checkout: a peer session
+    can land its own commit on top of ours between our ``git commit`` and this
+    read, leaving ours one below the tip. A tip-only check would then see the
+    peer's subject, conclude "the commit did not happen", and reverse-rename --
+    stranding our migration commit on ``main`` (#3530's end state) with a dirty
+    index on top of it.
+
+    Returns ``True`` whenever the commit cannot be *proven* absent: an
+    unreadable pre-commit HEAD (no usable range) or a failing ``git log`` both
+    mean "unknown", and the safe disposition for unknown is the rollback path.
+    ``_rollback_migration_commit`` independently re-verifies that our commit is
+    in ``origin/main..HEAD`` and refuses to touch ``main`` otherwise, so a
+    false ``True`` costs a refusal (or a ``"migrated"`` report) with any staged
+    rename cleanly undone rather than left dirty; a false ``False`` costs a
+    stranded commit.
+    """
+    if head_before_commit is None:
+        return True
+    log_result = _run_git(["log", "--format=%s", f"{head_before_commit}..HEAD"], cwd=repo_root)
+    if log_result.returncode != 0:
+        return True
+    return any(line == expected_subject for line in log_result.stdout.splitlines())
+
+
+def _commits_ahead_of_origin(
+    repo_root: Path, expected_subject: str
+) -> tuple[int | None, str | None]:
+    """Inspect ``origin/main..HEAD``: how many commits are ahead, and which one
+    (if any) is the migration commit this call authored, matched by subject.
+
+    Returns ``(ahead_count, our_sha)``. ``ahead_count`` is ``None`` when the
+    ahead-set can't be determined at all (git itself failed), which callers
+    must treat as "unknown, do not mutate". ``our_sha`` is ``None`` when none
+    of the commits ahead carries our subject.
+    """
+    log_result = _run_git(["log", "--format=%H%x00%s", "origin/main..HEAD"], cwd=repo_root)
+    if log_result.returncode != 0:
+        return None, None
+    lines = [line for line in log_result.stdout.splitlines() if line.strip()]
+    our_sha = None
+    for line in lines:
+        sha, _, subject = line.partition("\0")
+        if subject == expected_subject and our_sha is None:
+            our_sha = sha
+    return len(lines), our_sha
+
+
+def _rename_present_at(repo_root: Path, ref: str, completed_path: Path) -> bool:
+    """True if the migrated plan already exists at its archive path in the tree at ``ref``."""
+    try:
+        rel = completed_path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return False
+    return _run_git(["cat-file", "-e", f"{ref}:{rel}"], cwd=repo_root).returncode == 0
+
+
+def _rename_on_origin(repo_root: Path, completed_path: Path) -> bool:
+    """True if the migrated plan already exists at its archive path on ``origin/main``."""
+    return _rename_present_at(repo_root, "origin/main", completed_path)
+
+
+def _undo_staged_rename_if_present(repo_root: Path, plan_path: Path, completed_path: Path) -> None:
+    """Undo a `git mv` this call staged, only if it's still staged (uncommitted).
+
+    `_rollback_migration_commit` is called whenever a `git commit` reports
+    failure but might have landed anyway (see `_migration_commit_may_have_landed`).
+    When it genuinely did NOT land, the `git mv` from before the failed commit
+    is still sitting in the index -- `git diff --cached` on the rename's own
+    paths is nonzero. When the commit DID land (committed, not staged) there is
+    nothing to undo, and this is a no-op. Never raises; a failure to undo is
+    logged and left for manual recovery, matching every other refusal in this
+    module.
+    """
+    staged_diff = _run_git(
+        ["diff", "--cached", "--quiet", "--", str(plan_path), str(completed_path)],
+        cwd=repo_root,
+    )
+    if staged_diff.returncode == 1:
+        undo = _run_git(["mv", str(completed_path), str(plan_path)], cwd=repo_root)
+        if undo.returncode != 0:
+            print(
+                f"[ERROR] Could not undo the staged rename for {plan_path.name}: "
+                f"{undo.stderr.strip()}"
+            )
+    elif staged_diff.returncode not in (0, 1):
+        print(
+            f"[ERROR] Could not determine whether a rename for {plan_path.name} is staged "
+            f"(git diff --cached exited {staged_diff.returncode}"
+            + (f": {staged_diff.stderr.strip()}" if staged_diff.stderr else "")
+            + "); leaving the index as-is for manual recovery"
+        )
+
+
+def _rollback_migration_commit(
+    repo_root: Path, plan_path: Path, expected_subject: str, completed_path: Path, has_origin: bool
+) -> str:
+    """Drop the migration commit this call authored -- and only that commit.
+
+    This runs against the *shared* ``main`` checkout, where another session may
+    hold uncommitted tracked edits or have landed its own commit. Safety is
+    enforced by git rather than pre-checked by this code: ``reset --keep`` and
+    ``rebase --onto`` both abort rather than overwrite local modifications, so
+    there is no check-then-act window for a peer to lose work in (a
+    ``git status --porcelain`` pre-check could not close that window).
+
+    Four shapes:
+
+    * no ``origin`` remote at all -- the ahead/fetch/reset logic below is
+      entirely origin-relative and cannot run. Checked directly against
+      ``HEAD``'s own tree instead: reported as ``"migrated"`` if the rename is
+      already committed there, or ``"mutation-failed-skip"`` (after undoing
+      any staged rename) if the commit genuinely never landed.
+    * nothing ahead of ``origin/main`` -- the push actually landed (server-side
+      success the client reported as failure, or a peer carried our commit up).
+      Confirmed against ``origin/main`` and reported as ``"migrated"`` rather
+      than escalating to a human over a migration that is already done. The
+      refusal shape below (migration absent everywhere) shares this ``ahead ==
+      0`` branch; both also clean up any staged rename left in the index by a
+      commit that never actually landed, so neither leaves a dirty tree behind.
+    * exactly our commit ahead -- ``git reset --keep origin/main``.
+    * our commit plus a peer's -- ``git rebase --onto <ours>^ <ours>``, which
+      drops only ours and replays theirs.
+
+    Anything git refuses, or any shape without our commit in it, returns
+    ``"rollback-refused-skip"`` with ``main`` left untouched for manual
+    recovery.
+    """
+    plan_name = plan_path.name
+
+    # No 'origin' means there is nothing to fetch or compare against -- the
+    # ahead/fetch/reset logic below is entirely origin-relative and cannot run
+    # at all. But "no origin" is not the same as "the commit landed": check
+    # HEAD's own tree directly, which is ground truth regardless of origin.
+    # If the rename really is committed there, it's already durable locally
+    # (consistent with the no-origin philosophy elsewhere in this file). If
+    # not, the commit genuinely never happened -- undo the staged rename
+    # rather than reporting a false "migrated" over a dirty index.
+    if not has_origin:
+        if _rename_present_at(repo_root, "HEAD", completed_path):
+            print(f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
+            return "migrated"
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
+        print(
+            f"[ERROR] Commit for {plan_name} did not land locally and there is no 'origin' "
+            "to reconcile against; undid the staged rename"
+        )
+        return "mutation-failed-skip"
+
+    # Refresh origin/main first: the ahead-set is only meaningful against the
+    # remote's current tip, and a push that landed server-side shows up here.
+    _run_git(["fetch", "origin", "main"], cwd=repo_root, timeout=60)
+
+    ahead, our_sha = _commits_ahead_of_origin(repo_root, expected_subject)
+    if ahead is None:
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
+        print(
+            f"[ERROR] Refusing to roll back local main for {plan_name}: could not determine "
+            "what HEAD carries ahead of origin/main; leaving main as-is for manual recovery"
+        )
+        return "rollback-refused-skip"
+
+    if ahead == 0:
+        # A commit that never actually landed (the commit-failure call site)
+        # can still leave its own `git mv` staged in the index even though
+        # nothing is ahead of origin/main. A commit that DID land (the other
+        # call sites, reached here only once it's already on origin/main) has
+        # nothing staged -- its rename is committed, not staged, and HEAD
+        # already matches the index. Only undo when there's a real staged
+        # difference to clean up, so a landed migration is never dirtied by
+        # an undo it doesn't need.
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
+        if _rename_on_origin(repo_root, completed_path):
+            print(
+                f"[MIGRATED] {plan_name} -> {COMPLETED_PLANS_DIR}/ "
+                "(push reported failure but landed on origin/main)"
+            )
+            return "migrated"
+        print(
+            f"[ERROR] Refusing to roll back local main for {plan_name}: nothing is ahead of "
+            "origin/main, yet the migration is absent there; leaving main as-is for manual "
+            "recovery"
+        )
+        return "rollback-refused-skip"
+
+    if our_sha is None:
+        _undo_staged_rename_if_present(repo_root, plan_path, completed_path)
+        print(
+            f"[ERROR] Refusing to roll back local main for {plan_name}: none of the "
+            f"{ahead} commit(s) ahead of origin/main is our migration commit; leaving main "
+            "as-is for manual recovery"
+        )
+        return "rollback-refused-skip"
+
+    if ahead == 1:
+        # --keep, never --hard: git aborts if the reset would overwrite a peer's
+        # uncommitted tracked edits in this shared checkout.
+        drop = _run_git(["reset", "--keep", "origin/main"], cwd=repo_root)
+    else:
+        # A peer's commit is here too. Excise only ours and replay theirs.
+        drop = _run_git(["rebase", "--onto", f"{our_sha}^", our_sha], cwd=repo_root, timeout=60)
+        if drop.returncode != 0:
+            _run_git(["rebase", "--abort"], cwd=repo_root)
+
+    if drop.returncode != 0:
+        print(
+            f"[ERROR] Refusing to roll back local main for {plan_name}: git declined to drop "
+            f"the migration commit ({drop.stderr.strip()}); leaving main as-is for manual "
+            "recovery"
+        )
+        return "rollback-refused-skip"
+
+    print(f"[ERROR] Rolled back the migration commit on local main for {plan_name}")
+    return "rolled-back-skip"
+
+
 def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     """Guarded git-mv of a root plan into the completed-plan archive.
 
     Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
-    "rebase-conflict-skip". Never raises -- all failure modes return a verdict
-    string and log the reason.
+    "fetch-failed-skip", "stale-main-skip", "mutation-failed-skip",
+    "rolled-back-skip", "rollback-refused-skip". Never raises -- all failure
+    modes return a verdict string and log the reason, including a git
+    subcommand that blows its timeout (see ``_run_git``).
 
-    Known behavior: the final ``git push origin main`` publishes the whole
-    local main, so unpushed commits already sitting on a clean local main
-    ride along with the migration commit. Accepted for this repo's
-    always-push workflow (PR #1903 review nit).
+    Freshness precondition (issue #3530): before mutating, local ``main`` must
+    already match ``origin/main`` or be cleanly fast-forwardable to it. A
+    local ``main`` that already carries commits ``origin/main`` lacks is
+    refused outright (``"stale-main-skip"``) rather than stacking another
+    migration commit on top of it -- a machine that can never win the push
+    race would otherwise accumulate unpushed commits on ``main`` forever,
+    breaking every subsequent ``/update`` fast-forward on that machine. A
+    remote-side precondition failure (fetch/compare/fast-forward against
+    `origin` all fail) is reported separately as ``"fetch-failed-skip"`` --
+    it means the remote couldn't be reached, not that the tree is dirty.
+
+    Rollback on failure to land (issue #3530): if the eventual push can't
+    land -- either a genuine rebase conflict, or exhausting the retry budget
+    on a plain non-fast-forward rejection -- exactly our own migration commit
+    is dropped (``git reset --keep`` / ``git rebase --onto``, see
+    ``_rollback_migration_commit``) before returning ``"rolled-back-skip"``.
+    The commit is a pure rename of one file with no unique content, so the
+    next ``--sweep``/``--issue`` invocation just redoes it from a clean base.
+    If git declines the drop -- because a peer holds uncommitted tracked edits
+    the drop would overwrite, or the ahead-set has a shape this primitive
+    doesn't recognise -- ``"rollback-refused-skip"`` is returned with ``main``
+    untouched for manual recovery.
+
+    A failed ``git mv``/``git commit`` returns ``"mutation-failed-skip"``: the
+    preconditions passed and the primitive was mid-mutation, which is a
+    distinct operator signal from the report-only ``"dirty-tree-skip"``. One
+    exception: a failed ``git commit`` whose commit is found anywhere in
+    ``HEAD_before..HEAD`` -- or whose absence can't be proven at all -- is
+    treated as landed (see ``_migration_commit_may_have_landed``) and routed
+    into the rollback above instead, so the verdict is whatever that rollback
+    returns.
     """
     plan_path = Path(plan_path)
 
@@ -311,30 +603,115 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
         print(f"[DRY-RUN] Would migrate {plan_path.name} -> {COMPLETED_PLANS_DIR}/")
         return "migrated"
 
+    # Freshness precondition (#3530): refuse to mutate on top of a local main
+    # that's already ahead of origin/main -- that's exactly how a machine that
+    # keeps losing the push race accumulates permanently unpushed commits on
+    # main. If local is simply behind, fast-forward it first. A repo with no
+    # 'origin' remote (e.g. a local-only test repo) has nothing to compare
+    # against, so it skips straight to the commit as before.
+    remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
+    has_origin = remote_check.returncode == 0
+    if has_origin:
+        fetch_result = _run_git(["fetch", "origin", "main"], cwd=repo_root, timeout=60)
+        if fetch_result.returncode != 0:
+            print(
+                f"[ERROR] git fetch origin main failed for {plan_path.name}: "
+                f"{fetch_result.stderr.strip()}"
+            )
+            return "fetch-failed-skip"
+
+        ahead_behind = _run_git(
+            ["rev-list", "--left-right", "--count", "main...origin/main"], cwd=repo_root
+        )
+        if ahead_behind.returncode != 0:
+            print(
+                f"[ERROR] Could not compare main to origin/main for {plan_path.name}: "
+                f"{ahead_behind.stderr.strip()}"
+            )
+            return "fetch-failed-skip"
+
+        ahead_str, _, _behind_str = ahead_behind.stdout.strip().partition("\t")
+        try:
+            ahead = int(ahead_str or "0")
+        except ValueError:
+            print(
+                f"[ERROR] Unexpected `git rev-list` output comparing main to origin/main "
+                f"for {plan_path.name}: {ahead_behind.stdout.strip()!r}"
+            )
+            return "fetch-failed-skip"
+        if ahead > 0:
+            print(
+                f"[SKIP] local main is {ahead} commit(s) ahead of origin/main; refusing to "
+                f"stack another migration commit on a diverged main: {plan_path.name}"
+            )
+            return "stale-main-skip"
+
+        ff_result = _run_git(["merge", "--ff-only", "origin/main"], cwd=repo_root)
+        if ff_result.returncode != 0:
+            print(
+                f"[ERROR] fast-forward to origin/main failed for {plan_path.name}: "
+                f"{ff_result.stderr.strip()}"
+            )
+            return "fetch-failed-skip"
+
     completed_path.parent.mkdir(parents=True, exist_ok=True)
     mv_result = _run_git(["mv", str(plan_path), str(completed_path)], cwd=repo_root)
     if mv_result.returncode != 0:
         print(f"[ERROR] git mv failed for {plan_path.name}: {mv_result.stderr.strip()}")
-        return "dirty-tree-skip"
+        return "mutation-failed-skip"
 
+    # Single definition of the commit subject: the rollback guard matches on it,
+    # so a second independent literal would let an edit to one silently degrade
+    # every rollback into a refusal.
+    migration_subject = f"Migrate completed plan: {plan_path.stem}"
+
+    # Pathspec-scoped commit: this is the shared main checkout, and a peer's
+    # `git add` between the clean-tree precondition and this line would
+    # otherwise be swept onto main under our subject. Scoping to the rename's
+    # two paths is also what makes "a pure rename, nothing else" true, which is
+    # the premise the rollback rests on.
+    head_before_commit = _head_sha(repo_root)
     commit_result = _run_git(
-        ["commit", "-m", f"Migrate completed plan: {plan_path.stem}"], cwd=repo_root
+        ["commit", "-m", migration_subject, "--", str(plan_path), str(completed_path)],
+        cwd=repo_root,
     )
     if commit_result.returncode != 0:
         print(f"[ERROR] git commit failed for {plan_path.name}: {commit_result.stderr.strip()}")
-        _run_git(["reset", "--hard", "HEAD"], cwd=repo_root)
-        return "dirty-tree-skip"
+        # A failed `git commit` does not prove the commit did not land. The
+        # hook chain (`core.hooksPath=.githooks`) can push a commit past the
+        # timeout in ``_run_git``, and a kill after git's ref update but before
+        # process exit reports non-zero for a commit that exists. Reverse-
+        # renaming in that state would strand the migration commit on the
+        # shared main AND leave its index dirty -- worse than #3530 itself.
+        # Ask the commit range -- not just the tip, a peer can be on top of
+        # ours by now -- what actually happened before compensating.
+        if _migration_commit_may_have_landed(repo_root, head_before_commit, migration_subject):
+            print(
+                f"[WARN] git commit reported failure for {plan_path.name} but the commit "
+                "may have landed; rolling it back instead of undoing the rename"
+            )
+            return _rollback_migration_commit(
+                repo_root, plan_path, migration_subject, completed_path, has_origin
+            )
+        # The commit genuinely did not happen. Undo only our own rename. A
+        # `reset --hard HEAD` here would discard whatever else a peer has
+        # staged or modified in this shared checkout.
+        revert = _run_git(["mv", str(completed_path), str(plan_path)], cwd=repo_root)
+        if revert.returncode != 0:
+            print(
+                f"[ERROR] Could not undo the rename for {plan_path.name}: {revert.stderr.strip()}"
+            )
+        return "mutation-failed-skip"
 
     # If there's no 'origin' remote (e.g. a local-only test repo), the migration
     # is already durable as a local commit -- nothing more to do.
-    remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
-    if remote_check.returncode != 0:
+    if not has_origin:
         print(f"[MIGRATED] {plan_path.name} -> {COMPLETED_PLANS_DIR}/ (no 'origin' remote)")
         return "migrated"
 
     # Rebase-retry loop: a losing push replays atop the winner. Distinguish a
-    # genuine textual conflict (abort + leave tree clean, never resolve
-    # unattended) from a plain non-fast-forward rejection (retry).
+    # genuine textual conflict (abort, roll back, never resolve unattended)
+    # from a plain non-fast-forward rejection (retry).
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         push_result = _run_git(["push", "origin", "main"], cwd=repo_root, timeout=60)
@@ -358,14 +735,25 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
             _rebase_in_progress(repo_root) or "conflict" in conflict_text
         ):
             _run_git(["rebase", "--abort"], cwd=repo_root)
-            print(
-                f"[ERROR] Rebase conflict migrating {plan_path.name}; "
-                "aborted rebase, tree left clean"
+            # Drop the stranded local commit (#3530) rather than leaving main
+            # permanently ahead of origin/main: it's a pure rename with no
+            # unique content, so the next sweep/--issue run just redoes it.
+            # Scoped to only our own commit, with git itself enforcing that a
+            # peer's work survives (#3530 follow-up) -- see
+            # _rollback_migration_commit.
+            print(f"[ERROR] Rebase conflict migrating {plan_path.name}")
+            return _rollback_migration_commit(
+                repo_root, plan_path, migration_subject, completed_path, has_origin
             )
-            return "rebase-conflict-skip"
 
+    # Exhausted the retry budget without a conflict (e.g. repeatedly losing
+    # the push race, or a transient network/gh failure). Same rollback as the
+    # conflict path (#3530): never return leaving local main ahead of origin,
+    # scoped to only our own commit (#3530 follow-up).
     print(f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts")
-    return "rebase-conflict-skip"
+    return _rollback_migration_commit(
+        repo_root, plan_path, migration_subject, completed_path, has_origin
+    )
 
 
 def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) -> Path | None:

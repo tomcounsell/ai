@@ -354,6 +354,947 @@ class TestMigratePlanToCompleted:
         assert status.stdout.strip() == "", "apply=False must leave the tree untouched"
 
 
+class TestMigratePlanToCompletedFreshness:
+    """Freshness precondition + rollback against a real 'origin' remote (#3530).
+
+    Regression coverage for the drift mechanism that let one machine
+    accumulate 12 permanently-unpushed "Migrate completed plan" commits on
+    local main: the primitive used to commit before checking freshness, and
+    left the commit stranded whenever the push loop couldn't land it. These
+    tests use a real bare 'origin' repo and a second 'racer' clone to
+    reproduce genuine git races rather than mocking git's behavior.
+    """
+
+    def _init_repo_with_origin(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Bare 'origin.git' + a clone at 'repo' wired to it as `origin`."""
+        origin = tmp_path / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        repo = tmp_path / "repo"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(repo)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / COMPLETED_PLANS_DIR).mkdir(parents=True)
+        return origin, repo
+
+    def _clone(self, origin: Path, dest: Path, *, name: str) -> Path:
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(dest, "config", "user.email", f"{name}@example.com")
+        _git(dest, "config", "user.name", name)
+        return dest
+
+    def _write_plan(self, repo: Path, name: str, tracking_issue: int = 1900) -> Path:
+        plan = repo / "docs" / "plans" / name
+        plan.write_text(
+            f"---\ntracking: https://github.com/tomcounsell/ai/issues/{tracking_issue}\n"
+            f"---\n# {name}\n"
+        )
+        return plan
+
+    def test_stale_main_refuses_and_preserves_plan(self, tmp_path):
+        """Local main already ahead of origin/main -> refuse, mutate nothing."""
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "example-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        # An unrelated local-only commit -- exactly the shape a prior stranded
+        # migration commit would leave behind.
+        (repo / "local-only.txt").write_text("never pushed\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "local-only change")
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "stale-main-skip"
+        assert plan.exists(), "refusal must never touch the plan"
+        completed = repo / COMPLETED_PLANS_DIR / "example-plan.md"
+        assert not completed.exists()
+        # The pre-existing local-only commit must survive untouched -- a
+        # refusal never resets anything out from under the caller.
+        log = _git(repo, "log", "--oneline", "-1")
+        assert "local-only change" in log.stdout
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+    def test_rebase_conflict_rolls_back_local_commit(self, tmp_path, monkeypatch):
+        """A genuine rebase conflict rolls local main back to origin/main (#3530)."""
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "conflict-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        racer = self._clone(origin, tmp_path / "racer", name="Racer")
+        racer_completed_dir = racer / COMPLETED_PLANS_DIR
+        racer_completed = racer_completed_dir / "conflict-plan.md"
+
+        injected = {"done": False}
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            # Land a racer commit that plants an UNRELATED file directly at
+            # the destination path (no `git mv`, source plan left untouched)
+            # right after our local commit lands, mirroring the real race
+            # window: another process pushes between our commit and our push.
+            # git's rebase treats our side as a clean rename (A deleted, B
+            # added, content unchanged) and would silently ride along with
+            # ANY unilateral edit on the other side -- a bare content tweak at
+            # either path never conflicts there. What it cannot auto-resolve
+            # is our rename product colliding with an independent add at the
+            # same destination path with different content: a genuine
+            # rename/add conflict.
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode == 0:
+                injected["done"] = True
+                racer_completed_dir.mkdir(parents=True, exist_ok=True)
+                racer_completed.write_text("racer already put something else here\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", "racer migrates the same plan concurrently")
+                _git(racer, "push", "-q", "origin", "main")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        # Local main must land exactly on origin/main's tip -- never ahead.
+        local_log = _git(repo, "log", "--oneline", "-1")
+        origin_log = subprocess.run(
+            ["git", "log", "--oneline", "-1", "main"],
+            cwd=str(origin),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert local_log.stdout.strip() == origin_log.stdout.strip()
+        assert "racer migrates the same plan concurrently" in local_log.stdout
+        # Nothing lost: the racer never touched the source plan, and the
+        # rollback lands local main exactly on origin/main -- so the plan is
+        # still in root, untouched, ready for the next run to redo the
+        # migration. Our own rolled-back copy never touched the archive.
+        assert plan.exists()
+        completed = repo / COMPLETED_PLANS_DIR / "conflict-plan.md"
+        assert completed.exists()
+        assert "racer already put something else here" in completed.read_text()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+    def test_push_exhaustion_rolls_back_local_commit(self, tmp_path, monkeypatch):
+        """Losing the push race 3 times straight rolls back, never stacks (#3530)."""
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo = self._init_repo_with_origin(tmp_path)
+        plan = self._write_plan(repo, "exhaust-plan.md")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        racer = self._clone(origin, tmp_path / "racer", name="Racer")
+        racer_counter = {"n": 0}
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["push", "origin", "main"]:
+                # Always win the race with an unrelated-file commit, so our
+                # push keeps losing but the eventual rebase never conflicts.
+                racer_counter["n"] += 1
+                n = racer_counter["n"]
+                (racer / f"racer-file-{n}.txt").write_text(f"racer commit {n}\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", f"racer commit {n}")
+                _git(racer, "push", "-q", "origin", "main")
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        assert racer_counter["n"] == 3, "must have retried the full budget before giving up"
+        local_log = _git(repo, "log", "--oneline", "-1")
+        origin_log = subprocess.run(
+            ["git", "log", "--oneline", "-1", "main"],
+            cwd=str(origin),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert local_log.stdout.strip() == origin_log.stdout.strip()
+        assert "racer commit 3" in local_log.stdout
+        # Nothing lost: the plan is back in root, untouched by the racer's
+        # unrelated commits, ready for the next run to redo the migration.
+        assert plan.exists()
+        completed = repo / COMPLETED_PLANS_DIR / "exhaust-plan.md"
+        assert not completed.exists()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+
+
+class TestMigrationRollbackSafety:
+    """The rollback must excise our own migration commit and nothing else.
+
+    These are the regression tests for the #3530 follow-up: the rollback used
+    to be an unconditional `git reset --hard origin/main` on the *shared* main
+    checkout, which silently destroyed a peer session's uncommitted tracked
+    edits. Safety is now enforced by git itself (`reset --keep`, `rebase
+    --onto`), so these tests drive real git races -- a real bare origin, a real
+    racer clone, a real dirty tree -- rather than mocking git's semantics.
+    """
+
+    def _setup(self, tmp_path: Path, plan_name: str) -> tuple[Path, Path, Path]:
+        """Bare origin + our clone (plan + a shared tracked file) + a racer clone."""
+        origin = tmp_path / "origin.git"
+        subprocess.run(
+            ["git", "init", "-q", "--bare", "-b", "main", str(origin)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        repo = tmp_path / "repo"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(repo)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        (repo / "docs" / "plans").mkdir(parents=True)
+        (repo / COMPLETED_PLANS_DIR).mkdir(parents=True)
+        plan = repo / "docs" / "plans" / plan_name
+        plan.write_text(
+            "---\ntracking: https://github.com/tomcounsell/ai/issues/3530\n---\n# plan\n"
+        )
+        (repo / "shared.txt").write_text("peer work in progress\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        _git(repo, "push", "-q", "origin", "main")
+
+        racer = tmp_path / "racer"
+        subprocess.run(
+            ["git", "clone", "-q", str(origin), str(racer)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        _git(racer, "config", "user.email", "racer@example.com")
+        _git(racer, "config", "user.name", "Racer")
+        return origin, repo, plan
+
+    def test_peer_uncommitted_edits_survive_the_rollback(self, tmp_path, monkeypatch):
+        """A peer's uncommitted tracked edit must survive a rolled-back migration.
+
+        The traced interleaving from the review: we commit, a peer dirties a
+        tracked file in this shared checkout, every `git rebase origin/main`
+        then fails on unstaged changes (no conflict, so the conflict branch is
+        skipped), the retry budget burns, and the rollback fires. Under
+        `reset --hard` the peer's edit was destroyed with no reflog and no
+        warning; under `reset --keep` it survives.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "peer-dirty-plan.md")
+        racer = tmp_path / "racer"
+        injected = {"done": False}
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode == 0:
+                injected["done"] = True
+                # The racer wins the push race on an unrelated file...
+                (racer / "racer.txt").write_text("racer work\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", "racer commit")
+                _git(racer, "push", "-q", "origin", "main")
+                # ...and a peer session dirties a tracked file right here in
+                # the shared checkout, without committing it.
+                (repo / "shared.txt").write_text("PEER UNCOMMITTED EDIT\n")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        assert (repo / "shared.txt").read_text() == "PEER UNCOMMITTED EDIT\n", (
+            "the rollback destroyed a peer session's uncommitted tracked work"
+        )
+        # Our migration commit is gone and local main is not ahead of origin.
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert "Migrate completed plan" not in _git(repo, "log", "--oneline", "-5").stdout
+        assert plan.exists(), "the plan returns to root for the next run to redo"
+
+    def test_rollback_refused_when_git_declines_to_reset(self, tmp_path, monkeypatch):
+        """If the reset would overwrite a peer's local modification, git refuses.
+
+        `reset --keep` aborts when a locally-modified file differs between HEAD
+        and the reset target. The primitive must report that honestly
+        (`rollback-refused-skip`) rather than claiming a rollback it did not
+        perform.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "refused-plan.md")
+        racer = tmp_path / "racer"
+        injected = {"done": False}
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode == 0:
+                injected["done"] = True
+                # The racer changes the SAME tracked file the peer is editing
+                # locally, so resetting onto origin/main would have to clobber
+                # the peer's uncommitted version of it.
+                (racer / "shared.txt").write_text("racer's committed version\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", "racer edits shared.txt")
+                _git(racer, "push", "-q", "origin", "main")
+                (repo / "shared.txt").write_text("PEER UNCOMMITTED EDIT\n")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        assert (repo / "shared.txt").read_text() == "PEER UNCOMMITTED EDIT\n"
+        # Refusing means leaving main exactly as it was, for manual recovery.
+        assert "Migrate completed plan" in _git(repo, "log", "--oneline", "-1").stdout
+
+    def test_peer_commit_is_replayed_while_only_ours_is_dropped(self, tmp_path, monkeypatch):
+        """A peer's local-only commit survives; only our commit is excised.
+
+        Refusing outright would leave our commit stranded on local main, which
+        is the very condition #3530 forbids. A surgical `rebase --onto` drops
+        ours and replays theirs.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "peer-commit-plan.md")
+        racer = tmp_path / "racer"
+        injected = {"done": False}
+        races = {"n": 0}
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["push", "origin", "main"]:
+                # The racer wins every push race on unrelated files, so our
+                # push keeps losing without ever producing a conflict.
+                races["n"] += 1
+                (racer / f"racer-{races['n']}.txt").write_text("racer work\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", f"racer commit {races['n']}")
+                _git(racer, "push", "-q", "origin", "main")
+            result = real_run_git(args, cwd, timeout)
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode == 0:
+                injected["done"] = True
+                # A peer session commits locally on the shared checkout, on
+                # top of our migration commit, and has not pushed it.
+                (repo / "peer.txt").write_text("peer's unpushed work\n")
+                _git(repo, "add", "peer.txt")
+                _git(repo, "commit", "-q", "-m", "peer local commit")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        log = _git(repo, "log", "--oneline", "-5").stdout
+        assert "peer local commit" in log, "the peer's commit must survive the rollback"
+        assert "Migrate completed plan" not in log, "our commit must be gone"
+        assert (repo / "peer.txt").read_text() == "peer's unpushed work\n"
+        assert plan.exists()
+
+    def test_reset_failure_is_reported_not_swallowed(self, tmp_path, monkeypatch):
+        """A rollback `reset` that fails must not yield a false all-clear.
+
+        A contended `.git/index.lock` in the shared checkout makes the reset
+        fail; reporting `rolled-back-skip` over a still-stranded commit would
+        be a false all-clear on exactly the bug this primitive exists to fix.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "locked-plan.md")
+        racer = tmp_path / "racer"
+        races = {"n": 0}
+        lock = repo / ".git" / "index.lock"
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["push", "origin", "main"]:
+                races["n"] += 1
+                (racer / f"racer-{races['n']}.txt").write_text("racer work\n")
+                _git(racer, "add", "-A")
+                _git(racer, "commit", "-q", "-m", f"racer commit {races['n']}")
+                _git(racer, "push", "-q", "origin", "main")
+            if args[:2] == ["reset", "--keep"]:
+                lock.write_text("")  # another git process holds the index
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        try:
+            verdict = migrate_plan_to_completed(plan, apply=True)
+        finally:
+            lock.unlink(missing_ok=True)
+
+        assert verdict == "rollback-refused-skip"
+        assert "Migrate completed plan" in _git(repo, "log", "--oneline", "-1").stdout, (
+            "the commit is genuinely still stranded -- the verdict must say so"
+        )
+
+    def test_push_that_landed_is_not_escalated_to_a_human(self, tmp_path, monkeypatch):
+        """A push that succeeded server-side but reported failure is `migrated`.
+
+        Nothing is ahead of origin/main and the rename is present there, so
+        there is nothing to roll back. Returning `rollback-refused-skip` would
+        fabricate a human escalation for a migration that actually landed.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "landed-plan.md")
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args == ["push", "origin", "main"]:
+                # The ref update lands, then the connection drops before the
+                # client sees the acknowledgement.
+                return subprocess.CompletedProcess(
+                    args=["git", *args], returncode=1, stdout="", stderr="connection reset"
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "migrated"
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert f"{COMPLETED_PLANS_DIR}/landed-plan.md" in self._origin_files(origin)
+
+    @staticmethod
+    def _origin_files(origin: Path) -> str:
+        return subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "main"],
+            cwd=str(origin),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+
+    def test_commit_does_not_sweep_a_peers_staged_work(self, tmp_path, monkeypatch):
+        """The migration commit carries the rename and nothing else.
+
+        The shared checkout has one index. A peer's `git add` between the
+        clean-tree precondition and our `git commit` must not be published to
+        main under our migration subject.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "pathspec-plan.md")
+        injected = {"done": False}
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if not injected["done"] and args[:1] == ["mv"] and result.returncode == 0:
+                injected["done"] = True
+                (repo / "peer-staged.txt").write_text("peer's half-finished work\n")
+                _git(repo, "add", "peer-staged.txt")
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "migrated"
+        committed = _git(repo, "show", "--name-only", "--format=", "HEAD").stdout
+        assert "peer-staged.txt" not in committed, "our commit swept a peer's staged file"
+        assert "pathspec-plan.md" in committed
+        # The peer's work is still staged, untouched, where they left it.
+        assert (repo / "peer-staged.txt").exists()
+        assert "peer-staged.txt" in _git(repo, "diff", "--cached", "--name-only").stdout
+
+    def test_fetch_failure_mutates_nothing(self, tmp_path):
+        """An unreachable origin returns fetch-failed-skip and touches nothing."""
+        origin, repo, plan = self._setup(tmp_path, "unreachable-plan.md")
+        _git(repo, "remote", "set-url", "origin", str(tmp_path / "does-not-exist.git"))
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "fetch-failed-skip"
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "unreachable-plan.md").exists()
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+    def test_run_git_reports_a_timeout_instead_of_raising(self, tmp_path):
+        """_run_git turns subprocess.TimeoutExpired into a non-zero result.
+
+        Letting it escape would bypass every rollback path and abort the
+        reflection sweep, which has no handler for it.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        _origin, repo, _plan = self._setup(tmp_path, "timeout-probe-plan.md")
+
+        result = real_run_git(["-c", "alias.stall=!sleep 5", "stall"], repo, timeout=1)
+
+        assert result.returncode != 0
+        assert "timed out" in result.stderr
+
+    def test_landed_but_timed_out_commit_is_rolled_back_not_reverse_renamed(
+        self, tmp_path, monkeypatch
+    ):
+        """A `git commit` that LANDS but blows its timeout must not be treated as a no-op.
+
+        The hook chain can push a commit past the timeout, and a kill after
+        git's ref update but before process exit reports non-zero for a commit
+        that exists. Reverse-renaming there strands the migration commit on the
+        shared main AND leaves its index dirty with a staged reverse-rename --
+        strictly worse than #3530. Real git throughout: the commit really runs
+        and really succeeds; only its reported returncode is replaced.
+        """
+        from scripts.migrate_completed_plan import GIT_TIMEOUT_RETURNCODE
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "timeout-commit-plan.md")
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args and args[0] == "commit":
+                # The commit really happened; git was killed before it could say so.
+                return subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=GIT_TIMEOUT_RETURNCODE,
+                    stdout=result.stdout,
+                    stderr=result.stderr + "git commit timed out after 30s",
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip", (
+            "a landed-but-timed-out commit was reported as a no-op; "
+            "the migration commit is stranded on the shared main"
+        )
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0", (
+            "the migration commit was left stranded ahead of origin/main"
+        )
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the shared checkout was left dirty (staged reverse-rename), which breaks "
+            "the clean-tree precondition for every peer session"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "timeout-commit-plan.md").exists()
+
+    def test_landed_commit_under_a_peer_commit_is_not_reverse_renamed(self, tmp_path, monkeypatch):
+        """Our commit landing BELOW a peer's commit must still be detected as landed.
+
+        The shared `main` checkout has one HEAD for every session on the
+        machine. Between our `git commit` and the re-read that decides whether
+        it landed, a peer session can land its own commit on top of ours --
+        leaving ours one below the tip. A tip-only `git log -1` check then sees
+        the peer's subject, concludes "the commit did not happen", and reverse-
+        renames: our migration commit is stranded on the shared main (#3530's
+        end state, breaking every later `/update` fast-forward) AND the index
+        is left dirty with a staged reverse-rename, all reported as a silent
+        `mutation-failed-skip` no-op.
+
+        Real git throughout -- real bare origin, real clone, a real peer
+        commit. Only the returncode of our own `git commit` is replaced.
+        """
+        from scripts.migrate_completed_plan import GIT_TIMEOUT_RETURNCODE
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "peer-on-top-plan.md")
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if args and args[0] == "commit":
+                # Our commit really happened. Now a peer session on this same
+                # shared checkout lands its own commit on top of ours, before
+                # we get to ask HEAD what happened.
+                (repo / "peer.txt").write_text("peer hotfix\n")
+                _git(repo, "add", "peer.txt")
+                _git(repo, "commit", "-q", "-m", "Peer hotfix on shared main")
+                # ...and git was killed before it could report our success.
+                return subprocess.CompletedProcess(
+                    args=result.args,
+                    returncode=GIT_TIMEOUT_RETURNCODE,
+                    stdout=result.stdout,
+                    stderr=result.stderr + "git commit timed out after 30s",
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip", (
+            "a landed commit sitting one below a peer's commit was reported as a no-op; "
+            "the migration commit is stranded on the shared main"
+        )
+        log = _git(repo, "log", "--format=%s", "origin/main..HEAD").stdout
+        assert "Migrate completed plan: peer-on-top-plan" not in log, (
+            "our migration commit was left stranded ahead of origin/main"
+        )
+        assert "Peer hotfix on shared main" in log, "the peer's commit was destroyed"
+        assert (repo / "peer.txt").read_text() == "peer hotfix\n"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the shared checkout was left dirty (staged reverse-rename), which breaks "
+            "the clean-tree precondition for every peer session"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "peer-on-top-plan.md").exists()
+
+    def test_ahead_computation_failure_refuses_rollback(self, tmp_path, monkeypatch):
+        """`_commits_ahead_of_origin` returning (None, None) must refuse, not mutate.
+
+        Regression for the `ahead is None` shape in `_rollback_migration_commit`:
+        when the `git log origin/main..HEAD` read that backs
+        `_commits_ahead_of_origin` itself fails, the ahead-set is unknowable, and
+        the only safe disposition is `rollback-refused-skip` with local `main`
+        left exactly as it was. Real git throughout -- a real failing pre-commit
+        hook genuinely fails our own commit, and `_head_sha` is forced to fail
+        the pre-commit read so the ambiguous-landing path routes into rollback --
+        only the one `git log` call `_commits_ahead_of_origin` issues is replaced.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "ahead-unknown-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["log", "--format=%H%x00%s", "origin/main..HEAD"]:
+                return subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: ambiguous argument 'origin/main..HEAD'",
+                )
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "an unknowable ahead-set must never be mutated on top of"
+        )
+        assert plan.exists(), "the plan must stay in place for manual recovery"
+        assert not (repo / COMPLETED_PLANS_DIR / "ahead-unknown-plan.md").exists()
+
+    def test_ahead_set_without_our_commit_refuses_rollback(self, tmp_path, monkeypatch):
+        """A commit range ahead of origin that is entirely a peer's must refuse.
+
+        Regression for the `our_sha is None` shape: our own `git commit`
+        genuinely fails (real failing pre-commit hook), but a peer session on
+        this shared checkout lands its own local, unpushed commit under a
+        different subject in the same window. `_commits_ahead_of_origin` then
+        finds a non-empty ahead-set that does not contain our migration
+        subject at all, which must refuse rather than pick any commit to drop.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "peer-only-ahead-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        injected = {"done": False}
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        def wrapper(args, cwd, timeout=30):
+            result = real_run_git(args, cwd, timeout)
+            if not injected["done"] and args[:1] == ["commit"] and result.returncode != 0:
+                injected["done"] = True
+                # A peer session lands its own unrelated, unpushed commit on
+                # this shared checkout right after our commit genuinely fails.
+                # Scoped to its own path so it does not sweep our still-staged
+                # rename into its commit.
+                # --no-verify: the failing pre-commit hook lives in this shared
+                # checkout's .git/hooks and would otherwise refuse every commit,
+                # ours and the peer's alike -- only OUR commit is meant to fail.
+                (repo / "peer.txt").write_text("peer work\n")
+                _git(repo, "add", "peer.txt")
+                _git(
+                    repo,
+                    "commit",
+                    "-q",
+                    "--no-verify",
+                    "-m",
+                    "Peer unrelated local commit",
+                    "--",
+                    "peer.txt",
+                )
+            return result
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        log = _git(repo, "log", "--oneline", "-5").stdout
+        assert "Peer unrelated local commit" in log, "the peer's commit must survive"
+        assert "Migrate completed plan" not in log
+        assert (repo / "peer.txt").read_text() == "peer work\n"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the staged rename must be undone even though the rollback itself refused"
+        )
+        assert plan.exists(), "the plan must stay in place for manual recovery"
+        assert not (repo / COMPLETED_PLANS_DIR / "peer-only-ahead-plan.md").exists()
+
+    def test_undo_staged_rename_reports_undetermined_diff_status(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`git diff --cached` exiting outside {0, 1} must be diagnosed, not guessed at.
+
+        `_undo_staged_rename_if_present` treats 0 as "nothing staged" and 1 as
+        "staged, undo it" -- any other exit code means it could not determine
+        which, and the new diagnostic branch must log that honestly and leave
+        the index untouched for manual recovery rather than silently doing
+        nothing or guessing wrong.
+        """
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "undetermined-diff-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        completed_path = repo / COMPLETED_PLANS_DIR / "undetermined-diff-plan.md"
+
+        # Force the ambiguous-landing path so this reaches
+        # `_rollback_migration_commit` (and thus `_undo_staged_rename_if_present`)
+        # instead of the direct undo taken by a commit provably-not-landed.
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        def wrapper(args, cwd, timeout=30):
+            if args[:3] == ["diff", "--cached", "--quiet"]:
+                return subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=128,
+                    stdout="",
+                    stderr="fatal: ambiguous argument in diff --cached",
+                )
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        captured = capsys.readouterr()
+        assert "Could not determine whether a rename" in captured.out
+        # The undo was skipped (diagnostic branch, not the undo branch), so the
+        # staged rename is left exactly as it was for manual recovery.
+        assert not plan.exists()
+        assert completed_path.exists()
+
+    def test_genuinely_failed_commit_undoes_only_its_own_rename(self, tmp_path):
+        """A commit git really refused leaves no stranded commit and no staged rename.
+
+        Real refusal via a real failing pre-commit hook -- no mocking of git
+        semantics. This is the other half of the landed/not-landed fork, and
+        the only coverage of the `mutation-failed-skip` undo path.
+        """
+        origin, repo, plan = self._setup(tmp_path, "refused-commit-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "mutation-failed-skip"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the rename was not undone; the shared checkout is left dirty"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "refused-commit-plan.md").exists()
+
+    def test_genuinely_failed_commit_misjudged_as_landed_undoes_staged_rename(
+        self, tmp_path, monkeypatch
+    ):
+        """A genuinely-failed commit routed to rollback must not strand a staged rename.
+
+        Forcing `_head_sha` to return None for the pre-commit read makes
+        `_migration_commit_may_have_landed` return the "unknown, may have
+        landed" `True` even though the commit really failed (a real failing
+        pre-commit hook, no mocking of git semantics beyond that one read).
+        The commit never happened, nothing is ahead of origin/main, and the
+        rename is absent from origin/main too -- the decisive
+        `"rollback-refused-skip"` shape -- but the `git mv` this call staged
+        must still be undone so the shared checkout comes back clean.
+        """
+        from scripts.migrate_completed_plan import _head_sha as real_head_sha
+
+        origin, repo, plan = self._setup(tmp_path, "misjudged-refused-plan.md")
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rollback-refused-skip"
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head_before
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the refusal left a staged rename dirty in the shared index"
+        )
+        assert plan.exists()
+        assert not (repo / COMPLETED_PLANS_DIR / "misjudged-refused-plan.md").exists()
+        # Sanity: real_head_sha still works normally outside the monkeypatch.
+        assert real_head_sha(repo) is not None
+
+    def test_ambiguous_commit_failure_with_no_origin_and_no_real_commit_is_honest(
+        self, tmp_path, monkeypatch
+    ):
+        """No 'origin' + a genuinely-failed commit must not fabricate `migrated`.
+
+        There is nothing to fetch or compare against without an `origin`
+        remote, so `_rollback_migration_commit` cannot use the ahead/fetch/
+        reset machinery at all -- but it must still check HEAD's own tree
+        directly (ground truth, independent of origin) rather than blindly
+        reporting `"migrated"`. A real failing pre-commit hook means the
+        commit truly never landed: reporting `"migrated"` here would be a
+        fabricated success over a plan that is still sitting unmigrated with
+        a dirty staged rename in the index.
+        """
+        origin, repo, plan = self._setup(tmp_path, "no-origin-failed-plan.md")
+        _git(repo, "remote", "remove", "origin")
+        remote_check = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert remote_check.returncode != 0, "test setup must actually remove 'origin'"
+
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "mutation-failed-skip", (
+            "a commit that never landed, with no origin to reconcile against, "
+            "was reported as 'migrated' -- a fabricated success"
+        )
+        assert _git(repo, "status", "--porcelain").stdout.strip() == "", (
+            "the staged rename from a commit that never landed was left behind"
+        )
+        assert plan.exists(), "the staged rename was not undone"
+        assert not (repo / COMPLETED_PLANS_DIR / "no-origin-failed-plan.md").exists()
+
+    def test_ambiguous_commit_failure_with_no_origin_and_real_landed_commit_is_migrated(
+        self, tmp_path, monkeypatch
+    ):
+        """No 'origin' + a commit that genuinely DID land reports `migrated` cleanly.
+
+        The commit really succeeds (real git, nothing mocked about the commit
+        itself); only the pre-commit `_head_sha` read is forced to fail so
+        `_migration_commit_may_have_landed` takes the "unknown, may have
+        landed" branch and routes into `_rollback_migration_commit` despite
+        the commit having actually worked. With no origin to compare against,
+        the HEAD-tree check must find the rename already committed there and
+        report `"migrated"` without touching anything.
+        """
+        origin, repo, plan = self._setup(tmp_path, "no-origin-landed-plan.md")
+        _git(repo, "remote", "remove", "origin")
+        head_before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        def fake_head_sha(repo_root):
+            return None
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._head_sha", fake_head_sha)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "migrated"
+        assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+        assert not plan.exists()
+        assert (repo / COMPLETED_PLANS_DIR / "no-origin-landed-plan.md").exists()
+        assert _git(repo, "rev-parse", "HEAD").stdout.strip() != head_before
+
+    def test_hanging_push_still_rolls_back(self, tmp_path, monkeypatch):
+        """A git push that blows its timeout must not strand the commit."""
+        from scripts.migrate_completed_plan import _run_git as real_run_git
+
+        origin, repo, plan = self._setup(tmp_path, "hanging-push-plan.md")
+
+        def wrapper(args, cwd, timeout=30):
+            if args == ["push", "origin", "main"]:
+                # A real git invocation that really blows a real timeout.
+                return real_run_git(["-c", "alias.stall=!sleep 5", "stall"], cwd, timeout=1)
+            return real_run_git(args, cwd, timeout)
+
+        monkeypatch.setattr("scripts.migrate_completed_plan._run_git", wrapper)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "rolled-back-skip"
+        assert _git(repo, "rev-list", "--count", "origin/main..HEAD").stdout.strip() == "0"
+        assert plan.exists()
+
+
 # --- Helpers ---
 
 
