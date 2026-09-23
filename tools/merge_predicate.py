@@ -454,6 +454,32 @@ def _resolve_tracked_issue(pr_number: int, repo_root: Path) -> _TrackedIssue:
 # ---------------------------------------------------------------------------
 
 
+def ci_check_blocker(check: object) -> str | None:
+    """Classify one ``statusCheckRollup`` entry; return why it blocks merge, or None.
+
+    The single source of truth for "is this CI check green enough to merge",
+    shared with ``tools.sdlc_stage_query`` so the router and this predicate can
+    never disagree on the same rollup. A check blocks only when it failed or is
+    still in flight. SKIPPED and NEUTRAL are finished, non-failing conclusions
+    and do not block.
+    """
+    if not isinstance(check, dict):
+        return None
+    name = check.get("name") or check.get("context") or "<check>"
+    # CheckRun entries carry `conclusion`; StatusContext entries carry `state`.
+    conclusion = (check.get("conclusion") or "").upper()
+    status_state = (check.get("state") or "").upper()
+    if conclusion in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT") or status_state in (
+        "FAILURE",
+        "ERROR",
+    ):
+        return f"CI check {name!r} concluded {conclusion or status_state}"
+    if not conclusion and status_state != "SUCCESS":
+        # In-flight check: no conclusion yet. Pending counts as not-green.
+        return f"CI check {name!r} is still pending (not green)"
+    return None
+
+
 def _check_pr_state(
     pr_number: int, repo_root: Path, failed: list[str]
 ) -> tuple[dict | None, int | None]:
@@ -482,25 +508,9 @@ def _check_pr_state(
         failed.append("CI status rollup is malformed")
         rollup = []
     for check in rollup:
-        if not isinstance(check, dict):
-            continue
-        name = check.get("name") or check.get("context") or "<check>"
-        # CheckRun entries carry `conclusion`; StatusContext entries carry `state`.
-        conclusion = (check.get("conclusion") or "").upper()
-        status_state = (check.get("state") or "").upper()
-        if conclusion in (
-            "FAILURE",
-            "ERROR",
-            "CANCELLED",
-            "TIMED_OUT",
-        ) or status_state in (
-            "FAILURE",
-            "ERROR",
-        ):
-            failed.append(f"CI check {name!r} concluded {conclusion or status_state}")
-        elif not conclusion and status_state != "SUCCESS":
-            # In-flight check: no conclusion yet. Pending counts as not-green.
-            failed.append(f"CI check {name!r} is still pending (not green)")
+        blocker = ci_check_blocker(check)
+        if blocker is not None:
+            failed.append(blocker)
 
     issue_number = _extract_issue_number(pr.get("body"))
     if issue_number is None:

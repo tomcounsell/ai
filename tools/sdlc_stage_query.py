@@ -60,6 +60,7 @@ from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_re
 from tools.class_set_retry import class_set_retry_attempts, log_class_set_exhaustion
 from tools.lane_identity import find_plan_path as _find_plan_path
 from tools.lane_identity import lane_branch_name, resolve_lane_slug
+from tools.merge_predicate import ci_check_blocker
 
 logger = logging.getLogger(__name__)
 
@@ -167,9 +168,10 @@ def _fetch_pr_merge_state(
     Returns a tuple of (pr_merge_state, ci_all_passing, pr_state):
     - ``pr_merge_state``: value of ``mergeStateStatus`` (e.g. "CLEAN", "BLOCKED",
       "DIRTY") or ``None`` on any failure.
-    - ``ci_all_passing``: ``True`` if all ``statusCheckRollup`` conclusions are
-      ``"SUCCESS"`` (empty list also returns ``True`` — a repo with no required
-      checks has no failing checks), ``None`` on failure.
+    - ``ci_all_passing``: ``True`` if no ``statusCheckRollup`` entry blocks
+      merge per ``tools.merge_predicate.ci_check_blocker`` (SKIPPED and NEUTRAL
+      pass; failed or pending checks do not; an empty list passes), ``None`` on
+      failure.
     - ``pr_state``: value of ``state`` — "OPEN", "MERGED", or "CLOSED" — or
       ``None`` on failure.
 
@@ -256,11 +258,9 @@ def _fetch_pr_merge_state(
         if not isinstance(rollup, list):
             ci_all_passing = None
         else:
-            # Empty statusCheckRollup: no required checks → no failing checks.
-            # all() on empty sequence returns True in Python, which is correct here.
-            ci_all_passing = all(
-                isinstance(check, dict) and check.get("conclusion") == "SUCCESS" for check in rollup
-            )
+            # Same classifier as the merge predicate, so router and gate agree.
+            # An empty rollup has no blocking checks and passes.
+            ci_all_passing = all(ci_check_blocker(check) is None for check in rollup)
         return merge_state, ci_all_passing, pr_state
     except Exception as e:
         logger.debug(f"_fetch_pr_merge_state failed: {e}")

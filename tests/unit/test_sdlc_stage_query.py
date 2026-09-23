@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch  # noqa: F401 - patch used in tests below
 
+import pytest
+
 from tests.db_claim import subprocess_env
 from tests.unit.session_lookup_mock import wire_session_lookup
 
@@ -1014,6 +1016,44 @@ class TestFetchPrMergeState:
 
         assert merge_state == "CLEAN"
         assert ci_passing is True
+
+    @pytest.mark.parametrize(
+        ("check", "expected"),
+        [
+            ({"name": "claude", "status": "COMPLETED", "conclusion": "SKIPPED"}, True),
+            ({"name": "lint", "status": "COMPLETED", "conclusion": "NEUTRAL"}, True),
+            ({"context": "ci/legacy", "state": "SUCCESS"}, True),
+            ({"name": "tests", "status": "IN_PROGRESS", "conclusion": None}, False),
+            ({"name": "tests", "status": "COMPLETED", "conclusion": "CANCELLED"}, False),
+            ({"context": "ci/legacy", "state": "PENDING"}, False),
+        ],
+    )
+    def test_ci_classification_matches_merge_predicate(self, check, expected):
+        """Router CI verdict agrees with the merge predicate's per-check classifier.
+
+        SKIPPED/NEUTRAL are finished non-failing conclusions; the router once
+        demanded strict SUCCESS and stalled PRs the merge gate would pass.
+        """
+        import json as _json
+
+        from tools.merge_predicate import ci_check_blocker
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps(
+            {
+                "mergeStateStatus": "CLEAN",
+                "statusCheckRollup": [
+                    {"name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    check,
+                ],
+            }
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=gh_output)
+            _, ci_passing, _ = _fetch_pr_merge_state(264)
+
+        assert ci_passing is expected
+        assert (ci_check_blocker(check) is None) is expected
 
     def test_returns_none_tuple_on_exception(self):
         from tools.sdlc_stage_query import _fetch_pr_merge_state
