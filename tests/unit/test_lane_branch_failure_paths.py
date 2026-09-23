@@ -753,6 +753,45 @@ class TestBranchMismatchRefusalIsAttributable:
         assert "session/some-other-lane" in joined, "the refusal log does not name the expectation"
 
 
+class TestSyntheticSlugPassesLaunchGuard:
+    """#3557: a slugless eng session (every Telegram chat turn) gets a synthetic
+    ``dev-{aid[:8]}`` slug and a worktree on ``session/dev-{aid[:8]}``. The #1377
+    guard must expect that branch, not the session-id seed ``resolve_lane_branch``
+    derives from the stored row, which names a branch nothing ever creates.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slugless_eng_session_reaches_launch(self, tmp_path, lane_rows, monkeypatch):
+        monkeypatch.setattr(
+            "agent.session_executor.validate_workspace",
+            lambda working_dir, allowed_root, is_worktree=False: working_dir,
+        )
+        repo = _make_repo(tmp_path)
+        session = _make_session(
+            repo, slug=None, session_id="tg_test3557_-100_740", status="pending"
+        )
+        synthetic = f"dev-{session.agent_session_id[:8]}"
+        worktree = repo / WORKTREES_DIR / synthetic
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        _git(repo, "worktree", "add", "-b", f"session/{synthetic}", str(worktree))
+        session.working_dir = str(worktree)
+        session.save()
+
+        class _PastTheGuardError(Exception):
+            pass
+
+        def _stop(**kwargs):
+            raise _PastTheGuardError
+
+        # The snapshot save is the first thing after the guard; reaching it
+        # proves the launch was not refused.
+        monkeypatch.setattr("agent.session_executor.save_session_snapshot", _stop)
+
+        with pytest.raises(_PastTheGuardError):
+            await _execute_agent_session(session)
+        assert read_worktree_branch(worktree) == f"session/{synthetic}"
+
+
 class TestCleanupBlockScopedToLanes:
     """PR #3547 review, TD1: the end-of-turn cleanup block must not run for a
     slug-less ad-hoc turn whose ``working_dir`` is the shared project checkout,

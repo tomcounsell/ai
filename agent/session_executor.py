@@ -1541,8 +1541,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 verify_worktree_branch,
             )
 
+            # A synthetic slug (#1272) lives only in this function, so the
+            # stored-field view in resolve_lane_branch cannot see it and would
+            # expect a session-id branch nothing creates (#3557). Expect the
+            # branch the synthetic provisioning above just checked out.
+            if is_synthetic_slug:
+                expected_branch = lane_branch_name(slug)
+            else:
+                expected_branch = resolve_lane_branch(session)
             try:
-                verify_worktree_branch(working_dir, resolve_lane_branch(session))
+                verify_worktree_branch(working_dir, expected_branch)
             except WorktreeBranchMismatchError as e:
                 logger.error(
                     f"[worktree-branch-guard] Session {session.session_id} "
