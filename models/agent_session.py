@@ -407,9 +407,10 @@ class AgentSession(Model):
     # Flows to the CLI harness subprocess as `--model <value>` via
     # `agent.session_executor._resolve_session_model()` and
     # `agent.sdk_client.get_response_via_harness(model=...)`. When None/empty,
-    # the D1 precedence cascade falls through to
-    # `settings.models.session_default_model` and finally the codebase
-    # default "fable". See `docs/features/agent-session-model.md` for details.
+    # the D1 precedence cascade falls through to the role default:
+    # `settings.session_runner.pm_model` ("opus") for eng (PM) sessions,
+    # `settings.models.session_default_model` ("fable") for Teammate sessions.
+    # See `docs/features/agent-session-model.md` for details.
     model = Field(null=True)
 
     # === BUILD session retention for hard-PATCH resume ===

@@ -225,14 +225,17 @@ at the bottom:
 
 1. **`AgentSession.model`** (per-session, explicit) — set via
    `valor-session create --model <name>`, persisted on the record.
-2. **`settings.models.session_default_model`** (machine-local override) —
-   pydantic-settings field, env var `MODELS__SESSION_DEFAULT_MODEL`, sourced
-   from `~/Desktop/Valor/.env` (iCloud-synced).
-3. **Codebase default `"fable"`** — hard-coded as the pydantic `Field`
-   default in `config/settings.py::ModelSettings`. Every worker-run session
-   (PM and Teammate) therefore runs on Fable 5.1 unless a session or
-   machine says otherwise. The Dev subagent is deliberately outside this
-   cascade; see [Dev Subagent Model](#dev-subagent-model).
+2. **Role default**, chosen by `session_type`:
+   - **PM (`eng`)**: `settings.session_runner.pm_model`, env
+     `SESSION_RUNNER__PM_MODEL`, codebase default `"opus"`. Every PM session
+     therefore runs on the latest Opus (Opus 5.5 today) unless a session or
+     machine says otherwise.
+   - **Teammate**: `settings.models.session_default_model`, env
+     `MODELS__SESSION_DEFAULT_MODEL`, codebase default `"fable"` (Fable 5.1).
+
+   Machine-local overrides are sourced from `~/Desktop/Valor/.env`
+   (iCloud-synced). The Dev subagent is deliberately outside this cascade;
+   see [Dev Subagent Model](#dev-subagent-model).
 
 Implemented in `agent.session_executor._resolve_session_model()`:
 
@@ -240,14 +243,16 @@ Implemented in `agent.session_executor._resolve_session_model()`:
 explicit = getattr(session, "model", None) if session else None
 if explicit:
     return explicit
-fallback = settings.models.session_default_model
+if getattr(session, "session_type", None) == SessionType.ENG:
+    fallback = settings.session_runner.pm_model
+else:
+    fallback = settings.models.session_default_model
 return fallback or None
 ```
 
-When the cascade resolves to `None` (operator set
-`MODELS__SESSION_DEFAULT_MODEL=""`), `get_response_via_harness` omits the
-`--model` flag and the Claude CLI uses its own default — graceful
-degradation rather than a hard error.
+When the cascade resolves to `None` (operator set the role's override to
+`""`), `get_response_via_harness` omits the `--model` flag and the Claude CLI
+uses its own default — graceful degradation rather than a hard error.
 
 ### How It Flows
 
@@ -268,11 +273,12 @@ degradation rather than a hard error.
 
 ### Override via `.env`
 
-Operators can flip the default on a per-machine basis:
+Operators can flip either role default on a per-machine basis:
 
 ```bash
 # ~/Desktop/Valor/.env
-MODELS__SESSION_DEFAULT_MODEL=sonnet
+SESSION_RUNNER__PM_MODEL=sonnet        # PM (eng) sessions
+MODELS__SESSION_DEFAULT_MODEL=sonnet   # Teammate sessions
 ```
 
 Short aliases (`fable`/`opus`/`sonnet`/`haiku`) are preferred; full version

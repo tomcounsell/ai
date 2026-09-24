@@ -310,10 +310,15 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
     Order (closest to LLM call wins):
       1. ``session.model`` (explicit per-session, via
          ``valor-session create --model <name>``)
-      2. ``settings.models.session_default_model`` (machine-local override,
-         env var ``MODELS__SESSION_DEFAULT_MODEL``)
-      3. codebase default ``"fable"`` (set on the pydantic Field default in
-         ``config/settings.py``)
+      2. The role default, by ``session.session_type``:
+         - ``eng`` (the PM role): ``settings.session_runner.pm_model``
+           (env ``SESSION_RUNNER__PM_MODEL``, codebase default ``"opus"``)
+         - every other session (Teammate, or no session):
+           ``settings.models.session_default_model``
+           (env ``MODELS__SESSION_DEFAULT_MODEL``, codebase default ``"fable"``)
+
+    The Dev subagent is outside this cascade: its model comes from the
+    ``.claude/agents/dev.md`` frontmatter.
 
     Returns the resolved model alias (e.g. ``"fable"``, ``"opus"``), or
     ``None`` if the cascade resolves to an empty string (operator-
@@ -323,7 +328,10 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
     explicit = getattr(session, "model", None) if session else None
     if explicit:
         return explicit
-    fallback = settings.models.session_default_model
+    if getattr(session, "session_type", None) == SessionType.ENG:
+        fallback = settings.session_runner.pm_model
+    else:
+        fallback = settings.models.session_default_model
     return fallback or None
 
 
@@ -2401,7 +2409,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if _sdlc_env:
             _harness_env.update(_sdlc_env)
 
-        # D1 precedence cascade: session.model > settings > codebase default.
+        # D1 precedence cascade: session.model > role default (PM: pm_model,
+        # Teammate: session_default_model).
         # Applied to the runner's PM subprocess; the Dev role runs as a
         # subagent inside the PM session (D1, plan #1924).
         _effective_model = _resolve_session_model(agent_session)

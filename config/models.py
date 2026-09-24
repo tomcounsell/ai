@@ -41,8 +41,8 @@ SONNET_4 = "claude-sonnet-4-20250514"
 # Strengths: Highest quality output, best at handling ambiguity
 OPUS = "claude-opus-4-5-20251101"
 
-# Fable 5.1 - Mythos-class tier above Opus; the default model for every
-# worker-run session (PM, Teammate, and the Dev subagent they spawn).
+# Fable 5.1 - Mythos-class tier above Opus; the default model for Teammate
+# sessions (PM sessions and the Dev subagent default to the "opus" alias).
 # Sessions reach it through the CLI alias "fable" (see _MODEL_ALIASES): the
 # pinned id is rejected under subscription-only auth, so this constant is for
 # registry lookups (context window, metadata), not for passing to the harness.

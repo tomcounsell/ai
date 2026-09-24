@@ -342,7 +342,9 @@ itself is minted and rotated.
 ## Configuration
 
 `SessionRunnerSettings` (`config/settings.py`), env prefix
-`SESSION_RUNNER__`: `pm_model`, `dev_model`, `hook_turn_end_wait_s`,
+`SESSION_RUNNER__`: `pm_model` (the PM role's default model, see
+[Agent Session Model](agent-session-model.md#precedence-cascade-d1)),
+`hook_turn_end_wait_s`,
 `hook_crash_resume_cap`, plus the per-turn timeout and the steer debounce
 (both env-overridable, provisional). Unknown keys are ignored
 (`extra="ignore"`), so any override must use the `SESSION_RUNNER__` prefix

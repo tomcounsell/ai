@@ -1,7 +1,7 @@
 """Unit tests for per-session model routing (plan docs/plans/session-model-routing-fallback.md).
 
 Covers:
-- `_resolve_session_model()` D1 precedence cascade (3 levels + empty-settings edge).
+- `_resolve_session_model()` D1 precedence cascade (explicit > role default + empty-settings edge).
 - `get_response_via_harness(model=...)` argv injection.
 - Argv ordering: `--model` precedes positional `message` AND `--resume <uuid>`.
 - INFO log line fires with the resolved value.
@@ -57,7 +57,7 @@ def _stub_subprocess(mock_exec, result_text: str = "ok", session_id: str = "sess
 
 
 class TestResolveSessionModelCascade:
-    """D1 precedence: session.model > settings > codebase default 'fable'."""
+    """D1 precedence: session.model > role default (PM: pm_model, else session_default_model)."""
 
     def test_explicit_session_model_wins(self):
         from agent.session_executor import _resolve_session_model
@@ -93,20 +93,57 @@ class TestResolveSessionModelCascade:
         ):
             assert _resolve_session_model(session) == "sonnet"
 
-    def test_settings_default_is_fable(self):
-        """Codebase default (settings default) is 'fable' when operator doesn't override."""
+    def test_pm_default_is_opus(self):
+        """PM (eng) sessions default to the unpinned 'opus' alias via pm_model."""
+        from agent.session_executor import _resolve_session_model
+        from config.settings import SessionRunnerSettings
+
+        session = MagicMock()
+        session.model = None
+        session.session_type = "eng"
+        # Read the pydantic Field default directly so a machine-local
+        # SESSION_RUNNER__PM_MODEL override in the ambient env cannot flip it.
+        assert SessionRunnerSettings.model_fields["pm_model"].default == "opus"
+        with patch(
+            "agent.session_executor.settings",
+            MagicMock(
+                session_runner=MagicMock(pm_model="opus"),
+                models=MagicMock(session_default_model="fable"),
+            ),
+        ):
+            assert _resolve_session_model(session) == "opus"
+
+    def test_explicit_model_wins_for_pm(self):
+        """An explicit session.model beats the PM role default."""
+        from agent.session_executor import _resolve_session_model
+
+        session = MagicMock()
+        session.model = "sonnet"
+        session.session_type = "eng"
+        with patch(
+            "agent.session_executor.settings",
+            MagicMock(session_runner=MagicMock(pm_model="opus")),
+        ):
+            assert _resolve_session_model(session) == "sonnet"
+
+    def test_teammate_default_is_fable(self):
+        """Teammate sessions keep session_default_model ('fable'), not pm_model."""
         from agent.session_executor import _resolve_session_model
         from config.settings import ModelSettings
 
         session = MagicMock()
         session.model = None
+        session.session_type = "teammate"
         # Read the pydantic Field default directly so a machine-local
         # MODELS__SESSION_DEFAULT_MODEL override in the ambient env cannot
         # flip this assertion.
         assert ModelSettings.model_fields["session_default_model"].default == "fable"
         with patch(
             "agent.session_executor.settings",
-            MagicMock(models=MagicMock(session_default_model="fable")),
+            MagicMock(
+                session_runner=MagicMock(pm_model="opus"),
+                models=MagicMock(session_default_model="fable"),
+            ),
         ):
             assert _resolve_session_model(session) == "fable"
 

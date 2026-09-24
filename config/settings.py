@@ -906,8 +906,9 @@ class ModelSettings(BaseModel):
     session_default_model: str = Field(
         default="fable",
         description=(
-            "Fallback Claude model for sessions where AgentSession.model is None/empty. "
-            "Part of the precedence cascade: session.model > settings > codebase default 'fable'. "
+            "Fallback Claude model for Teammate sessions where AgentSession.model is "
+            "None/empty (PM-role eng sessions use SessionRunnerSettings.pm_model). "
+            "Precedence: session.model > this setting (codebase default 'fable'). "
             "Short aliases (fable, opus, sonnet, haiku) preferred: the CLI resolves an alias "
             "to the latest model in that family under subscription auth, whereas a pinned "
             "full id (claude-fable-5-1) is rejected with an api_error on subscription-only "
@@ -1146,20 +1147,14 @@ class SessionRunnerSettings(BaseModel):
     pm_model: str = Field(
         default="opus",
         description=(
-            "Claude model alias for the PM role's headless turns. Role turns "
-            "run on the Claude subscription (OAuth, ANTHROPIC_API_KEY "
-            "blanked — see agent/session_runner/role_driver.py). Use "
-            "UNPINNED aliases (opus, sonnet, haiku) so the runner tracks the "
-            "latest version. Override via SESSION_RUNNER__PM_MODEL."
-        ),
-    )
-    dev_model: str = Field(
-        default="opus",
-        description=(
-            "Claude model alias for the ``dev`` subagent's work. See "
-            "``pm_model``. The Dev owns the full SDLC pipeline (issue #1692) "
-            "and fans out to Sonnet subagents for parallel work; opus is the "
-            "default for the Dev itself. Override via SESSION_RUNNER__DEV_MODEL."
+            "Default Claude model for PM-role (eng) sessions whose "
+            "AgentSession.model is None/empty; resolved by "
+            "agent/session_executor.py::_resolve_session_model. Use an "
+            "UNPINNED alias (opus, sonnet, haiku, fable) so the runner tracks "
+            "the latest version: a pinned full id is rejected under "
+            "subscription-only CLI auth. The Dev subagent's model comes from "
+            ".claude/agents/dev.md, not from settings. Override via "
+            "SESSION_RUNNER__PM_MODEL."
         ),
     )
     hook_turn_end_wait_s: float = Field(
