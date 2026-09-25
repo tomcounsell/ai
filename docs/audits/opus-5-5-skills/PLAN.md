@@ -51,6 +51,6 @@ Steps:
 
 ## Synthesis
 
-One report, one row per skill and agent (fails if any is missing). Accepted changes become GitHub issues grouped by cluster. The audit itself edits nothing.
+One report, one row per skill and agent (fails if any is missing). Recommendations live in this PR; no GitHub issues are filed. The audit itself edits nothing.
 
 Agent count: 7 Track A analysts + ~10 verifiers + 2 Track B analysts + the replay runs (~9 short sessions). Run in batches under the 10-agent guideline, or as a Workflow if Tom opts in.
