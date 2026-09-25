@@ -6,7 +6,7 @@ Invocation counts (last 60 days, this machine): every item in this cluster is 0.
 
 ## Field support, checked before recommending
 
-- **Skill `effort:` is supported.** The bundled Claude Code skills doc lists it: `effortNoEffort level when this skill is active. Overrides the session effort level. ... Options: low, medium, high, xhigh, max` (`audit-skills/references/anthropic-skills-docs.txt:344`). `${CLAUDE_EFFORT}` is also available as a substitution (`:376`).
+- **Skill `effort:` is supported.** The bundled Claude Code skills doc lists it: `effortNoEffort level when this skill is active. Overrides the session effort level. ... Options: low, medium, high, xhigh, max` (`audit-skills/references/anthropic-skills-docs.txt:344`). `${CLAUDE_EFFORT}` is also available as a substitution (`:376`). The CLI 2.1.282 skill loader reads the field and warns "Skill X has invalid effort" on a bad value; valid values are the effort level names or an integer. Effort recommendations in this report need no hedge on field support.
 - **Agent `effort:` is supported.** The installed CLI (2.1.282) whitelists agent frontmatter keys `["name","description","prompt","tools","disallowedTools","model","effort","permissionMode","mcpServers","hooks","maxTurns","skills","initialPrompt","memory","background","omitClaudeMd","isolation"]` (read from the binary). `tools` is on that list too.
 - **Our own lint would warn on it.** `audit_skills.py:70-83` `KNOWN_FIELDS` omits `effort` (and `when_to_use`, `arguments`, `disallowed-tools`, `paths`, `shell`), so rule 11 emits "Unknown frontmatter fields: effort" for every skill that adopts this audit's recommendations.
 - **Our sync can never notice.** `sync_best_practices.py:56-67` hardcodes `ANTHROPIC_KNOWN_FIELDS` to the same ten fields, and `extract_fields_from_docs` (`:233-240`) only reports doc fields that are already in that allowlist. New upstream fields are filtered out by construction. This is why zero skills in the repo carry `effort:` today.
@@ -34,7 +34,19 @@ Invocation counts (last 60 days, this machine): every item in this cluster is 0.
 
 The default path runs a script and relays its output (`SKILL.md:31`), which is the textbook case for low effort. The `--arch` pass is a fan-out whose analysts need medium, but those analysts are spawned subagents and can carry their own effort through an agent definition.
 
-1. **Lint blocks the audit's own recommendations.** `scripts/audit_skills.py:70-83` `KNOWN_FIELDS` lacks `effort`. Edit: add `"effort"`, `"when_to_use"`, `"arguments"`, `"disallowed-tools"`, `"paths"`, `"shell"` to the frozenset. Update `SKILL.md:49` ("only known fields") needs no text change.
+1. **Lint blocks the audit's own recommendations (concrete fix).** `scripts/audit_skills.py:70-83` `KNOWN_FIELDS` lacks `effort`, so rule 11 (`:424-434`) returns WARN "Unknown frontmatter fields: effort" on every skill that adopts an `effort:` line. Exact edit, inserting after `"model",` at line 78:
+
+   ```python
+           "model",
+           "effort",
+           "when_to_use",
+           "arguments",
+           "disallowed-tools",
+           "paths",
+           "shell",
+   ```
+
+   Optionally add a value check alongside rule 11 mirroring the loader: WARN when `effort` is neither one of `low`, `medium`, `high`, `xhigh`, `max` nor an integer, so a typo is caught by the lint instead of at load time. Add a unit case to `tests/unit/test_skills_audit.py` asserting a skill with `effort: low` passes rule 11. `SKILL.md:49` ("only known fields") needs no text change.
 2. **Sync is structurally blind to new fields.** `scripts/sync_best_practices.py:56-67` plus `:233-240`. Edit: derive the doc field set by parsing the field table in `anthropic-skills-docs.txt` (rows around `:333-349` have the shape `<field>No|Recommended<desc>`) instead of intersecting with a hardcoded dict. Without this, the next upstream field will be missed the same way.
 3. **Rubric lens 4 ignores effort.** `references/rubric.md:46-52`: "**4. Model tier.** Recommend by task property, not model fashion: - **sonnet** ... - **opus** ... - **fable** ...". The guide says effort "is the main control for how much Claude Opus 5.5 thinks" and that `medium` "matches or exceeds Claude Opus 5 at `high`" with `low` close on coding. A tier-only lens pushes work up a model tier when a lower effort on the same model is the cheaper lever. Replace lines 46-52 with:
 
