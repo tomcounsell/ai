@@ -132,9 +132,9 @@ mode (state not persisted)" at the top of its run instead of silently lagging.
 
 Three complementary fixes close the PLAN↔CRITIQUE loop that occurred when running local `/do-sdlc` against a non-ai-repo issue (reproduced with cuttlefish issues #547, #550):
 
-**Root cause:** `sdlc-tool` forces cwd to `~/src/ai` (correct and load-bearing). Local `/do-sdlc` never exported `SDLC_TARGET_REPO`, so `find_plan_path` resolved from `~/src/ai/docs/plans` — the wrong repo. `revision_applied: true` was never read; router row 4c was unreachable; the PLAN→CRITIQUE→PLAN loop ran forever.
+**Root cause:** `sdlc-tool` forces cwd to `~/src/ai` (correct and load-bearing). Without `SDLC_TARGET_REPO`, `find_plan_path` resolved from `~/src/ai/docs/plans` — the wrong repo. `revision_applied: true` was never read; router row 4c was unreachable; the PLAN→CRITIQUE→PLAN loop ran forever.
 
-**Fix 1 — SDLC_TARGET_REPO export:** `/do-sdlc` Step 2 now captures `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports `SDLC_TARGET_REPO` for the lifetime of the supervision loop. `sdlc-tool` inherits it (bash `exec` propagates the env). Both the bridge/worker path (`agent/sdk_client.py:1590`) and the local `/do-sdlc` path now export the same env var shape (absolute filesystem path). See `sdlc-tool-resolver.md` for the `SDLC_TARGET_REPO` vs `SDLC_REPO` (GitHub slug) distinction.
+**Fix 1 — SDLC_TARGET_REPO from the caller's checkout:** the `sdlc-tool` wrapper exports the caller's `git rev-parse --show-toplevel` as `SDLC_TARGET_REPO` (when unset) before forcing cwd, so the local `/do-sdlc` path needs no agent-side export, which would not survive between Bash tool calls anyway (#3566). The bridge/worker path (`agent/sdk_client.py`) sets the same env var shape (absolute filesystem path). See `sdlc-tool-resolver.md` for the `SDLC_TARGET_REPO` vs `SDLC_REPO` (GitHub slug) distinction.
 
 **Fix 2 — `find_plan_path` resolves on one rung:** a `tracking:` frontmatter line naming the issue. There is no textual-mention fallback on any resolution path. A plan that merely mentions `#N` in prose does not own N, and a "Not building #N" No-Gos line is the *opposite* of ownership — which is exactly where the deleted fallback answered confidently and wrongly (#2735). An issue whose plan carries no `tracking:` line now resolves to `None`; `tests/unit/test_plan_docs.py` is the durable guard that every lane plan carries one.
 
@@ -169,7 +169,7 @@ forward.
 - `tools/sdlc_dispatch.py` — `dispatch reset` subcommand (D5).
 - `tools/sdlc_stage_marker.py` — tri-state degradation probe (D7).
 - `.claude/skills-global/do-merge/SKILL.md` — portable merge gate (D6).
-- `.claude/skills-global/do-sdlc/SKILL.md` — `SDLC_TARGET_REPO` export in Step 2 (D8).
+- `scripts/sdlc-tool` — exports the caller's checkout as `SDLC_TARGET_REPO` before forcing cwd (D8, #3566).
 - `.claude/skills-global/do-{build,docs,patch,plan,plan-critique,pr-review}/` — all anchored
   to `AI_REPO_ROOT` for cross-repo portability (D8).
 - `docs/sdlc/do-merge.md` — repo-specific merge-gate addenda.

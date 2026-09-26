@@ -24,14 +24,14 @@ session; when one already owns the issue, supervisor mode is redundant and work 
 
 The global body writes `{target_repo_path}` wherever it needs the target repo's filesystem path.
 In this repo that is **`SDLC_TARGET_REPO`**, distinct from `SDLC_REPO` (the GitHub `org/repo`
-slug). `sdlc-tool` forces its own cwd to `~/src/ai`, so this env var is how it locates the target
-repo's plans and worktree when the target repo is not `ai` itself. Set it once in Step 2 and keep
-it exported for the lifetime of the loop:
-
-```bash
-SDLC_TARGET_REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
-export SDLC_TARGET_REPO
-```
+slug). `sdlc-tool` forces its own cwd to `~/src/ai`, so this env var is how every `tools.sdlc_*`
+CLI locates the target repo: the lease's pinned slug, the `sdlc-local-{N}` session's
+`project_key`, the plans dir, and G8's git checks. The wrapper sets it itself: when it is
+unset, `scripts/sdlc-tool` exports the caller's `git rev-parse --show-toplevel` before moving
+cwd. Running `sdlc-tool` from inside the target checkout is therefore enough, and the agent never
+has to carry it. Pass it explicitly only to target a checkout other than the caller's cwd, and do
+so on each call (`SDLC_TARGET_REPO=/path sdlc-tool ...`), because Claude Code's Bash tool does not
+persist an `export` between calls. See [sdlc-tool resolver](../features/sdlc-tool-resolver.md).
 
 ## Guard implementation, this repo's sources
 

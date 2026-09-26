@@ -129,9 +129,12 @@ SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null ||
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}"
 ```
 
-When the target repo is not the one you are standing in, `sdlc-tool` needs its filesystem path.
-The repo context probe declares the env var that carries it; export that var once, for the
-lifetime of the loop, and use it wherever this body writes `{target_repo_path}`.
+Run every `sdlc-tool` call from inside the target repo's checkout: the tool resolves which
+repo it is working on from the caller's working directory, never from a default. `{target_repo_path}`
+in this body is that checkout's root (`git rev-parse --show-toplevel`). To act on a checkout you
+are not standing in, pass its path on each call through the env var the repo context probe
+declares. Do not rely on an earlier `export`, which does not survive between separate shell
+invocations.
 
 Let stderr through and read the JSON payload. `session-ensure` reports a refusal *in the payload*
 (`{"blocked": true, "reason": ...}`), not through the exit code — it exits 0 either way — so a

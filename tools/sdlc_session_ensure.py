@@ -427,18 +427,19 @@ def _acquire_run_lock_and_bind(
     (``release_issue_lock`` -- never a raw DEL, cycle-2 CONCERN 2) so the
     next caller acquires immediately instead of waiting out the 1800s TTL.
 
-    Target-repo pinning (issue #2012): this is the ONE place ``target_repo``
-    is resolved for the issue-keyed ``PipelineLedger`` -- the process env
-    (``GH_REPO``/``SDLC_TARGET_REPO``, set authoritatively by
-    ``sdk_client.py``) is trustworthy here regardless of a takeover
-    session's foreign slug or cwd. Resolved exactly once per call and
-    passed into every ``touch_issue_lock`` call below so the lock payload
-    carries it for every subsequent writer/reader to read from the lease
-    instead of re-resolving via ``gh repo view`` per write. A ``None``
-    resolution is passed through as-is -- lock acquisition is never blocked
-    on repo resolution; a missing pinned repo is handled downstream as an
-    observable degradation by the issue-keyed ledger's writers/readers, not
-    here.
+    Target-repo pinning (issue #2012): this is the ONE place
+    ``target_repo`` is resolved for the issue-keyed ``PipelineLedger`` --
+    the process env (``GH_REPO``/``SDLC_TARGET_REPO``, set authoritatively
+    by ``sdk_client.py`` or, locally, by the ``sdlc-tool`` wrapper) is
+    trustworthy here regardless of a takeover session's foreign slug or
+    cwd. Resolved exactly once per call and passed into every
+    ``touch_issue_lock`` call below so the lock payload carries it for
+    every subsequent writer/reader to read from the lease instead of
+    re-resolving via ``gh repo view`` per write. A ``None`` resolution is
+    passed through as-is -- lock acquisition is never blocked on repo
+    resolution; a missing pinned repo is handled downstream as an
+    observable degradation by the issue-keyed ledger's writers/readers,
+    not here.
 
     Args:
         issue_number: The issue whose lock is contested.
