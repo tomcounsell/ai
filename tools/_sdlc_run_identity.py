@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,7 +146,9 @@ def reestablish_run_id(
     if not issue_number:
         return None
     if working_dir is None:
-        working_dir = os.getcwd()
+        from tools._sdlc_utils import caller_checkout
+
+        working_dir = caller_checkout()
 
     try:
         from agent.supervised_run import (
