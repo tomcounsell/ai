@@ -297,3 +297,59 @@ class TestSkillMarkdownParity:
             "Verdict/dispatch invocations must NOT silence failures — drop "
             "2>/dev/null and || true:\n" + "\n".join(f"  {p}:{n}: {ln}" for p, n, ln in offenders)
         )
+
+
+class TestWrapperTargetRepoCapture:
+    """The wrapper pins the caller's repo before `uv run --directory` moves cwd.
+
+    `uv run --directory "$AI_REPO_ROOT"` makes every tools.sdlc_* process run in
+    ~/src/ai, so any cwd-derived resolution (target_repo slug, project_key)
+    answers "tomcounsell/ai" for a cross-repo run. Claude Code's Bash tool does
+    not persist exported env vars between calls, so the wrapper -- not the
+    agent -- must carry the caller's checkout as SDLC_TARGET_REPO.
+    """
+
+    def _fake_ai_root(self, tmp_path: Path) -> Path:
+        """A valid AI_REPO_ROOT plus a `uv` shim that reports the env it received."""
+        root = tmp_path / "fake_ai"
+        (root / "tools").mkdir(parents=True)
+        shim_dir = tmp_path / "shim_bin"
+        shim_dir.mkdir()
+        shim = shim_dir / "uv"
+        shim.write_text('#!/usr/bin/env bash\necho "${SDLC_TARGET_REPO:-}"\n')
+        shim.chmod(0o755)
+        return root
+
+    def _run(self, cwd: Path, ai_root: Path, **env_overrides) -> str:
+        env = {k: v for k, v in os.environ.items() if k != "SDLC_TARGET_REPO"}
+        env["PATH"] = f"{ai_root.parent / 'shim_bin'}:{env['PATH']}"
+        env.update(AI_REPO_ROOT=str(ai_root), **env_overrides)
+        result = subprocess.run(
+            [str(WRAPPER), "stage-query"],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.strip()
+
+    def test_exports_caller_git_toplevel(self, tmp_path):
+        target = tmp_path / "target_repo"
+        (target / "sub").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(target)], check=True)
+        printed = self._run(target / "sub", self._fake_ai_root(tmp_path))
+        assert Path(printed).resolve() == target.resolve()
+
+    def test_explicit_env_wins(self, tmp_path):
+        target = tmp_path / "target_repo"
+        target.mkdir()
+        subprocess.run(["git", "init", "-q", str(target)], check=True)
+        printed = self._run(target, self._fake_ai_root(tmp_path), SDLC_TARGET_REPO="/explicit/path")
+        assert printed == "/explicit/path"
+
+    def test_non_git_cwd_leaves_it_unset(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert self._run(plain, self._fake_ai_root(tmp_path)) == ""

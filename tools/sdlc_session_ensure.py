@@ -943,14 +943,16 @@ def ensure_session(
             + (f" ({issue_url})." if issue_url else ".")
         )
 
+        # Resolve project_key from the caller's checkout (raises if unmatched —
+        # caught below by the broad except Exception, which returns {} for
+        # idempotent failure).
+        from tools._sdlc_utils import caller_checkout
         from tools.valor_session import (
             _resolve_project_working_directory,
             resolve_project_key,
         )
 
-        # Resolve project_key from cwd (raises if unmatched — caught below by
-        # the broad except Exception, which returns {} for idempotent failure).
-        project_key = resolve_project_key(os.getcwd())
+        project_key = resolve_project_key(caller_checkout())
         # Derive working_dir from projects.json, NOT os.getcwd(). This enforces
         # the immutable project→repo pairing: the session runs in the repo
         # declared for its project_key, not wherever the caller happens to be.

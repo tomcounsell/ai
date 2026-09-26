@@ -66,7 +66,9 @@ Two distinct env vars now govern where things live:
 | Env var | Shape | Set by | Used for |
 |---------|-------|--------|----------|
 | `SDLC_REPO` | GitHub slug (`org/repo`) | `/do-sdlc` Step 2 via `gh repo view` | `gh` CLI calls (`gh issue view`, `gh pr create`, etc.) |
-| `SDLC_TARGET_REPO` | Filesystem path (absolute) | `/do-sdlc` Step 2 via `git rev-parse --show-toplevel`; bridge path via `agent/sdk_client.py:1590` | `find_plan_path` plans-dir resolution inside `sdlc-tool` |
+| `SDLC_TARGET_REPO` | Filesystem path (absolute) | The `sdlc-tool` wrapper itself (caller's `git rev-parse --show-toplevel`, when unset); bridge path via `agent/sdk_client.py` | Target-repo slug pinned on the lease/ledger, `project_key` for `sdlc-local-{N}`, plans-dir, G8 git checks |
+
+**The wrapper pins the caller's checkout (#3566).** Claude Code's Bash tool does not persist exported env vars between calls, so an agent cannot be relied on to carry `SDLC_TARGET_REPO` across a loop. `scripts/sdlc-tool` therefore exports the caller's git toplevel as `SDLC_TARGET_REPO` before `uv run --directory` moves cwd; an explicit value wins, and a non-git caller cwd leaves it unset. Inside `tools.sdlc_*`, never read the process cwd to mean "the repo under work" — use `tools._sdlc_utils.caller_checkout()` (`SDLC_TARGET_REPO`, else cwd for direct `python -m` runs). A process-cwd read is how cross-repo runs got filed under `tomcounsell/ai`.
 
 **Before #1761:** local `/do-sdlc` never set `SDLC_TARGET_REPO`. `find_plan_path` fell through to `_git_toplevel()` (which resolves `~/src/ai` because that is `sdlc-tool`'s forced cwd), then to the `__file__` fallback — also `~/src/ai`. A target-repo plan was never found; `revision_applied: true` was never read; router row 4c was unreachable.
 

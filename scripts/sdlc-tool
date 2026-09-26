@@ -88,6 +88,17 @@ fi
 # Map kebab-case subcommand to underscore module suffix.
 MODULE_SUFFIX="$(echo "$SUBCOMMAND" | tr '-' '_')"
 
+# Pin the CALLER's checkout before `uv run --directory` moves cwd into the ai
+# repo. Without this, every cwd-derived resolution inside tools.sdlc_* (target
+# repo slug, project_key, plans dir) answers for ~/src/ai instead of the repo
+# being worked on, and a cross-repo run files its ledger under the wrong repo.
+# An explicit SDLC_TARGET_REPO wins; a non-git caller cwd leaves it unset.
+if [[ -z "${SDLC_TARGET_REPO:-}" ]]; then
+    if CALLER_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$CALLER_TOPLEVEL" ]]; then
+        export SDLC_TARGET_REPO="$CALLER_TOPLEVEL"
+    fi
+fi
+
 # Pass the underlying tool's exit code through unchanged. The wrapper itself
 # adds <50ms; the slow part is `uv run --directory` + Python startup, which
 # was already paid by `python -m tools.X` invocations.

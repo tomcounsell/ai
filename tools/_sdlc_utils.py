@@ -221,6 +221,17 @@ def resolve_target_repo_for_read(issue_number: int | None) -> str | None:
     return _resolve_target_repo_fallback()
 
 
+def caller_checkout() -> str:
+    """Return the checkout the SDLC caller is working in.
+
+    ``sdlc-tool`` runs every ``tools.sdlc_*`` process with cwd forced to the ai
+    repo, so this process's own cwd says nothing about the repo under work. The
+    wrapper exports the caller's git toplevel as ``SDLC_TARGET_REPO``; that wins.
+    The process cwd is only meaningful for a direct ``python -m`` invocation.
+    """
+    return os.environ.get("SDLC_TARGET_REPO") or os.getcwd()
+
+
 def _git_toplevel(cwd: Path | None = None) -> Path | None:
     """Return the git working-tree root for ``cwd`` (default: process cwd).
 
