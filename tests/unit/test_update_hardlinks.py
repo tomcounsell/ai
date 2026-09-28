@@ -2280,3 +2280,27 @@ def test_self_check_fixture_is_the_worktree_shape(tmp_path):
         text=True,
     ).stdout.split()
     assert staged == ["staged.py"]
+
+
+def test_sync_iterm_it2_links_bundled_cli(tmp_path, fake_home):
+    it2 = tmp_path / "it2"
+    it2.write_text("")
+
+    result = hardlinks.sync_iterm_it2(it2)
+
+    dst = fake_home / ".local" / "bin" / "it2"
+    assert result.created == 1
+    assert dst.is_symlink() and dst.resolve() == it2.resolve()
+
+
+def test_sync_iterm_it2_skips_without_iterm_or_existing_it2(tmp_path, fake_home):
+    assert hardlinks.sync_iterm_it2(tmp_path / "missing").skipped == 1
+
+    existing = fake_home / ".local" / "bin" / "it2"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("pip-installed")
+    it2 = tmp_path / "it2"
+    it2.write_text("")
+
+    assert hardlinks.sync_iterm_it2(it2).skipped == 1
+    assert existing.read_text() == "pip-installed"

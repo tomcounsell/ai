@@ -685,6 +685,12 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result.removed += script_result.removed
     result.errors += script_result.errors
 
+    it2_result = sync_iterm_it2()
+    result.actions.extend(it2_result.actions)
+    result.created += it2_result.created
+    result.skipped += it2_result.skipped
+    result.errors += it2_result.errors
+
     # Sync baseline env vars and editor settings to ~/.claude/settings.json
     editor_result = sync_user_editor_settings()
     result.actions.extend(editor_result.actions)
@@ -727,7 +733,17 @@ _USER_TOP_LEVEL_DEFAULTS: dict[str, object] = {
     "autoUpdatesChannel": "stable",
     "effortLevel": "high",
     "skipDangerousModePermissionPrompt": True,
+    # Agent-team teammates run as their own `claude` processes in terminal
+    # panes (iTerm2 via it2, or tmux) instead of inside the lead's process,
+    # so one crash no longer takes down the lead and every teammate. "auto"
+    # falls back to in-process outside iTerm2/tmux; an explicit "iterm2"
+    # would instead error in any other terminal.
+    "teammateMode": "auto",
 }
+
+# iTerm2 ships its own `it2` CLI inside the app bundle; the iTerm2 teammate
+# backend needs it on PATH.
+ITERM_IT2_PATH = Path("/Applications/iTerm.app/Contents/Resources/utilities/it2")
 
 
 def sync_user_editor_settings() -> HardlinkSyncResult:
@@ -809,6 +825,32 @@ def sync_user_scripts(project_dir: Path) -> HardlinkSyncResult:
         # (both inodes share permissions), so no chmod is needed after linking.
         _ensure_hardlink(src, dst, user_bin, result)
 
+    return result
+
+
+def sync_iterm_it2(it2_path: Path = ITERM_IT2_PATH) -> HardlinkSyncResult:
+    """Symlink iTerm2's bundled `it2` CLI into ~/.local/bin.
+
+    A no-op on machines without iTerm2, and an existing `it2` (e.g. a pip
+    install) is left alone.
+    """
+    result = HardlinkSyncResult()
+    dst = Path.home() / ".local" / "bin" / "it2"
+    rel_dst = _tilde(dst)
+
+    if not it2_path.is_file() or dst.exists() or dst.is_symlink():
+        result.actions.append(LinkAction(str(it2_path), rel_dst, "exists"))
+        result.skipped += 1
+        return result
+
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.symlink_to(it2_path)
+        result.actions.append(LinkAction(str(it2_path), rel_dst, "created"))
+        result.created += 1
+    except OSError as e:
+        result.actions.append(LinkAction(str(it2_path), rel_dst, "error", str(e)))
+        result.errors += 1
     return result
 
 
