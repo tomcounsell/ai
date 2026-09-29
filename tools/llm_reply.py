@@ -76,13 +76,17 @@ def openrouter_text(result: dict, max_tokens: int | None = None) -> str:
     return (choice.get("message") or {}).get("content") or ""
 
 
-def parse_last_json(text: str) -> Any:
+def parse_last_json(text: str, kind: type | tuple[type, ...] | None = None) -> Any:
     """Return the last complete JSON object or array in ``text``.
 
     Code-fence marker lines are stripped first. Every ``{`` / ``[`` position is tried with
     ``raw_decode``; the value ending at the end of the text wins, otherwise
     the value that ends last (outermost on ties), so nested values and
     trailing prose are both handled.
+
+    ``kind`` restricts candidates to that Python type (e.g. ``dict`` for a JSON
+    object), so a bracketed reference in trailing prose such as ``[1]`` cannot
+    outrank the object the caller asked for.
 
     Raises:
         ValueError: no complete JSON value is present.
@@ -95,6 +99,8 @@ def parse_last_json(text: str) -> Any:
         try:
             value, end = _DECODER.raw_decode(stripped, start)
         except json.JSONDecodeError:
+            continue
+        if kind is not None and not isinstance(value, kind):
             continue
         if end == len(stripped):
             return value

@@ -10,7 +10,7 @@ Four tools call the Anthropic Messages API, or OpenRouter chat completions, dire
 |----------|-------|----------|
 | `anthropic_text(response, max_tokens=None)` | An `anthropic` SDK `Message` or the raw JSON dict | Joins the `text` of every `type == "text"` block. Thinking and other blocks are skipped. Returns `""` when there are no text blocks. |
 | `openrouter_text(result, max_tokens=None)` | An OpenRouter chat-completion dict | Returns `choices[0].message.content`. The separate `message.reasoning` field is ignored. Returns `""` for empty `choices` or `None` content. |
-| `parse_last_json(text)` | Reply text | Returns the last complete JSON object or array in the text. Raises `ValueError` when none is present. |
+| `parse_last_json(text, kind=None)` | Reply text | Returns the last complete JSON object or array in the text; `kind` (e.g. `dict`) restricts candidates to that type. Raises `ValueError` when none is present. |
 
 ### Text blocks only
 
@@ -22,7 +22,7 @@ A reply cut off at the output-token limit is never returned as a partial answer.
 
 ### The last JSON value wins
 
-The model may reason in prose and end with the JSON, so `parse_last_json` returns the last complete JSON value, not the first. Only code-fence marker lines (a line holding just a fence such as `json`-tagged triple backticks) are stripped; fence-like text inside a JSON string value survives. Nested values and trailing prose are both handled. `test_judge` and `image_tagging` parse with it.
+The model may reason in prose and end with the JSON, so `parse_last_json` returns the last complete JSON value, not the first. Only code-fence marker lines (a line holding just a fence such as `json`-tagged triple backticks) are stripped; fence-like text inside a JSON string value survives. Nested values and trailing prose are both handled. `test_judge` and `image_tagging` parse with `kind=dict`, so a bracket in trailing prose (such as `[1]`) cannot displace the object.
 
 ## Per-tool request settings
 
@@ -45,5 +45,5 @@ The model may reason in prose and end with the JSON, so `parse_last_json` return
 
 ## Tests
 
-- `tests/unit/test_llm_reply.py` covers the helper: reasoning prose before the JSON, a leading thinking block in dict and SDK-object forms, both truncation signals, fenced JSON, nested JSON, and no JSON.
+- `tests/unit/test_llm_reply.py` covers the helper: reasoning prose before the JSON, a leading thinking block in dict and SDK-object forms, both truncation signals, fenced JSON, nested JSON, no JSON, and a trailing bracket in prose (`kind=dict` filters it out).
 - `tests/unit/test_direct_api_truncation.py` covers truncation surfacing as each tool's error result.

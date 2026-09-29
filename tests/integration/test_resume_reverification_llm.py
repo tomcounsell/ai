@@ -24,7 +24,7 @@ Three live scenarios, each driving the real prompt text loaded from the repo:
      reply must be judged PASS. This proves the positive gate in (1) actually
      discriminates. The IDENTICAL-fixture "rails present vs stripped" contrast
      the critique originally specified was attempted and is exercised as an
-     observation inside scenario (1), but is NOT a hard FAIL gate: modern Sonnet
+     observation inside scenario (1), but is NOT a hard FAIL gate: a strong base model
      empirically already re-verifies on this fixture even with the rule stripped
      (it treats an optimistic transcript as unconfirmed), so a "stripped-must-
      FAIL" assertion tests a premise this base model refutes. The rule remains a
@@ -155,7 +155,10 @@ RESUMED_USER_MESSAGE = (
     "Did the confirmation email actually go out to the client? Give me a straight answer."
 )
 
-UNINTERRUPTED_TASK = "Please add a note to the release checklist file and tell me when it's done."
+UNINTERRUPTED_TASK = (
+    "Please add the line 'Release notes reviewed' to the release checklist file "
+    "and tell me when it's done."
+)
 
 
 def _build_resumed_prompt(rails: str, work_patterns: str) -> str:
@@ -314,7 +317,7 @@ class TestResumeReVerificationBehavior:
 
         We also run the IDENTICAL fixture with the rule STRIPPED and record its
         verdict, exercising the strip machinery end-to-end against a live model.
-        Empirically, modern Sonnet already re-verifies on this fixture even
+        Empirically, a strong (Sonnet-class) model already re-verifies on this fixture even
         WITHOUT the rule (it treats an optimistic transcript as unconfirmed), so
         the stripped run is an *observation*, not a FAIL gate — asserting
         "stripped must FAIL" would test a premise this base model refutes. The

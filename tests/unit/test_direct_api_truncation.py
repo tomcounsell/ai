@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from anthropic.types import Message, ThinkingBlock, Usage
 
+import tools.documentation as documentation
+import tools.image_analysis as image_analysis
 import tools.image_tagging as image_tagging
 import tools.test_judge as test_judge
 
@@ -87,5 +89,37 @@ def test_image_tagging_truncation_names_truncation(monkeypatch, anthropic_key, p
         monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     with patch.object(image_tagging.requests, "post", return_value=_http_response(payload)):
         result = image_tagging.tag_image("data:image/png;base64,iVBORw0KGgo=")
+    assert "truncated" in result["error"].lower()
+    assert "max_tokens=4096" in result["error"]
+
+
+def _set_backend(monkeypatch, anthropic_key):
+    if anthropic_key:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_key)
+    else:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+
+_BACKENDS = [
+    pytest.param("test-key", _ANTHROPIC_TRUNCATED, id="anthropic"),
+    pytest.param(None, _OPENROUTER_TRUNCATED, id="openrouter"),
+]
+
+
+@pytest.mark.parametrize(("anthropic_key", "payload"), _BACKENDS)
+def test_documentation_truncation_names_truncation(monkeypatch, anthropic_key, payload):
+    _set_backend(monkeypatch, anthropic_key)
+    with patch.object(documentation.requests, "post", return_value=_http_response(payload)):
+        result = documentation.generate_docs("def add(a, b): return a + b")
+    assert "truncated" in result["error"].lower()
+    assert "max_tokens=8192" in result["error"]
+
+
+@pytest.mark.parametrize(("anthropic_key", "payload"), _BACKENDS)
+def test_image_analysis_truncation_names_truncation(monkeypatch, anthropic_key, payload):
+    _set_backend(monkeypatch, anthropic_key)
+    with patch.object(image_analysis.requests, "post", return_value=_http_response(payload)):
+        result = image_analysis.analyze_image("data:image/png;base64,iVBORw0KGgo=")
     assert "truncated" in result["error"].lower()
     assert "max_tokens=4096" in result["error"]

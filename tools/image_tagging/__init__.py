@@ -31,6 +31,8 @@ DEFAULT_MODEL_OPENROUTER = MODEL_VISION
 # Structured JSON over a perception task: light adaptive thinking (low effort)
 # with the JSON last. MAX_TOKENS covers thinking plus the reply on both paths.
 MAX_TOKENS = 4096
+# Sonnet 5.5 request fields; other models may reject them, so they are sent only for Sonnet.
+_SONNET_5_5_FIELDS = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
 
 
 class ImageTaggingError(Exception):
@@ -164,8 +166,7 @@ def tag_image(
                 json={
                     "model": model or DEFAULT_MODEL,
                     "max_tokens": MAX_TOKENS,
-                    "thinking": {"type": "adaptive"},
-                    "output_config": {"effort": "low"},
+                    **(_SONNET_5_5_FIELDS if (model or DEFAULT_MODEL) == SONNET else {}),
                     "messages": [
                         {
                             "role": "user",
@@ -227,7 +228,7 @@ def tag_image(
             return {"error": "No response from model", "image_source": image_source}
 
         try:
-            parsed = parse_last_json(content)
+            parsed = parse_last_json(content, kind=dict)
             if not isinstance(parsed, dict):
                 raise ValueError("Reply JSON is not an object")
 

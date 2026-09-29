@@ -165,3 +165,14 @@ def test_parse_last_json(text, expected):
 def test_parse_last_json_raises_when_no_value(text):
     with pytest.raises(ValueError):
         parse_last_json(text)
+
+
+def test_parse_last_json_kind_ignores_trailing_bracket_in_prose():
+    text = '{"pass_fail": true}\nSee criterion [1].'
+    assert parse_last_json(text) == [1]
+    assert parse_last_json(text, kind=dict) == {"pass_fail": True}
+
+
+def test_parse_last_json_kind_no_matching_type_raises():
+    with pytest.raises(ValueError):
+        parse_last_json("only an array [1, 2]", kind=dict)

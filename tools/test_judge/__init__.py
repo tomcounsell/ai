@@ -162,7 +162,7 @@ object in this exact format (the JSON object must be the last thing in your repl
             return {"error": "No response from AI"}
 
         try:
-            judgment = parse_last_json(content)
+            judgment = parse_last_json(content, kind=dict)
         except ValueError:
             return {
                 "error": "Failed to parse AI response",
