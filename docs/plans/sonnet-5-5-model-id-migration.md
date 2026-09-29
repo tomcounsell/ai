@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
@@ -25,7 +25,7 @@ Four tools call the model directly: `tools/test_judge`, `tools/documentation`, `
 - treats a truncated reply as a failure,
 - parses the last JSON value.
 
-The registry, alias, and price-table entries all carry the new model.
+The registry and alias entries carry the new model. `run_typed`'s Anthropic leg is not changed here: it keeps PydanticAI tool output, cannot serve Sonnet 5.5, and the one test that drove it on `MODEL_REASONING` is pinned to `MODEL_FAST` (see Open Question 2 resolution). Making the leg serve Sonnet 5.5 is a follow-up issue.
 
 ## Freshness Check
 
@@ -52,7 +52,7 @@ The registry, alias, and price-table entries all carry the new model.
 
 - **PR #3381**: "Fix delisted OPENROUTER_GEMMA4_FREE default, single-source ai-judge, add listing probe". Added `tests/unit/test_models.py`, which checks configured `OPENROUTER_*` ids against the public listing. Only the Gemma default hard-fails; other ids warn. This plan's new `OPENROUTER_SONNET` value is checked by that probe.
 - **PR #1153** (issue #1099): added `get_model_context_window` and `_MODEL_ALIASES`. The `sonnet` alias resolves through `SONNET`, so this migration also corrects the context-window lookup for CLI sessions that run `--model sonnet`.
-- **Issue #2975**: a nightly regression in `test_resume_reverification_llm.py::test_judge_discriminates_grounded_from_ungrounded` (closed). It was on the same test that this plan's NativeOutput change unblocks, but for an unrelated reason.
+- **Issue #2975**: a nightly regression in `test_resume_reverification_llm.py::test_judge_discriminates_grounded_from_ungrounded` (closed). Same test file this plan pins to `MODEL_FAST`, unrelated cause.
 - No prior attempt at a Sonnet model-ID migration was found.
 
 ## Research
@@ -69,7 +69,7 @@ The registry, alias, and price-table entries all carry the new model.
   - Effort levels are `low|medium|high|xhigh|max`.
   - `structured_outputs` is supported.
   - This sets the `MODEL_INFO` context window to 1,000,000.
-- OpenRouter lists `anthropic/claude-sonnet-5.5` with a 1M context at $2 / $10 per Mtoken. That fixes the price-table row and the OpenRouter slug. The listing uses dotted ids, and the current `anthropic/claude-sonnet-4-5-20250929` is not listed; it survives only as an unlisted alias.
+- **OpenRouter id citation.** The public models listing `https://openrouter.ai/api/v1/models` (fetched 2026-09-29 during the revision pass) carries an entry with `id: "anthropic/claude-sonnet-5.5"`, `canonical_slug: "anthropic/claude-sonnet-5.5-20260928"`, `context_length: 1000000`, pricing `prompt 0.000002` / `completion 0.00001` per token ($2 / $10 per Mtoken). The model page `https://openrouter.ai/anthropic/claude-sonnet-5.5` names the same id. The listing uses dotted ids; the current `anthropic/claude-sonnet-4-5-20250929` is not listed (only `anthropic/claude-sonnet-4.5` is) and survives as an unlisted alias. `OPENROUTER_SONNET` moves to the cited id.
 - From the prompting guide:
   - Put the JSON last and parse the last complete value.
   - Treat `stop_reason == "max_tokens"` as a failure.
@@ -109,7 +109,7 @@ The registry, alias, and price-table entries all carry the new model.
   - `Agent(AnthropicModel(...), output_type=NativeOutput(R))` succeeds on both `claude-sonnet-5-5` and `claude-haiku-4-5-20251001` (pydantic-ai 2.51.0).
   - The Ollama leg already uses `stack.NativeOutput(output_type)`.
 - **Confidence**: high for the tested output type; medium for every production output type (see Risk 1).
-- **Impact on plan**: The Anthropic leg moves to `NativeOutput`. That is the only way the leg can serve a Sonnet 5.5 route.
+- **Impact on plan**: Switching the leg to `NativeOutput` would reach every production Haiku site on the Anthropic leg, including 3-second no-retry bridge gates (critique concern 1). Per the Open Question 2 answer, the leg is left alone in this issue. The one consumer that drove it on `MODEL_REASONING` (`tests/integration/test_resume_reverification_llm.py::_run_model`) is pinned to `MODEL_FAST`. "run_typed Anthropic leg cannot serve Sonnet 5.5" is a follow-up issue.
 
 ## Data Flow
 
@@ -122,7 +122,7 @@ The registry, alias, and price-table entries all carry the new model.
 5. **Parsing (JSON tools only)**: the helper returns the last complete JSON value in the text, with code fences tolerated.
 6. **Output**: the tool's existing result dict. A truncated or unparseable reply becomes the tool's existing `{"error": ...}` shape, with a message naming truncation.
 
-Separately: `run_typed` → router → `agent/llm/backends/anthropic.py::call` → PydanticAI `Agent(AnthropicModel(route.model), output_type=NativeOutput(output_type))` → validated instance.
+Unchanged: `run_typed` → router → `agent/llm/backends/anthropic.py::call` → PydanticAI `Agent(AnthropicModel(route.model), output_type=output_type)` (tool output, forced `tool_choice`) → validated instance. No production route passes a Sonnet model into this leg (`git grep -nE 'model=(MODEL_REASONING|SONNET)[,)]' 1defbad24 -- agent tools bridge worker` returns nothing); the only caller that did is the integration test pinned in this plan.
 
 ## Architectural Impact
 
@@ -130,7 +130,7 @@ Separately: `run_typed` → router → `agent/llm/backends/anthropic.py::call` �
 - **Interface changes**: none public. Tool return shapes are unchanged. Truncation now surfaces as an `error` string where it used to be an empty or garbled result.
 - **Coupling**: lower. Four copies of `content[0]` plus fence-stripping become one helper.
 - **Data ownership**: unchanged.
-- **Reversibility**: easy. The constant values and the leg's `output_type` wrapper are one-line reverts. The helper is additive.
+- **Reversibility**: easy. The constant values and the test pin are one-line reverts. The helper is additive.
 
 ## Appetite
 
