@@ -1280,6 +1280,7 @@ def classify_process(
     """
     result = {
         "running": pid is not None,
+        "pid": pid,
         "boot_sha": None,
         "beacon_ts": None,
         "process_start_ts": None,
@@ -1320,8 +1321,8 @@ def classify_process(
 def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict) -> dict:
     """Verify the running bridge/worker releases against pulled HEAD (#1898).
 
-    Returns ``{process_name: {running, boot_sha, beacon_ts, process_start_ts,
-    classification}}`` with classification in ``{matches, stale, unknown}``
+    Returns ``{process_name: {running, pid, boot_sha, beacon_ts,
+    process_start_ts, classification}}`` with classification in ``{matches, stale, unknown}``
     per :func:`classify_process` (positive staleness against the process's
     OWN relevant path set — never raw HEAD equality).
 
@@ -1399,6 +1400,12 @@ def verify_running_release_settled(
     under ``--skip-bridge``, or a worker the ``--since`` beacon poll forced
     ``stale``): waiting for them buys nothing. A terminal unknown returns
     immediately — this never sleeps on a beacon that cannot arrive.
+
+    A process that is this process or one of its ancestors is never waited on
+    either. A bridge-hosted ``/update`` runs this verify inside a subprocess
+    the bridge blocks its own event loop on, so a mid-boot bridge that is our
+    ancestor cannot write its beacon until we return: settling on it would
+    burn the whole window and still end ``unknown``.
     """
     if timeout_s is None or interval_s is None:
         # Read at call time, never at import (TimeoutSettings, #1968): both
@@ -1412,10 +1419,21 @@ def verify_running_release_settled(
             interval_s = settings.timeouts.beacon_settle_interval_s
     deadline = time.monotonic() + timeout_s
 
+    ancestor_by_pid: dict[int, bool] = {}
+
+    def _is_ancestor(pid: int | None) -> bool:
+        # Default polarity: an inconclusive walk reads as "not an ancestor", so
+        # the worst case is the bounded settle wait this guard exists to avoid.
+        if pid is None:
+            return False
+        if pid not in ancestor_by_pid:
+            ancestor_by_pid[pid] = is_own_ancestor(pid)
+        return ancestor_by_pid[pid]
+
     def _needs_settle(results: dict) -> bool:
         now = time.time()
         return any(
-            _is_mid_boot_unknown(info, now, timeout_s)
+            _is_mid_boot_unknown(info, now, timeout_s) and not _is_ancestor(info.get("pid"))
             for name, info in results.items()
             if name not in settle_skip
         )

@@ -328,6 +328,19 @@ def test_shell_timeout_covers_verify_poll_and_settle_budget(monkeypatch):
     assert bridge_update.update_shell_timeout_seconds() >= 120 + poll_s + settle_s + 50
 
 
+def test_max_settle_override_keeps_update_under_watchdog_threshold(monkeypatch):
+    """The /update shell budget blocks the bridge's event loop, so even the
+    largest allowed settle override must finish before the bridge watchdog's
+    stale-log restart fires mid-update."""
+    from config.settings import TimeoutSettings, settings
+    from monitoring.bridge_watchdog import LOG_STALENESS_THRESHOLD
+
+    field = TimeoutSettings.model_fields["beacon_settle_timeout_s"]
+    (max_settle_s,) = [m.le for m in field.metadata if hasattr(m, "le")]
+    monkeypatch.setattr(settings.timeouts, "beacon_settle_timeout_s", max_settle_s)
+    assert bridge_update.update_shell_timeout_seconds() < LOG_STALENESS_THRESHOLD
+
+
 # ---------------------------------------------------------------------------
 # _verify_release_after_update: bounded beacon poll (Race 1, inline path)
 # ---------------------------------------------------------------------------

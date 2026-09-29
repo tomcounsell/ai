@@ -549,7 +549,7 @@ class TimeoutSettings(BaseModel):
     beacon_settle_timeout_s: float = Field(
         default=90.0,
         ge=0.0,
-        le=600.0,
+        le=120.0,
         description=(
             "Settle window (seconds) the release verify waits on a process "
             "that is mid-boot -- exec'd, but not yet at its boot-beacon write "
@@ -563,7 +563,12 @@ class TimeoutSettings(BaseModel):
             "bridge writes its beacon after the Telegram connect (~30s after "
             "exec on this fleet); this is that plus headroom for a slow "
             "catchup, and it doubles as the cap on how long a never-arriving "
-            "beacon can stall the run. Env: TIMEOUTS__BEACON_SETTLE_TIMEOUT_S."
+            "beacon can stall the run. Capped at 120s: "
+            "bridge/update.py::update_shell_timeout_seconds adds this window "
+            "to a 150s shell budget the bridge's event loop blocks on, and "
+            "150 + 120 stays under the bridge watchdog's 300s stale-log "
+            "restart (monitoring/bridge_watchdog.py::LOG_STALENESS_THRESHOLD). "
+            "Env: TIMEOUTS__BEACON_SETTLE_TIMEOUT_S."
         ),
     )
     beacon_settle_interval_s: float = Field(

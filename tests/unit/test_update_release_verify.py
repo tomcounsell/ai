@@ -98,6 +98,8 @@ def live_processes(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(service, "get_worker_pid", lambda: 4343)
     monkeypatch.setattr(service, "get_process_start_ts", lambda pid: PROC_START_TS)
     monkeypatch.setattr(service, "BRIDGE_PLIST_PATH", plist)
+    # The fake pids must never collide with this test process's real ancestry.
+    monkeypatch.setattr(service, "is_own_ancestor", lambda pid, **kwargs: False)
     return plist
 
 
@@ -261,16 +263,15 @@ def test_orphaned_beacon_settles_to_stale(repo, booting_bridge, monkeypatch):
 def test_settle_gives_up_at_the_timeout(repo, live_processes, monkeypatch):
     """A beacon that never arrives still returns — unknown, at the deadline.
 
-    The bridge is exec'd *now*, so it stays younger than the (short) window
-    for the whole run: the loop genuinely polls, and only the monotonic
-    deadline ends it.
+    The bridge reads as exec'd *now* on every poll (a crash-looping process
+    that keeps coming back young), so the mid-boot age limit never ends the
+    loop: only the monotonic deadline does.
     """
     real_sleep = time.sleep
-    bridge_start = time.time()
     monkeypatch.setattr(
         service,
         "get_process_start_ts",
-        lambda pid: bridge_start if pid == 4242 else PROC_START_TS,
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
     )
     sleeps: list[float] = []
 
@@ -287,8 +288,27 @@ def test_settle_gives_up_at_the_timeout(repo, live_processes, monkeypatch):
     elapsed = time.monotonic() - started
     assert results["bridge"]["classification"] == "unknown"
     assert len(sleeps) >= 2  # the loop was entered and re-polled
-    assert elapsed >= timeout_s  # it waited out the window...
-    assert elapsed < timeout_s + 2.0  # ...and exited at the deadline, not later
+    assert elapsed < timeout_s + 2.0  # the deadline ended it
+
+
+def test_settle_never_waits_on_own_ancestor(repo, live_processes, monkeypatch):
+    """A bridge-hosted /update blocks the bridge's own event loop while this
+    verify runs, so a mid-boot bridge that is our ancestor cannot write its
+    beacon: waiting on it would burn the window and still end unknown."""
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
+    )
+    monkeypatch.setattr(service, "is_own_ancestor", lambda pid, **kwargs: pid == 4242)
+    sleeps: list[float] = []
+    monkeypatch.setattr(service.time, "sleep", lambda s: sleeps.append(s))
+    results = service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, timeout_s=60.0, interval_s=1.0
+    )
+    assert results["bridge"]["classification"] == "unknown"
+    assert results["bridge"]["pid"] == 4242
+    assert sleeps == []
 
 
 def test_long_running_process_without_beacon_never_polls(repo, live_processes, monkeypatch):
@@ -586,6 +606,11 @@ def cli_sleeps(monkeypatch):
     """Capture every sleep the CLI's settle loop would take."""
     sleeps: list[float] = []
     monkeypatch.setattr(verify_release.service.time, "sleep", lambda s: sleeps.append(s))
+    # Shrink the settle window so a regressed settle_skip wiring fails fast
+    # instead of busy-spinning the no-op sleep for the full default window.
+    from config.settings import settings
+
+    monkeypatch.setattr(settings.timeouts, "beacon_settle_timeout_s", 0.2)
     return sleeps
 
 
