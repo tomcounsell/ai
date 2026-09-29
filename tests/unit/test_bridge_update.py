@@ -271,6 +271,19 @@ async def test_notice_reaches_telegram_on_clean_run(update_env, tg_client, event
     bridge_update._queue_fix_session.assert_not_awaited()
 
 
+def test_force_update_summary_keeps_the_pause_note():
+    """#3581: /update --force keyword-filters run.py output; the pause NOTE survives."""
+    stdout = (
+        "[update] Syncing .claude hardlinks...\n"
+        "[update] NOTE: skills sync paused (~/.local/state/valor/skip-skills-sync present)\n"
+        "[update] Already up to date\n"
+    )
+    assert bridge_update._force_update_steps(stdout) == [
+        "NOTE: skills sync paused (~/.local/state/valor/skip-skills-sync present)",
+        "Already up to date",
+    ]
+
+
 def test_suppressed_trailer_extracts_as_zero_warnings():
     """The load-bearing half of the inertness claim (critique round 9): fed
     through extract_update_warnings, the REAL trailer (built from the real

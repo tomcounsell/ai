@@ -644,6 +644,20 @@ async def run_boot_release_check(tg_client) -> None:
         logger.warning(f"[update] pending update report flush failed (non-fatal): {e}")
 
 
+# Lines of `run.py --full` output worth echoing in the /update --force summary.
+# "NOTE:" carries deliberate operator states, such as a paused skills sync (#3581).
+_FORCE_SUMMARY_KEYWORDS = ("commit", "Already up to date", "FAIL", "ERROR", "NOTE:")
+
+
+def _force_update_steps(stdout: str) -> list[str]:
+    """Summary steps for /update --force, keyword-filtered from run.py output."""
+    return [
+        line.strip().removeprefix("[update] ")
+        for line in stdout.strip().split("\n")
+        if any(k in line for k in _FORCE_SUMMARY_KEYWORDS)
+    ]
+
+
 async def handle_force_update_command(tg_client, event):
     """Force update: flush queue, kill running sessions, update, restart.
 
@@ -694,10 +708,7 @@ async def handle_force_update_command(tg_client, event):
             text=True,
             timeout=settings.timeouts.subprocess_default_s,
         )
-        output_lines = (result.stdout or "").strip().split("\n")
-        for line in output_lines:
-            if any(k in line for k in ["commit", "Already up to date", "FAIL", "ERROR"]):
-                steps.append(line.strip().removeprefix("[update] "))
+        steps.extend(_force_update_steps(result.stdout or ""))
     except subprocess.TimeoutExpired:
         steps.append("Update timed out after 120s")
     except Exception as e:
