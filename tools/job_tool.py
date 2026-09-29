@@ -61,6 +61,10 @@ elif _REPO_ROOT not in sys.path:
 logger = logging.getLogger(__name__)
 
 
+# Role names that never identify a lane; an outbound owner must be a slug or agentId.
+_PLACEHOLDER_OWNERS = frozenset({"dev", "pm"})
+
+
 class JobToolError(Exception):
     """Loud refusal: unknown session, unresolvable Room, or out-of-Room Job."""
 
@@ -144,9 +148,20 @@ def add_expectation(
         raise JobToolError("expectation owner must be non-empty")
     if direction not in ("inbound", "outbound"):
         raise JobToolError("expectation direction must be 'inbound' or 'outbound'")
+    if direction == "outbound" and owner.strip().lower() in _PLACEHOLDER_OWNERS:
+        raise JobToolError(
+            f"outbound expectation owner {owner.strip()!r} names a role, not a lane. Record the "
+            "lane slug (session/<slug>) or the agentId the Agent tool returned, so the "
+            "reconciler can tell whether the lane is alive."
+        )
     job = _own_room_job(session_id, job_id)
+    # An outbound expectation is held by the session that recorded it, so the
+    # reconciler can find that session again (an inbound one keeps the default).
+    holder = session_id if direction == "outbound" else None
     try:
-        expectation_id = job.add_expectation(text.strip(), direction=direction, owner=owner.strip())
+        expectation_id = job.add_expectation(
+            text.strip(), direction=direction, owner=owner.strip(), holder=holder
+        )
     except (ValueError, CorruptGoalError) as e:
         raise JobToolError(str(e)) from e
     try:

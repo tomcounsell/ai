@@ -184,11 +184,15 @@ def _live_session_in_room(room_id: str, holder: str | None):
             and not _is_ledger(r)
             and room_id_for_session(r) == room_id
         ]
-        holder_row = _resolve_holder_row(holder)
-        holder_id = getattr(holder_row, "id", None) if holder_row is not None else None
-        if holder_id is not None:
+        if holder and holder not in _UNRESOLVABLE_HOLDERS:
+            holder_row = _resolve_holder_row(holder)
+            holder_ids = {holder, getattr(holder_row, "id", None)}
             for row in live:
-                if getattr(row, "id", None) == holder_id:
+                if (
+                    getattr(row, "id", None) in holder_ids
+                    or getattr(row, "session_id", None) == holder
+                    or getattr(row, "agent_session_id", None) == holder
+                ):
                     return row
         handoffs = [r for r in live if _is_handoff_row(r)]
         if handoffs:

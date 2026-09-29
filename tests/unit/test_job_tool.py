@@ -124,6 +124,17 @@ class TestExpectations:
         assert entry["what"] == "the migration PR"
         # PM-authored through the tool is never a mechanical placeholder.
         assert entry["placeholder"] is False
+        # The caller is recorded as holder so the reconciler can find it again.
+        assert entry["holder"] == session.session_id
+
+    @pytest.mark.parametrize("owner", ["dev", "pm", " DEV "])
+    def test_outbound_role_placeholder_owner_is_refused(self, scratch_session, owner):
+        session, _rid = scratch_session
+        job = create_job(session.session_id, "Ship the reconciler")
+        with pytest.raises(JobToolError, match="lane"):
+            add_expectation(
+                session.session_id, job.job_id, "deliver", direction="outbound", owner=owner
+            )
 
     def test_discharged_expectation_leaves_the_open_set(self, scratch_session):
         session, _rid = scratch_session
