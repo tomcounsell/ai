@@ -347,3 +347,10 @@ Round 3 (re-critique of revision 3b15ad0ca; sequential lenses, Agent tool unavai
 |----------|---------|---------|--------------|---------------------|
 | CONCERN | Risk & Robustness | The "Global bodies free of repo tooling" and "CHECKLIST blue-sky readings" rows carry markdown-escaped `\\|` in their commands. Run verbatim, `grep -E` treats `\\|` as a literal pipe, so the token grep exits 1 vacuously (a false green) and the CHECKLIST count returns 0 (a false red). Verified against a file that contains sdlc-tool. | Commands A and B moved to fenced blocks below the Verification table, with a prove-red step for A (both proven at plan time) | Put both commands in fenced code blocks outside the table, or note that `\\|` is table escaping and means `\|` in the shell. Before trusting the token grep's exit 1, check that it returns 0 against a scratch file containing "sdlc-tool". |
 | NIT | Scope & Value | The Success Criteria bullet says blue-sky variants exist "for the two checks the mode changes", but Solution §1 and Verification require four readings. | Success Criteria bullet now names all four checks | Reword it to name all four checks. |
+
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound. The concerns below were carried into BUILD and are accepted on the record.
+
+- **Escaped pipes in Verification commands (round 3 CONCERN)** - the token grep and CHECKLIST count carried table-escaped `\|` that would make `grep -E` match a literal pipe. Accepted because: the round-3 revision moved both commands to fenced blocks (Commands A and B) with a prove-red step, so the concern is answered, and it was non-blocking by definition of CONCERN.
+- **Success Criteria wording (round 3 NIT)** - the bullet named two checks instead of four. Accepted because: the revision reworded it to name all four; it never blocked the build.
