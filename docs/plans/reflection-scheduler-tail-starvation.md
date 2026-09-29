@@ -178,7 +178,7 @@ Tick starts → walk registry (skip paused / running / not due; agent entries di
 
 ### Risk 1: Short-interval jobs run later than today
 **Impact:** Steady-state demand (4.73 per tick) is above the cap, so fairness moves some of the shortfall from the tail onto `circuit-health-gate`, `side-effect-drain`, and the 300 s jobs. The simulation showed `circuit-health-gate` up to ~5 ticks late and running about 30% less often at cap 4.
-**Mitigation:** Every job is bounded (at most ceil((N−1)/cap) ticks). The new `Tick complete ... deferred` count makes sustained overload visible at INFO. The capacity decision (default cap) is surfaced as an Open Question instead of being made silently here.
+**Mitigation:** Every job is bounded (at most ceil((N−1)/cap) ticks). The new `Tick complete ... deferred` count makes sustained overload visible at INFO. The capacity decision is resolved in RD-1: the production revert to cap 4 is gated on a 1 h post-deploy observation of the deferred count and `circuit-health-gate` cadence.
 
 ### Risk 2: Deferral age lost on restart
 **Impact:** A never-run entry deferred before a restart starts its deferral clock again.
