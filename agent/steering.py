@@ -596,3 +596,36 @@ def reset_self_draft_attempts(session_id: str) -> None:
     key = _self_draft_attempts_key(session_id)
     r.delete(key)
     logger.debug("[steering] Reset self-draft attempts for %s", session_id)
+
+
+def mark_handoff_human_steered(session_id: str) -> bool:
+    """Stamp a human steer onto a live reflection-handoff session (#3588).
+
+    A handoff session is silent because no human waits on it. A human message
+    steered into one changes that: the flag makes ``is_reflection_handoff``
+    False so failure, timeout and interrupt notices reach the human. Returns
+    True when a row was stamped; never raises.
+    """
+    try:
+        from config.enums import (  # noqa: PLC0415
+            HUMAN_STEERED_KEY,
+            REFLECTION_HANDOFF_ORIGIN,
+        )
+        from models.agent_session import AgentSession  # noqa: PLC0415
+        from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        stamped = False
+        for row in AgentSession.rows_for_session_id(session_id):
+            extra = dict(getattr(row, "extra_context", None) or {})
+            if extra.get("origin") != REFLECTION_HANDOFF_ORIGIN or extra.get(HUMAN_STEERED_KEY):
+                continue
+            if getattr(row, "status", None) not in NON_TERMINAL_STATUSES:
+                continue
+            extra[HUMAN_STEERED_KEY] = True
+            row.extra_context = extra
+            row.save(update_fields=["extra_context"])
+            stamped = True
+        return stamped
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[steering] mark_handoff_human_steered failed for %s: %s", session_id, e)
+        return False

@@ -88,7 +88,7 @@ from agent.session_runner.router import (
     validate_structured_route,
 )
 from agent.session_runner.transcript_tailer import last_assistant_text
-from config.enums import is_reflection_handoff
+from config.enums import is_reflection_handoff_live
 
 logger = logging.getLogger(__name__)
 
@@ -1933,7 +1933,7 @@ class SessionRunner:
 
     def _is_handoff_session(self) -> bool:
         """True for a session created by ``reflections.agent_handoff``."""
-        return is_reflection_handoff(self._agent_session)
+        return is_reflection_handoff_live(self._agent_session)
 
     def _handoff_silent_exit_reason(self) -> ExitReason | None:
         """Exit reason for a reflection-handoff session ending with nothing to say.

@@ -207,10 +207,10 @@ class TestExecutorRunnerWiring:
         ("extra_context", "expected"),
         [({"origin": "reflection_handoff"}, True), ({}, False)],
     )
-    async def test_executor_passes_silent_interrupt_only_for_handoff(
+    async def test_executor_passes_silent_only_for_handoff(
         self, redis_test_db, extra_context, expected
     ):
-        """The executor suppresses the terminal "stopped" notice for a
+        """The executor silences the canned notices for a
         reflection-handoff session only (#3588). RED if the argument is
         dropped from the BackgroundTask construction."""
         import agent
@@ -220,7 +220,7 @@ class TestExecutorRunnerWiring:
 
         class _SpyBackgroundTask(_RealBackgroundTask):
             def __init__(self, *args, **kwargs):
-                seen.append(kwargs.get("silent_interrupt", False))
+                seen.append(bool(kwargs["silent"]()))
                 super().__init__(*args, **kwargs)
 
         session = _make_session(working_dir="/tmp")

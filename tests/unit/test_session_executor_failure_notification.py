@@ -137,3 +137,31 @@ async def test_reflection_handoff_session_gets_no_failure_notice():
 
     messenger._send_callback.assert_not_awaited()
     redis.set.assert_not_called()
+
+
+from types import SimpleNamespace as SimpleNamespaceCompat  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_empty_output_fallback_logs_truthfully_for_handoff(caplog):
+    """The empty-output branch says "no fallback sent" and sends nothing for a
+    silent handoff, and sends the fallback otherwise (#3588)."""
+    from unittest.mock import AsyncMock
+
+    from agent.session_executor import _deliver_empty_output_fallback
+
+    send_cb = AsyncMock()
+    base = dict(project_key="p", chat_id="1", telegram_message_id=2)
+    handoff = SimpleNamespaceCompat(extra_context={"origin": "reflection_handoff"}, **base)
+    with caplog.at_level("WARNING"):
+        assert await _deliver_empty_output_fallback(handoff, None, send_cb) is False
+    send_cb.assert_not_awaited()
+    assert "no fallback sent" in caplog.text
+    assert "delivering fallback" not in caplog.text
+
+    caplog.clear()
+    ordinary = SimpleNamespaceCompat(extra_context={}, **base)
+    with caplog.at_level("WARNING"):
+        assert await _deliver_empty_output_fallback(ordinary, None, send_cb) is True
+    send_cb.assert_awaited_once()
+    assert "delivering fallback" in caplog.text

@@ -76,19 +76,38 @@ explicit origin marker and ends:
 
 A handoff session never receives the wrap-up turn or any canned human text
 (`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`, the turn-timeout and
-steer-abort notices, the executor failure notice, the empty-output fallback,
-the deferred self-draft flush fallbacks, the tool-timeout degraded notice, and
-the terminal "stopped" interrupt notice). Every system-authored notice routed
-through `deliver_system_notice` (`agent/output_handler.py`) or
+steer-abort notices, the executor failure notice and the canned
+`BackgroundTask` error messages, the empty-output fallback, the canned
+substitutes of the deferred self-draft flush, the tool-timeout degraded
+notice, and the terminal "stopped" interrupt notice). Every system-authored
+notice routed through `deliver_system_notice` (`agent/output_handler.py`) or
 `_deliver_oneshot_dedup_notice` (`agent/session_health.py`) is suppressed at
-those two chokepoints. The interrupt notice is suppressed at all three of its send sites: the
-executor via `BackgroundTask(silent_interrupt=True)`,
-`_deliver_terminal_interrupt_notice` in `agent/session_health.py`, and the
-parent-notice send in `agent/session_completion.py`. A
-harness-level empty output, a harness error, or running out of turns ends as the
-non-clean anomaly `ERROR`; a turn timeout ends `TURN_TIMEOUT` (`failed`). All are
-visible to the operator and silent in the Room. A timed-out handoff session's
-worktree is reclaimed like any other terminal exit, since no reply will resume it.
+those two chokepoints, which also cover the terminal interrupt notice
+(`_deliver_terminal_interrupt_notice` in `agent/session_health.py`). The
+remaining interrupt send sites check the marker themselves: the executor via
+`BackgroundTask(silent=...)` and the parent-notice send in
+`agent/session_completion.py`.
+
+The agent's own held reply is not canned text. The deferred self-draft flush
+(`flush_deferred_self_draft_sync`) delivers it for a handoff session like any
+other; only its substitutes (the "couldn't finish" text, narration fallback,
+promise-gate rewrite, dead-path notice) are withheld. A withheld flush on a
+`handoff_requires_delivery` session logs `handoff-undelivered` at WARNING.
+
+A harness-level empty output, a harness error, or running out of turns ends as
+the non-clean anomaly `ERROR`; a turn timeout ends `TURN_TIMEOUT` (`failed`).
+All are visible to the operator and silent in the Room. A timed-out handoff
+session's worktree is reclaimed like any other terminal exit, since no reply
+will resume it.
+
+## Human steer lifts the silence
+
+A human who steers into a running handoff session is waiting, so silence would
+strand them. The bridge stamps `extra_context["human_steered"]` on the row
+(`agent.steering.mark_handoff_human_steered`, called from the steering ack and
+the edit-steer path), and `is_reflection_handoff` returns False from then on.
+The executor and runner re-read the row through `is_reflection_handoff_live`,
+so a steer landing mid-run applies to the notices that follow it.
 
 Handoff sessions run in the same synthetic-slug worktree as any slugless eng
 session, so the main-checkout guard applies when a brief leads the agent to fix

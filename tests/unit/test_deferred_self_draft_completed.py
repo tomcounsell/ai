@@ -1735,19 +1735,96 @@ def test_no_new_terminal_writer_bypasses_outside_lifecycle():
     )
 
 
-def test_reflection_handoff_completed_flush_sends_nothing(cleanup):
-    """A reflection-handoff session has no human waiting (#3588): a pending
-    deferred self-draft must not flush any canned text to the Room."""
-    sid = f"{SID_PREFIX}handoff-flush"
+def _make_handoff(sid, cleanup, *, text=ORIGINAL_REPLY, requires_delivery=False, **extra):
     cleanup.append(sid)
-    session = _make_session(sid, text=ORIGINAL_REPLY)
-    session.extra_context = {**session.extra_context, "origin": "reflection_handoff"}
+    session = _make_session(sid, text=text)
+    session.extra_context = {
+        **session.extra_context,
+        "origin": "reflection_handoff",
+        **({"handoff_requires_delivery": True} if requires_delivery else {}),
+        **extra,
+    }
     session.save(update_fields=["extra_context"])
+    return session
+
+
+def test_reflection_handoff_completed_flush_delivers_agents_own_text(cleanup):
+    """A handoff session's held text is the agent's OWN reply (#3588): it is
+    delivered, not swallowed with the canned substitutes."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-flush", cleanup, requires_delivery=True)
 
     from agent.session_health import flush_deferred_self_draft_sync
 
-    assert flush_deferred_self_draft_sync(session, "completed") is False
-    assert _outbox_count(sid) == 0
+    assert flush_deferred_self_draft_sync(session, "completed") is True
+    assert _outbox_count(session.session_id) == 1
+
+
+def test_reflection_handoff_completed_flush_withholds_canned_substitute(cleanup, caplog):
+    """No held text means the flush would send the canned "couldn't finish"
+    text: a handoff withholds it, and a delivery-required one logs WARNING."""
+    session = _make_handoff(
+        f"{SID_PREFIX}handoff-flush-canned", cleanup, text=None, requires_delivery=True
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with caplog.at_level("WARNING"):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+    assert any("handoff-undelivered" in r.getMessage() for r in caplog.records)
+
+
+def test_reflection_handoff_completed_flush_withholds_narration_fallback(cleanup):
+    """A narration-only held draft would be replaced by canned narration text."""
+    session = _make_handoff(
+        f"{SID_PREFIX}handoff-flush-narration",
+        cleanup,
+        text="Let me check the logs and then look at the config.",
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch("bridge.message_quality.is_narration_only", return_value=True):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_human_steered_handoff_flush_delivers_like_any_session(cleanup):
+    """Once a human steered the session it is no longer silent: even the canned
+    substitute is sent."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-human", cleanup, text=None, human_steered=True)
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    assert flush_deferred_self_draft_sync(session, "completed") is True
+    assert _outbox_count(session.session_id) == 1
+
+
+def test_mark_handoff_human_steered_lifts_silence(cleanup):
+    """A human steer stamps the handoff row so every chokepoint treats it as
+    a normal session (#3588)."""
+    from agent.steering import mark_handoff_human_steered
+    from config.enums import is_reflection_handoff, is_reflection_handoff_live
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-mark", cleanup)
+    assert is_reflection_handoff_live(session) is True
+
+    assert mark_handoff_human_steered(session.session_id) is True
+
+    # The caller's in-memory copy is stale; the live check re-reads the row.
+    assert is_reflection_handoff(session) is True
+    assert is_reflection_handoff_live(session) is False
+    # Idempotent.
+    assert mark_handoff_human_steered(session.session_id) is False
+
+
+def test_mark_handoff_human_steered_ignores_ordinary_sessions(cleanup):
+    from agent.steering import mark_handoff_human_steered
+
+    sid = f"{SID_PREFIX}ordinary-mark"
+    cleanup.append(sid)
+    _make_session(sid)
+    assert mark_handoff_human_steered(sid) is False
 
 
 @pytest.mark.asyncio

@@ -107,7 +107,11 @@ from telethon.errors import FloodWaitError  # noqa: E402
 
 from agent import build_harness_turn_input  # noqa: F401, E402
 from agent.private_tag import strip_private  # noqa: E402
-from agent.steering import ABORT_KEYWORDS, push_steering_message  # noqa: E402
+from agent.steering import (  # noqa: E402
+    ABORT_KEYWORDS,
+    mark_handoff_human_steered,
+    push_steering_message,
+)
 from bridge.context import (  # noqa: E402
     REPLY_THREAD_CONTEXT_HEADER,  # noqa: F401
     build_activity_context,  # noqa: F401
@@ -1146,6 +1150,9 @@ async def _ack_steering_routed(
 
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     push_steering_message(session_id, text, sender_name, is_abort=is_abort, room_id=room_id)
+    # A human steered into a silent reflection-handoff session: a human now
+    # waits, so its failure/timeout/interrupt notices must reach them (#3588).
+    mark_handoff_human_steered(session_id)
 
     # An answer typed into the chat closes the question just as a tap does. The
     # registry is otherwise written only by the vote path, so a prose answer
@@ -2921,6 +2928,7 @@ async def main():
                 sender_name,
                 room_id=room_id_for_session(session),
             )
+            mark_handoff_human_steered(session_id)
             logger.info(
                 f"[edit] Steered edit into {session.status} session {session_id} "
                 f"(msg {message.id}, {len(edited_text)} chars)"
