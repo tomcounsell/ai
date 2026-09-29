@@ -29,12 +29,12 @@ Gates, in order, per open non-draft lane PR:
 Then the action ladder, keyed on ``(slug, head-sha)``:
 
     escalation key already set                 -> stop acting entirely
-    SDLC_STALL_RESUME_ENABLED=false            -> escalate once, stop
-    attempts >= SDLC_STALL_RESUME_MAX_ATTEMPTS -> escalate once, stop
+    SDLC_STALL_RESUME_ENABLED=false            -> dashboard finding only, stop
+    attempts >= SDLC_STALL_RESUME_MAX_ATTEMPTS -> hand off to an agent once, stop
     rung 1  live non-ledger eng session        -> steer_session(...)
     rung 2  resumable eng session              -> resume_session(...)
     rung 3  no target                          -> create_session(slug=lane slug)
-    rung 4  action failed (non-benign)         -> escalate once, stop
+    rung 4  action failed (non-benign)         -> hand off to an agent once, stop
 
 Rung selection runs BEFORE the action-cooldown claim, because every same-tick
 brake needs its result: the per-tick target dedupe keys on the selected
@@ -96,7 +96,6 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
-from reflections.pm_briefings.collector import _project_repo
 
 # _LOCK_KEY, _lock_says_live and _get_redis moved to reflections/utilities.py
 # (#2717) so the sibling reflection reflections/sdlc_upvote_lanes.py can share
@@ -104,13 +103,14 @@ from reflections.pm_briefings.collector import _project_repo
 # Re-exported here so this module's own call sites (and this module's own
 # names, e.g. ``sdlc_progress._LOCK_KEY`` and ``sdlc_progress._get_redis``)
 # keep resolving unchanged.
+from reflections.agent_handoff import Finding, hand_off, project_eng_room_id
+from reflections.pm_briefings.collector import _project_repo
 from reflections.utilities import (  # noqa: F401
     _LOCK_KEY,
     _get_redis,
     _lock_says_live,
     machine_owns_project,
     run_per_project_audit,
-    send_eng_telegram,
 )
 from tools.lane_identity import adopt_lane_slug
 
@@ -730,27 +730,8 @@ def _steer_message(*, slug: str, pr_number: Any, issue_number: int, age_hours: i
     )
 
 
-def _escalation_message(
+def _hand_off_escalation(
     *,
-    project: str,
-    slug: str,
-    pr_number: Any,
-    issue_number: int,
-    age_hours: int,
-    attempts: int,
-    reason: str,
-) -> str:
-    """Attempt-and-failure voice: the system tried and could not."""
-    return (
-        f"[{project}] SDLC lane {slug} (PR #{pr_number}, issue #{issue_number}) stalled "
-        f"{age_hours}h and auto-resume failed after {attempts} attempt(s): {reason}. "
-        "Needs a human."
-    )
-
-
-def _escalate_once(
-    *,
-    project: str,
     project_dict: dict,
     slug: str,
     sha: str,
@@ -759,47 +740,47 @@ def _escalate_once(
     age_hours: int,
     attempts: int,
     reason: str,
-) -> tuple[bool, str | None]:
-    """Page a human at most once per ``(slug, head-sha)``.
+) -> tuple[bool, str]:
+    """Hand a stalled-lane failure to an agent in the project's ``Eng:`` Room, once per head SHA.
 
-    Returns ``(sent, message)``:
-      - sentinel already burned or Redis unreadable for the ``SET NX`` guard
-        → ``(False, None)`` — nothing to report, nothing to count
-        (under-alert during a flap beats spam during one, unchanged).
-      - a page was sent → ``(True, message)``.
-      - the sentinel claimed but ``send_eng_telegram`` resolved no ``Eng:``
-        group for this project → ``(False, "alert-suppressed: ...")`` — the
-        caller threads this into ``findings`` without counting a page that
-        never sent.
+    Returns ``(delivered, finding)``. The once-per-``(slug, sha)`` sentinel is
+    written only after a delivered handoff (``steered`` / ``created``), so an
+    unreachable handoff retries on a later tick instead of being suppressed.
+    Nothing here writes to a chat: the agent looks at the lane, PR and error,
+    recovers it if it can, and asks a human in plain words only if it cannot.
     """
-    if not _escalation_set(slug, sha):
-        logger.info("sdlc_progress: escalation already recorded for %s@%s", slug, sha[:8])
-        return False, None
-    message = _escalation_message(
-        project=project,
-        slug=slug,
-        pr_number=pr_number,
-        issue_number=issue_number,
-        age_hours=age_hours,
-        attempts=attempts,
-        reason=reason,
+    room = project_eng_room_id(project_dict)
+    if room is None:
+        return False, f"handoff-unreachable: no Eng: room for {slug}@{sha[:8]}"
+    result = hand_off(
+        Finding(
+            source="sdlc_progress",
+            project=project_dict,
+            room_id=room,
+            facts=[
+                f"SDLC lane {slug} (PR #{pr_number}, issue #{issue_number}) has been stalled "
+                f"{age_hours}h and auto-resume did not recover it: {reason}.",
+                f"Recovery attempts spent: {attempts}.",
+            ],
+            evidence={
+                "lane": slug,
+                "pr_number": pr_number,
+                "issue_number": issue_number,
+                "head_sha": sha,
+                "stalled_hours": age_hours,
+                "attempts": attempts,
+                "reason": reason,
+            },
+            suggested_action=(
+                "Look at the lane, its PR and the error. Recover the lane if you can. Ask a "
+                "human, in plain words, only if a decision is needed."
+            ),
+            dedup_key=f"{slug}@{sha}",
+        )
     )
-    sent = _send_alert(project_dict, message)
-    if sent:
-        return True, message
-    return False, f"alert-suppressed: no Eng: group for {project} ({slug}@{sha[:8]})"
-
-
-def _send_alert(project_dict: dict, message: str) -> bool:
-    """Page ``project_dict``'s own ``Eng:`` group. All transport failures
-    swallowed and logged.
-
-    Caller contract: fires ONLY from the escalation path, and only after
-    ``_escalation_set`` returned True. Returns ``False`` only when no
-    ``Eng:`` group resolved for the project — see
-    ``reflections.utilities.send_eng_telegram``'s contract.
-    """
-    return send_eng_telegram(project_dict, message, logger_prefix="sdlc_progress")
+    if result.delivered:
+        _escalation_set(slug, sha)
+    return result.delivered, result.finding_line(f"{slug}@{sha[:8]}")
 
 
 # --- The steer-target ladder ------------------------------------------------
@@ -1186,8 +1167,7 @@ def _check_project_stalls(project: dict) -> dict:
             continue
 
         def _escalate(reason: str, attempts: int) -> None:
-            sent, msg = _escalate_once(
-                project=project_key,
+            delivered, msg = _hand_off_escalation(
                 project_dict=project,
                 slug=slug,
                 sha=sha,
@@ -1197,13 +1177,16 @@ def _check_project_stalls(project: dict) -> dict:
                 attempts=attempts,
                 reason=reason,
             )
-            if msg:
-                findings.append(msg)
-            if sent:
+            findings.append(msg)
+            if delivered:
                 counts["escalated"] += 1
 
         if not resume_enabled:
-            _escalate("auto-resume disabled (SDLC_STALL_RESUME_ENABLED=false)", 0)
+            # Config state, not a decision: dashboard finding only, no handoff.
+            findings.append(
+                f"auto-resume-disabled: {slug} (PR #{pr.get('number')}; "
+                "SDLC_STALL_RESUME_ENABLED=false)"
+            )
             continue
 
         attempts = _attempts_count(slug, sha)
@@ -1301,7 +1284,7 @@ def _check_project_stalls(project: dict) -> dict:
         "summary": (
             f"sdlc-progress-check: {len(prs)} lane PR(s) inspected, "
             f"{counts['steered']} steered, {counts['resumed']} resumed, "
-            f"{counts['created']} created, {counts['escalated']} escalated"
+            f"{counts['created']} created, {counts['escalated']} handed off"
         ),
         "duration": time.time() - t0,
     }

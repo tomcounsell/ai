@@ -3,8 +3,9 @@
 What it does: Gathers throttle level, queue_paused state, active failure-cluster
     count, circuit states (anthropic/telegram/redis), and failed/abandoned session
     count over the last 24h. If everything is nominal it sends NOTHING. If any
-    anomaly is present, enqueues a low-priority eng AgentSession that investigates
-    and sends a Telegram digest to the 'Eng: Valor' chat.
+    anomaly is present, hands the findings to an agent session in the host's
+    'Eng:' Room (reflections.agent_handoff), which investigates and speaks to
+    the team in its own words.
 Cadence: 86400s (once daily; the all-clear is intentionally suppressed because
     live status is always on the dashboard at localhost:8500).
 Failure modes:
@@ -118,36 +119,47 @@ def run() -> None:
             elif failed_24h < 0:
                 anomalies.append("could not count failed sessions")
 
-            command = (
-                "You are generating the daily sustainability digest for the Valor AI system. "
-                "There are anomalies that need reporting:\n"
-                + "\n".join(f"- {a}" for a in anomalies)
-                + "\n\n"
-                "Investigate each anomaly. Collect details:\n"
-                "1. Circuit state per dependency (anthropic, telegram, redis)\n"
-                "2. Current throttle level and queue paused status from Redis\n"
-                "3. Session counts and failure details from last 24 hours\n"
-                "4. Active failure cluster count\n\n"
-                "When reporting circuit states, translate as follows"
-                " — never output the raw state string:\n"
-                "- 'closed' or 'CLOSED' → OK\n"
-                "- 'open' or 'OPEN' → DOWN\n"
-                "- 'half_open' or 'HALF_OPEN' → RECOVERING\n\n"
-                "Format as a concise Telegram message highlighting what's wrong. "
-                "Send via valor-telegram to the 'Eng: Valor' chat. "
-                "Subject line: ⚠️ Daily Health Digest — anomalies detected."
-            )
+            from datetime import UTC, datetime
 
-            AgentSession.create_and_enqueue(
-                project_key=project_key,
-                message_text=command,
-                session_type="eng",
-                priority="low",
-                extra_context={"digest_type": "sustainability_digest"},
+            from reflections.agent_handoff import Finding, hand_off, project_eng_room_id
+            from reflections.utilities import resolve_project_for_repo
+
+            project = resolve_project_for_repo()
+            room = project_eng_room_id(project) if project else None
+            if project is None or room is None:
+                logger.warning(
+                    "[system-health-digest] Anomalies detected (%s) but no Eng: room resolves "
+                    "for this host -- dashboard only",
+                    ", ".join(anomalies),
+                )
+                return
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            result = hand_off(
+                Finding(
+                    source="system_health_digest",
+                    project=project,
+                    room_id=room,
+                    facts=[f"Daily health check found: {a}." for a in anomalies],
+                    dedup_key=f"{today}:{'|'.join(sorted(anomalies))}",
+                    evidence={
+                        "throttle_level": throttle_level,
+                        "queue_paused": queue_paused,
+                        "failure_clusters": failure_cluster_count,
+                        "failed_sessions_24h": failed_24h,
+                        "circuits_ok": circuits_ok,
+                    },
+                    suggested_action=(
+                        "Investigate each anomaly (circuit state per dependency, throttle and "
+                        "queue state in Redis, failed sessions in the last 24 hours, active "
+                        "failure clusters). Fix what you can; tell the team in plain words "
+                        "only what still needs a human."
+                    ),
+                )
             )
             logger.info(
-                "[system-health-digest] Anomalies detected (%s) — enqueued agent session",
+                "[system-health-digest] Anomalies detected (%s) -- handoff %s",
                 ", ".join(anomalies),
+                result.kind,
             )
     except Exception:
         logger.exception("[system-health-digest] Unhandled exception — skipping tick")

@@ -251,27 +251,44 @@ def cmd_propose_amendment(args) -> int:
         claims=json.dumps([{"claim": request_text, "url": "", "retrieved_at": ""}]),
     )
 
-    from reflections.utilities import load_local_projects, send_eng_telegram
+    from reflections.agent_handoff import Finding, hand_off, project_eng_room_id
+    from reflections.utilities import load_local_projects
 
     projects = [p for p in load_local_projects() if p.get("slug") == "valor"]
-    if not projects:
+    room = project_eng_room_id(projects[0]) if projects else None
+    if room is None:
         _emit(
             args,
-            "journaled and recorded; no 'valor' project entry to notify",
+            "journaled and recorded; no 'valor' Eng: room to hand the ask to",
             {"accepted": bool(result.accepted), "notified": False},
         )
         return 1
-    send_eng_telegram(
-        projects[0],
-        f"Improvement charter amendment proposed for case {case_id}: {request_text}",
-        logger_prefix="[improve]",
+    handoff = hand_off(
+        Finding(
+            source="improvement_charter_amendment",
+            project=projects[0],
+            room_id=room,
+            facts=[
+                "The improvement controller proposes a charter amendment and needs Tom's "
+                f"authorization (charter section 12): {request_text}",
+            ],
+            evidence={"case_id": case_id},
+            suggested_action=(
+                "Ask Tom plainly, in your own words, whether he authorizes this amendment. "
+                "Do not stay silent: the request must reach him."
+            ),
+            dedup_key=case_id,
+            requires_delivery=True,
+        )
     )
     _emit(
         args,
-        "amendment journaled and Tom notified",
-        {"accepted": bool(result.accepted), "notified": True},
+        "amendment journaled and handed to an agent to ask Tom"
+        if handoff.delivered
+        else f"amendment journaled; handoff {handoff.kind}: {handoff.reason}",
+        {"accepted": bool(result.accepted), "notified": handoff.delivered},
     )
-    return 0
+    return 0 if handoff.delivered else 1
 
 
 def cmd_pause(args) -> int:

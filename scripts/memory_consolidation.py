@@ -16,8 +16,8 @@ Algorithm:
     6. In apply mode: write merged record via Memory.safe_save(), mark originals
        superseded by setting superseded_by / superseded_by_rationale and calling save().
        Guard the save() return value — WriteFilter may silently drop writes.
-    7. Contradiction flagging: send Telegram notification; fall back to
-       logs/memory-contradictions.log if bridge is down.
+    7. Contradiction flagging: append to logs/memory-contradictions.log and
+       count it in the reflection summary (no chat message).
 
 Safety rails:
     - Records with importance >= 7.0 are NEVER merged (exempt).
@@ -43,12 +43,10 @@ Manual invocation:
 import json
 import logging
 import os
-import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
-from reflections.utilities import resolve_host_eng_chat
 
 # Thinking: proposes memory merges as JSON (raw Anthropic client).
 # Fail-safe: ``None`` (no merges applied) on invalid JSON or any error.
@@ -342,55 +340,24 @@ def _apply_merge(action: dict, record_map: dict, project_key: str) -> bool:
 
 
 def _flag_contradiction(action: dict, record_map: dict) -> None:
-    """Flag a contradiction by sending a Telegram notification (with log fallback)."""
+    """Record a contradiction in ``logs/memory-contradictions.log``.
+
+    That log is the primary path: nothing here writes to a chat. The count
+    reaches the operator surface through the reflection summary
+    (``contradictions=N``).
+    """
     ids = action["ids"]
     rationale = action.get("rationale", "")
     contents = [record_map[id_].content[:100] for id_ in ids if id_ in record_map]
-    summary = (
-        f"[memory-dedup] Contradiction flagged:\n"
-        f"IDs: {ids}\n"
-        f"Rationale: {rationale}\n"
-        f"Contents: {contents}"
+    logger.info(
+        f"[memory-dedup] Contradiction flagged:\nIDs: {ids}\n"
+        f"Rationale: {rationale}\nContents: {contents}"
     )
-    logger.info(summary)
-
-    chat = resolve_host_eng_chat()
-    if chat is None:
-        logger.warning(
-            "[memory-dedup] no Eng: group resolved for this checkout; "
-            "Telegram notification suppressed (contradiction log not written — "
-            "nothing was attempted, nothing failed)"
-        )
-        return
-
-    # Attempt Telegram notification
-    try:
-        telegram_msg = (
-            f"Memory contradiction detected:\nIDs: {ids}\nReason: {rationale}\nMemories: {contents}"
-        )
-        subprocess.run(
-            ["valor-telegram", "send", "--chat", chat, telegram_msg],
-            check=True,
-            capture_output=True,
-            timeout=10,
-        )
-    except subprocess.CalledProcessError as e:
-        # Bridge is down — write to fallback log
-        _write_contradiction_log(ids, rationale, contents)
-        logger.warning(
-            f"[memory-dedup] Telegram send failed (bridge down): {e}. "
-            f"Contradiction written to logs/memory-contradictions.log"
-        )
-    except Exception as e:
-        _write_contradiction_log(ids, rationale, contents)
-        logger.warning(
-            f"[memory-dedup] Telegram send error: {e}. "
-            f"Contradiction written to logs/memory-contradictions.log"
-        )
+    _write_contradiction_log(ids, rationale, contents)
 
 
 def _write_contradiction_log(ids: list, rationale: str, contents: list) -> None:
-    """Write contradiction to fallback log when Telegram bridge is unavailable."""
+    """Append a contradiction entry to ``logs/memory-contradictions.log``."""
     try:
         log_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)), "logs", "memory-contradictions.log"
