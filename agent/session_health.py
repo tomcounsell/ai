@@ -2402,6 +2402,18 @@ async def _deliver_oneshot_dedup_notice(
         delivery failed.
     """
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+    from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+    if is_reflection_handoff(entry):
+        # No human waits on a reflection handoff (#3588): every canned one-shot
+        # notice (degraded, interrupt) is suppressed here, before the dedup key
+        # is burned.
+        logger.debug(
+            "[session-health] one-shot notice suppressed for reflection handoff %s (key=%s)",
+            session_id,
+            dedup_key,
+        )
+        return False
     try:
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
@@ -2515,10 +2527,7 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     Never raises; failures are logged at WARNING and swallowed.
     """
     from agent.notification_copy import INTERRUPT_NO_RESUME  # noqa: PLC0415
-    from config.enums import is_reflection_handoff  # noqa: PLC0415
 
-    if is_reflection_handoff(entry):
-        return  # no human waiting on a reflection handoff (#3588)
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     await _deliver_oneshot_dedup_notice(
         entry,
@@ -2657,7 +2666,12 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         from config.enums import is_reflection_handoff  # noqa: PLC0415
 
         if is_reflection_handoff(source):
-            return False  # no human waiting on a reflection handoff (#3588)
+            # Not silent (#3053): no human waits on a reflection handoff (#3588).
+            logger.debug(
+                "[session-health] deferred self-draft flush skipped for reflection handoff %s",
+                session_id,
+            )
+            return False
 
         if not extra_ctx.get("deferred_self_draft_pending"):
             # Not silent (#3053): makes "flush ran, nothing pending" distinguishable

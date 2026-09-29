@@ -446,6 +446,13 @@ async def deliver_system_notice(
     if not message:
         logger.debug("[deliver_system_notice] empty message for %s — skipping", session_id)
         return False
+    from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+    if is_reflection_handoff(entry):
+        # Chokepoint for every system-authored canned notice: no human waits on
+        # a reflection handoff session (#3588).
+        logger.debug("[deliver_system_notice] suppressed for reflection handoff %s", session_id)
+        return False
     try:
         project_key = getattr(entry, "project_key", None) or "unknown"
 

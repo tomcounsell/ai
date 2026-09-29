@@ -1933,13 +1933,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] Empty output and nudge cap "
                     f"reached — delivering fallback"
                 )
-                await send_cb(
-                    session.chat_id,
-                    "The task completed but produced no output. "
-                    "Please re-trigger if you expected results.",
-                    session.telegram_message_id,
-                    agent_session,
-                )
+                if not is_reflection_handoff(session):
+                    await send_cb(
+                        session.chat_id,
+                        "The task completed but produced no output. "
+                        "Please re-trigger if you expected results.",
+                        session.telegram_message_id,
+                        agent_session,
+                    )
                 chat_state.completion_sent = True
 
             elif action == "deliver":

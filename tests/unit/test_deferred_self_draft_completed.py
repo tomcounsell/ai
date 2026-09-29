@@ -1748,3 +1748,63 @@ def test_reflection_handoff_completed_flush_sends_nothing(cleanup):
 
     assert flush_deferred_self_draft_sync(session, "completed") is False
     assert _outbox_count(sid) == 0
+
+
+@pytest.mark.asyncio
+async def test_reflection_handoff_async_fallback_sends_nothing(cleanup):
+    """The async email fallback must not speak for a reflection-handoff
+    session (#3588), even with a pending deferred self-draft."""
+    from agent.session_health import _deliver_deferred_self_draft_fallback
+
+    sid = f"{SID_PREFIX}handoff-async-fallback"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY, transport="email", chat_id="a@example.com")
+    session.extra_context = {**session.extra_context, "origin": "reflection_handoff"}
+    session.save(update_fields=["extra_context"])
+
+    with patch(
+        "agent.output_handler.deliver_system_notice",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as mock_notice:
+        await _deliver_deferred_self_draft_fallback(session)
+
+    mock_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_system_notice_chokepoint_suppresses_handoff():
+    """deliver_system_notice and _deliver_oneshot_dedup_notice (which covers the
+    tool-timeout degraded and terminal-interrupt notices) never send for a
+    reflection-handoff session, and do not burn the dedup key (#3588)."""
+    from types import SimpleNamespace
+
+    from agent.output_handler import deliver_system_notice
+    from agent.session_health import (
+        _deliver_oneshot_dedup_notice,
+        _deliver_terminal_interrupt_notice,
+        _deliver_tool_timeout_degraded_notice,
+    )
+
+    entry = SimpleNamespace(
+        session_id="test-handoff-chokepoint",
+        project_key="test-handoff",
+        chat_id="1",
+        telegram_message_id=1,
+        extra_context={"origin": "reflection_handoff"},
+    )
+    send_cb = AsyncMock()
+    with (
+        patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)),
+        patch("popoto.redis_db.POPOTO_REDIS_DB") as redis_mock,
+    ):
+        assert await deliver_system_notice(entry, "canned") is False
+        assert (
+            await _deliver_oneshot_dedup_notice(entry, dedup_key="k", ttl=5, message="canned")
+            is False
+        )
+        assert await _deliver_tool_timeout_degraded_notice(entry, "some-tool") is False
+        await _deliver_terminal_interrupt_notice(entry)
+
+    send_cb.assert_not_awaited()
+    redis_mock.set.assert_not_called()

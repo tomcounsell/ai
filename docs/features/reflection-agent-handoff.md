@@ -76,9 +76,12 @@ explicit origin marker and ends:
 
 A handoff session never receives the wrap-up turn or any canned human text
 (`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`, the turn-timeout and
-steer-abort notices, the executor failure notice, the deferred self-draft flush
-fallbacks in `agent/session_health.py`, and the terminal "stopped" interrupt
-notice). The interrupt notice is suppressed at all three of its send sites: the
+steer-abort notices, the executor failure notice, the empty-output fallback,
+the deferred self-draft flush fallbacks, the tool-timeout degraded notice, and
+the terminal "stopped" interrupt notice). Every system-authored notice routed
+through `deliver_system_notice` (`agent/output_handler.py`) or
+`_deliver_oneshot_dedup_notice` (`agent/session_health.py`) is suppressed at
+those two chokepoints. The interrupt notice is suppressed at all three of its send sites: the
 executor via `BackgroundTask(silent_interrupt=True)`,
 `_deliver_terminal_interrupt_notice` in `agent/session_health.py`, and the
 parent-notice send in `agent/session_completion.py`. A
