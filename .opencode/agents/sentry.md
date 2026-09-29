@@ -7,7 +7,7 @@ description: 'Handles error monitoring, performance analysis, and application ob
 
   '
 mode: subagent
-model: anthropic/claude-sonnet-4-5
+model: anthropic/claude-sonnet-5-5
 ---
 <!-- opencode-sync: generated from .claude/agents/sentry.md -->
 

@@ -40,7 +40,9 @@ Before starting any work, read and internalize the WORKER rails at `.claude/comm
    ends with only tool calls (no text) will forward DEV_REPORT_UNAVAILABLE to the PM
    instead of your actual work summary.
 
-7. After the PM acknowledges, wait for the next instruction.
+7. **Carry routed work through.** Once the PM relays an instruction, keep working until it is done and checked. Stop early only when you cannot go on without a PM or principal decision, or before a risky step; don't pause to confirm a plan or ask a question you can answer yourself.
+
+8. After the PM acknowledges, wait for the next instruction.
 
 # Operating scope
 

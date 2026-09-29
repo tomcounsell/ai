@@ -1,6 +1,6 @@
 {
   "generated_on": "2026-09-29",
-  "generator_version": 2,
+  "generator_version": 3,
   "settings": {
     ".claude/settings.json": "e1093e010cfc6d2feb48b677b77285a9eb9eff9ebbbc8281ebf090158378be64"
   },
@@ -9,7 +9,7 @@
     ".claude/agents/builder.md": "0e95e06c2024d7ceac569480ed61f1e9d2b8c73a7261d9d89056c375cfbd8514",
     ".claude/agents/code-reviewer.md": "7e8d5843a095f4ed950d12647b24f525c86e7ead7081cfd417f656714615d5f5",
     ".claude/agents/cruft-auditor.md": "93910c5e84cbe16fd113ecd7e4ce66ca79f49589f5816c7e450aaac950f4204a",
-    ".claude/agents/dev.md": "b592b7f307a6ba1b3e941a29badc8088d0c5b5493f6d0a47de15c904a3afb324",
+    ".claude/agents/dev.md": "4a76b19a31a941a2bfe004b8af63e918085b0bb975a6f58b7b64093577d8c43e",
     ".claude/agents/documentarian.md": "c756968d47d4032fecc20bc1b9ebe407ac063aaa930bb2e9cfbae2f8dccb9768",
     ".claude/agents/frontend-tester.md": "6bbf20edd956711e750d5413046b0c28babd106ef48d0f290267a9f7b3485c3d",
     ".claude/agents/linear.md": "763288f42cb904d70e47d55bbfc075696ba0655cce32c0f07dae2438b2908ef9",
@@ -24,7 +24,7 @@
     ".claude/agents/validator.md": "392fb0615365dbf6d7789178ffd856f0fe91d344a0dd42526025924c2557233e"
   },
   "commands": {
-    ".claude/commands/roles/prime-dev-role.md": "f186ddc03e0fa021b88aad849c20b30d9a643332ce4ea56feab735028749bee8",
+    ".claude/commands/roles/prime-dev-role.md": "14971297e1652fa9d8c46185242dbbc27f9edf1ae5a9bca9e214479eee4b1d5b",
     ".claude/commands/roles/prime-pm-codex-role.md": "24601328f43aec7a6b959fbf688d89fda77cc1f0b907de49e3b4834e590160db",
     ".claude/commands/roles/prime-pm-role.md": "cd57cf634ab09e0290c747a1b0fb4eb380b25945ec3d4e6f4d56696df65eed54",
     ".claude/commands/roles/prime-teammate-role.md": "15a59f6f09181909d7d2a22f1552d014ffdf92ea0d8389eac46db76a1ae16875"

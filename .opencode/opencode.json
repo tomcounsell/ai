@@ -4,7 +4,7 @@
 // Re-run scripts/sync_claude_to_opencode.py to regenerate idempotently.
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "anthropic/claude-sonnet-4-5",
+  "model": "anthropic/claude-sonnet-5-5",
   "small_model": "anthropic/claude-haiku-4-5",
   "instructions": [
     "CLAUDE.md"

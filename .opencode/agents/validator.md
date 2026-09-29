@@ -2,7 +2,7 @@
 description: Read-only validation agent that verifies work meets acceptance criteria.
   Use after a builder finishes to verify quality.
 mode: subagent
-model: anthropic/claude-sonnet-4-5
+model: anthropic/claude-sonnet-5-5
 color: warning
 permission:
   write: deny
