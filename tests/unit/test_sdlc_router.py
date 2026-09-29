@@ -9,6 +9,8 @@ This file focuses exclusively on the G7 guard added for issue #1302.
 
 from __future__ import annotations
 
+import pytest
+
 from agent.sdlc_router import (
     GUARDS,
     MAX_PLAN_REVISING_DISPATCHES,
@@ -1562,6 +1564,73 @@ class TestHeadShaStaleness:
             latest_review_verdict=_approved_with_trailer(_SHA_A),
         )
         assert guard_g6_terminal_merge_ready(states, meta, {"pr_head_sha": _SHA_B}) is None
+
+    @staticmethod
+    def _drift(drift, reviewed=_SHA_A, head=_SHA_B):
+        return {
+            "pr_head_sha": _SHA_B,
+            "review_head_drift": {"reviewed": reviewed, "head": head, "drift": drift},
+        }
+
+    def test_docs_only_drift_is_fresh(self):
+        """#3228: the mandatory post-REVIEW DOCS commit does not stale the verdict."""
+        assert self._helper(_approved_with_trailer(_SHA_A), self._drift("docs_only")) is False
+
+    @pytest.mark.parametrize("drift", ["code", "unknown", "identical", None, "DOCS_ONLY"])
+    def test_non_docs_drift_stays_stale(self, drift):
+        """Known-bad: a code change after review (or an unclassifiable range)
+        must still invalidate the verdict."""
+        assert self._helper(_approved_with_trailer(_SHA_A), self._drift(drift)) is True
+
+    @pytest.mark.parametrize(
+        "reviewed,head", [(_SHA_B, _SHA_B), (_SHA_A, _SHA_A), ("f" * 40, _SHA_B)]
+    )
+    def test_drift_signal_for_other_shas_is_ignored(self, reviewed, head):
+        """A docs_only signal computed for a different SHA pair never widens
+        the tolerance."""
+        context = self._drift("docs_only", reviewed=reviewed, head=head)
+        assert self._helper(_approved_with_trailer(_SHA_A), context) is True
+
+    def test_malformed_drift_signal_is_stale(self):
+        context = {"pr_head_sha": _SHA_B, "review_head_drift": "docs_only"}
+        assert self._helper(_approved_with_trailer(_SHA_A), context) is True
+
+    def test_docs_only_drift_routes_to_merge_not_re_review(self):
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        result = decide_next_dispatch(states, meta, self._drift("docs_only"))
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
+
+    def test_code_drift_after_review_routes_to_re_review(self):
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            last_dispatched_skill=SKILL_DO_DOCS,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        result = decide_next_dispatch(states, meta, self._drift("code"))
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PR_REVIEW
+
+    def test_g6_fast_path_on_docs_only_drift(self):
+        from agent.sdlc_router import guard_g6_terminal_merge_ready
+
+        states = dict(_ALL_COMPLETED, PATCH="completed")
+        meta = _base_meta(
+            pr_number=2062,
+            pr_merge_state="CLEAN",
+            ci_all_passing=True,
+            latest_review_verdict=_approved_with_trailer(_SHA_A),
+        )
+        assert guard_g6_terminal_merge_ready(states, meta, self._drift("code")) is None
+        result = guard_g6_terminal_merge_ready(states, meta, self._drift("docs_only"))
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_MERGE
 
     def test_g6_fast_path_fires_on_fresh_head(self):
         from agent.sdlc_router import guard_g6_terminal_merge_ready

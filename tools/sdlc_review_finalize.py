@@ -241,7 +241,7 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             "reason": str | None,  # one of the named errors, or None
         }
 
-    ``head_drift`` (popoto#642) is populated only on the APPROVED path, and
+    ``head_drift`` (#3228) is populated only on the APPROVED path, and
     reports WHY ``trailer_matches_head`` reads as it does: ``"identical"`` when
     the recorded SHA IS the live head, ``"docs_only"`` when the head moved but
     every path changed since the reviewed commit is documentation (tolerated —
@@ -337,7 +337,7 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             result["trailer_matches_head"] = True
             result["head_drift"] = "identical"
         elif recorded_head:
-            # Documentation-only drift is not staleness (popoto#642). `/do-docs`
+            # Documentation-only drift is not staleness (#3228). `/do-docs`
             # is a MANDATORY post-REVIEW stage that commits, so strict equality
             # here failed on every lane and forced a human authorization. The
             # classifier is fail-CLOSED: anything but a strictly-descending,

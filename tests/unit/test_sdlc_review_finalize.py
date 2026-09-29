@@ -104,7 +104,7 @@ class TestCheckReviewPersistence:
             patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
             patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
             patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
-            # popoto#642: a mismatch is now classified before it is refused.
+            # #3228: a mismatch is now classified before it is refused.
             # Stub the classifier so this stays hermetic (it shells out to gh).
             patch("tools.sdlc_review_drift.classify_head_drift", return_value="code"),
         ):
@@ -115,7 +115,7 @@ class TestCheckReviewPersistence:
         assert result["reason"] == "REVIEW_TRAILER_MISSING"
 
     def test_docs_only_drift_after_review_is_not_staleness(self):
-        """popoto#642 acceptance criterion 2: `/do-docs` is a MANDATORY stage
+        """#3228 acceptance criterion 2: `/do-docs` is a MANDATORY stage
         that commits after REVIEW, so the head has always moved by the time
         `/do-merge` self-checks. When everything it moved past is
         documentation, the verdict is still fresh and the lane merges without a

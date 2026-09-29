@@ -32,7 +32,7 @@ Four check groups:
   A bare ``"APPROVED" in text`` check is explicitly insufficient (#2003
   critique BLOCKER 2). A trailer mismatch is not automatically staleness: when
   every path changed between the reviewed SHA and the live head is
-  documentation, the drift is tolerated (popoto#642) — DOCS is a mandatory
+  documentation, the drift is tolerated (#3228) — DOCS is a mandatory
   post-REVIEW stage that commits, so strict equality refused every
   pipeline-native merge. See ``tools/sdlc_review_drift.py``; the classifier
   fails closed on code drift, force-pushes, and any error.
@@ -661,7 +661,7 @@ def _check_verdict_freshness(
         if trailer.lower() == head_sha.lower():
             notes.append("REVIEW verdict fresh: head_sha trailer matches PR head commit")
             return
-        # Documentation-only drift is not staleness (popoto#642). DOCS is a
+        # Documentation-only drift is not staleness (#3228). DOCS is a
         # mandatory post-REVIEW stage that commits, so this leg refused every
         # pipeline-native merge on a trailer the pipeline itself invalidated.
         # classify_head_drift is fail-CLOSED: it tolerates ONLY a strictly

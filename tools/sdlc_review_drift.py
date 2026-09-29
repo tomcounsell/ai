@@ -1,4 +1,4 @@
-"""Classify post-review head drift as documentation-only or code (popoto #642).
+"""Classify post-review head drift as documentation-only or code (#3228).
 
 **The defect this closes.** ``sdlc-tool verdict finalize`` pins the REVIEW
 verdict to the head SHA the reviewer read, and every consumer then compares
@@ -23,7 +23,7 @@ so it stops counting as staleness. Everything else still fails closed:
   This is the force-push / rebase case: the reviewed commit is no longer in the
   history, so "only docs changed since" is not even a well-formed claim. A
   tree-hash-over-non-docs-paths scheme (the other direction considered in
-  popoto#642) would have waved exactly that case through.
+  #3228) would have waved exactly that case through.
 - any error, timeout, unparseable payload, missing field, or truncated file
   list is ``"unknown"``, which callers treat exactly like ``"code"``.
 
@@ -60,32 +60,40 @@ _COMPARE_FILE_CAP = 300
 
 # Directory prefixes whose contents are documentation.
 #
-# Generalised one notch from popoto's own human-ratified docs-only definition in
-# `.github/workflows/guard-main-push.yml` (`^(docs/|CLAUDE\.md|\.claude/commands/)`),
-# which gates what a human is allowed to push straight to main there. Reusing
-# that boundary is deliberate: the question "is this diff documentation?" already
-# had a ratified answer in the repo this defect was filed against, and inventing
-# a second, looser one here would be the fail-open move.
+# The test is "could this file change what an agent or program DOES?" A file
+# that is read as instructions at runtime is code for review purposes, however
+# much it looks like prose. So the rule accepts prose directories and carves
+# out every documentation-shaped path that is actually an instruction surface:
 #
-# Notably ABSENT, and intentionally so: `mkdocs.yml` and `.github/` (build and CI
-# configuration, not prose), `tests/` (a test is code), and `.claude/skills/`
-# (skill bodies are executable instructions for an agent).
-DOCS_ONLY_PREFIXES = (
-    "docs/",
-    ".claude/commands/",
-)
+# - `docs/sdlc/` is excluded from `docs/`: those files are the repo-specific
+#   addenda the SDLC skills load and follow (docs/features/skill-context-convention.md).
+# - `CLAUDE.md` / `AGENTS.md` are excluded from top-level `*.md`: agent harnesses
+#   load them as standing instructions, and the worker parses CLAUDE.md headings
+#   into prompts.
+# - `.claude/` is never documentation (skills, commands, agents, hooks), nor are
+#   `mkdocs.yml`, `.github/`, or `tests/`.
+#
+# A post-review edit to any excluded path is "code": the verdict goes stale and
+# REVIEW re-runs, which is the strict-equality behaviour this module otherwise
+# relaxes. Erring toward re-review is the fail-closed direction.
+DOCS_ONLY_PREFIXES = ("docs/",)
+_INSTRUCTION_PREFIXES = ("docs/sdlc/",)
+_INSTRUCTION_TOP_LEVEL = frozenset({"CLAUDE.md", "AGENTS.md"})
 
 
 def is_docs_only_path(path: str) -> bool:
     """Return True iff ``path`` is documentation by the rule above.
 
-    Accepts anything under :data:`DOCS_ONLY_PREFIXES`, plus any TOP-LEVEL
-    ``*.md`` (``README.md``, ``CLAUDE.md``, ``AGENTS.md``, ``CHANGELOG.md``).
-    The top-level restriction is the point: a nested ``*.md`` is waved through
-    only when its directory is already a documentation directory, so a
-    behaviour-bearing ``.claude/skills/x/SKILL.md`` is code.
+    Accepts anything under :data:`DOCS_ONLY_PREFIXES` except the instruction
+    surfaces carved out of it, plus any TOP-LEVEL ``*.md`` (``README.md``,
+    ``CHANGELOG.md``) except ``CLAUDE.md`` / ``AGENTS.md``. The top-level
+    restriction is the point: a nested ``*.md`` is waved through only when its
+    directory is already a documentation directory, so a behaviour-bearing
+    ``.claude/skills/x/SKILL.md`` is code.
     """
     if not isinstance(path, str) or not path:
+        return False
+    if path.startswith(_INSTRUCTION_PREFIXES) or path in _INSTRUCTION_TOP_LEVEL:
         return False
     if path.startswith(DOCS_ONLY_PREFIXES):
         return True

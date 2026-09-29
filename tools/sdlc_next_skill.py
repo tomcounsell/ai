@@ -562,11 +562,59 @@ def _build_context(
                 head_sha = None
             if head_sha:
                 context["pr_head_sha"] = head_sha
+                drift = _review_head_drift(stage_states, meta, head_sha)
+                if drift is not None:
+                    context["review_head_drift"] = drift
             else:
                 context["pr_head_sha"] = ""
                 context["pr_head_sha_lookup_failed"] = True
 
     return context
+
+
+def _review_head_drift(stage_states: dict, meta: dict, head_sha: str) -> dict | None:
+    """Classify the drift from the reviewed SHA to the live head (#3228).
+
+    The router compares the verdict's head SHA to ``pr_head_sha`` by strict
+    equality, so the mandatory post-REVIEW ``/do-docs`` commit made every
+    APPROVED verdict read stale and cost a re-review (row 8f), disagreeing with
+    ``tools.merge_predicate``, which tolerates documentation-only drift. The
+    router makes no ``gh`` calls, so the classification is assembled here and
+    handed over as ``{"reviewed": sha, "head": sha, "drift": class}``. The
+    router honours ``"docs_only"`` only when both SHAs match its own view, so a
+    signal computed against a different verdict can never widen the tolerance.
+
+    Returns ``None`` when there is nothing to classify (no attributable
+    reviewed SHA, or it already IS the head). Never raises: every failure
+    inside the classifier comes back as ``"unknown"``, which the router treats
+    as stale.
+    """
+    from tools._sdlc_utils import head_sha_of_record, head_sha_of_text
+    from tools.sdlc_review_drift import classify_head_drift
+
+    reviewed = meta.get("latest_review_head_sha") or ""
+    if not reviewed:
+        record = (stage_states.get("_verdicts") or {}).get("REVIEW")
+        if isinstance(record, dict):
+            reviewed = head_sha_of_record(record)
+        elif isinstance(record, str):
+            reviewed = head_sha_of_text(record)
+    if not isinstance(reviewed, str) or not reviewed.strip():
+        return None
+    reviewed = reviewed.strip()
+    if reviewed.lower() == head_sha.lower():
+        return None
+    try:
+        drift = classify_head_drift(
+            reviewed,
+            head_sha,
+            meta.get("_resolved_target_repo") or "",
+            repo_root=_target_repo_cwd(),
+        )
+    except Exception as e:
+        logger.warning(f"review head drift classification failed ({type(e).__name__}: {e})")
+        drift = "unknown"
+    return {"reviewed": reviewed, "head": head_sha, "drift": drift}
 
 
 def _recover_stage_states_from_durable_signals(issue_number: int) -> dict:

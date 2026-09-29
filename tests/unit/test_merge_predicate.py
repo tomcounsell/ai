@@ -572,7 +572,7 @@ def test_verdict_freshness_blocks_on_stale_head_sha_field(monkeypatch):
 
     failed: list[str] = []
     notes: list[str] = []
-    # popoto#642: a mismatch is classified before it is refused. Stub the
+    # #3228: a mismatch is classified before it is refused. Stub the
     # classifier to "code" so this stays hermetic and keeps testing the refusal.
     monkeypatch.setattr(
         "tools.sdlc_review_drift.classify_head_drift", lambda *a, **k: "code", raising=True
@@ -585,7 +585,7 @@ def test_verdict_freshness_blocks_on_stale_head_sha_field(monkeypatch):
 
 
 def test_verdict_freshness_tolerates_docs_only_drift(monkeypatch):
-    """popoto#642: `/do-docs` is a MANDATORY post-REVIEW stage that commits, so
+    """#3228: `/do-docs` is a MANDATORY post-REVIEW stage that commits, so
     this leg refused every pipeline-native merge on a trailer the pipeline
     itself invalidated. A range whose every path is documentation is fresh."""
     monkeypatch.setattr(

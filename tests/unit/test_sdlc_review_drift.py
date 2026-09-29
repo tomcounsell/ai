@@ -1,4 +1,4 @@
-"""Unit tests for tools.sdlc_review_drift (popoto#642).
+"""Unit tests for tools.sdlc_review_drift (#3228).
 
 The classifier's whole value is that it narrows a detected trailer mismatch in
 exactly one direction — documentation-only drift — and fails closed on
@@ -42,11 +42,9 @@ class TestIsDocsOnlyPath:
         "path",
         [
             "docs/plans/sdlc-642.md",
-            "docs/sdlc/do-pr-review.md",
-            ".claude/commands/foo.md",
+            "docs/features/merge-gate.md",
             "README.md",
-            "CLAUDE.md",
-            "AGENTS.md",
+            "CHANGELOG.md",
         ],
     )
     def test_documentation(self, path):
@@ -61,6 +59,12 @@ class TestIsDocsOnlyPath:
             ".github/workflows/tests.yml",
             # A skill body is executable instruction, not prose.
             ".claude/skills/do-pr-review/SKILL.md",
+            ".claude/commands/foo.md",
+            # Instruction surfaces that look like prose: loaded and followed
+            # by agents at runtime, so a post-review edit must be re-reviewed.
+            "docs/sdlc/do-pr-review.md",
+            "CLAUDE.md",
+            "AGENTS.md",
             # Nested *.md outside a docs directory is not waved through.
             "src/popoto/NOTES.md",
             "",
@@ -79,9 +83,16 @@ class TestClassifyHeadDrift:
     def test_docs_only_range_is_tolerated(self):
         with patch(
             "subprocess.run",
-            return_value=_compare("ahead", ["docs/plans/x.md", "CLAUDE.md"]),
+            return_value=_compare("ahead", ["docs/plans/x.md", "README.md"]),
         ):
             assert classify_head_drift(_BASE, _HEAD, "o/r") == "docs_only"
+
+    @pytest.mark.parametrize("path", ["docs/sdlc/do-merge.md", "CLAUDE.md"])
+    def test_instruction_surface_edit_is_code(self, path):
+        """A post-review edit to a file agents load as instructions changes
+        behaviour, so it invalidates the verdict like a source change."""
+        with patch("subprocess.run", return_value=_compare("ahead", ["docs/plans/x.md", path])):
+            assert classify_head_drift(_BASE, _HEAD, "o/r") == "code"
 
     def test_one_source_file_makes_the_whole_range_code(self):
         """The rule is all-or-nothing: a docs cascade that also fixes a
