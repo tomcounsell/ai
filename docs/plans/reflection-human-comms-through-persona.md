@@ -33,7 +33,7 @@ Both came through the same side door: `reflections/utilities.py::_send_telegram_
 **Desired outcome:**
 - Every Telegram message a human sees in an `Eng:`/client group is written by an agent session in the Valor persona and passes the session outbound pipeline (`TelegramRelayOutputHandler` → drafter → redundancy filter → read-the-room → outbox).
 - A reflection that finds something hands a **structured finding to an agent**. The agent decides whether to act, fix, stay silent, or ask a human. If it asks, it names the decision in plain words.
-- Status-only output never reaches human chat. It goes to the operator surface: the reflection `summary` on the dashboard, and the logs.
+- Status-only output never reaches human chat. It goes to the operator surface: the reflection `summary` on the dashboard, and the logs. The one named exception is the charter §11 assumption digest (see the disposition table and Open Question 1), which only Tom can move.
 - The reconciler's reads are truthful. The 2026-09-29 incident replays to *silence in human chat* plus an agent discharging the expectation.
 
 ## Freshness Check
@@ -135,9 +135,10 @@ No relevant external findings. This work is internal: routing, the Popoto ORM, a
    - the suggested action
    - dedup key
 2. `reflections/agent_handoff.py::hand_off(finding)`:
-   - a. **Steer**: a live, non-ledger session *whose Room is the target Room*. The Job's recorded holder is preferred. `steer_session` drains it at the next turn.
-   - b. **Else create**: enqueue an eng session in the target Room's chat. It gets `extra_context={"origin": "reflection_handoff", "handoff_source": ..., "job_id": ...}` and a brief rendered from the finding.
-   - c. **Else (worker/enqueue failure)**: operator surface only (warning log, reflection finding/summary). **Never** a human page.
+   - a. **Ownership gate**: `machine_owns_project(finding.project.get("slug"))` is False → `unreachable("not-owner")`.
+   - b. **Steer**: a live session in the target Room that is either the Job's recorded holder or itself a handoff session (`extra_context.origin == "reflection_handoff"`). Never an arbitrary human conversation or SDLC lane PM. `steer_session` drains it at the next turn.
+   - c. **Else create**: enqueue an eng session in the target Room's chat through `_push_agent_session(idempotency_key=...)`. It gets `extra_context={"origin": "reflection_handoff", "handoff_source": ..., "job_id": ...}` and a brief rendered from the finding.
+   - d. **Else (not-owner, rate-capped, worker/enqueue failure)**: operator surface only (warning log, reflection finding/summary). **Never** a human page.
 3. The agent (a PM in that Room, so `job_tool` room scope passes) reads the evidence, then:
    - discharges (`job_tool expectation-remove`), re-owns (respawns the lane), fixes, or stays silent (the silent-completion rule), or
    - asks a human. That output goes through `TelegramRelayOutputHandler.send` → drafter → redundancy → read-the-room → outbox → relay → the Room's chat.
@@ -158,7 +159,7 @@ No relevant external findings. This work is internal: routing, the Popoto ORM, a
 - **New module**: `reflections/agent_handoff.py` is the one sanctioned exit from reflection code toward humans. It is agent-mediated, and nothing in it writes to a chat.
 - **Removed interface**: `send_eng_telegram`, `send_host_eng_telegram`, `_send_telegram_transport` (`reflections/utilities.py`), `docs_auditor._send_telegram_notification`, the `valor-telegram` subprocess in `scripts/memory_consolidation.py` and `reflections/sdlc_upvote_lanes.py`, and `stall_advisory`'s Telegram branch together with its `stall_advisory_telegram_enabled` param. There is no flag and no parallel path.
 - **Kept**: `resolve_eng_group` (the handoff uses it to find a project's `Eng:` Room). `resolve_host_eng_chat` / `FALLBACK_ENG_CHAT` are deleted if no caller remains after the cut (the handoff needs a numeric chat id, not a name).
-- **Runner change**: sessions carrying `extra_context["origin"] == "reflection_handoff"` may complete silently. An empty `[/complete]` ends the run with no wrap-up turn and no fallback message, and the output is logged. Every other session is unchanged.
+- **Runner change**: sessions carrying `extra_context["origin"] == "reflection_handoff"` may complete silently. An empty final reply ends the run under a new clean `ExitReason.HANDOFF_SILENT` with no wrap-up turn and no fallback message, and it finalizes `completed`. Every other session is unchanged.
 - **job_tool change**: outbound `expectation-add` records `holder` = the calling session's `agent_session_id`, and rejects reserved placeholder owners (`dev`, `pm`).
 - **Coupling**: reflections stop depending on the `valor-telegram` binary and on `Eng:` chat naming. They start depending on the Room model (`models/room.py`), which the reconciler already uses.
 - **Reversibility**: moderate. Deleted senders can be restored from git, but the no-parallel-path rule means there is no toggle.
