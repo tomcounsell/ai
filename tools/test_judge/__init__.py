@@ -168,11 +168,6 @@ object in this exact format (the JSON object must be the last thing in your repl
                 "error": "Failed to parse AI response",
                 "raw_response": content,
             }
-        if not isinstance(judgment, dict):
-            return {
-                "error": "Failed to parse AI response",
-                "raw_response": content,
-            }
         judgment["test_output_preview"] = (
             test_output[:200] + "..." if len(test_output) > 200 else test_output
         )

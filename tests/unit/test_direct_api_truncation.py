@@ -16,6 +16,7 @@ import tools.documentation as documentation
 import tools.image_analysis as image_analysis
 import tools.image_tagging as image_tagging
 import tools.test_judge as test_judge
+from config.models import MODEL_FAST
 
 
 def _truncated_sdk_message() -> Message:
@@ -123,3 +124,31 @@ def test_image_analysis_truncation_names_truncation(monkeypatch, anthropic_key, 
         result = image_analysis.analyze_image("data:image/png;base64,iVBORw0KGgo=")
     assert "truncated" in result["error"].lower()
     assert "max_tokens=4096" in result["error"]
+
+
+_OK_ANTHROPIC = {
+    "stop_reason": "end_turn",
+    "content": [{"type": "text", "text": "{}"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("call", "module", "sonnet_fields"),
+    [
+        pytest.param(
+            image_tagging.tag_image, image_tagging, {"thinking", "output_config"}, id="tagging"
+        ),
+        pytest.param(image_analysis.analyze_image, image_analysis, {"thinking"}, id="analysis"),
+    ],
+)
+@pytest.mark.parametrize("model", [None, MODEL_FAST], ids=["default", "haiku"])
+def test_sonnet_only_fields_follow_effective_model(monkeypatch, call, module, sonnet_fields, model):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    kwargs = {"model": model} if model else {}
+    with patch.object(module.requests, "post", return_value=_http_response(_OK_ANTHROPIC)) as post:
+        call("data:image/png;base64,iVBORw0KGgo=", **kwargs)
+    body = post.call_args.kwargs["json"]
+    for field in sonnet_fields:
+        assert (field in body) is (model is None)
+    if model:
+        assert body["model"] == model

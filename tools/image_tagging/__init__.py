@@ -229,8 +229,6 @@ def tag_image(
 
         try:
             parsed = parse_last_json(content, kind=dict)
-            if not isinstance(parsed, dict):
-                raise ValueError("Reply JSON is not an object")
 
             # Filter by confidence threshold
             tags = [

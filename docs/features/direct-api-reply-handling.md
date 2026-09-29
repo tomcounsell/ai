@@ -33,6 +33,7 @@ The model may reason in prose and end with the JSON, so `parse_last_json` return
 | `documentation` | `between_tools` | none | 8192 |
 | `image_analysis` | `between_tools` | none | 4096 |
 
+- `image_tagging` and `image_analysis` send their thinking/effort fields only when the effective model is Sonnet 5.5; a `model=` override omits them.
 - `max_tokens` covers thinking plus the reply, so it is sized above the reply alone.
 - `between_tools` allows thinking only between tool calls, which none of these single-shot requests make, so it effectively turns thinking off for the Anthropic path.
 - The OpenRouter path sends the same `max_tokens` and no reasoning parameters. OpenRouter leaves thinking on by default, which is why the shared limit carries the headroom.
