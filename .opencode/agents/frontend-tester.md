@@ -85,6 +85,7 @@ ERRORS:
 - **Re-read after every interaction** — `byob:idx` refs become stale when the DOM updates
 - **Be literal** — report exactly what you see, not what you expect to see
 - **Screenshot always** — evidence is required even on failure
+- **Verify dense visuals from text or a crop**: when the expected outcome is a detail inside a chart, table, or diagram, read it from the DOM (`browser_read`, `browser_extract_table`, `browser_eval`) when it is there; when only the pixels carry it, crop and enlarge the relevant region of the saved screenshot with a quick script before judging, rather than reading it off the full page image
 - **Don't close the user's tab** unless the test scenario explicitly requires it; BYOB drives the user's real Chrome
 - **FAIL clearly** — if the expected outcome is not met, FAIL with a specific reason
 - **ERROR on crash** — if BYOB transport fails or the page is unreachable, surface a clean error message and use RESULT: ERROR
