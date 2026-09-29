@@ -672,7 +672,12 @@ def _check_verdict_freshness(
         try:
             repo = _gh_repo_name_with_owner(repo_root)
         except Exception as exc:
-            failed.append(f"repo slug unavailable for verdict freshness check ({exc})")
+            # Fail closed, but keep the named leg: the trailer still mismatches,
+            # the drift just cannot be classified without the repo slug.
+            failed.append(
+                "REVIEW verdict predates PR head commit (head_sha trailer mismatch; "
+                f"repo slug unavailable to classify post-review drift: {exc})"
+            )
             return
         drift = classify_head_drift(trailer, head_sha, repo, repo_root=str(repo_root))
         if drift == "docs_only":

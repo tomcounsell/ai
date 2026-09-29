@@ -124,7 +124,8 @@ get` readback) into one self-verifying operation.
 | Error | Meaning |
 |-------|---------|
 | `REVIEW_VERDICT_MISSING` | No readable REVIEW verdict for the issue. |
-| `REVIEW_TRAILER_MISSING` | The recorded verdict resolves to no head SHA matching the PR's current head (or the head SHA itself couldn't be resolved via `gh`). |
+| `REVIEW_TRAILER_MISSING` | The recorded verdict resolves to no head SHA, or to one that differs from the PR's current head by anything other than documentation-only drift (see [SDLC Review Drift Classifier](sdlc-review-drift-classifier.md)), or the head SHA itself couldn't be resolved via `gh`. |
+| `REVIEW_HEAD_DRIFT` | `finalize --reviewed-head` was given a SHA the live head has moved past by more than documentation; the verdict is not recorded. |
 | `REVIEW_MARKER_INCOMPLETE` | REVIEW stage marker is not `completed`. |
 | `NO_CONFIRMED_MARKER_WRITE` | The run recorded zero confirmed `ok` stage-marker writes (issue #2451; see below). |
 
@@ -179,11 +180,14 @@ raises) typed JSON:
   "ok": true,
   "verdict_present": true,
   "trailer_matches_head": true,
+  "head_drift": "docs_only",
   "marker_completed": true,
   "reason": null
 }
 ```
 
+`head_drift` (APPROVED path only, else `null`) is `identical`, `docs_only`,
+`code`, or `unknown`; `trailer_matches_head` is true for the first two.
 `ok` carries the verdict, not the process exit code — callers branch on the
 JSON, same convention as `stage-query` and `verdict get`. `finalize`
 (write+verify) and `selfcheck` (verify-only) share one
