@@ -603,8 +603,8 @@ def user_hooks_root_is_repo_aliased(
 SKILLS_SYNC_PAUSE_MARKER = Path(".local") / "state" / "valor" / "skip-skills-sync"
 
 # Detail on the one "skipped" action a paused sync records. run.py keys on it to
-# surface the pause as a warning on every run, so a forgotten marker cannot
-# leave a machine on stale skills without saying so.
+# report the pause as a notice on every run, so a forgotten marker cannot leave
+# a machine on stale skills without saying so.
 SKILLS_PAUSED_DETAIL = f"skills sync paused (~/{SKILLS_SYNC_PAUSE_MARKER} present)"
 
 

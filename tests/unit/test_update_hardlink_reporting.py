@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from update import hardlinks  # noqa: E402
-from update.run import UpdateResult, report_hardlink_actions  # noqa: E402
+from update.run import UpdateResult, notice_lines, report_hardlink_actions  # noqa: E402
 
 
 def _result(*actions):
@@ -103,14 +103,28 @@ class TestNoHardlinkResult:
         assert result.warnings == []
 
 
-class TestSkillsSyncPauseIsSaidEveryRun:
-    def test_pause_surfaces_as_a_warning(self):
-        """#3581: a forgotten marker must not hide behind a clean report."""
+class TestSkillsSyncPauseIsANoticeNotAWarning:
+    def _paused(self):
         result = _result(
             hardlinks.LinkAction("", "~/.claude/skills", "skipped", hardlinks.SKILLS_PAUSED_DETAIL)
         )
-
         report_hardlink_actions(result, False)
+        return result
 
-        assert result.warnings == [hardlinks.SKILLS_PAUSED_DETAIL]
+    def test_pause_is_recorded_as_a_notice(self):
+        """#3581: a forgotten marker must not hide behind a clean report."""
+        result = self._paused()
+
+        assert result.notices == [hardlinks.SKILLS_PAUSED_DETAIL]
+        assert result.warnings == []
         assert result.errors == []
+
+    def test_pause_never_queues_an_update_fix_session(self):
+        """The Telegram /update path queues a "diagnose and fix" session for
+        every warning it parses; its likely fix would delete the marker."""
+        from bridge.update import extract_update_warnings
+
+        lines = notice_lines(self._paused())
+
+        assert lines and hardlinks.SKILLS_PAUSED_DETAIL in lines[0]
+        assert extract_update_warnings(["update successful", *lines]) == []
