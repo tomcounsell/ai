@@ -117,8 +117,7 @@ The badge is computed by the dashboard's JSON API from the latest reflection fin
 3. For each surviving session, reads its telemetry timeline and calls `classify_session_stall()`.
 4. Collects non-healthy verdicts into a `findings` list.
 5. Logs each finding at `WARNING` level; healthy sessions at `DEBUG`.
-6. Optionally sends a concise Telegram note when the `stall_advisory_telegram_enabled` flag is set and findings are present.
-7. Returns `{"status": "ok"|"warn", "findings": [...], "summary": "..."}`.
+6. Returns `{"status": "ok"|"warn", "findings": [...], "summary": "..."}`.
 
 ### Registering the Reflection
 
@@ -132,16 +131,12 @@ The reflection is not scheduled by default. To activate, add to `~/Desktop/Valor
     priority: normal
     execution_type: function
     callable: "reflections.stall_advisory.run_stall_advisory"
-    params:
-      stall_advisory_telegram_enabled: false
     enabled: true
 ```
 
-### Telegram Alert Flag
+### Operator Surface
 
-`stall_advisory_telegram_enabled` defaults to `false` in v1. The reflection computes and logs findings regardless; the flag gates only the Telegram send. It is off by default pending coordination with #1313 (the adjacent session watchdog alert) to avoid double-alerting on the same session. When enabled, the reflection sends only when findings are present — no all-clear spam.
-
-The alert has no single project in scope (this reflection classifies sessions globally, not per-project), so it pages the host checkout's own engineer group via `reflections.utilities.resolve_host_eng_chat` — the same `PROJECT_ROOT`-narrowed fallback rule `docs_auditor` and `sentry_triage` use. See [`reflection-telegram-routing.md`](reflection-telegram-routing.md).
+Findings are logged and returned in the reflection `summary` for the dashboard. The reflection sends nothing to human chat: a stall is system state with no decision attached. See [Reflection Agent Handoff](reflection-agent-handoff.md).
 
 ## Fail-Soft Guarantees
 
@@ -155,7 +150,7 @@ The alert has no single project in scope (this reflection classifies sessions gl
 | File | Role |
 |---|---|
 | `agent/session_stall_classifier.py` | Core classifier: `StallVerdict`, `classify_session_stall`, `read_project_health_counters` |
-| `reflections/stall_advisory.py` | Periodic reflection: scan running sessions, collect findings, optional Telegram alert to the host checkout's own `Eng:` group |
+| `reflections/stall_advisory.py` | Periodic reflection: scan running sessions, collect findings, report them on the operator surface |
 
 ## Related
 
@@ -164,4 +159,4 @@ The alert has no single project in scope (this reflection classifies sessions gl
 - [Agent Session Health Monitor](agent-session-health-monitor.md) — the kill/recovery machinery; this classifier intentionally imports none of it
 - Epic #1536 — Session Telemetry parent epic
 - Issue #1538 — this feature
-- Issue #1313 — session watchdog (adjacent alert, pending coordination for Telegram flag)
+- Issue #1313 — session watchdog (adjacent session watchdog alert)

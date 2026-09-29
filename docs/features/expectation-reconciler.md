@@ -37,13 +37,22 @@ is what looks.
    - no live PM and work unshipped → **respawn** the lane via
      `create_session` with the recorded `what` (which re-records the
      expectation through the spawn chokepoint, `--job-id` bound);
-   - action failed → escalate once (Telegram alert to the project's own
-     `Eng:` group, resolved by numeric `chat_id` — see
-     [`reflection-telegram-routing.md`](reflection-telegram-routing.md)),
-     stop. When no `Eng:` group resolves for the project, the page is
-     suppressed rather than misrouted; the suppression reaches this
-     reflection's `findings`/`summary` as an `alert-suppressed` entry so it
-     stays legible, but no counter treats it as a delivered page.
+   - action failed, budget spent, or no respawnable slug → **hand off**
+     (`reflections.agent_handoff.hand_off`) a typed `Finding` to an agent in
+     the Job's own Room. The agent discharges, re-owns, or asks the human one
+     plain question if a decision is needed. The reconciler never writes to a
+     chat; an unreachable handoff is a `handoff-unreachable` finding on the
+     operator surface and leaves the once-only sentinel unset so a later tick
+     retries under the cooldown. See
+     [Reflection Agent Handoff](reflection-agent-handoff.md).
+
+Owner resolution accepts a session id, an `AgentSession` slug, or a
+`dev_agent_id` (an Agent-tool subagent's parent row stands in as the liveness
+claim). The reserved placeholders `dev` and `pm` name no lane: `job_tool
+expectation-add` rejects them as owners, and the reconciler treats a
+recorded one as having no respawnable slug. Shipped work is typed evidence
+(`merged`, `closed_unmerged`, `branch_only`, plus the issues the PR closes)
+and is never respawned over: it goes to the agent in the handoff.
 
 Immediately before acting it re-fetches the Job by KeyFields and re-checks
 the expectation is still open — a PM discharge racing the tick always wins.

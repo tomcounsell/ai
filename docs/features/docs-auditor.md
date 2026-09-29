@@ -44,28 +44,17 @@ neighborhood (≤20 files via outbound links + inbound refs;
 so a feature doc linking to a plan cannot readmit it — #3133), runs auto-fix
 detectors, applies them, stages exactly `files_touched` (never a whole-tree
 `git add -A`), opens a `docs-audit/{slug}-{ts}` branch, posts a non-draft PR,
-and notifies that review is required. The notification destination is
-derived, not hardcoded: it goes to the `Eng:` group of the project whose
-`working_directory` (in `projects.json`) matches the audited repo root,
-addressed by numeric `chat_id` rather than group name. It falls back to the
-`Eng: Valor` literal only when the audited repo is this checkout **and** no
-`Eng:` group could be resolved for it, whether because no project matched, the
-matched project's `Eng:` group is misconfigured, or the lookup itself raised;
-for any other repo whose `Eng:` group does not resolve, the
-Telegram notification is suppressed with a logged warning **and** a
-suppression notice spliced into the run's `summary` (placed before the PR
-URL so the 500-char truncation the reflection scheduler applies cannot drop
-it). Errors are swallowed; the auditor never crashes the worker.
+and hands the PR to an agent for review. The destination is derived, not
+hardcoded: `_hand_off_pr_review` resolves the `Eng:` Room of the project whose
+`working_directory` (in `projects.json`) matches the audited repo root and
+calls `reflections.agent_handoff.hand_off`. The agent reviews the PR and asks
+a human only if a merge decision is really needed. A repo with no registered
+project or no `Eng:` group yields an `unreachable` handoff, recorded in the
+run's `findings` on the operator surface; nothing falls back to another
+project's chat. Errors are swallowed; the auditor never crashes the worker.
 
-The resolution ladder itself — repo-root match, numeric `chat_id`, the
-`PROJECT_ROOT`-narrowed fallback — now lives in
-[`reflections/utilities.py::resolve_host_eng_chat`](reflection-telegram-routing.md)
-(#3072), lifted out of this module so `sentry_triage` and `stall_advisory`
-share the same host-machine rule instead of each asserting a destination.
-`docs_auditor._resolve_notify_chat(repo_root)` delegates to it, passing this
-module's own `load_local_projects` and `PROJECT_ROOT` bindings through so an
-existing `patch("reflections.docs_auditor....")` still lands correctly. The
-behavior described above is unchanged by the lift.
+The Room resolution (`project_eng_room_id`, numeric `chat_id`) and the handoff
+ladder live in [Reflection Agent Handoff](reflection-agent-handoff.md).
 
 A guard-skipped run (daily PR cap reached, or an open PR already exists for
 the picked doc's slug) performs no working-tree write and no git operation,
@@ -412,11 +401,11 @@ withholds dedup independently rather than sharing one key. Filing is bounded
 by the module's shared per-run cap (`ISSUE_FILING_PER_RUN_CAP`, see
 [Two-tier dedup](#two-tier-dedup)); entries past the cap are logged and
 suppressed, not filed. It also threads the withheld set into its `findings`,
-`summary`, and, when a destination resolves, a Telegram message which states
-plainly that review is required and that the PR is closed unmerged after
-`STALE_PR_AGE_DAYS` if nobody acts. When no destination resolves for the
-audited repo, the Telegram notification is suppressed and the same
-`summary` field carries the suppression notice instead — `summary` is the
+`summary`. Notification dispositions: the opened PR is handed to an agent
+(`hand_off`) when the audited repo's `Eng:` Room resolves, and a zero-diff
+pass or withheld fixes are operator surface only (`summary`), because the
+withheld fixes are already filed issues. When no Room resolves, the
+`unreachable` handoff reason goes into `findings`. `summary` is the
 only field the reflection scheduler persists, so it is the load-bearing
 carrier of this outcome, not just `findings`. It also stamps
 `WITHHELD_PR_MARKER` plus the rejection list into the PR body. The branch sweeper reads that marker from its own `gh pr list` query
@@ -840,7 +829,7 @@ ambiguous-but-present pass, no re-validation of pre-existing refs — every case
 is expressed as a prose-anchored regex fix whose *replacement*, not its match,
 carries the path-shaped string, so gate 3's path-token suppression cannot eat
 the case before the invariant runs), and `TestWithheldBlocksStaleClose` (a
-bare-name withhold reaching the PR body and Telegram).
+bare-name withhold reaching the PR body).
 `TestWithheldRateNonRegression` self-baselines the narrow and widened
 `_PATH_REF_RE` arms in one run inside a disposable detached `git worktree`,
 asserting the widening adds no withholds. `TestDeletedTargetFiltering::
@@ -875,9 +864,8 @@ pytest tests/unit/test_docs_auditor_substrate.py -v
 - [Reflections](reflections.md) — registry and scheduler design
 - [Vault↔Site/Docs Drift Audit](vault-drift-audit.md) — the curated
   `VAULT_SITE_MAPPING` drift detector, in full
-- [Reflection Telegram Routing](reflection-telegram-routing.md) — the
-  `resolve_host_eng_chat` ladder this module's `_resolve_notify_chat`
-  delegates to
+- [Reflection Agent Handoff](reflection-agent-handoff.md) — how the opened PR
+  reaches an agent in the audited repo's `Eng:` Room
 - `.claude/skills-global/do-docs/SKILL.md` — Caller B skill definition
 - `reflections/docs_auditor.py` — substrate source
 - Issue #1247 — design and rollout plan

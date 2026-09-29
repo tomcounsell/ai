@@ -117,11 +117,11 @@ under 200 — `gh` silently truncates beyond that, so a genuinely-filed issue
 past position 200 would be missed and refiled. Raise the limit if the open
 backlog approaches it.
 
-## Telegram digest
+## Digest (operator surface)
 
 In live mode, the digest gets an explicit `[LIVE — Sentry state changes applied]` footer. In dry-run mode, it gets `[dry run — no Sentry state changes]` (mirroring the existing `[dry run — no GitHub issues filed]` line for tier C). The auto-actioned block sits between the per-tier counts and the C-tier highlight rows, separating "what we already handled" from "what still needs you".
 
-The digest spans every Sentry project in the org, not one repo, so it has no single project to route by. It pages the host checkout's own engineer group via `reflections.utilities.send_host_eng_telegram` / `resolve_host_eng_chat` — the same `PROJECT_ROOT`-narrowed fallback rule `docs_auditor` and `stall_advisory` use. A foreign or unregistered checkout suppresses the digest (logs a warning) rather than sending it to `Eng: Valor`. See [`reflection-telegram-routing.md`](reflection-telegram-routing.md).
+The digest spans every Sentry project in the org, so it has no single project to route by, and it is status with no decision attached (Class C and D items already become GitHub issues). It goes to the operator surface only: each digest line is recorded as a `digest: ...` finding and the text appears in the reflection summary and log. Nothing is sent to human chat. See [Reflection Agent Handoff](reflection-agent-handoff.md).
 
 ## Environment gating (init side)
 

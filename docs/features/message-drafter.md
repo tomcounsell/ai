@@ -324,6 +324,18 @@ After the drafter finalises `delivery_text`, three optional layers may intercept
 
 The first two queue a 👀 reaction on suppress (with an anchor) and emit `session_events` entries for observability. Context-recall neither suppresses nor reacts: the message is returned to its author to rewrite, and on self-draft budget exhaustion the original is sent unchanged.
 
+## Reflection handoff sessions
+
+Reflections hand findings to agent sessions (`extra_context.origin ==
+"reflection_handoff"`); the drafter and the persona path are the only
+human-facing path. A handoff session that judges there is nothing to say ends
+silently and sends nothing. A finding that must arrive unchanged (the charter
+assumption digest) carries `extra_context.verbatim_payload`: in
+`TelegramRelayOutputHandler.send`, any non-empty reply makes the handler
+deliver the payload byte-exact and skip `draft_message` (the drafter would
+strip, restructure, or withhold it). Redundancy and read-the-room still run on
+the delivery text. See [Reflection Agent Handoff](reflection-agent-handoff.md).
+
 ## Files
 
 - `bridge/message_drafter.py` — the drafter module. Includes `_truncate_at_sentence_boundary` since the #1074 follow-up, plus `convert_local_paths_to_attachments` (issue #2211), consumed by the terminal-flush chokepoint — see [Agent-Controlled Message Delivery §Validator-aware terminal flush](agent-message-delivery.md#validator-aware-terminal-flush-local-path--attachment-conversion-2211).

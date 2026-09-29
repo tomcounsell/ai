@@ -487,6 +487,20 @@ to the pre-enum vocabulary (`"pm_complete"`, `"pm_user"`,
 `"headless_subprocess_error"`, etc.), since `exit_summary` session events and
 `AgentSession.exit_reason` depend on the exact strings.
 
+Two members serve reflection-handoff sessions (`extra_context.origin ==
+"reflection_handoff"`, see [Reflection Agent Handoff](reflection-agent-handoff.md)):
+
+- `HANDOFF_SILENT` (`handoff_silent`, clean): the session ended with an empty
+  turn or an empty `[/complete]` because it judged there was nothing to say.
+  No wrap-up turn, no fallback message; the session finalizes `completed`.
+- `HANDOFF_UNDELIVERED` (`handoff_undelivered`, anomaly): a delivery-required
+  handoff (`handoff_requires_delivery`) ended without reaching the human. The
+  session finalizes `failed`.
+
+Both apply only when no user-facing message was routed and only to the explicit
+origin marker. A harness-level `EMPTY_OUTPUT` failure stays a failure for
+every session.
+
 Role-driver turn failures (minted in `role_driver.py`, e.g. a subprocess
 crash or a missing binary) used to smuggle exception detail into the reason
 string itself (`f"headless_subprocess_error: {e}"`). They now carry a
