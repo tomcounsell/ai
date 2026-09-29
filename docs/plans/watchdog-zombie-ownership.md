@@ -7,7 +7,7 @@ created: 2026-09-30
 tracking: https://github.com/tomcounsell/ai/issues/3592
 last_comment_id:
 revision_applied: true
-revision_applied_at: 2026-09-29T19:40:28Z
+revision_applied_at: 2026-09-29T19:52:02Z
 ---
 
 # Bridge watchdog stops killing `claude` processes by age
@@ -214,7 +214,7 @@ Worker dies mid-turn → its `claude -p` reparents to launchd (PPID==1) → work
 
 ## Race Conditions
 
-No race conditions introduced. The change removes a second, uncoordinated killer (the watchdog) that raced the worker reapers over the same PIDs; after it, only the worker signals these processes. The log-line edits read values already captured in the same loop iteration (`ppid`, `create_time`, `cmdline`, the resolved `session`) and add no new shared state.
+No race conditions introduced. The change removes a second, uncoordinated killer (the watchdog) that raced the worker reapers over the same PIDs; after it, only the worker signals these processes. The log-line edits read values already captured in the same loop iteration (`ppid`, `create_time`, `cmdline`, the resolved `session`) and add no new shared state. The pyright `environ()` read and session lookup act on the same psutil `Process` the iterator yielded (already `create_time`-fenced against PID reuse); if the process exits between the read and the kill, `terminate()` raises `NoSuchProcess` and the existing handler skips it.
 
 ## No-Gos (Out of Scope)
 
@@ -234,7 +234,7 @@ CLI surface.
 
 ### Feature Documentation
 - [ ] Update `docs/features/bridge-self-healing.md`: delete the "Zombie process detection" bullet and the whole "Zombie Process Detection" subsection (currently ~lines 69-81); change the recovery-level table rows 2-4 from "kill zombies" to the actions that remain; delete the "Zombie cleanup is integrated into recovery levels 2+" sentence; rewrite the "vs. `kill_zombie_processes()`" comparison bullet (~line 239) to state that the worker reapers are the only component that signals `claude` processes, and why (ownership gates: PPID==1 or orphaned wrapper, no live owning AgentSession). Describe the new state only, no history.
-- [ ] Update `docs/features/agent-session-health-monitor.md` (~line 63): same comparison bullet, same rewrite; mention that kill log lines carry command, parent PID, and evidence.
+- [ ] Update `docs/features/agent-session-health-monitor.md` (~line 63): same comparison bullet, same rewrite; mention that kill log lines carry command, parent PID, and evidence, and that an orphaned `pyright` is reaped only when its executable name matches, it is orphaned, its environment carries a worker `AGENT_SESSION_ID`, and that session is not live.
 - [ ] No `docs/features/README.md` change: no feature is added or removed from the index.
 
 ### Inline Documentation
@@ -246,7 +246,8 @@ CLI surface.
 - [ ] An interactive `claude` process older than 2h, not descended from the bridge or worker, is never signalled by the watchdog, from `check_bridge_health()` or from `execute_recovery()` at levels 2, 3, or 4. Covered by a regression test that is **proven red** against the pre-change `monitoring/bridge_watchdog.py` (the builder runs the new test against `origin/main`'s watchdog and pastes the failing output into the PR description).
 - [ ] A genuinely orphaned worker-spawned `claude -p` (PPID==1, no live owning AgentSession) is still cleaned up, by the worker reapers, whose existing tests stay green.
 - [ ] Every orphan-reaper kill log line includes the command, the parent PID, and the evidence behind the verdict: the hourly reaper's parent Killed line, its per-descendant Killed line, its `Drain: SIGKILL'd` escalation line, and the fast reaper's SIGTERM and SIGKILL lines. Covered by log-capture tests. Scope note: `[reap-killlist] SIGKILL'd boot-persisted survivor` (`agent/reap_killlist.py`) is a recorded-PID kill of a wedge survivor whose evidence (`pgid`, `session`) was captured at wedge time and is already on the line; it is not a name-matched orphan kill and is unchanged.
-- [ ] An orphaned `pyright-langserver` (PPID==1, no owning session) is reaped by the hourly/startup worker reaper; a `pyright` with a live parent is not a candidate. Covered by unit tests.
+- [ ] An orphaned `pyright-langserver` (PPID==1) whose environment carries an `AGENT_SESSION_ID` naming a non-live or absent session is reaped by the hourly/startup worker reaper. A `pyright` without the marker, with a live marked session, with a live parent, whose `environ()` or session lookup raises, or matched only by a cmdline substring (`tail -f pyright.log`) is never signalled. Covered by unit tests.
+- [ ] A formatting failure in the evidence cannot lose a Killed line or counter increment: the evidence is built before the kill by a helper that cannot raise. Covered by unit tests.
 - [ ] Nothing in the watchdog matches `pyright` or `claude` process names (`git grep -n -i pyright -- monitoring/` is empty).
 - [ ] None of the removed watchdog symbols remains referenced anywhere in the repo outside `docs/plans/` and `docs/archive/`.
 - [ ] `docs/features/bridge-self-healing.md` and `docs/features/agent-session-health-monitor.md` describe the new behavior only.
@@ -307,13 +308,14 @@ CLI surface.
 - **Assigned To**: watchdog-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `ORPHAN_KILL_LOG_CMD_CHARS = 500` near the other `ORPHAN_*` constants in `agent/session_health.py`.
-- In `_reap_orphan_session_processes`, record the orphan route when the PPID gate passes, and extend the `[orphan-reap] Killed PID` line with `ppid`, `sig=` (claude / mcp / pyright / oneshot), the route, and the ownership evidence (no owning session, or the found session's id, status, and heartbeat age).
-- Add a per-descendant `[orphan-reap] Killed descendant PID` line (command, `ppid=`, `descendant of orphan PID <parent>`), reading cmdline/ppid in a guard before `terminate()`.
-- Extend the Step 1 drain line `[orphan-reap] Drain: SIGKILL'd PID` with command, `ppid=`, and `escalation: survived SIGTERM, create_time matched`, reading cmdline/ppid in a guard that can never skip `proc.kill()`.
-- Add `_PYRIGHT_CMDLINE_RE` and `is_pyright` to the signature test, behind the unchanged PPID and ownership gates (see Technical Approach).
-- In `_fast_reap_stale_print_oneshots`, extend the SIGTERM and SIGKILL lines with `ppid=1`, age in seconds, and `owner=not-live`.
-- Add tests in `tests/unit/test_session_health_orphan_process_reap.py` using `caplog`: one per log line (parent, descendant, drain escalation, fast SIGTERM, fast SIGKILL), including the session-`None` case, a session whose `last_heartbeat_at` is `None`, and a drain where `cmdline()` raises `AccessDenied` (assert `kill()` still ran and the line reads `<unreadable>`), asserting the command text, `ppid=`, and the evidence token appear. Add the `pyright` signature tests listed in Test Impact.
+- Add a named command-length cap constant near the other `ORPHAN_*` constants in `agent/session_health.py`.
+- Add `_orphan_owner_evidence(session) -> str` (cannot raise) next to `_session_is_alive`.
+- In `_reap_orphan_session_processes`, record the orphan route when the PPID gate passes, build the evidence string before `proc.terminate()`, and log the parent Killed line with command, `ppid`, and evidence (route, matched signature, owner evidence).
+- Add a per-descendant Killed line (command, `ppid`, evidence naming the orphan parent), reading cmdline/ppid in a guard before `terminate()`.
+- Enrich the reaper's drain-phase escalation line (`[orphan-reap] Drain: SIGKILL'd PID`) with command, `ppid`, and the escalation evidence, reading cmdline/ppid in a guard that can never skip `proc.kill()`.
+- Add `_is_pyright_executable(cmdline)` and the pyright branch with its four ordered gates (executable name, orphan gate, `environ()` marker, `get_by_id_strict` + `_session_is_alive`), each failing closed, as specified in Technical Approach.
+- In `_fast_reap_stale_print_oneshots`, enrich the SIGTERM and SIGKILL lines with command, `ppid`, and evidence (age, not-live owner verdict).
+- Add the tests listed under Test Impact for `tests/unit/test_session_health_orphan_process_reap.py`, using `caplog` for the log lines.
 
 ### 4. Validate
 - **Task ID**: validate-all-code
@@ -322,7 +324,7 @@ CLI surface.
 - **Agent Type**: validator
 - **Parallel**: false
 - Confirm the red proof exists (Step 1 output) and the test is now green.
-- Run the Verification table.
+- Run the **Code checks** block under Verification only. The repo-wide symbol sweep and the docs check are not run here: the feature docs still name the removed functions until Step 5 rewrites them, so those checks would fail by construction.
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -338,9 +340,13 @@ CLI surface.
 - **Assigned To**: watchdog-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Re-run the Verification table and confirm every Success Criterion.
+- Re-run the **Code checks** block, then run the **Post-docs checks** block, and confirm every Success Criterion.
 
 ## Verification
+
+Both tables are machine-parsed (`agent/verification_parser.py`), which splits cells on unescaped `|`. Every command below is therefore written with no pipe character at all: alternation uses repeated `-e` patterns (real alternation, one pattern per `-e`), and "nothing matches" is asserted through `git grep -q`'s exit status (1 = no match; an error exits 128, so it cannot pass vacuously) or `grep -c`'s literal `0`. No cell needs Markdown escaping.
+
+### Code checks (Step 4 and Step 6)
 
 | Check | Command | Expected |
 |-------|---------|----------|
@@ -348,25 +354,32 @@ CLI surface.
 | Reaper tests pass | `scripts/pytest-clean.sh tests/unit/test_session_health_orphan_process_reap.py tests/integration/test_orphan_reap_forward_scan.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
 | Format clean | `python -m ruff format --check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
-| Removed symbols gone | `git grep -n -E "ZOMBIE_THRESHOLD_SECONDS\|SOFT_INSTANCE_LIMIT\|ZOMBIE_PROCESS_PATTERNS\|ZOMBIE_PROCESS_EXCLUDES\|_enumerate_claude_processes\|classify_zombies\|kill_zombie_processes\|_kill_detected_zombies\|zombie_memory_mb\|active_claude_count" -- ':!docs/plans' ':!docs/archive' \| wc -l` | match count == 0 |
-| Watchdog matches no process names | `git grep -n -i -E 'pyright\|"claude "' -- monitoring \| wc -l` | match count == 0 |
-| No test patches a removed symbol | `git grep -n -E "_enumerate_claude_processes\|kill_zombie_processes\|_kill_detected_zombies\|classify_zombies" tests/ \| wc -l` | match count == 0 |
-| Pyright reaped only behind the gate | `grep -c "is_pyright" agent/session_health.py` | output > 0 |
-| Docs describe new state | `grep -c -i "zombie process detection\|kill zombies" docs/features/bridge-self-healing.md` | match count == 0 |
+| Watchdog matches no process names | `git grep -q -i -e pyright -e '"claude "' -- monitoring` | exit code 1 |
+| No code or test references a removed symbol | `git grep -q -e ZOMBIE_THRESHOLD_SECONDS -e SOFT_INSTANCE_LIMIT -e ZOMBIE_PROCESS_PATTERNS -e ZOMBIE_PROCESS_EXCLUDES -e _enumerate_claude_processes -e classify_zombies -e kill_zombie_processes -e _kill_detected_zombies -e zombie_memory_mb -e active_claude_count -- '*.py'` | exit code 1 |
+| Pyright gated on the session marker | `grep -c AGENT_SESSION_ID agent/session_health.py` | output > 0 |
+| Pyright matched by executable only | `grep -c _is_pyright_executable agent/session_health.py` | output > 0 |
 | Regression test present | `grep -c "class TestWatchdogNeverSignalsClaudeProcesses" tests/unit/test_bridge_watchdog.py` | output > 0 |
+
+### Post-docs checks (Step 6 only, after Step 5 rewrites the feature docs)
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Removed symbols gone repo-wide | `git grep -q -e ZOMBIE_THRESHOLD_SECONDS -e SOFT_INSTANCE_LIMIT -e ZOMBIE_PROCESS_PATTERNS -e ZOMBIE_PROCESS_EXCLUDES -e _enumerate_claude_processes -e classify_zombies -e kill_zombie_processes -e _kill_detected_zombies -e zombie_memory_mb -e active_claude_count -- . ':!docs/plans' ':!docs/archive'` | exit code 1 |
+| Self-healing doc describes new state | `grep -c -i -e "zombie process detection" -e "kill zombies" docs/features/bridge-self-healing.md` | match count == 0 |
+| Health-monitor doc names no removed function | `grep -c -e kill_zombie_processes -e _enumerate_claude_processes docs/features/agent-session-health-monitor.md` | match count == 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness (Scope & Value dissents, see NIT) | `_PYRIGHT_CMDLINE_RE = \bpyright(?:-langserver)?\b` would run against the whole joined `cmdline_str` (`agent/session_health.py:6649`), so any PPID==1 process with "pyright" as a word anywhere in its argv becomes a candidate (e.g. `tail -f pyright.log`, a script with `--tool pyright`). No AgentSession ever owns a pyright, so `find_live_session_by_pid` returns None and the ownership gate adds nothing. The verdict reduces to PPID==1 plus a substring, and the descendant walk also SIGTERMs the subtree. That is the name-only kill Risk 4 says never happens. | pending | Compute `is_pyright` from the executable identity only, e.g. `" ".join(str(x) for x in cmdline[:2])` (covers `node .../pyright-langserver` and `python -m pyright`), with a basename-anchored pattern such as `(?:^\|[/\s])pyright(?:-langserver)?(?:\.js)?(?:\s\|$)`. Do not reuse `cmdline_str`. Add negative tests: orphaned PPID==1 `python worker_thing.py --tool pyright` and orphaned `claude -p "run pyright"` must not match as pyright. |
-| CONCERN | Risk & Robustness | The enriched parent `[orphan-reap] Killed PID` line is built after `terminate()`, inside the per-PID `try` whose `except Exception` logs only at DEBUG and continues (`agent/session_health.py:6738-6755`). `_increment_orphan_process_counter(session)` (`:6748`) comes after the log call. If the new `heartbeat_age` / status formatting raises (naive datetime, float heartbeat), the process is already dead but the Killed line and the counter are silently lost, exactly in the found-but-not-alive case the evidence is meant for. | pending | Add a never-raising helper `_orphan_owner_evidence(session) -> str` next to `_session_is_alive`, wrapped in `try/except Exception: return "owning session <unreadable>"`, reusing the datetime / tz-naive / float / None branches of `_session_is_alive` (`:6435-6446`). Compute it before `proc.terminate()`. Extend the tests to cover a naive-datetime heartbeat and a float heartbeat, not only None. |
-| CONCERN | History & Consistency | Test Impact spells out "remove the decorator AND its mock parameter" only for the two crash classes, where the mock is the last parameter. Two other tests have the removed mocks mid-list: `test_a_wedged_update_flow_makes_the_bridge_unhealthy` (`mock_enumerate`, `mock_kill` are the 5th and 6th of 7 params, `tests/unit/test_bridge_watchdog.py:484-500`) and `test_revert_failure_routes_to_recovery_exhausted` (`mock_kill_zombies` is the 2nd param, `:1157-1170`). Removing only the decorators binds the wrong mocks or raises TypeError. | pending | Stacked `@patch` decorators bind bottom-up to positional params. For each removed decorator, delete the parameter at the matching position: in the wedged-update test drop both `mock_enumerate` and `mock_kill` (leaving `mock_update_flow` last); in the revert test drop `mock_kill_zombies` (leaving `mock_clear_locks, mock_kill_stale, ...`). Run each test individually after the edit. |
-| CONCERN | History & Consistency | Step 4 (validate-all-code) runs the full Verification table before Step 5 rewrites the docs. The feature docs still name `kill_zombie_processes` / `_enumerate_claude_processes` (`docs/features/bridge-self-healing.md:76,78,239`, `docs/features/agent-session-health-monitor.md:63`), so the "Removed symbols gone" and "Docs describe new state" rows necessarily fail at Step 4. | pending | Scope Step 4 to the code rows only (tests, lint, format, "Watchdog matches no process names", "No test patches a removed symbol", "Pyright reaped only behind the gate", "Regression test present"); leave the repo-wide symbol sweep and docs rows to Step 6. Also: the `\|` in the Verification cells is Markdown table escaping; the validator must unescape each to a bare pipe before running (both the `-E` alternation and the `wc -l` pipe), otherwise the grep patterns are literal and the zero-count rows pass vacuously. State this once above the table. |
-| NIT | Scope & Value | The pyright signature adds a new kill class to the worker reaper in the same change that removes a mis-scoped one; the issue only asks that pyright matching be "reviewed under the same rule". This dissents from the prior round's CONCERN that added it; the anchoring CONCERN above addresses the risk if it stays. | pending | Keep it with executable-anchored matching, or drop it and record orphaned pyright as an accepted residual in Risks. |
-| NIT | Scope & Value | Log enrichment is over-specified for a Small appetite (500-char constant, `sig=` token names, exact line formats). | pending | Name the required fields (command, ppid, evidence) and let the builder own formatting. |
-| NIT | History & Consistency | Step 3 says "Extend the Step 1 drain line"; Step 1 of this plan is the red regression test. It means the reaper's Step-1 drain loop. | pending | Reword to "the reaper's drain-phase line". |
-| NIT | Risk & Robustness | Risk 4 does not name the existing break-glass `DISABLE_ORPHAN_PROCESS_REAP=1` (`agent/session_health.py:6539`), which also disables the new pyright signature. | pending | Mention it in Risk 4's mitigation. |
+| CONCERN | Risk & Robustness (Scope & Value dissents, see NIT) | `_PYRIGHT_CMDLINE_RE = \bpyright(?:-langserver)?\b` would run against the whole joined `cmdline_str` (`agent/session_health.py:6649`), so any PPID==1 process with "pyright" as a word anywhere in its argv becomes a candidate (e.g. `tail -f pyright.log`, a script with `--tool pyright`). No AgentSession ever owns a pyright, so `find_live_session_by_pid` returns None and the ownership gate adds nothing. The verdict reduces to PPID==1 plus a substring, and the descendant walk also SIGTERMs the subtree. That is the name-only kill Risk 4 says never happens. | Technical Approach (pyright signature with provable ownership); Test Impact; Risk 4 | Compute `is_pyright` from the executable identity only, e.g. `" ".join(str(x) for x in cmdline[:2])` (covers `node .../pyright-langserver` and `python -m pyright`), with a basename-anchored pattern such as `(?:^\|[/\s])pyright(?:-langserver)?(?:\.js)?(?:\s\|$)`. Do not reuse `cmdline_str`. Add negative tests: orphaned PPID==1 `python worker_thing.py --tool pyright` and orphaned `claude -p "run pyright"` must not match as pyright. |
+| CONCERN | Risk & Robustness | The enriched parent `[orphan-reap] Killed PID` line is built after `terminate()`, inside the per-PID `try` whose `except Exception` logs only at DEBUG and continues (`agent/session_health.py:6738-6755`). `_increment_orphan_process_counter(session)` (`:6748`) comes after the log call. If the new `heartbeat_age` / status formatting raises (naive datetime, float heartbeat), the process is already dead but the Killed line and the counter are silently lost, exactly in the found-but-not-alive case the evidence is meant for. | Technical Approach (evidence helper that cannot raise); Failure Path Test Strategy | Add a never-raising helper `_orphan_owner_evidence(session) -> str` next to `_session_is_alive`, wrapped in `try/except Exception: return "owning session <unreadable>"`, reusing the datetime / tz-naive / float / None branches of `_session_is_alive` (`:6435-6446`). Compute it before `proc.terminate()`. Extend the tests to cover a naive-datetime heartbeat and a float heartbeat, not only None. |
+| CONCERN | History & Consistency | Test Impact spells out "remove the decorator AND its mock parameter" only for the two crash classes, where the mock is the last parameter. Two other tests have the removed mocks mid-list: `test_a_wedged_update_flow_makes_the_bridge_unhealthy` (`mock_enumerate`, `mock_kill` are the 5th and 6th of 7 params, `tests/unit/test_bridge_watchdog.py:484-500`) and `test_revert_failure_routes_to_recovery_exhausted` (`mock_kill_zombies` is the 2nd param, `:1157-1170`). Removing only the decorators binds the wrong mocks or raises TypeError. | Test Impact (explicit decorator and parameter removal, resulting signatures) | Stacked `@patch` decorators bind bottom-up to positional params. For each removed decorator, delete the parameter at the matching position: in the wedged-update test drop both `mock_enumerate` and `mock_kill` (leaving `mock_update_flow` last); in the revert test drop `mock_kill_zombies` (leaving `mock_clear_locks, mock_kill_stale, ...`). Run each test individually after the edit. |
+| CONCERN | History & Consistency | Step 4 (validate-all-code) runs the full Verification table before Step 5 rewrites the docs. The feature docs still name `kill_zombie_processes` / `_enumerate_claude_processes` (`docs/features/bridge-self-healing.md:76,78,239`, `docs/features/agent-session-health-monitor.md:63`), so the "Removed symbols gone" and "Docs describe new state" rows necessarily fail at Step 4. | Step 4/6 scoping; Verification split into Code checks and Post-docs checks, pipe-free commands | Scope Step 4 to the code rows only (tests, lint, format, "Watchdog matches no process names", "No test patches a removed symbol", "Pyright reaped only behind the gate", "Regression test present"); leave the repo-wide symbol sweep and docs rows to Step 6. Also: the `\|` in the Verification cells is Markdown table escaping; the validator must unescape each to a bare pipe before running (both the `-E` alternation and the `wc -l` pipe), otherwise the grep patterns are literal and the zero-count rows pass vacuously. State this once above the table. |
+| NIT | Scope & Value | The pyright signature adds a new kill class to the worker reaper in the same change that removes a mis-scoped one; the issue only asks that pyright matching be "reviewed under the same rule". This dissents from the prior round's CONCERN that added it; the anchoring CONCERN above addresses the risk if it stays. | Kept with provable ownership (executable name + orphan gate + AGENT_SESSION_ID marker + non-live session); no name-only kill remains | Keep it with executable-anchored matching, or drop it and record orphaned pyright as an accepted residual in Risks. |
+| NIT | Scope & Value | Log enrichment is over-specified for a Small appetite (500-char constant, `sig=` token names, exact line formats). | Solution Key Elements; Technical Approach; Step 3 now name required fields only | Name the required fields (command, ppid, evidence) and let the builder own formatting. |
+| NIT | History & Consistency | Step 3 says "Extend the Step 1 drain line"; Step 1 of this plan is the red regression test. It means the reaper's Step-1 drain loop. | Step 3 wording | Reword to "the reaper's drain-phase line". |
+| NIT | Risk & Robustness | Risk 4 does not name the existing break-glass `DISABLE_ORPHAN_PROCESS_REAP=1` (`agent/session_health.py:6539`), which also disables the new pyright signature. | Risk 4 | Mention it in Risk 4's mitigation. |
 
 ---
 
