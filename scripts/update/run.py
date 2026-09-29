@@ -278,6 +278,12 @@ def report_hardlink_actions(result: UpdateResult, v: bool) -> None:
             if action.action == "skipped" and hardlinks.SELF_CHECK_DETAIL in (action.error or ""):
                 log(f"WARN: {action.error}", v, always=True)
                 _append_warning(result, action.error or "")
+            # A deliberate per-machine pause (#3581). Said on every run for the
+            # same reason: a forgotten marker otherwise leaves the machine on
+            # stale skills behind a clean report.
+            elif action.action == "skipped" and action.error == hardlinks.SKILLS_PAUSED_DETAIL:
+                log(f"WARN: {action.error}", v, always=True)
+                _append_warning(result, action.error)
 
 
 def _append_error(result: UpdateResult, text: str) -> None:

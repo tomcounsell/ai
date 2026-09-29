@@ -143,3 +143,30 @@ def test_hook_registered_for_write_and_edit():
         assert covering, f"no PostToolUse entry covering {tool}"
         commands = " ".join(h.get("command", "") for m in covering for h in m["hooks"])
         assert "relink_global_skills.py" in commands, f"relink hook not registered for {tool}"
+
+
+def test_hook_leaves_skills_alone_when_sync_paused(synced_tree):
+    """#3581: the per-machine pause covers the relink hook, not only /update."""
+    project, home, src, dst = synced_tree
+    marker = home / ".local" / "state" / "valor" / "skip-skills-sync"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+    _break_link(src)
+
+    result = _run_hook(src, project, home)
+
+    assert result.returncode == 0
+    assert not src.samefile(dst), "hook relinked a paused machine's skill"
+    assert "edited" not in dst.read_text()
+
+
+def test_hook_pause_marker_matches_update():
+    """The hook mirrors the /update marker path; drift would make the pause partial."""
+    import importlib.util
+
+    from scripts.update import hardlinks
+
+    spec = importlib.util.spec_from_file_location("relink_global_skills", HOOK)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    assert hook.SKILLS_SYNC_PAUSE_MARKER == hardlinks.SKILLS_SYNC_PAUSE_MARKER

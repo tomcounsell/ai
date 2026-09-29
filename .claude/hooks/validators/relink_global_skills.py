@@ -38,6 +38,10 @@ SYNCED_DIRS = {
     "agents": "agents",
 }
 
+# Per-machine pause of the skills sync (issue #3581). Mirrors
+# SKILLS_SYNC_PAUSE_MARKER in scripts/update/hardlinks.py; keep the two in step.
+SKILLS_SYNC_PAUSE_MARKER = Path(".local") / "state" / "valor" / "skip-skills-sync"
+
 
 def _relink(src: Path, dst: Path) -> str:
     """Point dst at src's inode. Returns a short status for logging."""
@@ -91,6 +95,9 @@ def main() -> int:
     dest_subdir = SYNCED_DIRS.get(rel.parts[0])
     if dest_subdir is None:
         return 0
+
+    if dest_subdir == "skills" and (Path.home() / SKILLS_SYNC_PAUSE_MARKER).exists():
+        return 0  # this machine paused its skills sync; leave ~/.claude/skills alone
 
     dst = Path.home() / ".claude" / dest_subdir / Path(*rel.parts[1:])
     status = _relink(src, dst)

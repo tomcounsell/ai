@@ -595,21 +595,26 @@ def user_hooks_root_is_repo_aliased(
     return None
 
 
+# Per-machine opt-out of the ~/.claude/skills half of the sync (issue #3581).
+# The marker lives under the user's local state dir, outside this repo and the
+# iCloud vault, so creating it affects only the machine it was created on. The
+# relink hook (.claude/hooks/validators/relink_global_skills.py) honors the same
+# path; keep the two in step.
+SKILLS_SYNC_PAUSE_MARKER = Path(".local") / "state" / "valor" / "skip-skills-sync"
+
+# Detail on the one "skipped" action a paused sync records. run.py keys on it to
+# surface the pause as a warning on every run, so a forgotten marker cannot
+# leave a machine on stale skills without saying so.
+SKILLS_PAUSED_DETAIL = f"skills sync paused (~/{SKILLS_SYNC_PAUSE_MARKER} present)"
+
+
 def _skills_sync_paused() -> bool:
     """True if this machine has opted out of syncing ~/.claude/skills.
 
-    Per-machine only: gated by a local marker file that is never synced (not
-    in the iCloud vault, not in this repo), so pausing here has no effect on
-    the rest of the fleet. Everything else in /update — git pull,
-    commands/agents/hooks sync, service restarts — still runs normally;
-    delete the marker to resume.
-
-    To pause/resume on a given machine:
-        mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync   # pause
-        rm ~/.local/state/valor/skip-skills-sync                                       # resume
-    A machine without the marker syncs skills normally.
+    Pause:  mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync
+    Resume: rm ~/.local/state/valor/skip-skills-sync
     """
-    return (Path.home() / ".local" / "state" / "valor" / "skip-skills-sync").exists()
+    return (Path.home() / SKILLS_SYNC_PAUSE_MARKER).exists()
 
 
 def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
@@ -631,7 +636,7 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
                 "",
                 "~/.claude/skills",
                 "skipped",
-                "skills sync paused (~/.local/state/valor/skip-skills-sync present)",
+                SKILLS_PAUSED_DETAIL,
             )
         )
         result.skipped += 1

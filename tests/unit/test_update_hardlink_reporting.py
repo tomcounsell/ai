@@ -101,3 +101,16 @@ class TestNoHardlinkResult:
 
         assert result.errors == []
         assert result.warnings == []
+
+
+class TestSkillsSyncPauseIsSaidEveryRun:
+    def test_pause_surfaces_as_a_warning(self):
+        """#3581: a forgotten marker must not hide behind a clean report."""
+        result = _result(
+            hardlinks.LinkAction("", "~/.claude/skills", "skipped", hardlinks.SKILLS_PAUSED_DETAIL)
+        )
+
+        report_hardlink_actions(result, False)
+
+        assert result.warnings == [hardlinks.SKILLS_PAUSED_DETAIL]
+        assert result.errors == []

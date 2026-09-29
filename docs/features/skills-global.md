@@ -73,7 +73,7 @@ Differing inodes mean the live copy is stale; `/update` re-establishes every lin
 
 ### Pausing skills sync on one machine
 
-A machine can opt out of the `~/.claude/skills/` half of the sync with a local marker file, `~/.local/state/valor/skip-skills-sync`. While it exists, `/update` skips skills hardlinking, the old dir-symlink migration, stale-skill cleanup, and `RENAMED_REMOVALS` entries of kind `skills`, and reports one `skipped` action for `~/.claude/skills`. Commands, agents, hooks, and everything else in `/update` still run. The marker lives outside the repo and the vault, so it affects only the machine that created it.
+A machine can opt out of the `~/.claude/skills/` half of the sync with a local marker file, `~/.local/state/valor/skip-skills-sync`. While it exists, `/update` skips skills hardlinking, the old dir-symlink migration, stale-skill cleanup, and `RENAMED_REMOVALS` entries of kind `skills`, and prints a `WARN: skills sync paused` line on every run, so a forgotten marker cannot leave the machine on stale skills silently. The `relink_global_skills` PostToolUse hook honors the same marker and stops relinking edited `skills-global` files into `~/.claude/skills/`. Commands, agents, hooks, and everything else in `/update` still run. The marker lives outside the repo and the vault, so it affects only the machine that created it.
 
 ```bash
 mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync   # pause
