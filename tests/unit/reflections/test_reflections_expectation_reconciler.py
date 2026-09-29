@@ -295,6 +295,21 @@ class TestLadderBookkeeping:
         result = er._reconcile_project(_project(owned_project))
         assert not any("steered" in f or "respawned" in f for f in result["findings"])
 
+    def test_exhausted_rung_undelivered_handoff_retries_once_per_cooldown(
+        self, owned_project, monkeypatch
+    ):
+        """An undelivered handoff at the exhausted rung is paced by the cooldown:
+        a second tick inside the window does not call hand_off again (#3588)."""
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        spy = _HandoffSpy("unreachable")
+        monkeypatch.setattr(er, "hand_off", spy)
+        er._reconcile_project(_project(owned_project))
+        er._reconcile_project(_project(owned_project))
+        assert len(spy.findings) == 1
+
     def test_attempt_cap_hands_off_once_then_stops(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/capped-lane")

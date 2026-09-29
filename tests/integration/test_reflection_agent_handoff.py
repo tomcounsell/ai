@@ -277,3 +277,17 @@ def test_digest_is_delivered_byte_exact_whatever_the_agent_says(project_key):
     assert len(items) == 1
     assert items[0]["text"] == digest
     assert items[0]["text"].endswith(CLOSING_LINE)
+
+
+def test_holder_that_is_a_verbatim_row_is_never_a_steer_target(room_key, steer_spy):
+    """A holder whose row carries a verbatim payload would have the finding
+    replaced by its digest, so the holder match skips it (#3588)."""
+    holder_row = _live_row(
+        room_key, origin=ah.HANDOFF_ORIGIN, handoff_source="digest", verbatim_payload="REPORT"
+    )
+    room = f"{room_key}|telegram:{CHAT}"
+    assert ah._live_session_in_room(room, holder_row.session_id) is None
+
+    result = hand_off(_finding(room_key, holder=holder_row.session_id))
+    assert result.kind == "created", result
+    assert steer_spy == []

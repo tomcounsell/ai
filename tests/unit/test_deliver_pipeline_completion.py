@@ -310,6 +310,16 @@ class TestReasonAwareInterrupt:
             )
         send_cb.assert_not_awaited()
 
+    async def test_handoff_session_sends_nothing(self, parent, send_cb):
+        """A reflection-handoff parent has no human waiting (#3588)."""
+        parent.extra_context = {"origin": "reflection_handoff"}
+        fake = _DualFireRedis(reason=b"no_resume")
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
+            await session_completion._send_interrupted_message(
+                send_cb, parent.chat_id, None, parent, parent.session_id
+            )
+        send_cb.assert_not_awaited()
+
     async def test_dual_fire_winner_sends_no_resume_loser_silent(self, parent):
         """BLOCKER regression guard: both sites race the interrupted-sent dedup with
         cancel-reason=no_resume. The SET-NX winner sends the no-resume copy; the

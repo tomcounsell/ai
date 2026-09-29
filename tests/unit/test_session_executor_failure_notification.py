@@ -119,3 +119,21 @@ async def test_redis_unavailable_still_sends():
         await _maybe_send_failure_notice(messenger, "sess-fail-5")
 
     messenger._send_callback.assert_awaited_once_with(FAILURE_NOTICE)
+
+
+@pytest.mark.asyncio
+async def test_reflection_handoff_session_gets_no_failure_notice():
+    """A reflection-handoff session has no human waiting (#3588): no send at all."""
+    from types import SimpleNamespace
+
+    messenger = _messenger()
+    handoff = SimpleNamespace(extra_context={"origin": "reflection_handoff"})
+    redis = _redis_setnx(True)
+    with (
+        patch("agent.cancel_reason.get_cancel_reason", return_value=None),
+        patch("popoto.redis_db.POPOTO_REDIS_DB", redis),
+    ):
+        await _maybe_send_failure_notice(messenger, "sess-handoff-1", handoff)
+
+    messenger._send_callback.assert_not_awaited()
+    redis.set.assert_not_called()
