@@ -229,16 +229,16 @@ validator run above.
 - Writing long anti-pattern lists for blue-sky mode; state the mode's rules.
 
 ## Success Criteria
-- [ ] `do-issue` has a documented blue-sky mode with a `## Fog` section; a
+- [x] `do-issue` has a documented blue-sky mode with a `## Fog` section; a
       fog-forward issue still passes the recon gate; CHECKLIST blue-sky readings
       present for all four affected checks (No undefined jargon, Measurable
       acceptance criteria, Observed not inferred, Recon performed).
-- [ ] `do-plan` welcomes fog, offers the decision-map affordance, and carries
+- [x] `do-plan` welcomes fog, offers the decision-map affordance, and carries
       the fog-and-model-selection note.
-- [ ] Edited global bodies contain no repo-specific tooling or model names.
-- [ ] Feature doc and README entry exist.
-- [ ] PR body says `Refs #2340` and lists the deferred charting skill.
-- [ ] Draft PR #3577 closed as superseded, with a comment linking the new PR.
+- [x] Edited global bodies contain no repo-specific tooling or model names.
+- [x] Feature doc and README entry exist.
+- [x] PR body says `Refs #2340` and lists the deferred charting skill.
+- [x] Draft PR #3577 closed as superseded, with a comment linking the new PR.
 
 ## Verification
 
