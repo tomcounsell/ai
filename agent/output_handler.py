@@ -775,9 +775,7 @@ class TelegramRelayOutputHandler:
         # discarded and the payload is delivered byte-exact, past the drafter
         # (which strips narration, composes structure, and can withhold).
         # Redundancy and read-the-room still run on the delivery text.
-        verbatim_payload = (getattr(session, "extra_context", None) or {}).get(
-            "verbatim_payload"
-        )
+        verbatim_payload = (getattr(session, "extra_context", None) or {}).get("verbatim_payload")
         if not (isinstance(verbatim_payload, str) and verbatim_payload.strip() and text.strip()):
             verbatim_payload = None
         try:
