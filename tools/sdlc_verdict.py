@@ -1055,6 +1055,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=count_help.format(what="tech-debt findings"),
     )
     fin.add_argument(
+        "--reviewed-head",
+        dest="reviewed_head",
+        default=None,
+        help=(
+            "Head SHA the reviewer actually read (#3228). Recorded instead of the "
+            "live PR head when only documentation changed in between (e.g. the "
+            "reviewer's own plan-checkbox commit); refused as REVIEW_HEAD_DRIFT "
+            "when anything else changed. Omit to record the live head."
+        ),
+    )
+    fin.add_argument(
         "--run-id",
         dest="run_id",
         default=None,

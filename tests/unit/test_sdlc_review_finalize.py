@@ -507,6 +507,79 @@ class TestFinalize:
 
         assert mock_sha.call_args.kwargs.get("repo") == "yudame/psyoptimal"
 
+    _REVIEWED = "d" * 40
+
+    def _finalize_with_reviewed_head(self, drift):
+        """Run the APPROVED path where the live head moved past the reviewed
+        head (the reviewer's own checkbox commit); returns (record mock, classify mock)."""
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_drift.classify_head_drift", return_value=drift
+            ) as mock_classify,
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch(
+                "tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}
+            ) as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)),
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(
+                pr=1,
+                issue_number=42,
+                verdict="APPROVED",
+                run_id="run-1",
+                reviewed_head=self._REVIEWED,
+            )
+        return mock_record, mock_classify
+
+    def test_reviewed_head_is_recorded_across_docs_only_drift(self):
+        """#3228 AC2: the recorded head is the commit the reviewer inspected,
+        not the reviewer's own post-review checkbox commit."""
+        mock_record, mock_classify = self._finalize_with_reviewed_head("docs_only")
+        assert mock_classify.call_args.args[:3] == (self._REVIEWED, _HEAD_SHA, "o/r")
+        assert mock_record.call_args.kwargs["head_sha"] == self._REVIEWED
+
+    @pytest.mark.parametrize("drift", ["code", "unknown"])
+    def test_reviewed_head_refused_when_code_moved(self, drift):
+        """Known-bad: code changed between the reviewed head and the live head.
+        Recording either SHA would approve code nobody reviewed."""
+        with pytest.raises(ReviewFinalizeError, match="REVIEW_HEAD_DRIFT"):
+            self._finalize_with_reviewed_head(drift)
+
+    def test_reviewed_head_equal_to_live_head_skips_classification(self):
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_review_drift.classify_head_drift") as mock_classify,
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch(
+                "tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}
+            ) as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)),
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(
+                pr=1,
+                issue_number=42,
+                verdict="APPROVED",
+                run_id="run-1",
+                reviewed_head=_HEAD_SHA.upper(),
+            )
+        mock_classify.assert_not_called()
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
+
     def test_lease_lost_between_resolve_and_write_refuses(self):
         with (
             patch("tools._sdlc_utils.resolve_ledger_lease", return_value=("o/r", None)),
@@ -718,6 +791,7 @@ class TestCliEntryPoints:
             blockers=None,
             tech_debt=None,
             run_id="run-1",
+            reviewed_head=None,
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -744,6 +818,7 @@ class TestCliEntryPoints:
             run_id="run-1",
             blockers=None,
             tech_debt=None,
+            reviewed_head=None,
         )
 
     def test_cli_selfcheck_never_raises_and_returns_check_result(self):

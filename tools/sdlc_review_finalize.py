@@ -415,6 +415,7 @@ def finalize(
     run_id: str | None,
     blockers: int | None = None,
     tech_debt: int | None = None,
+    reviewed_head: str | None = None,
 ) -> dict:
     """Record verdict + head_sha + REVIEW marker, then verify all three landed.
 
@@ -443,6 +444,14 @@ def finalize(
         run_id: The caller's run identity (``sdlc-tool session-ensure``).
         blockers: Optional blocker count.
         tech_debt: Optional tech-debt count.
+        reviewed_head: The head SHA the reviewer actually read (#3228). The
+            APPROVED path of ``/do-pr-review`` may push its own plan-checkbox
+            commit before finalizing, so the live head is then a commit no
+            reviewer inspected. When given and different from the live head,
+            it is recorded instead -- but only if the drift from it to the
+            live head is documentation-only; anything else raises
+            ``REVIEW_HEAD_DRIFT`` (the reviewed code is not what is on the
+            branch). Omitted, the live head is recorded as before.
 
     Returns:
         The :func:`check_review_persistence` result dict on success
@@ -543,6 +552,23 @@ def finalize(
         # already-trailered verdict untouched.
         embedded = head_sha_of_text(verdict)
         recorded_head = embedded or head_sha
+        if not embedded and reviewed_head and reviewed_head.strip().lower() != head_sha.lower():
+            # #3228: pin the verdict to the commit the reviewer read, never to
+            # the reviewer's own post-review commit -- and only when everything
+            # between the two is documentation. Fail-closed like every other
+            # consumer of the classifier.
+            from tools.sdlc_review_drift import classify_head_drift
+
+            reviewed_head = reviewed_head.strip()
+            drift = classify_head_drift(reviewed_head, head_sha, target_repo)
+            if drift != "docs_only":
+                raise ReviewFinalizeError(
+                    f"REVIEW_HEAD_DRIFT: the PR head {head_sha[:7]} moved since the "
+                    f"reviewed head {reviewed_head[:7]} and the drift is {drift!r}, not "
+                    "documentation-only; re-run /do-pr-review at the live head. "
+                    "Nothing was written."
+                )
+            recorded_head = reviewed_head
         bare_verdict = _strip_head_sha_trailer(verdict)
     else:
         # Non-APPROVED verdicts carry no trailer by design (plan No-Gos), but
@@ -639,6 +665,7 @@ def _cli_finalize(args) -> dict:
         run_id=args.run_id,
         blockers=args.blockers,
         tech_debt=args.tech_debt,
+        reviewed_head=args.reviewed_head,
     )
 
 
