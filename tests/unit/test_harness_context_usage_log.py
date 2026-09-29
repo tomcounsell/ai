@@ -92,7 +92,7 @@ def test_helper_never_raises_on_malformed_usage():
     "alias,full_id",
     [
         ("opus", "claude-opus-4-5-20251101"),
-        ("sonnet", "claude-sonnet-4-5-20250929"),
+        ("sonnet", "claude-sonnet-5-5"),
         ("haiku", "claude-haiku-4-5-20251001"),
     ],
 )
@@ -101,3 +101,10 @@ def test_alias_and_full_id_both_resolve(alias, full_id, caplog):
     from config.models import get_model_context_window
 
     assert get_model_context_window(alias) == get_model_context_window(full_id)
+
+
+def test_sonnet_alias_resolves_to_sonnet_5_5_window():
+    """The ``sonnet`` CLI alias follows SONNET to Sonnet 5.5's 1M-token window."""
+    from config.models import get_model_context_window
+
+    assert get_model_context_window("sonnet") == 1_000_000

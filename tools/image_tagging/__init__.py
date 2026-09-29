@@ -6,7 +6,6 @@ Tries Anthropic API first (direct), falls back to OpenRouter.
 """
 
 import base64
-import json
 import os
 from pathlib import Path
 
@@ -14,6 +13,7 @@ import requests
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+from tools.llm_reply import ReplyTruncated, anthropic_text, openrouter_text, parse_last_json
 
 # Thinking: vision tagging over raw HTTP (Anthropic, OpenRouter fallback).
 # Fail-safe: an ``{"error": ...}`` dict for every failure path.
@@ -27,6 +27,10 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Vision tasks - Anthropic API (primary), OpenRouter (fallback)
 DEFAULT_MODEL = SONNET
 DEFAULT_MODEL_OPENROUTER = MODEL_VISION
+
+# Structured JSON over a perception task: light adaptive thinking (low effort)
+# with the JSON last. MAX_TOKENS covers thinking plus the reply on both paths.
+MAX_TOKENS = 4096
 
 
 class ImageTaggingError(Exception):
@@ -133,7 +137,8 @@ def tag_image(
             "- Dominant colors (up to 5)",
             "- Image type (photo, illustration, screenshot, diagram, etc.)",
             "",
-            "Respond in this JSON format:",
+            "Think the problem through before you answer, then end your reply with a",
+            "JSON object in this format (the JSON object must be the last thing in your reply):",
             "{",
             '  "tags": [{"tag": "string", "category": "string", "confidence": 0.0-1.0}],',
             '  "dominant_colors": ["color1", "color2"],',
@@ -158,7 +163,9 @@ def tag_image(
                 },
                 json={
                     "model": model or DEFAULT_MODEL,
-                    "max_tokens": 1024,
+                    "max_tokens": MAX_TOKENS,
+                    "thinking": {"type": "adaptive"},
+                    "output_config": {"effort": "low"},
                     "messages": [
                         {
                             "role": "user",
@@ -202,7 +209,7 @@ def tag_image(
                             ],
                         }
                     ],
-                    "max_tokens": 1024,
+                    "max_tokens": MAX_TOKENS,
                 },
                 timeout=120,
             )
@@ -212,25 +219,17 @@ def tag_image(
 
         # Extract content based on API
         if use_anthropic:
-            content = result.get("content", [{}])[0].get("text", "")
+            content = anthropic_text(result, max_tokens=MAX_TOKENS)
         else:
-            if "choices" not in result or len(result["choices"]) == 0:
-                return {"error": "No response from model", "image_source": image_source}
-            content = result["choices"][0]["message"]["content"]
+            content = openrouter_text(result, max_tokens=MAX_TOKENS)
 
         if not content:
             return {"error": "No response from model", "image_source": image_source}
 
-        # Clean up response
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1]
-        if content.endswith("```"):
-            content = content.rsplit("\n", 1)[0]
-        content = content.strip()
-
         try:
-            parsed = json.loads(content)
+            parsed = parse_last_json(content)
+            if not isinstance(parsed, dict):
+                raise ValueError("Reply JSON is not an object")
 
             # Filter by confidence threshold
             tags = [
@@ -253,7 +252,7 @@ def tag_image(
                 "image_type": parsed.get("image_type", "unknown"),
                 "tag_count": len(tags),
             }
-        except json.JSONDecodeError:
+        except ValueError:
             return {
                 "error": "Failed to parse AI response",
                 "raw_response": content,
@@ -261,6 +260,8 @@ def tag_image(
 
     except ImageTaggingError as e:
         return {"error": e.message, "image_source": image_source}
+    except ReplyTruncated as e:
+        return {"error": str(e), "image_source": image_source}
     except requests.exceptions.Timeout:
         return {"error": "Tagging request timed out", "image_source": image_source}
     except requests.exceptions.RequestException as e:

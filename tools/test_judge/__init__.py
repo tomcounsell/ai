@@ -13,6 +13,7 @@ import requests
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+from tools.llm_reply import ReplyTruncated, anthropic_text, openrouter_text, parse_last_json
 
 # Thinking: free-text JSON judgment over a test run (raw Anthropic / OpenRouter).
 # Fail-safe: an ``{"error": ...}`` dict on timeout, transport, or parse failure.
@@ -24,6 +25,12 @@ TEST_JUDGE = LLMTask(
 
 DEFAULT_MODEL = MODEL_REASONING
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
+
+# Multi-criterion judgment benefits from up-front thinking, so the Anthropic
+# request uses adaptive thinking at medium effort. MAX_TOKENS covers thinking
+# plus the JSON reply on both paths (OpenRouter thinks by default too).
+MAX_TOKENS = 8192
+REQUEST_TIMEOUT = 120
 
 
 @dataclass
@@ -110,7 +117,8 @@ def judge_test_result(
 ## Instructions
 For each criterion, determine if it is met. Then provide an overall pass/fail judgment.
 
-Respond in this exact JSON format:
+Think the problem through before you answer, then end your reply with a JSON
+object in this exact format (the JSON object must be the last thing in your reply):
 {{
     "pass_fail": true/false,
     "confidence": 0.0-1.0,
@@ -120,19 +128,19 @@ Respond in this exact JSON format:
         ...
     }},
     "suggestions": ["suggestion 1", "suggestion 2"]
-}}
-
-Only output valid JSON, nothing else."""
+}}"""
 
     try:
         if use_anthropic:
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key, timeout=REQUEST_TIMEOUT)
             response = client.messages.create(
                 model=DEFAULT_MODEL,
-                max_tokens=1024,
+                max_tokens=MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
+                thinking={"type": "adaptive"},
+                output_config={"effort": "medium"},
             )
-            content = response.content[0].text if response.content else ""
+            content = anthropic_text(response, max_tokens=MAX_TOKENS)
         else:
             raw_response = requests.post(
                 OPENROUTER_URL,
@@ -143,40 +151,35 @@ Only output valid JSON, nothing else."""
                 json={
                     "model": DEFAULT_MODEL_OPENROUTER,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 1024,
+                    "max_tokens": MAX_TOKENS,
                 },
-                timeout=60,
+                timeout=REQUEST_TIMEOUT,
             )
             raw_response.raise_for_status()
-            result = raw_response.json()
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = openrouter_text(raw_response.json(), max_tokens=MAX_TOKENS)
 
         if not content:
             return {"error": "No response from AI"}
 
-        # Parse JSON response
-        import json
-
-        # Clean up response (remove markdown code blocks if present)
-        content = content.strip()
-        if content.startswith("```"):
-            content = content.split("\n", 1)[1]
-        if content.endswith("```"):
-            content = content.rsplit("\n", 1)[0]
-        content = content.strip()
-
         try:
-            judgment = json.loads(content)
-            judgment["test_output_preview"] = (
-                test_output[:200] + "..." if len(test_output) > 200 else test_output
-            )
-            return judgment
-        except json.JSONDecodeError:
+            judgment = parse_last_json(content)
+        except ValueError:
             return {
                 "error": "Failed to parse AI response",
                 "raw_response": content,
             }
+        if not isinstance(judgment, dict):
+            return {
+                "error": "Failed to parse AI response",
+                "raw_response": content,
+            }
+        judgment["test_output_preview"] = (
+            test_output[:200] + "..." if len(test_output) > 200 else test_output
+        )
+        return judgment
 
+    except ReplyTruncated as e:
+        return {"error": str(e)}
     except anthropic.APITimeoutError:
         return {"error": "Judgment request timed out"}
     except anthropic.APIError as e:

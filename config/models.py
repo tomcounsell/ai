@@ -27,14 +27,14 @@ logger = logging.getLogger(__name__)
 # Strengths: Speed, cost-efficiency, good enough for most routine tasks
 HAIKU = "claude-haiku-4-5-20251001"
 
-# Sonnet 4.5 - Balanced reasoning and speed
+# Sonnet 5.5 - Balanced reasoning and speed
 # Use cases: code generation, complex analysis, documentation, test judgment
 # Strengths: Better reasoning than Haiku, still relatively fast
-SONNET = "claude-sonnet-4-5-20250929"
-
-# Sonnet 4 (previous gen) - Use SONNET instead for new code
-# Kept for reference during migration
-SONNET_4 = "claude-sonnet-4-20250514"
+# Direct-API callers must follow tools/llm_reply.py: replies can open with a
+# thinking block, only adaptive / between_tools thinking is accepted (no
+# "disabled", no budget_tokens), and forced tool_choice ("any"/"tool") is
+# rejected, so it cannot be served by agent.llm.run_typed's Anthropic leg.
+SONNET = "claude-sonnet-5-5"
 
 # Opus 4.5 - Best reasoning, slowest and most expensive
 # Use cases: Complex multi-step reasoning, nuanced analysis, creative tasks
@@ -92,7 +92,10 @@ JEV_PRICE_USD_PER_MTOKEN: float | None = 0.042
 
 # Anthropic models via OpenRouter (fallback when no direct API key)
 OPENROUTER_HAIKU = "anthropic/claude-haiku-4-5-20251001"
-OPENROUTER_SONNET = "anthropic/claude-sonnet-4-5-20250929"
+# Sonnet 5.5 id verified against the public listing
+# https://openrouter.ai/api/v1/models on 2026-09-29 (canonical_slug
+# anthropic/claude-sonnet-5.5-20260928). The listing uses dotted ids.
+OPENROUTER_SONNET = "anthropic/claude-sonnet-5.5"
 OPENROUTER_OPUS = "anthropic/claude-opus-4-5-20251101"
 
 # -----------------------------------------------------------------------------
@@ -448,10 +451,10 @@ MODEL_INFO = {
         ],
     },
     SONNET: {
-        "name": "Claude Sonnet 4.5",
+        "name": "Claude Sonnet 5.5",
         "tier": "balanced",
         "vision": True,
-        "context_window": 200_000,
+        "context_window": 1_000_000,
         "strengths": [
             "Strong reasoning capabilities",
             "Good balance of speed and quality",

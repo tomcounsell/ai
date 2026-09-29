@@ -14,6 +14,7 @@ import requests
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_VISION, OPENROUTER_URL, SONNET
+from tools.llm_reply import ReplyTruncated, anthropic_text, openrouter_text
 
 # Thinking: vision analysis over raw HTTP (Anthropic, OpenRouter fallback).
 # Fail-safe: an ``{"error": ...}`` dict for every failure path.
@@ -27,6 +28,11 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Vision tasks - Anthropic API (primary), OpenRouter (fallback)
 DEFAULT_MODEL = SONNET
 DEFAULT_MODEL_OPENROUTER = MODEL_VISION
+
+# Descriptive output where latency matters: the Anthropic request thinks only
+# between tool calls (i.e. not at all here). MAX_TOKENS leaves headroom for
+# OpenRouter, where thinking stays on by default.
+MAX_TOKENS = 4096
 
 
 class ImageAnalysisError(Exception):
@@ -167,7 +173,8 @@ def analyze_image(
                 },
                 json={
                     "model": model or DEFAULT_MODEL,
-                    "max_tokens": 2048,
+                    "max_tokens": MAX_TOKENS,
+                    "thinking": {"type": "between_tools"},
                     "messages": [
                         {
                             "role": "user",
@@ -211,7 +218,7 @@ def analyze_image(
                             ],
                         }
                     ],
-                    "max_tokens": 2048,
+                    "max_tokens": MAX_TOKENS,
                 },
                 timeout=120,
             )
@@ -221,11 +228,9 @@ def analyze_image(
 
         # Extract content based on API
         if use_anthropic:
-            content = result.get("content", [{}])[0].get("text", "")
+            content = anthropic_text(result, max_tokens=MAX_TOKENS)
         else:
-            if "choices" not in result or len(result["choices"]) == 0:
-                return {"error": "No response from model", "image_source": image_source}
-            content = result["choices"][0]["message"]["content"]
+            content = openrouter_text(result, max_tokens=MAX_TOKENS)
 
         if not content:
             return {"error": "No response from model", "image_source": image_source}
@@ -258,6 +263,8 @@ def analyze_image(
 
     except ImageAnalysisError as e:
         return {"error": e.message, "image_source": image_source}
+    except ReplyTruncated as e:
+        return {"error": str(e), "image_source": image_source}
     except requests.exceptions.Timeout:
         return {"error": "Analysis request timed out", "image_source": image_source}
     except requests.exceptions.RequestException as e:
