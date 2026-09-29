@@ -202,7 +202,7 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 | `sdlc_progress` "budget exhausted" / "resume failed" | page with raw error | **agent-handled** | `hand_off` to the lane project's `Eng:` Room with the lane, PR, issue and error as evidence |
 | `sentry_triage` digest | host page (fails silently in the cloud routine) | **operator surface** | summary/log only; Class C/D items already become GitHub issues |
 | `stall_advisory` | host page (already disabled) | **operator surface** | delete the Telegram branch and the `stall_advisory_telegram_enabled` param; dashboard events stay |
-| `improvement_assumption_digest` | host page, "asks nothing" | **persona path (default; see Open Question 1)** | `hand_off` of the digest to the valor `Eng:` Room, briefed to deliver it as a status report per charter §11 in the persona. Operator surface too: the full text goes in the reflection summary/log |
+| `improvement_assumption_digest` | host page, "asks nothing" | **persona path, verbatim (ships unless Tom answers Open Question 1 otherwise)** | `hand_off` of the digest to the valor `Eng:` Room. The brief carries the rendered digest as verbatim text the session must deliver unchanged as a status report per charter §11; no rewording, no silence. The full text also goes in the reflection summary/log. This is the one named exception to "status-only never reaches human chat", held because charter §11 mandates it and only Tom can amend it |
 | `tools/improvement.py` charter amendment | raw page | **persona path** | `hand_off` of the amendment request; the agent asks Tom plainly for authorization (charter §12) |
 | `docs_auditor` zero-diff / withheld fixes | page | **operator surface** | summary only; the withheld fixes are already filed issues |
 | `docs_auditor` PR opened | page "Review required" | **agent-handled** | `hand_off` to the audited repo's `Eng:` Room; the agent reviews and escalates only if a human merge decision is needed |
@@ -211,6 +211,20 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 | `sdlc_upvote_lanes` retractions | raw post with raw error | **operator surface** | finding + summary |
 | `agents/system_health_digest` | calls nonexistent `AgentSession.create_and_enqueue`; the brief forces "send via valor-telegram to Eng: Valor" | **agent-handled** | `hand_off` of the anomalies to the host `Eng:` Room; drop the forced send and the chat name |
 | `pm_briefings`, `email_cs._ping_human` (raw outbox) | raw outbox | out of scope | #3589 |
+
+### Operator surface: who reads it
+
+"Operator surface" means the reflection's `summary` and findings, rendered in the reflections panel of the dashboard (`localhost:8500`, `dashboard.json`), plus the reflection's log. Its reader is the operator (Tom or an ops agent session) checking system state on demand; nothing pushes it. Rows that move there are ones where no decision exists: config state, already-filed issues, and log-only records.
+
+### Behavior Tom will notice
+
+- The assumption digest arrives written by an agent session in the Valor persona instead of the raw host page. The text, including the closing line, is unchanged.
+- No more memory-contradiction pings with raw memory IDs. Contradictions are in `logs/memory-contradictions.log` and counted in the consolidation summary.
+- No more "auto-resume disabled" pings. That state is on the dashboard.
+- No more Sentry-triage digest pings (they were already failing silently in the cloud routine) and no docs-auditor "zero-diff" / "fixes withheld" pings.
+- The upvote pickup announcement becomes the lane session's first message, written in the persona, instead of a raw post; later replies are no longer threaded under a separate announcement.
+- Reconciler messages with Job UUIDs and shell commands stop. When a human decision is needed, an agent asks it in plain words.
+- Projects with no `Eng:` group get no human-facing handoff at all; their findings are dashboard-only (Open Question 4).
 
 ### Flow
 
@@ -318,13 +332,16 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 **Impact:** Swapping raw pages for many agent posts is still noise.
 **Mitigation:**
 - Silent completion is the default outcome the brief asks for.
+- Every finding carries a required `dedup_key`; the enqueue idempotency key caps each distinct finding at one created session per 24h.
+- `HANDOFF_MAX_LIVE_PER_SOURCE` caps concurrent live handoff sessions per source.
 - Caller dedup keys stay: the reconciler's per-(job, eid) cooldown and sentinel, and `sdlc_progress`'s per-(slug, sha) sentinel.
 - The drafter's redundancy filter applies.
+- The reflection summary carries `handoff-steered` / `handoff-created` / `handoff-silent` / `handoff-unreachable` counts, so session cost is visible on the dashboard.
 - The incident-replay test asserts zero human-chat writes for a delivered-work case.
 
 ### Risk 2: A created handoff session collides with a human conversation in the same Room
 **Impact:** Two sessions answer in one chat.
-**Mitigation:** Creation happens only when no live session exists in the Room. When one exists, the finding is steered into it, and the steering list drains at turn boundaries (`agent/steering.py`).
+**Mitigation:** A live human conversation is never a steer target (only the Job's holder or a handoff-origin session is). A created handoff session runs at low priority and completes silently unless a decision is needed; when it does speak, the drafter's redundancy filter and read-the-room apply. The builder confirms and tests that the low-priority session does not delay a human's message in the same chat.
 
 ### Risk 3: Silent completion masks a genuinely broken handoff session
 **Impact:** A session that crashed or produced nothing looks like a deliberate silence.
@@ -338,7 +355,7 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 
 ### Risk 5: Charter §11 conflict
 **Impact:** Removing the digest from Telegram would amend the charter without Tom's authorization (charter §12: only Tom authorizes amendments).
-**Mitigation:** Default to the persona path, so the digest stays in Telegram and is voiced by an agent. The deviation from the issue's AC is raised as Open Question 1 rather than decided by fiat.
+**Mitigation:** Default to the persona path with verbatim delivery, so the digest stays in Telegram with its charter-pinned `CLOSING_LINE` intact. A test asserts `CLOSING_LINE` appears byte-exact in the outbox payload. If the drafter rewrites it, the build must make the drafter pass the digest through unchanged for this origin, or stop and ask; it must not ship a reworded digest. A silent completion of a digest handoff is recorded as an operator failure (`handoff-digest-undelivered`), not success. The deviation from the issue's AC4 is named and raised as Open Question 1 rather than decided by fiat.
 
 ## Race Conditions
 
@@ -354,7 +371,7 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 **Trigger:** The reconciler and `sdlc_progress` both find the Room empty in the same instant.
 **Data prerequisite:** none
 **State prerequisite:** At most one handoff session per Room should be created per short window.
-**Mitigation:** A raw-Redis bookkeeping claim `handoff:create:{room_id}` (SET NX, short TTL, not Popoto-managed; same exception class as the reconciler keys). A second caller in the window steers the just-created session instead: `_live_session_in_room` sees the pending row, because pending is non-terminal.
+**Mitigation:** No new claim. `_push_agent_session(idempotency_key=f"handoff:{source}:{room_id}:{dedup_key}")` is single-winner: the second caller with the same key gets the bound session id back instead of creating a second row, including when the winner died between binding and saving the row (the loser creates under the same preallocated id). Two *different* findings for one Room may each create a session; that is intended, since they are different work, and the per-source cap bounds it. A later caller can also steer an existing handoff-origin session through `_live_session_in_room`, because pending is non-terminal.
 
 ### Race 3: The steer target turns terminal between selection and `steer_session`
 **Location:** `hand_off` steer rung
