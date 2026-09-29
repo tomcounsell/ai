@@ -659,6 +659,11 @@ def kill_stale_processes() -> int:
     A probe that needs a PID from an ancestor-safe lookup and then signals it
     must gate on ``tools.process_lookup.is_own_ancestor`` (Python) or
     ``service_pid_refuse_self_kill`` (shell) instead.
+
+    ``pgrep`` supplies candidates only. Each candidate must also appear in
+    ``find_python_service_pids(script_suffix="bridge/telegram_bridge.py")``:
+    a Python interpreter running the bridge script, never a process whose
+    command line merely mentions it.
     """
     killed = 0
     try:
@@ -669,10 +674,18 @@ def kill_stale_processes() -> int:
             timeout=settings.timeouts.subprocess_default_s,
         )
         if result.returncode == 0:
+            # pgrep -f matches any command line that mentions the file (an
+            # operator's `claude ...`, `vim`, `tail -f`), so it only supplies
+            # candidates with ancestors excluded. A PID is killed only when it
+            # is also a Python interpreter whose script argument is the bridge.
+            bridge_pids = set(find_python_service_pids(script_suffix="bridge/telegram_bridge.py"))
             for pid_str in result.stdout.strip().split("\n"):
                 if pid_str:
                     try:
                         pid = int(pid_str)
+                        if pid not in bridge_pids:
+                            logger.info(f"Not killing PID {pid}: not a bridge interpreter process")
+                            continue
                         os.kill(pid, 9)
                         killed += 1
                         logger.info(f"Killed stale bridge process {pid}")

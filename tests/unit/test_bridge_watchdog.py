@@ -1,5 +1,6 @@
 """Unit tests for the bridge watchdog health check, recovery, and alert wiring."""
 
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -856,3 +857,39 @@ class TestWatchdogNeverSignalsClaudeProcesses:
         signalled = self._signalled_pids(mock_kill)
         assert _INTERACTIVE_CLAUDE_PID not in signalled
         assert _PYRIGHT_PID not in signalled
+
+
+class TestKillStaleProcessesOnlyKillsBridgeInterpreter:
+    """``pgrep -f telegram_bridge.py`` matches every command line that mentions
+    the file. ``kill_stale_processes`` must SIGKILL only a Python interpreter
+    whose script argument is ``bridge/telegram_bridge.py``, never an operator's
+    ``claude``, ``vim`` or ``tail`` that merely names it."""
+
+    _PROCESS_TABLE = {
+        201: "claude --continue --permission-mode bypassPermissions bridge/telegram_bridge.py",
+        202: "vim /Users/op/src/ai/bridge/telegram_bridge.py",
+        203: "tail -f bridge/telegram_bridge.py",
+        204: "/opt/homebrew/bin/python3 -m ruff check bridge/telegram_bridge.py",
+        205: "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14"
+        "/Resources/Python.app/Contents/MacOS/Python /Users/op/src/ai/bridge/telegram_bridge.py",
+    }
+    _BRIDGE_PID = 205
+
+    def _fake_run(self, cmd, *args, **kwargs):
+        if cmd[:2] == ["pgrep", "-f"]:
+            out = "\n".join(str(pid) for pid in self._PROCESS_TABLE)
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+        if cmd[0] == "ps":
+            out = "\n".join(f"{pid} {args_}" for pid, args_ in self._PROCESS_TABLE.items())
+            return subprocess.CompletedProcess(cmd, 0, stdout=out + "\n", stderr="")
+        raise AssertionError(f"unexpected subprocess call: {cmd}")
+
+    @patch("os.kill")
+    def test_only_the_bridge_interpreter_is_killed(self, mock_kill):
+        from monitoring.bridge_watchdog import kill_stale_processes
+
+        with patch("subprocess.run", side_effect=self._fake_run):
+            killed = kill_stale_processes()
+
+        assert [c.args for c in mock_kill.call_args_list] == [(self._BRIDGE_PID, 9)]
+        assert killed == 1
