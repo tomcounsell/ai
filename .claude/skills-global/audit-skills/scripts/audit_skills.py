@@ -76,11 +76,18 @@ KNOWN_FIELDS = frozenset(
         "user-invocable",
         "allowed-tools",
         "model",
+        "effort",
         "context",
         "agent",
         "hooks",
+        "when_to_use",
+        "arguments",
+        "disallowed-tools",
+        "paths",
+        "shell",
     }
 )
+EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 # Classification lists — which skills should have specific frontmatter flags.
 # NOTE: setup/prime/sdlc moved to project-only .claude/skills/ (issue #1783, Bucket C).
@@ -430,6 +437,13 @@ def rule_11_known_fields(skill_name: str, fm: dict) -> Finding:
             11,
             "WARN",
             f"Unknown frontmatter fields: {', '.join(sorted(unknown))}",
+        )
+    if "effort" in fm and str(fm["effort"]) not in EFFORT_LEVELS:
+        return Finding(
+            skill_name,
+            11,
+            "FAIL",
+            f"Invalid effort {fm['effort']!r}; expected one of {', '.join(sorted(EFFORT_LEVELS))}",
         )
     return Finding(skill_name, 11, "PASS", "All frontmatter fields recognized")
 

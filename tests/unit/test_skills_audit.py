@@ -350,6 +350,13 @@ class TestRule11KnownFields:
         assert f.severity == "WARN"
         assert "custom-field" in f.message
 
+    def test_effort_levels(self):
+        for level in ("low", "medium", "high", "xhigh", "max"):
+            f = rule_11_known_fields("test", {"name": "foo", "effort": level})
+            assert f.severity == "PASS"
+        f = rule_11_known_fields("test", {"name": "foo", "effort": "extreme"})
+        assert f.severity == "FAIL"
+
 
 # ---------------------------------------------------------------------------
 # Rule 12: Argument hint
