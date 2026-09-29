@@ -148,7 +148,7 @@ Worker dies mid-turn → its `claude -p` reparents to launchd (PPID==1) → work
 - [ ] `tests/unit/test_bridge_watchdog.py::TestCheckOnlyOutput` (3 tests) — UPDATE: drop zombie/instance kwargs; replace `test_check_only_includes_zombie_section`, `test_check_only_with_zombies`, `test_check_only_instance_limit_warning` with one test asserting the zombie and active-instance lines are absent.
 - [ ] `tests/unit/test_bridge_watchdog.py::TestRecoveryExhaustedFallback::test_revert_failure_routes_to_recovery_exhausted` — UPDATE: drop the `_kill_detected_zombies` patch.
 - [ ] `tests/unit/test_reconciler_scan_health.py` (lines ~327 and ~541) — UPDATE: drop the `_enumerate_claude_processes` patch from both `with` blocks (patching a deleted attribute raises `AttributeError`).
-- [ ] Worker reaper tests that assert on the `[orphan-reap] Killed PID` or `[fast-oneshot-reap]` log text — UPDATE if any match the exact old format; the builder locates them with `git grep -n "orphan-reap\] Killed\|fast-oneshot-reap\] SIG" tests`.
+- [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE (extend): add log-evidence tests for both reapers. No existing test asserts on the `[orphan-reap] Killed PID` or `[fast-oneshot-reap] SIG...` text (verified: `git grep` over `tests/` returns nothing), so no existing assertion breaks.
 
 ## Rabbit Holes
 
@@ -191,23 +191,122 @@ CLI surface.
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` (details below)
+### Feature Documentation
+- [ ] Update `docs/features/bridge-self-healing.md`: delete the "Zombie process detection" bullet and the whole "Zombie Process Detection" subsection (currently ~lines 69-81); change the recovery-level table rows 2-4 from "kill zombies" to the actions that remain; delete the "Zombie cleanup is integrated into recovery levels 2+" sentence; rewrite the "vs. `kill_zombie_processes()`" comparison bullet (~line 239) to state that the worker reapers are the only component that signals `claude` processes, and why (ownership gates: PPID==1 or orphaned wrapper, no live owning AgentSession). Describe the new state only, no history.
+- [ ] Update `docs/features/agent-session-health-monitor.md` (~line 63): same comparison bullet, same rewrite; mention that kill log lines carry command, parent PID, and evidence.
+- [ ] No `docs/features/README.md` change: no feature is added or removed from the index.
+
+### Inline Documentation
+- [ ] Update the `monitoring/bridge_watchdog.py` module docstring and `execute_recovery` level comments so none mention zombies.
+- [ ] Add a comment at the watchdog health check (where Check 4 was) only if the builder judges a reader would otherwise look for it; if added, it states the rule ("the watchdog never signals `claude` processes; the worker's orphan reapers own that") without narrating the removal.
 
 ## Success Criteria
 
-(filled below)
+- [ ] An interactive `claude` process older than 2h, not descended from the bridge or worker, is never signalled by the watchdog, from `check_bridge_health()` or from `execute_recovery()` at levels 2, 3, or 4. Covered by a regression test that is **proven red** against the pre-change `monitoring/bridge_watchdog.py` (the builder runs the new test against `origin/main`'s watchdog and pastes the failing output into the PR description).
+- [ ] A genuinely orphaned worker-spawned `claude -p` (PPID==1, no live owning AgentSession) is still cleaned up, by the worker reapers, whose existing tests stay green.
+- [ ] Every orphan kill log line (hourly reaper SIGTERM, fast reaper SIGTERM and SIGKILL) includes the command, the parent PID, and the evidence behind the verdict. Covered by log-capture tests.
+- [ ] No sweep anywhere in the repo matches `pyright` by name (`git grep -n '"pyright"'` over `monitoring/ agent/ worker/` is empty).
+- [ ] None of the removed watchdog symbols remains referenced anywhere in the repo outside `docs/plans/` and `docs/archive/`.
+- [ ] `docs/features/bridge-self-healing.md` and `docs/features/agent-session-health-monitor.md` describe the new behavior only.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
-(filled below)
+### Team Members
+
+- **Builder (watchdog + reaper logs)**
+  - Name: watchdog-builder
+  - Role: delete the watchdog sweep, enrich worker reaper log lines, update tests
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator**
+  - Name: watchdog-validator
+  - Role: verify the red-then-green proof, the symbol sweep, and the success criteria
+  - Agent Type: validator
+  - Resume: true
+
+- **Documentarian**
+  - Name: watchdog-docs
+  - Role: update the two feature docs
+  - Agent Type: documentarian
+  - Resume: true
 
 ## Step by Step Tasks
 
-(filled below)
+### 1. Write the regression test first and prove it red
+- **Task ID**: build-red-test
+- **Depends On**: none
+- **Validates**: tests/unit/test_bridge_watchdog.py
+- **Assigned To**: watchdog-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add `TestWatchdogNeverSignalsClaudeProcesses` to `tests/unit/test_bridge_watchdog.py`. Fixture: patch `subprocess.run` so any `ps` invocation returns a table containing an interactive session line (e.g. `  170     03:00:12  568000 claude --continue --permission-mode bypassPermissions --model opus`) and a `pyright-langserver --stdio` line aged 3h; patch `os.kill` and `time.sleep`; patch `is_bridge_running`, `are_logs_fresh`, `detect_crash_pattern`, `get_recent_crashes`, `assess_update_flow`, `_get_watchdog_redis` as the existing health-check tests do.
+- Case A: healthy bridge, call `check_bridge_health()`; assert `os.kill` was never called with PID 170 or the pyright PID.
+- Case B: call `execute_recovery(level, [...])` for levels 2 and 3 (patch `kill_stale_processes`, `restart_bridge`, `clear_lock_files`); assert the same. Level 4 is covered by patching `AUTO_REVERT_ENABLED_FILE` to exist and `revert_last_commit` to return False.
+- Run the new test against the unchanged watchdog and confirm it FAILS (capture output for the PR description). Do not proceed until it is red.
+
+### 2. Delete the watchdog sweep
+- **Task ID**: build-watchdog
+- **Depends On**: build-red-test
+- **Validates**: tests/unit/test_bridge_watchdog.py, tests/unit/test_reconciler_scan_health.py
+- **Assigned To**: watchdog-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Remove every symbol listed under Technical Approach from `monitoring/bridge_watchdog.py`, the Check 4 block, the `HealthStatus` fields and `__post_init__`, the level 2-4 `_kill_detected_zombies()` calls, and the `--check-only` lines. Fix the docstring and level comments.
+- Apply every Test Impact entry for `test_bridge_watchdog.py` and `test_reconciler_scan_health.py`.
+- The Step 1 test is now green.
+
+### 3. Enrich worker reaper kill logs
+- **Task ID**: build-reaper-logs
+- **Depends On**: none
+- **Validates**: tests/unit/test_session_health_orphan_process_reap.py
+- **Assigned To**: watchdog-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `ORPHAN_KILL_LOG_CMD_CHARS = 500` near the other `ORPHAN_*` constants in `agent/session_health.py`.
+- In `_reap_orphan_session_processes`, record the orphan route when the PPID gate passes, and extend the `[orphan-reap] Killed PID` line with `ppid`, the route, and the ownership evidence (no owning session, or the found session's id, status, and heartbeat age).
+- In `_fast_reap_stale_print_oneshots`, extend the SIGTERM and SIGKILL lines with `ppid=1`, age in seconds, and `owner=not-live`.
+- Add tests in `tests/unit/test_session_health_orphan_process_reap.py` using `caplog`: one per log line, including the session-`None` case and a session whose `last_heartbeat_at` is `None`, asserting the command text, `ppid=`, and the evidence token appear.
+
+### 4. Validate
+- **Task ID**: validate-all-code
+- **Depends On**: build-watchdog, build-reaper-logs
+- **Assigned To**: watchdog-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Confirm the red proof exists (Step 1 output) and the test is now green.
+- Run the Verification table.
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-all-code
+- **Assigned To**: watchdog-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Apply every item in the Documentation section.
+
+### 6. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
+- **Assigned To**: watchdog-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Re-run the Verification table and confirm every Success Criterion.
 
 ## Verification
 
-(filled below)
+| Check | Command | Expected |
+|-------|---------|----------|
+| Watchdog tests pass | `scripts/pytest-clean.sh tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py -q` | exit code 0 |
+| Reaper tests pass | `scripts/pytest-clean.sh tests/unit/test_session_health_orphan_process_reap.py tests/integration/test_orphan_reap_forward_scan.py -q` | exit code 0 |
+| Lint clean | `python -m ruff check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
+| Format clean | `python -m ruff format --check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
+| Removed symbols gone | `git grep -n -E "ZOMBIE_THRESHOLD_SECONDS\|SOFT_INSTANCE_LIMIT\|ZOMBIE_PROCESS_PATTERNS\|ZOMBIE_PROCESS_EXCLUDES\|_enumerate_claude_processes\|classify_zombies\|kill_zombie_processes\|_kill_detected_zombies\|zombie_memory_mb\|active_claude_count" -- ':!docs/plans' ':!docs/archive' \| wc -l` | match count == 0 |
+| No pyright sweep | `git grep -n '"pyright"' -- monitoring agent worker \| wc -l` | match count == 0 |
+| Docs describe new state | `grep -c -i "zombie process detection\|kill zombies" docs/features/bridge-self-healing.md` | match count == 0 |
+| Regression test present | `grep -c "class TestWatchdogNeverSignalsClaudeProcesses" tests/unit/test_bridge_watchdog.py` | output > 0 |
 
 ## Critique Results
 
