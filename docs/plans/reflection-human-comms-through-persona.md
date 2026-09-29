@@ -600,6 +600,17 @@ The lead orchestrates and never builds directly.
 | NIT | Risk & Robustness | `enqueue_idempotency.release()` is an unconditional DELETE (`agent/enqueue_idempotency.py:83-90`). Two callers that both observe the same dead bound row can interleave: A releases, rebinds and creates, then B deletes A's fresh binding and creates a duplicate. The window is narrow. | Technical Approach > Create (`release_if_bound_to`); Step 1; Test Impact | Release only if the key still maps to the observed dead id (compare-and-delete). Otherwise skip the release and re-run `_push_agent_session`, which then loses the bind to the new row. |
 | NIT | History & Consistency | Removals delete `resolve_host_eng_chat` / `FALLBACK_ENG_CHAT`, but neither Verification grep checks them. Both still appear in `docs/features/reflection-telegram-routing.md` and `reflections/utilities.py`. | Verification (both grep rows) | Add both names to the "No side-door senders" and "No stale doc references" grep rows, conditional on the removal. |
 
+
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound. The concerns
+below were carried into BUILD unresolved and are accepted on the record.
+
+- **Verbatim-digest machinery ships while Open Question 1 is unanswered** (Scope & Value) -- if Tom answers "amend §11", the `verbatim_payload` branch is dead code.
+  Accepted because: non-blocking by definition of CONCERN; the plan's default keeps the digest in Telegram (no unauthorized §11 amendment), the branch is small, and it is removable in one commit if Tom rules otherwise.
+- **`Finding` field list and paraphrase-proof digest delivery** (History & Consistency, Risk & Robustness) -- addressed by the revision (`verbatim_payload`/`requires_delivery` fields, deterministic branch in `TelegramRelayOutputHandler.send`); residual risk is only implementation drift, covered by the byte-exact `CLOSING_LINE` outbox test.
+  Accepted because: the plan text now specifies the mechanism and tests that verify it.
+
 ---
 
 ## Open Questions
