@@ -6,7 +6,7 @@ status: Ready
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2340
 revision_applied: true
-revision_applied_at: 2026-09-29T06:06:53Z
+revision_applied_at: 2026-09-29T06:13:45Z
 ---
 
 # Blue-sky / fog-forward goal-setting
@@ -44,7 +44,9 @@ new global skill (working name `do-chart`) and made its **name an owner
 decision** that must precede building it, since the name threads through the
 dir, skill-context file, labels, docs, and cross-links. That decision has not
 been made, so the skill is out of this PR. #2340 stays open for it; the PR says
-`Refs #2340` and names what remains.
+`Refs #2340` and names what remains. The naming question (candidates
+`do-chart` / `do-wayfinder` / `do-map` / `do-survey`) is tracked on #2340 and
+is not needed for this plan.
 
 ## Recon Summary (from #2340, re-verified 2026-09-29)
 
@@ -71,13 +73,16 @@ do not re-derive it from this plan's filename). The build closes draft PR
 #3577 as superseded, with a comment linking the new PR; nothing from its
 single commit is cherry-picked.
 
-Re-verified 2026-09-29 against `origin/main` at f43ab3669: no commits since
+Re-verified 2026-09-29 against `origin/main` at 37de11f3e (the single
+baseline for every check in this plan): no commits since f43ab3669
 touch `.claude/skills-global/do-issue/`, `.claude/skills-global/do-plan/`, or
 `docs/features/README.md`; every section anchor cited below (do-issue Step 1,
 Step 4 rule 4, CHECKLIST "No undefined jargon" / "Measurable acceptance
 criteria", do-plan SCOPING §1, SKILL Phase 1 step 2 and Phase 1.5) still exists;
 the recon gate passes for #2340; the repo-token grep in Verification is clean
-(exit 1) on the baseline. #2340 has no comments.
+(exit 1) on the baseline; the skill audit passes for both `do-issue` and
+`do-plan` (exit 0); `do-plan/SKILL.md` is 453 lines against the audit's
+500-line limit. #2340 has no comments.
 
 The Opus 5.5 skills audit (`docs/audits/opus-5-5-skills/`, #3565) has open
 recommendations for these same skills (do-issue RECON headless stop, label
@@ -118,10 +123,15 @@ say what to do rather than enumerate failure modes).
   criterion stays in force for that pain: an unobserved "could/would" pain
   still means file nothing); **Recon performed** is met by the broad scan plus
   fan-out on cheap concerns only. **Not already decided** and the remaining
-  falsification checks apply unchanged in both modes.
+  falsification checks apply unchanged in both modes. Each of the four
+  blue-sky readings is appended to its own check's line (every check is a
+  single bullet line today), so each check carries the word "blue-sky" on
+  exactly its own line.
 
 ### 2. `do-plan` — chart fog instead of narrowing it away
-- `SCOPING.md` §1 gains **"When the issue is fog-forward"**: keep the low
+- `SCOPING.md` §1 gains **"When the issue is fog-forward"**. Trigger: the
+  issue carries a `## Fog (Not Yet Specified)` section or records blue-sky
+  mode in its body. Then: keep the low
   resolution, resolve what can be resolved, carry the rest as a
   **Not Yet Specified** list in the plan that graduates into tasks as it clears.
   For work spanning several interdependent decisions across sessions, **chart a
@@ -129,7 +139,11 @@ say what to do rather than enumerate failure modes).
   one child issue per decision, resolved one at a time with the result recorded
   on the map, then re-plan. Distinguish fog (one unknown direction: chart it)
   from a grab-bag (several known features: split it).
-- `SKILL.md` Phase 1 step 2 points to that SCOPING section for fog-forward issues.
+- `SKILL.md` Phase 1 step 2 points to that SCOPING section for fog-forward
+  issues (same trigger).
+- `SKILL.md` additions stay short (target under 15 lines total) because the
+  file is 453 lines against the skill audit's 500-line limit; any longer fog
+  guidance goes in `SCOPING.md`.
 - `SKILL.md` Phase 1.5 gains **fog and model selection**: survey/research
   spikes go to the cheapest capable model; the plan author's strongest
   reasoning goes to the load-bearing decision the fog hangs on.
@@ -179,11 +193,17 @@ No existing test asserts on these skill bodies' fog/mode wording. Verification:
       baseline with an unedited validator); the real evidence that blue-sky
       issues keep satisfying the gate is that `ISSUE_TEMPLATE.md` keeps
       `## Recon Summary` in both modes (Verification row below).
-- [ ] Skill lint/coupling tests that scan `skills-global` bodies stay green,
-      run via `scripts/pytest-clean.sh`: `tests/unit/test_skills_audit.py`
-      (has a `do-issue` entry), `tests/unit/test_update_hardlinks.py`,
-      `tests/unit/test_symlinks.py`, `tests/unit/test_relink_global_skills.py`.
-      No UPDATE/DELETE/REPLACE expected: none asserts on fog/mode wording.
+- [ ] The skill audit run on the real edited bodies passes:
+      `audit_skills.py --no-sync --skill do-issue` and `--skill do-plan`
+      (exit 0 on the baseline). This is the check that catches global-body
+      coupling (audit rule 21, a bare `/sdlc` or `/update` slash invocation)
+      and the 500-line SKILL.md limit (rule 1).
+- [ ] Skill-infrastructure tests stay green, run via `scripts/pytest-clean.sh`:
+      `tests/unit/test_skills_audit.py` (audit rules on synthetic fixtures),
+      `tests/unit/test_update_hardlinks.py`, `tests/unit/test_symlinks.py`,
+      `tests/unit/test_relink_global_skills.py` (link integrity, not content).
+      None reads these skill bodies' wording, so no UPDATE/DELETE/REPLACE is
+      expected; they guard that in-place edits keep the hardlinks intact.
 - [ ] Grep every edited global body (do-issue/, do-plan/SCOPING.md,
       do-plan/SKILL.md) for repo-specific tokens (`sdlc-tool`,
       `validate_issue_recon`, `valor`, model family names): none.
@@ -224,10 +244,12 @@ validator run above.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Recon gate passes for the fog-forward dogfood issue | `python .claude/hooks/validators/validate_issue_recon.py 2340` | exit code 0 |
-| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md` | exit code 1 (clean on baseline b6d7696ad) |
+| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md` | exit code 1 (clean on baseline 37de11f3e) |
 | Blue-sky mode present | `grep -c 'Fog (Not Yet Specified)' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
 | Recon Summary kept in template | `grep -c 'Recon Summary' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
-| CHECKLIST blue-sky readings present | `grep -c -i 'blue-sky' .claude/skills-global/do-issue/CHECKLIST.md` | output >= 4 (jargon, acceptance criteria, observed, recon) |
+| CHECKLIST blue-sky readings present, one per check | `grep -i -E '^- \[ \] \*\*(No undefined jargon\|Measurable acceptance criteria\|Observed, not inferred\|Recon performed)\*\*.*blue-sky' .claude/skills-global/do-issue/CHECKLIST.md \| wc -l` | output 4 (each of the four check lines carries its own blue-sky reading) |
+| Skill audit passes on the edited bodies | `python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-issue && python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-plan` | exit code 0 (both pass on baseline 37de11f3e) |
+| do-plan SKILL.md within the line limit | `wc -l < .claude/skills-global/do-plan/SKILL.md` | output < 500 |
 | Skill tests green | `scripts/pytest-clean.sh tests/unit/test_skills_audit.py tests/unit/test_update_hardlinks.py tests/unit/test_symlinks.py tests/unit/test_relink_global_skills.py` | exit code 0 |
 | Decision map present | `grep -c -i 'decision map' .claude/skills-global/do-plan/SCOPING.md` | output > 0 |
 | Feature doc indexed | `grep -c 'blue-sky-fog-planning' docs/features/README.md` | output > 0 |
@@ -262,8 +284,8 @@ feature doc; there is no parallelizable code.
 - **Parallel**: false
 - do-issue `SKILL.md`: Step 1 mode decision (default well-scoped, record mode), Blue-sky mode subsection, Step 4 rule 4 cross-reference (Solution §1).
 - do-issue `ISSUE_TEMPLATE.md`: conditional `## Fog (Not Yet Specified)`, blue-sky acceptance-criteria comment; `## Recon Summary` unchanged.
-- do-issue `CHECKLIST.md`: blue-sky variants for No undefined jargon, Measurable acceptance criteria, Observed not inferred, Recon performed.
-- do-plan `SCOPING.md` §1 "When the issue is fog-forward" with the decision map; `SKILL.md` Phase 1 step 2 pointer and Phase 1.5 fog-and-model-selection note (Solution §2), with no model family names.
+- do-issue `CHECKLIST.md`: blue-sky variants for No undefined jargon, Measurable acceptance criteria, Observed not inferred, Recon performed, each appended to its own check's line.
+- do-plan `SCOPING.md` §1 "When the issue is fog-forward" (triggered by a `## Fog (Not Yet Specified)` section or recorded blue-sky mode) with the decision map; `SKILL.md` Phase 1 step 2 pointer and Phase 1.5 fog-and-model-selection note (Solution §2), with no model family names and under 15 added lines.
 - Edit files in place (Edit tool), never replace-and-rename, so the `~/.claude/skills/` hardlinks survive.
 
 ### 2. Feature doc
@@ -280,7 +302,7 @@ feature doc; there is no parallelizable code.
 - **Assigned To**: fog-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run every row of the Verification table; report pass/fail per row.
+- Run every row of the Verification table, including the skill audit for `do-issue` and `do-plan`; report pass/fail per row.
 
 ### 4. Close the superseded draft
 - **Task ID**: close-superseded-pr
@@ -297,12 +319,8 @@ Round 2 (re-critique of revision e13c96c7d). All round-1 concerns were closed by
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Test Impact says the listed tests "scan skills-global bodies", but tests/unit/test_skills_audit.py runs audit rules on synthetic fixtures and the hardlink/symlink tests check links, not content. No Verification row runs the real skill audit on the edited bodies, so rule 21 coupling (a bare `/sdlc` or `/update` slash invocation in a global body) and rule 1 (500-line SKILL.md limit; do-plan/SKILL.md is 453 lines) go unchecked; the repo-token grep covers neither. | pending | Add a Verification row: `python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-issue && python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-plan`, expect exit 0 (both pass all 16 rules on the 2026-09-29 baseline). Correct the Test Impact wording. Keep do-plan SKILL.md additions within the ~47-line headroom; longer fog guidance goes in SCOPING.md. |
-| NIT | Risk & Robustness | The SCOPING "When the issue is fog-forward" trigger is unstated; do-plan has no named signal for recognising a fog-forward issue. | pending | Key it on the issue carrying `## Fog (Not Yet Specified)` or the recorded blue-sky mode. |
-| NIT | Scope & Value | `grep -c -i 'blue-sky'` counts lines, so ">= 4" depends on each CHECKLIST reading sitting on its own line. | pending | Say each reading goes on its check's line, or verify per-check presence. |
-| NIT | Scope & Value | Plan is `status: Ready` but keeps an Open Questions section, which do-plan Phase 4 removes on finalize; the question is not needed for this plan. | pending | Fold the charting-skill naming question into the deferred-scope paragraph (tracked on #2340) and drop the section. |
-| NIT | History & Consistency | Freshness Check pins f43ab3669 while the repo-token Verification row says "clean on baseline b6d7696ad"; both are clean but read as two baselines. | pending | Name one baseline SHA in both places. |
-
-## Open Questions
-1. **Charting skill name** (owner): `do-chart` / `do-wayfinder` / `do-map` /
-   `do-survey`. Needed before the follow-up; not needed for this plan.
+| CONCERN | Risk & Robustness | Test Impact says the listed tests "scan skills-global bodies", but tests/unit/test_skills_audit.py runs audit rules on synthetic fixtures and the hardlink/symlink tests check links, not content. No Verification row runs the real skill audit on the edited bodies, so rule 21 coupling (a bare `/sdlc` or `/update` slash invocation in a global body) and rule 1 (500-line SKILL.md limit; do-plan/SKILL.md is 453 lines) go unchecked; the repo-token grep covers neither. | Verification rows "Skill audit passes" and "line limit"; Test Impact rewording; Solution §2 SKILL.md size note; task validate-all | Add a Verification row: `python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-issue && python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-plan`, expect exit 0 (both pass all 16 rules on the 2026-09-29 baseline). Correct the Test Impact wording. Keep do-plan SKILL.md additions within the ~47-line headroom; longer fog guidance goes in SCOPING.md. |
+| NIT | Risk & Robustness | The SCOPING "When the issue is fog-forward" trigger is unstated; do-plan has no named signal for recognising a fog-forward issue. | Solution §2 SCOPING trigger; task build-fog-skills | Key it on the issue carrying `## Fog (Not Yet Specified)` or the recorded blue-sky mode. |
+| NIT | Scope & Value | `grep -c -i 'blue-sky'` counts lines, so ">= 4" depends on each CHECKLIST reading sitting on its own line. | Solution §1 CHECKLIST placement; Verification per-check row | Say each reading goes on its check's line, or verify per-check presence. |
+| NIT | Scope & Value | Plan is `status: Ready` but keeps an Open Questions section, which do-plan Phase 4 removes on finalize; the question is not needed for this plan. | Scope deferred paragraph; Open Questions removed | Fold the charting-skill naming question into the deferred-scope paragraph (tracked on #2340) and drop the section. |
+| NIT | History & Consistency | Freshness Check pins f43ab3669 while the repo-token Verification row says "clean on baseline b6d7696ad"; both are clean but read as two baselines. | Freshness Check and Verification both name 37de11f3e | Name one baseline SHA in both places. |
