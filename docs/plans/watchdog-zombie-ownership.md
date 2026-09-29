@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-30
 tracking: https://github.com/tomcounsell/ai/issues/3592
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-29T19:40:28Z
 ---
 
 # Bridge watchdog stops killing `claude` processes by age
@@ -151,10 +153,14 @@ Worker dies mid-turn → its `claude -p` reparents to launchd (PPID==1) → work
 - [ ] `tests/unit/test_bridge_watchdog.py::TestKillZombieProcesses` — DELETE: function removed.
 - [ ] `tests/unit/test_bridge_watchdog.py::TestHealthStatus::test_default_zombie_fields` and `::test_zombie_fields_populated` — DELETE: fields removed. `::test_alert_signal_fields_settable` — UPDATE only if it passes zombie kwargs.
 - [ ] `tests/unit/test_bridge_watchdog.py::TestCheckBridgeHealthZombieIntegration` — REPLACE: `test_populates_zombie_data` and `test_no_zombies_still_populates` become the new never-signals-claude regression test (see Step 2); `test_a_wedged_update_flow_makes_the_bridge_unhealthy` — UPDATE: drop the `kill_zombie_processes` / `_enumerate_claude_processes` patches, keep the assertion, and move it to a class whose name does not mention zombies.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestCrashDetectionOnBridgeDeath` (3 tests: `test_calls_log_crash_when_bridge_not_running`, `test_does_not_call_log_crash_when_bridge_running`, `test_log_crash_failure_does_not_break_health_check`) — UPDATE: remove the `@patch("monitoring.bridge_watchdog._enumerate_claude_processes")` decorator, its `mock_enumerate` parameter, and the `mock_enumerate.return_value = []` line. The decorator is the top-most in each stack, so its mock is the LAST positional parameter; removing both together leaves every other mock's position unchanged.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestCrashStormActionAlertSplit` (4 tests: `test_wedge_dominated_crash_storm_livelock_regression`, `test_non_wedge_storm_opens_circuit`, `test_mixed_50_50_storm_opens_circuit`, `test_below_threshold_no_alert_no_circuit`) — UPDATE: same edit as above (top-most decorator, last parameter `mock_enumerate`, plus its `return_value` line).
+- [ ] `tests/unit/test_bridge_watchdog.py` imports (lines ~12, ~16) — UPDATE: drop the imports of every removed symbol.
 - [ ] `tests/unit/test_bridge_watchdog.py::TestCheckOnlyOutput` (3 tests) — UPDATE: drop zombie/instance kwargs; replace `test_check_only_includes_zombie_section`, `test_check_only_with_zombies`, `test_check_only_instance_limit_warning` with one test asserting the zombie and active-instance lines are absent.
 - [ ] `tests/unit/test_bridge_watchdog.py::TestRecoveryExhaustedFallback::test_revert_failure_routes_to_recovery_exhausted` — UPDATE: drop the `_kill_detected_zombies` patch.
 - [ ] `tests/unit/test_reconciler_scan_health.py` (lines ~327 and ~541) — UPDATE: drop the `_enumerate_claude_processes` patch from both `with` blocks (patching a deleted attribute raises `AttributeError`).
-- [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE (extend): add log-evidence tests for both reapers. No existing test asserts on the `[orphan-reap] Killed PID` or `[fast-oneshot-reap] SIG...` text (verified: `git grep` over `tests/` returns nothing), so no existing assertion breaks.
+- [ ] `tests/unit/test_session_health_orphan_process_reap.py` — UPDATE (extend): add log-evidence tests for both reapers (parent Killed line, descendant line, drain escalation line, fast-reaper SIGTERM and SIGKILL lines) and `pyright` signature tests (orphaned `pyright-langserver --stdio` at PPID==1 with no owning session is terminated; the same process with a live non-1 parent is not a candidate; a `basedpyright`-style or unrelated cmdline is not matched by the name alone). No existing test asserts on the `[orphan-reap] Killed PID`, `Drain: SIGKILL'd`, or `[fast-oneshot-reap] SIG...` text (verified: `git grep` over `tests/` returns nothing), so no existing assertion breaks.
+- [ ] Completeness gate: after the edits, `git grep -n -E "_enumerate_claude_processes|kill_zombie_processes|_kill_detected_zombies|classify_zombies" tests/` must return nothing. This is the check that Risk 2's mitigation depends on, not the enumerated list above.
 
 ## Rabbit Holes
 
@@ -167,15 +173,19 @@ Worker dies mid-turn → its `claude -p` reparents to launchd (PPID==1) → work
 
 ### Risk 1: A genuinely orphaned worker `claude -p` lingers longer
 **Impact:** with the watchdog gone, an orphaned harness waits for the worker's next reap. The fast reaper runs every health-loop tick for stale one-shots; the full reaper runs at worker startup and hourly. If the worker is down (e.g. `worker-disable`), orphans persist until it returns.
-**Mitigation:** the worker going down is itself the event that orphans harnesses, and launchd `KeepAlive` restarts it, whereupon the startup reap runs. A deliberately disabled worker is an operator choice. The old sweep would also have left orphans for up to 2h, so the worst case for an enabled worker (next tick) is faster than today.
+**Mitigation:** the worker going down is itself the event that orphans harnesses, and launchd `KeepAlive` restarts it, whereupon the startup reap runs. A deliberately disabled worker is an operator choice. Latency by class, for an enabled worker: a stale `-p` one-shot is reaped on the next health-loop tick (faster than the old 2h sweep); a non-`-p` `bypassPermissions` harness, an SDK-bundled `claude`, an MCP server, or a `pyright` waits for worker startup or the next hourly pass (at most ~1h, still faster than the old 2h sweep).
 
 ### Risk 2: Test or tooling still patches a deleted attribute
-**Impact:** `patch("monitoring.bridge_watchdog._enumerate_claude_processes")` raises `AttributeError` at test time.
-**Mitigation:** Test Impact enumerates both known files; Verification includes a `git grep` sweep for every removed symbol across the repo, which must return nothing.
+**Impact:** `patch("monitoring.bridge_watchdog._enumerate_claude_processes")` raises `AttributeError` at test time (ten decorator sites in `test_bridge_watchdog.py` across three classes, plus two `with` blocks in `test_reconciler_scan_health.py`).
+**Mitigation:** Test Impact lists every class, but the enumeration is not the guarantee: the completeness gate (`git grep` over `tests/` for the removed symbols returns nothing) and the repo-wide Verification sweep are. A sweep, not a checklist.
 
 ### Risk 3: A human process with PPID==1 matches the worker reaper
 **Impact:** an interactive `claude --permission-mode bypassPermissions` whose shell parent died (reparented to launchd, no TTY) could be reaped by the worker.
 **Mitigation:** this is unchanged by the plan and matches the issue's own standard of positive orphan evidence (parent gone, no owning session). The enriched log line makes any such kill attributable. Noted, not changed (see Rabbit Holes).
+
+### Risk 4: The new `pyright` signature reaps a pyright a human still wants
+**Impact:** a `pyright` whose parent died (editor crashed, terminal closed without SIGHUP reaching it) now gets reaped at the next hourly pass.
+**Mitigation:** a `pyright-langserver` with its client gone serves nobody; its stdio peer is dead. A `pyright` under a live editor or live harness has a non-1 parent and is never a candidate. The match is a word-bounded regex behind the PPID and ownership gates, never a name-only kill, and the Killed line records `sig=pyright`, the command, and `ppid=1`, so any surprising kill is attributable in `logs/worker.log`.
 
 ## Race Conditions
 
@@ -210,8 +220,9 @@ CLI surface.
 
 - [ ] An interactive `claude` process older than 2h, not descended from the bridge or worker, is never signalled by the watchdog, from `check_bridge_health()` or from `execute_recovery()` at levels 2, 3, or 4. Covered by a regression test that is **proven red** against the pre-change `monitoring/bridge_watchdog.py` (the builder runs the new test against `origin/main`'s watchdog and pastes the failing output into the PR description).
 - [ ] A genuinely orphaned worker-spawned `claude -p` (PPID==1, no live owning AgentSession) is still cleaned up, by the worker reapers, whose existing tests stay green.
-- [ ] Every orphan kill log line (hourly reaper SIGTERM, fast reaper SIGTERM and SIGKILL) includes the command, the parent PID, and the evidence behind the verdict. Covered by log-capture tests.
-- [ ] No sweep anywhere in the repo matches `pyright` by name (`git grep -n '"pyright"'` over `monitoring/ agent/ worker/` is empty).
+- [ ] Every orphan-reaper kill log line includes the command, the parent PID, and the evidence behind the verdict: the hourly reaper's parent Killed line, its per-descendant Killed line, its `Drain: SIGKILL'd` escalation line, and the fast reaper's SIGTERM and SIGKILL lines. Covered by log-capture tests. Scope note: `[reap-killlist] SIGKILL'd boot-persisted survivor` (`agent/reap_killlist.py`) is a recorded-PID kill of a wedge survivor whose evidence (`pgid`, `session`) was captured at wedge time and is already on the line; it is not a name-matched orphan kill and is unchanged.
+- [ ] An orphaned `pyright-langserver` (PPID==1, no owning session) is reaped by the hourly/startup worker reaper; a `pyright` with a live parent is not a candidate. Covered by unit tests.
+- [ ] Nothing in the watchdog matches `pyright` or `claude` process names (`git grep -n -i pyright -- monitoring/` is empty).
 - [ ] None of the removed watchdog symbols remains referenced anywhere in the repo outside `docs/plans/` and `docs/archive/`.
 - [ ] `docs/features/bridge-self-healing.md` and `docs/features/agent-session-health-monitor.md` describe the new behavior only.
 - [ ] Tests pass (`/do-test`)
@@ -272,9 +283,12 @@ CLI surface.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `ORPHAN_KILL_LOG_CMD_CHARS = 500` near the other `ORPHAN_*` constants in `agent/session_health.py`.
-- In `_reap_orphan_session_processes`, record the orphan route when the PPID gate passes, and extend the `[orphan-reap] Killed PID` line with `ppid`, the route, and the ownership evidence (no owning session, or the found session's id, status, and heartbeat age).
+- In `_reap_orphan_session_processes`, record the orphan route when the PPID gate passes, and extend the `[orphan-reap] Killed PID` line with `ppid`, `sig=` (claude / mcp / pyright / oneshot), the route, and the ownership evidence (no owning session, or the found session's id, status, and heartbeat age).
+- Add a per-descendant `[orphan-reap] Killed descendant PID` line (command, `ppid=`, `descendant of orphan PID <parent>`), reading cmdline/ppid in a guard before `terminate()`.
+- Extend the Step 1 drain line `[orphan-reap] Drain: SIGKILL'd PID` with command, `ppid=`, and `escalation: survived SIGTERM, create_time matched`, reading cmdline/ppid in a guard that can never skip `proc.kill()`.
+- Add `_PYRIGHT_CMDLINE_RE` and `is_pyright` to the signature test, behind the unchanged PPID and ownership gates (see Technical Approach).
 - In `_fast_reap_stale_print_oneshots`, extend the SIGTERM and SIGKILL lines with `ppid=1`, age in seconds, and `owner=not-live`.
-- Add tests in `tests/unit/test_session_health_orphan_process_reap.py` using `caplog`: one per log line, including the session-`None` case and a session whose `last_heartbeat_at` is `None`, asserting the command text, `ppid=`, and the evidence token appear.
+- Add tests in `tests/unit/test_session_health_orphan_process_reap.py` using `caplog`: one per log line (parent, descendant, drain escalation, fast SIGTERM, fast SIGKILL), including the session-`None` case, a session whose `last_heartbeat_at` is `None`, and a drain where `cmdline()` raises `AccessDenied` (assert `kill()` still ran and the line reads `<unreadable>`), asserting the command text, `ppid=`, and the evidence token appear. Add the `pyright` signature tests listed in Test Impact.
 
 ### 4. Validate
 - **Task ID**: validate-all-code
@@ -310,7 +324,9 @@ CLI surface.
 | Lint clean | `python -m ruff check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
 | Format clean | `python -m ruff format --check monitoring/bridge_watchdog.py agent/session_health.py tests/unit/test_bridge_watchdog.py tests/unit/test_reconciler_scan_health.py tests/unit/test_session_health_orphan_process_reap.py` | exit code 0 |
 | Removed symbols gone | `git grep -n -E "ZOMBIE_THRESHOLD_SECONDS\|SOFT_INSTANCE_LIMIT\|ZOMBIE_PROCESS_PATTERNS\|ZOMBIE_PROCESS_EXCLUDES\|_enumerate_claude_processes\|classify_zombies\|kill_zombie_processes\|_kill_detected_zombies\|zombie_memory_mb\|active_claude_count" -- ':!docs/plans' ':!docs/archive' \| wc -l` | match count == 0 |
-| No pyright sweep | `git grep -n '"pyright"' -- monitoring agent worker \| wc -l` | match count == 0 |
+| Watchdog matches no process names | `git grep -n -i -E 'pyright\|"claude "' -- monitoring \| wc -l` | match count == 0 |
+| No test patches a removed symbol | `git grep -n -E "_enumerate_claude_processes\|kill_zombie_processes\|_kill_detected_zombies\|classify_zombies" tests/ \| wc -l` | match count == 0 |
+| Pyright reaped only behind the gate | `grep -c "is_pyright" agent/session_health.py` | output > 0 |
 | Docs describe new state | `grep -c -i "zombie process detection\|kill zombies" docs/features/bridge-self-healing.md` | match count == 0 |
 | Regression test present | `grep -c "class TestWatchdogNeverSignalsClaudeProcesses" tests/unit/test_bridge_watchdog.py` | output > 0 |
 
@@ -318,11 +334,11 @@ CLI surface.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Orphaned pyright is unreaped after the sweep is deleted. A harness that dies abnormally (OOM SIGKILL, crash) leaves its pyright-langserver at PPID==1. No worker reaper signature (`_CLAUDE_CMDLINE_RE`, `_MCP_SERVER_CMDLINE_RE`, `_is_stale_print_oneshot`) matches it, so it leaks forever: the #426 scenario. "Dies with the harness" holds only for a runner-initiated killpg. | pending | In `_reap_orphan_session_processes`, add an `is_pyright` signature (`pyright(-langserver)?\b`) beside is_claude/is_mcp and route it through the existing `ppid != 1 and not _parent_is_orphaned_shell_wrapper(ppid)` gate unchanged. Never add a name-only match without the PPID gate. Alternatively, record it as an accepted residual in Risks and say how an operator would detect it. |
-| CONCERN | History & Consistency | Test Impact misses 7 tests that `@patch("monitoring.bridge_watchdog._enumerate_claude_processes")`: TestCrashDetectionOnBridgeDeath (3 tests; decorators at lines 611/638/665) and TestCrashStormActionAlertSplit (4 tests; lines 1006/1034/1058/1085). Once the symbol is deleted they all raise AttributeError, so Risk 2's completeness claim is false. | pending | These are stacked @patch decorators, so removing the decorator also means removing its mock parameter. The bottom-most decorator maps to the first mock argument, and dropping only the decorator shifts later mocks (TypeError or wrong-mock asserts). Confirm with `git grep -n _enumerate_claude_processes tests/`, which must return nothing. |
-| CONCERN | Scope & Value | The issue AC says "Every kill log line includes the command, parent PID, and the evidence", but the plan covers only three lines. The hourly drain line `[orphan-reap] Drain: SIGKILL'd PID %d (escalation)` still logs a bare PID, and terminated descendants get no per-PID line. | pending | At drain time the code already holds a create_time-matched `proc`. Read `proc.cmdline()` and `proc.ppid()` before `proc.kill()`, inside a guard so AccessDenied never skips the kill. Log cmd capped at ORPHAN_KILL_LOG_CMD_CHARS plus `escalation: survived SIGTERM, create_time matched`. Also list descendant PIDs on the Killed line, or scope the Success Criterion explicitly. |
-| NIT | Risk & Robustness | Risk 1's "worst case ... (next tick)" holds only for stale `-p` one-shots. Non-`-p` bypassPermissions or SDK-bundled orphans wait for worker startup or the hourly pass. | pending | Qualify the sentence. |
-| NIT | History & Consistency | `worker/__main__.py:903` calls the shim `_cleanup_orphaned_claude_processes()`, not `_reap_orphan_session_processes()` directly. | pending | Name the shim in Data Flow and the Freshness Check. |
+| CONCERN | Risk & Robustness | Orphaned pyright is unreaped after the sweep is deleted. A harness that dies abnormally (OOM SIGKILL, crash) leaves its pyright-langserver at PPID==1. No worker reaper signature (`_CLAUDE_CMDLINE_RE`, `_MCP_SERVER_CMDLINE_RE`, `_is_stale_print_oneshot`) matches it, so it leaks forever: the #426 scenario. "Dies with the harness" holds only for a runner-initiated killpg. | Technical Approach (pyright bullet), Risk 4, Step 3, Success Criteria, Verification | In `_reap_orphan_session_processes`, add an `is_pyright` signature (`pyright(-langserver)?\b`) beside is_claude/is_mcp and route it through the existing `ppid != 1 and not _parent_is_orphaned_shell_wrapper(ppid)` gate unchanged. Never add a name-only match without the PPID gate. Alternatively, record it as an accepted residual in Risks and say how an operator would detect it. |
+| CONCERN | History & Consistency | Test Impact misses 7 tests that `@patch("monitoring.bridge_watchdog._enumerate_claude_processes")`: TestCrashDetectionOnBridgeDeath (3 tests; decorators at lines 611/638/665) and TestCrashStormActionAlertSplit (4 tests; lines 1006/1034/1058/1085). Once the symbol is deleted they all raise AttributeError, so Risk 2's completeness claim is false. | Test Impact (two classes + completeness gate), Risk 2, Verification | These are stacked @patch decorators, so removing the decorator also means removing its mock parameter. The bottom-most decorator maps to the first mock argument, and dropping only the decorator shifts later mocks (TypeError or wrong-mock asserts). Confirm with `git grep -n _enumerate_claude_processes tests/`, which must return nothing. |
+| CONCERN | Scope & Value | The issue AC says "Every kill log line includes the command, parent PID, and the evidence", but the plan covers only three lines. The hourly drain line `[orphan-reap] Drain: SIGKILL'd PID %d (escalation)` still logs a bare PID, and terminated descendants get no per-PID line. | Technical Approach (drain + descendant bullets), Step 3, Success Criteria (scope note for reap-killlist) | At drain time the code already holds a create_time-matched `proc`. Read `proc.cmdline()` and `proc.ppid()` before `proc.kill()`, inside a guard so AccessDenied never skips the kill. Log cmd capped at ORPHAN_KILL_LOG_CMD_CHARS plus `escalation: survived SIGTERM, create_time matched`. Also list descendant PIDs on the Killed line, or scope the Success Criterion explicitly. |
+| NIT | Risk & Robustness | Risk 1's "worst case ... (next tick)" holds only for stale `-p` one-shots. Non-`-p` bypassPermissions or SDK-bundled orphans wait for worker startup or the hourly pass. | Risk 1 (latency by class) | Qualify the sentence. |
+| NIT | History & Consistency | `worker/__main__.py:903` calls the shim `_cleanup_orphaned_claude_processes()`, not `_reap_orphan_session_processes()` directly. | Freshness Check, Data Flow | Name the shim in Data Flow and the Freshness Check. |
 
 ---
 
