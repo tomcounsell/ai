@@ -128,3 +128,15 @@ class TestSkillsSyncPauseIsANoticeNotAWarning:
 
         assert lines and hardlinks.SKILLS_PAUSED_DETAIL in lines[0]
         assert extract_update_warnings(["update successful", *lines]) == []
+
+    def test_notice_is_inert_beside_warnings_and_failures(self):
+        """Every cron summary shape: the notice adds nothing to what the
+        parser returns and does not break the declared-count cross-check."""
+        from bridge.update import extract_update_warnings
+
+        lines = notice_lines(self._paused())
+
+        warned = ["up to date at abc1234 (1 warning)", "  ⚠️ disk low", *lines]
+        assert extract_update_warnings(warned) == ["disk low"]
+        failed = ["update failed at abc1234", "  - pull failed", *lines]
+        assert extract_update_warnings(failed) == ["pull failed"]

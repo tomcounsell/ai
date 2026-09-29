@@ -38,6 +38,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # consumer can never spell it differently (the drift that produced Defect 2).
 SUPPRESSED_PREFIX = "suppressed (unchanged since first warning):"
 
+# Leading glyph of a notice bullet in the cron summary: a deliberate operator
+# state reported every run, such as a paused skills sync (#3581). Not a warning,
+# so `extract_update_warnings` ignores it; `bridge/update.py` forwards it to the
+# Telegram reply the same way it forwards the suppression trailer. Shared by
+# both sides for the same reason as SUPPRESSED_PREFIX.
+NOTICE_PREFIX = "ℹ️"
+
 
 def _state_path(project_dir: Path) -> Path:
     return project_dir / "data" / _STATE_FILENAME

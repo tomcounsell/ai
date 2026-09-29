@@ -294,7 +294,7 @@ def report_hardlink_actions(result: UpdateResult, v: bool) -> None:
 def notice_lines(result: UpdateResult) -> list[str]:
     """The cron summary's notice bullets. Deliberately not the warning glyph,
     so bridge/update.py's extract_update_warnings never reads them as work."""
-    return [f"  ℹ️ {notice}" for notice in result.notices]
+    return [f"  {warn_state.NOTICE_PREFIX} {notice}" for notice in result.notices]
 
 
 def _append_error(result: UpdateResult, text: str) -> None:

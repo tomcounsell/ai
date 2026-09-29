@@ -490,6 +490,19 @@ async def handle_update_command(tg_client, event):
         except Exception as e:
             logger.debug("[update] suppressed-trailer forwarding failed (non-fatal): %s", e)
 
+        # Notice forwarding (#3581): deliberate operator states, such as a
+        # paused skills sync, reported every run. Outside the failed/has_warnings
+        # branch for the same reason as the trailer: the modal case is a clean
+        # run, and a paused machine must not read as a plain "update OK".
+        try:
+            from scripts.update.warn_state import NOTICE_PREFIX
+
+            for line in status_lines:
+                if line.strip().startswith(NOTICE_PREFIX):
+                    status += f"\n{line.strip()}"
+        except Exception as e:
+            logger.debug("[update] notice forwarding failed (non-fatal): %s", e)
+
         await tg_client.send_message(event.chat_id, f"{machine} - {status}")
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
