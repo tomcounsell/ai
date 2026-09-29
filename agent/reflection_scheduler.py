@@ -49,7 +49,9 @@ SCHEDULER_TICK_INTERVAL = 60
 # At worker startup all ~30 reflections are overdue; without a cap they fire
 # as concurrent asyncio tasks in a single pass, saturating the event loop and
 # starving time-sensitive coroutines (e.g. session delivery callbacks).
-# Remaining due reflections are deferred to the next tick (~60s later).
+# The cap also binds in steady state whenever demand exceeds it. Due function
+# reflections are dispatched oldest-due first, so a reflection the cap skipped
+# is at the front of the line next tick and none starves by registry position.
 # Provisional / tunable — override via REFLECTION_STARTUP_MAX_CONCURRENT env var.
 REFLECTION_STARTUP_MAX_CONCURRENT = int(os.environ.get("REFLECTION_STARTUP_MAX_CONCURRENT", "4"))
 
@@ -869,6 +871,10 @@ class ReflectionScheduler:
         self._registry_path = registry_path
         self._entries: list[ReflectionEntry] = []
         self._running_tasks: dict[str, asyncio.Task] = {}
+        # name -> epoch when a due function reflection was first deferred by the
+        # per-tick cap in its current deferral episode. Rebuilt every tick; pins
+        # the age of never-run entries, whose due time is re-stamped to "now".
+        self._deferred_since: dict[str, float] = {}
         self._started = False
         # The file the current entries came from and its (mtime_ns, size) at
         # that moment; ``reload_if_changed`` compares against these each tick.
@@ -947,6 +953,17 @@ class ReflectionScheduler:
     async def tick(self) -> int:
         """Run one scheduler tick: check all reflections and enqueue due ones.
 
+        Due function-type reflections are collected during the registry walk and
+        dispatched afterwards, oldest-due first (ties broken by registry order),
+        up to ``REFLECTION_STARTUP_MAX_CONCURRENT``. The rest are deferred and
+        rank first on later ticks. Absent dispatch failures, and provided no
+        entry stays due after it runs, every due function reflection is
+        dispatched within ceil((N - 1) / cap) ticks of its first deferral, where
+        N is the number of enabled function-type entries. A same-named duplicate
+        registry entry is skipped with a warning so one tick never dispatches a
+        reflection twice.
+        Agent-type reflections are awaited inline and are not capped.
+
         Returns:
             Number of reflections enqueued this tick.
         """
@@ -957,12 +974,11 @@ class ReflectionScheduler:
 
         now = time.time()
         enqueued = 0
-        # Count of function-type reflections dispatched this tick.  We cap at
-        # REFLECTION_STARTUP_MAX_CONCURRENT to avoid saturating the event loop
-        # when many reflections are simultaneously overdue (e.g. at startup).
-        function_dispatched_this_tick = 0
+        # Due function-type reflections: (registry index, entry, state, due_epoch).
+        candidates: list[tuple[int, ReflectionEntry, Reflection, float | None]] = []
+        collected: set[str] = set()
 
-        for entry in self._entries:
+        for index, entry in enumerate(self._entries):
             try:
                 state = Reflection.get_or_create(entry.name, schedule=entry.schedule)
 
@@ -1005,37 +1021,23 @@ class ReflectionScheduler:
 
                 # Execute or enqueue
                 if entry.execution_type == "function":
-                    # Per-tick cap: defer excess function-type reflections to the
-                    # next tick (~60s) to avoid event-loop saturation at startup.
-                    if function_dispatched_this_tick >= REFLECTION_STARTUP_MAX_CONCURRENT:
-                        logger.debug(
-                            "[reflection] Deferring %s to next tick (per-tick cap %d reached)",
+                    # Dispatch is deferred until after the walk, so a duplicate
+                    # name would read the same not-yet-started state and be
+                    # dispatched twice in this tick.
+                    if entry.name in collected:
+                        logger.warning(
+                            "[reflection] Skipping duplicate registry entry %s this tick",
                             entry.name,
-                            REFLECTION_STARTUP_MAX_CONCURRENT,
                         )
                         continue
-
-                    logger.info("[reflection] %s is due, executing", entry.name)
-                    # Run function-type reflections as background tasks
-                    task = asyncio.create_task(
-                        run_reflection(entry, state, due_epoch=due_epoch),
-                        name=f"reflection-{entry.name}",
-                    )
-                    self._running_tasks[entry.name] = task
-                    # Clean up completed tasks
-                    task.add_done_callback(
-                        lambda t, name=entry.name: self._running_tasks.pop(name, None)
-                    )
-                    function_dispatched_this_tick += 1
-                    # Yield the event loop between dispatches so time-sensitive
-                    # coroutines (e.g. session delivery callbacks) can be scheduled.
-                    await asyncio.sleep(0)
+                    collected.add(entry.name)
+                    candidates.append((index, entry, state, due_epoch))
+                    continue
                 else:
                     logger.info("[reflection] %s is due, executing", entry.name)
                     # Agent-type reflections are enqueued to session queue
                     await run_reflection(entry, state, due_epoch=due_epoch)
-
-                enqueued += 1
+                    enqueued += 1
 
             except Exception as e:
                 logger.error(
@@ -1045,7 +1047,86 @@ class ReflectionScheduler:
                     exc_info=True,
                 )
 
+        enqueued += await self._dispatch_function_candidates(candidates, now)
         return enqueued
+
+    async def _dispatch_function_candidates(
+        self,
+        candidates: list[tuple[int, ReflectionEntry, Reflection, float | None]],
+        now: float,
+    ) -> int:
+        """Dispatch the oldest-due ``REFLECTION_STARTUP_MAX_CONCURRENT`` candidates.
+
+        Age key is ``min(due_epoch, deferred_since)``: ``due_epoch`` ages on its
+        own for reflections with a last run, ``deferred_since`` pins the age of
+        never-run entries (whose due time is re-stamped to ``now`` each tick).
+        Replaces ``self._deferred_since`` with this tick's deferred set.
+        """
+        previously_deferred = self._deferred_since
+        deferred: dict[str, float] = {}
+
+        def age_key(
+            candidate: tuple[int, ReflectionEntry, Reflection, float | None],
+        ) -> tuple[float, int]:
+            index, entry, _state, due_epoch = candidate
+            age = due_epoch if due_epoch is not None else now
+            return (min(age, previously_deferred.get(entry.name, float("inf"))), index)
+
+        dispatched = 0
+        slots_used = 0
+        for candidate in sorted(candidates, key=age_key):
+            _index, entry, state, due_epoch = candidate
+            name = entry.name
+            if slots_used >= REFLECTION_STARTUP_MAX_CONCURRENT:
+                first_deferred = previously_deferred.get(name)
+                if first_deferred is None:
+                    deferred[name] = now
+                    logger.info(
+                        "[reflection] Deferring %s (per-tick cap %d reached; due since %.0fs ago)",
+                        name,
+                        REFLECTION_STARTUP_MAX_CONCURRENT,
+                        max(0.0, now - (due_epoch if due_epoch is not None else now)),
+                    )
+                else:
+                    deferred[name] = first_deferred
+                    logger.debug(
+                        "[reflection] Still deferring %s (per-tick cap %d reached)",
+                        name,
+                        REFLECTION_STARTUP_MAX_CONCURRENT,
+                    )
+                continue
+
+            # A failed attempt still spends its slot.
+            slots_used += 1
+            try:
+                if name in previously_deferred:
+                    logger.info(
+                        "[reflection] %s dispatched after %.0fs deferred by per-tick cap",
+                        name,
+                        now - previously_deferred[name],
+                    )
+                else:
+                    logger.info("[reflection] %s is due, executing", name)
+                # Run function-type reflections as background tasks
+                task = asyncio.create_task(
+                    run_reflection(entry, state, due_epoch=due_epoch),
+                    name=f"reflection-{name}",
+                )
+                self._running_tasks[name] = task
+                # Clean up completed tasks
+                task.add_done_callback(lambda t, name=name: self._running_tasks.pop(name, None))
+                dispatched += 1
+                # Yield the event loop between dispatches so time-sensitive
+                # coroutines (e.g. session delivery callbacks) can be scheduled.
+                await asyncio.sleep(0)
+            except Exception as e:
+                deferred[name] = previously_deferred.get(name, now)
+                logger.error(
+                    "[reflection] Error dispatching reflection '%s': %s", name, e, exc_info=True
+                )
+
+        self._deferred_since = deferred
+        return dispatched
 
     def reap_stale_running(self) -> int:
         """Force-mark Reflection records that have been ``last_status="running"`` past
@@ -1122,8 +1203,14 @@ class ReflectionScheduler:
         while True:
             try:
                 enqueued = await self.tick()
-                if enqueued > 0:
-                    logger.info("[reflection] Tick complete: %d reflection(s) enqueued", enqueued)
+                deferred = len(self._deferred_since)
+                if enqueued > 0 or deferred > 0:
+                    logger.info(
+                        "[reflection] Tick complete: %d reflection(s) enqueued, "
+                        "%d deferred by per-tick cap",
+                        enqueued,
+                        deferred,
+                    )
             except Exception as e:
                 logger.error("[reflection] Scheduler tick error: %s", e, exc_info=True)
 
