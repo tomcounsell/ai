@@ -29,7 +29,8 @@ def _cleanup(key: str) -> None:
     from models.agent_session import AgentSession
 
     for row in AgentSession.query.filter(project_key=key):
-        release_if_bound_to(f"handoff:it:{key}|telegram:{CHAT}:k1", row.agent_session_id)
+        for suffix in ("k1", "k2"):
+            release_if_bound_to(f"handoff:it:{key}|telegram:{CHAT}:{suffix}", row.agent_session_id)
         row.delete()
 
 

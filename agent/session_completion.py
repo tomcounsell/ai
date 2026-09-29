@@ -1182,7 +1182,10 @@ async def _send_interrupted_message(
     value returns immediately with no send.
     """
     from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
+    from config.enums import is_reflection_handoff  # noqa: PLC0415
 
+    if is_reflection_handoff(parent):
+        return  # no human waiting on a reflection handoff (#3588)
     reason = get_cancel_reason(session_id)
     if reason != "no_resume":
         return

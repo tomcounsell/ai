@@ -27,7 +27,7 @@ from agent.worktree_manager import (
     WORKTREES_DIR,
     validate_workspace,
 )
-from config.enums import ClassificationType, SessionType
+from config.enums import ClassificationType, SessionType, is_reflection_handoff
 from config.project_key_resolver import resolve_project_key
 from config.settings import settings
 from models.agent_session import AgentSession
@@ -975,7 +975,7 @@ def steer_session(session_id: str, message: str) -> dict:
         return {"success": False, "session_id": session_id, "error": str(e)}
 
 
-async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
+async def _maybe_send_failure_notice(messenger, session_id: str, session=None) -> None:
     """Best-effort user-facing notice on a running->failed transition (#1877 defect #2).
 
     Mirrors the CancelledError best-effort interrupted-message pattern. Guarantees:
@@ -996,6 +996,12 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
     try:
         from agent.cancel_reason import get_cancel_reason
         from agent.notification_copy import FAILURE_NOTICE
+        from config.enums import is_reflection_handoff
+
+        # A reflection-handoff session has no human waiting (#3588): its
+        # failure stays an operator signal.
+        if session is not None and is_reflection_handoff(session):
+            return
 
         # Cross-class dedup collision (critique concern): a killer that already
         # owns a *no-resume* exit narrative must not be double-messaged. The
@@ -2624,7 +2630,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # used to be silent — no Telegram message at all. Best-effort, deduped,
         # and never blocking finalization; see `_maybe_send_failure_notice`.
         if task.error and not chat_state.defer_reaction:
-            await _maybe_send_failure_notice(messenger, session.session_id)
+            await _maybe_send_failure_notice(messenger, session.session_id, session)
 
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
@@ -3056,7 +3062,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     if _runner_exit_reason_local is not None
                     else getattr(_agent_session_for_cleanup, "exit_reason", None)
                 )
-                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
+                # A handoff session's timeout has no reply coming to resume it,
+                # so its worktree is reclaimed like any other terminal exit.
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT and not (
+                    _agent_session_for_cleanup is not None
+                    and is_reflection_handoff(_agent_session_for_cleanup)
+                )
                 if _wd is not None:
                     # Pre-finalize guard (#3176). Its one remaining job is
                     # the CANCELLED exit: `_finalize_if_still_running` at the

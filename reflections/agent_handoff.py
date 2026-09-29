@@ -198,7 +198,7 @@ def _live_session_in_room(room_id: str, holder: str | None):
             holder_row = _resolve_holder_row(holder)
             holder_ids = {holder, getattr(holder_row, "id", None)}
             for row in live:
-                if (
+                if not _needs_delivery_row(row) and (
                     getattr(row, "id", None) in holder_ids
                     or getattr(row, "session_id", None) == holder
                     or getattr(row, "agent_session_id", None) == holder

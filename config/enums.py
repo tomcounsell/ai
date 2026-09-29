@@ -18,6 +18,17 @@ from enum import StrEnum
 REFLECTION_HANDOFF_ORIGIN = "reflection_handoff"
 
 
+def is_reflection_handoff(session: object) -> bool:
+    """True for a session created by ``reflections.agent_handoff`` (#3588).
+
+    Keys on the explicit origin marker only. Every canned human-facing notice
+    (turn timeout, steer abort, failure, interrupt) checks it, because a
+    handoff session has no human waiting in the Room.
+    """
+    extra = getattr(session, "extra_context", None)
+    return isinstance(extra, dict) and extra.get("origin") == REFLECTION_HANDOFF_ORIGIN
+
+
 class SessionType(StrEnum):
     """Discriminator for AgentSession: eng or teammate."""
 

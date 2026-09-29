@@ -279,6 +279,30 @@ async def test_steer_during_completion_drains_at_boundary_no_kill():
 # --------------------------------------------------------------------------
 
 
+async def test_handoff_session_timeout_is_failed_and_silent():
+    """A reflection-handoff session that blows its deadline ends TURN_TIMEOUT
+    (non-clean, so the executor finalizes it `failed`) without paging the Room (#3588)."""
+    driver = KillableDriver()
+
+    def fake_kill(pid, sig):
+        driver.kill_event.set()
+
+    runner, deliveries, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        kill_fn=fake_kill,
+        killpg_fn=fake_kill,
+        pid_alive_fn=lambda pid: False,
+        idle_timeout_s=0.12,
+    )
+    session.session_id = f"dbg-handoff-timeout-{uuid.uuid4()}"
+    session.extra_context = {"origin": "reflection_handoff", "handoff_source": "t"}
+    summary = await runner.run("long task")
+    assert summary.exit_reason is ExitReason.TURN_TIMEOUT
+    assert not summary.exit_reason.is_clean
+    assert deliveries == []
+
+
 async def test_timeout_expiry_is_graceful_preempt_not_error():
     driver = KillableDriver()
     kills = []

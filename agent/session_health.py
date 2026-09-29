@@ -2515,7 +2515,10 @@ async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
     Never raises; failures are logged at WARNING and swallowed.
     """
     from agent.notification_copy import INTERRUPT_NO_RESUME  # noqa: PLC0415
+    from config.enums import is_reflection_handoff  # noqa: PLC0415
 
+    if is_reflection_handoff(entry):
+        return  # no human waiting on a reflection handoff (#3588)
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     await _deliver_oneshot_dedup_notice(
         entry,

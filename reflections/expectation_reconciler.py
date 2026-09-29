@@ -34,7 +34,7 @@ Nothing here writes to a human chat. Every finding goes through
 ``reflections.agent_handoff.hand_off``: an agent in the Job's Room judges it and
 speaks to a human, in persona, only when a decision is needed. A handoff that
 cannot reach an agent is an operator-surface finding and leaves the sentinel
-unset, so a later tick retries under the cooldown.
+unset, so it retries once per cooldown window.
 
 Nothing here ever discharges an expectation, takes a lock, or writes
 anything outside its own raw-Redis bookkeeping keys and the handoff — expectations are
@@ -213,7 +213,7 @@ def _mark_handed_off(job_id: str, eid: str) -> None:
 
     Written only after a delivered handoff (``steered`` / ``created``). An
     unreachable or rate-capped handoff leaves it unset and relies on the
-    cooldown key, so a transient failure retries on a later tick instead of
+    cooldown key, so a transient failure retries after the cooldown instead of
     being suppressed for the sentinel's whole TTL.
     """
     key = _ESCALATED_KEY.format(job=job_id, eid=eid)
@@ -607,6 +607,10 @@ def _reconcile_project(project: dict) -> dict:
                 slug = _lane_slug(owner, project_key)
                 base_evidence = {"expected": what, "lane_owner": owner or "unrecorded"}
                 if attempts >= _max_attempts():
+                    # The cooldown paces an undelivered handoff at this rung: it
+                    # retries once per cooldown window, not once per tick.
+                    if not _cooldown_claim(job.job_id, eid):
+                        continue
                     result = _handoff(
                         project,
                         job,
@@ -625,8 +629,8 @@ def _reconcile_project(project: dict) -> dict:
                     )
                     _note_handoff(result, job, eid, findings, counts, mark=True)
                     if result.delivered:
-                        # An undelivered handoff must retry on a later tick, so
-                        # only a delivered one parks the expectation.
+                        # An undelivered handoff must retry after the cooldown,
+                        # so only a delivered one parks the expectation.
                         _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
                     continue
                 if not _cooldown_claim(job.job_id, eid):

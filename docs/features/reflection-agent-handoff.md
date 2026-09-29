@@ -74,10 +74,13 @@ explicit origin marker and ends:
 | Delivery-required handoff ends with nothing to say | `HANDOFF_UNDELIVERED` | `failed` |
 | Handoff session already routed a user-facing message | ordinary exit | ordinary |
 
-A handoff session never receives the wrap-up turn or the canned human text
-(`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`). A harness-level empty
-output, a harness error, or running out of turns ends as the non-clean anomaly
-`ERROR`, visible to the operator and silent in the Room.
+A handoff session never receives the wrap-up turn or any canned human text
+(`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`, the turn-timeout and
+steer-abort notices, the executor failure notice, the interrupt notice). A
+harness-level empty output, a harness error, or running out of turns ends as the
+non-clean anomaly `ERROR`; a turn timeout ends `TURN_TIMEOUT` (`failed`). All are
+visible to the operator and silent in the Room. A timed-out handoff session's
+worktree is reclaimed like any other terminal exit, since no reply will resume it.
 
 Handoff sessions run in the same synthetic-slug worktree as any slugless eng
 session, so the main-checkout guard applies when a brief leads the agent to fix

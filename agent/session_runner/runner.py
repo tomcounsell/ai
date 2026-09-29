@@ -88,7 +88,7 @@ from agent.session_runner.router import (
     validate_structured_route,
 )
 from agent.session_runner.transcript_tailer import last_assistant_text
-from config.enums import REFLECTION_HANDOFF_ORIGIN
+from config.enums import is_reflection_handoff
 
 logger = logging.getLogger(__name__)
 
@@ -1025,7 +1025,8 @@ class SessionRunner:
                 # -- Steering boundary drain (D4 + boundary case of Race 1) --
                 steers, abort = self._drain_steering_boundary()
                 if abort:
-                    self._adapter.on_user_payload(STEER_ABORT_USER_MESSAGE)
+                    if not self._is_handoff_session():
+                        self._adapter.on_user_payload(STEER_ABORT_USER_MESSAGE)
                     summary.exit_reason = ExitReason.STEER_ABORT
                     break
                 if steers:
@@ -1055,7 +1056,9 @@ class SessionRunner:
                             if handle.kill_cause == TIMEOUT_KILL_CAUSE_ABSOLUTE
                             else TIMEOUT_NEEDS_ATTENTION_MESSAGE
                         )
-                        if _claim_timeout_notice(
+                        # A handoff session has no human waiting: its timeout
+                        # stays an operator signal, never a page (#3588).
+                        if not self._is_handoff_session() and _claim_timeout_notice(
                             str(getattr(self._agent_session, "session_id", "") or ""),
                             str(getattr(self._agent_session, "id", "") or ""),
                         ):
@@ -1930,8 +1933,7 @@ class SessionRunner:
 
     def _is_handoff_session(self) -> bool:
         """True for a session created by ``reflections.agent_handoff``."""
-        extra = getattr(self._agent_session, "extra_context", None)
-        return isinstance(extra, dict) and extra.get("origin") == REFLECTION_HANDOFF_ORIGIN
+        return is_reflection_handoff(self._agent_session)
 
     def _handoff_silent_exit_reason(self) -> ExitReason | None:
         """Exit reason for a reflection-handoff session ending with nothing to say.

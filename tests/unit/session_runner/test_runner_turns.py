@@ -639,6 +639,16 @@ async def test_handoff_max_turns_is_anomaly_without_wrapup_or_human_text():
     assert len(driver.calls) == 1
 
 
+async def test_handoff_steer_abort_sends_no_human_text():
+    steers = [[{"text": "stop it", "is_abort": True}]]
+    runner, deliveries, _, _ = make_runner(
+        ["x"], session=HandoffSession(), steering=lambda: steers.pop(0) if steers else []
+    )
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.STEER_ABORT
+    assert deliveries == []
+
+
 async def test_non_handoff_empty_turn_unchanged():
     """A session without the origin marker keeps wrap-up + fallback."""
     runner, deliveries, _, driver = make_runner(["", ""])
