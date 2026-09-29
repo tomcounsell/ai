@@ -337,9 +337,8 @@ def test_every_dispatch_template_is_explicitly_foreground():
     """Every `Task({`/`Agent({` template in the prompt surface sets the flag.
 
     This replaces a two-file glob over `**/SKILL.md` that could not see a
-    skill's sub-files -- `do-test/special-targets.md`,
-    `do-test/baseline-verification.md`, and `do-patch/SKILL.md` all shipped
-    flagless templates while that test passed (PR #2455 review).
+    skill's sub-files -- `do-test/special-targets.md` and `do-patch/SKILL.md`
+    both shipped flagless templates while that test passed (PR #2455 review).
 
     Scanning the whole surface rather than a named list is the durable part:
     a new sub-file, agent, or persona is covered the day it is written. The
@@ -374,7 +373,6 @@ def test_dispatch_template_discovery_finds_known_sites():
         ".claude/skills-global/do-build/WORKFLOW.md",
         ".claude/skills-global/do-patch/SKILL.md",
         ".claude/skills-global/do-test/special-targets.md",
-        ".claude/skills-global/do-test/baseline-verification.md",
         ".claude/skills-global/do-test/parallel-dispatch.md",
     ):
         assert anchor in found, (

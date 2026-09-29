@@ -91,8 +91,7 @@ Agent Types (by capability)
 │   └── agent-architect.md — Agent design
 ├── Validators (read-only)
 │   ├── validator.md — Acceptance verification
-│   ├── code-reviewer.md — Code quality
-│   └── baseline-verifier.md — Regression classification
+│   └── code-reviewer.md — Code quality
 ├── Domain Specialists (scoped tools)
 │   ├── stripe.md — stripe_* tools only
 │   ├── sentry.md — sentry_* tools only

@@ -105,32 +105,25 @@ Verify key imports work:
 
 If this fails, debug before continuing.
 
-## Step 3: Environment File (.env)
+## Step 3: Secrets and `.env`
 
-Check if `.env` exists. If not:
+Secrets live in the iCloud-synced vault `~/Desktop/Valor/.env`; the repo `.env` is a symlink to it. `/update` (`scripts/update/env_sync.py`) replaces a regular-file `.env` with that symlink, so anything written into a repo-local `.env` is lost. Create the link:
 
 ```bash
-cp .env.example .env
+cd ~/src/ai && ln -sfn ~/Desktop/Valor/.env .env
 ```
 
-**Ask the user** which project(s) this machine should monitor. The available projects are defined in `~/Desktop/Valor/projects.json` -- check the full list there. Common options:
-- Single project: `ACTIVE_PROJECTS=psyoptimal`
-- Multiple: `ACTIVE_PROJECTS=valor,popoto`
-- All: `ACTIVE_PROJECTS=valor,django-project-template,popoto,psyoptimal,flutter-project-template,cuttlefish,yudame-research`
-
-Edit `.env` and ensure these are set:
+If the vault `.env` is missing (first machine ever, or iCloud not yet synced), wait for iCloud or seed the vault file from `.env.example`. Required values (ask the user for any that are placeholder or missing; write them to the vault file):
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `ACTIVE_PROJECTS` | Yes | Comma-separated project keys |
 | `ANTHROPIC_API_KEY` | Yes | Starts with `sk-ant-` |
 | `TELEGRAM_API_ID` | Yes | Numeric, from my.telegram.org |
 | `TELEGRAM_API_HASH` | Yes | Hex string, from my.telegram.org |
 | `TELEGRAM_PHONE` | Yes | With country code, e.g. `+1234567890` |
 | `TELEGRAM_PASSWORD` | If 2FA on | Telegram 2FA password |
-| `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
 
-If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `~/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
+Which projects this machine serves comes from each project's `machine` field in `projects.json` ([project configuration](projects-config.md)), not from `.env`; `ACTIVE_PROJECTS` is only a fallback when no project names this machine. Ask the user which projects this machine should own.
 
 ## Troubleshooting
 

@@ -1,6 +1,6 @@
 ---
 name: authenticity-pass
-description: "Pre-publish human-signal gate for social media drafts. Use when /linkedin or /x-com is about to publish a post, or when asked to run an authenticity check on any draft file."
+description: "Pre-publish human-signal gate for social drafts. Use when /linkedin or /x-com is about to publish, or to authenticity-check a draft file."
 allowed-tools: Read, Bash, Write
 user-invocable: true
 argument-hint: "[draft-file-path]"
@@ -8,17 +8,9 @@ argument-hint: "[draft-file-path]"
 
 # Authenticity Pass
 
-A mandatory pre-publish gate. Reads the draft, scores it against three human-signal markers, and returns a structured PASS or BLOCK verdict with specific remediation.
+A pre-publish gate for social posts, comments, and replies: does the draft carry the signal of a human with real experience? It scores the draft against three markers and returns PASS or BLOCK with specific remediation. Style and register are de-slop's and the caller's cold-reader loop's job, not this gate's.
 
-The cold-reader loop (in `/linkedin` and `/x-com`) handles style, register, and audience fit. This gate handles one thing only: does this content carry signal that proves a human with real experience wrote it?
-
-## Input
-
-**Called by `/linkedin`:** reads `/tmp/linkedin-post.txt`
-**Called by `/x-com`:** reads `/tmp/x-post.txt`
-**Called directly:** reads the file path given as argument, or prompts if none.
-
-If the file doesn't exist or is empty, return BLOCK with reason "no draft found."
+**Input:** the draft file path passed by the caller or as the argument (linkedin posts: `/tmp/linkedin-post.txt`; X posts: `/tmp/x-post.txt`). Missing or empty file → BLOCK, reason "no draft found."
 
 ---
 
@@ -110,20 +102,12 @@ TO UNBLOCK:
    satisfy CONSTRAINT." Pull from what you know about the content's context.]
 ```
 
-Do not editorialize beyond this format. Style is the cold-reader loop's job.
+Nothing beyond this format.
 
 ---
 
 ## What the calling skill does with the verdict
 
-- **PASS** → proceed to publish
-- **BLOCK** → return the draft to the drafter subagent with the BLOCKING GAPS as revision instructions. The drafter revises and the authenticity-pass is re-invoked on the new draft.
-- **After 2 BLOCK→revise cycles with no PASS** → drop the post. The source material is too generic; no amount of editing will manufacture signal that isn't there.
-
-The 2-retry cap matters. A post that needs three authenticity loops to find one real number is a post without an angle. Better to ship nothing than to manufacture false specificity.
-
----
-
-## Why this gate exists
-
-Platform algorithms measurably punish AI-generic content: pure-AI posts earn 30-40% fewer LinkedIn impressions (360Brew practitioner data), and X's Phoenix algorithm suppresses low-variation automated posting. The three markers are the minimum human-signal footprint that distinguishes "AI helped me write this" from "AI wrote this instead of me" (Yudame Research, AI content marketing report, May 2026).
+- **PASS** → publish.
+- **BLOCK** → the drafter revises from BLOCKING GAPS and this gate re-runs on the new draft.
+- **After 2 BLOCK→revise cycles** → drop the item. Signal that isn't in the source material can't be edited in, and false specificity is worse than not posting.

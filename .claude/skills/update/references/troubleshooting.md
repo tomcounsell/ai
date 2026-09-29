@@ -58,7 +58,7 @@ tail -50 ~/src/ai/logs/worker_error.log
 
 ## Reflection scheduler dead or stale
 
-The scheduler is its own launchd subprocess (`python -m reflections`, label `com.valor.reflection-worker`) — separate from the worker since issue #1828.
+The scheduler is its own launchd subprocess (`python -m reflections`, label `com.valor.reflection-worker`).
 
 ```bash
 # Check logs

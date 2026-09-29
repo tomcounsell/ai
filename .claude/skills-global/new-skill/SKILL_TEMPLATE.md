@@ -1,22 +1,32 @@
 ---
 name: skill-name
-description: Use when [specific trigger conditions]. Also use when [additional triggers]. Handles [sub-capability 1], [sub-capability 2], and [sub-capability 3].
-allowed-tools: Read, Grep, Glob, Bash
+description: Use when [primary trigger]. [Trigger phrases users say]. (Aim for 120 chars or fewer.)
+# model / effort: choose from the placement table in new-skill/SKILL.md, or delete these lines
+# to inherit. Leave both unset for a skill invoked mid-task.
+# model: sonnet
+# effort: low
 ---
 
 # Skill Name
 
-## What this skill does
-One paragraph. What problem does it solve? What does Claude do differently when this skill is active?
+[Objective, in one short paragraph: what the skill produces, for whom, and why.]
 
-## When to load sub-files
-- [Condition A] → read [SUB_FILE_A.md](SUB_FILE_A.md)
-- [Condition B] → read [SUB_FILE_B.md](SUB_FILE_B.md)
-- [Condition C] → read [SUB_FILE_C.md](SUB_FILE_C.md)
+Done when:
+- [a checkable condition, e.g. "PR open with CI green", "report lists every item with a verdict"]
 
-## Quick start
-Step-by-step instructions for the most common use of this skill.
-Enough to complete the task without reading sub-files.
+## Constraints
 
-## Scripts
-- `scripts/example.sh` — brief description of what it does and when to use it
+- [Safety rules, permissions, protected resources. Gates before outward or irreversible actions.]
+
+## Facts
+
+- [Paths, commands, formats, conventions, and incident-learned gotchas the model cannot infer]
+
+## Procedure
+
+[Only the steps whose order or method is non-obvious. Delete this section if there are none.]
+
+## Sub-files
+
+- [Condition] → [SUB_FILE.md](SUB_FILE.md)
+- `scripts/example.sh`: [what it does; deterministic work belongs in scripts]

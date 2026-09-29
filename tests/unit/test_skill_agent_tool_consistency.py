@@ -1,10 +1,11 @@
 """A skill that dispatches subagents must be allowed to (#2649).
 
-`allowed-tools` in a SKILL.md frontmatter is a restriction: per
-`.claude/skills-global/new-skill/SKILL.md`, "Restricts which tools the skill
-can use. Omit to allow all." So a skill whose body instructs the driver to
-dispatch subagents, while its own `allowed-tools` omits `Agent`, asks for
-something it has forbidden itself.
+`allowed-tools` in a SKILL.md frontmatter pre-approves the tools it lists; it
+does not restrict the others (`disallowed-tools` does that). The test still
+guards consistency between a skill's declared tool list and its body: a skill
+whose body instructs the driver to dispatch subagents, while its own
+`allowed-tools` omits `Agent`, declares a tool list that contradicts its own
+instructions.
 
 `do-pr-review` was in exactly that state: `context: fork`, an `allowed-tools`
 list without `Agent`, and a body mandating judge subagents — with this repo

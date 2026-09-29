@@ -4,13 +4,14 @@ description: "Turn what's being communicated into a crafted single-page HTML exp
 allowed-tools: Read, Write, Bash
 argument-hint: "<topic or notes — defaults to the current conversation>"
 user-invocable: true
+effort: medium
 ---
 
 # /present — Explain It As a Crafted Page
 
 Take whatever is being communicated right now and render it as a single, self-contained HTML page that makes the idea **easier to grasp** than prose would. Then show it: open it in the local Chrome, or — if this session is running through a communication bridge — print it to PDF and send the PDF back over that bridge.
 
-The output is not a document dump. It is a **taught explanation**. Success is when a smart person who is new to the topic understands it faster from the page than from a paragraph.
+**Done:** a smart newcomer understands the idea faster from the page than from a paragraph, and the page has been opened locally or delivered over the bridge.
 
 ## Repo Context Probe
 
@@ -18,39 +19,15 @@ If `.claude/skill-context/present.md` exists, read it and honor its declarations
 
 The context file is where a repo declares **how it detects bridge mode** and the **bridge-delivery command** that sends the rendered PDF back to the human. When the file is absent (the common case in a foreign repo), there is no bridge: the page opens in the local browser and the skill reports the file paths.
 
-## The two mental postures
+## What makes the page work
 
-Hold both at once while you build the page. They are the whole point of the skill.
+- **Teach.** Name the one thing the reader must grasp first, then the next; a concrete example before the abstraction; rank ideas rather than presenting five as equal. Before writing HTML, state in one sentence what the reader must walk away understanding; if it is fuzzy, sharpen it.
+- **Guide the eye.** A title that states the takeaway, section headers that skim as an outline, signposts and "notice this" callouts, no walls of text, an ending the reader can act on. Cut any section that neither teaches nor guides.
+- **Show structure.** Pick the shape from the content (flow, parts diagram, side-by-side comparison, decision with a marked recommendation, timeline, one analogy then the mechanism, a few stat tiles) and reach for a diagram before another paragraph: Mermaid for flows, sequences, timelines, and state; inline SVG where Mermaid fights you; HTML and CSS for boxes, tables, and cards. A diagram must show a relationship the prose cannot, not restate the bullets. Restyled prose with no restructuring adds nothing.
 
-- **Think like a teacher.** Start from what the reader already knows and build one step at a time. Name the *one* thing they must understand first, then the next. Use a concrete example before the abstraction. Anticipate the question each section raises and answer it in the next. Never present five things as equally important — rank them.
-- **Think like a tour guide.** Control the eye's path down the page. Give a clear "you are here" at the top and signposts between sections. Point at the interesting thing and say why it matters ("notice how…"). Keep momentum — no dead stretches, no wall of text. End where the reader can act.
+The subject is `$ARGUMENTS`, or the current conversation when that is empty.
 
-If a section doesn't teach or guide, cut it.
-
-## Step 1 — Get the content
-
-The subject comes from `$ARGUMENTS`. If empty, the subject **is the current conversation** — the concept, plan, result, or comparison you and the user have been discussing. Summarize to yourself in one sentence what the reader must walk away understanding. If that sentence is fuzzy, the page will be too — sharpen it before writing any HTML.
-
-## Step 2 — Choose the shape that fits the idea
-
-Pick the layout from the *content*, not a template. Match the structure to what the idea actually is:
-
-| If the idea is… | Lead with… |
-|---|---|
-| A process or flow | a numbered path / flow diagram, left-to-right or top-down |
-| A system with parts | a labeled diagram of the parts + how they connect |
-| A comparison / trade-off | a side-by-side table or two columns, differences highlighted |
-| A decision | the question at top, options as cards, recommendation marked |
-| A sequence of events | a timeline |
-| A single hard concept | one strong analogy up top, then the mechanism |
-| A set of numbers | a small number of clear stat tiles or a chart, not a spreadsheet |
-
-Most pages need a **diagram**. Reach for it before reaching for another paragraph. Use whichever is simplest to get right:
-- **Mermaid** (flowcharts, sequence, timeline, state) via the CDN — write the diagram in a `<pre class="mermaid">` block and load `mermaid.min.js`.
-- **Inline SVG** for a bespoke picture where Mermaid would fight you.
-- **HTML + CSS** (grid, flex, borders) for boxes-and-arrows layouts, tables, and cards.
-
-## Step 3 — Write one self-contained HTML file
+## Write one self-contained HTML file
 
 These pages are **ephemeral** — a look-and-discard artifact, not a saved document. Write into a swept temp root so old runs clean themselves up:
 
@@ -66,19 +43,11 @@ concrete path once and use it **literally** in every later step.
 
 Requirements:
 
-- **Self-contained**: one `.html` file. All CSS inline in a `<style>` block. The only external fetch allowed is the Mermaid CDN (needed for diagram rendering); everything else must be local so the PDF prints identically offline.
-- **Legible hierarchy.** A title that states the takeaway (not just the topic), section headers that a reader could skim as an outline, short paragraphs, and callouts for the "notice this" moments.
-
-### Default styling direction
-
-Start from this so you're not re-deciding the look every time. It's a direction, not a component library — deviate when the content clearly wants something else.
-
-- **Light mode, always — every component.** Warm off-white ground, tinted-dark text (never pure `#000`/`#fff`), one restrained accent. No dark panels breaking the page: **diagrams and code blocks are light too.** A single dark box in an otherwise light page is the most common thing that makes these pages look unfinished.
-- **Calm and editorial.** Generous whitespace, a comfortable reading measure (~50rem), a committed type pairing, and deliberate spacing rhythm over decoration. One memorable visual choice is enough.
-- **Prints like it screens.** `@media print { ... }` for margins and `break-inside: avoid` on figures/cards so diagrams don't split across pages.
-- **Skip the AI tells:** cyan-on-dark, purple→blue gradients, gradient text on headings, glow, everything-in-identical-cards.
-
-If `frontend-design` is available and the piece deserves a stronger point of view, borrow its taste — but keep the light-mode-throughout rule.
+- **Self-contained**: one `.html` file with inline CSS. The only external fetch allowed is the Mermaid CDN, so the PDF prints identically offline.
+- **Light mode throughout, every component**: diagrams and code blocks too. A single dark panel in a light page is the most common thing that makes these pages look unfinished. Tinted-dark text, never pure `#000`/`#fff`, one restrained accent.
+- **Calm and editorial**: generous whitespace, a ~50rem measure, a committed type pairing, spacing rhythm over decoration. One memorable visual choice is enough.
+- **Prints like it screens**: `@media print` margins and `break-inside: avoid` on figures and cards.
+- **Skip the tells**: cyan-on-dark, purple-to-blue gradients, gradient text, glow, identical card grids, and reflexive model defaults (cream or off-white ground, an italic accent word in the headline, numbered 01/02/03 section labels, monospace eyebrow labels, pill buttons, emoji bullets) unless the piece has a reason for one.
 
 Minimal Mermaid include when you use a diagram (light theme, to match the page):
 
@@ -89,7 +58,7 @@ Minimal Mermaid include when you use a diagram (light theme, to match the page):
 
 Keep diagram nodes light-filled with a soft border; use the accent only to mark what matters (a decision, the recommended path), not every box.
 
-## Step 4 — Show it
+## Show it
 
 **Detect the mode.** Follow the context file's bridge-detection rule if present. Absent a context file, assume **local mode**.
 
@@ -133,11 +102,3 @@ Then deliver the PDF over the bridge exactly as the context file specifies (pref
 **Cleanup (bridge mode).** The delivery step owns the PDF — do **not** `rm` it synchronously, or you race the send. Remove everything else now: `rm -rf "$SCRATCH/present.html"` (the PDF, if still in `$SCRATCH`, is left for the relay). The start-of-run sweep is the backstop for anything left behind.
 
 If no context file declares a delivery command, you are effectively in local mode — fall back to opening the HTML and report that bridge delivery is unavailable in this repo.
-
-## Anti-patterns
-
-- **Dumping the prose into a styled box.** Same words, nicer font, no diagram — that adds nothing. The value is re-structuring the idea visually.
-- **Over-decorating.** Grain, glass, glow, and five gradients don't teach. Decoration that isn't doing brand or wayfinding work is noise.
-- **Everything equally weighted.** A teacher ranks. If the page has no clear "most important thing," you skipped Step 1.
-- **Diagram that restates the text.** A good diagram shows a relationship the sentence can't — a flow, a structure, a comparison. If it just lists the same bullets, cut it.
-- **Multi-file output.** One HTML file. External assets break the PDF and the "just open it" promise.

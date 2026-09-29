@@ -3,10 +3,6 @@
 
 ## Substrate, Identity & Tooling (the generic body defers these here)
 
-The leaned body refers to these abstractly. The Multi-Judge Consensus and the
-verdict+marker finalize block are documented in their own sections below; this
-section adds what they don't cover.
-
 **Plan resolution.** The generic body's priority list includes "extract the
 slug from the branch name and read `docs/plans/{slug}.md`." In this repo that
 guess is unreliable: the branch is the lane's recorded `{slug}`, but the plan
@@ -66,7 +62,7 @@ legitimately miss and produce a false self-block. Under a live supervised run (#
 inheritance, not a block: use the returned `run_id` and continue; only a foreign
 `ISSUE_LOCKED` (no live supervised signal) means stop and report.
 
-**Verification-table runner (§ 4.5):**
+**Verification-table runner (code-review.md section 5):**
 
 ```bash
 python -c "import sys; from agent.verification_parser import parse_verification_table, run_checks, format_results; t = parse_verification_table(open(PLAN_PATH).read()); r = run_checks(t.checks); print(format_results(r, t)); sys.exit(1 if t.malformed or not all(x.passed for x in r) else 0)"
@@ -77,7 +73,7 @@ python -c "import sys; from agent.verification_parser import parse_verification_
 # the exit code.
 ```
 
-**Plan-checkbox updater (post-review § 2.5).** Sync each rubric-judged criterion with:
+**Plan-checkbox updater (post-review.md §2.5).** Sync each rubric-judged criterion with:
 
 ```bash
 "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"   # rubric=pass
@@ -89,25 +85,15 @@ Exit 0 with a real mutation → `PLAN_MUTATED=true`. Exit 2 semantics (all prese
 - `MATCH_NOT_FOUND` when the rubric judged pass/fail → append `> Rubric judged criterion "{text}" {verdict} but no matching item in plan — investigate.`
 - `NO_CRITERIA_SECTION` → one-line warning and skip (some chore plans legitimately omit the section).
 
-**Verdict recording (global skill Step 6.6, #2193).** This runs **before** the
-OUTCOME block, not after it. In a local pipeline run (`/do-sdlc`) there are no
-hooks to write markers/verdicts for you — this single `sdlc-tool` call is the
-ONLY thing that persists the verdict, and the router (`sdlc-tool next-skill`)
-re-dispatches REVIEW in a loop until it sees one. Skipping it is the #1
-local-pipeline stall. Always pass `--issue-number` (quoted) — it is the
-authoritative session selector:
+**Verdict recording (SKILL.md Step 5, #2193).** One `sdlc-tool verdict
+finalize` call, before the OUTCOME block, is the only thing that persists the
+verdict; the router (`sdlc-tool next-skill`) re-dispatches REVIEW until it sees
+one. Always pass `--issue-number` (quoted); it is the authoritative session
+selector. On APPROVED it records the verdict, its `head_sha` field (#2769), and
+the REVIEW `completed` marker, and reads all three back; on any other verdict it
+leaves the marker `in_progress`.
 
 ```bash
-# ONE call replaces the old 3-call sequence (verdict record + stage-marker
-# completed + verdict get readback). `finalize` computes the PR head SHA
-# itself, records the bare verdict token plus the SHA in its own `head_sha`
-# record field (#2769), writes the REVIEW `completed` marker on the APPROVED
-# path, and reads all three back.
-#
-# --blocker-count / --tech-debt-count take integer COUNTS, not findings text.
-# Findings go in the review posted to the PR. Omit for "not assessed"; 0 means
-# "assessed, none found".
-#
 # --reviewed-head is the HEAD_SHA captured before reading the diff
 # (code-review.md), NOT the live head: Step 2.5's plan-checkbox commit has
 # already moved the branch, and the verdict must pin the commit you inspected.
@@ -123,18 +109,12 @@ sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --ve
 # (single-writer invariant preserved).
 ```
 
-`finalize` is **self-verifying, and it is honest about partial state rather
-than free of it** (#2740). It exits **non-zero with a named error**
-(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`)
-if any of the three writes fails to read back. It is deliberately **not**
-transactional: the verdict is written before the marker is attempted (the
-ordering #2415/#2577 hardened the read sites around), so the marker write can be
-refused after the verdict has already landed durably. When that happens the
-error says so explicitly — it names the verdict as persisted and the marker as
-missing, and re-running the identical command is idempotent. **Treat a non-zero
-exit as a hard failure: stop, do NOT proceed to emit the OUTCOME block** — but
-do not assume nothing was written. No separate `verdict get` readback call is
-needed; `finalize` already verifies persistence before returning 0.
+A failed read-back exits non-zero with a named error
+(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`,
+or `REVIEW_ARTIFACT_MISSING` when no posted review or `## Review:` comment is
+verifiable). The error says which writes landed (#2740); re-running the
+identical call is idempotent. After this skill returns, `/do-sdlc` runs
+`sdlc-tool verdict selfcheck` and advances past REVIEW only on `ok:true`.
 
 ### PRs with no plan document
 
@@ -166,9 +146,7 @@ judges list; a `"skipped"`/error result is a non-fatal skip unless
 `SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1` (then inject a synthetic CHANGES REQUESTED
 so any-blocker-wins triggers). Never crash the review.
 
-**Real-Chrome session requirement (Surface).** Screenshot capture runs against
-the user's real, logged-in Chrome via BYOB MCP — there is no anonymous-headless
-fallback (retired #1256). The calling session must have `requires_real_chrome=True`;
+**Real-Chrome session requirement (Surface).** The calling session must have `requires_real_chrome=True`;
 the bridge auto-infers for pipeline runs, or pass
 `valor-session create --needs-real-chrome ...` for manual runs. Two concurrent
 real-Chrome sessions race on the active tab.
@@ -196,41 +174,6 @@ A PR must not merge with:
 
 These are hard gates. No exceptions.
 
-## Mandatory Finalize — Verdict + Marker Co-Write (#1642, atomized #2193)
-
-On the approval path, the REVIEW verdict record, its `head_sha` field, and the
-REVIEW completion marker are written by **one `sdlc-tool verdict finalize` call** ("Verdict recording" above) instead of a
-hand-run, separable sequence. Never emit the OUTCOME block without a
-successful (exit 0) `finalize` call first. The verification is enforced in the
-tool itself (`tools/sdlc_review_finalize.py`, sharing `check_review_persistence`
-with `verdict selfcheck`): `finalize` records the verdict and its head SHA,
-writes the marker on the APPROVED path, and reads all three back before
-returning 0 — any gap yields a named non-zero error
-(`REVIEW_VERDICT_MISSING`, `REVIEW_TRAILER_MISSING`, `REVIEW_MARKER_INCOMPLETE`).
-It is self-verifying, not transactional: on the branch where the verdict landed
-and the marker write was then refused, the error names exactly that, and
-re-running the identical call is idempotent. The underlying WS3c gate in
-`tools/sdlc_stage_marker.py` still refuses `stage-marker --stage REVIEW
---status completed` with `REVIEW_VERDICT_MISSING` when no substrate verdict is
-readable (and, on the APPROVED path, also requires the trailer — see
-"Plan Section Compliance" below), so the marker can never precede or outrun
-the verdict even if something calls the lower-level primitives directly.
-
-This closes the #1642 desync: because `finalize` is a single call that either
-fully succeeds or fails loudly, the REVIEW marker can no longer stay
-non-`completed` while the verdict says APPROVED — there is no longer a
-separable "marker write" step the skill can exit before reaching. Router
-**row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW ==
-completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the
-gate — `REVIEW == completed` alone is no longer sufficient, since a crashed
-re-review can leave REVIEW `completed` with no verdict at all), so a desynced
-state stalls `/do-docs`. On any non-APPROVED verdict, `finalize` leaves the
-marker at `in_progress`. The `/do-sdlc` supervisor adds a second,
-committed backstop: after this skill returns, it calls `sdlc-tool verdict
-selfcheck --pr N --issue-number M` and advances past REVIEW only on
-`ok:true`, halting and surfacing the machine-readable `reason` on `ok:false`
-instead of silently re-looping (#2193).
-
 ## Multi-Machine Compatibility
 
 If the PR adds new environment variables, verify they are in `.env.example` and `config/settings.py`. If the PR adds new migrations, verify they are registered in `MIGRATIONS` in `scripts/update/migrations.py`.
@@ -251,29 +194,13 @@ expect:
 - The aggregate verdict is derived by `agent.sdlc_review_consensus.compute_consensus`
   with `rule="any-blocker-wins"` — any judge raising a blocker forces
   `CHANGES_REQUESTED`.
-- The parent passes `expected_judges=2` — the size of the mandatory declared
-  roster above, derived from the roster it just dispatched rather than from a
-  second hardcoded literal. Optional judges (the cross-vendor judge) are never
-  counted toward `expected_judges`: an optional judge that returns can only
-  raise `n` above the floor, and one that skips leaves the floor exactly where
-  it was. When fewer distinct judges report than `expected_judges`,
-  `compute_consensus` refuses `APPROVED` and returns `CHANGES REQUESTED` with
-  `quorum_shortfall: true` in the consensus metadata — a degraded single-judge
-  run is recorded as a shortfall, never read back as agreement. The aggregate
-  `## Review:` comment must state the shortfall explicitly rather than posting
-  a bare `CHANGES REQUESTED`.
-- The OUTCOME block includes `judges_run` (int) and `consensus_disagreement` (bool)
-  side-fields when multi-judge runs. On a `quorum_shortfall`, the artifacts
-  instead carry `judges_run` and `quorum_shortfall: true`, and omit
-  `consensus_disagreement` — that field derives from `tied`, which is only
-  meaningful once the rule has run over a full roster, and the rule never ran
-  on a shortfall. The `notes` field names the degraded run in its first
-  clause (e.g. "1 of 2 judges reported").
-- The aggregate `## Review:` comment states the run's `REVIEW_MODE`. With the
-  declared roster dispatched that is `independent roster (2 judges)`; where the
-  Agent tool is unavailable it is
-  `sequential lenses (Agent tool unavailable: {reason})`, and the run is
-  recorded as a quorum shortfall rather than read back as agreement (#3198).
+- The parent passes `expected_judges=2`, the size of the declared roster it
+  just dispatched. Optional judges (the cross-vendor judge) never count toward
+  it. When fewer distinct judges report, `compute_consensus` refuses `APPROVED`
+  and returns `CHANGES REQUESTED` with `quorum_shortfall: true`; the aggregate
+  `## Review:` comment states the shortfall explicitly, and the OUTCOME uses
+  the quorum-shortfall variant in `outcome-contract.md`. A sequential-lenses
+  run (#3198) is recorded the same way.
 - Cost containment: trivial PRs force the legacy single-judge path. A PR is
   trivial when its changed files (`gh pr diff $PR_NUMBER --name-only`) are all
   docs (`docs/**`, `**/*.md`) or all lockfile sync (`uv.lock` /
@@ -285,33 +212,15 @@ expect:
 
 Full design: [`docs/features/multi-judge-consensus.md`](../features/multi-judge-consensus.md).
 
-### In-turn-await + artifact-presence gate (WS-D, issue #2124)
+### Artifact-presence backstop (WS-D, #2124)
 
-REVIEW runs **inline** in the dispatching context: `do-pr-review` carries no
-`context: fork` frontmatter, so the judges are the stage runner's own subagents.
-A forked review sat at the harness spawn-depth limit, was withheld the Agent
-tool, and silently collapsed this two-judge roster into one sequential reviewer
-(#3198). Judge dispatches pass `run_in_background: false` and no `name` — a named
-nested spawn is refused with a misleading "Teammates cannot spawn other
-teammates" error.
-
-The judge subagents run in the **foreground and are awaited in-turn**: the parent
-blocks on every judge returning IN THE SAME TURN before it aggregates, posts the
-`## Review:` comment, and records the verdict. A parent that returns with judges
-still in flight kills those children and posts nothing (the #2112 miss) — so this
-is a hard contract, not a latency preference.
-
-The mechanical backstop lives in `tools/sdlc_stage_marker.py`: the REVIEW `completed`
-marker now requires **both** (a) a readable substrate verdict (WS3c / #2062,
-`_review_verdict_readable`) **and** (b) a verifiable posted review artifact
-(`_review_artifact_posted` — a formal GitHub review OR a `## Review:` issue comment on
-the PR). If either is missing the completion write is refused with a named
-`REVIEW_ARTIFACT_MISSING` (or `REVIEW_VERDICT_MISSING`) error and the WS3b recovery row
-re-dispatches `/do-pr-review` — the failure direction is "re-run the stage", never a
-silent advance. Both probes fail CLOSED (any error ⇒ refusal).
+`tools/sdlc_stage_marker.py` refuses the REVIEW `completed` marker unless both a
+readable substrate verdict and a verifiable posted review artifact (a formal
+GitHub review or a `## Review:` issue comment) exist, failing closed with
+`REVIEW_VERDICT_MISSING` or `REVIEW_ARTIFACT_MISSING`; the router then
+re-dispatches `/do-pr-review`. An un-awaited-judge exit therefore fails closed
+rather than advancing the pipeline.
 
 ## UI Screenshots
 
-For any PR that touches `ui/`, include before/after screenshots of the actual running app (not mockups). Capture via BYOB MCP (`mcp__byob__browser_*`) — the only browser surface — so the screenshot reflects the user's real, logged-in Chrome session. See `.claude/skills/do-pr-review/SKILL.md` and `sub-skills/screenshot.md`.
-
-For background, see [`docs/features/byob-browser-control.md`](../features/byob-browser-control.md).
+For any PR that touches `ui/`, include before/after screenshots of the running app (not mockups). See [`docs/features/byob-browser-control.md`](../features/byob-browser-control.md).

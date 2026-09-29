@@ -4,11 +4,12 @@ description: "Create a polished Marp slide deck about a feature, concept, or sys
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 argument-hint: "<topic or feature name>"
 context: fork
+effort: medium
 ---
 
 # Make a Presentation
 
-Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational, client-facing, or informational), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, fonts loaded, slide count matches plan, every editorial flag addressed.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational, client-facing, or informational), set in the Yudame House theme, and exported via Marp to PDF/HTML (PPTX on request). **Done:** the Step 10 checks pass (exports exist, fonts loaded, slide count matches the plan, every editorial flag addressed) and the user has the file locations.
 
 ## Repo Context Probe
 
@@ -23,34 +24,17 @@ The static-deck flow (research → structure → theme → diagrams → editoria
 | `CONTENT_GUIDE.md` | Structuring slide content — educational best practices, slide types, pacing |
 | `THEME.md` | Writing the Marp front matter — the Yudame House theme, its style block, slide archetypes |
 
-## Quick start
+## Workflow
 
-The topic comes from `$ARGUMENTS`. If empty, ask the user what to present on.
+The topic comes from `$ARGUMENTS`; if empty, ask the user what to present on.
 
 ### Step 1: Scope the topic
 
-Determine what the presentation covers:
-- A single feature? A system overview? A concept explanation?
-- Who is the audience? Default: **general technical audience, high-school reading level**
-- How long? Default: **10-15 slides** (5-8 minute talk)
-
-Ask the user only if the scope is genuinely ambiguous. Otherwise, make a reasonable call.
+Settle what the deck covers, the audience (default: general technical audience, high-school reading level), and the length (default: 10-15 slides, a 5-8 minute talk). Ask only if the scope is genuinely ambiguous.
 
 ### Step 2: Research
 
-Spawn an Explore agent to deeply research the topic:
-- Read relevant source files, docs, READMEs, and config
-- Trace how the feature works end-to-end
-- Identify the 3-5 key concepts someone must understand
-- Find concrete examples, real data, or code snippets
-- Note any diagrams that would clarify architecture or flow
-
-**Research output should answer:**
-1. What is this? (one sentence a teenager could understand)
-2. Why does it exist? (the problem it solves)
-3. How does it work? (the mechanism, simplified)
-4. What are the key parts? (components, steps, or layers)
-5. What's interesting about it? (the clever bit, the trade-off, the insight)
+Research the topic in the codebase and docs (delegate to an Explore agent when the ground is wide) until you can answer: what it is in one plain sentence, why it exists, how it works simplified, its 3-5 key parts, and what is interesting about it (the clever bit or trade-off), with concrete examples and real data.
 
 ### Step 3: Design the slide structure
 
@@ -117,97 +101,27 @@ deck slug in the masthead rule. Choose that slug yourself, a short uppercase lin
 and the deck's purpose. Nothing else in the block changes: no design-system detection, no per-deck
 restyling, no adjusting `:root`.
 
-Two rules from `THEME.md` govern everything downstream and belong in working memory now:
-
-- **One accent per slide.** Annotation red marks *value* — the number that matters, the
-  recommendation, the one word carrying the slide. A slide with two reds has no accent at all.
-- **Light ground, square corners, hairlines over boxes.** Cream `#FAF9F6`, no shadows, no gradients,
-  no rounded cards.
-
 A deck about another company's product still ships in Yudame House. Their brand appears as a logo
 (Step 5), never in the slide's colors or type.
 
 ### Step 5: Collect brand logos
 
-When the presentation mentions companies, products, or branded technologies, pull in their logos for visual polish. Logos appear inline next to brand names or as small icons in tables/lists.
-
-**Source priority:**
-
-1. **Simple Icons (GitHub raw)** — 3000+ tech/business brands, monochrome SVGs, no auth
-   ```bash
-   # Download SVG (slug is lowercase brand name, no spaces)
-   curl -s "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/{slug}.svg" \
-     -o diagrams/logo-{slug}.svg
-   ```
-   Common slugs: `anthropic`, `stripe`, `github`, `slack`, `redis`, `python`, `docker`, `linear`, `sentry`, `notion`, `telegram`, `postgresql`
-
-   To find a slug, check: `https://raw.githubusercontent.com/simple-icons/simple-icons/develop/slugs.md`
-
-2. **Google Favicons** — universal fallback, any domain, PNG
-   ```bash
-   curl -sL "https://www.google.com/s2/favicons?domain={domain}&sz=128" \
-     -o diagrams/logo-{name}.png
-   ```
-
-**Colorizing SVGs:**
-
-Simple Icons SVGs ship with no fill and default to black, which reads correctly on the Yudame House
-cream ground. Set the theme ink explicitly so the logos match the rest of the deck rather than
-sitting a shade darker:
+For polished decks only, fetch logos for brands central to a slide's content (skip internal or informal decks). Sources, in order:
 
 ```bash
-sed -i '' 's/<path/<path fill="#1A1A1A"/' diagrams/logo-{slug}.svg
+# Simple Icons: monochrome SVGs, no auth. Slug list: https://raw.githubusercontent.com/simple-icons/simple-icons/develop/slugs.md
+curl -s "https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/{slug}.svg" -o diagrams/logo-{slug}.svg
+sed -i '' 's/<path/<path fill="#1A1A1A"/' diagrams/logo-{slug}.svg   # theme ink, not default black
+# Fallback, any domain (PNG)
+curl -sL "https://www.google.com/s2/favicons?domain={domain}&sz=128" -o diagrams/logo-{name}.png
+# SVG to PNG if needed (macOS): qlmanage -t -s 512 -o diagrams/ diagrams/logo-{slug}.svg; mv diagrams/logo-{slug}.svg.png diagrams/logo-{slug}.png
 ```
 
-A brand's official color is the exception, not the default — it spends the slide's one accent on a
-logo. Use theme ink unless the brand color *is* the point of the slide.
-
-**Converting SVG to PNG (if needed for Marp compatibility):**
-
-```bash
-# macOS built-in, no dependencies, good quality at 512px
-qlmanage -t -s 512 -o diagrams/ diagrams/logo-{slug}.svg 2>/dev/null
-mv diagrams/logo-{slug}.svg.png diagrams/logo-{slug}.png
-```
-
-**Using logos in Marp slides:**
-
-```markdown
-<!-- Inline next to text (small, 24-32px) -->
-![w:28](diagrams/logo-{slug}.svg) Anthropic ships Managed Agents
-
-<!-- In a table cell -->
-| ![w:24](diagrams/logo-{slug}.svg) Stripe | Payment processing |
-
-<!-- Larger, standalone -->
-![w:80](diagrams/logo-{slug}.svg)
-```
-
-**Rules:**
-- Only fetch logos for brands **central to the slide content**, and only for polished decks — skip for internal/informal ones
-- Keep logos small (24-32px inline, 64-80px standalone) — they accent, not dominate
-- Prefer SVG over PNG for sharpness (SVGs render in Marp with `--allow-local-files`)
+Embed with `![w:28](diagrams/logo-{slug}.svg)`: 24-32px inline or in table cells, 64-80px standalone. Prefer SVG (renders with `--allow-local-files`). Use theme ink, not the brand color: a brand color spends the slide's one accent, so use it only when the color is the point.
 
 ### Step 6: Generate diagrams
 
-For any architectural or flow concepts, create diagrams:
-
-1. **Prefer ASCII art** in code blocks for simple flows (always renders correctly)
-2. **Use Mermaid** for complex diagrams — check if `mermaid-render` skill is available:
-   - Write `.mmd` file, render to PNG, embed as image
-   - Fallback: include as fenced code block (renders in HTML export)
-3. **Use tables** for comparisons, feature matrices, component lists
-
-Diagram guidelines:
-- Max 7 nodes/boxes per diagram (cognitive load limit)
-- Label every arrow/connection
-- Annotation red marks one emphasis node. Everything else is ink and hairline
-- Put the diagram inside a `.figure` panel with a mono `.figure__meta` footer (`FIG. 01` left,
-  caption right) so it reads as a plate rather than a floating image
-
-For charts specifically, read the "Charts" section of `THEME.md` — flat bars, values labeled on the
-marks, no gridlines, no axis, no legend. Anything more involved than a bar comparison goes through
-the `dataviz` skill carrying those constraints.
+ASCII art in code blocks for simple flows (always renders), tables for comparisons and matrices, Mermaid for complex diagrams. The `mermaid-render` skill is user-invoked only, so read its `SKILL.md` and follow its render workflow to produce a PNG; if that is unavailable, include the diagram as a fenced block. Diagrams follow the rules in `CONTENT_GUIDE.md` (at most 7 nodes, labeled arrows, one red emphasis node) and sit in a `.figure` panel with a mono `.figure__meta` footer (`FIG. 01` left, caption right). Charts follow the "Charts" section of `THEME.md`; anything beyond a bar comparison goes through the `dataviz` skill carrying those constraints.
 
 ### Step 7: Write the Marp markdown
 
@@ -252,7 +166,7 @@ style: |
 content...
 ```
 
-**Writing rules:**
+**Writing rules** (budgets and archetypes are detailed in `CONTENT_GUIDE.md`):
 - One idea per slide — if you need a scroll bar, split it
 - **Action titles.** Every content slide's `##` is a full sentence stating that slide's conclusion,
   under 15 words, and it is the largest text on the slide. `## Queue depth doubled after the retry
@@ -264,13 +178,9 @@ content...
 - The only slide classes are `cover`, `section` and `statement`. Diagram, table and number slides
   need no class; they are compositions of `.figure`, a markdown table, or `.big`. An undefined
   `_class` is a silent no-op
-- Use tables over bullet lists when comparing things
-- Use code blocks sparingly — only when the actual code IS the point
 - Every 3rd-4th slide should be visual (figure plate, table, or `.big` number)
 - Use `.rose` for the one governing quote or line, once per deck. A plain markdown `>` is the quiet
   treatment (hairline box, serif italic) and carries no such limit
-- Bold key terms on first use
-- Use analogies liberally — connect technical concepts to everyday things
 - **Write each paragraph on one source line.** Marp renders a newline inside a paragraph as a line
   break, so markdown you wrapped for readability in the editor comes out broken mid-sentence on the
   slide. Let the source line run long
@@ -281,10 +191,11 @@ margin annotation for a risk or caveat, `.card` inside `.cols-3` gives A/B/C dec
 
 ### Step 8: Editorial gate
 
-One gate, run once, on the finished draft. Invoke `Skill('de-slop')` as a **fresh-context review** —
-a subagent that receives only the deck file path, the medium (`presentation`), the audience, and the
-addendum below. It must not receive this drafting conversation; the author of a draft is the worst
-judge of its slop.
+One gate, run once, on the finished draft, per de-slop's "Cold read" section: a **foreground** Agent
+call (`run_in_background: false`) whose prompt carries only the deck file path, the medium
+(`presentation`), the audience, and the addendum below, says "you did not write this draft", and
+invokes `Skill('de-slop')`. Wait for its verdict before publishing. It must not receive this drafting
+conversation; the author of a draft is the worst judge of its slop.
 
 Pass this addendum along with the standard inputs, since these checks are deck-shaped and de-slop's
 generic catalog does not cover them:
@@ -361,12 +272,7 @@ Tell the user:
 
 ## Narrated deck video (`--video` mode)
 
-`/do-presentation <topic> --video` produces a **narrated MP4** of the deck: each slide held on screen for the length of its spoken narration, voiceover muxed in, exported as a single `deck.mp4` next to the deck.
-
-This mode depends on a repo-provided deck-video CLI that owns the full compositing pipeline (Marp PNG-per-slide export → per-slide TTS synthesis → ffmpeg mux). The skill does not re-implement compositing; it authors the deck (with per-slide narration blocks) and shells out to that CLI.
-
-- **Context file present** → it declares the deck-video CLI invocation and the per-slide narration-block schema. Author the deck with one narration comment per slide and invoke the declared CLI exactly as specified.
-- **Context file absent** → `--video` is unavailable in this repo. Produce the static deck (PDF/HTML/PPTX) as the deliverable and tell the user that narrated-video export requires a repo-provided CLI this repo does not declare. The static-export flow above is unaffected.
+`/do-presentation <topic> --video` produces a narrated `deck.mp4` next to the deck, each slide held for the length of its narration. It needs a repo-provided deck-video CLI that owns compositing; the context file declares it and the per-slide narration schema. Without a context file, `--video` is unavailable: ship the static deck and say so.
 
 ## Narration / voiceover
 

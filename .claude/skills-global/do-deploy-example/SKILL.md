@@ -8,134 +8,39 @@ disable-model-invocation: true
 
 # Deploy to Production (Template)
 
-**This is a template.** Copy this directory to `.claude/skills/do-deploy/` and customize it for your repo. See the bottom of this file for what to change.
+**This is a template.** Copy this directory to `.claude/skills/do-deploy/` and customize it for your repo (see the last section).
 
-You are the **production deployment operator**. You verify a merge is complete, execute the production deployment process, and confirm the deployment succeeded. You do not write code, run tests, or create PRs.
+You are the production deployment operator: verify a merge is complete, run the repo's production deployment, and confirm it succeeded. You do not write code, run tests, or create PRs. This skill is not part of the SDLC pipeline, which ends at merge (and handles dev/staging deployment as a side effect); it runs when the team is ready to promote merged changes to production.
 
-This skill is **not part of the SDLC pipeline**. The SDLC pipeline ends at merge, which already handles dev/staging deployment as a side effect. This skill is invoked separately when the team is ready to promote merged changes to production.
+DEPLOY_ARG: $ARGUMENTS. If it is empty or literally `$ARGUMENTS`, take whatever follows the command in the user's message and proceed; do not stop to report an error. A `#N` or bare number is a PR; a branch name means its merged PR; nothing means the most recently merged PR.
 
-## What this skill does
+**Done when** the report below is filled with evidence: the PR is confirmed merged, the deployment ran (or was blocked, with the reason), and every health check has a recorded result.
 
-1. Verifies the PR was merged to the target branch
-2. Executes the repo-specific production deployment process
-3. Runs post-deployment health checks against production
-4. Reports deployment status with evidence
+## Constraints
 
-## When to load sub-files
+- **Never deploy unmerged code.** If the PR's `state` is not `MERGED`, stop: `Deploy blocked: PR #N is not merged (state: {state}). Merge it first, then re-run the deploy.`
+- **Never deploy during an active incident or freeze.** Check the blockers `DEPLOYMENT_PROCESS.md` names before starting.
+- **Know the rollback before you start.**
+- **Never auto-retry a failed deployment.** Report the failure with logs and let a human decide.
+- **Never modify code during deployment.** This skill deploys; it does not fix.
+- **Never skip health checks.** Run all of them, even after one fails, and compare against a pre-deploy baseline when you can.
 
-| Sub-file | Load when... |
-|----------|-------------|
-| `DEPLOYMENT_PROCESS.md` | Starting the deploy (repo-specific production steps, rollback) |
-| `HEALTH_CHECKS.md` | After production deployment completes (verification commands, expected outputs) |
+## Facts
 
-## Variables
-
-DEPLOY_ARG: $ARGUMENTS
-
-**If DEPLOY_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation -- they invoked this template's installed command (in this repo, `/do-deploy <argument>`). Extract whatever follows the command as the value of DEPLOY_ARG. Do NOT stop or report an error; just use the argument from the message.
-
-## Cross-Repo Resolution
-
-For cross-project work, check whether the `GH_REPO` environment variable is set (some agent harnesses export it automatically; otherwise export `GH_REPO=owner/name` yourself). The `gh` CLI natively respects this env var, so all `gh` commands target that repository — no `--repo` flags or manual parsing needed. When it is unset, `gh` targets the repo of the current working directory.
-
-If your environment exports a filesystem path to the deploy target's checkout (this template calls it `DEPLOY_TARGET_REPO`; adapt the name to your repo's convention, or default to the current directory), use it for all local filesystem and git operations.
-
-## Step 1: Resolve What to Deploy
-
-**Detect argument type:**
-- If `DEPLOY_ARG` starts with `#` or is a pure number: treat as PR number
-- If `DEPLOY_ARG` is a branch name: find the associated merged PR
-- If empty: find the most recently merged PR
+- `gh` respects `GH_REPO` (some harnesses export it; otherwise export `GH_REPO=owner/name` for cross-repo work). Unset, it targets the current directory's repo.
+- If your environment exports a path to the deploy target's checkout (this template calls it `DEPLOY_TARGET_REPO`; adapt the name, default to the cwd), use it for all local git and filesystem work.
+- Bring the checkout current by fetching and fast-forwarding a named ref, not a bare pull: `.git/FETCH_HEAD` is shared by every worktree, so a concurrent fetch can retarget a pull's merge.
 
 ```bash
-# By PR number:
-gh pr view $PR_NUMBER --json number,title,state,mergedAt,mergeCommit,headRefName
-
-# Most recent merge:
-gh pr list --state merged --limit 1 --json number,title,mergedAt,mergeCommit,headRefName
-```
-
-**Verify the PR is merged.** If `state` is not `MERGED`, stop and report:
-```
-Deploy blocked: PR #N is not merged (state: {state}).
-Merge the PR first, then re-run /do-deploy.
-```
-
-Record:
-- `PR_NUMBER`: The PR number
-- `PR_TITLE`: The PR title
-- `MERGE_COMMIT`: The merge commit SHA
-- `MERGE_BRANCH`: The base branch the PR was merged into
-
-## Step 2: Pre-Deploy Verification
-
-Before deploying, verify the environment is ready:
-
-```bash
-# Adapt DEPLOY_TARGET_REPO to your repo's target-path env var (see Cross-Repo Resolution)
 REPO="${DEPLOY_TARGET_REPO:-.}"
-
-# 1. Confirm local repo is on the merge target branch and up to date.
-# Fetch + ff-merge a named ref rather than `git pull`: `.git/FETCH_HEAD` is
-# shared by every worktree of a repo, so in a multi-worktree checkout a
-# concurrent fetch can retarget a bare pull's merge.
 git -C "$REPO" checkout main && git -C "$REPO" fetch origin main \
   && git -C "$REPO" merge --ff-only origin/main
-
-# 2. Verify the merge commit exists locally
-git -C "$REPO" log --oneline -1 $MERGE_COMMIT
-
-# 3. Check for deployment blockers (customize per repo)
-# Examples: active incidents, deploy freezes, dependency issues
+git -C "$REPO" log --oneline -1 $MERGE_COMMIT   # absent: stop and report the discrepancy
 ```
 
-If the merge commit is not present locally after pull, stop and report the discrepancy.
+- The deploy commands and rollback live in `DEPLOYMENT_PROCESS.md`; the verification commands and expected outputs live in `HEALTH_CHECKS.md`. If `DEPLOYMENT_PROCESS.md` is missing, stop and report that this skill still needs customizing (production details, deploy commands, rollback, required access). If `HEALTH_CHECKS.md` is missing, check at least that the service responds, logs show no new errors since the deploy, and key endpoints return expected status codes.
 
-## Step 3: Execute Deployment
-
-**This step is repo-specific.** Load `DEPLOYMENT_PROCESS.md` for the actual deployment commands.
-
-If `DEPLOYMENT_PROCESS.md` does not exist, use this fallback template:
-
-```
-No DEPLOYMENT_PROCESS.md found. This skill needs to be customized for this repo.
-
-Create DEPLOYMENT_PROCESS.md inside the .claude/skills/do-deploy/ directory with:
-1. Production environment details (URLs, infrastructure, access)
-2. Production deployment commands
-3. Rollback procedure
-4. Required credentials or access
-
-See /do-deploy-example for a complete template.
-```
-
-**Production deployment rules:**
-- This is production -- dev/staging was already validated by the SDLC pipeline and merge
-- Capture all deployment output for the report
-- Record the deployment timestamp
-- If deployment fails, do NOT retry automatically -- report the failure with logs
-
-## Step 4: Post-Deploy Health Checks
-
-**This step is repo-specific.** Load `HEALTH_CHECKS.md` for verification commands.
-
-If `HEALTH_CHECKS.md` does not exist, use basic checks:
-
-```bash
-# Generic health checks (customize per repo)
-# 1. Service is responding
-# 2. No new errors in logs since deployment
-# 3. Key endpoints return expected status codes
-```
-
-**Health check rules:**
-- Run ALL checks, do not stop at first failure
-- Collect evidence (response codes, log snippets, timestamps)
-- Compare against pre-deployment baseline when possible
-
-## Step 5: Report
-
-Report deployment status with structured evidence:
+## Report
 
 ```
 ## Deploy Report: PR #{PR_NUMBER}
@@ -158,41 +63,21 @@ Report deployment status with structured evidence:
 {If failed: rollback steps. If succeeded: "No rollback needed."}
 ```
 
-## Hard Rules
+## How to customize this template
 
-1. **NEVER deploy unmerged code** -- verify merge state first
-2. **NEVER skip health checks** -- always verify after deployment
-3. **NEVER auto-retry failed deployments** -- report and let human decide
-4. **NEVER deploy during an active incident** -- check for blockers first
-5. **NEVER modify code during deployment** -- this skill deploys, it does not fix
-6. **Capture evidence** -- every deployment needs a paper trail
-7. **Rollback plan ready** -- know how to undo before you start
+First decide, with your team, what "deploy" means for this repo, and write the answers into `DEPLOYMENT_PROCESS.md` and `HEALTH_CHECKS.md`:
 
-## How to Customize This Template
+1. Where does production run?
+2. What triggers a production deploy (merge auto-deploys, manual promotion, tagged release, cron)?
+3. What is the deploy mechanism (platform CLI, SSH, API call, deploy branch, container registry)?
+4. How many machines or instances?
+5. How do you know it worked?
+6. How do you roll back?
+7. Are there deploy freezes or gates?
 
-### Step 0: Define what "deploy" means for this repo
+Then:
 
-Before writing any config, have a conversation with your team (or with the PM session) to answer these questions. Every repo's deploy is different -- there is no universal answer.
-
-**Questions to answer:**
-1. **Where does production run?** (Cloud platform, self-hosted machines, serverless, edge, etc.)
-2. **What triggers a production deploy?** (Merge to main auto-deploys? Manual promotion? Tagged release? Cron job picks it up?)
-3. **What is the deploy mechanism?** (Platform CLI, SSH, API call, git push to deploy branch, container registry, etc.)
-4. **Are there multiple machines/instances?** (Single server, fleet, regional replicas, etc.)
-5. **How do you know it worked?** (Health endpoint, log check, smoke test, monitoring dashboard, etc.)
-6. **How do you roll back?** (Platform rollback, git revert, redeploy previous image, etc.)
-7. **Are there deploy freezes or gates?** (Incident check, approval required, time-of-day restrictions, etc.)
-
-Write the answers into `DEPLOYMENT_PROCESS.md` and `HEALTH_CHECKS.md`. The SKILL.md orchestration (Steps 1-5 above) stays the same across repos -- only the sub-files change.
-
-### Step 1: Copy and configure
-
-1. Copy this directory: `cp -r .claude/skills-global/do-deploy-example .claude/skills/do-deploy` (in a repo without a `skills-global/` split, copy from wherever this template lives to a sibling `do-deploy/` directory)
-2. Update `SKILL.md` frontmatter:
-   - Change `name:` to `do-deploy`
-   - Write a `description:` specific to your repo's production deployment
-   - Remove `disable-model-invocation: true`
-   - Remove this "How to Customize" section and the "(Template)" from the title
-3. Create `DEPLOYMENT_PROCESS.md` with your production deployment commands, rollback procedure, and any deploy freeze checks
-4. Create `HEALTH_CHECKS.md` with your production health verification commands
-5. Test: invoke the installed command (in this repo, `/do-deploy`) after your next merge
+1. `cp -r .claude/skills-global/do-deploy-example .claude/skills/do-deploy` (in a repo without a `skills-global/` split, copy from wherever this template lives to a sibling `do-deploy/`).
+2. In `SKILL.md`: set `name: do-deploy`, write a repo-specific `description:`, remove `disable-model-invocation: true`, and remove this section and "(Template)" from the title. Set `effort: low` unless your deploy involves judgment calls (canary analysis, incident gating).
+3. Create `DEPLOYMENT_PROCESS.md` and `HEALTH_CHECKS.md`.
+4. Test: invoke the installed command (in this repo, `/do-deploy`) after your next merge.

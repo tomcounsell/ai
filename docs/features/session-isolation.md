@@ -231,7 +231,7 @@ When the guard fires:
 
 - `remove_worktree(repo_root, slug)` returns `("blocked", session_id)` instead of `True`/`False`.
 - `cleanup_after_merge(repo_root, slug)` surfaces the block as `result["blocked_by_session"]` and adds `f"blocked: worktree in use by session_id=..."` to `result["errors"]`.
-- `python scripts/post_merge_cleanup.py {slug}` prints the offending session id to stderr and exits **2** (distinct from exit 1 for generic errors). See [`docs/sdlc/do-merge.md`](../sdlc/do-merge.md#busy-guard-issue-1357) for the operator workflow.
+- `python scripts/post_merge_cleanup.py {slug}` prints the offending session id to stderr and exits **2** (distinct from exit 1 for generic errors). See [`docs/sdlc/do-merge.md`](../sdlc/do-merge.md#busy-guard) for the operator workflow.
 
 **Why this guard exists.** Investigation #1246 documented a 10.9-hour PM-session wedge: a sibling `/do-merge` ran `post_merge_cleanup.py` while the PM session's SDK subprocess was still running with cwd inside the same worktree. macOS does not signal subprocesses about deleted cwd directories — `getcwd(3)` returns ENOENT, the harness hangs in `await proc.communicate()` forever, and the AgentSession row stays at `status=running` until a manual kill. The busy guard prevents that delete from happening.
 

@@ -1,170 +1,107 @@
 ---
 name: do-patch
-description: "Apply a targeted fix to failing tests or review blockers. Triggered by 'patch this', 'fix the failures', 'fix the blockers', 'do-patch', or by do-build at test-fail and review-blocker steps."
+description: "Apply a targeted fix to failing tests or review findings. Triggered by 'patch this', 'fix the failures', 'fix the blockers', or 'do-patch'."
 argument-hint: "<description-of-what-to-patch>"
+effort: low
 ---
 
 # Do Patch (Targeted Fix)
 
-You are a **focused fixer**. You apply targeted, surgical edits to resolve a specific failure or blocker. You do not plan features, orchestrate teams, or create PRs. You fix what is broken, verify it passes, and advance the pipeline.
+Fix a specific test failure or set of review findings with the smallest change
+that stays aligned with the plan, verify it, and land it as one commit on the
+current branch. You do not plan features, create PRs, or advance pipeline
+stages; the SDLC router does that.
 
-## Repo Context Probe
+**Done when:** every finding has a visible disposition, the test suite and lint
+pass in this environment, the fix is committed and pushed as one commit, and
+you have reported what changed. Stop there; mention extra work you noticed
+instead of doing it.
 
-If `docs/sdlc/do-patch.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+## Repo Context
 
-The context file is where a repo declares its patch specifics: the worktree/branch and plan-doc conventions for recovering build context, the lint/format commands, a plan-checkbox sync mechanism to bundle a criterion tick into the fix commit, cross-repo `gh` targeting, and any restart-after-patch requirement. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, and the repo's test runner — no repo-specific tooling required.
+If `docs/sdlc/do-patch.md` exists, read it and honor its declarations: how to
+recover the plan from the branch, test and lint commands, a plan-checkbox sync
+mechanism, cross-repo `gh` targeting, and restart-after-patch rules. Without it,
+the skill needs only `git`, `gh`, and the repo's test runner.
 
-## When This Skill Is Invoked
-
-Two lifecycle points trigger `/do-patch`:
-
-1. **Test failure** — `do-build` hit failing tests after a build iteration. The failure output is passed as `PATCH_ARG`.
-2. **Review blocker** — `do-build` hit a review comment blocking merge. The comment text is passed as `PATCH_ARG`.
-
-Users may also invoke directly:
-- `do-patch "3 tests failing in test_bridge.py — connection timeout"`
-- `do-patch "review blocker: race condition in session lock"`
-- `do-patch` (no args — reads most recent failure from context)
-
-## Variables
+## Inputs
 
 PATCH_ARG: $ARGUMENTS
-ITERATION_CAP: 3  (default; caller may override by appending e.g. `--max-iterations 5`)
+ITERATION_CAP: 3 (a caller may override, e.g. `--max-iterations 5`)
 
-## Build Context Recovery
-
-The patch agent is re-entering the build loop. It needs the **same context** that `do-build` originally gave its builder agents — not just a failure message. Without this context, fixes may pass tests but drift from intent, use wrong patterns, or edit the wrong files.
-
-**Before deploying the builder agent, gather ALL of this:**
-
-1. **Plan document** — The full plan, not just a summary:
-   - If the caller passed the plan path, read it
-   - Otherwise, if the repo keeps plan docs, derive the plan path from the current branch (the context file declares the branch→slug→plan-path convention) and read it
-   - Extract: goal, acceptance criteria, no-gos, relevant files, architectural decisions
-   - If the repo has no plan docs, proceed with the failure context alone
-2. **Tracking issue** — `gh issue view N` for the original issue context and discussion
-3. **Working directory** — Confirm CWD (worktree path if invoked by do-build, repo root if direct)
-4. **What was already built** — Run `git log --oneline main..HEAD` to see what the build has done so far
-5. **Relevant file paths** — From the plan's "Relevant Files" section, so the builder knows where to look
-6. **PR review comments** (for review blockers) — **MANDATORY** when fixing review feedback:
-   ```bash
-   # Find the PR for the current branch
-   PR_NUMBER=$(gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number -q '.[0].number')
-
-   # Fetch ALL review comments — these are the authoritative blockers
-   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/reviews --jq '.[] | select(.state != "APPROVED") | {user: .user.login, state: .state, body: .body}'
-   gh api repos/{owner}/{repo}/pulls/${PR_NUMBER}/comments --jq '.[] | {path: .path, line: .line, body: .body, user: .user.login}'
-   ```
-   Do NOT rely solely on the PATCH_ARG text — it may be a summary that misses specific blockers. The PR review comments are the ground truth. Include the full review comment text in the builder prompt.
-
-**If no plan exists** (e.g., user-invoked hotfix), proceed with failure context alone — but note this in the fix report.
-
-**If PATCH_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-patch <argument>`. Extract whatever follows `/do-patch` as the value of PATCH_ARG. Do NOT stop or report an error; just use the argument from the message.
+If PATCH_ARG is empty or literally `$ARGUMENTS`, take whatever followed
+`/do-patch` in the invoking message. If there is still nothing, use the most
+recent test output or review in the conversation; if none exists, stop with a
+stuck report saying no failure context was found.
 
 ## Instructions
 
-### Step 1: Identify What Is Broken
+### Step 1: Recover the Build Context
 
-If `PATCH_ARG` is non-empty, use it directly as the description of what needs fixing.
+A fix that passes tests but drifts from intent is not a fix. Before dispatching
+the builder, gather:
 
-If `PATCH_ARG` is empty, read the most recent failure from session context:
-- Look for the most recent pytest output or review comment in the conversation
-- If nothing is found, ask the user: "What is failing? Paste the test output or review comment."
+1. **Plan**: read it in full if the caller passed a path or the context file
+   says how to resolve it; extract goal, acceptance criteria, No-Gos, relevant
+   files, and architectural decisions. No plan (e.g. a hotfix): proceed, and say
+   so in the report.
+2. **Tracking issue**: `gh issue view N`.
+3. **Build history**: `git log --oneline main..HEAD`, and `pwd` (work in the
+   current directory or worktree; never create or navigate to another one).
+4. **Review findings** (when fixing a review): the PR review comments are the
+   authority, not PATCH_ARG, which may be a lossy summary.
 
-Parse the input to classify the fix type:
-- **Test failure**: pytest output with `FAILED`, `ERROR`, or traceback lines
-- **Review blocker**: prose describing a code issue, race condition, logic bug, or style violation
+   ```bash
+   PR_NUMBER=$(gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --json number -q '.[0].number')
+   gh api "repos/{owner}/{repo}/pulls/${PR_NUMBER}/reviews" --jq '.[] | select(.state != "APPROVED") | {user: .user.login, state: .state, body: .body}'
+   gh api "repos/{owner}/{repo}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | startswith("## Review:")) | {created_at, body}'
+   gh api "repos/{owner}/{repo}/pulls/${PR_NUMBER}/comments" --jq '.[] | {path: .path, line: .line, body: .body}'
+   ```
 
-**If the fix type is "review blocker" or "review findings"**: You MUST fetch the actual PR review comments from GitHub (see Build Context Recovery step 6 above). The PATCH_ARG may be a summary that omits specific findings. The PR comments are the authoritative source of what needs fixing.
+**Every review finding gets a disposition**, not just blockers: fix it, or, if
+it should stay as-is, annotate it in code (`# NOTE: [finding] -- left as-is
+because [rationale]`) so the next reviewer sees a decision rather than a skip.
 
-**ALL review findings must be addressed** — not just blockers. Nits, tech debt suggestions, and style feedback are all actionable. A "minimum approve" with unresolved findings is not acceptable. For each finding:
-- **Fix it** if the fix is straightforward and aligned with the plan
-- **Annotate it** if the finding should remain as-is — add an inline code comment: `# NOTE: [finding] -- left as-is because [rationale]` so the next reviewer sees a deliberate decision, not a skipped issue
-- **Never silently skip** a finding — every item must have a visible disposition
+For multi-component failures or a non-obvious root cause, trace the data flow to
+where it diverges and write a failing test that reproduces the bug before
+fixing it (the context file may point to a fuller Trace & Verify reference). If
+existing tests pass while the bug exists, find the mock hiding it.
 
-#### Root Cause Analysis: Trace & Verify
+### Step 2: Dispatch One Builder
 
-Before jumping to a fix, apply the Trace & Verify protocol (the context file may point to a fuller reference). This replaces narrative-only reasoning with data-driven verification:
-
-1. **Trace the data flow** from input to expected output. At each boundary between components, capture the actual values being passed. Where does the data diverge from expectations?
-2. **Write a failing test** that reproduces the exact broken behavior. The test must fail for the right reason (the bug), not a setup issue.
-3. **Identify the fix** based on where the trace diverged.
-4. **Verify forward**: After applying the fix, re-run the trace. Show that every step now produces correct values and the test passes.
-5. **Check for mocks hiding reality**: If existing tests pass but the bug exists in production, identify which mocks are hiding the real behavior and add integration tests that exercise the actual code paths.
-
-For single-component bugs with obvious fixes (typo, missing import, off-by-one), skip straight to the fix. Use Trace & Verify when the failure involves multiple components or when the root cause is not immediately obvious.
-
-### Step 2: Deploy a Single Builder Agent
-
-Deploy **one** builder agent to make the targeted fix. Do NOT spawn multiple agents or orchestrate a team — this is a single-focus repair.
+One builder, one focused repair; never a team.
 
 ```
 Task({
   description: "Fix: [one-line summary of the failure]",
   subagent_type: "builder",
   prompt: "
-You are fixing a specific failure. Make targeted edits only — do not refactor unrelated code.
+Fix a specific failure with targeted edits only; do not refactor unrelated code.
 
 CWD: [current working directory — do not navigate away]
+PLAN CONTEXT: [full plan: goal, acceptance criteria, no-gos, architectural decisions]
+TRACKING ISSUE: [issue title and body, or 'No tracking issue']
+RELEVANT FILES: [paths the plan names]
+BUILD HISTORY: [git log --oneline main..HEAD]
+FAILURE TO FIX: [full PATCH_ARG or failure text]
+PR REVIEW FINDINGS: [every finding with path, line, and body, if fixing a review]
 
-PLAN CONTEXT:
-[full plan document contents — goal, acceptance criteria, no-gos, architectural decisions]
+Make the minimal change that fixes each root cause, consistent with the plan.
+Give every review finding a disposition: fix it, or annotate it in code with
+`# NOTE: [finding] -- left as-is because [rationale]`. If a fix would contradict
+the plan's No-Gos or architectural decisions, or needs an architectural change,
+report the conflict instead of proceeding. Do not create a PR. Do not commit,
+including WIP commits before exiting; the caller owns the single commit.
 
-TRACKING ISSUE:
-[issue title and body from gh issue view, or 'No tracking issue']
-
-RELEVANT FILES (from plan):
-[list of file paths the plan identifies as relevant to the feature]
-
-BUILD HISTORY (commits so far on this branch):
-[output of git log --oneline main..HEAD]
-
-FAILURE TO FIX:
-[full PATCH_ARG content or failure text from context]
-
-PR REVIEW COMMENTS (if fixing review blockers):
-[full review comments from gh api — include path, line number, and comment body for each]
-
-YOUR JOB:
-1. Read the failure output carefully. Identify the root cause.
-2. Review the plan context and build history to understand what was intended.
-3. Make the minimal code change that fixes the root cause while staying aligned with the plan.
-4. Do NOT change unrelated code, tests, or files.
-5. Do NOT create a PR.
-6. Do NOT commit — the caller will handle commits.
-7. After editing, report what you changed and why, referencing the plan context.
-
-If the fix requires understanding surrounding context, read the relevant files first.
-If the failure has multiple root causes, fix all of them in this single pass.
-If a fix would contradict the plan's no-gos or architectural decisions, report the conflict instead of proceeding.
-
-**Annotate rather than skip:** If a review finding is genuinely not worth fixing (e.g., a style nit in legacy code, a suggestion that contradicts the plan), do NOT silently skip it. Instead:
-- Add an inline code comment at the relevant location: `# NOTE: [finding summary] -- left as-is because [rationale]`
-- This creates a paper trail so the next reviewer does not re-flag the same issue.
-- The finding is then 'addressed' (annotated), not 'skipped'.
-
-**Criterion mapping (REQUIRED in your completion report):** If your fix
-addresses a specific criterion from the plan's criteria section
-(`## Acceptance Criteria` or `## Success Criteria`), identify which criterion
-by exact text. Report this in your completion summary as
-`criterion_addressed: <text>` (or `criterion_addressed: null` if no clear
-match). The patch skill writes the corresponding tick `[x]` to the plan file
-in the SAME commit as your code change — atomic single commit, no separate
-'tick off' commit.
-
-You MUST report `criterion_addressed: null` when your fix only changes any of
-the following (cosmetic-only fixes never tick a criterion):
-1. lint or formatting-only edits (whitespace, import order, ruff fixes)
-2. test-file-only edits where the test exercises pre-existing behavior
-3. comment-only or docstring-only edits
-4. typo fixes
-5. edits that touch only `__pycache__/`, `.gitignore`, `.gitkeep`, or
-   generated artifacts
-
-Edits outside this list MAY tick a criterion if the criterion's text references
-the runtime behavior the edit changes. When uncertain, prefer
-`criterion_addressed: null` — the next `/do-pr-review` round will tick it
-properly if the fix actually satisfies a criterion.
+Report what you changed and why, and `criterion_addressed: <exact criterion
+text>` naming the plan criterion (`## Acceptance Criteria` or
+`## Success Criteria`) your fix satisfies, or `criterion_addressed: null`.
+It MUST be null when the fix only touches lint or formatting, is
+test-file-only (the test exercises pre-existing behavior), is comment- or
+docstring-only, is a typo fix, or only touches `__pycache__/`, `.gitignore`,
+`.gitkeep`, or generated artifacts. Otherwise name a criterion only if its
+text describes the runtime behavior you changed; when unsure, use null (the
+next review ticks it if the fix satisfies it).
 ",
   run_in_background: false
 })
@@ -172,36 +109,26 @@ properly if the fix actually satisfies a criterion.
 
 ### Step 3: Re-run Tests to Verify
 
-After the builder agent reports completion, run the repo's test suite and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification). The context file declares the test command; generic default is the repo's standard runner, e.g.:
+Run the test suite and lint yourself (commands per the context file; generic
+default is the repo's standard runner and linter). Do not invoke `/do-test`.
 
-```bash
-# Run full test suite (Python example — use cargo test / npm test / etc. per the repo)
-pytest tests/ -v --tb=short
-```
+- Exit 0 and lint clean → Step 3.5.
+- Test failures or an execution error → Step 5.
+- No tests collected → treat as pass.
 
-Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` for Python when available, else skip).
+A number the builder reported is a claim, not a measurement: its environment may
+differ from yours (a venv missing optional dependencies silently deselects test
+files). Report only what you observed here, including the collected/run count,
+so a shrunken suite is visible. If your numbers disagree with the builder's,
+report both and which environment produced each. A delta ("+0 errors") needs a
+baseline you measured the same way; without one, report the absolute number and
+say the baseline is unmeasured.
 
-Parse the results:
-- **Test runner exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
-- **Non-zero exit (test failures)**: Proceed to Step 5 (retry or report stuck)
-- **Non-zero exit (execution error, e.g. pytest exit code 2)**: Report the error and proceed to Step 5
-- **"No tests collected" (e.g. pytest exit code 5)**: Treat as pass (no tests to break)
-
-Report the test summary (passed/failed/skipped counts) before proceeding.
-
-**A number the builder reported is a claim, not a measurement.** The builder ran in its own environment; yours may differ in ways neither of you noticed — a self-built venv silently omitting optional dependencies deselects whole test files with no error, and a type-checker's error count moves with the version of the stubs installed. Never forward the builder's counts upward. Re-measure in this environment and report what *you* observed, including the total collected/run count so a shrunken suite is visible as a shrunken suite rather than a green one. If your number disagrees with the builder's, the disagreement is the finding: say both, and say which environment produced which.
-
-A delta ("+0 errors", "no new failures") is only meaningful against a baseline measured the same way in the same environment. If you did not measure the baseline yourself, you do not have a delta — report the absolute number and say the baseline is unmeasured.
+A failing fix never produces a commit.
 
 ### Step 3.5: Sync Plan Checkbox and Commit the Fix (Atomic Single Commit)
 
-After the test-pass verification in Step 3 succeeds and BEFORE Report
-Completion, commit the fix as a single atomic commit and push it to the current
-branch. A separate follow-up commit (e.g. ticking plan items) is exactly the
-oscillation symptom this skill avoids — on a repo with a review-freshness gate
-it would invalidate the prior PR approval and force a re-review.
-
-**Generic procedure:**
+Commit the fix as one new commit and push it:
 
 ```bash
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -210,109 +137,48 @@ git commit -m "fix: ${SUMMARY}"
 git push origin "HEAD:${BRANCH}"
 ```
 
-**Plan-checkbox sync (only if the context file declares it).** If the repo keeps
-plan docs with acceptance-criteria checkboxes and the context file declares a
-plan-checkbox sync mechanism, run the declared mechanism's exact invocation to
-tick the builder's reported `criterion_addressed` (from Step 2) — never hand-edit
-the checkbox when a mechanism is declared — in the SAME `git add -A` so the plan
-edit and the code fix land in one commit. A helper failure (ambiguous /
-not-found match) is NON-FATAL — the commit still happens with the code change
-only. If no such mechanism is declared (the generic case), skip the tick and
-just commit the fix.
-
-**Why same-commit (and not amend, not separate):** Bundling everything into one
-commit keeps a repo's merge-gate review-comment freshness check passing on the
-next attempt — the latest commit's `committer.date` advances together with the
-code change. A separate follow-up commit pushed AFTER a review would force
-re-review. Do NOT use `git commit --amend` — every patch is a fresh commit.
-
-**Builder authorship invariant:** The builder agent does NOT commit; the patch
-skill is the commit author. Step 3.5 preserves that — any helper invocation and
-the commit happen at the patch-skill level, not at the builder-agent level.
-
-**Test ordering invariant:** The test-pass check in Step 3 happens BEFORE the
-commit in Step 3.5, so a failing fix never produces a commit.
+- If the context file declares a plan-checkbox sync mechanism, run its exact
+  invocation to tick the builder's `criterion_addressed` (Step 2) before the
+  `git add -A`, so the plan tick and the code land in the same commit; never
+  hand-edit the checkbox when a mechanism is declared. A helper failure
+  (ambiguous or not-found match) is non-fatal: commit the code change alone.
+  With no mechanism declared, skip the tick.
+- Do NOT use `git commit --amend`; every patch is a fresh commit. A separate
+  follow-up commit is also wrong: on a repo whose merge gate judges review
+  freshness against the latest commit, it stales the review.
+- You are the commit author: the builder never commits, and no parent skill
+  commits on your behalf.
+- If the repo's pre-commit hook auto-fixes lint (the context file says so), let
+  it run on this commit instead of fixing lint by hand; fix only what it cannot.
 
 ### Step 4: Report Completion
-
-When tests pass, report success. Pipeline stage advancement is handled by the Observer/SDLC router -- do-patch does not determine or advance pipeline stages.
-
-### Step 5: Handle Failure — Retry or Report Stuck
-
-If tests still fail after the fix attempt:
-
-**Check iteration count.** Count how many times `/do-patch` has been called in this session for the same failure.
-
-- If `iterations < ITERATION_CAP`: retry from Step 2 with the new failure output
-  - Re-read the updated test output
-  - Deploy a new builder agent with both the original and new failure outputs for context
-- If `iterations >= ITERATION_CAP`: report stuck — do NOT retry
-
-**Stuck report format:**
-```
-PATCH STUCK — iteration cap reached ({N}/{CAP})
-
-Original failure:
-[original PATCH_ARG summary]
-
-Current failure after {N} fix attempts:
-[current test output — key lines only]
-
-What was tried:
-- Attempt 1: [what was changed]
-- Attempt 2: [what was changed]
-- Attempt N: [what was changed]
-
-Recommendation:
-[analysis of why the fix isn't working — root cause hypothesis]
-
-This requires human review or a different approach. Escalating.
-```
-
-## Lint Discipline
-
-If the repo auto-handles lint/format (via a pre-commit hook or editor-time
-formatter the context file describes), agents should never waste iterations on
-lint fixes:
-
-- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task, avoiding unnecessary lint interruptions while still working.
-- **Final commits**: Let the pre-commit hook run (no `--no-verify`) so it auto-fixes and re-stages. Only genuinely unfixable issues block the commit.
-- **Avoid redundant manual lint** when an auto-fix hook already runs on commit.
-
-If the repo has no such automation (the generic case), run its lint/format
-checks once before committing and fix any reported issues manually.
-
-## Critical Rules
-
-- NEVER create a PR — that is `do-build`'s responsibility
-- NEVER touch the Document or PR pipeline stages
-- NEVER create new worktrees — work in the CWD/worktree already active
-- NEVER refactor unrelated code — targeted fixes only
-- Keep fixes minimal: change the least amount of code needed to pass tests
-- If a fix would require architectural changes, report stuck immediately — do not attempt it
-- This skill owns its commit lifecycle (Step 3.5) — commit nowhere else; no parent skill commits on its behalf
-- NEVER forward a number you did not measure yourself in this environment (Step 3) — a reported metric is a claim until reproduced
-
-## CWD-Relative Execution
-
-All commands run relative to the current working directory. Do not attempt to detect or navigate to worktrees. When `/do-patch` is invoked:
-- From `do-build`: CWD is already the worktree — commands run there
-- Directly by user: CWD is wherever the user is — commands run there
-
-Run `pwd` once at the start to confirm and log it.
-
-## Success Report Format
-
-When the patch succeeds and tests pass:
 
 ```
 Patch applied successfully.
 
-Fix summary: [what was changed and why]
-
+Fix summary: [what changed and why]
+Findings: [each finding → fixed | annotated (rationale)]
 Files modified:
-- [file1.py] — [brief description of change]
-- [file2.py] — [brief description of change]
+- [file] — [change]
+Test result: [passed/failed/skipped, collected count] — measured here
+Commit: [sha]
+```
 
-Test result: ALL TESTS PASSED
+### Step 5: Retry or Report Stuck
+
+If tests still fail, count the `/do-patch` attempts on this failure in the
+session. Below ITERATION_CAP, dispatch a fresh builder (Step 2) with both the
+original and the new failure output. At the cap, or when the fix needs an
+architectural change, stop and report:
+
+```
+PATCH STUCK — iteration cap reached ({N}/{CAP})
+
+Original failure: [summary]
+Current failure after {N} attempts: [key lines]
+What was tried:
+- Attempt 1: [change]
+Root-cause hypothesis: [why the fix is not working]
+
+This requires human review or a different approach.
 ```

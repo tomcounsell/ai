@@ -1,6 +1,6 @@
 # Pre-Publish Checklist
 
-Run every check before creating the issue. Fix failures — do not skip items.
+Run every check before creating the issue and fix failures.
 
 ## Falsification Checks
 
@@ -17,8 +17,6 @@ Run these first. They ask whether the issue should exist at all; every other sec
 **Kill criterion:** if one of these fails, the right output is usually *no issue*. Say so where the finding came up and move on. Filing anyway transfers the cost of disproving your claim onto whoever picks it up next.
 
 ## Reconnaissance Checks
-
-- [ ] **Recon performed** — The reconnaissance routine (Step 3) was executed: broad scan completed, concerns identified, parallel fan-out agents dispatched, and findings synthesized. Skip only for trivially simple issues (typo fixes, config changes). In blue-sky mode the broad scan plus fan-out on cheap concerns only meets this.
 
 - [ ] **Recon summary present** — The issue body contains a `## Recon Summary` section with the four buckets (Confirmed, Revised, Pre-requisites, Dropped) and at least one concrete item. OR it contains a `## Recon: Skipped` section with justification for why recon was unnecessary.
 
@@ -40,16 +38,12 @@ Run these first. They ask whether the issue should exist at all; every other sec
 
 - [ ] **Measurable acceptance criteria** — Each criterion is verifiable (can be checked off with a yes/no). No vague criteria like "improve quality" — instead, "issues created by the skill pass the pre-publish checklist." In blue-sky mode each criterion is a checkable signal that the fog cleared.
 
-- [ ] **Type label** — Issue has a label: `bug`, `feature`, or `chore`.
+- [ ] **Label exists** — Any label comes from the repo's label set (context file or `gh label list`); none is better than an invented one.
 
 ## Downstream Checks
 
 - [ ] **Planner-ready** — The Problem and Solution Sketch sections contain enough detail for `/do-plan` to produce a meaningful plan without asking clarifying questions. If you read only those two sections, could you start planning?
 
 - [ ] **No implementation details** — The issue describes *what* and *why*, not *how*. Implementation details belong in the plan document, not the issue. Exception: constraints ("must not add new dependencies") are appropriate.
-
-## Quality Bar
-
-If any check fails, fix the issue body before publishing. The purpose of this checklist is to catch issues that would produce low-quality plans downstream.
 
 The heuristic: **if `/do-plan` would need to ask you "what does X mean?" after reading the issue, X needs to be defined in the issue.**

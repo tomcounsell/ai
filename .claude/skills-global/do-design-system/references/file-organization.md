@@ -1,8 +1,5 @@
 # Canonical design-file organization (Step 0 reference)
 
-Load this when auditing or organizing a repo's design files against the canonical
-structure — before any moodboard work.
-
 ## Canonical file structure
 
 ```
@@ -41,21 +38,9 @@ docs/designs/
 | `product/` files never appear in `gap-audit.md` | Audit is system-only |
 | No version numbers or dates in `design-system.pen` filename | Git history is the version log |
 
-## Step 0 audit checklist
-
-Check each of:
-
-- `docs/designs/` exists
-- `docs/designs/charter.md` exists and is non-empty
-- `docs/designs/design-system.pen` exists (may be under a legacy name)
-- `docs/designs/gap-audit.md` exists
-- `docs/designs/inspiration/` exists
-- `docs/designs/product/` exists (may be empty)
-- Downstream CSS files present and token names match
-
 ## Gap → proposed migration
 
-Propose migrations; do NOT auto-apply.
+Propose these; never auto-apply.
 
 | Gap | Proposed migration |
 |---|---|

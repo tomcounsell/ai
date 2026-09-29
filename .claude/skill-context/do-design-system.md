@@ -1,83 +1,31 @@
 # do-design-system context — this repo (ai)
 
-The `/do-design-system` body is generic over the `docs/designs/` convention (moodboard scrape,
-`.pen` JSON editing, motif tables, gap-audit). This repo adds the **deterministic generator**
-that emits downstream artifacts from the `.pen` source, the **PreToolUse safety hooks** that
-guard those artifacts, and the reference implementation. Honor these for Steps 5–7.
+This repo adds a deterministic generator for downstream artifacts, hooks guarding them, and a reference pass. Honor these for Steps 5-7.
 
-## The generator — `tools.design_system_sync` (Steps 6 & 7)
+## The generator — `tools.design_system_sync` (Steps 6 and 7)
 
-CSS files, `design-system.md`, and DTCG / Tailwind exports are GENERATED from
-`design-system.pen`. Do NOT hand-edit `brand.css`, `source.css`, or `design-system.md`.
-
-Run the generator:
+`brand.css`, `source.css`, `design-system.md`, and the DTCG / Tailwind exports are generated from `design-system.pen`; never hand-edit them.
 
 ```bash
 python -m tools.design_system_sync --all \
     --pen <consumer-repo>/docs/designs/design-system.pen \
-    --css-root <consumer-repo>/<css-root>
+    --css-root <consumer-repo>/<css-root>   # optional when design-system-sync.toml sits next to the .pen
+npx --no-install @google/design.md lint <consumer-repo>/docs/designs/design-system.md   # must exit 0
 ```
 
-Or rely on `design-system-sync.toml` adjacent to the `.pen`:
+Output is byte-identical across runs; to force regeneration, re-run `--all` and stage the results. `--all` needs `node` and `npx`; `--generate` alone falls back to Python-only emission without Node (`--no-node` makes it explicit). See `docs/features/design-system-tooling.md`.
 
-```bash
-python -m tools.design_system_sync --all \
-    --pen <consumer-repo>/docs/designs/design-system.pen
-```
+## Gap-audit ordering (Step 7)
 
-Verify lint exits 0:
+Run `python -m tools.design_system_sync --audit --pen <path>/design-system.pen` after `--all` and BEFORE `git commit`, then paste its stdout into `gap-audit.md`. The audit diffs against `HEAD:<pen-dir>/design-system.md`, so after the commit it produces an empty diff.
 
-```bash
-npx --no-install @google/design.md lint \
-    <consumer-repo>/docs/designs/design-system.md
-```
+## Hooks (Step 5)
 
-The generator is deterministic: running twice produces byte-identical output. To force
-regeneration (e.g. after a `.pen` pattern change), re-run `--all` and stage the resulting
-artifacts.
+- `validate_design_system_readonly.py` (PreToolUse on Write/Edit) blocks direct writes to the generated artifacts whether or not this skill is active.
+- `validate_design_system_sync.py` blocks a commit when the generated artifacts drift from the `.pen`.
 
-**Node:** `--all` requires `node` + `npx` (for lint + exports). `--generate` alone auto-falls
-back to Python-only emission when Node is absent (pass `--no-node` to be explicit). See
-`docs/features/design-system-tooling.md` for the full Node-absent fallback semantics.
+Both complement the skill's inline `.pen` assertion; keep all of them.
 
-## Gap-audit sequence (Step 7)
+## Reference pass
 
-Run `--audit` BEFORE `git commit`. The audit diffs against `HEAD:<pen-dir>/design-system.md`, so
-`HEAD` must still hold the PRIOR pass's `design-system.md`. Running `--audit` after commit
-produces an empty diff; the generator emits a stderr `--stale-warn` when it detects that case.
-
-```bash
-# 1. Regenerate every artifact from the updated .pen
-python -m tools.design_system_sync --all --pen <path-to>/design-system.pen
-
-# 2. Produce the diff table (goes to stdout)
-python -m tools.design_system_sync --audit --pen <path-to>/design-system.pen
-
-# 3. Paste the audit output into gap-audit.md under a new dated heading, THEN git add + commit.
-```
-
-## Safety gate — two layers (Step 5)
-
-- **Layer A — inline Python assertion (agent-level, runtime).** Pins the write target to
-  `design-system.pen` and refuses any other path. Scope: the `.pen` source only.
-- **Layer B — `validate_design_system_readonly.py` PreToolUse hook (tool-level, runtime).**
-  Registered in `.claude/settings.json` against the `Write`/`Edit` matchers. Scope: the generated
-  artifacts (`design-system.md`, `brand.css`, `source.css`) — it blocks any direct Write/Edit
-  against them regardless of whether this skill is active.
-- Additionally, `validate_design_system_sync.py` blocks the commit if drift between the `.pen`
-  and the generated artifacts is detected.
-
-The two layers are complementary, not redundant: Layer A discriminates the correct `.pen` write
-path from a wrong `.pen` write path; Layer B discriminates a write to a generated artifact from a
-write to anything else. Do NOT remove either.
-
-## Reference implementation
-
-Commit `a702484` on `yudame/cuttlefish` main (moodboard pass, 2026-04-20):
-
-- Moodboard source: `https://www.cosmos.so/tomcounsell/yudame-research`
-- Files changed: `docs/designs/pencil-design-system.pen` (legacy name, now `design-system.pen`),
-  `static/css/brand.css`, `static/css/source.css`, `docs/designs/pencil-design-gap-audit.md`
-  (legacy name, now `gap-audit.md`), `docs/designs/inspiration/` (19 images, flat — now would be
-  `inspiration/2026-04-20-research-editorial/`).
-- Shape: 3 variable edits + 5 new components, no renames, no deletions.
+Commit `a702484` on `yudame/cuttlefish` main: moodboard `https://www.cosmos.so/tomcounsell/yudame-research`; 3 variable edits and 5 new components, no renames or deletions; touched the `.pen`, `static/css/brand.css`, `static/css/source.css`, the gap audit, and `docs/designs/inspiration/`.

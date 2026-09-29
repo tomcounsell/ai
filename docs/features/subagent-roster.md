@@ -33,9 +33,9 @@ Each agent file is self-documenting via its frontmatter `description` — that t
 is what surfaces in the `Task` tool's agent picker. This doc explains the *why*
 and the *relationships* the frontmatter can't.
 
-## The roster (16 agents, two groups)
+## The roster (15 agents, two groups)
 
-### Group A — SDLC pipeline agents (11)
+### Group A — SDLC pipeline agents (10)
 
 Dispatched by the `/do-*` skills as the SDLC pipeline runs. These are the working
 agents of this repo's development loop.
@@ -46,13 +46,12 @@ agents of this repo's development loop.
 | `validator` | Read-only verification that work meets acceptance criteria. Has no Write/Edit/NotebookEdit tools by construction, so it cannot "fix" what it is judging. | `do-build`, `do-test`, granite prime roles |
 | `code-reviewer` | Correctness, maintainability, security, and project-standards review of a diff. | `do-build`, granite prime roles |
 | `test-engineer` | Implements test strategy with real integrations and AI judges (the repo's testing philosophy). | `do-test`, `do-build` (test tasks) |
-| `test-baseline` → `baseline-verifier` | Classifies a failing test as a real regression vs. pre-existing by re-running it against `main`. Returns structured JSON. The merge-gate's safety net against false regressions. | `do-test` |
 | `frontend-tester` | Drives BYOB MCP (real Chrome) to execute UI test scenarios and return pass/fail with screenshot evidence. | `do-test`, `do-pr-review` |
 | `plan-maker` | Produces structured feature plans; the plan-creation subagent for team-orchestration plans. | `do-plan` |
-| `plan-reviewer` | Plan critic — challenges and validates a plan before build. Read-only. | `do-plan-critique` |
+| `plan-reviewer` | The `/do-plan-critique` war-room critic (opus, effort medium): challenges and validates a plan before build and writes its own result file. | `do-plan-critique` |
 | `documentarian` | Writes the feature doc with knowledge of the full documentation structure so nothing gets missed. | `do-build`, `do-docs` |
 | `cruft-auditor` | Scans a PR diff for legacy patterns that should have been cleaned up — the enforcement arm of the NO LEGACY CODE TOLERANCE principle. | `do-pr-review` (cruft pass) |
-| `strategic-analyst` | Runs a multi-dimensional strategic analysis (parallel passes → cross-examine → synthesize → HTML report). The only non-engineering agent here. | `analyze` skill |
+| `strategic-analyst` | Runs a multi-dimensional strategic analysis (parallel passes → cross-examine → synthesize → HTML report). The only non-engineering agent here. | invoked directly (the `analyze` skill is retired) |
 
 ### Group B — Service / MCP agents (5)
 
@@ -79,7 +78,7 @@ and are often the right choice — prefer them over writing a thin custom agent:
 - **`Plan`** — software-architect agent for designing implementation plans (read-only).
 - **`general-purpose`** — catch-all for multi-step research and search when no specific agent fits.
 
-## Why the roster is 16 and not 34
+## Why the roster is 15 and not 34
 
 The directory once held 34 agents. An audit (this cleanup) found that 18 were
 **dead weight** — never referenced by any skill, command, or module:
@@ -94,6 +93,9 @@ The directory once held 34 agents. An audit (this cleanup) found that 18 were
 - A **stub pack** of 5 (`planner`, `reviewer`, `scout`, `documenter`, `red-team`)
   — ~300-byte generic duplicates of the built-in `Plan`/`code-reviewer`/`Explore`
   and the `documentarian` agent.
+
+Separately, `baseline-verifier` became do-test's bundled `scripts/baseline_verify.py`:
+its classification is mechanical, so a script does it without a subagent.
 
 None cross-referenced each other (each agent is standalone). They were dispatchable
 (a plan could assign a task to one and `do-build` would spawn it), but were used in

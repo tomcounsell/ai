@@ -64,6 +64,12 @@ ANTHROPIC_KNOWN_FIELDS = {
     "context": "Set to 'fork' to run in a forked subagent context.",
     "agent": "Which subagent type to use when context: fork is set.",
     "hooks": "Hooks scoped to this skill's lifecycle.",
+    "when_to_use": "Extra trigger context appended to the description.",
+    "arguments": "Named positional arguments for $name substitution.",
+    "disallowed-tools": "Tools removed from the pool while the skill is active.",
+    "effort": "Reasoning effort for the rest of the turn.",
+    "paths": "Globs that limit auto-activation to matching files.",
+    "shell": "Shell for inline shell blocks (bash or powershell).",
 }
 
 ANTHROPIC_RULES = {
@@ -233,7 +239,7 @@ def sync_from_upstream(force: bool = False) -> dict:
 def extract_fields_from_docs(text: str) -> set[str]:
     """Extract frontmatter field names mentioned in documentation."""
     fields = set()
-    for m in re.finditer(r"`([a-z][a-z-]+)`", text):
+    for m in re.finditer(r"`([a-z][a-z_-]+)`", text):
         candidate = m.group(1)
         if candidate in ANTHROPIC_KNOWN_FIELDS:
             fields.add(candidate)
@@ -286,7 +292,7 @@ def read_our_template() -> dict:
 
     if OUR_SKILL_DOCS.exists():
         text = OUR_SKILL_DOCS.read_text(encoding="utf-8")
-        for m in re.finditer(r"\|\s*`([a-z][a-z-]+)`\s*\|", text):
+        for m in re.finditer(r"\|\s*`([a-z][a-z_-]+)`\s*\|", text):
             our_fields.add(m.group(1))
 
     return {"fields": our_fields}

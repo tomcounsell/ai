@@ -81,7 +81,7 @@ See [Test Reliability: Flaky Filter](test-reliability-flaky-filter.md) for full 
 
 ## Baseline Verification
 
-When tests fail consistently (not flaky), the skill dispatches the `baseline-verifier` subagent to classify failures as regressions vs pre-existing by running the failing tests against `main`. The verifier uses `--junitxml` for deterministic parsing — no LLM interpretation of console output.
+When tests fail consistently (not flaky), the skill runs its bundled `scripts/baseline_verify.py` to classify failures as regressions vs pre-existing by running the failing tests against `main`. The script uses `--junitxml` for deterministic parsing — no LLM interpretation of console output.
 
 See [Test Baseline Verification](test-baseline-verification.md) for classification rules and pipeline impact.
 

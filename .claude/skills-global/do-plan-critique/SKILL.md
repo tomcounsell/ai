@@ -2,52 +2,38 @@
 name: do-plan-critique
 description: "Use when reviewing a plan before build. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
 argument-hint: "<plan-path-or-issue-number>"
+effort: medium
 ---
 
 # Plan Critique (War Room)
 
-## Execution Context
+Critique a plan document before build and return a verdict the pipeline acts on: READY TO BUILD
+(no concerns / with concerns), NEEDS REVISION, or MAJOR REWORK. A frozen roster of independent
+critics (1 for LITE, 3 for FULL) plus automated structural checks produce severity-rated,
+cited findings; you aggregate them and decide. The output is findings; plan edits belong to
+`/do-plan`.
 
-This skill runs inline in the context that invokes it. It is deliberately not a
-`context: fork` skill: the harness withholds the Agent tool from any subagent at
-its spawn-depth limit (three layers below the main conversation by default, and
-a forked skill's subagent is an ordinary subagent, not a conversation fork). An
-SDLC supervisor already runs each stage inside its own general-purpose Agent, so
-a forked critique landed exactly at that limit and could spawn no critics; the
-roster silently collapsed into one agent applying every lens in sequence while
-the report kept the war-room format. Running inline keeps the roster one layer
-shallower and leaves the isolation to whoever dispatched the stage. Invoke it
-directly from a top-level conversation and the critics are ordinary subagents;
-invoke it from a stage-runner Agent and they are that runner's subagents.
+**Runs inline, never as `context: fork`.** A forked skill's subagent sits at the harness
+spawn-depth limit, where the Agent tool is withheld, so a forked critique under an SDLC stage
+runner could spawn no critics and silently collapsed into one agent (#3137).
 
-## Repo Context Probe
-
-If `docs/sdlc/do-plan-critique.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
-
-The context file is where a repo layers its SDLC automation onto this generic baseline: stage/status markers around the critique, the repo's mandated plan sections, force-FULL doctrine paths, a resume/roster-completion barrier (a crash-resume probe, a frozen roster manifest, a plan-hash guard, and a membership-gate CLI), a verdict-recording substrate the downstream pipeline reads, and a plan-revising lock. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, and the Agent tool — it dispatches critics in the foreground, waits for each to return its findings, aggregates, and prints a verdict (no repo-specific tooling required).
-
-## What this skill does
-
-Critiques a plan document from a frozen roster of expert perspectives (1 (LITE) or 3 (FULL) critics selected by a triage step) plus automated structural validation. Each critic has a defined lens and returns severity-rated findings. The skill aggregates, deduplicates, and produces a verdict: READY TO BUILD, NEEDS REVISION, or MAJOR REWORK.
-
-## When to load sub-files
-
-- Spawning war room critics → read [CRITICS.md](CRITICS.md) for critic definitions and prompt templates
+**Repo context.** If `docs/sdlc/do-plan-critique.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+It declares stage markers, mandated plan sections, force-FULL doctrine paths, the
+resume/roster barrier (resume probe, frozen `_roster.json`, plan-hash guard, membership-gate
+CLI), the verdict-recording substrate, and the plan-revising lock. Without it, the skill runs
+on `git`, `gh`, and the Agent tool alone and prints its verdict.
 
 ## Plan Resolution
 
-Resolve the plan document path and issue number from `$ARGUMENTS`.
-
-**IMPORTANT:** Always assign `ISSUE_NUMBER` unconditionally (never `${ISSUE_NUMBER:-…}`).
-A non-empty inherited value (e.g. a stale "1724" latched from a prior context) would survive
-deferral and divert recorder writes to the wrong session. Clobber it on every run. (#1731)
+Assign `ISSUE_NUMBER` unconditionally (never `${ISSUE_NUMBER:-…}`): an inherited stale value
+would divert recorder writes to the wrong session (#1731).
 
 ```bash
 ARG="$ARGUMENTS"
 
 # If argument is a number, resolve from GitHub issue
 if [[ "$ARG" =~ ^#?[0-9]+$ ]]; then
-  ISSUE_NUMBER="${ARG#\#}"  # assign ISSUE_NUMBER (canonical name) — clobbers any inherited value
+  ISSUE_NUMBER="${ARG#\#}"  # clobbers any inherited value
   PLAN_PATH=$(gh issue view "$ISSUE_NUMBER" --json body -q '.body' | grep -oP '(?<=docs/plans/)[^\s)]+\.md' | head -1)
   if [ -n "$PLAN_PATH" ]; then
     PLAN_PATH="docs/plans/$PLAN_PATH"
@@ -57,25 +43,18 @@ fi
 # If argument is a path, use directly; recover the issue number from plan frontmatter
 if [[ "$ARG" == *.md ]]; then
   PLAN_PATH="$ARG"
-  # Extract tracking issue from frontmatter: "tracking: https://.../issues/N" or "tracking: #N"
+  # "tracking: https://.../issues/N" or "tracking: #N"
   ISSUE_NUMBER=$(grep -oP '(?<=tracking:[ \t])(https://[^\s]+/issues/|#?)\K[0-9]+' "$PLAN_PATH" 2>/dev/null | head -1)
 fi
 
-# Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
-# An empty or non-integer value here means the caller did not supply a resolvable
-# issue reference — fail loudly so the supervisor sees an actionable error rather
-# than a silently diverted verdict on a wrong session.
+# Fail loudly before any recorder call rather than divert a verdict (#1731).
 [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || {
-  echo "do-plan-critique: could not resolve a positive-integer ISSUE_NUMBER (got: '${ISSUE_NUMBER}'). Pass a numeric issue number or a plan path with a tracking: field." >&2
+  echo "do-plan-critique: no positive-integer ISSUE_NUMBER (got: '${ISSUE_NUMBER}')." >&2
   exit 1
 }
 
-# WS-B (issue #2124): canonicalize PLAN_PATH to an ABSOLUTE path rooted at the repo
-# top-level BEFORE the existence check and before it is passed to critics/SOURCE_FILES.
-# A repo-root-relative plan path is unresolvable from a `.claude/worktrees/agent-*`
-# cwd — the critic then finds nothing and may improvise a critique of a nonexistent
-# plan instead of failing loudly. An absolute path removes that failure mode: the
-# read either succeeds or the existence check below exits 1.
+# Absolute path (#2124): a repo-relative path is unresolvable from an agent worktree cwd,
+# and a critic that cannot find the plan may critique an imagined one.
 if [[ -n "$PLAN_PATH" && "$PLAN_PATH" != /* ]]; then
   REPO_TOPLEVEL=$(git rev-parse --show-toplevel 2>/dev/null)
   if [ -n "$REPO_TOPLEVEL" ] && [ -f "$REPO_TOPLEVEL/$PLAN_PATH" ]; then
@@ -85,265 +64,188 @@ if [[ -n "$PLAN_PATH" && "$PLAN_PATH" != /* ]]; then
   fi
 fi
 
-# Verify plan exists (now at an absolute path — no cwd ambiguity)
 if [ ! -f "$PLAN_PATH" ]; then
   echo "Plan not found: $PLAN_PATH"
   exit 1
 fi
 ```
 
-**Pass the absolute `$PLAN_PATH` into SOURCE_FILES and every critic prompt** so no
-downstream step re-resolves a relative path against a worktree cwd.
+Pass the absolute `$PLAN_PATH` into SOURCE_FILES and every critic prompt.
 
 ## Instructions
 
 ### Step 1: Load Context
 
-1. Read the plan document in full
-2. If plan references a tracking issue, fetch it: `gh issue view N --json title,body,comments`
-3. If plan has a "Prior Art" section, fetch referenced PRs/issues (up to 5):
-   ```bash
-   gh issue view N --json title,state,body --jq '{title, state}'
-   gh pr view N --json title,state,mergedAt --jq '{title, state, mergedAt}'
-   ```
+Read the plan in full, the tracking issue (`gh issue view N --json title,body,comments`), and up
+to 5 PRs/issues its Prior Art section cites.
 
 ### Step 1.5: Extract and Bundle Source Files
 
-Extract all file paths referenced in the plan and read their contents. This prevents critics from hallucinating file contents by giving them verified source code.
-
-1. Extract file paths from the plan text using regex patterns like `path/to/file.py`, backtick-quoted paths, and paths in code blocks
-2. For each extracted path, attempt to read the file:
-   - If the file exists: include its full contents in the SOURCE_FILES block
-   - If the file does not exist: note it as `[FILE NOT FOUND: path/to/file.py]` -- do NOT ask critics to discover it
-3. Bundle all contents into a `SOURCE_FILES` context block formatted as:
+Critics do not read files; they get verified contents, which keeps them from inventing code.
+Read every file path the plan references and bundle them, marking missing ones rather than
+asking critics to find them:
 
 ```
 SOURCE_FILES:
 --- path/to/file1.py ---
 {file contents}
---- path/to/file2.py ---
-{file contents}
 --- path/to/missing.py ---
 [FILE NOT FOUND]
 ```
 
-This SOURCE_FILES block is passed to every critic in Step 3.
-
 ### Step 2: Structural Checks (Automated)
 
-Run these checks directly — no LLM needed:
+Run these yourself, no critic needed, and report each with its severity:
 
-**2a. Required Sections**
-Verify the plan's required sections exist and are non-empty. The context file
-declares which sections this repo mandates; absent a declaration, verify the
-plan's own structure is internally complete (problem, solution, tasks,
-verification).
-
-**2b. Task Integrity**
-- Check for gaps in task numbering (e.g., 1, 2, 4 — missing 3)
-- Verify all `Depends On` references point to valid task IDs
-- Check for circular dependencies
-- Flag any task with no validation command
-
-**2c. Internal References**
-- Extract file paths mentioned in the plan (e.g., `models/agent_session.py`, `bridge/observer.py`)
-- Check which ones exist and which don't — report non-existent paths as findings
-- Extract test file paths from Test Impact section — verify they exist
-
-**2d. Prerequisite Status**
-- For each prerequisite with a check command, run it and report current pass/fail status
-
-**2e. Cross-Reference Consistency**
-- Every Success Criterion should map to at least one task
-- Every No-Go should not appear in the Solution section as planned work
-- Every Rabbit Hole should not appear in the tasks as planned work
-
-Report structural findings with severity:
-- Missing required section → BLOCKER
-- Task numbering gap → CONCERN
-- Invalid dependency reference → BLOCKER
-- Non-existent file path → CONCERN (could be intentionally new)
-- Orphaned success criterion → CONCERN
+| Check | Severity on failure |
+|---|---|
+| Required sections present and non-empty (the context file declares the repo's mandated sections; otherwise problem, solution, tasks, verification) | BLOCKER |
+| Task numbering has no gaps | CONCERN |
+| Every `Depends On` points at a valid task; no cycles | BLOCKER |
+| Every task has a validation command | CONCERN |
+| File paths and Test Impact test paths exist | CONCERN (may be intentionally new) |
+| Prerequisites with a check command pass when run | CONCERN |
+| Every Success Criterion maps to a task; no No-Go or Rabbit Hole appears as planned work | CONCERN |
 
 ### Step 2b: Resume Probe (only if the context file declares a roster barrier)
 
-If the context file declares a crash-resume barrier, run its resume probe here:
-check for a reusable incomplete run dir from a prior crash, and if found, set
-`RESUMED=1`, reuse that dir's frozen roster, skip triage + roster freeze, and
-proceed directly to Step 3 to dispatch only the missing critics. Follow the
-context file's exact probe invocation and stale-dir GC instructions.
-
-If no barrier is declared (the generic case), set `RESUMED=0` and continue to
-Step 2.6 (triage) → Step 3 (dispatch all critics). There is nothing to resume.
+Run the context file's resume probe. If it finds a reusable incomplete run dir from a crash,
+set `RESUMED=1`, reuse that dir's frozen roster, skip triage and roster freeze, and dispatch
+only the missing critics in Step 3. Otherwise, and always in the generic case, set `RESUMED=0`.
 
 ### Step 2.6: Triage (fresh path only — skip if RESUMED=1)
 
-Determine LITE (1 consolidated critic) or FULL (3 merged critics):
+Choose LITE (1 Consolidated Critic) or FULL (3 critics).
 
-**Deterministic force-FULL** — use FULL without an LLM call if ANY of:
-- The plan frontmatter has `appetite: Large` (or the repo's equivalent large-scope marker)
-- The plan touches doctrine paths the context file enumerates (high-risk areas a repo always wants the full war room to vet). If the context file declares no doctrine paths, this trigger does not apply.
+**Force FULL**, with no classifier call, when the plan frontmatter has `appetite: Large` (or the
+repo's equivalent) or the plan touches a doctrine path the context file enumerates. A LITE vote
+never overrides force-FULL.
 
-A LITE vote can never override force-FULL.
-
-**LLM triage** (when force-FULL does not apply):
-Spawn a single short-lived `sonnet` Agent with `run_in_background: false` and a brief classification prompt:
+Otherwise spawn one `haiku` Agent (`run_in_background: false`) with:
 
 ```
-You are a plan triage agent. Classify this plan as LITE or FULL critique depth.
-LITE = purely internal, non-doctrine, small scope change (one bug fix, one CLI flag, one config key).
-FULL = anything touching critical paths, cross-component changes, new abstractions, architectural decisions.
+Classify this plan's critique depth.
+LITE = purely internal, non-doctrine, small scope (one bug fix, one CLI flag, one config key).
+FULL = critical paths, cross-component changes, new abstractions, architectural decisions.
 Bias to FULL on any ambiguity.
-Think the plan through before you answer.
 Reply with exactly one line: "LITE: <one-line reason>" or "FULL: <one-line reason>".
 
 PLAN:
 {plan frontmatter + first 1000 chars}
 ```
 
-Set `CRITIQUE_DEPTH` to `LITE` or `FULL` based on the result.
+Set `CRITIQUE_DEPTH` from the reply.
 
 ### Step 3a: Fix the Critic Roster
 
-(Skip this step if RESUMED=1 — the surviving run already defines the roster.)
+(Skip if RESUMED=1.) Freeze the roster before dispatching any critic; Step 3.5 verifies
+membership against it, so dispatching fewer critics can never satisfy completion.
 
-Before dispatching ANY critic, freeze the expected critic roster. This is the
-membership set the Step 3.5 completion check verifies — completion cannot be
-satisfied by dispatching fewer critics than the roster lists.
+- **LITE** → `["Consolidated Critic"]`
+- **FULL** → `["Risk & Robustness", "Scope & Value", "History & Consistency"]`
 
-The roster follows from the triage depth:
-- **LITE** → `["Consolidated Critic"]` (1)
-- **FULL** → `["Risk & Robustness", "Scope & Value", "History & Consistency"]` (3)
-
-If the context file declares a roster barrier (a frozen `_roster.json` manifest,
-a per-run directory, and a plan-hash stale-resume guard), create those artifacts
-exactly as it specifies — the frozen manifest is what makes the Step 3.5 gate
-mechanically verifiable across a crash. In the generic case, simply record the
-roster names in memory; the Step 3.5 check verifies each named critic returned
-its findings.
+If the context file declares a roster barrier, create its artifacts exactly as specified (run
+dir, frozen `_roster.json` manifest, plan-hash guard). Otherwise hold the names in memory.
 
 ### Step 3: War Room (Parallel Critics)
 
-Read [CRITICS.md](CRITICS.md) for the full critic definitions and prompt templates.
+Read [CRITICS.md](CRITICS.md) for the prompt template and each critic's lens. Dispatch the roster
+(all members on a fresh run; only uncompleted members on a resume), all calls in one message so
+they run concurrently. Each critic gets the full plan, the SOURCE_FILES block, the issue context,
+prior-art summaries, and its lens.
 
-Dispatch the roster's critics (on a fresh run, all roster members; on a resume, only those not yet completed). Read CRITICS.md for the 3 FULL critics and 1 Consolidated Critic (LITE). Each critic gets:
-- The full plan text
-- The SOURCE_FILES block (verified file contents from Step 1.5)
-- The issue context (if available)
-- Prior art summaries (if fetched)
-- Their specific lens and instructions from CRITICS.md
+Dispatch each critic with `subagent_type: "plan-reviewer"` (pinned to opus at medium effort;
+critique is a gate whose misses reach the build). If that agent type is unavailable, use a
+general-purpose Agent with `model: "opus"`. Pass `run_in_background: false` explicitly on every
+call; an eng session denies a spawn that omits it. Do not pass `name`: a named spawn from inside
+a subagent is refused.
 
-Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost. Do not pass `name` on critic dispatches: a named spawn from inside a subagent is refused where an unnamed one succeeds.
+**Record the mode**, since independent convergence is the war room's value:
 
-**Record the mode.** The value of the war room is independent convergence: two critics reaching the same blocker without seeing each other's reasoning is stronger evidence than one pass listing it twice. Set `CRITIQUE_MODE` before dispatching:
+- Roster dispatched as subagents → `CRITIQUE_MODE = independent roster ({M} critics)`.
+- Agent tool absent, or every dispatch refused with the spawn-depth error → apply each lens
+  yourself in sequence, writing each under its roster name so Step 3.5 still sees the full
+  roster, and set `CRITIQUE_MODE = sequential lenses (Agent tool unavailable: {exact error or
+  "not in tool list"})`.
 
-- Agent tool present and the roster dispatched → `independent roster ({M} critics)`.
-- Agent tool absent from this context, or every dispatch refused with the harness's spawn-depth error → apply each roster lens yourself, in sequence, writing each lens's findings under its roster name so the Step 3.5 gate still sees the full roster, and set `CRITIQUE_MODE` to `sequential lenses (Agent tool unavailable: {exact tool error or "not in tool list"})`.
+The mode goes in the report header and never changes the verdict string.
 
-The mode is printed in the Step 5 report header and never alters the verdict string. A sequential run still produces cited, verified findings; what it cannot produce is corroboration, and the reader must be able to see that from the report alone.
+**Generic completion:** wait for each foreground critic to return its findings.
 
-**Generic completion model:** dispatch the critics in the **foreground**, passing `run_in_background: false` explicitly on each call, and wait for each to return its findings before aggregating. Omitting the flag is denied in an eng session, not defaulted to foreground.
+**With a result-file roster barrier** (context file), each critic writes its findings
+atomically: to `{critic_name}.result.md.tmp`, then rename to `{critic_name}.result.md`, ending
+with the two-line terminal fence `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED`.
+Completion is then observed on the filesystem whether or not the driver awaited the agents.
+Pass each critic its run-dir path and `{critic_name}` per the context file's layout.
 
-**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file — atomically: write to `{critic_name}.result.md.tmp`, then rename to `{critic_name}.result.md` — ending in the two-line terminal completion fence `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` (the exact convention CRITICS.md embeds in every critic prompt). Completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's run-dir layout and pass each critic its run-dir path and `{critic_name}`. The barrier is the robust form when the agent driver may return early from a background dispatch; foreground-and-wait suffices when the driver reliably blocks.
-
-Each critic returns **0-3 findings** (or the literal `No findings.`) in this format:
+Each critic returns 0-3 findings (or `No findings.`):
 
 ```
 SEVERITY: BLOCKER | CONCERN | NIT
 LOCATION: Section name or line reference in the plan
 FINDING: What's wrong (1-2 sentences)
 SUGGESTION: How to fix it (1-2 sentences)
-IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.]
-  The specific guard condition, call signature, or gotcha that makes this finding
-  implementable without re-investigation. If you cannot write this note, the finding
-  is not yet specific enough to ship.
+IMPLEMENTATION NOTE: Required for CONCERN and BLOCKER. The specific guard condition, call
+  signature, or gotcha that makes the fix implementable without re-investigation.
 ```
-
-NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
 
 ### Step 3.5: Roster Completion Check (mandatory, runs BEFORE Step 4)
 
-You do NOT proceed to Step 4 (aggregation) until every roster member fixed in
-Step 3a has returned its findings, OR you record the `CRITIQUE INCOMPLETE`
-fallback after exhausting the re-dispatch cap.
+Do not aggregate until every roster member from Step 3a has returned findings, or the
+`CRITIQUE INCOMPLETE` fallback below is recorded.
 
-**Generic check:** confirm each named roster member returned findings (or
-`No findings.`). If any are missing, re-dispatch ONLY the missing critics in the
-**foreground**, then re-check.
+**Generic check:** confirm each named member returned findings (or `No findings.`); re-dispatch
+only the missing ones in the foreground, then re-check.
 
-**If the context file declares a membership-gate CLI**, invoke it against the run
-dir instead — it reads the frozen `_roster.json` manifest and verifies each
-named member's result file carries the terminal completion fence, printing a JSON
-gate decision (`{"complete": bool, "missing": [...], ...}`) and exiting non-zero
-until complete. This filesystem membership check holds whether or not the driver
-awaited the agents.
+**If the context file declares a membership-gate CLI**, run it against the run dir instead. It
+reads the frozen `_roster.json`, checks each member's result file for the terminal fence, prints
+`{"complete": bool, "missing": [...], ...}`, and exits non-zero until complete. When it accepts
+`--plan-path`, pass it: the gate then also requires each result to quote the real plan, so a
+fabricated critique of a nonexistent plan counts as an incomplete (`ungrounded`) member (#2124).
 
-**Grounding leg (issue #2124).** When the context file's membership-gate CLI accepts
-a `--plan-path`, pass the plan path so the gate ALSO verifies each result file
-verifiably cites the real plan (a verbatim quote or a real section header). A critic
-that returned a structurally-valid but **fabricated** critique — reviewing a
-different, nonexistent plan with zero grounded reads — carries no substring that
-collides with the real plan bytes, so it is reported as an incomplete member
-(`ungrounded`) exactly like a missing critic: bounded re-dispatch, then the loud
-`MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP. This closes the "hallucinated critique
-that looks valid" hole at the gate rather than trusting the fork's self-report.
+**Bounded re-dispatch.** `MAX_CRITIC_REDISPATCH = 2`: 1 initial dispatch + up to 2
+re-dispatches = 3 attempts maximum per critic. Re-dispatches are foreground; never
+`run_in_background: true`, which reintroduces the fire-and-forget failure this check exists for.
 
-**Bounded re-dispatch.** `MAX_CRITIC_REDISPATCH = 2`. The total attempt budget
-is pinned: **1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts
-maximum per critic** — never an unbounded retry loop. Every re-dispatch is
-**foreground** (never `run_in_background: true` — a background re-dispatch
-re-introduces exactly the fire-and-forget assumption this check replaces).
-
-**STOP-grade verdict on a still-incomplete roster.** If the roster is still
-incomplete after `MAX_CRITIC_REDISPATCH` rounds, do NOT aggregate and do NOT
-loop further. Jump to **Step 5.5** and record the verdict string:
+**Still incomplete after the cap:** do not aggregate or loop. Record, via Step 5.5:
 
 ```
 MAJOR REWORK (CRITIQUE INCOMPLETE: roster N/M — missing: {names})
 ```
 
-(`N` = completed count, `M` = roster count, `{names}` = the critics that never
-reported.) The `MAJOR REWORK` substring routes back to `/do-plan` (in a repo
-with an SDLC router its guard **G1** consumes it). The stage **ALWAYS produces
-a verdict** — never a silent or empty exit. Then set the plan-revising lock per
-**Step 5.6** (a `CRITIQUE INCOMPLETE` verdict is revision-grade).
+(`N` completed, `M` roster size.) `MAJOR REWORK` routes back to `/do-plan` (SDLC router guard
+G1). The stage always produces a verdict, never an empty exit. Then set the plan-revising lock
+per Step 5.6.
 
-**Run-dir cleanup gating (barrier only).** If the context file's barrier created
-a per-run directory, clean it up **ONLY on the `complete: true` path**. On the
-incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** it for forensics — the
-partial/missing result files are the diagnostic evidence of which critics never
-reported.
+**Run-dir cleanup (barrier only):** delete the run dir only on the `complete: true` path; on
+the incomplete path, preserve it as evidence of which critics never reported.
 
 ### Step 4: Aggregate and Deduplicate
 
-**Aggregation invariant: iterate every roster member fixed in Step 3a and read
-each one's findings** — never just "whatever happened to come back". A missing
-member at this point is a visible gap (Step 3.5 should have caught it), never a
-member silently dropped. (When the barrier is active, iterate the frozen
-`_roster.json` manifest and read each `{name}.result.md` rather than globbing
-whatever files exist.)
+Iterate every roster member fixed in Step 3a (with the barrier, the frozen `_roster.json`, reading
+each `{name}.result.md`), never just the files that happen to exist; a missing member is a visible
+gap.
 
-1. Collect all findings (structural + critic), accounting for every roster member fixed in Step 3a
-2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
-3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
-4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
-5. **Implementation Note validation** — for each finding with SEVERITY = CONCERN or BLOCKER:
-   - If IMPLEMENTATION NOTE is missing or empty: mark the finding as malformed, exclude it from the report, and log: "Finding [title] missing Implementation Note — excluded (critic should have included it in first pass)"
-   - **Do NOT re-run the critic.** The note requirement is enforced in CRITICS.md; a missing note means the finding is not yet specific enough to ship. Exclude and move on.
+1. Collect structural and critic findings.
+2. Deduplicate: keep the higher severity and note which critics agreed.
+3. Sort BLOCKERs, then CONCERNs, then NITs.
+4. When the Skeptic sub-section (of Risk & Robustness, or LITE sub-section A) and the Simplifier
+   sub-section (of Scope & Value, or LITE sub-section B) flag the same component, elevate it to
+   BLOCKER.
+5. Exclude any CONCERN or BLOCKER missing its Implementation Note, logging "Finding [title]
+   missing Implementation Note — excluded". Do not re-dispatch for it.
 
 ### Step 5: Report
 
-Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header.
-
-Output the final report in this format:
+Emit every section header literally; an empty category reads `None.` under its header.
 
 ```markdown
 # Plan Critique: {plan name}
 
 **Plan**: {plan_path}
 **Issue**: #{issue_number} (if applicable)
-**Critics**: {roster members from _roster.json} ({LITE or FULL} depth)
-**Mode**: {CRITIQUE_MODE — `independent roster (M critics)` or `sequential lenses (Agent tool unavailable: reason)`}
+**Critics**: {roster members} ({LITE or FULL} depth)
+**Mode**: {CRITIQUE_MODE}
 **Findings**: {N} total ({blockers} blockers, {concerns} concerns, {nits} nits)
 
 ## Blockers
@@ -354,17 +256,11 @@ Output the final report in this format:
 - **Location**: {section reference}
 - **Finding**: {description}
 - **Suggestion**: {how to fix}
-- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
+- **Implementation Note**: {guard condition, call signature, or gotcha}
 
 ## Concerns
 
-### {finding title}
-- **Severity**: CONCERN
-- **Critics**: {which critics flagged this}
-- **Location**: {section reference}
-- **Finding**: {description}
-- **Suggestion**: {how to fix}
-- **Implementation Note**: {the specific guard condition, call signature, or gotcha}
+(same fields, Severity: CONCERN)
 
 ## Nits
 
@@ -385,92 +281,57 @@ Output the final report in this format:
 ## Verdict
 
 {One of:}
-- **READY TO BUILD (no concerns)** — No CONCERN or BLOCKER findings (NITs do not trigger this variant). Proceed directly to build.
-- **READY TO BUILD (with concerns)** — No BLOCKERs, but one or more CONCERN findings exist. A revision pass will embed Implementation Notes before build.
+- **READY TO BUILD (no concerns)** — no CONCERN or BLOCKER findings (NITs allowed).
+- **READY TO BUILD (with concerns)** — no BLOCKERs, one or more CONCERNs.
 - **NEEDS REVISION** — {N} blockers must be resolved before build.
-- **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
+- **MAJOR REWORK** — fundamental issues; recommend re-planning.
 ```
 
 ### Step 5.5: Finalize — record the verdict (mandatory, self-contained)
 
-This step is **mandatory and reached on EVERY exit path** — every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK) passes through it. Do not return control to a supervisor before completing it.
+Every exit path passes through this step before control returns to a supervisor.
 
-**Generic case:** the verdict printed in Step 5 IS the recorded output — the caller reads it from your response. Nothing further to do.
+**Generic case:** the printed Step 5 verdict is the output.
 
-**If the context file declares a verdict-recording substrate** (so a downstream
-pipeline router can consume the verdict programmatically), record the verdict via
-that substrate now, and on a READY TO BUILD verdict **co-locate** the completion
-stage-marker write with the verdict record in the SAME block so the verdict and
-the marker can never desync. Follow the context file's exact invocation. Verdict
-+ marker are a single unit on the READY path: never record one without the other.
-On any non-READY verdict, leave the stage marker at `in_progress`. Do NOT suppress
-substrate errors — a failed recording must surface as a visible non-zero exit.
+**With a verdict-recording substrate** (context file), record the verdict now using the
+context file's invocation. On READY TO BUILD, write the CRITIQUE completion stage-marker in the
+same block, never as a follow-up; on any other verdict leave the marker `in_progress`. If the
+context file declares a durable findings table in the plan, write the aggregated findings into
+it before recording the verdict. Never suppress substrate errors.
 
-**If the context file also declares a durable findings table** (a section of the
-plan the downstream stages read as the record of what the critics said), write the
-aggregated Step 5 findings into it in the SAME finalize block as the verdict —
-before recording the verdict — so a recorded verdict never lands without the
-evidence that justifies it. Follow the context file's exact rendering and path
-rules.
-
-**A missing context file is not proof there is no substrate (issue #2419).** The context file is where a repo writes an invocation down; it is not what makes the substrate exist. If your prompt carries a run identity (a `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor is tracking this run and will otherwise have to hand-backfill whatever you decline to record — a manual step that is easy to get wrong under time pressure. In that case record the verdict and marker yourself with the standard invocation rather than skipping to the generic case:
+**A missing context file does not prove there is no substrate (#2419).** If your prompt carries
+a `run_id` and `sdlc-tool` is on PATH, a supervisor is tracking the run; record it yourself:
 
 ```bash
-sdlc-tool verdict record --stage CRITIQUE --verdict "$VERDICT_STRING" --issue-number {issue_number} --run-id {run_id}
+sdlc-tool verdict record --stage CRITIQUE --verdict "$VERDICT_STRING" --issue-number "$ISSUE_NUMBER" --run-id {run_id}
 # READY TO BUILD only — same block, never a follow-up:
-sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number {issue_number} --run-id {run_id}
+sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number "$ISSUE_NUMBER" --run-id {run_id}
 ```
 
-Report a failed write; never silently continue as though the state landed.
-
-`$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`).
+`$VERDICT_STRING` is the exact Step 5 verdict. Report a failed write; never continue as though
+state landed.
 
 ### Step 5.6: Set plan-revising lock (only if the context file declares one)
 
-If the context file declares a plan-revising lock (a flag a downstream router
-reads to block build dispatch until a revision pass completes), set it after
-recording the verdict whenever the verdict requires a revision pass. Follow the
-context file's exact invocation.
-
-Set the lock when the verdict is one of:
-- `NEEDS REVISION`
-- `MAJOR REWORK`
-- `READY TO BUILD (with concerns)`
-
-**Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed.
-
-The rule is the verdict kind and nothing else. Do not add an exemption for plans
-that have already been revised once: a *prior* revision says nothing about
-whether *this* verdict has been answered, and such an exemption makes the lock
-permanently inert on every plan that has ever gone round the loop. Deciding
-whether a revision has landed *since this verdict* requires ledger state the
-skill cannot read; that event-scoping belongs to the downstream router, which
-reads the recorded verdict timestamp directly.
-
-In the generic case (no lock declared), skip this step — the printed verdict already tells the caller whether a revision pass is needed.
+After recording the verdict, set the lock (context file's invocation) when the verdict is
+`NEEDS REVISION`, `MAJOR REWORK`, or `READY TO BUILD (with concerns)`; never for
+`READY TO BUILD (no concerns)`. The verdict kind is the only rule: no exemption for
+already-revised plans, which would leave the lock permanently inert. Whether a revision has
+landed since this verdict is the router's call, not this skill's.
 
 ## Outcome Contract
 
-The skill returns a structured verdict that the SDLC pipeline can use:
-
 | Verdict | SDLC Action |
 |---------|-------------|
-| READY TO BUILD (no concerns) | Proceed directly to `/do-build` |
-| READY TO BUILD (with concerns) | Revision pass via `/do-plan`, then **re-critique** — never `/do-build` directly |
+| READY TO BUILD (no concerns) | Proceed to `/do-build` |
+| READY TO BUILD (with concerns) | Revision pass via `/do-plan`, then re-critique — never `/do-build` directly |
 | NEEDS REVISION | Return to `/do-plan` with blocker findings |
 | MAJOR REWORK | Return to issue discussion |
 
-The report's **Mode** line is part of the contract. `sequential lenses` tells a supervisor, and any escalation reader weighing a critique-cycle cap, that no finding in the report was independently corroborated, whatever the "Critics" line lists.
+The Mode line is part of the contract: `sequential lenses` tells any reader, including one
+weighing a critique-cycle cap, that no finding was independently corroborated.
 
-**"READY TO BUILD (with concerns)" does not reach `/do-build` directly.** It enters a bounded revision + re-critique loop: `/do-plan` applies the revision, then this skill runs again over the revised plan. The loop exits to `/do-build` either when a round returns `READY TO BUILD (no concerns)`, or when the pipeline's concern re-critique bound is exhausted — at which point the remaining concerns are accepted on the record and the build proceeds. The bound's name and value are pipeline configuration, not part of this skill; where the pipeline declares one, the context file names it.
-
-The revision pass incorporates the Implementation Note from each concern into the plan text. CONCERNs are not reclassified as defects — the revision pass is a plan clarity step, not a rework step. The concern is still acknowledged (not blocking), but its Implementation Note is embedded in the plan so the builder has unambiguous implementation guidance without re-investigation.
-
-Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER findings (NITs do not block and do not trigger revision).
-
-## What This Skill Does NOT Do
-
-- **Does not rewrite the plan** — output is findings, not a revised document
-- **Does not expand scope** — critics flag gaps, they don't suggest features
-- **Does not re-architect** — validates internal consistency, not whether a different approach is better
-- **Does not block on NITs** — only BLOCKERs prevent a READY TO BUILD verdict
+"With concerns" loops through revision and re-critique until a round returns no concerns or the
+pipeline's concern re-critique bound is exhausted (the context file names the bound); then the
+remaining concerns are accepted on the record and the build proceeds. The revision pass embeds
+each concern's Implementation Note in the plan; concerns are not reclassified as defects.

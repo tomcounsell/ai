@@ -87,7 +87,7 @@ Drift now surfaces at commit time, not merge time.
 Removed with the merge-time full-suite gate: `scripts/baseline_gate.py`,
 its decay/flake-tracker machinery, and the post-merge baseline update no
 longer exist. Test-failure classification lives in the TEST stage
-(`baseline-verifier`) and the nightly regression run.
+(do-test's `scripts/baseline_verify.py`) and the nightly regression run.
 
 ### 5. Engineer gate-recovery rule
 

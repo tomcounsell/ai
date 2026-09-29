@@ -33,10 +33,6 @@ and it very likely answers its own question by guessing — which defeats the en
 Under `claude -p` step 2 does not prompt anyone. It fires the edge and ends the turn. That
 is the whole reason it is there.
 
-(The second half of that mechanism is `agent/output_router.py`'s `pause_open_question`
-branch, which stops the nudge loop re-enqueuing the session while a poll of its own is
-outstanding. You do not have to do anything for it — it reads the poll registry itself.)
-
 ## Invocation
 
 ```bash

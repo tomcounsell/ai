@@ -49,25 +49,6 @@ sdlc-tool stage-query --issue-number N | python -c "import sys,json; d=json.load
 
 ## Related Meta Field: `plan_hash_at_build_start`
 
-A companion field, `_plan_hash_at_build_start` (str|None), stores the git commit hash of the plan document at the moment `/do-build` begins. This enables a defense-in-depth check at Step 21 (pre-PR) that aborts the build if the plan was revised mid-execution.
-
-The hash is set by `/do-build` Step 7 and verified at Step 21:
-
-```bash
-# Step 7: record hash
-PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
-git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
-PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number N --run-id "$RUN_ID"
-
-# Step 21: verify (aborts if changed)
-CURRENT_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-STORED_HASH=$(sdlc-tool stage-query --issue-number N | python -c "...")
-if [ -n "$STORED_HASH" ] && [ "$CURRENT_HASH" != "$STORED_HASH" ]; then
-  echo "BUILD ABORT: plan revised mid-build"
-  sdlc-tool stage-marker --stage BUILD --status failed --issue-number N --run-id "$RUN_ID"
-  exit 1
-fi
-```
-
-The check is a no-op when `STORED_HASH` is empty (no hash recorded, or the plan file is untracked).
+`/do-build` records the plan's commit hash at build start and aborts before opening the PR if the
+plan changed mid-build (a no-op when no hash was recorded). The commands live in
+[`do-build.md`](do-build.md).

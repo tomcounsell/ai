@@ -1,86 +1,36 @@
-# Reconnaissance Routine (Explore → Concerns → Fan-out → Synthesize)
+# Reconnaissance Routine
 
-A pre-planning investigation pattern that surfaces unknowns, conflicts, and stale assumptions before they get baked into the issue. This prevents downstream waste: issues that propose already-done work, reference dead code, or conflate separate systems.
+Surface unknowns, conflicts, and stale assumptions before they get baked into the
+issue: work already done, dead code, or two systems conflated as one. Run it for
+any issue touching multiple files or systems, and always when the area changed
+recently (the most common source of stale assumptions).
 
-## When to Run
+## 1. Broad scan
 
-- **Always** for feature and chore issues touching multiple files or systems
-- **Always** when the request references recent PRs or refactors (high staleness risk)
-- **Skip** for trivial issues: typo fixes, config changes, single-file bugs with obvious fixes
+One Explore agent (thoroughness "very thorough", budget 5 minutes) maps the
+affected area: source files, tests, the last few PRs, and docs describing the
+intended architecture. It returns paths and key details.
 
-## Phase 1: Broad Scan
+## 2. Concerns
 
-Spawn a single Explore agent (thoroughness: "very thorough") with a prompt like:
+From the scan, list 3-8 specific, answerable questions about what is:
+already done, conflicting (code vs docs, or two systems doing one job), stale,
+conflated, missing infrastructure the request assumes, or at odds with the
+current design direction. "Does the retry logic in X get called in production?"
+is a concern; "investigate the job queue" is not.
 
-> Map the affected area for [TOPIC]. Find: relevant source files, existing tests, recent PRs, related docs, and any infrastructure that would be touched. Return file paths and key details.
+## 3. Fan-out
 
-**What you're looking for:**
-- Which files exist and what they contain
-- What tests already cover this area
-- What changed recently (last 2-3 PRs)
-- What docs describe the intended architecture
+One read-only Explore agent per concern, all in one message (budget 5 minutes
+each). Each prompt carries the question, the files from the scan to read, and the
+required return: findings plus a recommendation (CREATE / EXTEND / SKIP / FIX
+FIRST / SPLIT).
 
-## Phase 2: Surface Concerns
+## 4. Synthesize
 
-From the scan results, identify **discrete concerns** — things that are:
-
-| Category | Signal |
-|----------|--------|
-| **Already done** | Tests/code already exist for a proposed deliverable |
-| **Conflicting** | Code contradicts docs, or two systems do the same thing differently |
-| **Stale** | Code comments say "legacy", dead imports, functions defined but never called |
-| **Conflated** | Issue treats two independent systems as one (e.g., "nudge loop + steering queue") |
-| **Missing infrastructure** | Issue assumes code exists that doesn't (e.g., retry logic that's stubbed out) |
-| **Architectural mismatch** | Proposed approach contradicts the current design direction |
-
-List each concern as a **specific, answerable question**. Aim for 3-8 concerns. Fewer means you haven't looked hard enough; more means you're splitting hairs.
-
-## Phase 3: Parallel Fan-out
-
-Spawn **one Explore agent per concern**, all in parallel. Each agent gets:
-
-1. **The specific question** it's investigating
-2. **Which files to read** (from Phase 1 scan)
-3. **What to return**: findings + a concrete recommendation (CREATE / EXTEND / SKIP / FIX FIRST / SPLIT)
-
-Example prompt template:
-
-> Research task — no code changes.
->
-> **Question:** [The specific concern from Phase 2]
->
-> **Investigate:**
-> 1. Read [specific files] — find [specific functions/patterns]
-> 2. Search for existing tests covering this
-> 3. Check if [assumption] is true in the current code
->
-> **Return:** Findings and recommendation: should this be included in the issue as-is, modified, split out, or dropped?
-
-**Key rules:**
-- Each agent investigates ONE concern (keeps responses focused)
-- All agents run in parallel (wall-clock time = slowest agent, not sum)
-- Agents are read-only explorers, never write code
-- Give each agent enough file paths to be self-sufficient (don't make them search from scratch)
-
-## Phase 4: Synthesize
-
-Reconcile all agent findings into four buckets:
-
-### 1. Confirmed (include in issue as-is)
-Items where the investigation validated the original assumption. No changes needed.
-
-### 2. Revised (include but modify scope)
-Items where the investigation found partial overlap, architectural nuance, or better boundaries. Update the issue scope to match reality.
-
-### 3. Pre-requisites (fix before this issue)
-Items where stale code, architectural conflicts, or missing infrastructure must be addressed first. Either: call these out as blockers in the issue, or split them into a separate issue.
-
-### 4. Dropped (remove from issue)
-Items where the work is already done, the assumption was wrong, or the proposed approach doesn't match the architecture. Don't include these — they'll waste planning and build time.
-
-## Output Format
-
-After synthesis, present findings to the user before writing the issue body:
+Reconcile into four buckets; disagreements between agents are worth reporting,
+since they reveal real architectural ambiguity. The issue body carries this
+section verbatim in shape (a hook parses the heading and bucket labels):
 
 ```
 ## Recon Summary
@@ -96,16 +46,8 @@ After synthesis, present findings to the user before writing the issue body:
 
 **Dropped:** [N items] — removed from scope
 - [Item]: [why it was dropped]
-
-Proceed with writing the issue?
 ```
 
-Wait for user confirmation before moving to Step 4 (Write the Issue Body). The user may want to discuss scope changes or disagree with a recommendation.
-
-## Anti-Patterns
-
-- **Skipping recon for "simple" issues that aren't simple** — If the issue touches code that changed in the last week, run recon. Recent changes are the #1 source of stale assumptions.
-- **Running recon serially** — The whole point is parallel fan-out. If you're investigating concerns one at a time, you're wasting wall-clock time.
-- **Agents that are too broad** — "Investigate everything about the job queue" produces noise. "Does the retry logic in bridge/agents.py get called in production?" produces signal.
-- **Skipping synthesis** — Raw agent outputs aren't useful to the user. Reconcile into the four buckets. Conflicts between agents are especially valuable — they reveal genuine architectural ambiguity.
-- **Proceeding without user confirmation** — Recon often changes the scope significantly. The user needs to approve the revised scope before you write the issue.
+Recon often changes scope. In an interactive session, show this summary and ask
+before writing the issue. In a pipeline or headless run, put the summary in the
+issue body and continue.

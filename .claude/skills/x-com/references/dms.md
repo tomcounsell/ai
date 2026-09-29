@@ -1,8 +1,6 @@
-# Task 1: Check DMs
+# Task 1: DMs
 
-## Voice
-
-Same as LinkedIn DMs: short (1-3 sentences), curious not eager, warm but professional. No sycophancy. X DMs skew more casual than LinkedIn. Match the platform.
+Voice as for LinkedIn DMs (1-3 sentences, curious not eager, warm but professional, no sycophancy), a notch more casual. Zero em-dashes (—), as in all X text.
 
 ## Read the inbox
 
@@ -11,12 +9,7 @@ browser_navigate(url="https://x.com/messages", tabId=<x_tab>, waitUntil="network
 browser_read(url="https://x.com/messages", reuseTab=true, screens=2)
 ```
 
-The conversation list IEs have names like `"<sender name> <preview>"`. Skip:
-- Snippets where the last sender appears to be Valor (recent. You're already waiting on them)
-- Obvious spam / mass DMs
-- Unsolicited sales/crypto pitches
-
-If nothing remains, say "no DMs need replies right now" with a one-line reason and move on.
+Conversation IEs are named `"<sender name> <preview>"`. Skip threads where Valor sent last recently, spam and mass DMs, and unsolicited sales or crypto pitches. If nothing remains, say "no DMs need replies right now" with a one-line reason and move on.
 
 ## Open a thread
 
@@ -26,32 +19,19 @@ browser_wait_for(tabId=<x_tab>, selector="[data-testid='dmDrawer'], [aria-label*
 browser_read(url="<current url>", reuseTab=true, screens=2)
 ```
 
-Read the thread to understand context. Then check the work vault before replying:
+Before replying, check `~/work-vault/Consulting/leads/` and `chats/`: known contact → read their file; unknown → friendly and curious.
 
-```bash
-ls ~/work-vault/Consulting/leads/
-ls ~/work-vault/Consulting/chats/
-```
+## Send
 
-- Known lead/chat → read their file, reply with awareness
-- Unknown → friendly and curious
-- Spam → skip
-
-## Send the reply
-
-Write draft to `/tmp/x-dm-reply.txt`. Then:
+Draft to `/tmp/x-dm-reply.txt`, pass the publish gate's de-slop step in SKILL.md (DMs skip authenticity-pass), then:
 
 ```text
-# Find the message-input textbox in the latest read. Name typically "Start a new message" or empty role="textbox"
+# Input: name "Start a new message" or an unnamed role="textbox"
 browser_click(tabId=<x_tab>, selector="byob:idx=<input_idx>")
 browser_type(tabId=<x_tab>, selector="byob:idx=<input_idx>", text="<reply>", clear=true)
-# Re-read for the send button. Name "Send" with tag "button"
 browser_read(url="<current url>", reuseTab=true, screens=1)
+# Send: name "Send", tag "button"
 browser_click(tabId=<x_tab>, selector="byob:idx=<send_idx>")
 ```
 
-Confirm: textbox empties, your message appears at the bottom of the thread.
-
-## Update knowledge base
-
-Same conventions as `/linkedin` - `~/work-vault/Consulting/leads/{name}.md` for confirmed leads, `chats/{name}.md` for new contacts.
+Success: textbox empties and the message appears at the bottom of the thread. Update `~/work-vault/Consulting/leads/{name}.md` for confirmed leads and `chats/{name}.md` for new contacts.

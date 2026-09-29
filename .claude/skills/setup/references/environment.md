@@ -53,82 +53,44 @@ After it runs, open a fresh shell and confirm a shared secret is loaded (e.g., `
 
 If you need to add new cross-machine shell config later (PATH tweaks shared across all Valor machines, shell functions, etc.), edit `~/Desktop/Valor/zshenv.sh` directly — it syncs everywhere automatically. Keep host-specific config in the local `~/.zshenv` or `~/.zshrc`.
 
-## Step 1: Install uv Package Manager
-
-We use `uv` for fast, reliable Python package management (much faster than pip).
+## Step 1: Install uv
 
 ```bash
-# Check if uv is already installed
-if ! command -v uv &> /dev/null; then
-  echo "Installing uv package manager..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-fi
-
-# Verify installation
+command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
 uv --version
 ```
 
-## Step 2: Virtual Environment & Dependencies
+## Step 2: Virtual environment and dependencies
 
 ```bash
 cd ~/src/ai
-
-# Create virtual environment with uv (auto-creates with pip support)
 uv venv
-
-# Sync all dependencies including dev tools from pyproject.toml
 uv sync --all-extras
-
-# Install package in editable mode (registers CLI tools)
-uv pip install -e .
+uv pip install -e .    # editable install registers the valor-* CLIs
+.venv/bin/python -c "import telethon, httpx, dotenv, anthropic, google_auth_oauthlib; print('Dependencies OK')"
 ```
 
-This will:
-- Create `.venv/` with Python 3.12 (or latest)
-- Install all dependencies including:
-  - Telegram bridge (telethon, httpx)
-  - Claude SDK integration (anthropic, claude-agent-sdk)
-  - Google Calendar (google-auth-oauthlib, google-api-python-client)
-  - Job queue (popoto, redis)
-  - Summarization (ollama)
-  - Dev tools (pytest, ruff, mypy)
-- Register CLI tools (`valor-calendar`, `valor-telegram`)
+Debug any failure here before continuing.
 
-Verify key imports work:
+## Step 3: Secrets and `.env`
+
+Secrets live in the iCloud-synced vault `~/Desktop/Valor/.env`; the repo `.env` is a symlink to it. `/update` (`scripts/update/env_sync.py`) replaces a regular-file `.env` with that symlink, so anything written into a repo-local `.env` is lost. Create the link:
 
 ```bash
-.venv/bin/python -c "import telethon; import httpx; import dotenv; import anthropic; import google_auth_oauthlib; print('Dependencies OK')"
+cd ~/src/ai && ln -sfn ~/Desktop/Valor/.env .env
 ```
 
-If this fails, debug before continuing.
-
-## Step 3: Environment File (.env)
-
-Check if `.env` exists. If not:
-
-```bash
-cp .env.example .env
-```
-
-**Ask the user** which project(s) this machine should monitor. The available projects are defined in `~/Desktop/Valor/projects.json` -- check the full list there. Common options:
-- Single project: `ACTIVE_PROJECTS=psyoptimal`
-- Multiple: `ACTIVE_PROJECTS=valor,popoto`
-- All: `ACTIVE_PROJECTS=valor,django-project-template,popoto,psyoptimal,flutter-project-template,cuttlefish,yudame-research`
-
-Edit `.env` and ensure these are set:
+If the vault `.env` is missing (first machine ever, or iCloud not yet synced), wait for iCloud or seed the vault file from `.env.example`. Required values (ask the user for any that are placeholder or missing; write them to the vault file):
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `ACTIVE_PROJECTS` | Yes | Comma-separated project keys |
 | `ANTHROPIC_API_KEY` | Yes | Starts with `sk-ant-` |
 | `TELEGRAM_API_ID` | Yes | Numeric, from my.telegram.org |
 | `TELEGRAM_API_HASH` | Yes | Hex string, from my.telegram.org |
 | `TELEGRAM_PHONE` | Yes | With country code, e.g. `+1234567890` |
 | `TELEGRAM_PASSWORD` | If 2FA on | Telegram 2FA password |
-| `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
 
-If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `~/src/.env` may have `ANTHROPIC_API_KEY` and other keys -- check there first.
+Which projects this machine serves comes from each project's `machine` field in `projects.json` (Phase 3), not from `.env`; `ACTIVE_PROJECTS` is only a fallback when no project names this machine. Ask the user which projects this machine should own.
 
 ## Troubleshooting
 

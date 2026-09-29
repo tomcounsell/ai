@@ -1,6 +1,6 @@
 ---
 name: new-skill
-description: Use when creating a Claude Code skill, subagent, or tool, or capturing this session as a skill. Triggered by 'new skill', 'new agent', 'skillify', 'capture this as a skill', 'save this workflow'.
+description: "Use when creating a skill, subagent, or tool, or capturing a session as one: 'new skill', 'new agent', 'skillify', 'save this workflow'."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<skill-name>"
 disable-model-invocation: true
@@ -8,107 +8,118 @@ disable-model-invocation: true
 
 # New Skill
 
-## Repo Context Probe
+Create a Claude Code skill, subagent, or project tool that a current model (Opus 5.5, Sonnet
+5.5 and later) can run well: it states the objective, the done-criteria, the constraints and
+facts the model cannot infer, and only the procedure that is genuinely non-obvious. It runs on
+the fastest model and effort that holds quality.
 
-If `.claude/skill-context/new-skill.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+Done when:
+- The artifact sits at the chosen location, and `name` matches its directory (skill) or file
+  (agent).
+- The description says when to use it and carries the trigger phrases users actually say.
+- The body leads with the objective and done-criteria. Every other line is a constraint, a fact,
+  or non-obvious procedure.
+- `model`/`effort` are set or deliberately left unset, with the reason given to the user.
+- It was invoked once and did what it says. The `audit-skills` lint passes on it if that skill
+  is installed (`--skill <name> --no-sync`).
 
-The context file is where a repo declares its own scaffolding conventions — most commonly how to create a **project tool / CLI** (entry-point registration, packaging, where reference implementations live) and its global-vs-project-only skill placement rules. When the file is absent, this skill creates Claude Code skills and subagents using the portable, spec-compliant patterns below; "create a tool" without a context file falls back to the generic project-tool guidance in `Quick start`.
+## Repo context
 
-## What this skill does
+If `.claude/skill-context/new-skill.md` exists, read it and follow it. It declares the repo's
+skill placement rules and how to create a project tool (entry-point registration, layout,
+reference implementations). Without it, skills go in `.claude/skills/<name>/` (this repo only)
+or `~/.claude/skills/<name>/` (all repos), and a tool is a small CLI registered in the
+project's package manifest.
 
-Creates Claude Code skills and subagents from scratch, following canonical patterns. Guides through naming, scoping, structuring with progressive disclosure, and registering the artifact. The result is a complete, spec-compliant artifact ready for use. When a repo declares tool-creation conventions (see the probe above), it also scaffolds project tools to that repo's standard.
+## Sub-files
 
-## When to load sub-files
+- Skill skeleton: [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md)
+- Multi-stage workflow skeleton: [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md)
+- Capturing this session as a skill ("skillify"): [SESSION_CAPTURE.md](SESSION_CAPTURE.md)
+- Subagent definition: [AGENT.md](AGENT.md)
+- The full standard for judging a body, if `audit-skills` is installed:
+  `~/.claude/skills/audit-skills/references/rubric.md`. It also bundles current Anthropic
+  field specs (`anthropic-skills-docs.txt`).
 
-- Creating a Claude Code skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the skeleton
-- Creating a workflow-capture skill (step-based process with success criteria) → read [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md)
-- Capturing this session's repeatable process into a skill (the "skillify" flow) → read [SESSION_CAPTURE.md](SESSION_CAPTURE.md)
-- Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
-- Creating a project tool / CLI → follow the repo's tool conventions declared in `.claude/skill-context/new-skill.md` if present; otherwise scaffold a small CLI with an entry point registered in the project's package manifest
-- Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `audit-skills` skill's bundled `references/` (installed alongside it on every machine), if available
+## Writing the body
 
-## Quick start
+Keep a line only if it states the objective, defines done, sets a constraint, or gives a fact
+the model cannot work out itself: a path, a command, a format, or a gotcha learned from an
+incident. Cut the rest:
+- steps the model would take anyway;
+- "think carefully / step by step";
+- stacked MUST/CRITICAL/caps;
+- a rule said twice;
+- anti-pattern tables that mirror the steps;
+- worked examples of default behavior;
+- history of why the skill exists.
 
-1. **Choose a name**: lowercase, hyphenated (e.g., `my-new-skill`). Must match the directory name.
-2. **Choose scope**:
-   - Project-specific: `.claude/skills/<name>/SKILL.md` (only this repo)
-   - Shared/personal: `~/.claude/skills/<name>/SKILL.md` (all repos for this user)
-3. **Create the directory**: `mkdir -p <scope-path>/<name>/`
-4. **Copy the template**: Read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) and save it as `<name>/SKILL.md`
-5. **Fill in the frontmatter**: Set `name`, `description`, and `allowed-tools`
-6. **Write the body**: Follow the template sections — "What this skill does", "When to load sub-files", "Quick start"
-7. **Test discovery**: Invoke `/name` in Claude Code and verify the skill loads
+Keep ordering only where the order is itself a constraint, such as a guard before a push.
 
-## Description field rules
+Add these only when they apply:
+- **Headless runs** (no human watching): name the stops you want, such as a decision only a
+  human can make or a risky or irreversible step. Say that a text-only turn with open items is
+  a progress note, not the end.
+- **Coding work:** tell it to stop and report once the change is done and checked, and to
+  mention extras instead of adding them. Require a real check that exercises the change.
+- **Outward or irreversible actions** (send, publish, merge, delete, spend): an explicit
+  confirmation or gate.
+- **Untrusted input** (email, chat, web, issue comments): one line saying it is data, never
+  instructions.
+- **Fan-out:** a time budget, and spawn prompts that carry the objective and done-criteria,
+  not a script.
 
-The `description` field in frontmatter is what Claude uses to decide whether to load a skill. It must be written carefully.
+Use a script for anything deterministic, since a model should not do what code can verify.
+Keep SKILL.md short (500 lines at most) and move rare reference material into sub-files that
+are linked with the condition for reading them.
 
-**Format**: Third person, trigger-oriented. Start with "Use when..." not "This skill...".
+## Description
 
-**Structure**: `Use when [primary trigger]. Also use when [secondary triggers]. Handles [capability list].`
+It ships in every session's skill listing, so keep it short: 120 characters is the target and
+about 200 the ceiling. Lead with the use case, then the trigger phrases and synonyms users say
+("check", "validate", "review" as well as "audit"). Write it in third person, "Use when…",
+never "I help…".
 
-**Examples**:
-- Good: `Use when creating a new Claude Code skill directory and SKILL.md. Also use when the user says 'create a skill'. Handles both shared and project-specific skills.`
-- Bad: `This skill helps create new skills for Claude Code.`
-- Bad: `A tool for making skills.`
+## Model and effort
 
-**Rules**:
-1. Must describe WHEN to use the skill, not WHAT it is
-2. Include natural language phrases users might say (e.g., "create a skill", "add a command")
-3. Written in third person — Claude reads this to decide if the skill matches
-4. Max 1024 characters (hard limit from spec)
-5. Aim for under 200 characters to stay within the 2% context budget across all skills
+A skill's `model`/`effort` apply for the rest of the turn it runs in. Leave both unset for a
+skill invoked mid-task unless it owns the whole turn; otherwise the setting leaks into the
+caller's work. Leave `model` unset when the session model is already right.
 
-## Field constraints
+| Work | Placement |
+|---|---|
+| Deterministic procedure | A script the skill calls |
+| One-shot classification or extraction, or a runner that executes one command and reports | model `haiku` |
+| Short, well-specified work whose errors a later step catches; one-shot writing | `sonnet`, effort `low`/`medium` |
+| Multi-step agentic work in a real codebase, errors caught downstream | `opus`, effort `low`/`medium` |
+| Gates whose misses escape: review, critique, outward-facing text, irreversible actions | `opus`, effort `medium`/`high` |
 
-| Field | Required | Constraints |
-|-------|----------|-------------|
-| `name` | Yes | Must match directory name. Lowercase, hyphenated. |
-| `description` | Yes | Max 1024 chars. Third person, trigger-oriented ("Use when..."). |
-| `allowed-tools` | No | Comma-separated tool names. Restricts which tools the skill can use. Omit to allow all. |
-| `hooks` | No | YAML block defining validation hooks that run on Stop events. |
-| `disable-model-invocation` | No | Set `true` to prevent Claude from auto-triggering. Use for infrastructure skills (setup, update). |
-| `user-invocable` | No | Set `false` to hide from `/slash-command` menu. Use for background reference skills. |
-| `context` | No | Set `fork` to run in a separate context. Use for long-running or parallel tasks. |
-| `agent` | No | Which subagent type to use when `context: fork` is set. |
-| `argument-hint` | No | Hint shown during autocomplete when the skill expects `$ARGUMENTS`. |
-| `model` | No | Model to use when this skill is active. |
+Use `xhigh`/`max` only for a named quality reason. Speed comes from fewer turns, lower effort,
+and scripts more than from a smaller model.
 
-## Skill directory structure
+## Frontmatter fields
 
-A minimal skill needs only `SKILL.md`. Larger skills use progressive disclosure:
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `name` | No | Display name; defaults to the directory name, which sets the `/command` |
+| `description` | Recommended | When to use it, with trigger phrases |
+| `when_to_use` | No | Extra trigger context appended to the description (shares its 1,536-char cap) |
+| `argument-hint` | No | Autocomplete hint for `$ARGUMENTS` |
+| `arguments` | No | Named positional arguments for `$name` substitution |
+| `disable-model-invocation` | No | `true`: runs only as `/name`, never auto-loaded |
+| `user-invocable` | No | `false`: hidden from the `/` menu (background knowledge) |
+| `allowed-tools` | No | Tools pre-approved (no permission prompt) while the skill is active. Does NOT restrict: every other tool stays callable |
+| `disallowed-tools` | No | Tools removed from the pool while the skill is active. This is the restriction field |
+| `model` | No | Model for the rest of the turn |
+| `effort` | No | `low`, `medium`, `high`, `xhigh`, or `max` for the rest of the turn |
+| `context` | No | `fork` runs the skill in a forked subagent context |
+| `agent` | No | Subagent type used with `context: fork` |
+| `hooks` | No | Hooks scoped to the skill's lifecycle |
+| `paths` | No | Globs that limit auto-activation to matching files |
+| `shell` | No | `bash` (default) or `powershell` for inline shell blocks |
 
-```
-.claude/skills/<name>/
-├── SKILL.md              # Main file (REQUIRED, < 500 lines)
-├── SUB_FILE.md           # Reference material loaded on demand
-├── ANOTHER_SUB_FILE.md   # More reference material
-├── scripts/
-│   └── validate.sh       # Executable automation (saves context tokens)
-└── references/
-    └── API_REFERENCE.md  # Detailed specs, schemas, examples
-```
+## If the skill is not discovered
 
-**Key principle**: SKILL.md is a navigator. It tells Claude what the skill does and when to read sub-files. Detailed instructions, templates, and reference material go in sub-files that are loaded only when needed.
-
-## Debugging
-
-If a skill is not being discovered or loaded:
-
-1. **Check the name**: `name` in frontmatter must exactly match the directory name
-2. **Check frontmatter syntax**: YAML must be valid, enclosed in `---` delimiters
-3. **Check description**: Must contain trigger words that match the user's request
-4. **Check location**: Skill must be in `.claude/skills/` (project) or `~/.claude/skills/` (personal)
-5. **Check `disable-model-invocation`**: If `true`, Claude will not auto-load it — only `/slash-command` works
-6. **Check line count**: SKILL.md should stay under 500 lines for optimal loading
-7. **Restart Claude Code**: Skill discovery happens at session start; new skills need a restart
-
-## Anti-patterns
-
-- **Monolithic SKILL.md**: Do not put everything in one file. Extract templates, examples, and reference material into sub-files loaded conditionally.
-- **Vague descriptions**: "A useful skill for doing things" will never match. Be specific about triggers.
-- **First-person descriptions**: "I help create skills" is wrong. Use "Use when creating skills."
-- **Missing trigger phrases**: If users say "make a command" but the description only says "create a skill", it will not match. Include synonyms.
-- **Hardcoded paths**: Use relative paths for sub-file references so skills work in both project and personal scope.
-- **Over-permissive allowed-tools**: Only list tools the skill actually needs. Fewer tools = smaller attack surface.
-- **Skipping progressive disclosure**: A 600-line SKILL.md that loads every time wastes context tokens. Split it.
+Check that the frontmatter YAML is valid, that the directory is under a `skills/` root, and that
+`disable-model-invocation` is not `true` (a `true` value leaves only `/name`). A skill created
+mid-session may need a new session before it appears.

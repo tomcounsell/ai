@@ -8,7 +8,7 @@ Re-verify against live docs if a call 4xxs: https://platform.claude.com/docs/en/
 
 - **Base URL:** `https://api.anthropic.com/v1`
 - **Auth header:** `x-api-key: <key>` — **NOT** `Authorization: Bearer`. Using Bearer returns
-  `401 authentication_error` even on a perfectly valid key. (We lost a whole debugging loop to this.)
+  `401 authentication_error` even on a perfectly valid key.
 - **Version header:** `anthropic-version: 2023-06-01`
 - **CMA beta header:** `anthropic-beta: managed-agents-2026-04-01`
 - **Files API also needs:** `anthropic-beta: files-api-2025-04-14`
@@ -18,13 +18,13 @@ Smoke test the key/account before any build:
 # auth works?  -> HTTP 200
 curl -s -o /dev/null -w "%{http_code}\n" https://api.anthropic.com/v1/models \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01"
-# CMA enabled?  -> HTTP 200 with {"data":[...]}
-curl -s https://api.anthropic.com/v1/agents \
+# CMA enabled?  -> HTTP 200 (403 = account lacks the managed-agents beta: stop, tell the human)
+curl -s -o /dev/null -w "%{http_code}\n" https://api.anthropic.com/v1/agents \
   -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
   -H "anthropic-beta: managed-agents-2026-04-01"
 ```
 
-## The core primitives (explain each the first time it appears)
+## The core primitives (explain each to the human the first time it appears)
 
 | Primitive | ID prefix | One-sentence meaning |
 |-----------|-----------|----------------------|
@@ -85,7 +85,7 @@ GET    /v1/files/:id/content
 ```json
 {
   "name": "string",
-  "model": "claude-opus-4-8",
+  "model": "<slug resolved from GET /v1/models>",
   "system": "job + never-dos + 'write outputs to /mnt/session/outputs/'",
   "tools": [{ "type": "agent_toolset_20260401", "default_config": {"enabled": true} }],
   "mcp_servers": [{ "type": "url", "name": "string", "url": "https://..." }],
@@ -124,8 +124,7 @@ GET    /v1/files/:id/content
   `repository_url`); pass `authorization_token` (a `gh` token) to clone a private
   repo. Verified against the live API 2026-07-24; read-back nests the clone under
   `mount_path` (e.g. `/workspace/<repo>`) and redacts the token.
-- `resources: [{type: "repository", repository_url}]` clones the target repo into the sandbox — this is the
-  hook for "an agent for any repo."
+- The repo resource is what scopes an agent to "any repo": it is cloned into the sandbox.
 
 ### Events envelope (live sessions) — FOOTGUN #2
 

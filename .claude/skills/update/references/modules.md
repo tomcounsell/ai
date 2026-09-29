@@ -96,19 +96,17 @@ r2 = mcp_byob.verify_byob_mcp(write=True)
 `write=False` runs in verify-only mode (LOCK_SH, no rename) -- used by
 `/update --verify`.
 
-## BYOB + Computer-Use Update Steps
+Binary updates for BYOB (`config/byob_pin.json`) and bcu (`config/bcu_pin.json`) are designed but not implemented in `scripts/update/`; see `docs/features/byob-browser-control.md` and `docs/features/computer-use.md`.
 
-`run.py` wires:
+## Auto-bump of critical dependencies (`deps.py`)
 
-- **Step 4.8**: `mcp_memory.verify_memory_mcp()` -- runs every invocation.
-- **Step 4.9**: `mcp_byob.verify_byob_mcp()` -- runs every invocation.
+`AUTO_BUMP_SETS` declares coupled sets (packages that move together or not at all). Only the lockfile-maintainer machine auto-bumps. Per set: skip if it carries a `hold` (recorded as `held: <reason>`) or if any member's latest PyPI version is unresolvable or no pin changed; otherwise snapshot `pyproject.toml`, rewrite the changed pins, `uv sync`, and run the set's gate phases in order (`llm`: `python -m agent.llm.compat --json --allow-network`, one real billed call; `import`; `pytest tests/unit/test_docs_auditor_substrate.py -x -q`). All pass: pins are committed and pushed. Any failure: that set's snapshot is restored and re-synced, `rolled_back` names the failed phase; a failed restore sets `restore_failed` and nothing is committed that run.
 
-Binary updates (rebuilding `~/.byob/` when the pin in `config/byob_pin.json`
-changes; re-downloading bcu against `config/bcu_pin.json` when the opt-in
-sentinel `~/.config/valor/computer-use-enabled` is present) are designed but
-not yet implemented in `scripts/update/` — see
-`docs/features/byob-browser-control.md` and `docs/features/computer-use.md`
-for the design (including `--bump-byob` / `--bump-bcu` and rollback paths).
+Every run on every machine also reports `llm-stack-compat` (`python -m agent.llm.compat --json`), which covers hand-staged pins and followers. See `docs/features/llm-stack-compat-gate.md`.
+
+## Launchd sweep and session cleanup
+
+Step 1.56 boots out LaunchAgents whose features were removed, listed in `scripts/update/service.py::OBSOLETE_SERVICE_SUFFIXES`. When you delete a launchd-backed feature, add its label suffix there. Step 5.5 deletes corrupted sessions, rebuilds indexes, and moves running/pending sessions older than 120 min with no live process to `killed`.
 
 ## Service Management (`service.py`)
 

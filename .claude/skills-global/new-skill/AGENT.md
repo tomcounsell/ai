@@ -5,55 +5,50 @@ description: Reference for creating a Claude Code subagent definition.
 
 # Creating a Claude Code Agent
 
-Agents live in `.claude/agents/<name>.md`.
-
-## Template
+An agent definition is a system prompt plus frontmatter, saved at `.claude/agents/<name>.md`
+(project) or `~/.claude/agents/<name>.md` (user). Create one only for parallelism or for
+fresh-context isolation, for example so the author does not review its own work. Otherwise a
+skill does the job.
 
 ```markdown
 ---
 name: agent-name
-description: "One-sentence description. Be specific about when to invoke it."
-model: sonnet
-color: cyan
+description: "When to delegate to it, specifically. The caller reads this to decide."
+effort: medium
+# model: omit to inherit the caller's model; set per the placement table in new-skill/SKILL.md
+# disallowedTools: Write, Edit, NotebookEdit
 ---
 
-# Agent Name
+[Objective: what this agent produces and for whom.]
 
-## Purpose
+Done when: [checkable conditions, and what to return: format, length, fields].
 
-What this agent does and when it's used.
-
-## Instructions
-
-- Focused behavioral instructions
-- What to do, what NOT to do
-- How to signal completion
+[Constraints: what it must not touch or do, and the gates before outward or irreversible actions.]
+[Facts it cannot infer: paths, commands, conventions.]
 ```
 
-## Read-only agents
+The body follows the same standard as a skill body (see new-skill/SKILL.md, "Writing the body").
+The caller relays the agent's final message, so define the report's shape.
 
-Use `disallowedTools` to restrict writes without breaking tool discovery:
+## Model and effort
 
-```markdown
----
-name: auditor
-description: Read-only agent that inspects and reports without modifying anything.
-disallowedTools: Write, Edit, NotebookEdit
----
-```
+- **`model`**: omit it to inherit the caller's model, which is usually right. Set it only when
+  the role needs a specific tier (placement table in new-skill/SKILL.md): `haiku` for a one-shot
+  classifier or a runner that executes one command and reports; `opus` for a gate whose misses
+  escape (review, critique, verification).
+- **`effort`**: set it here. The Agent tool can override `model` per call but not `effort`, so a
+  role that needs a fixed effort needs it in its definition. Use `low` for well-specified
+  execution, `medium` by default, and `high` for gates.
 
-Do NOT use `tools: [Read, Grep]` — those names don't match Claude Code's internal tool identifiers and are silently ignored.
+## Tool access
 
-## Optional frontmatter fields
+- `tools: Read, Grep, Glob` is an allowlist: the agent gets only those tools.
+- `disallowedTools: Write, Edit, NotebookEdit` is a denylist: it removes those tools and keeps
+  every other one, including tools added later. Prefer it for read-only agents.
+- A skill's `allowed-tools` is different: it pre-approves tools and does not restrict them.
 
-| Field | Example | When to use |
-|-------|---------|-------------|
-| `model` | `sonnet`, `haiku` | Override default model |
-| `color` | `cyan`, `yellow`, `red` | Visual distinction in UI |
-| `disallowedTools` | `Write, Edit, NotebookEdit` | Read-only agents |
-| `hooks` | YAML block | Post-tool side effects |
+## Other fields
 
-## Examples in `.claude/agents/`
-
-- `builder.md` — full tool access, PostToolUse format hook
-- `validator.md` — read-only via `disallowedTools`
+`color` (UI label), `hooks` (lifecycle hooks such as a PostToolUse formatter), `skills`
+(skills preloaded into the agent's context), and `permissionMode`. For the current field list,
+see Anthropic's subagent docs.

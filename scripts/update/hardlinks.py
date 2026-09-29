@@ -173,6 +173,25 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # check under a colliding name (co-author/empty-message vs code-to-main
     # block; docs/plans/hook-registration-manifest-dispatcher.md spike-4B).
     ("hooks", "sdlc/validate_commit_message.py"),
+    # Retired agents. An agent file whose source is deleted keeps its only
+    # remaining inode at the user level, so the inode-matched stale sweep never
+    # sees it; each one is named here. baseline-verifier became do-test's
+    # bundled scripts/baseline_verify.py; designer and ui-ux-specialist were
+    # pruned in 4a66f506d.
+    ("agents", "baseline-verifier.md"),
+    ("agents", "designer.md"),
+    ("agents", "ui-ux-specialist.md"),
+    # Deleted sub-files of surviving global skills. _prune_intra_dir_orphans
+    # already removes these while the user-level SKILL.md shares the source's
+    # inode; these entries also cover a machine where it does not.
+    ("skills", "do-plan/EXAMPLES.md"),
+    ("skills", "frontend-design/reference/color-and-contrast.md"),
+    ("skills", "frontend-design/reference/interaction-design.md"),
+    ("skills", "frontend-design/reference/motion-design.md"),
+    ("skills", "frontend-design/reference/responsive-design.md"),
+    ("skills", "frontend-design/reference/spatial-design.md"),
+    ("skills", "frontend-design/reference/typography.md"),
+    ("skills", "frontend-design/reference/ux-writing.md"),
 ]
 
 # The repo's own skill roots, relative to the project dir. RENAMED_REMOVALS

@@ -1,35 +1,36 @@
 ---
 name: do-merge
 description: "Use when merging a pull request that has cleared the SDLC pipeline. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage."
+effort: medium
 ---
 
 # Do-Merge (Deterministic Merge Gate)
 
-You perform the **terminal SDLC merge gate**: verify a PR is genuinely finished,
-authorize the merge through the merge-guard hook, squash-merge it, and clean up.
-This skill is portable — it runs in any repo, not just `~/src/ai`.
+The **terminal SDLC merge gate**: verify a PR is genuinely finished,
+squash-merge it, and clean up. Merging is irreversible and outward-facing.
 
 The gate is deterministic: every precondition is a checkable fact (PR state, CI
-rollup, review verdict, issue link). If any precondition fails, the skill
-refuses to merge, surfaces a clear reason, and does NOT call the merge command.
+rollup, review verdict, issue link). If any precondition fails, refuse, report
+exactly which one and its observed value, and do NOT call the merge command. Do
+not argue past a refusal.
+
+**Done when:** the PR is merged and every addendum step has run and been
+reported, or the gate refused with its reason; either way the OUTCOME block is
+the last line.
 
 ## Repo Context Probe
 
 If `docs/sdlc/do-merge.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-This addendum is where a repo layers SDLC automation onto the generic `git`/`gh`
-gate: a stage/verdict substrate (stage markers, recorded REVIEW verdicts), a
-merge-authorization hook, extra deterministic gates (lint, lockfile, full
-suite), plan migration, and post-merge cleanup/restart. When the file is absent
-(the common case in a foreign repo), this skill runs entirely on `git` and `gh`
-— no repo-specific tooling required.
+The addendum layers a repo's automation onto this generic `git`/`gh` gate: a
+stage/verdict substrate, a merge-authorization hook, extra deterministic gates,
+plan migration, and post-merge cleanup and restarts. Without it, the skill runs
+on `git` and `gh` alone.
 
-If the addendum declares a **shared deterministic merge predicate** (a single
-command that evaluates the whole gate and returns structured pass/fail legs),
-run that command and honor its result in place of hand-assembling the
-equivalent checks — it is the same predicate the repo's merge-guard hook
-enforces, so evaluating anything else invites drift. The repo-specific command
-lives in the addendum, never in this body.
+If the addendum declares a **shared deterministic merge predicate** (one command
+that evaluates the whole gate and returns pass/fail legs), run it and honor its
+result instead of hand-assembling Steps 1-3: it is the same predicate the repo's
+merge-guard hook enforces, so evaluating anything else invites drift.
 
 ## Variables
 
@@ -68,23 +69,19 @@ specific to it:
 > you edited the body to add the issue link, re-read it immediately before Step 3
 > and re-apply the edit if the rebase ate it.
 
-## Step 0: Stage Marker (only if the context file declares a substrate)
+## Step 0: Stage Marker (only if a substrate exists)
 
-If the repo-context file declares a stage-marker substrate, write an
-`in_progress` marker for the MERGE stage now, following its exact invocation and
-degraded-mode handling. This lets a forked sub-skill announce degraded mode
-instead of silently lagging state. The gate itself depends only on `gh`, never
-on the substrate, so a missing or degraded substrate never blocks the merge.
-
-**A missing context file is not proof there is no substrate (issue #2419).** If your prompt carries a run identity (a `run_id` to pass on state writes) and the `sdlc-tool` CLI is on PATH, a supervisor is tracking this run and will otherwise hand-backfill whatever you skip:
+If the context file declares a stage-marker substrate, write the MERGE
+`in_progress` marker per its invocation and degraded-mode handling. A missing
+context file is not proof there is no substrate (#2419): if your prompt carries
+a `run_id` and `sdlc-tool` is on PATH, write it anyway:
 
 ```bash
 sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number} --run-id {run_id}
 ```
 
-Report a failed write; the gate depends only on `gh`, so never block the merge on it.
-
-Only when there is no run identity and no `sdlc-tool` — a genuinely standalone merge — skip this step.
+Report a failed write but never block the merge on it; the gate depends only on
+`gh`. A genuinely standalone merge (no run identity, no `sdlc-tool`) skips this.
 
 ## Step 1: Verify PR State
 
@@ -104,12 +101,8 @@ ALL of the following must hold, or the gate FAILS:
    `conclusion == "SUCCESS"` (an empty rollup means no required checks — treat
    as pass only if branch protection does not require checks).
 
-If any check fails, STOP: report exactly which precondition failed and its
-observed value. Do NOT create the auth file. Do NOT call merge.
-
-> Conflict resolution is explicitly OUT OF SCOPE. The gate verifies
-> `mergeable`/`CLEAN` and stops; it never rebases, force-pushes, or resolves
-> conflicts.
+If any check fails, STOP and report it. Conflict resolution is out of scope:
+the gate never rebases, force-pushes, or resolves conflicts.
 
 ## Step 2: Verify Review Approved
 
@@ -132,13 +125,9 @@ other value or no verdict FAILS.
 Whichever source is used: if review approval cannot be confirmed, FAIL closed —
 never merge an unconfirmed-review PR.
 
-If the repo-context file declares a DOCS stage-completion substrate, treat
-DOCS-stage completion as a first-class precondition here alongside the REVIEW
-verdict, following its exact invocation (the deterministic gate lives in that
-substrate addendum, not this global skill). When no such substrate exists, DOCS
-completion cannot be verified at merge time, so emit this announced non-gate
-advisory line to the merge log (an auditable advisory, NOT a silent pass) and
-proceed on supervisor sequencing:
+If the context file declares a DOCS stage-completion substrate, DOCS completion
+is a precondition alongside the REVIEW verdict. With no such substrate, emit
+this advisory line (announced, not a silent pass) and proceed:
 
 `"DOCS-completion gate: NOT ENFORCED — no substrate; DOCS completion cannot be verified here, merge relies on supervisor sequencing (see #1915)."`
 
@@ -165,51 +154,31 @@ Only after Steps 1-3 all pass:
    ```
 3. **Clean up** any authorization file created in sub-step 1, on every path.
 
-If the merge command itself fails (e.g. a race where branch protection changed
-between Step 1 and now), report the failure, ensure any auth file is removed,
-and do NOT retry blindly.
+If the merge command fails (e.g. branch protection changed since Step 1), report
+it, remove any auth file, and do NOT retry blindly.
 
 ## Step 5: Record Completion
 
-If the repo-context file declares a stage-marker substrate, mark the MERGE stage
-`completed` now (no-op / degraded marker if the substrate is absent is fine).
-Absent a context file, apply the same Step 0 detection: with a run identity and
-`sdlc-tool` on PATH, write `--stage MERGE --status completed` yourself. Only a
-genuinely standalone merge skips this — there the merge itself is the completion
-signal.
+Under the same detection as Step 0, mark the MERGE stage `completed`. A
+standalone merge skips this; the merge itself is the completion signal.
 
 ## Step 6: Apply Repo-Specific Addenda
 
-If the repo-context file (read in the Repo Context Probe) declares additional
-gate steps — extra lint gates, lockfile sync, full-suite runs, documentation
-gates, plan migration, worktree cleanup, post-merge restarts — apply them now,
-in addition to the deterministic gate above. The addendum is additive — it never
-relaxes the verify-then-merge contract. In the generic case there is no addendum
-and the merge is already complete.
+Apply any further steps the addendum declares (extra gates before the merge;
+plan migration, cleanup, and restarts after it). The addendum is additive; it
+never relaxes the verify-then-merge contract.
 
-Run every addendum step **in-turn, synchronously** (issue #2051): execute each
-gate command (including a full test suite) to completion and read its result
-within your current turn. If a long command must be backgrounded, poll it
-in-turn with repeated status checks until it exits, then act on the result in
-the same turn. Before waiting on anything, verify a live producer exists that
-will complete it — this skill often runs as a fork with exactly one turn, and
-no completion event, monitor notification, or scheduled wake-up will ever
-arrive after the turn ends. The proven pattern is start → poll in-turn → read
-result → act, all in one turn.
+Run every step **in-turn, synchronously** (#2051): run each command to
+completion and act on its result within this turn, polling a backgrounded
+command until it exits. This skill often runs with exactly one turn; no
+completion event or wake-up arrives after the turn ends.
 
 ## Critical Rules
 
-- **Never bypass the gate.** The auth file is created ONLY after every
-  precondition passes. Creating the repo's authorization file without running
-  the gate defeats the entire mechanism.
+- **Never bypass the gate.** Create an authorization file only after every
+  precondition passes, and remove it on every path.
 - **Fail closed.** Any unconfirmed precondition (unknown CI state, missing
-  review verdict, unresolved mergeability) is a FAIL, not a pass.
-- **Clean up the auth file** on every path — success, gate failure after
-  creation (should not happen, but defensive), or merge-command error.
-- **No conflict resolution.** Out of scope; the gate stops at `mergeable`.
-- **Work in-turn, synchronously.** Poll every gate command to completion within
-  your current turn and record the outcome before the turn ends (issue #2051);
-  verify a live producer exists before waiting on anything.
+  review verdict, unresolved mergeability) is a FAIL.
 
 ## OUTCOME Contract Emission
 

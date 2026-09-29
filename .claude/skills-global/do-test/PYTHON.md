@@ -1,67 +1,11 @@
-# Python Test Runner
+# Python (pytest)
 
-Loaded when the project uses Python (pytest, pyproject.toml, setup.py, etc.).
-
-## Test Runner: pytest
-
-### Argument Mapping
-
-| Input | Command |
-|-------|---------|
-| _(empty)_ | `pytest tests/ -v --tb=short` |
-| `unit` | `pytest tests/unit/ -v --tb=short` |
-| `integration` | `pytest tests/integration/ -v --tb=short` |
-| `e2e` | `pytest tests/e2e/ -v --tb=short` |
-| `tools` | `pytest tests/tools/ -v --tb=short` |
-| `performance` | `pytest tests/performance/ -v --tb=short` |
-| `tests/unit/test_foo.py` | `pytest tests/unit/test_foo.py -v --tb=short` |
-
-### Lint Tools
-
-Generic default (when the repo has no declared lint commands):
-
-```bash
-python -m ruff check .
-python -m ruff format --check .
-```
-
-If the project configures a different linter/formatter (`black`, `flake8`, `mypy`), run what the project configures instead.
-
-### Changed-File Mapping
-
-Map source files to test files using these conventions:
-
-| Source Pattern | Test Pattern |
-|---------------|-------------|
-| `src/foo/bar.py` | `tests/*/test_bar.py` |
-| `app/models.py` | `tests/*/test_models.py` |
-| `lib/*.py` | `tests/*/test_*.py` |
-| General rule | `foo/bar.py` → `tests/*/test_bar.py` |
-| Test files | Include directly if changed |
-
-Filter to existing files only.
-
-### Test Discovery (all tests)
-
-Check which directories exist and contain `test_*.py` files:
-- `tests/unit/`
-- `tests/integration/`
-- `tests/e2e/`
-- `tests/performance/`
-- `tests/tools/`
-- `tests/` (top-level `test_*.py` files)
-
-### Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | All tests passed |
-| 1 | Some tests failed |
-| 2 | Test execution error |
-| 5 | No tests collected |
-
-### Notes
-
-- Use `-v --tb=short` for verbose names with concise tracebacks
-- For coverage: `pytest --cov=src --cov-report=term-missing` (only if explicitly requested)
-- For parallel execution: `pytest -n auto` (requires pytest-xdist)
+- Command: `pytest <target> -v --tb=short` unless the context file names a
+  wrapper. Coverage (`--cov=<pkg> --cov-report=term-missing`) only on request.
+- Lint default when the repo declares none: `python -m ruff check .` and
+  `python -m ruff format --check .`; run the project's configured tools
+  (`black`, `flake8`, `mypy`) instead when it has them.
+- `--changed` mapping: `foo/bar.py` → `tests/*/test_bar.py`, after any
+  repo-specific mappings in the context file.
+- Exit codes: 0 all passed, 1 some failed, 2 execution error, 5 nothing
+  collected (treat 5 as a failure to run, not a pass).

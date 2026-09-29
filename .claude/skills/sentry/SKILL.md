@@ -4,11 +4,13 @@ description: "Check Sentry for unresolved issues and run triage on demand. Trigg
 allowed-tools: Bash
 user-invocable: true
 argument-hint: "[--apply]"
+model: sonnet
+effort: low
 ---
 
 # Sentry Triage
 
-Run the Sentry triage pipeline on demand. Classifies all unresolved issues (A–E), files GitHub issues for actionable bugs, and sends a Telegram summary.
+Run the Sentry triage pipeline (`reflections.sentry_triage`) on demand. Classifies all unresolved issues (A–E), files GitHub issues for actionable bugs, and sends a Telegram summary.
 
 ## Classification
 
@@ -20,20 +22,9 @@ Run the Sentry triage pipeline on demand. Classifies all unresolved issues (A–
 | D     | Review     | Ambiguous → listed for human review        |
 | E     | Stale      | No events in 30 days → Sentry resolved     |
 
-## Apply Mode
-
-By default the triage runs **dry-run** — it classifies and reports but does not file GitHub issues or change Sentry state.
-
-Pass `--apply` to enable live writes:
-
-```
-/sentry --apply
-```
-
 ## How to Run
 
-The `SENTRY_TRIAGE_APPLY` env var controls live writes (default `0` = dry-run;
-`1` = files GitHub issues + updates Sentry state):
+The default is a **dry-run**: it classifies and reports, filing nothing and changing no Sentry state. `SENTRY_TRIAGE_APPLY=1` enables live writes (files GitHub issues, updates Sentry state).
 
 ```bash
 cd ~/src/ai && python -c "
@@ -54,11 +45,9 @@ if result['status'] != 'disabled':
 
 For live mode, run the same command prefixed with `SENTRY_TRIAGE_APPLY=1`.
 
-## Argument Handling
+## Live writes are gated
 
-Check the user's invocation for `--apply`. If present, use the live mode command. Otherwise use dry-run.
-
-If the user says "apply changes", "file the issues", "do it for real", or similar — first run the dry-run to show what will be actioned, state the count explicitly ("This will file N GitHub issues and update M Sentry issues"), then ask for confirmation before running live mode.
+Run live mode only when the invocation carries `--apply`. If the user asks for live action in words ("file the issues", "do it for real"), run the dry-run first, state the count ("This will file N GitHub issues and update M Sentry issues"), and get confirmation before running live.
 
 ## After Running
 

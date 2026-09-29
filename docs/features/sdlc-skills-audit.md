@@ -62,17 +62,17 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 
 **Observed impact:** LLM-based reviewers produce different verdicts on identical input because each run's salience drives what surfaces. No fixed set of items was required for evaluation before writing the verdict.
 
-**Fix applied:** Added a mandatory 12-item Pre-Verdict Checklist to `do-pr-review/sub-skills/code-review.md`. The checklist must be evaluated for every PR before writing the verdict. Each item gets `PASS | FAIL | N/A`. An "Approved" verdict with any `FAIL` items is not valid — FAIL items must be promoted to findings.
+**Fix applied:** A fixed set of items is evaluated for every PR before the verdict. The checklist is now folded into the 10-item Rubric in section 6 of `do-pr-review/sub-skills/code-review.md`: each item gets `pass | fail | acknowledged | n/a`, a blank item invalidates the review, and the verdict is derived mechanically from the Rubric.
 
-**Checklist items:** plan acceptance criteria, No-Gos, except Exception blocks, integration test serialization boundary, plan internal consistency, no debug artifacts, public API docstrings, breaking change migration, tests for new behavior, failure path coverage, UI screenshots, docs for user-facing changes.
+**Rubric items:** plan vs. implementation match (acceptance criteria, No-Gos, plan consistency), new code quality (including `except Exception` handling and debug artifacts), test coverage (including failure paths and the real serialization boundary), regression risk, data integrity, security, documentation accuracy, PR body accuracy, disclosed deferrals, follow-up claims.
 
-**File:** `.claude/skills/do-pr-review/sub-skills/code-review.md`
+**File:** `.claude/skills-global/do-pr-review/sub-skills/code-review.md`
 
 ---
 
 ## Decisions
 
-- **#1040 remains open** as an independent tracking issue. The Pre-Verdict Checklist (Pattern 5) reduces oscillation frequency by making verifier output more deterministic, but does not fix the router-level oscillation logic.
+- **#1040 remains open** as an independent tracking issue. The fixed review Rubric (Pattern 5) reduces oscillation frequency by making verifier output more deterministic, but does not fix the router-level oscillation logic.
 - **#1041 remains open** as an independent tracking issue. The Full Suite Gate (Pattern 4) blocks new regressions on green main; fixing the existing 71 failures is #1041's scope.
 - **Retrospective doc location:** `docs/features/` (not `docs/sdlc/`) — this is a shipped feature, not a per-stage process note.
 
@@ -83,7 +83,7 @@ PR #1039 exposed five recurring patterns where each layer of the SDLC pipeline's
 | `.claude/skills/do-plan-critique/CRITICS.md` | Added Consistency Auditor (critic #7) + serialization-boundary item in Skeptic |
 | `.claude/skills/do-test/SKILL.md` | Promoted Exception Swallow Scan to blocking gate before OUTCOME emission |
 | `.claude/commands/do-merge.md` | Added Full Suite Gate with red-main recovery path and baseline comparison |
-| `.claude/skills/do-pr-review/sub-skills/code-review.md` | Added mandatory 12-item Pre-Verdict Checklist |
+| `.claude/skills/do-pr-review/sub-skills/code-review.md` | Added a mandatory fixed checklist, now the 10-item Rubric |
 | `docs/features/sdlc-skills-audit.md` | This document |
 
 ---
@@ -104,10 +104,10 @@ Anthropic shipped Opus 4.7 on 2026-04-16. This audit pass reviewed the four SDLC
 
 | Skill | Edit |
 |------|------|
-| `.claude/skills/do-plan/SKILL.md` | Phase 1 Step 1 expanded into a 3-step evidence-gathering checklist (read issue body, read Recon Summary, follow sibling issues); "try to reproduce the bug" hedge replaced with direct directive. |
+| `.claude/skills/do-plan/SKILL.md` | Phase 1 opens by reading the issue body, its Recon Summary, and every cited sibling issue or PR (now the Phase 1 objective paragraph); "try to reproduce the bug" hedge replaced with direct directive. |
 | `.claude/skills/do-plan-critique/SKILL.md` | Added canonical sentence above Step 5: *"Emit every section header literally; empty categories emit '## Blockers\n\nNone.' — do not omit the header."* Critic subagent prompts (Sonnet) unchanged. |
 | `.claude/skills/do-pr-review/SKILL.md` | Step 5 format block promoted from "use this format" to hard "you MUST emit exactly this block, every field present" directive. Explicit empty-section rule added for Blockers / Tech Debt / Nits headings. |
-| `.claude/skills/do-pr-review/sub-skills/code-review.md` | "Every row MUST be filled; blank cells invalidate the review" added above the 12-row Pre-Verdict Checklist. Section 6 format block tightened to match parent SKILL.md. |
+| `.claude/skills/do-pr-review/sub-skills/code-review.md` | "A blank item invalidates the review" (now stated on the section 6 Rubric). Section 6 format block tightened to match parent SKILL.md. |
 | `.claude/skills/daily-integration-audit/SKILL.md` | Step 2 Opus subagent brief rewritten into a self-contained structured block (`FEATURE_TOPIC` / `SEED_DOC_PATH` / `VERIFICATION_PASS` / `OUTPUT_FORMAT` / `FINAL_LINE`). |
 
 **Out of scope (explicitly dropped):** version-pinning `opus` to `claude-opus-4-7` — Anthropic's alias routes `opus` to the current Opus and pinning creates maintenance burden without predictability gain.

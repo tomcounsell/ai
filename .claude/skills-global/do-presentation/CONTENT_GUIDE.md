@@ -1,37 +1,8 @@
 # Content Guide: Educational Presentation Best Practices
 
-## Core Principle: Teach, Don't Tell
+## Teach, don't tell
 
-The goal is **understanding**, not information transfer. A slide deck that lists facts is a document pretending to be a presentation. Instead, build a narrative arc that takes the audience from "I don't know what this is" to "I get it, and I find it interesting."
-
-## The Explanation Stack
-
-Use this framework to structure any technical explanation. Each level builds on the previous:
-
-### Level 1: Anchor (What is it?)
-- One sentence, no jargon
-- Use an analogy to something the audience already knows
-- Example: "Redis is like a giant sticky-note board that every part of the system can read and write to instantly"
-
-### Level 2: Motivation (Why does it exist?)
-- Frame as a **problem** the audience can feel
-- Make it concrete: "Imagine you're texting a friend, but every message takes 3 seconds to deliver..."
-- The problem should make the solution feel inevitable
-
-### Level 3: Mechanism (How does it work?)
-- Walk through the **happy path** first — the simplest, most common case
-- Use a diagram or step-by-step visual
-- Max 5 steps — if more, you need to chunk into sub-concepts first
-
-### Level 4: Depth (What's clever about it?)
-- This is where you earn engagement — the "oh, that's smart" moment
-- Trade-offs, design decisions, or elegant solutions
-- Only for audiences who made it through Level 3
-
-### Level 5: Connection (How does it fit?)
-- Connect back to the bigger system or real-world impact
-- "Without this, the whole system would..."
-- Leave them with a mental model they can build on
+The goal is understanding, not information transfer: take the audience from "I don't know what this is" to "I get it, and it's interesting." A reliable arc for technical explanation: **anchor** (one jargon-free sentence, ideally an analogy a 16-year-old would get), **motivation** (a concrete problem the audience can feel, making the solution feel inevitable), **mechanism** (the happy path first, at most 5 steps, with a visual), **depth** (the trade-off or clever bit), **connection** (how it fits the bigger system; leave a reusable mental model).
 
 ## Action titles
 
@@ -130,29 +101,9 @@ Mix these to maintain engagement. Never use more than 3 of the same type in a ro
 
 **Pacing formula:** ~30 seconds per slide. If a slide needs more than 60 seconds of explanation, split it.
 
-## Writing for Accessibility
+## Language
 
-### Language
-- **High-school reading level** — avoid jargon, or define it immediately on first use
-- Short sentences (under 20 words)
-- Active voice: "The bridge sends messages" not "Messages are sent by the bridge"
-- Concrete nouns over abstract ones: "the server" not "the infrastructure layer"
-
-### Analogies (use one per major concept)
-Good analogy patterns:
-- **Kitchen analogy**: Queues are like order tickets, workers are like chefs
-- **Mail analogy**: APIs are like postal addresses, payloads are like letters
-- **Highway analogy**: Load balancers are like traffic cops, lanes are like server instances
-- **Library analogy**: Databases are like card catalogs, indexes are like the sorting system
-
-Test your analogy: Would a 16-year-old get it? If not, simplify.
-
-### Visual Hierarchy
-- Headings: what the slide is about (scannable)
-- Body: the explanation (readable)
-- Bold: key terms and concepts (findable)
-- Code: only when the actual syntax matters
-- Blockquotes: memorable takeaways
+High-school reading level: define jargon on first use, sentences under 20 words, active voice, concrete nouns ("the server", not "the infrastructure layer"), one analogy per major concept.
 
 ## Client-Facing Decks: Why → How → What
 
@@ -184,44 +135,15 @@ For a client-facing deck, the title slide is not about the deck — it is about 
 
 **Rule:** never bury the client attribution in small muted print. Client name on top, a real name/face at the bottom, the deck title in between. Implement with a full-height flex column (`justify-content: space-between`) rather than absolute positioning — it stays balanced regardless of title length.
 
-## Anti-Patterns (What NOT to Do)
+## Failures the budgets don't catch
 
-- **Wall of text**: any slide over the body budget above. Split it
-- **Topic-label titles**: "Market overview" tells the audience nothing they can act on. See "Action titles"
-- **Orphan bullets**: A single bullet point is not a list — make it a sentence
-- **Jargon avalanche**: Never introduce more than 2 new terms per slide
-- **Code dumps**: Code blocks over the budget lose the audience — excerpt the key part
-- **No visuals**: If you go 4+ slides without a figure, table, or visual break, add one
-- **Burying the lead**: Put the conclusion FIRST, then explain why — don't build to a reveal
-- **Accent inflation**: More than one red on a slide. The second one cancels the first
-- **Slide numbers as content**: "Step 1, Step 2..." is a document, not a presentation
-- **Belittling the audience / manufactured fear**: Never tell the audience what they lack, imply
-  they are exposed, impotent, or behind, or manufacture urgency to make a point land. Describe the
-  subject, not the audience's inadequacy. A finding is a neutral technical fact with a remediation,
-  never a warning about the reader's competence or a countdown to disaster
-
-## Engagement Hooks
-
-Use at least 2-3 of these across the deck:
-
-- **Opening question**: "What happens when 10,000 users hit the same endpoint?"
-- **Surprising fact**: "This system processes 50,000 messages per day with zero human intervention"
-- **Contrast**: "Without this, X takes 3 hours. With it, 4 seconds."
-- **Failure story**: "Last quarter, this exact scenario caused a 2-hour outage..."
-- **Scale visualization**: "If each request were a grain of sand, this is a beach"
+- **Orphan bullets**: a single bullet is a sentence, not a list.
+- **Burying the lead**: conclusion first, then why; don't build to a reveal.
+- **Slide numbers as content**: "Step 1, Step 2..." is a document, not a presentation.
+- **More than 4 slides without a figure, table, or visual break.**
+- **Belittling the audience or manufactured fear**: never tell the audience what they lack, imply they are exposed, impotent, or behind, or manufacture urgency to make a point land. Describe the subject, not the audience's inadequacy. A finding is a neutral technical fact with a remediation, never a warning about the reader's competence or a countdown to disaster.
 
 ## Diagram Best Practices
-
-### When to Use Each Type
-
-| Diagram Type | Best For |
-|-------------|----------|
-| **Flowchart** | Step-by-step processes, decision trees |
-| **Architecture** | System components and how they connect |
-| **Sequence** | Message flow between actors over time |
-| **Comparison table** | Feature matrices, trade-off analysis |
-| **Timeline** | Ordered events, pipeline stages |
-| **ASCII art** | Simple flows that must render everywhere |
 
 ### Diagram Rules
 - **Max 7 nodes** — more than that, abstract into groups first

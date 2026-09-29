@@ -21,7 +21,7 @@ When tests fail on a feature branch, the pipeline retries only the failing tests
 
 ## Deterministic Baseline Parsing (junitxml)
 
-The baseline-verifier runs pytest with `--junitxml=/tmp/baseline-results.xml` and parses the XML deterministically using Python's `xml.etree.ElementTree`. This avoids the non-determinism of LLM interpretation of raw console output, which is vulnerable to:
+do-test's `scripts/baseline_verify.py` runs pytest with `--junitxml` into its temp dir and parses the XML deterministically using Python's `xml.etree.ElementTree`. This avoids the non-determinism of LLM interpretation of raw console output, which is vulnerable to:
 - Output truncation filling the context window
 - Test ID format mismatches
 - Status keywords appearing in test names
@@ -31,7 +31,7 @@ The structured XML parse:
 
 ```python
 import xml.etree.ElementTree as ET
-tree = ET.parse('/tmp/baseline-results.xml')
+tree = ET.parse(junit_path)
 for tc in tree.findall('.//testcase'):
     # Extract classname, name, and status from structured XML
     # No LLM interpretation needed
@@ -39,14 +39,9 @@ for tc in tree.findall('.//testcase'):
 
 The classification rules table (regression, pre_existing, inconclusive) is applied to the parsed output without any LLM judgment.
 
-## Completeness Validation (Step 5.5)
+## Completeness
 
-After classification, a completeness check ensures every input test ID appears in exactly one bucket:
-
-- **Missing IDs** (in input but not in any bucket) → added to `inconclusive` with note "not found in baseline results"
-- **Duplicate IDs** (in multiple buckets) → kept in highest-severity bucket (regression > pre_existing > inconclusive)
-
-This prevents silent drops where a test ID is lost during classification and never reported.
+The script buckets each input test ID exactly once: an ID that errors, skips, or is missing from the baseline results goes to `inconclusive`, and a setup failure marks every ID inconclusive. No test ID is silently dropped.
 
 ## Pipeline Integration
 
@@ -55,18 +50,16 @@ Test failures detected
     ↓
 Step 0.5: Flaky Filter (retry on branch)
     ↓ (only consistent failures proceed)
-Step 1-3: Baseline Verifier (worktree at main)
+baseline_verify.py: throwaway worktree at main
     ↓
-Step 4: Run with --junitxml
+Run only the failing IDs with --junitxml
     ↓
-Step 5: Parse XML deterministically
+Parse XML deterministically; bucket every ID once
     ↓
-Step 5.5: Completeness validation
-    ↓
-Step 6-7: Cleanup + return JSON
+Remove worktree + print JSON
 ```
 
 ## Related
 
 - Plan: `docs/plans/476_test_reliability.md`
-- Spec files: `.claude/skills/do-test/SKILL.md`, `.claude/agents/baseline-verifier.md`
+- Spec files: `.claude/skills-global/do-test/baseline-verification.md`, `.claude/skills-global/do-test/scripts/baseline_verify.py`

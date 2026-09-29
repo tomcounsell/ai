@@ -2,13 +2,11 @@
 
 When the merge gate (`/do-merge`) fails on a PR that is otherwise approved,
 mergeable, and green, the PM session can self-resolve the blocker using the
-recipes below. Each section follows the house style of other `docs/sdlc/`
-pages: terse, command-first, with explicit verify-then-proceed hooks. The
-G4 oscillation guard (`.claude/skills-global/do-sdlc/SKILL.md`) caps same-category
+recipes below. The G4 oscillation guard (`.claude/skills-global/do-sdlc/SKILL.md`) caps same-category
 retries at 3; anything beyond that escalates to a human.
 
 See also:
-- `.claude/commands/do-merge.md` — the gate script itself.
+- `.claude/skills-global/do-merge/SKILL.md` and `docs/sdlc/do-merge.md` — the gate and its shared predicate (`python -m tools.merge_predicate`).
 - `config/personas/engineer.md` → **Gate-Recovery Behavior** — the
   engineer persona's dispatch table mapping blockers to remediations.
 - `docs/features/self-healing-merge-gate.md` — feature-level overview.
@@ -69,33 +67,16 @@ produces infinite loops that drain compute without finishing work.
 
 ## Stale Review (Approved/Changes-Requested Predates Latest Commit)
 
-**Symptom.** The Structured Review Comment Check reports
-`REVIEW_COMMENT: FAIL -- No current '## Review:' comment found` even
-though the PR page in the GitHub UI shows a visible review. The
-commit-SHA filter is correctly dropping a stale review.
+**Symptom.** The merge predicate's `failed_checks` reports
+`REVIEW verdict predates PR head commit`: commits other than docs-only changes
+landed after the recorded APPROVED verdict.
 
-**Diagnose.**
+**Remediate.** Dispatch a fresh `/do-pr-review {pr}` on the current head. Do not
+re-run `sdlc-tool verdict finalize`; that re-records the old judgment.
 
-```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-LATEST=$(gh api repos/$REPO/pulls/{pr}/commits --jq '.[-1].commit.committer.date')
-echo "Latest commit date: $LATEST"
-gh api repos/$REPO/issues/{pr}/comments \
-  --jq '.[] | select(.body | startswith("## Review:")) | {created_at, body: (.body | split("\n")[0])}'
-```
-
-**Remediate.** Re-run the PR review so a new `## Review:` comment lands
-after the latest commit's committer date:
-
-```bash
-python -m tools.valor_session create \
-  --role eng --model opus \
-  --slug {slug} --parent "$AGENT_SESSION_ID" \
-  --message "Stage: REVIEW / Required skill: /do-pr-review / PR: {pr_url} / ..."
-```
-
-**Verify.** Re-run the diagnose command; the newest `## Review:` comment
-should have `created_at > $LATEST`. Re-dispatch `/do-merge {pr}`.
+**Verify.** Re-run `python -m tools.merge_predicate --pr-number {pr} --run-id {run_id} --json`
+and confirm the REVIEW leg is gone from `failed_checks`, then re-dispatch
+`/do-merge {pr}`.
 
 ---
 
@@ -114,8 +95,7 @@ uv lock --locked
 **Remediate.** Regenerate the lockfile on the session branch and commit:
 
 ```bash
-git -C .worktrees/{slug} checkout session/{slug}
-uv lock
+uv --directory .worktrees/{slug} lock
 git -C .worktrees/{slug} add uv.lock
 git -C .worktrees/{slug} commit -m "Sync uv.lock"
 git -C .worktrees/{slug} push
@@ -124,7 +104,7 @@ git -C .worktrees/{slug} push
 **Verify.**
 
 ```bash
-uv lock --locked && echo "LOCKFILE OK"
+uv --directory .worktrees/{slug} lock --locked && echo "LOCKFILE OK"
 ```
 
 Re-dispatch `/do-merge {pr}`.
@@ -133,43 +113,25 @@ Re-dispatch `/do-merge {pr}`.
 
 ## Partial Pipeline State
 
-**Symptom.** `python -m tools.sdlc_stage_query --session-id
-"$AGENT_SESSION_ID"` returns some stages but not all; `/do-merge` reports
-a mix of `pending` and `completed`. This is the "mid-session Redis
-eviction" case — the primary state machine has partial history.
+**Symptom.** The predicate fails a stage leg (`REVIEW stage marker not
+completed`, a DOCS marker `in_progress`) even though the work visibly happened,
+typically after Redis state was lost mid-session.
 
 **Diagnose.**
 
 ```bash
 python -m tools.sdlc_stage_query --issue-number {N}
-# Read the PR branch's durable artifacts to confirm the missing stages
-# actually produced output:
-BRANCH=$(gh pr view {pr} --json headRefName -q .headRefName)
-git fetch origin "$BRANCH" --quiet
-git show "origin/$BRANCH:docs/plans/{slug}.md" | head -5       # PLAN present?
-gh pr view {pr} --json statusCheckRollup                       # TEST status?
-gh pr view {pr} --json reviews                                 # REVIEW entry?
-gh pr diff {pr} --name-only | grep ^docs/                      # DOCS diff?
+gh pr view {pr} --json reviews                 # REVIEW artifact present?
+gh pr diff {pr} --name-only | grep ^docs/      # DOCS diff present?
 ```
 
-**Remediate.** Re-dispatch `/do-merge {pr}` and trust the durable-signal
-fallback in `PipelineStateMachine.derive_from_durable_signals()` (see
-`docs/features/pipeline-state-machine.md`) to fill in the missing
-stages. The fallback only activates when the primary path is empty; it
-does not override valid Redis state.
+**Remediate.** A REVIEW marker that never completed is repaired by re-running
+`sdlc-tool verdict finalize` (only if the recorded verdict is still fresh); a
+stage whose artifacts genuinely do not exist needs its skill dispatched
+(`/do-docs` for DOCS, `/do-pr-review` for REVIEW).
 
-**Verify.**
-
-```bash
-# After re-dispatching /do-merge, the Pre-Merge Pipeline Check should print
-# "INFO: Redis state cold -- derived from durable signals." followed by
-# a pipeline line where all stages show as completed.
-```
-
-If the durable-signal fallback also shows `pending` for a stage, that
-stage's artifacts genuinely do not exist — dispatch the appropriate
-remediation skill (for example, `/do-docs` for DOCS pending, `/do-test`
-for TEST pending).
+**Verify.** Re-run the predicate and confirm the leg cleared, then re-dispatch
+`/do-merge {pr}`.
 
 ---
 
@@ -211,7 +173,7 @@ python scripts/post_merge_cleanup.py {slug}
 echo "Exit: $?"  # 0 == clean; 2 == still blocked
 ```
 
-See [`docs/sdlc/do-merge.md#busy-guard-issue-1357`](do-merge.md#busy-guard-issue-1357) for the full operator workflow and
+See [`docs/sdlc/do-merge.md#busy-guard`](do-merge.md#busy-guard) for the operator workflow and
 [`docs/features/session-isolation.md#worktree-busy-guard-issue-1357`](../features/session-isolation.md#worktree-busy-guard-issue-1357) for the runtime invariant.
 
 ---

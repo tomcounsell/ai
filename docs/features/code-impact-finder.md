@@ -111,4 +111,4 @@ Results map to plan sections:
 
 - [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) — Same pipeline for docs, used by `/do-docs`
 - `tools/impact_finder_core.py` — Shared pipeline infrastructure
-- `.claude/skills/do-plan/SKILL.md` — Integration point (Phase 1, step 3)
+- `.claude/skills-global/do-plan/SKILL.md` — Integration point (Phase 1, Blast radius)

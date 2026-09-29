@@ -43,8 +43,7 @@ code:
   computer-use opt-in.
 - **exit 1** — some other error (e.g. bcu returned HTTP 500); surface it.
 
-You only need this once per session — bcu readiness does not change between actions
-within a session. Chain it to gate the first action:
+Readiness does not change within a session. Chain it to gate the first action:
 
 ```bash
 valor-computer bootstrap && valor-computer list_windows Notes
@@ -70,17 +69,6 @@ valor-computer screenshot <window> --output /tmp/notes.png
 # Press a key or chord (no modifiers flag — chords go in the key string)
 valor-computer press_key <window> cmd+a
 valor-computer press_key <window> return
-```
-
-## Core workflow
-
-```
-0. bootstrap                        # once per session: gate on instructions.ready
-1. list_apps                        # find the app
-2. list_windows <app>               # pick the string window ID
-3. get_window_state <window>        # AX tree + stateToken + screenshot (optional)
-4. click / type_text / press_key    # drive the window
-5. screenshot <window>              # capture proof
 ```
 
 ## Targets and stateToken (element-level actions)
@@ -109,43 +97,9 @@ valor-computer set_value <window> "hello" --target '{"kind":"node_id","value":"n
 valor-computer scroll <window> --target '{"kind":"node_id","value":"n3"}' --direction down --pages 2
 ```
 
-## Loopback-only
-
-The bcu HTTP server binds to `127.0.0.1` only. There is no remote control surface. All requests
-go through `urllib.request` to the loopback URL stored in
-`$TMPDIR/background-computer-use/runtime-manifest.json`.
-
-## Common workflows
-
-### Open Notes, type, screenshot
-
-```bash
-valor-computer list_windows Notes                        # pick the string window ID
-valor-computer click <window> --x 400 --y 300            # click in the body
-valor-computer type_text <window> "Reminder: ship the plan"
-valor-computer screenshot <window> --output /tmp/notes-after.png
-```
-
-### Drive Slack via targets
-
-```bash
-valor-computer list_windows Slack                        # pick the window ID
-valor-computer get_window_state <window>                 # find node IDs + stateToken
-valor-computer click <window> --target '{"kind":"node_id","value":"<channel_node>"}' --state-token <tok>
-valor-computer type_text <window> "Build complete"
-valor-computer press_key <window> cmd+return             # send
-```
-
 ## Error handling
 
 - `{"error": "computer_use_unavailable", ...}` → bcu not installed, not opted in, or not running. Exit code 78. Tell the user to run `/setup` and answer "yes" to the computer-use opt-in.
 - `{"error": "not_found", "path": ...}` → route missing on the running bcu (version drift). Check the installed bcu against `config/bcu_pin.json`.
 - Action responses carry `ok`, `classification`, and `warnings` — a stale `stateToken` surfaces as a JSON-level rejection; re-run `get_window_state` and retry with the fresh token.
 - `{"error": "timeout", ...}` → bcu took longer than 10s. bcu is loopback HTTP; transient timeouts are unusual — check that the bcu app is responsive.
-
-## BYOB note (do not conflate surfaces)
-
-When BYOB MCP tools are invoked, the registrar at `scripts/update/mcp_byob.py` keeps
-`BYOB_ALLOW_EVAL=1` — `browser_eval` is enabled by default in this repo so skills like
-`mermaid-render`, `do-discover-paths`, and `do-design-system` work out of the box. Computer-use
-does not interact with BYOB; this note is here so the agent does not conflate the two surfaces.

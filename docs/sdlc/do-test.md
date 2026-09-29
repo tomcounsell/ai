@@ -1,85 +1,65 @@
 # do-test addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-test/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
-## TEST Stage Owns the Full-Suite Run (#2376)
+## TEST Owns the Full-Suite Run (#2376)
 
-This stage is the **last full-suite run in the pipeline**. The merge gate runs
-no tests (see `docs/sdlc/do-merge.md`) — it verifies only deterministic facts
-(merge predicate, ruff, lockfile) so it cannot wedge. A PR-introduced
-regression in a test file the diff never touched is caught here or not at all
-before merge (the nightly regression run is the post-merge backstop). So:
-
-- Run the **full suite** (`scripts/pytest-clean.sh tests/ ...`) at least once
-  before the stage completes — targeted runs alone are not sufficient to
-  complete the TEST stage.
-- Classify failures against main with the `baseline-verifier` subagent
-  (`docs/features/test-baseline-verification.md`): pre-existing failures are
-  reported, PR-introduced failures block and route to `/do-patch`.
-
-**No code gates on a full-suite result, deliberately (#2376, #2823).** The
-TEST stage records only `{passed, failed}` — nothing tracks *what was
-collected*, so a targeted `-k one_test` run and a genuine full-suite run are
-indistinguishable downstream. That is intentional: a merge-time full-suite
-gate wedged routinely and was removed wholesale (`docs/sdlc/do-merge.md`).
-The compensating control is the nightly regression run
-(`docs/features/nightly-regression-tests.md`), which collects the default
-collection nightly on any worker-role machine and gates its own trust in the
-result via `validate_run_integrity()` before diffing or dispatching — it
-does not replace this stage's own full-suite requirement above.
-
-## Baseline Comparability: Record the Checkout, Not Just the Count
-
-"Reproduce it on main" assumes the two runs differ only in the code. Two
-things used to break that assumption, and both are now enforced rather than
-merely documented:
-
-- **Interpreter.** A worktree venv is pinned to the main checkout's
-  `MAJOR.MINOR` at provisioning time and re-synced if it drifts (#2572).
-  `python -m tools.doctor` reports any worktree already on disk that diverges.
-  A worktree two minor versions from the checkout once produced a false
-  accusation against a clean diff.
-- **Machine-local gitignored files.** `.env` and `config/reflections.yaml`
-  exist in the main checkout and not in worktrees. Tests that need them now
-  skip with a stated reason instead of failing (#2573), and tests that only
-  needed `main()` to get past `load_env_or_die()` patch that seam.
-
-When a failure count still differs between a worktree and the main checkout,
-that gap is a finding, not noise. Record which checkout produced a baseline
-alongside the count; a bare number is not diffable.
-
-## Test Tiers and Markers
-
-Tests are organized by tier with pytest markers. See `tests/README.md` for the full index.
-
-- `tests/unit/` — No external connections; must be fast (~60s). Run with `-n auto` for parallel execution.
-- `tests/integration/` — Requires live APIs and services. Do not mock.
-- `pytest -m sdlc` — Run SDLC-related tests as a feature slice.
+The merge gate runs no tests (`docs/sdlc/do-merge.md`), so a PR-introduced
+regression in a test file the diff never touched is caught here or not before
+merge. Run the full suite (`scripts/pytest-clean.sh tests/ ...`) at least once
+before the stage completes; targeted runs alone do not complete TEST. Nothing
+downstream can tell a targeted run from a full one (the stage records only
+`{passed, failed}`), so this rule is on you; the nightly regression run
+(`docs/features/nightly-regression-tests.md`) is the post-merge backstop, not a
+substitute.
 
 ## Test Runner: scripts/pytest-clean.sh (never bare pytest)
 
-This repo runs the suite through `scripts/pytest-clean.sh`, a drop-in pytest wrapper that
-reaps xdist workers on exit. Orphaned workers each consume ~180 MB; a full run spawns 8–12
-that accumulate if interrupted. Never use bare `pytest` or `pytest -n auto` directly — the
-wrapper handles parallelism via `pyproject.toml`.
+The wrapper reaps xdist workers (~180 MB each, 8–12 per run) and takes its
+parallelism and the per-test `--timeout=420` bound from `pyproject.toml`. A full
+`tests/unit/` run takes about 20 minutes.
 
 | Input | Command |
 |-------|---------|
 | _(empty)_ | `scripts/pytest-clean.sh tests/ -v --tb=short` |
-| `unit` / `integration` / `e2e` / `tools` / `performance` | `scripts/pytest-clean.sh tests/{tier}/ -v --tb=short` |
+| a tier | `scripts/pytest-clean.sh tests/{tier}/ -v --tb=short` |
 | a file path | `scripts/pytest-clean.sh tests/unit/test_foo.py -v --tb=short` |
-| a single test node | add `-n0` (no xdist workers to reap; cleaner output) |
+| a single test node | add `-n0` |
 
-Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
+Tiers: `tests/unit/` (no external connections), `tests/integration/` (live APIs
+and services, never mocked), and `pytest -m sdlc` for the SDLC slice. Index:
+`tests/README.md`.
 
-## Full-Suite Coordination Lock
+## Baseline Verification Inputs
 
-There is no coordination lock. The former advisory lock judged full-suite-ness from the pytest args, so any run naming a path below `tests/` skipped it — a full run held a lock no targeted run ever tried to take, while its silence read as protection (#2535 Problem 1). It is deleted. Cross-run isolation comes from sentinel-ID namespacing instead; see [Test Concurrency Coordination](../features/test-concurrency-coordination.md).
+Invoke the bundled baseline script with the checkout's own venv and no xdist,
+copying the gitignored files the tests read:
 
-Runs are bounded by `--timeout=420 --timeout-method=thread` (set in `pyproject.toml` addopts), so a stuck test becomes a NAMED failure rather than a hang that never prints a summary.
+```bash
+.venv/bin/python <skill-dir>/scripts/baseline_verify.py \
+  --runner ".venv/bin/python -m pytest -n0" \
+  --copy .env --copy ~/Desktop/Valor/projects.json:config/projects.json \
+  <failing-node-ids>
+```
 
-## Changed-File Source-to-Test Mappings (`--changed`)
+Record which checkout produced a baseline next to its count; a bare number is not
+diffable. A failure count that differs between a worktree and the main checkout is
+a finding, not noise. Worktree venvs are pinned to the main checkout's
+`MAJOR.MINOR` (#2572; `python -m tools.doctor` reports drift), and tests needing
+machine-local gitignored files skip with a stated reason (#2573).
 
-Repo-specific mappings, applied before the generic `foo/bar.py -> tests/*/test_bar.py` rule:
+## Stage-Entry Venv Probe (warn-only)
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.venv_health || true
+```
+
+It names missing extras in the shared venv so a stripped environment reads as a
+warning, not a wall of `ModuleNotFoundError`s
+(`docs/features/uv-sync-worktree-guard.md`).
+
+## Changed-File Mappings (`--changed`)
+
+Applied before the generic rule:
 
 | Source pattern | Test pattern |
 |----------------|--------------|
@@ -88,108 +68,27 @@ Repo-specific mappings, applied before the generic `foo/bar.py -> tests/*/test_b
 | `agent/*.py` | `tests/unit/test_agent*.py` |
 | `monitoring/*.py` | `tests/unit/test_monitoring*.py` |
 
-## Redis Isolation
+## Isolation
 
-Unit tests must never touch production Redis. `tests/conftest.py::pytest_configure` claims a private db from the pool `[1..15]` per pytest process and exports it as both `POPOTO_TEST_DB` and `REDIS_URL` (#2805) — no test-specific key prefix is needed for isolation. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
+Each pytest process claims a private Redis db from `[1..15]` and exports it as
+`POPOTO_TEST_DB` and `REDIS_URL` (#2805). A live bridge or worker outside pytest
+still needs its own test-mode `.env` to stay off db0. Cross-run isolation is by
+sentinel-ID namespacing (`docs/features/test-concurrency-coordination.md`).
 
-Violating this rule corrupts production session data.
+## Pass Thresholds
 
-## AI Judge Pattern
+Unit 100%, integration 95%, E2E 90%. A failing unit test is a blocker.
 
-Integration tests that validate LLM outputs must use an AI judge (Haiku/Sonnet), not keyword matching. See `tests/integration/` for examples. Never assert on exact LLM response content.
+## Lint / Format
 
-## Test Database State
-
-Before running integration tests, verify the bridge and worker are not running tests against the same Redis instance. The pytest process's own claimed db is correct by construction (`POPOTO_TEST_DB` / `REDIS_URL`, see Redis Isolation above); a live bridge or worker process outside pytest still needs its own separate test-mode `.env` to avoid db0.
-
-## Quality Gates
-
-Tests must pass at these thresholds before a PR can merge:
-- Unit: 100% pass
-- Integration: 95% pass
-- E2E: 90% pass
-
-A failing unit test is a blocker; do not open a PR with failing unit tests.
-
-## Lint / Format Commands (the generic body defers to here)
-
-This repo uses `ruff` for both lint and format. When lint is enabled, run:
-
-```bash
-python -m ruff check .
-python -m ruff format --check .
-```
-
-Do NOT run `black` — `ruff format` is the formatter. There is no separate
-formatter step.
-
-## Quality-Scan Source Directories
-
-The post-test quality scans (exception-swallow scan, closure-coverage flag)
-target this repo's primary source directories: `agent/ bridge/` (and, for wider
-sweeps, `tools/ worker/ monitoring/`). Substitute these for the generic body's
-`<source-dirs>` placeholder.
+`python -m ruff check .` and `python -m ruff format --check .`. Never `black`.
 
 ## Happy-Path Runner
 
-The `happy-paths` target runs this repo's deterministic runner directly:
-
-```bash
-python tools/happy_path_runner.py tests/happy-paths/scripts/
-```
-
-It outputs a markdown summary table plus a JSON summary in an HTML comment block.
-When running all tests, if `tests/happy-paths/scripts/` contains `.sh` files,
-include happy-paths execution alongside the pytest and frontend targets.
-
-## Shared-.venv Health Probe (Warn-Only, Stage Entry)
-
-Worktrees get their own `.venv` (#2052), but the repo-root one is still what a
-lane falls back to when provisioning failed. Before running the suite, probe
-the shared venv so a stripped environment (e.g. from a `uv sync` that slipped
-past the PreToolUse guard) is a loud warning here instead of a confusing wall
-of `ModuleNotFoundError`s:
-
-```bash
-"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.venv_health || true
-```
-
-This is warn-only (`|| true`) — a missing extra does not block the test run
-by itself; it just names what's missing so the failure that follows is
-diagnosable instead of mysterious. See
-`docs/features/uv-sync-worktree-guard.md`.
+`python tools/happy_path_runner.py tests/happy-paths/scripts/` (markdown table
+plus a JSON summary in an HTML comment). Include it in all-tests runs when that
+directory holds `.sh` files.
 
 ## OUTCOME Parser
 
-The OUTCOME contract this skill emits is parsed by `classify_outcome()` in
-`agent/pipeline_state.py` (Tier 0) before any text pattern matching.
-
-## Router-Test Fixtures: Seed a Recorded Verdict for Merge-Termination Asserts
-
-This applies to **any** test that asserts a router `row_id` or dispatch skill —
-`tests/unit/test_sdlc_router*.py` **and integration fixtures** that drive
-`decide()` end to end (`tests/integration/test_sdlc_session_ensure_integration.py`).
-Scoping the rule to the unit router tests is exactly how an integration fixture
-sat red on `main` unnoticed until #2757.
-
-When such a fixture asserts the happy-path terminal
-dispatches `/do-merge`, it MUST seed a recorded `APPROVED` review verdict (via
-`meta["latest_review_verdict"]` or `_verdicts["REVIEW"]`) alongside the
-all-`completed` stage states. A `REVIEW == completed` marker is unwritable
-without a readable verdict (#2062 WS3c invariant), so an all-completed state with
-no verdict is not the terminal state — Row 8e (no-verdict recovery) correctly
-re-dispatches `/do-pr-review`, and Row 10 (ready-to-merge) requires the recorded
-verdict (#2062 WS3a). A fixture that omits the verdict but asserts `/do-merge` is
-stale, not a router bug (see #2091).
-
-An integration fixture needs one thing more, because it drives the real
-`_build_context` rather than handing the router a context dict: the verdict's
-`head_sha` must **match the live PR head**, and the fixture's `subprocess.run`
-fake must answer the head-SHA read that produces it. That read is git-FIRST
-(`tools/pr_head_resolver.resolve_pr_head_sha`, #2404), so answering only
-`gh pr view --json headRefOid` is not enough — the fake must also answer
-`git remote get-url origin` (the resolver's cross-repo guard) and
-`git ls-remote origin refs/pull/{N}/head`. Miss any of them and
-`context["pr_head_sha"]` lands on the fail-closed empty sentinel, the verdict
-reads stale, and the tick routes to Row 8f (`/do-pr-review`) instead of Row 10 —
-a failure that looks like a router bug and is not one (#2757).
+`classify_outcome()` in `agent/pipeline_state.py`.

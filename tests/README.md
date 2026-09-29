@@ -151,7 +151,7 @@ Attribute access through a module alias — `_queue.<X>`, where `_queue` is the 
 ## Test-Reliability Layers
 
 - **PR-branch flaky filter** (`/do-test`, PR #484, issue #476) — when a test fails on the PR branch, pytest retries the failure once; tests that pass on retry are dropped from the failure report. This layer addresses flakiness *on the PR branch*.
-- **Baseline verification** (`/do-test`'s `baseline-verifier` subagent) — consistent failures are re-run against `main` to classify them as PR-introduced regressions (blocking) vs pre-existing (reported). See `docs/features/test-baseline-verification.md`.
+- **Baseline verification** (`/do-test`'s bundled `scripts/baseline_verify.py`) — consistent failures are re-run against `main` to classify them as PR-introduced regressions (blocking) vs pre-existing (reported). See `docs/features/test-baseline-verification.md`.
 
 The merge gate runs no tests (#2376) — the TEST stage owns the final full-suite run and the nightly regression run is the post-merge backstop.
 
@@ -524,6 +524,36 @@ enforces this in CI, not just in this note.
 | `e2e_config` | function | `tests/e2e/conftest.py` | Config with test overrides |
 | `perplexity_api_key` | function | `tools/conftest.py` | Perplexity API key (skip if missing) |
 | `anthropic_api_key` | function | `tools/conftest.py` | Anthropic API key (skip if missing) |
+
+## Router-Test Fixtures: Seed a Recorded Verdict for Merge-Termination Asserts
+
+This applies to **any** test that asserts a router `row_id` or dispatch skill —
+`tests/unit/test_sdlc_router*.py` **and integration fixtures** that drive
+`decide()` end to end (`tests/integration/test_sdlc_session_ensure_integration.py`).
+Scoping the rule to the unit router tests is exactly how an integration fixture
+sat red on `main` unnoticed until #2757.
+
+When such a fixture asserts the happy-path terminal
+dispatches `/do-merge`, it MUST seed a recorded `APPROVED` review verdict (via
+`meta["latest_review_verdict"]` or `_verdicts["REVIEW"]`) alongside the
+all-`completed` stage states. A `REVIEW == completed` marker is unwritable
+without a readable verdict (#2062 WS3c invariant), so an all-completed state with
+no verdict is not the terminal state — Row 8e (no-verdict recovery) correctly
+re-dispatches `/do-pr-review`, and Row 10 (ready-to-merge) requires the recorded
+verdict (#2062 WS3a). A fixture that omits the verdict but asserts `/do-merge` is
+stale, not a router bug (see #2091).
+
+An integration fixture needs one thing more, because it drives the real
+`_build_context` rather than handing the router a context dict: the verdict's
+`head_sha` must **match the live PR head**, and the fixture's `subprocess.run`
+fake must answer the head-SHA read that produces it. That read is git-FIRST
+(`tools/pr_head_resolver.resolve_pr_head_sha`, #2404), so answering only
+`gh pr view --json headRefOid` is not enough — the fake must also answer
+`git remote get-url origin` (the resolver's cross-repo guard) and
+`git ls-remote origin refs/pull/{N}/head`. Miss any of them and
+`context["pr_head_sha"]` lands on the fail-closed empty sentinel, the verdict
+reads stale, and the tick routes to Row 8f (`/do-pr-review`) instead of Row 10 —
+a failure that looks like a router bug and is not one (#2757).
 
 ## Adding Tests for New Features
 

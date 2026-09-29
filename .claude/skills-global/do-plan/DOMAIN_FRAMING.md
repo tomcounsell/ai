@@ -1,24 +1,16 @@
 # Domain Framing Cheatsheet
 
-There is **no standing pool of specialist agents**. When a plan task needs domain
-expertise, assign a Tier-1 agent (`builder`, or `code-reviewer` for review-only)
-and **tag the task** with the matching domain below, then paste the relevant rules
-into the task's "Your assignment" so the builder applies them.
+For a task needing domain expertise, assign a `builder` (or `code-reviewer` for review-only work),
+tag the task literally (e.g. `Domain: async`) so `/do-build` injects the rules and reviewers know
+what to check, and paste the matching rules below into its assignment. These are only rules a
+strong general model does not apply by default. Rules enforced elsewhere are not restated:
 
-This is the salvaged, repo-specific signal from the retired specialist agents —
-deliberately narrow. It lists only framing a strong general model does **not**
-already apply by default. It does **not** restate rules the repo already enforces
-elsewhere; those are cross-referenced instead:
-
-- Never raw Redis on Popoto keys → enforced by `validate_no_raw_redis_delete.py`; see `CLAUDE.md`.
-- Additive Popoto fields heal generically (no backfill) → Popoto ≥1.6.1 default-fills absent fields at lazy-load; `AgentSession.__setattr__` coerces write-path values (issues #1099, #1172; see `docs/features/popoto-descriptor-pollution-ledger.md`, #2083).
-- No parallel-run migrations / no historical artifacts → `CLAUDE.md` HARD RULE.
+- Never raw Redis on Popoto keys → `validate_no_raw_redis_delete.py`; see `CLAUDE.md`.
+- Additive Popoto fields heal generically (no backfill) → Popoto ≥1.6.1 default-fills absent fields at lazy-load; `AgentSession.__setattr__` coerces write-path values (#1099, #1172, #2083; `docs/features/popoto-descriptor-pollution-ledger.md`).
+- No parallel-run migrations / no historical artifacts → `CLAUDE.md`.
 - Persona voice, never raw errors/stack to chat → `feedback_telegram_persona_always`.
-- Real integration tests, AI judges, minimal runs → `CLAUDE.md` Testing Philosophy.
+- Real integration tests, AI judges → `CLAUDE.md` Testing Philosophy.
 - Cross-component bug method → [`docs/features/trace-and-verify.md`](../../../docs/features/trace-and-verify.md).
-
-Use the tag literally in the task (e.g. `Domain: async`) so `/do-build` knows to
-inject the rules and reviewers know what to check.
 
 ---
 

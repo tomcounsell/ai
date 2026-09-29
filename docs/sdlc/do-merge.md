@@ -26,80 +26,34 @@ generic steps as follows:
   python -m tools.merge_predicate --pr-number {PR} --run-id {run_id} --json
   ```
   Output shape: `{"allowed": bool, "failed_checks": [...], "substrate_present":
-  bool, "notes": [...]}`; exit 0 iff allowed. **Always pass `--run-id {run_id}`**
-  (the run identity from `session-ensure`) — it is required for the single-owner
-  MERGE gate (group (d)) below; omitting it silently skips that gate. One call
-  covers all four check groups:
-  - **(a) PR state**: OPEN, MERGEABLE, mergeStateStatus CLEAN, CI green
-    (FAILURE/ERROR fail; pending is not-green), and a word-boundary
-    `Closes/Fixes/Resolves #N` issue link in the body.
-  - **(b) DOCS stage gate**: `stages.DOCS ==
-    completed` passes; `in_progress` hard-fails (the sole affirmative "DOCS
-    unfinished" signal); `pending`/empty stages degrade
-    to a `docs/features/{slug}.md` existence check, slug derived from the PR
-    head ref (main/master/HEAD/empty → no usable slug → FAIL).
-  - **(c) REVIEW completion and verdict freshness**: `stages.REVIEW ==
-    completed` is required. `sdlc-tool verdict finalize` writes that marker
-    beside the verdict on the APPROVED path, so a verdict whose REVIEW marker
-    reads `pending`/empty is a review that never finalized and fails with
-    `REVIEW stage marker not completed (status=...)`; `in_progress` fails as
-    `REVIEW stage in_progress`. Both marker and verdict live on the same
-    `PipelineLedger`, so this leg has no out-of-ledger fallback the way (b)
-    has `docs/features/{slug}.md`; the repair is re-running `finalize`. Then a
-    recorded verdict must
-    exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
-    latest commit — via the head SHA the verdict attributes to
-    (`head_sha_of_record()`: the record's `head_sha` field, else a
-    `REVIEW_CONTEXT head_sha=` trailer in the verdict text) when resolvable,
-    else recorded-at timestamp vs latest-commit committer date. A trailer
-    that differs from the live head is tolerated only when
-    `tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only`: the
-    live head strictly descends from the reviewed SHA and every changed path
-    is a prose or image file under `docs/` (`.md`, `.markdown`, `.rst`,
-    `.txt`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`; never `docs/sdlc/`) or
-    a top-level `*.md`, and no path is named `CLAUDE.md`, `CLAUDE.local.md`,
-    or `AGENTS.md` at any depth (all matched case-insensitively). Any other
-    file under `docs/`, such as an mkdocs `docs/hooks.py`, is code. Code
-    drift, a force-push, or an `unknown`
-    classification is stale, and a stale APPROVED verdict FAILS with
-    `REVIEW verdict predates PR head commit`. The
-    PR's current head SHA is resolved git-first via
-    `tools/pr_head_resolver.py::resolve_pr_head_sha` (`git ls-remote
-    refs/pull/N/head`, no shared cache with `gh`), so a stale `gh` head read
-    cannot match the trailer and pass a stale approval.
-  - **(d) Single-owner MERGE lease**: the merge actor's
-    `run_id` must hold the current per-issue SDLC lease. This refuses a
-    parallel fork/lineage that never held the lease from merging past a
-    supervisor's still-blocked gate (Race 2). Enforced only when `--run-id` is
-    supplied — so **always pass it**; the merge-guard hook, which carries no
-    run identity, skips this gate but still enforces (a)/(b)/(c). Under the
-    single-owner invariant this also enforces "`run_id` matches the run that
-    recorded the operative REVIEW verdict": verdict recording is itself
-    lease-gated, and the supervisor holds the one lease continuously for the
-    whole run. Fails **open** on a Redis error (lease confirmed), **closed** on
-    a substrate-present lock-import failure. A refusal reads
-    `single-owner MERGE: merge actor run_id does not hold the issue lease ...`.
+  bool, "notes": [...]}`; exit 0 iff allowed. **Always pass `--run-id {run_id}`**:
+  without it the single-owner lease leg is silently skipped. The legs:
+  - **(a) PR state**: OPEN, MERGEABLE, `CLEAN`, CI green (pending is not
+    green), and a `Closes/Fixes/Resolves #N` issue link.
+  - **(b) DOCS**: `stages.DOCS == completed`; `in_progress` fails; an
+    unreadable or `pending` marker degrades to a `docs/features/{slug}.md`
+    existence check.
+  - **(c) REVIEW**: `stages.REVIEW == completed` plus a recorded `APPROVED`
+    verdict fresh against the PR head (the verdict's `head_sha`, else
+    recorded-at vs the latest commit's `committer.date`). Drift from the
+    reviewed SHA is tolerated only when `tools/sdlc_review_drift.py` classifies
+    it `docs_only` (see
+    [`docs/features/sdlc-review-drift-classifier.md`](../features/sdlc-review-drift-classifier.md));
+    the head is read git-first via `tools/pr_head_resolver.py`, never a stale
+    `gh` read.
+  - **(d) Single-owner lease**: the merge actor's `run_id` must hold the
+    issue's SDLC lease.
 
-  `allowed: false` → report every `failed_checks` leg, emit `GATES_FAILED`,
-  and route back (`/do-docs` for the DOCS leg, `sdlc-tool verdict finalize` for
-  the REVIEW marker leg, `/do-pr-review`/`/do-patch` for verdict legs). Do NOT re-implement any of these checks inline in this file —
-  the helper is the single source; the parity test
-  (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
-  - **Tracked-issue resolution for (b)/(c).** Groups (b) and (c) key
-    on the SDLC-tracked issue looked up in the durable `PipelineLedger` by PR
-    number (`PipelineLedger.query.filter(pr_number=...)`, scoped to the repo
-    resolved by `gh repo view`), not the first `Closes #N` in the PR body. A PR
-    that closes several sub-issues under an umbrella tracking issue records its
-    DOCS marker and REVIEW verdict on the umbrella; keying on the first-match
-    body issue false-fails the gate for that shape. `pr_number` is written by
-    `sdlc-tool meta-set --key pr_number` at PR creation, so it is populated long
-    before the gate runs. When no ledger resolves for the PR number, groups
-    (b)/(c) fall back to the first-match body issue — single-issue PRs are
-    unaffected. When more than one distinct tracked issue is found for the PR
-    number, the predicate **fails closed** with an explicit
-    `tracked-issue lookup ambiguous` entry in `failed_checks` rather than
-    guessing. Group (a)'s body-link presence check always uses the raw
-    first-match body issue, unchanged.
+  Legs (b)/(c) key on the tracked issue the `PipelineLedger` records for the PR
+  number (an umbrella issue may differ from the first `Closes #N`); an
+  ambiguous lookup fails closed.
+
+  `allowed: false` → report every `failed_checks` entry verbatim, emit
+  `GATES_FAILED`, and route: DOCS leg → `/do-docs`; REVIEW marker not completed
+  → re-run `sdlc-tool verdict finalize`; stale or missing verdict (`REVIEW
+  verdict predates PR head commit`) → a fresh `/do-pr-review`, never a
+  `finalize` re-run; findings → `/do-patch`. Never re-implement a leg inline;
+  the parity test (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
 - **Step 4 merge-authorization guard.** The merge-guard hook
   (`.claude/hooks/validators/validate_merge_guard.py`) evaluates the SAME live
   predicate (`tools.merge_predicate`) when the merge command runs. On the happy
@@ -147,16 +101,6 @@ stages the predicate reads, so none of them is ever skippable. Everything else
 is the ordinary gate: a posted review artifact, a finalized APPROVED verdict, a
 DOCS completion marker, `Closes #N` in the body. See
 [`docs/features/off-pipeline-merge-path.md`](../features/off-pipeline-merge-path.md).
-
-## Documentation Gate
-
-The authoritative check is DOCS *stage completion*, evaluated as group (b) of
-the shared predicate (`tools/merge_predicate.py`): PASS when `stages.DOCS ==
-completed`, hard-FAIL closed when it is `in_progress`. When the marker is
-unreadable (session reaped, empty `stages`) or the stage never started
-(`pending`), the gate degrades to verifying `docs/features/{slug}.md` exists —
-retained as the degraded fallback rather than a separate, weaker check.
-Present ⇒ PASS (degraded); absent ⇒ FAIL, missing feature docs block the merge.
 
 ## Ruff Gates
 
@@ -217,10 +161,6 @@ none of them is the migration commit; or nothing is ahead yet the migration is
 absent on `origin/main`. In the last shape nothing is stranded, but the state
 is still unexplained and left untouched.
 
-## Post-Merge Memory Extraction
-
-After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
-
 ## Post-Merge Site Deploy
 
 If the merged diff touched `site/`, `wrangler.jsonc`, or `src/index.js`, redeploy the
@@ -255,30 +195,13 @@ The branch `session/{slug}` is deleted automatically by GitHub on merge if "dele
 
 ### Busy Guard
 
-`post_merge_cleanup.py` refuses to delete a worktree while a non-terminal `AgentSession` still references it as `working_dir`. This protects against the macOS cwd-vanished wedge: deleting a directory out from under a live SDK subprocess does not signal that subprocess; `getcwd(3)` returns ENOENT, the harness hangs forever in `proc.communicate()`, and the session row sits at `status=running` for hours.
-
-The script's exit codes:
-
-| Exit | Meaning |
-|------|---------|
-| 0 | Cleanup succeeded (or already clean) |
-| 1 | Generic error — git/branch removal failed |
-| 2 | **Blocked** — a live session is using the worktree |
-
-When you see exit 2, the stderr line points to the offending session:
-
-```text
-Error: worktree .worktrees/{slug} is in use by session_id=0_LIVE.
-Investigate the session (valor-session status --id 0_LIVE);
-kill it if dead (valor-session kill --id 0_LIVE) and re-run.
-```
-
-Operator response, in order:
-1. Run `valor-session status --id <session_id>` to verify whether the session is genuinely live or wedged.
-2. If wedged or dead: `valor-session kill --id <session_id>` then re-run `post_merge_cleanup.py`.
-3. If genuinely live and the cleanup must proceed anyway, override programmatically with `cleanup_after_merge(repo_root, slug)` after passing `force=True` to `remove_worktree`. **Do not make `--force` your reflex** — copy-paste `--force` defeats the protection. The WARNING log on `force=True` (`force-removing worktree ... despite live session_id=...`) is grep-able for audit.
-
-The complementary defense at runtime is the `BackgroundTask._watchdog` cwd-vanished check: if a worktree disappears underneath a session by some other path (manual `rm -rf`, OS-level cleanup, recovery script), the watchdog cancels the work task within one heartbeat tick (~60s in production), logs `cwd_vanished session_id=...`, and increments `{project_key}:session-health:cwd_vanished`.
+`post_merge_cleanup.py` exits **2** when a non-terminal `AgentSession` still uses
+the worktree as `working_dir` (deleting a live session's cwd wedges it
+permanently); exit 1 is a generic git error. On exit 2, check the named session
+with `valor-session status --id <id>`; if it is wedged or dead,
+`valor-session kill --id <id>` and re-run. Do not force-remove a worktree under
+a live session; the only override is programmatic (`force=True` to
+`remove_worktree`) and is logged for audit.
 
 ## Bridge/Worker Restart After Merge
 
@@ -301,7 +224,7 @@ merge.
 seconds and cannot wedge. Test responsibility lives elsewhere:
 
 - The **TEST stage** owns the final full-suite run before REVIEW (see
-  `docs/sdlc/do-test.md`) — `baseline-verifier` classifies pre-existing
+  `docs/sdlc/do-test.md`) — its baseline script classifies pre-existing
   failures against main there, where the pipeline can iterate and patch.
 - The **nightly regression run** (`scripts/nightly_regression_tests.py`) is
   the backstop for anything that slips through. It collects the default
@@ -310,39 +233,11 @@ seconds and cannot wedge. Test responsibility lives elsewhere:
   result, and installs on any machine that owns a project (worker-role, not
   bridge-role) — see `docs/features/nightly-regression-tests.md`.
 
-  The wrapper is referred to obliquely on purpose: a guard forbids the
-  runner's literal name anywhere in this section, so that merge-time test
-  execution cannot creep back in even as prose. The bright line covers the
-  whole section, not just live commands.
-
 Do not add a pytest invocation to this gate stack. A merge-time
 full-suite gate (shape classifier, per-SHA verdict cache, categorised
 baseline comparison) wedges routinely — xdist bringup deadlocks, worker
 crashes, Redis DB pollution from concurrent suites — so the gate stack
 carries no such step.
-
-### Review Verdict Freshness
-
-The stale-approval protection (an APPROVED verdict that predates a force-push
-or new commits) is enforced as group (c) of the
-shared predicate (`python -m tools.merge_predicate --pr-number {PR} --json`,
-already run in Steps 1–3 above): the recorded REVIEW verdict must be APPROVED
-AND fresh against the PR's latest commit, preferring the
-`<!-- REVIEW_CONTEXT head_sha=... -->` trailer `/do-pr-review` emits (exact
-head-SHA match) and falling back to recorded-at timestamp vs the latest
-commit's `committer.date`. Missing latest-commit data fails closed — a silent
-fallback would defeat the exact stale-Approved-after-force-push bug this check
-prevents. Do not re-implement the filter inline here; the same check runs in
-the merge-guard hook, so a stale approval that slips past the skill still
-blocks at the choke point. A trailer mismatch is tolerated when
-`tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only` (a
-strictly descending range whose paths are all prose or image files under
-`docs/` outside `docs/sdlc/`, or top-level `*.md`, with no `CLAUDE.md`,
-`CLAUDE.local.md`, or `AGENTS.md` at any depth; see
-[`docs/features/sdlc-review-drift-classifier.md`](../features/sdlc-review-drift-classifier.md)), so the
-mandatory post-review DOCS commit does not stale the approval (#3228). Code
-drift, a force-push, and an `unknown` classification still refuse; the remedy
-is a fresh `/do-pr-review`, never a re-run of `finalize`.
 
 ### Lockfile Sync Check
 

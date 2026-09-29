@@ -1,89 +1,53 @@
 # do-docs context — this repo (ai)
 
-This repo's nuances for the `/do-docs` cascade. The global skill body runs a generic,
-`git`-only baseline; this file layers the ai-repo automation back in. Read top to bottom and
-honor every declaration — each maps to a numbered step in the global `SKILL.md`.
+Operational specifics the `/do-docs` cascade executes in this repo. Pipeline-level
+docs policy (feature index, tools reference, plans on main, addenda) lives in
+`docs/sdlc/do-docs.md`; do not duplicate it here.
 
-For the higher-level SDLC-pipeline guidance on docs (docs/features as primary index,
-commit-on-branch rules, plan commit-on-main), see `docs/sdlc/do-docs.md`. This file carries
-the **operational** specifics the skill body executes; do not duplicate `docs/sdlc/do-docs.md`.
+## Stage markers
 
-## Stage marker (wraps the whole skill)
-
-At the very start of the skill, write an `in_progress` marker:
+At the start:
 
 ```bash
-sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} --run-id {run_id} || true
 ```
 
-After the cascade completes (Step 4), write the completion marker. Write it whether the
-cascade **committed** doc changes **or** verified the docs already consistent with **nothing to
-commit** (a clean no-op). Do NOT gate the marker on a commit having happened — a verified-clean
-run is a successful DOCS completion, and withholding the marker loops the router (DOCS ↔ REVIEW
-re-dispatch via router row 9 `_rule_review_approved_docs_not_done`; issue #2377 Mode 2):
+At the end, whether the cascade committed doc changes or verified the docs
+consistent with nothing to commit (a clean no-op is a successful DOCS completion):
 
 ```bash
-sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} --run-id {run_id} || true
 ```
 
-**The one exception — an errored run must NOT mark completed.** If Step 2d's auto-fix substrate
-returned `status: error`, abort and do not write this marker: the docs are in an unknown state
-(see "Auto-fix substrate" above, line 139). An error is the only path that legitimately leaves
-DOCS incomplete; a clean no-op is not an error and must still mark completed.
+Never gate this marker on a commit having happened: withholding it makes the
+router re-dispatch DOCS after REVIEW in a loop (#2377 Mode 2). The one exception:
+if the auto-fix substrate returned `status: error`, abort and do not write the
+completion marker, because the docs are in an unknown state.
 
-## Goal alignment — finding plan context (Step 1 input)
+## Plan context
 
-When invoked by `do-build`, this skill should receive the **plan context** (high-level goal,
-tracking issue, acceptance criteria) so doc updates align with the feature's intent — not
-just the raw diff. Resolve plan context in priority order:
+To align edits with the feature's intent, use plan context in this order: what
+the caller passed inline; the plan behind the PR body's `Closes #N`; the plan
+matching a `session/{slug}` branch (`docs/plans/{slug}.md`); otherwise the diff
+alone.
 
-1. If the caller passed plan context inline (e.g. `do-build` includes it in the prompt), use it directly.
-2. Check the PR body for `Closes #N` — fetch the issue, then look for `docs/plans/{slug}.md`.
-3. Check the current git branch — if `session/{slug}`, look for `docs/plans/{slug}.md`.
-4. If no plan found, proceed without it — the diff alone is sufficient for doc cascading.
+## Cross-repo `gh`
 
-Use plan context to understand the *purpose* of the change, identify conceptually-related
-docs without keyword overlap, and write updates that explain the "why" alongside the "what".
+`GH_REPO` is set for cross-project work and `gh` honors it; no `--repo` flags.
 
-## Cross-repo resolution (Step 1 `gh` commands)
+## Doc locations (inventory priority order)
 
-For cross-project work, the `GH_REPO` environment variable is set automatically by
-`sdk_client.py`. The `gh` CLI natively respects it, so all `gh` commands target the correct
-repository — no `--repo` flags or manual parsing needed.
+`CLAUDE.md`; `docs/features/*.md` and its `README.md` index; `docs/tools-reference.md`;
+`.claude/commands/*.md`; `docs/plans/*.md`; `docs/sdlc/*.md`;
+`.claude/skill-context/*.md`; `.claude/skills-global/*/SKILL.md`;
+`.claude/skills/*/SKILL.md`; `config/identity.json`;
+`config/personas/segments/*.md`; `site/*.html` (published pages, edited like
+markdown; `site/assets/` is out of scope); other `docs/*.md`.
 
-## Doc inventory locations (Step 1, Agent B)
-
-This repo's documentation lives in these locations. Scan them in this priority order:
-
-| Location | What lives there |
-|----------|-----------------|
-| `CLAUDE.md` | Primary project guidance, architecture, rules |
-| `docs/tools-reference.md` | Full command/tool catalog (new CLI commands go here) |
-| `docs/features/*.md` | Feature documentation |
-| `docs/features/README.md` | Feature index table (canonical feature list — keep entries current) |
-| `site/*.html` | Published docs site pages at valorengels.com (living docs — edit alongside markdown; `site/assets/` is out of scope) |
-| `docs/plans/*.md` | Plans that may reference this work as a prerequisite |
-| `docs/sdlc/*.md` | Per-stage SDLC addenda (this repo only) |
-| `.claude/skill-context/*.md` | Per-skill repo-context files (this repo only) |
-| `.claude/skills-global/*/SKILL.md` | Workflow skill definitions (cross-repo) |
-| `.claude/skills/*/SKILL.md` | Workflow skill definitions (project-only) |
-| `.claude/commands/*.md` | Slash commands |
-| `config/identity.json` | Structured identity data |
-| `config/personas/segments/*.md` | Composable persona segments |
-| `docs/*.md` (other top-level) | Deployment guides, etc. |
-
-Sort by importance: `CLAUDE.md` first, then features, then commands, then plans, then the rest.
-
-## Semantic doc-impact finder (Step 1, Agent C)
-
-In addition to lexical matching, run the embedding-based finder to catch conceptually-related
-docs with no shared keywords:
+## Semantic doc-impact finder
 
 ```bash
-# 1. Ensure the doc index is current
 python3 -c "import sys; sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}'); from tools.doc_impact_finder import index_docs; index_docs()"
-
-# 2. Find affected docs from the change summary
 python3 -c "
 import sys
 sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}')
@@ -96,33 +60,19 @@ for r in results:
 "
 ```
 
-Replace `<CHANGE_SUMMARY>` with a 2-3 sentence natural-language summary of the change.
-`find_affected_docs` returns `(results, meta)`; a `DEGRADED:` line (e.g.
-`no_embedding_provider` when no embedding API key is configured) means the finder could not
-run cleanly — that is expected in keyless environments; the cascade degrades gracefully to
-lexical-only matching. Zero results WITHOUT a DEGRADED line means no docs are affected.
-Merge per the global body's Step 2 rules.
+A `DEGRADED:` line (e.g. `no_embedding_provider` without an embedding key) means
+fall back to lexical matching. Zero results without it means no docs affected.
 
-## Stale-reference sweep paths (Step 2b)
-
-For each retired term from the change summary, grep across all doc locations:
+## Stale-reference sweep paths
 
 ```bash
 rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/ .claude/skills-global/ .claude/skill-context/
-```
-
-Sweep the published site pages separately, scoped to HTML only — never bare `site/`,
-which would grep the 38k-line generated `site/assets/graph.js` on every cascade:
-
-```bash
 rg "<retired-term>" --glob 'site/*.html'
 ```
 
-## Auto-fix substrate (Step 2d — run BEFORE manual edits)
+Never grep bare `site/`: it includes the 38k-line generated `site/assets/graph.js`.
 
-Run the unified docs-auditor substrate against the PR-changed files. It auto-handles one
-class of mechanical fix — stale-term renames — so manual editing in Step 3 only handles
-cases the substrate can't auto-detect.
+## Auto-fix substrate (run before manual edits)
 
 ```bash
 python -c "
@@ -139,85 +89,46 @@ sys.exit(0 if result['status'] != 'error' else 1)
 "
 ```
 
-The substrate applies fixes to the working tree, fires the memory-refresh hook on the applied
-set, and files deduped GitHub issues for cases needing human judgment (deleted targets, stub
-docs, orphan plans). It runs **no git at all** and leaves the tree dirty: you own the commit,
-and its diff passes through your Step 4 review first. Carry the `files_touched` list from the
-JSON output into Step 4 — those paths are expected there, alongside the Step 2 task list.
+It applies stale-term renames to the working tree, runs no git, and files deduped
+issues for cases needing judgment. Its `files_touched` joins the expected set.
+Route on the JSON:
 
-Parse the JSON output. `status` alone does **not** mean the output is correct — check
-`fixes_withheld` too:
+- `status: "ok"`, `fixes_withheld == 0`: continue.
+- `fixes_withheld > 0` (any status): the existence invariant rejected fixes whose
+  target path does not exist. Echo each `withheld` entry (`doc`, `old`, `new`,
+  `reason`) into your output, then fix or explicitly leave each named doc by
+  hand. `status: "ok"` is not a pass on those docs.
+- `status: "error"`: abort and report; no completion marker.
+- `status: "disabled"`: auth probe failed; continue without auto-fixes.
 
-- `status: "ok"` and `fixes_withheld == 0` — proceed to Step 3 for any remaining manual edits.
-- `fixes_withheld > 0` (with any `status`) — the existence invariant rejected one or more
-  fixes because they would have introduced a path that does not exist on disk. Before
-  trusting the substrate's applied-but-uncommitted output:
-  1. **Echo every `withheld` entry into your transcript output** — one line per entry giving
-     `doc`, `old`, `new`, and `reason` — so the rejection is visible in the stage record and
-     not buried in a log file.
-  2. Re-check each named `doc` by hand in Step 3. The withheld fix means the doc has a stale
-     reference the substrate declined to guess at; either correct it manually or leave it and
-     say so.
-  3. Only then continue. Do not treat `status: "ok"` as a pass on those docs.
-- `status: "error"` — abort and report; do NOT write the completion stage marker.
-- `status: "disabled"` — auth probe failed; proceed in skill-only mode (no auto-fixes).
+## Indexes
 
-Result keys that carry the withheld set: `fixes_withheld` (int) and `withheld`
-(list of `{"doc", "old", "new", "reason"}`, `reason` = `"target-absent"`).
+A new feature doc gets a row in `docs/features/README.md`; a new CLI command,
+script, or tool gets an entry in `docs/tools-reference.md`. Adding or removing a
+`site/*.html` page updates `site/sitemap.xml`.
 
-Withheld fixes were never written, so there is nothing of theirs in the diff; any correction
-you make for them in Step 3 rides in the same commit you make in Step 4.
+## Site deploy
 
-## Index-table maintenance (Step 3)
+Site changes deploy at merge (`docs/sdlc/do-merge.md` runs `scripts/deploy-site.sh`).
+If the cascade committed `site/` changes directly on `main`, run
+`scripts/deploy-site.sh` now and state the outcome (deployed / failed /
+skipped-report); on a machine without `wrangler` or the vault token it exits 0
+with a "redeploy needed" notice.
 
-When a new feature doc is created, add an entry to the `docs/features/README.md` index table.
-Missing entries cause discoverability gaps. When a new CLI command, script, or tool is added,
-add it to `docs/tools-reference.md` (the full command catalog, and the first place devs look).
-
-When you **add or remove** a `site/*.html` page during the cascade, update `site/sitemap.xml`
-so the published sitemap matches the page set. Edit affected site pages surgically, exactly
-like any markdown doc.
-
-## Site deploy (Step 4)
-
-Site changes deploy at merge: `docs/sdlc/do-merge.md` declares a post-merge step that runs
-`scripts/deploy-site.sh` (wrangler deploy + liveness curl) when the merged diff touched
-`site/`, `wrangler.jsonc`, or `src/index.js`. The cascade itself does not deploy. The one
-exception: if the cascade committed `site/` changes **directly on `main`** (not a feature
-branch), run `scripts/deploy-site.sh` immediately and report its output in the cascade
-summary — state the deploy outcome explicitly (deployed / failed / skipped-report), never
-swallow it. On a machine without `wrangler` or the vault token the script exits 0 with a
-"redeploy needed" notice, which is the correct report on non-deploy machines.
-
-## Mark the plan docs-complete (Step 4, after commit)
-
-Locate the plan via the current branch slug or PR context, then set `status: docs_complete`
-in its YAML frontmatter so it is ready for deletion at merge time:
+## Push guard (before any push to `main`)
 
 ```bash
-BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-PLAN_PATH="docs/plans/${SLUG}.md"
+sdlc-push-guard --assume-head || { echo "Push refused: HEAD carries open-PR ancestry — checkout main / merge through gh pr merge"; exit 1; }
+git push
 ```
 
-```python
-import re
-from pathlib import Path
+It refuses a push from a HEAD at or descended from an open PR head, which would
+register that PR's ancestry as merged (#2026). `--assume-head` is required: with
+no pre-push stdin the guard otherwise treats the call as "nothing to push" and
+passes (#2800).
 
-plan_path = Path('docs/plans/{slug}.md')
-if plan_path.exists():
-    text = plan_path.read_text()
-    if text.startswith('---\n'):
-        end = text.index('\n---', 4)
-        frontmatter = text[4:end]
-        if 'status:' not in frontmatter:
-            new_fm = frontmatter + '\nstatus: docs_complete'
-        else:
-            new_fm = re.sub(r'status:\s*\S+', 'status: docs_complete', frontmatter)
-        plan_path.write_text('---\n' + new_fm + '\n---' + text[end + 4:])
-    else:
-        plan_path.write_text('---\nstatus: docs_complete\n---\n\n' + text)
-    print(f'Marked {plan_path} as docs_complete')
-else:
-    print(f'No plan found at {plan_path} — skipping plan marker')
-```
+## Plan bookkeeping
+
+After the commit, set `status: docs_complete` in the frontmatter of the lane's
+plan (`docs/plans/{slug}.md`, slug from the `session/{slug}` branch), adding the
+key if absent. No plan file: skip.

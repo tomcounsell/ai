@@ -1,32 +1,34 @@
 ---
 name: reclassify
-description: "Change a plan's type (bug/feature/chore) during the Planning phase. Use when the initial classification was wrong or scope changed; only works before plan approval."
+description: "Change a plan's type (bug/feature/chore) while it is still in Planning. Use when the classification was wrong or scope changed."
 allowed-tools: Read, Edit, Glob, Bash
 disable-model-invocation: true
+argument-hint: "<bug|feature|chore>"
+model: haiku
+effort: low
 ---
 
 # Reclassify Plan Type
 
-Changes the `type:` field in a plan document's YAML frontmatter. Only allowed while the plan is still in its planning phase — after approval, type is immutable.
+Change the `type:` frontmatter field of the active plan document to the type given in
+`$ARGUMENTS` (e.g. `/reclassify bug`), and commit that one-line change.
 
-## Repo Context Probe
+Done when: the plan's `type:` holds the new value, the change is committed on its own, and you
+have reported `Reclassified {plan_file} from '{old}' to '{new}'.` If the argument is missing or
+not an allowed type, show usage and stop.
 
-If `.claude/skill-context/reclassify.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+## Repo context
 
-The context file is where a repo declares its plan-document conventions: where plan files live, the allowed `type:` values, which `status:` values still permit reclassification, and any hooks that enforce these. Generic defaults: plans are markdown files under `docs/plans/` with `type:` and `status:` frontmatter, allowed types are `bug`, `feature`, `chore`, and only `status: Planning` permits the change. If the repo has no plan documents matching this shape, report that there is nothing to reclassify.
+If `.claude/skill-context/reclassify.md` exists, read it for plan location, allowed types, and
+the status gate. Defaults: plans are `docs/plans/*.md`, types are `bug`, `feature`, `chore`,
+and only `status: Planning` permits the change. If no plan document has this shape, report
+that there is nothing to reclassify.
 
-## Process
+## Constraints
 
-Argument: the new type (e.g. `/reclassify bug`). If missing or not an allowed value, show usage and stop.
-
-1. **Find the active plan.** Exactly one plan in a planning status → use it. Multiple → list them and ask which. None → report it.
-2. **Gate on status.** If the plan's status does not permit reclassification, reject with:
-   ```
-   Cannot reclassify: plan status is '{status}'. Type can only be changed during Planning phase.
-   To change type after approval, first change status back to Planning.
-   ```
-3. **Edit the `type:` field** in the frontmatter, then confirm:
-   ```
-   Reclassified {plan_file} from '{old_type}' to '{new_type}'.
-   ```
-4. **Commit** the change: `git add {plan_file} && git commit -m "Reclassify {plan_file} as {new_type}"`.
+- Type is immutable once the plan leaves Planning. If it has, refuse with the plan's current
+  status, and say that the status must be set back to Planning first.
+- If exactly one plan is in Planning, use it. If there are several, ask which one. If there are
+  none, report that.
+- Edit only the `type:` line. Commit only that file:
+  `git add {plan_file} && git commit -m "Reclassify {plan_file} as {new_type}" -- {plan_file}`.

@@ -1,63 +1,55 @@
 ---
 name: sdlc
-description: "Single-stage router for development work. Assesses current state, dispatches ONE sub-skill, then returns. The PM session handles pipeline progression."
+description: "Single-stage SDLC router: assess where work stands, dispatch ONE sub-skill, return. The PM session handles progression."
 context: fork
 ---
 
 # SDLC — Single-Stage Router
 
-This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE
-sub-skill, and returns. The PM session handles pipeline progression by re-invoking this skill
-after each stage completes. In a local Claude Code session (no PM loop), use `/do-sdlc` to
-supervise the full pipeline in one invocation.
+Assess where the work stands, invoke ONE sub-skill, and return; the PM session re-invokes this
+skill after each stage. For a local session with no PM loop, use `/do-sdlc` to supervise the whole
+pipeline.
 
-You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
+Read `.claude/skills-global/do-sdlc/SKILL.md` and execute its **router mode**: Steps 1–4 (Resolve →
+Ensure the Tracking Session → Assess Current State → Dispatch ONE Sub-Skill), once, then return.
+The supervisor loop (Step 5+) and the report/release steps belong to `/do-sdlc`. Honor its repo
+context probe (`docs/sdlc/do-sdlc.md`).
 
-**The substantive procedure lives in the merged SDLC skill.** Read
-`.claude/skills-global/do-sdlc/SKILL.md` and execute its **router mode** — Steps 1–4 (Resolve →
-Ensure the Tracking Session → Assess Current State → Dispatch ONE Sub-Skill) — then **return**.
-Do not run the supervisor loop (Step 5+) or the final-report/release steps; those belong to
-`/do-sdlc`. Honor the repo context probe it declares (`docs/sdlc/do-sdlc.md`).
+## Rules
+
+1. Delegate all work: code goes through `/do-build` or `/do-patch`, tests through `/do-test`,
+   plans through `/do-plan`. Never do them directly.
+2. Every piece of work needs a GitHub issue, and every code change a plan doc, before BUILD.
+3. Never commit to main; code goes to `session/{slug}` branches.
+4. Never loop: invoke one sub-skill, then return.
 
 ## Router-mode dispatch notes
 
-- **Dispatch via `sdlc-tool next-skill`** (Step 4 of the merged body). Record the dispatch with
-  `sdlc-tool dispatch record` before invoking the returned skill. Surface `blocked` decisions to
-  the PM; never guess an alternative skill.
-- **Terminal decision:** `{"decision": "terminal", ...}` means the lane is finished. Return
-  cleanly and report the pipeline complete with its `reason` and `evidence` — nothing to record,
-  nothing to invoke. This is a **success**, not the `blocked` escalation path.
+- **Dispatch via `sdlc-tool next-skill`**, and record it with `sdlc-tool dispatch record` before
+  invoking the returned skill. Surface `blocked` decisions to the PM; never guess an alternative.
+- **Terminal decision** (`{"decision": "terminal", ...}`): the lane is finished. Return and report
+  it complete with its `reason` and `evidence`; record and invoke nothing. This is success.
 - **Live-ref cross-check:** `gh pr list --head session/{slug} --state open` queries live refs
-  because the `--search` index lags GitHub (Step 3c of the merged body).
+  because the `--search` index lags GitHub (Step 3c).
 - **Merge gate (row 10):** `/do-merge` fires only when REVIEW and DOCS are complete, the PR merge
   state is CLEAN, CI is all-passing, and the recorded REVIEW verdict is APPROVED at the current
-  head — see the guard table in the merged body.
-
-## Hard Rules
-
-1. **NEVER write code directly** -- invoke `/do-build` or `/do-patch`
-2. **NEVER run tests directly** -- invoke `/do-test`
-3. **NEVER create plans directly** -- invoke `/do-plan`
-4. **NEVER skip the issue** -- every piece of work needs a GitHub issue
-5. **NEVER skip the plan** -- every code change needs a plan doc first
-6. **NEVER commit to main** -- all code goes to `session/{slug}` branches
-7. **NEVER loop** -- invoke one sub-skill, then return. The PM session handles progression.
+  head (see the guard table in the merged body).
 
 ## Pipeline Stages Reference
 
-| Stage | Skill | Dev Model | Notes |
-|-------|-------|-----------|-------|
-| ISSUE | /do-issue | — | Or already exists |
-| PLAN | /do-plan {slug} | opus | Adversarial design |
-| CRITIQUE | /do-plan-critique | opus | Adversarial review |
-| BUILD | /do-build {plan or issue} | sonnet | Plan execution |
-| TEST | /do-test | sonnet | Deterministic runs |
-| PATCH | /do-patch | sonnet | Targeted fix (see resume rules in PM persona) |
-| REVIEW | /do-pr-review | opus | Code review judgment |
-| DOCS | /do-docs | sonnet | Structured writing |
-| MERGE | /do-merge {pr_number} | sonnet | Programmatic merge gate: verifies all stages, then merges |
+| Stage | Skill | Dev Model | Effort | Notes |
+|-------|-------|-----------|--------|-------|
+| ISSUE | /do-issue | sonnet | medium | Or already exists |
+| PLAN | /do-plan {slug} | opus | medium | Gate: design |
+| CRITIQUE | /do-plan-critique | opus | medium | Gate: adversarial review |
+| BUILD | /do-build {plan or issue} | opus | medium | Plan execution |
+| TEST | /do-test | opus | medium | Runs and triages suites |
+| PATCH | /do-patch | opus | low | Targeted fix (see resume rules in PM persona) |
+| REVIEW | /do-pr-review | opus | high | Last judgment gate before merge |
+| DOCS | /do-docs | opus | low | Doc cascade |
+| MERGE | /do-merge {pr_number} | opus | medium | Programmatic merge gate: verifies all stages, then merges |
 
-The **Dev Model** column shows the model the PM should pass via `--model` when spawning a dev
-session for that stage (see Stage→Model Dispatch Table in PM persona). Pipeline state transitions
-are defined in `agent/pipeline_graph.py`; dispatch logic in `agent/sdlc_router.py` — both
-accessed at runtime via `sdlc-tool`.
+**Dev Model** is what the PM passes via `--model` when spawning a dev session for that stage
+(Stage→Model Dispatch Table in the PM persona); effort comes from each stage skill's frontmatter.
+State transitions live in `agent/pipeline_graph.py` and dispatch logic in `agent/sdlc_router.py`,
+both reached at runtime through `sdlc-tool`.

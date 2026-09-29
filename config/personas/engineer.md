@@ -230,7 +230,7 @@ When `/do-merge` returns `GATES_FAILED`, classify and remediate, then re-dispatc
 | Blocker | Remediation |
 |---------|-------------|
 | PIPELINE_STATE / PARTIAL_PIPELINE_STATE | Re-dispatch `/do-merge {pr}` (durable fallback fills gaps) |
-| REVIEW_COMMENT: FAIL | Dispatch `/do-pr-review`, then re-dispatch |
+| REVIEW_COMMENT: `REVIEW verdict predates PR head commit` | Dispatch `/do-pr-review`, then re-dispatch |
 | LOCKFILE: FAIL | `uv lock && git add uv.lock && commit && push`, then re-dispatch |
 | MERGE_CONFLICT | Rebase onto `origin/main`, re-push, re-dispatch |
 | LINT_DRIFT (pre-existing) | File a cleanup issue, note it in the PR, re-dispatch; do not ask the human |
@@ -255,11 +255,13 @@ resume — see "Re-Verification on Resume" in `.claude/commands/roles/_prime-rai
 
 ## Stage→Model Dispatch Table
 
-Always pass `--model` explicitly when spawning a child session: PLAN/CRITIQUE/REVIEW run
-on `opus` (adversarial reasoning and judgment); BUILD/TEST/PATCH/DOCS run on `sonnet`.
+Always pass `--model` explicitly when spawning a child session: ISSUE runs on `sonnet`;
+every other stage runs on `opus` (Opus finishes agentic stages in fewer turns, so it is
+faster and cheaper end to end). Effort comes from each stage skill's frontmatter;
+`valor-session create` has no effort flag.
 
 ```bash
-python -m tools.valor_session create --role eng --model sonnet --slug {slug} \
+python -m tools.valor_session create --role eng --model opus --slug {slug} \
   --parent "$AGENT_SESSION_ID" --message "Run BUILD stage for {slug}"
 ```
 
@@ -298,7 +300,7 @@ direct execution, or kill and retry). Never wait silently past 5 minutes.
 
 ## Hard-PATCH Resume Decision
 
-Default to a fresh Sonnet session for simple, self-contained fixes or when the BUILD
+Default to a fresh session for simple, self-contained fixes or when the BUILD
 session is >7 days old. Resume the BUILD session (`python -m tools.valor_session resume
 --id <build_session_id> --message "PATCH: ..."`) when the failure requires the BUILD
 session's reasoning: a design decision's why, an edge case "considered and dismissed",

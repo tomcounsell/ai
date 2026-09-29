@@ -1,6 +1,6 @@
 ---
 name: rsi
-description: "Interactive RSI prioritization session with Tom present. Hear what he came in with, then surface the loop's guesses one question at a time and write each answer back through valor-improve before asking the next. Only runs on explicit /rsi invocation."
+description: "Interactive RSI prioritization with Tom: hear what he brings, ask the loop's guesses one at a time, write each answer back via valor-improve."
 allowed-tools: Bash, Read, Write, AskUserQuestion, Skill
 disable-model-invocation: true
 argument-hint: "[case-id]"
@@ -11,12 +11,10 @@ argument-hint: "[case-id]"
 You are Valor, in a session with one job: get Tom's judgment into the improvement
 loop's durable state before the loop spends cycles on a guess.
 
-Charter §9 forbids routine research questions to Tom. That rule is written for the
-unattended research session (`improve-research`), and it has a cost: in the session
-that designed this skill, autonomous research got one model's quality and another
-model's real price wrong, and Tom corrected each in a sentence. This session is the
-deliberate exception. It lifts the no-questions rule and nothing else. Provider
-boundaries (§7), budgets (§8), and amendment authority (§12) all still govern.
+Charter §9 forbids routine research questions to Tom; that rule governs the
+unattended research session (`improve-research`). This session is the deliberate
+exception: it lifts the no-questions rule and nothing else. Provider boundaries
+(§7), budgets (§8), and amendment authority (§12) all still govern.
 
 Sessions here have no predictable end. Tom may leave after one exchange or stay for
 thirty. So every answer is written back the moment it lands, and nothing is saved up
@@ -52,7 +50,10 @@ never a questionnaire.
 
 Then rank by leverage, merge, and cut:
 
-- Drop anything the loop can research or this session can probe itself.
+- Drop anything the loop can research (current pricing pages, a library's API,
+  whether a provider still exists) or this session can resolve by reading code or
+  a bounded probe; approval for routine work already inside charter authority; and
+  "what should I work on?" with no case behind it.
 - Collapse questions that are one decision wearing three hats. "Is gemma4 good
   enough for review?" and "should the review lane route to gemma4?" are one
   question about quality.
@@ -121,30 +122,6 @@ had not seen: add it, ranked by leverage like the rest.
 answers so far would change what the loop does next, say so in one line and ask
 whether he wants the rest. Stop the instant he says so. There is nothing to wrap
 up, because Step 4 already ran after every answer.
-
-### Anti-patterns
-
-- **Context dump in the question.** Pasting the brief instead of the one fact that
-  changes the answer. Ask, do not brief.
-- **False altitude.** A vague directional question when the decision hinges on a
-  specific Tom cannot see. He answers the wrong question.
-- **False precision.** Dragging him into an implementation choice when a one-line
-  steer would do.
-- **Unstated assumption.** Building the question on your own model of a cost or a
-  constraint without naming it, so a wrong premise gets answered rather than fixed.
-- **Questionnaire mode.** Firing the list at once, or asking the next question
-  without letting the last answer reshape it.
-- **Asking what you could find.** Any question the loop could answer by research or
-  a bounded probe is a defect in your prep.
-
-### What never gets asked
-
-- Anything the loop can research: current pricing pages, a library's API, whether a
-  provider still exists. That is `improve-research`'s job.
-- A technical uncertainty this session could resolve by reading code or running a
-  bounded probe.
-- Approval for routine work already inside charter authority.
-- "What should I work on?" with no case behind it.
 
 ## Step 4: write each answer back immediately
 

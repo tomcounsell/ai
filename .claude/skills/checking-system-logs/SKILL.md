@@ -7,23 +7,21 @@ user-invocable: false
 
 # System Logs
 
-Two surfaces. Structured bridge events live in Redis (`BridgeEvent` Popoto
-model — the old `logs/bridge.events.jsonl` file is gone); plain-text service
-logs live under `~/src/ai/logs/`. Always narrow by project or keyword — raw
-tails of a busy bridge log bury the signal.
+Find what the system did: structured bridge events live in Redis (`BridgeEvent`
+Popoto model), plain-text service logs under `~/src/ai/logs/`, and per-session
+detail in session telemetry. Narrow by project or keyword; raw tails of a busy
+bridge log bury the signal.
 
 ## Structured events (Redis)
 
-Query via the analyzer script (respects the no-raw-Redis rule):
+Query via the analyzer script:
 
 ```bash
 cd ~/src/ai && python scripts/analyze_logs.py recent 20   # recent events, correlated by request
-cd ~/src/ai && python scripts/analyze_logs.py timeouts    # timeout events
 cd ~/src/ai && python scripts/analyze_logs.py stats       # counts by type/project
 ```
 
-For project-filtered queries, use the ORM directly (never raw Redis on
-Popoto-managed keys):
+For project-filtered queries, use the ORM (never raw Redis):
 
 ```bash
 cd ~/src/ai && python -c "
@@ -36,10 +34,9 @@ for e in events[:20]:
 ```
 
 Fields: `event_type`, `chat_id`, `project_key`, `timestamp`, `data` (dict with
-`sender`, `chat`, `message_id`, ...). The bridge currently emits
-`message_received`; older types (`agent_request`, `agent_response`,
-`agent_timeout`, `reply_sent`) may appear in historical data. Events expire
-after ~7 days (`BridgeEvent.cleanup_old`).
+`sender`, `chat`, `message_id`, ...). The bridge emits only `message_received`
+(so `analyze_logs.py timeouts` finds nothing; look for timeouts in `worker.log`
+and session telemetry). Events expire after about 7 days (`BridgeEvent.cleanup_old`).
 
 ## Text logs (`~/src/ai/logs/`)
 
@@ -62,8 +59,7 @@ tail -50 ~/src/ai/logs/bridge.error.log
 
 ## Session-level debugging
 
-For what a specific agent session did, prefer session telemetry over log
-archaeology:
+For what a specific agent session did, telemetry beats log archaeology:
 
 ```bash
 python -m tools.valor_session telemetry --id <ID>   # turn events, tokens, status transitions

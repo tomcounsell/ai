@@ -26,7 +26,7 @@ What blue-sky mode changes:
 
 ## `do-plan` fog handling
 
-Trigger: the issue carries a `## Fog (Not Yet Specified)` section or records blue-sky mode in its body. `SKILL.md` Phase 1 step 2 points to "When the issue is fog-forward" in `.claude/skills-global/do-plan/SCOPING.md`, which says:
+Trigger: the issue carries a `## Fog (Not Yet Specified)` section or records blue-sky mode in its body. `SKILL.md` Phase 1 points to "When the issue is fog-forward" in `.claude/skills-global/do-plan/SCOPING.md`, which says:
 
 - Keep the low resolution and resolve what can be resolved now.
 - Carry the rest as a **Not Yet Specified** list in the plan; items graduate into tasks as they clear.

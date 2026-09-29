@@ -1,6 +1,6 @@
 ---
 name: calendar-sync
-description: Reconstructs a day's work from git commit history in the current repo, groups it into time-blocked calendar events (merged by feature/goal, minimum 20 minutes each), and writes them to that repo's mapped Google Calendar — creating new events or updating existing overlapping ones so reruns stay idempotent. Replaces the old hook-based time-tracking system. Use when the user wants to log/sync their day's work to their calendar, review what they did today, or backfill a prior day. Triggered by '/calendar-sync', 'sync my calendar', 'log today's work to calendar', 'daily lookback', 'what did I work on today'.
+description: "Log a day's git work to the repo's Google Calendar as time blocks. Triggered by 'sync my calendar', 'log today's work to calendar', 'daily lookback', 'what did I work on today'."
 allowed-tools:
   - Bash(git log:*)
   - Bash(git rev-parse:*)
@@ -8,104 +8,55 @@ allowed-tools:
   - Bash(gws:*)
   - Read
   - ToolSearch
-  - mcp__claude-in-chrome__tabs_context_mcp
-  - mcp__claude-in-chrome__tabs_create_mcp
-  - mcp__claude-in-chrome__navigate
-  - mcp__claude-in-chrome__computer
-  - mcp__claude-in-chrome__find
-  - mcp__claude-in-chrome__get_page_text
-  - mcp__claude-in-chrome__browser_batch
+  - mcp__claude_ai_Google_Calendar__*
+  - mcp__byob__*
 argument-hint: "[date or date range, default: today]"
 context: fork
+model: sonnet
+effort: medium
 ---
 
 # Calendar Sync
 
-Turns a repo's git commit history for a given day into time-blocked events on
-that repo's own Google Calendar. Fully autonomous — no approval gate, full
-CRUD freedom on the target calendar once it's correctly resolved.
+Turn the current repo's git commits for a date range (`$ARGUMENTS`, e.g. "yesterday",
+"2026-07-10", "2026-07-08 to 2026-07-10"; default today, local timezone) into
+time-blocked events on that repo's mapped Google Calendar, then report a short summary.
 
-## Inputs
-- `$ARGUMENTS`: Optional date or date range to sync (e.g. "yesterday", "2026-07-10", "2026-07-08 to 2026-07-10"). Defaults to today if omitted.
+**Done when** every distinct chunk of work in the range has exactly one event on the
+resolved calendar: titled by the feature or end-user goal (not a commit subject), a
+description summarizing the underlying commits, at least 20 minutes long, not
+overlapping this skill's other events, and a re-fetch of the calendar confirms it.
+Reruns for the same range must update, not duplicate.
 
-## Goal
-Every distinct chunk of work done in the repo during the target date range has
-exactly one correctly-timed, correctly-titled, >=20-minute event on the repo's
-mapped calendar — with no duplicates and no events left on the wrong (personal
-primary) calendar.
+## Constraints
 
-## Steps
+- **Only touch events this skill created.** Every event it writes carries the marker
+  line `[calendar-sync:<repo-dir-name>]` at the end of its description. Update or delete
+  an existing event only when its description carries that marker for this repo. Never
+  modify, move, or delete any other event, even when it overlaps a proposed block: real
+  meetings live on these calendars. A proposed block that overlaps an unmarked event is
+  still created alongside it.
+- On a rerun, marked events in the range that match a proposed block are updated in
+  place; marked events that no proposed block covers any more are deleted. Everything
+  else is left alone. No approval gate is needed within those bounds.
+- **Resolve the calendar; never default to primary.** Match the repo root
+  (`git rev-parse --show-toplevel`) against each project's `working_directory` in
+  `~/Desktop/Valor/projects.json` to get the project slug, then look that slug up in the
+  `calendars` map of `~/Desktop/Valor/calendar_config.json`. Use the map's `"default"`
+  entry only when no project matches. The personal primary calendar is a valid target
+  only when the mapping says `"primary"`/`"dm"`. Use only `calendar_config.json` from that
+  directory; the `.calendar_hook_*` files beside it belong to a retired hook system.
+- Group commits that share an issue number, plan doc, subsystem, or PR into one event.
+  Extend or merge a cluster shorter than 20 minutes rather than leaving a short event.
 
-### 1. Resolve scope and date range
-Determine the repo root (`git rev-parse --show-toplevel` from cwd) and parse
-`$ARGUMENTS` into a concrete start/end timestamp range, defaulting to today
-00:00–23:59 in the user's local timezone.
+## Write path
 
-**Success criteria**: repo root path and a concrete `[start, end]` timestamp range.
+Use the first that works: `gws calendar` (when `gws auth status` shows valid
+credentials), then the Google Calendar MCP tools, then browser automation on
+calendar.google.com via the `render?action=TEMPLATE&text=&dates=&details=` prefill URL.
 
-### 2. Resolve the target calendar (do not default to primary)
-Read `~/Desktop/Valor/projects.json`, match the repo root against each
-project's `working_directory` to find the project slug (e.g.
-`cyndra-consulting` → `cyndra`). Read `~/Desktop/Valor/calendar_config.json`'s
-`calendars` map and look up that slug to get the Google Calendar ID. Fall
-back to the map's `"default"` entry only if no project match is found.
-
-**Rules**:
-- Never silently fall back to the personal primary/"Valor Engels" calendar for a repo that has its own mapped calendar — that was the mistake made the first time this process ran manually.
-- This mapping data is reused as-is from the existing config; do not read or reimplement the old `.calendar_hook_*` hook logic in that same directory — this skill replaces it.
-
-**Success criteria**: a resolved Google Calendar ID that is not the personal primary calendar unless the project's mapping explicitly says `"primary"`/`"dm"`.
-
-### 3. Gather commit history
-Run `git log` scoped to the resolved date range in the repo root (subjects,
-bodies, and timestamps — `--since`/`--until`, `--date=format:'%Y-%m-%d %H:%M'`).
-
-**Artifacts**: chronological list of `{timestamp, subject, body}` commits for the range.
-
-**Success criteria**: full commit list for the range captured, nothing missed at the range boundaries.
-
-### 4. Group commits into events
-Cluster commits that share a common feature/goal (same issue number, plan
-doc, subsystem, or PR) into a single event rather than one event per commit.
-Title each event with the feature/end-user goal, not a literal commit
-subject; the description summarizes the underlying commits.
-
-**Rules**:
-- Every event must be at least 20 minutes long. If a natural cluster's span is shorter, extend it (merge into an adjacent same-feature cluster, or pad up to the 20-minute floor) rather than leaving a sub-20-minute event.
-- Events must not overlap.
-
-**Success criteria**: ordered list of `{title, start, end, description}` events, each >=20 minutes, non-overlapping, covering the day's real work.
-
-### 5. Resolve the write tool
-Try in order: (a) `gws calendar` if `gws auth status` shows valid credentials — target the calendar ID from step 2 directly; (b) a Calendar MCP tool if one is loaded for this session; (c) browser automation on calendar.google.com as the last resort, using the `render?action=TEMPLATE&text=&dates=&details=` prefill URL.
-
-**Rules**:
-- On tier (c), the prefilled event editor defaults to the personal primary calendar — you must switch the calendar dropdown to the resolved project calendar (step 2) before saving every single event.
-- On tier (c), do not batch "click Save" immediately followed by "navigate to the next event" in one call — Google Calendar's editor blocks navigation with a "Leave site?" dialog if the save hasn't visually completed. Click Save, screenshot to confirm the URL dropped `/eventedit`, then navigate to the next event.
-
-**Success criteria**: a working write path confirmed (auth valid, or tool present and responsive).
-
-### 6. Deduplicate against existing events
-Read events already on the resolved calendar for the date range. For each
-proposed event from step 4 that time-overlaps an existing event, update that
-existing event's title/time/description in place instead of creating a new
-one. Only create net-new events for time slots with nothing existing.
-
-**Success criteria**: no duplicate or overlapping events remain on the calendar after this run, including on reruns for the same day.
-
-### 7. Create/update events
-Execute the writes (creates and in-place updates) via the tier resolved in step 5.
-
-**Success criteria**: every event from step 4 exists on the resolved calendar exactly once, correctly timed/titled/described.
-
-### 8. Verify
-Re-fetch the calendar's day view (API read or day-view screenshot) for the
-resolved calendar and date range.
-
-**Success criteria**: every proposed event is visibly present, non-overlapping, and correctly timed; report a short summary back to the user.
-
-## Notes for the future scheduled version
-A later daily cron-scheduled variant of this will also ingest local machine
-activity alongside git commits as an input to step 4's grouping. Keep step 3
-("gather commit history") as a swappable input-gathering step rather than
-hardcoding git as the only source, so that addition slots in cleanly.
+Browser tier gotchas: the prefilled editor defaults to the personal primary calendar, so
+switch the calendar dropdown to the resolved calendar before saving every event. Don't
+batch "click Save" with navigating to the next event: the editor raises a "Leave site?"
+dialog if the save hasn't completed. Save, confirm the URL dropped `/eventedit`, then
+move on.

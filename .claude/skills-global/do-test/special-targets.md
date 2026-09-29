@@ -1,19 +1,11 @@
 # Special Targets: Frontend and Happy Paths
 
-Loaded when `TEST_ARGS` routes to the `frontend` or `happy-paths` target.
 Neither target runs the project's unit-test runner.
 
-## Frontend Testing (`frontend` target)
+## `frontend <url> "<scenario>" [-- steps: ...]`
 
-When `TEST_ARGS` starts with `frontend`, route to the `frontend-tester` subagent. Do **not** run the unit-test runner.
-
-**Input format:**
-```
-/do-test frontend https://myapp.com "Login form submits and shows dashboard"
-/do-test frontend https://myapp.com "Checkout flow completes successfully" -- steps: click add-to-cart, click checkout, fill address, submit
-```
-
-**Dispatch a single `frontend-tester` subagent:**
+Dispatch one `frontend-tester` subagent; it owns all browser interaction, and
+this skill never drives the browser itself.
 
 ```
 Task({
@@ -23,49 +15,22 @@ Task({
 URL: <url>
 Scenario: <scenario>
 Steps:
-  <extracted steps if provided, otherwise infer from scenario>
+  <steps if given, otherwise inferred from the scenario>
 Expected: <inferred from scenario>
   ",
   run_in_background: false
 })
 ```
 
-The `frontend-tester` agent owns all browser interaction via BYOB MCP (`mcp__byob__browser_*`) — the skill never drives the browser directly.
+On an all-tests run, if `tests/frontend/` holds scenario files (`.json`/`.yaml`
+with `url`, `scenario`, `steps`, `expected`), dispatch one `frontend-tester` per
+file in the same message as the other runners. Report frontend rows (Status,
+Passed, Failed, Screenshot path) in the summary table.
 
-**When running all tests** (no target) and a `tests/frontend/` directory exists with `.json` or `.yaml` scenario files, dispatch one `frontend-tester` subagent per scenario file in parallel alongside the unit-test agents.
+## `happy-paths`
 
-**Scenario file format** (for `tests/frontend/`):
-```json
-{
-  "url": "https://myapp.com/login",
-  "scenario": "Login with valid credentials shows dashboard",
-  "steps": [
-    "Fill email field with test@example.com",
-    "Fill password field with password123",
-    "Click Login button"
-  ],
-  "expected": "Dashboard page loads with user name visible"
-}
-```
-
-**Result aggregation:** Include frontend results in the summary table alongside the other suites:
-
-```
-| Suite           | Status | Passed | Failed | Screenshot |
-|-----------------|--------|--------|--------|------------|
-| frontend/login  | PASS   | 1      | 0      | /tmp/...   |
-| frontend/checkout | FAIL | 0      | 1      | /tmp/...   |
-```
-
-## Happy Path Testing (`happy-paths` target)
-
-When `TEST_ARGS` starts with `happy-paths`, run the repo's deterministic happy-path runner directly. No subagent needed. This target only applies when the context file declares such a runner (command and scenario directory); if none is declared, report "no happy-path runner configured in this repo" and skip.
-
-### Execution:
-Run the runner command the context file specifies, against its declared scenario directory.
-
-### Result format:
-The runner typically outputs a markdown summary table to stdout with pass/fail/error counts per script, followed by a JSON summary in an HTML comment block. Include results in the summary table alongside the other suites.
-
-### When running all tests:
-If the context file declares a happy-path scenario directory and it contains scripts, include happy-paths execution alongside the other targets. Run via bash, not subagent.
+Applies only when the context file declares a deterministic happy-path runner
+and scenario directory; otherwise report "no happy-path runner configured in this
+repo" and skip. Run it directly with Bash (no subagent) and include its pass/fail
+counts in the summary table. On an all-tests run, include it when the declared
+scenario directory has scripts.

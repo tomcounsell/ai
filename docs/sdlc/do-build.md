@@ -14,7 +14,6 @@ track an issue-derived lane, or the reverse. See
 
 ## Pipeline Substrate & Scripts (the generic body defers these here)
 
-The leaned body describes these abstractly; here are the concrete invocations.
 Always pass `--issue-number {issue_number}` on every `sdlc-tool` write — it is the
 authoritative session selector (the `VALOR_SESSION_ID`/`AGENT_SESSION_ID` env-var
 session is only a last-resort fallback). A forked build subagent must still pass
@@ -110,7 +109,7 @@ This command is the single writer of `AgentSession.pr_number`; the read-only
 recovery rungs (validated gh search, `session/{slug}` branch-head fallback)
 live in `stage-query` and never write.
 
-**Accepted Residual Concerns note (Step 2).** Router row 4c dispatches `/do-build`
+**Accepted Residual Concerns note (Step 1).** Router row 4c dispatches `/do-build`
 when the with-concerns revision + re-critique loop hit its bound, and the residual
 concerns were accepted unreviewed. `row_id` is never plumbed into the dispatched
 skill's invocation, so `/do-build` re-derives row 4c's own condition from the same
@@ -175,7 +174,7 @@ command errors rather than printing `normal`), stop and report rather than
 proceeding — an unrecorded accepted concern is the failure this note exists to
 prevent.
 
-**Build validators (Step 14) and verification parser (Step 5.1):**
+**Build validators (Step 9) and verification parser (WORKFLOW.md Step 5.1):**
 
 ```bash
 # scripts/validate_build.py and the inline verification-table runner below share one
@@ -192,7 +191,7 @@ python -c "import sys; from agent.verification_parser import parse_verification_
 # the exit code.
 ```
 
-**Documentation gate scripts (Step 6):**
+**Documentation gate scripts (PR_AND_CLEANUP.md Step 6):**
 
 ```bash
 (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})   # exit 1 (missing docs) or exit 3 (file/command error) BLOCKS PR; exit 2 (stale markers, diff-scoped) = non-blocking warning, proceed
@@ -213,16 +212,10 @@ Use `--no-verify` on intermediate WIP commits only. Final commits must go throug
 
 Unit tests in `tests/unit/` must never touch production Redis. `tests/conftest.py::pytest_configure` claims a private db from the pool `[1..15]` per pytest process and exports it as both `POPOTO_TEST_DB` and `REDIS_URL` (#2805) — no builder action is required for a test process or its children to land on the claimed db by construction. Bulk Redis operations must always be project-scoped. See `tests/README.md` for test markers.
 
-## Worktree Pattern
-
-- Builder agents work in `.worktrees/{slug}/`, not main checkout
-- Never `git checkout session/{slug}` — the worktree IS the checkout
-- Commits happen at logical checkpoints throughout Implement, not batched at end
-
 ## Definition of Done (this repo)
 
 In addition to global DoD, this repo requires:
 - `python -m ruff check .` passes (exit 0)
 - `python -m ruff format --check .` passes (exit 0)
-- `pytest tests/unit/ -x -q` passes
+- `scripts/pytest-clean.sh tests/unit/ -x -q` passes (never bare `pytest`; see CLAUDE.md)
 - New `docs/features/` doc created if plan has one in the ## Documentation section

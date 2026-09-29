@@ -1,14 +1,25 @@
 # audit-hooks context — this repo (ai)
 
-This repo's conventions for the `/audit-hooks` checks. The global skill body runs a generic
-baseline; this file supplies the repo-specific declarations.
+## Deterministic half already runs
 
-## Validator inventory (Rule 3 — must NOT have `|| true`)
+`reflections/audits/hooks_audit.py` checks both settings scopes on a schedule: parse errors,
+crash guards on Stop/SubagentStop, script existence, and agent-frontmatter hooks. Use its
+logic as ground truth for those checks, and spend the audit on classification and rules 4-8.
+Registrations are generated from `.claude/hooks/manifest.toml`, so fixes go there, never into
+either settings file by hand.
 
-Authoritative list: every script under `.claude/hooks/validators/` (all named `validate_*.py`).
-Enumerate that directory at audit time rather than trusting any static list — validators are
-added frequently. Anything registered in `.claude/settings.json` that points into
-`validators/` is a validator; everything else is advisory or Stop.
+## Validator inventory (Rule 3)
+
+Every script under `.claude/hooks/validators/` (`validate_*.py`) is a validator. Enumerate the
+directory at audit time, because validators are added often. Anything registered that points
+elsewhere is advisory or Stop.
+
+## Crash-guard forms (Rules 1-2)
+
+Hooks generated with the `deny-only` exit policy end in
+`__hook_rc=$?; [ "$__hook_rc" = 2 ] && exit 2 || exit 0`. That satisfies the crash-guard
+requirement: it passes a deliberate exit 2 and maps every other exit to 0. Never recommend
+adding `|| true` to it, because that would disable its deny.
 
 ## Error logging (Rule 4)
 

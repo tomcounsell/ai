@@ -1,80 +1,45 @@
 ---
 name: audit-SUBJECT
-description: "Audit SUBJECT for WHAT_YOU_CHECK. Use when reviewing SUBJECT health, validating SUBJECT quality, or after SUBJECT changes."
+description: "Audit SUBJECT for PROBLEMS. Use when checking, validating, or reviewing SUBJECT, or after SUBJECT changes."
 allowed-tools: Read, Grep, Glob, Bash
 disable-model-invocation: true
+# model / effort: see the placement notes in new-audit-skill/SKILL.md
 ---
 
 # SUBJECT Audit
 
-BRIEF_DESCRIPTION — what gets audited, why it matters, what outcome the user gets.
+OBJECTIVE: what gets audited (TARGET_LOCATION), why it matters, and what the reader gets.
+DISPOSITION: "Report only; a human decides fixes." | "Auto-fixes trivial issues, reports the
+rest." | "Applies corrections to the working tree for review."
 
-## What this skill does
+Done when: every item in TARGET_LOCATION has a verdict on every check, each finding cites
+evidence (file:line or a value), and the report below is produced.
 
-1. Scans TARGET_LOCATION to discover all SUBJECT items
-2. Runs RULE_COUNT deterministic checks against each item
-3. Produces a structured findings report organized by severity
-4. DISPOSITION — one of: "Pauses for discussion (no auto-fix)" | "Optionally auto-fixes trivial issues" | "Applies corrections and commits"
+## Repo context
 
-## When to load sub-files
+If `.claude/skill-context/audit-SUBJECT.md` exists, read it for repo-specific paths,
+exemptions, and conventions. Otherwise use the defaults below.
 
-- CONDITION_A → read [SUB_FILE_A.md](SUB_FILE_A.md)
-- CONDITION_B → read [SUB_FILE_B.md](SUB_FILE_B.md)
-
-## Quick start
+## Run
 
 ```bash
-# If script-backed:
-python .claude/skills/audit-SUBJECT/scripts/audit.py $ARGUMENTS
-
-# If prompt-only: follow the steps below
+python scripts/audit.py $ARGUMENTS   # if script-backed; delete otherwise
 ```
 
-1. **Enumerate**: Find all items to audit in TARGET_LOCATION
-2. **Check**: Run each audit rule against each item
-3. **Report**: Present findings grouped by severity
-4. **Act**: Apply the disposition (fix, report, or pause)
+## Checks
 
-## Audit Checks
+| Check | Severity | Fails when |
+|---|---|---|
+| `check-name` | FAIL | CONCRETE, VERIFIABLE CONDITION (and why it matters, if not obvious) |
+| `check-name` | WARN | … |
 
-### 1. CHECK_NAME
-DESCRIPTION of what this check validates.
-**Severity**: CRITICAL | WARNING | INFO
-
-### 2. CHECK_NAME
-DESCRIPTION.
-**Severity**: CRITICAL | WARNING | INFO
-
-## Output Format
+## Report
 
 ```
-## SUBJECT Audit Report
+## SUBJECT Audit: PASS N · WARN N · FAIL N
 
-### Items Scanned
-- ItemName (key metrics)
-
-### Findings
-
-#### CRITICAL
-- [check-name] ItemName: specific finding
-
-#### WARNING
-- [check-name] ItemName: specific finding
-
-#### INFO
-- [check-name] ItemName: specific finding
-
-### Summary
-PASS: N  WARN: N  FAIL: N
+#### FAIL
+- [check-name] ItemName: expected X, found Y (path:line)
+#### WARN
+- [check-name] ItemName: …
 ```
-
-## After the Audit
-
-DISPOSITION_DETAILS — what happens next. Options:
-- "Findings only. Next steps decided by the human."
-- "Auto-fixes trivial issues. Creates GitHub issue for complex findings."
-- "Applies corrections, commits, and reports."
-
-## Version history
-
-- v1.0.0 (YYYY-MM-DD): Initial

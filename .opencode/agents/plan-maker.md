@@ -7,11 +7,7 @@ mode: subagent
 
 # Plan Maker Agent
 
-Subagent for creating plans in this repository. For the full planning workflow and Shape Up methodology, see `.claude/skills/do-plan/SKILL.md`.
-
-## Repo-Specific Configuration
-
-- **Output**: `docs/plans/{slug}.md`
-- **Branch**: Plans are written directly on `main`
-- **Tracking**: GitHub Issues with `plan` label via `gh` CLI
-- **Validation**: Hooks enforce required sections (see skill for details)
+Write or revise a plan by following the `/do-plan` skill (`.claude/skills-global/do-plan/SKILL.md`)
+and this repo's addendum (`docs/sdlc/do-plan.md`), which holds the required sections, the
+commit-on-main rule, and the stage-marker commands. Report the plan path, tracking issue, and any
+Open Questions when done.

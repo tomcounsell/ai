@@ -6,14 +6,9 @@ owner: [Name]
 created: [YYYY-MM-DD]
 tracking: [GitHub Issue URL - added automatically]
 last_comment_id: [Latest issue comment ID incorporated into this plan - updated automatically]
-<!-- Template adaptability: the universal sections below (Problem, Solution,
-     Step by Step Tasks, Verification, Risks, etc.) apply to any repo. Sections
-     and frontmatter fields that encode a specific repo's conventions — the
-     mandated `## Documentation` / `## Update System` / `## Agent Integration` /
-     `## Test Impact` set, and any tool/path references in their guidance — are
-     this repo's requirements, declared in `docs/sdlc/do-plan.md`. A repo without
-     those conventions keeps the universal sections and adapts or omits the
-     repo-specific ones. -->
+<!-- Universal sections apply to any repo. The mandated Documentation / Update System /
+     Agent Integration / Test Impact set is a repo convention declared in docs/sdlc/do-plan.md;
+     a repo without it adapts or omits those sections. Delete CONDITIONAL sections that do not apply. -->
 
 ---
 
@@ -30,10 +25,6 @@ last_comment_id: [Latest issue comment ID incorporated into this plan - updated 
 [What success looks like]
 
 ## Freshness Check
-
-<!-- Phase 0.5 of /do-plan re-verifies the issue's claims against the current state of main
-     before planning. This section records what was re-verified and what (if anything) drifted.
-     Skip only if the issue was filed within the last hour AND no commits have landed on main since. -->
 
 **Baseline commit:** [SHA of `git rev-parse HEAD` at plan time]
 **Issue filed at:** [createdAt from `gh issue view N --json createdAt`]
@@ -54,23 +45,13 @@ last_comment_id: [Latest issue comment ID incorporated into this plan - updated 
 
 ## Prior Art
 
-<!-- Search closed issues and merged PRs for related work before proposing solutions.
-     Skip for trivial changes (Small appetite, no-code, or clearly greenfield work). -->
-
-[Search results from `gh issue list --state closed` and `gh pr list --state merged` for related work.
-Include issue/PR numbers, what they attempted, and whether they succeeded or failed.
-If nothing found, state "No prior issues found related to this work."]
+[Related closed issues and merged PRs: what each attempted and whether it worked.
+If none: "No prior issues found related to this work."]
 
 - **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
 - **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
 
 ## Research
-
-<!-- Phase 0.7 of /do-plan uses WebSearch to gather external context before planning.
-     Skip if the work is purely internal (no external libraries, APIs, or ecosystem patterns involved).
-     Findings are saved as memories for future plan reuse. -->
-
-[External research findings from WebSearch that inform the technical approach.]
 
 **Queries used:**
 - [Search query 1]
@@ -84,11 +65,7 @@ If nothing found, state "No prior issues found related to this work."]
 
 ## Spike Results
 
-<!-- CONDITIONAL: Only include if Phase 1.5 ran spike tasks to validate assumptions.
-     Delete this section if no spikes were needed (e.g., Small appetite greenfield work).
-     Spike results provide validated findings so builders don't re-investigate assumptions. -->
-
-[Results from time-boxed spike investigations that validated or invalidated plan assumptions.]
+<!-- CONDITIONAL: only if Phase 1.5 ran spikes. -->
 
 ### spike-1: [Description]
 - **Assumption**: "[What was being tested]"
@@ -99,13 +76,7 @@ If nothing found, state "No prior issues found related to this work."]
 
 ## Data Flow
 
-<!-- Trace the end-to-end data flow through the components this change touches.
-     Skip for trivial changes or purely documentation/process work.
-     For multi-component features, trace from input to output across all boundaries. -->
-
-[Trace how data moves through the system for the feature/fix being planned.
-Start from the entry point (user action, API call, event) and follow through
-each component, transformation, and storage layer to the final output.]
+<!-- CONDITIONAL: multi-component changes only. -->
 
 1. **Entry point**: [Where the data/action originates]
 2. **[Component]**: [What happens to the data here]
@@ -114,15 +85,7 @@ each component, transformation, and storage layer to the final output.]
 
 ## Why Previous Fixes Failed
 
-<!-- CONDITIONAL: Only include this section if Prior Art search found previous attempts
-     to fix the same or similar problem. If this is greenfield work or no prior fixes
-     exist, delete this entire section.
-     This section prevents the pattern of repeated fixes that each address a symptom
-     without resolving the root cause. -->
-
-[For each prior attempt that failed or was incomplete, analyze WHY it failed.
-Look for patterns: Was the root cause misidentified? Was the fix applied at the
-wrong layer? Did it address a symptom instead of the cause?]
+<!-- CONDITIONAL: only if Prior Art found earlier failed or incomplete fixes. -->
 
 | Prior Fix | What It Did | Why It Failed / Was Incomplete |
 |-----------|-------------|-------------------------------|
@@ -133,12 +96,7 @@ wrong layer? Did it address a symptom instead of the cause?]
 
 ## Architectural Impact
 
-<!-- Assess how this change affects the broader system architecture.
-     Skip for isolated changes with no cross-component effects.
-     Focus on: coupling changes, new dependencies, interface modifications,
-     and changes to data ownership or flow direction. -->
-
-[How does this change affect system architecture? Consider:]
+<!-- CONDITIONAL: cross-component changes only. -->
 
 - **New dependencies**: [Any new imports, services, or libraries required]
 - **Interface changes**: [APIs, function signatures, or contracts that change]
@@ -155,8 +113,6 @@ wrong layer? Did it address a symptom instead of the cause?]
 **Interactions:**
 - PM check-ins: [0 | 1-2 | 2-3] (scope alignment, requirement clarification)
 - Review rounds: [0 | 1 | 2+] (code review, design review, QA)
-
-Solo dev work is fast — the bottleneck is alignment and review. Appetite measures communication overhead, not coding time.
 
 ## Prerequisites
 
@@ -195,7 +151,7 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 
 ## Failure Path Test Strategy
 
-[Every plan must address how failure paths will be tested. Silent failures are a class of bug where exceptions are caught and swallowed without logging, empty outputs loop indefinitely, or error states render incorrectly. Address each category below.]
+[How failure paths will be tested: swallowed exceptions, empty outputs that loop, error states that render wrong.]
 
 ### Exception Handling Coverage
 - [ ] Identify `except Exception: pass` blocks in touched files — each must have a corresponding test asserting observable behavior (logger.warning, metric, or state change)
@@ -212,7 +168,7 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 
 ## Test Impact
 
-[Audit existing tests that will break or need changes due to this work. For each affected test file or test case, specify a disposition: UPDATE, DELETE, or REPLACE. This gives builders clear guidance on test modifications before they start implementation.]
+[Existing tests this work breaks or changes, each with a disposition: UPDATE, DELETE, or REPLACE.]
 
 - [ ] `tests/unit/test_example.py::test_old_behavior` — UPDATE: assert new return value instead of old
 - [ ] `tests/integration/test_flow.py::test_end_to_end` — REPLACE: rewrite for new API contract
@@ -224,7 +180,7 @@ No existing tests affected — [justification explaining why, e.g., "this is a g
 
 ## Rabbit Holes
 
-[Areas that look tempting but will swallow disproportionate time. Call these out so the team deliberately avoids them.]
+[Tempting avenues that would swallow disproportionate time.]
 
 - [Tempting but wasteful avenue to avoid]
 - [Complexity trap that seems important but isn't worth it]
@@ -256,13 +212,10 @@ and single-threaded").]
 
 ## No-Gos (Out of Scope)
 
-[Explicitly state what we're NOT doing. **Each entry must be tagged** with one
-of the four reasons below — plain "deferred" or "follow-up" without a tag is
-not allowed. Enforced by `.claude/hooks/validators/validate_no_gos_justification.py`.
-
-If the agent could finish the item in this plan, **do it instead of deferring**.
-The audit in issue #1325 found that most "operator step" / "follow-up issue"
-entries were laziness, not legitimate scope control.
+[What we are NOT doing. **Every entry carries one of the four tags below**; untagged
+"deferred" / "follow-up" entries fail the plan validator (in this repo,
+`.claude/hooks/validators/validate_no_gos_justification.py`). If the agent could finish the
+item in this plan, do it instead of deferring (#1325).
 
 Tag legend:
 
@@ -289,33 +242,25 @@ outcomes). See `docs/features/machine-readable-dod.md` for examples.]
 - [ORDERED] [Item blocked by a human-gated event — name the event]
 - [SEPARATE-SLUG #NNN] [Item filed as separate issue — link the issue]
 
-<!-- The two sections below are repo-convention sections (see the template
-     adaptability note at the top). Their guidance is framed for THIS repo;
-     `docs/sdlc/do-plan.md` is the authority. A repo with a different deployment
-     or agent-integration model adapts the prompts accordingly, or omits these
-     sections if its plan conventions don't require them. -->
+<!-- Repo-convention sections: docs/sdlc/do-plan.md is the authority for their content. -->
 
 ## Update System
 
-[If this system is deployed/propagated to multiple environments, consider whether the deploy/update process needs changes. In this repo that means the `/update` skill.]
-
-- Whether the update/deploy process needs changes
+- Whether the deploy/update process needs changes
 - New dependencies or config files that must be propagated
 - Migration steps for existing installations
 - If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
 
 ## Agent Integration
 
-[If new functionality must be reachable by an agent/tool surface, describe the wiring. In this repo the agent receives Telegram messages via the bridge and uses tools exposed through MCP servers registered in `.mcp.json`; new Python functions in `tools/` are invisible until wrapped.]
-
-- Whether a new or existing tool/MCP surface needs to expose this functionality (this repo: `mcp_servers/` + `.mcp.json`)
-- Whether the entry point (this repo: `bridge/telegram_bridge.py`) needs to import/call the new code directly
+- Which agent-reachable surface (CLI entry point, tool, or direct import) exposes the new functionality
+- Whether the entry point needs to import/call the new code directly
 - Integration tests that verify the agent can actually invoke the new capability
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
 
 ## Documentation
 
-[What documentation needs to be created or updated when this work ships. Use the `documentarian` agent type for these tasks.]
+[Docs to create or update when this ships (`documentarian` agent type).]
 
 ### Feature Documentation
 - [ ] Create/update `docs/features/[feature-name].md` describing the feature
@@ -346,11 +291,11 @@ outcomes). See `docs/features/machine-readable-dod.md` for examples.]
 
 ## Team Orchestration
 
-When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+The build lead orchestrates and never builds directly.
 
 ### Team Members
 
-[List each team member needed. Name them uniquely so they can be referenced in tasks.]
+[Uniquely named, so tasks can reference them. Pattern: a builder + validator pair per major component.]
 
 - **Builder ([component-name])**
   - Name: [unique-name, e.g., "api-builder"]
@@ -364,8 +309,6 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
   - Agent Type: validator
   - Resume: true
 
-[Add more team members as needed. Pattern: builder + validator pairs for each major component.]
-
 ### Available Agent Types
 
 **Tier 1 — Core (default choices):**
@@ -377,15 +320,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - `plan-maker` - Planning subagent
 - `frontend-tester` - Browser testing
 
-**Domain expertise (no dedicated agent — prompt a Tier 1 agent):**
-There is no standing pool of "specialist" agents. For domain-specific work
-(async/concurrency, Redis/Popoto data, security/untrusted-input, debugging,
-MCP-tool/API integration, conversational-UX/testing), assign a `builder` (or
-`code-reviewer` for review-only work), add a `Domain: <tag>` line to the task,
-and paste the matching rules from [`DOMAIN_FRAMING.md`](DOMAIN_FRAMING.md) into
-the task's assignment. That cheatsheet is the salvaged, repo-specific signal from
-the retired specialist agents. For broad recon use the built-in `Explore` /
-`general-purpose` agents.
+**Domain expertise:** there are no specialist agents. Assign a `builder` (or
+`code-reviewer` for review-only work), add a `Domain: <tag>` line to the task, and paste the
+matching rules from [`DOMAIN_FRAMING.md`](DOMAIN_FRAMING.md) into its assignment. Use the
+built-in `Explore` / `general-purpose` agents for broad recon.
 
 **Service Agents (domain-specific task delegation):**
 - `linear`, `notion`, `sentry`, `stripe`, `render` — portable agents that wrap a
@@ -453,17 +391,9 @@ Each row is a named check with an executable command and expected result.
 - `output does not contain X` — passes when X is absent from stdout AND stdout is non-empty (empty-stdout gate prevents false-passes from errored commands)
 - `match count == 0` — passes when every non-blank stdout line is "0" or ends with ":0" (supports `grep -c`, `grep -rc`, and `grep -r ... | wc -l` shapes) AND stdout is non-empty
 
-**Note:** `exit code N` is a positive exact-match (passes when `exit_code == N`).
-`exit code != N` is the inverse (passes when `exit_code != N`). The two are syntactically
-disjoint and unambiguous. The existing `exit code 1` sample row ("No stale xfails") is
-a positive exact-match — it stays as-is.
-
-**Anti-criteria** are inverse rows in this table that assert a forbidden code-level
-outcome from a No-Go cannot be detected in the PR. They are opt-in: only add an
-inverse row when you can write a command that mechanically detects the violation.
-When authoring an anti-criterion, demonstrate it FAILS against a deliberately-violating
-input first (red-state proof), then paste that FAIL output into the PR description as a
-paper trail. See `docs/features/machine-readable-dod.md` for a worked example.
+**Anti-criteria** are inverse rows asserting a No-Go's forbidden code-level outcome is absent.
+Add one only when a command can detect the violation mechanically, and show it FAILS against a
+deliberately violating input first (red-state proof, pasted into the PR description).
 
 **One table definition per pipe-block.** A check table is identified by a `Command`
 column among its first three columns. If this section needs a second table -- a

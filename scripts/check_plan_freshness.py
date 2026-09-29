@@ -6,7 +6,7 @@ comments); exits 1 when the plan is stale and should be revised via
 ``/do-plan`` before building.
 
 This script replaces the inline shell block at
-``.claude/skills/do-build/SKILL.md`` step 4 that previously used ``gh api``
+``.claude/skills-global/do-build/SKILL.md`` step 3 that previously used ``gh api``
 with command substitution and pipes. Both of those patterns are blocked for
 PM sessions by ``agent/hooks/pre_tool_use.py`` (see the PM Bash allowlist),
 so the freshness check is delegated here where a single allowlisted

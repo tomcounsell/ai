@@ -1,10 +1,8 @@
 # present context — this repo (ai)
 
-The global skill body owns everything generic (postures → content → shape → HTML → show). This
-file declares the two repo-specific bits: **how to detect bridge mode** and **how to deliver the
-PDF** back over the Telegram bridge.
+Declares how to detect bridge mode and how to deliver the PDF over the Telegram bridge (`tools/valor_telegram.py` `send`).
 
-## Bridge detection (Step 4)
+## Bridge detection
 
 This session is running through the Telegram bridge iff **`$TELEGRAM_CHAT_ID` is set and
 non-empty**. The worker injects it into the harness env for bridge-originated Eng/Teammate
@@ -19,9 +17,9 @@ else
 fi
 ```
 
-## Bridge delivery (Step 4, bridge mode)
+## Bridge delivery
 
-Print the page to PDF with headless Chrome (the generic Step-4 command), then send the PDF as a
+Print the page to PDF with the skill's headless Chrome command, then send the PDF as a
 Telegram document to the originating chat:
 
 ```bash
@@ -37,7 +35,7 @@ python -m tools.valor_telegram send \
   leave it to the default rather than passing it explicitly.
 - `--cleanup-after-send` lets the relay own the PDF's lifecycle (deletes after successful send or
   dead-letter placement). Don't `rm` it yourself — synchronous deletion races the retry loop.
-- `$CAPTION` is a one-line framing of what the PDF explains (the Step-1 takeaway sentence), so the
+- `$CAPTION` is a one-line framing of what the PDF explains (the takeaway sentence), so the
   chat shows something searchable above the document bubble.
 
 ## Error handling (delivery)
@@ -46,10 +44,3 @@ python -m tools.valor_telegram send \
   disk. Remove `$SCRATCH` manually so it doesn't leak, and report the failure to the user.
 - **Bridge relay not running** → the payload sits in Redis until the relay starts. For synchronous
   confirmation, `./scripts/valor-service.sh status` first.
-
-## Related references
-
-- `~/src/ai/tools/valor_telegram.py` — the `send` subcommand (`--file`, `--cleanup-after-send`)
-- `~/src/ai/agent/session_executor.py` — where `TELEGRAM_CHAT_ID` enters the env
-- `~/src/ai/agent/sdk_client.py` — where `TELEGRAM_REPLY_TO` enters the env
-- `~/src/ai/.claude/skill-context/do-debrief.md` — the sibling pattern (voice note over the same bridge)

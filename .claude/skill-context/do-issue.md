@@ -1,46 +1,36 @@
 # do-issue context — this repo (ai)
 
-This repo's nuances for the `/do-issue` skill. The global skill body runs a
-generic `git`/`gh` baseline; this file layers the ai-repo SDLC automation back
-in. Read top to bottom and honor every declaration.
+This repo's additions to the `/do-issue` skill.
 
-## Stage Marker (wraps the whole skill)
+## Stage marker
 
-At the very start of the skill, write an `in_progress` marker:
-
-```bash
-sdlc-tool stage-marker --stage ISSUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
-```
-
-After the issue is created (Step 7), write the completion marker:
+After the issue is created, write the completion marker (there is no issue
+number to mark before then):
 
 ```bash
-sdlc-tool stage-marker --stage ISSUE --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage ISSUE --status completed --issue-number {issue_number} || true
 ```
 
-## Cross-Repo `gh` Targeting
+Omit `--run-id`: an ISSUE marker without one takes the sessionless path
+(`tools/sdlc_stage_marker.py::write_issue_marker_cold`), which also handles a
+live run that already holds the lease.
 
-For cross-project work, the `GH_REPO` environment variable is set automatically
-by `sdk_client.py`. The `gh` CLI natively respects it, so all `gh` commands
-target the correct repository — no `--repo` flags or manual parsing needed.
+## Cross-repo `gh`
 
-## Canonical Doc Locations (Step 2 related-context search)
+`GH_REPO` is set for cross-project work and `gh` honors it; no `--repo` flags.
 
-When searching for related context before writing, scan this repo's doc
-locations:
+## Related-context search
 
 ```bash
 grep -rl "KEYWORD" docs/features/ docs/plans/ 2>/dev/null | head -5
 ```
 
-## Plan-Doc Path Convention (Downstream context)
+## Downstream path
 
-State the concrete downstream path: the issue will be consumed by `/do-plan` to
-produce a plan document at `docs/plans/{slug}.md`, then executed by `/do-build`.
-The slug is kebab-case, derived from the issue title.
+`/do-plan` turns the issue into `docs/plans/{slug}.md` (kebab-case slug from the
+title), which `/do-build` executes.
 
-## Issue Labels
+## Labels
 
-Use this repo's label set consistently (see `CLAUDE.md` → GitHub Issue Labels):
-`bug`, `reflections`, `memory`, `skills`, `dashboard`, `bridge`, `testing`. Do
-NOT use a `feature` label — it adds no signal here.
+`bug`, `reflections`, `memory`, `skills`, `dashboard`, `bridge`, `testing`
+(see `CLAUDE.md`). There is no `feature` label; don't use one.

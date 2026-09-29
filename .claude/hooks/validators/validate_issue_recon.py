@@ -30,7 +30,7 @@ import sys
 MISSING_RECON_ERROR = """
 VALIDATION FAILED: Issue #{number} is missing reconnaissance evidence.
 
-Before planning, run the recon routine (Step 3 in /do-issue) to surface
+Before planning, run the recon routine in /do-issue (RECON.md) to surface
 unknowns and conflicts. The issue body must contain either:
 
 1. A "## Recon Summary" section with findings, OR
@@ -38,7 +38,7 @@ unknowns and conflicts. The issue body must contain either:
 
 Add one of these to the issue body, then retry /do-plan.
 
-See .claude/skills/do-issue/RECON.md for the full pattern.
+See .claude/skills-global/do-issue/RECON.md for the full pattern.
 """
 
 INCOMPLETE_RECON_ERROR = """

@@ -1,6 +1,6 @@
 # Prose people enjoy reading
 
-The second editorial dimension. Removing AI tells (SIGNS.md) gets a draft to *not-suspicious*; this pass gets it to *pleasant to read*. They pull in different directions, and this file exists because tell-removal alone overshoots: strip the slop aggressively and prose drifts punchy, sharp, and too clever — short fragments, knowing asides, technical jargon dressed in grand metaphor. That register reads as out of touch to a human audience. Sharp is not the goal. **Warm and clear is the goal.**
+Tell removal (SIGNS.md) gets a draft to *not-suspicious*; this pass gets it to *pleasant to read*. Stripping slop aggressively overshoots into punchy, too-clever prose and jargon dressed in grand metaphor, which reads as out of touch. **Warm and clear is the goal.**
 
 Touchstones, and what each contributes. **Zinsser carries the most weight** — when principles pull in different directions, resolve toward him:
 
@@ -58,7 +58,7 @@ Last check before verdict: read the piece aloud (literally, or in the mind's ear
 
 ## How this pass applies
 
-- It runs **after** the tell sweep and rewrite, on the already-de-slopped text — including on your own edits, which are the likeliest source of staccato and cleverness.
-- It is a **rewriting** dimension, almost never a blocking one. Substance decides BLOCK; register problems get fixed, not spiked. (Exception: a piece whose entire voice is wrong for its audience end-to-end counts toward REWRITE-level diagnosis.)
-- Change-log categories for this dimension: `register` (jargon/metaphor mixing, voice drift), `rhythm` (staccato runs, uniform punch), `warmth` (clever-for-its-own-sake cut, companion stance restored), `grounding` (metaphor replaced with the plain fact or number).
-- Light touch. This pass exists to restore ease, not to impose an author impression — an imitation of a beloved writer is its own kind of slop. Take the *stance* (plain, warm, curious, concrete); leave the mannerisms and the devices.
+- It runs on the already-de-slopped text, including your own edits, the likeliest source of staccato and cleverness.
+- It rewrites; it almost never blocks. Substance decides BLOCK, except that a voice wrong for its audience end to end counts toward the diagnosis.
+- Change-log categories: `register` (jargon/metaphor mixing, voice drift), `rhythm` (staccato runs, uniform punch), `warmth` (clever-for-its-own-sake cut), `grounding` (metaphor replaced with the plain fact or number).
+- Light touch: take the stance (plain, warm, curious, concrete), not a beloved writer's mannerisms; an imitation is its own slop.
