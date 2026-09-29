@@ -98,6 +98,8 @@ def live_processes(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(service, "get_worker_pid", lambda: 4343)
     monkeypatch.setattr(service, "get_process_start_ts", lambda pid: PROC_START_TS)
     monkeypatch.setattr(service, "BRIDGE_PLIST_PATH", plist)
+    # The fake pids must never collide with this test process's real ancestry.
+    monkeypatch.setattr(service, "is_own_ancestor", lambda pid, **kwargs: False)
     return plist
 
 
@@ -203,6 +205,155 @@ def test_process_not_running_classifies_unknown(repo, live_processes, monkeypatc
     results = verify_running_release(repo, "HEAD", FULL_MACHINE_CHECK)
     assert results["bridge"]["running"] is False
     assert results["bridge"]["classification"] == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Boot-beacon settle poll: a process restarting while /update verifies must
+# resolve to a real verdict instead of `unknown`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def booting_bridge(monkeypatch, live_processes):
+    """Bridge exec'd 10s ago (mid-boot); worker long-running. Sleep is captured."""
+    bridge_start = time.time() - 10
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: bridge_start if pid == 4242 else PROC_START_TS,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(service.time, "sleep", lambda s: sleeps.append(s))
+    return bridge_start, sleeps
+
+
+def test_mid_boot_bridge_settles_to_matches(repo, booting_bridge, monkeypatch):
+    """No beacon yet from a just-exec'd bridge: poll until it writes one."""
+    bridge_start, sleeps = booting_bridge
+    head = get_short_sha(repo)
+
+    def _sleep(_seconds):
+        sleeps.append(_seconds)
+        _write_beacon(repo, "bridge", head, bridge_start + 5)
+
+    monkeypatch.setattr(service.time, "sleep", _sleep)
+    results = service.verify_running_release_settled(repo, head, FULL_MACHINE_CHECK)
+    assert results["bridge"]["classification"] == "matches"
+    assert len(sleeps) == 1
+
+
+def test_orphaned_beacon_settles_to_stale(repo, booting_bridge, monkeypatch):
+    """The masked verdict was STALE: settling must surface it, not swallow it."""
+    bridge_start, sleeps = booting_bridge
+    old_sha = get_short_sha(repo)
+    _write_beacon(repo, "bridge", old_sha, bridge_start - 100)  # previous image
+    _commit(repo, "bridge/new_handler.py", "bridge-relevant commit")
+    head = get_short_sha(repo)
+
+    def _sleep(_seconds):
+        sleeps.append(_seconds)
+        _write_beacon(repo, "bridge", old_sha, bridge_start + 5)
+
+    monkeypatch.setattr(service.time, "sleep", _sleep)
+    results = service.verify_running_release_settled(repo, head, FULL_MACHINE_CHECK)
+    assert results["bridge"]["classification"] == "stale"
+    assert len(sleeps) == 1
+
+
+def test_settle_gives_up_at_the_timeout(repo, live_processes, monkeypatch):
+    """A beacon that never arrives still returns — unknown, at the deadline.
+
+    The bridge reads as exec'd *now* on every poll (a crash-looping process
+    that keeps coming back young), so the mid-boot age limit never ends the
+    loop: only the monotonic deadline does.
+    """
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
+    )
+    sleeps: list[float] = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(service.time, "sleep", _sleep)
+    timeout_s, interval_s = 0.5, 0.05
+    started = time.monotonic()
+    results = service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, timeout_s=timeout_s, interval_s=interval_s
+    )
+    elapsed = time.monotonic() - started
+    assert results["bridge"]["classification"] == "unknown"
+    assert len(sleeps) >= 2  # the loop was entered and re-polled
+    assert elapsed < timeout_s + 2.0  # the deadline ended it
+
+
+def test_settle_sleep_never_overshoots_the_deadline(repo, live_processes, monkeypatch):
+    """An interval coarser than the window is clamped to the time left."""
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
+    )
+    sleeps: list[float] = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(service.time, "sleep", _sleep)
+    timeout_s, interval_s = 0.3, 30.0
+    started = time.monotonic()
+    results = service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, timeout_s=timeout_s, interval_s=interval_s
+    )
+    elapsed = time.monotonic() - started
+    assert results["bridge"]["classification"] == "unknown"
+    assert sleeps and all(s <= timeout_s for s in sleeps)
+    assert elapsed < timeout_s + 2.0
+
+
+def test_settle_never_waits_on_own_ancestor(repo, live_processes, monkeypatch):
+    """A bridge-hosted /update blocks the bridge's own event loop while this
+    verify runs, so a mid-boot bridge that is our ancestor cannot write its
+    beacon: waiting on it would burn the window and still end unknown."""
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
+    )
+    monkeypatch.setattr(service, "is_own_ancestor", lambda pid, **kwargs: pid == 4242)
+    sleeps: list[float] = []
+    monkeypatch.setattr(service.time, "sleep", lambda s: sleeps.append(s))
+    results = service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, timeout_s=60.0, interval_s=1.0
+    )
+    assert results["bridge"]["classification"] == "unknown"
+    assert results["bridge"]["pid"] == 4242
+    assert sleeps == []
+
+
+def test_long_running_process_without_beacon_never_polls(repo, live_processes, monkeypatch):
+    """Terminal unknown (process far older than the settle window): no waiting."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(service.time, "sleep", lambda s: sleeps.append(s))
+    results = service.verify_running_release_settled(repo, get_short_sha(repo), FULL_MACHINE_CHECK)
+    assert results["bridge"]["classification"] == "unknown"
+    assert sleeps == []
+
+
+def test_settle_skip_does_not_wait_for_a_skipped_bridge(repo, booting_bridge):
+    """--skip-bridge discards the bridge verdict, so it must not be waited on."""
+    _, sleeps = booting_bridge
+    _write_beacon(repo, "worker", get_short_sha(repo), PROC_START_TS + 100)
+    service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, settle_skip=("bridge",)
+    )
+    assert sleeps == []
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +613,72 @@ def test_cli_fresh_restart_marker_shares_skip_signal(cli_env, monkeypatch, capsy
     exit_code = verify_release.main(["--project-dir", str(cli_env)])
     assert exit_code == 0
     assert "FAILED" not in capsys.readouterr().out
+
+
+def _mid_boot_results(*mid_boot: str) -> dict:
+    """Canned results where each named process is a just-exec'd, beacon-less
+    ``unknown`` (a real settle candidate); the rest match."""
+    now = time.time()
+    results = _canned_results("matches", "matches")
+    for name in mid_boot:
+        results[name].update(
+            boot_sha=None, beacon_ts=None, process_start_ts=now, classification="unknown"
+        )
+    return results
+
+
+@pytest.fixture
+def cli_sleeps(monkeypatch):
+    """Capture every sleep the CLI's settle loop would take."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(verify_release.service.time, "sleep", lambda s: sleeps.append(s))
+    # Shrink the settle window so a regressed settle_skip wiring fails fast
+    # instead of busy-spinning the no-op sleep for the full default window.
+    from config.settings import settings
+
+    monkeypatch.setattr(settings.timeouts, "beacon_settle_timeout_s", 0.2)
+    return sleeps
+
+
+def test_cli_skip_bridge_never_settles_mid_boot_bridge(cli_env, monkeypatch, cli_sleeps, capsys):
+    """--skip-bridge reaches settle_skip: a mid-boot bridge is not waited on."""
+    monkeypatch.setattr(
+        verify_release.service,
+        "verify_running_release",
+        lambda pd, head, mc: _mid_boot_results("bridge"),
+    )
+    assert verify_release.main(["--skip-bridge", "--project-dir", str(cli_env)]) == 0
+    assert cli_sleeps == []
+    assert "worker matches" in capsys.readouterr().out
+
+
+def test_cli_fresh_restart_marker_never_settles_mid_boot_bridge(cli_env, monkeypatch, cli_sleeps):
+    """A fresh restart marker reaches settle_skip exactly like --skip-bridge."""
+    (cli_env / "data" / "update-restart-in-progress").write_text(str(time.time()))
+    monkeypatch.setattr(
+        verify_release.service,
+        "verify_running_release",
+        lambda pd, head, mc: _mid_boot_results("bridge"),
+    )
+    assert verify_release.main(["--project-dir", str(cli_env)]) == 0
+    assert cli_sleeps == []
+
+
+def test_cli_forced_stale_worker_is_never_settled(cli_env, monkeypatch, cli_sleeps, capsys):
+    """A worker the --since poll gave up on is already `stale`: settling it
+    would only burn the /update shell budget before overwriting the result."""
+    monkeypatch.setattr(verify_release, "_poll_worker_beacon", lambda pd, since: False)
+    monkeypatch.setattr(
+        verify_release.service,
+        "verify_running_release",
+        lambda pd, head, mc: _mid_boot_results("worker"),
+    )
+    exit_code = verify_release.main(["--since", str(time.time()), "--project-dir", str(cli_env)])
+    assert cli_sleeps == []
+    assert exit_code == 1
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "worker running" in out
 
 
 def test_cli_stale_restart_marker_does_not_skip(cli_env, monkeypatch):

@@ -315,11 +315,30 @@ async def test_poll_enabled_when_shell_shows_worker_restart(update_env, tg_clien
     assert call.kwargs["worker_restarted"] is True
 
 
-def test_shell_timeout_covers_verify_poll_budget():
-    """The subprocess budget must cover the shell's 30s verify-poll window."""
-    assert bridge_update.UPDATE_SHELL_TIMEOUT_SECONDS >= 120 + (
-        bridge_update.UPDATE_POLL_ATTEMPTS * bridge_update.UPDATE_POLL_INTERVAL_SECONDS
-    )
+def test_shell_timeout_covers_verify_poll_and_settle_budget(monkeypatch):
+    """The subprocess budget must cover the 30s verify poll AND the settle
+    window, read at call time so an env override moves the budget."""
+    from config.settings import settings
+
+    poll_s = bridge_update.UPDATE_POLL_ATTEMPTS * bridge_update.UPDATE_POLL_INTERVAL_SECONDS
+    settle_s = settings.timeouts.beacon_settle_timeout_s
+    assert bridge_update.update_shell_timeout_seconds() >= 120 + poll_s + settle_s
+
+    monkeypatch.setattr(settings.timeouts, "beacon_settle_timeout_s", settle_s + 50)
+    assert bridge_update.update_shell_timeout_seconds() >= 120 + poll_s + settle_s + 50
+
+
+def test_max_settle_override_keeps_update_under_watchdog_threshold(monkeypatch):
+    """The /update shell budget blocks the bridge's event loop, so even the
+    largest allowed settle override must finish before the bridge watchdog's
+    stale-log restart fires mid-update."""
+    from config.settings import TimeoutSettings, settings
+    from monitoring.bridge_watchdog import LOG_STALENESS_THRESHOLD
+
+    field = TimeoutSettings.model_fields["beacon_settle_timeout_s"]
+    (max_settle_s,) = [m.le for m in field.metadata if hasattr(m, "le")]
+    monkeypatch.setattr(settings.timeouts, "beacon_settle_timeout_s", max_settle_s)
+    assert bridge_update.update_shell_timeout_seconds() < LOG_STALENESS_THRESHOLD
 
 
 # ---------------------------------------------------------------------------
