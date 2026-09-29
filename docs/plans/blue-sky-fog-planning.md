@@ -63,8 +63,19 @@ Step 3.5 "Try to Kill the Issue" and Falsification Checks, and do-plan's
 Phase 0 was genericized (the recon gate is now a context-file declaration).
 The July diff also names repo-specific tooling (`validate_issue_recon.py`) and
 specific model families in global skill bodies, and leans on long anti-pattern
-lists. Rather than rebase it, the change is **redone on current main** in a new
-lane (`session/blue-sky-fog-planning`); PR #3577 is closed as superseded.
+lists. Rather than rebase it, the change is **redone on current main** in this
+issue's recorded SDLC lane (the lane-identity resolver owns the branch name;
+do not re-derive it from this plan's filename). The build closes draft PR
+#3577 as superseded, with a comment linking the new PR; nothing from its
+single commit is cherry-picked.
+
+Re-verified 2026-09-29 against `origin/main` at f43ab3669: no commits since
+touch `.claude/skills-global/do-issue/`, `.claude/skills-global/do-plan/`, or
+`docs/features/README.md`; every section anchor cited below (do-issue Step 1,
+Step 4 rule 4, CHECKLIST "No undefined jargon" / "Measurable acceptance
+criteria", do-plan SCOPING §1, SKILL Phase 1 step 2 and Phase 1.5) still exists;
+the recon gate passes for #2340; the repo-token grep in Verification is clean
+(exit 1) on the baseline. #2340 has no comments.
 
 The Opus 5.5 skills audit (`docs/audits/opus-5-5-skills/`, #3565) has open
 recommendations for these same skills (do-issue RECON headless stop, label
@@ -177,6 +188,7 @@ validator run above.
 - [ ] Edited global bodies contain no repo-specific tooling or model names.
 - [ ] Feature doc and README entry exist.
 - [ ] PR body says `Refs #2340` and lists the deferred charting skill.
+- [ ] Draft PR #3577 closed as superseded, with a comment linking the new PR.
 
 ## Verification
 
