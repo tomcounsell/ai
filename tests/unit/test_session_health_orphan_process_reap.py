@@ -1018,3 +1018,312 @@ class TestOneshotOwnerIsLive:
             session_health._oneshot_owner_is_live(3107, 0.0)
 
         assert seen["args"] == (3107, None)
+
+
+# -----------------------------------------------------------------------------
+# Evidence-bearing kill logs and pyright ownership (issue #3592)
+# -----------------------------------------------------------------------------
+
+_PYRIGHT_NODE_BIN = ["node", "/x/node_modules/.bin/pyright-langserver", "--stdio"]
+_PYRIGHT_NPM = ["node", "/x/node_modules/pyright/langserver.index.js", "--stdio"]
+_PYRIGHT_MODULE = ["python3", "-m", "pyright"]
+
+
+def _pyright_proc(cmdline=None, *, pid=5000, ppid=1, marker="dead-session", environ=None):
+    """An orphan pyright fake whose environment carries the worker session marker."""
+    proc = _fake_proc(pid=pid, ppid=ppid, cmdline=cmdline or _PYRIGHT_NODE_BIN)
+    if environ is not None:
+        proc.environ.side_effect = environ
+    else:
+        proc.environ.return_value = {"AGENT_SESSION_ID": marker} if marker is not None else {}
+    return proc
+
+
+def _reap_with_marker_session(procs, session=None, *, lookup_error=None):
+    """Run the hourly reaper with ``get_by_id_strict`` resolving to ``session``."""
+    strict = MagicMock(return_value=session)
+    if lookup_error is not None:
+        strict.side_effect = lookup_error
+    with (
+        patch.object(psutil, "process_iter", return_value=procs),
+        patch.object(session_health.AgentSession, "find_live_session_by_pid", return_value=None),
+        patch.object(session_health.AgentSession, "get_by_id_strict", strict),
+        patch.object(session_health, "_increment_orphan_process_counter"),
+    ):
+        return session_health._reap_orphan_session_processes()
+
+
+class TestIsPyrightExecutable:
+    @pytest.mark.parametrize(
+        "cmdline",
+        [
+            ["pyright-langserver", "--stdio"],
+            ["node", "/x/node_modules/.bin/pyright-langserver", "--stdio"],
+            ["node", "/x/node_modules/pyright/langserver.index.js", "--stdio"],
+            ["node", "/x/node_modules/pyright/index.js"],
+            ["python3", "-m", "pyright"],
+            ["/usr/bin/python3.12", "-m", "pyright-langserver", "--stdio"],
+        ],
+    )
+    def test_matches(self, cmdline):
+        assert session_health._is_pyright_executable(cmdline) is True
+
+    @pytest.mark.parametrize(
+        "cmdline",
+        [
+            ["node", "/app/index.js"],
+            ["node", "/x/langserver.index.js"],
+            ["python", "-m", "pytest", "pyright"],
+            ["python", "-m"],
+            ["node"],
+            [],
+            ["tail", "-f", "pyright.log"],
+            ["python", "worker.py", "--tool", "pyright"],
+            ["claude", "-p", "run pyright"],
+        ],
+    )
+    def test_rejects(self, cmdline):
+        assert session_health._is_pyright_executable(cmdline) is False
+
+
+class TestPyrightOwnershipGate:
+    @pytest.mark.parametrize("cmdline", [_PYRIGHT_NODE_BIN, _PYRIGHT_NPM, _PYRIGHT_MODULE])
+    def test_orphan_with_dead_session_marker_is_terminated(self, clean_state, cmdline):
+        proc = _pyright_proc(cmdline)
+        killed = _reap_with_marker_session([proc], _session(status="completed"))
+        assert killed == 1
+        proc.terminate.assert_called_once()
+
+    def test_marker_resolving_to_no_record_is_terminated(self, clean_state):
+        proc = _pyright_proc()
+        assert _reap_with_marker_session([proc], None) == 1
+        proc.terminate.assert_called_once()
+
+    @pytest.mark.parametrize("marker", [None, ""])
+    def test_missing_or_empty_marker_is_left_alone(self, clean_state, marker):
+        proc = _pyright_proc(marker=marker)
+        assert _reap_with_marker_session([proc], _session(status="completed")) == 0
+        proc.terminate.assert_not_called()
+
+    def test_live_marked_session_is_left_alone(self, clean_state):
+        proc = _pyright_proc()
+        assert _reap_with_marker_session([proc], _session(status="running")) == 0
+        proc.terminate.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            psutil.AccessDenied(5000),
+            psutil.ZombieProcess(5000),
+            RuntimeError("boom"),
+        ],
+    )
+    def test_environ_failure_fails_closed(self, clean_state, error):
+        proc = _pyright_proc(environ=error)
+        assert _reap_with_marker_session([proc], _session(status="completed")) == 0
+        proc.terminate.assert_not_called()
+
+    def test_session_lookup_failure_fails_closed(self, clean_state):
+        proc = _pyright_proc()
+        killed = _reap_with_marker_session([proc], lookup_error=RuntimeError("redis down"))
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_live_parent_is_not_a_candidate(self, clean_state):
+        proc = _pyright_proc(ppid=4242)
+        with patch.object(session_health, "_parent_is_orphaned_shell_wrapper", return_value=False):
+            killed = _reap_with_marker_session([proc], _session(status="completed"))
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "cmdline",
+        [["tail", "-f", "pyright.log"], ["python", "worker.py", "--tool", "pyright"]],
+    )
+    def test_substring_match_is_not_a_candidate(self, clean_state, cmdline):
+        proc = _pyright_proc(cmdline)
+        assert _reap_with_marker_session([proc], _session(status="completed")) == 0
+        proc.terminate.assert_not_called()
+
+    def test_kill_switch_disables_pyright_signature(self, clean_state, monkeypatch):
+        monkeypatch.setenv("DISABLE_ORPHAN_PROCESS_REAP", "1")
+        proc = _pyright_proc()
+        assert _reap_with_marker_session([proc], _session(status="completed")) == 0
+        proc.terminate.assert_not_called()
+
+
+class _ExplodingSession:
+    """A session whose attribute access raises."""
+
+    def __getattr__(self, name):
+        raise RuntimeError(f"cannot read {name}")
+
+
+class TestOrphanOwnerEvidence:
+    def test_none_session(self):
+        assert "no owning session" in session_health._orphan_owner_evidence(None)
+
+    @pytest.mark.parametrize(
+        "make_heartbeat",
+        [
+            lambda: None,
+            lambda: datetime.now(UTC) - timedelta(hours=2),
+            lambda: datetime.now() - timedelta(hours=2),  # tz-naive
+            lambda: time.time() - 7200,  # float epoch
+        ],
+        ids=["none", "aware", "naive", "epoch"],
+    )
+    def test_heartbeat_shapes_return_a_string(self, make_heartbeat):
+        session = SimpleNamespace(
+            agent_session_id="sess-1", status="completed", last_heartbeat_at=make_heartbeat()
+        )
+        evidence = session_health._orphan_owner_evidence(session)
+        assert isinstance(evidence, str)
+        assert "sess-1" in evidence
+
+    def test_raising_session_returns_fixed_string(self):
+        assert (
+            session_health._orphan_owner_evidence(_ExplodingSession())
+            == "owning session <unreadable>"
+        )
+
+    def test_unreadable_evidence_still_logs_and_counts(self, clean_state, caplog):
+        proc = _fake_proc(pid=6000, ppid=1)
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession,
+                "find_live_session_by_pid",
+                return_value=_ExplodingSession(),
+            ),
+            patch.object(session_health, "_session_is_alive", return_value=False),
+            patch.object(session_health, "_increment_orphan_process_counter") as counter,
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            killed = session_health._reap_orphan_session_processes()
+        assert killed == 1
+        proc.terminate.assert_called_once()
+        counter.assert_called_once()
+        assert "owning session <unreadable>" in caplog.text
+
+
+class TestKillLogEvidence:
+    def test_parent_and_descendant_lines_carry_command_ppid_and_evidence(self, clean_state, caplog):
+        child = _fake_proc(
+            pid=6101, ppid=6100, cmdline=["python", "/path/to/mcp_servers/memory_server.py"]
+        )
+        proc = _fake_proc(pid=6100, ppid=1, children=[child])
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+            patch.object(session_health, "_increment_orphan_process_counter"),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._reap_orphan_session_processes()
+
+        lines = [r.getMessage() for r in caplog.records]
+        parent = next(m for m in lines if m.startswith("[orphan-reap] Killed PID 6100"))
+        assert "claude" in parent
+        assert "ppid=1" in parent
+        assert "no owning session" in parent
+        assert "signature=claude" in parent
+        descendant = next(m for m in lines if "Killed descendant PID 6101" in m)
+        assert "memory_server.py" in descendant
+        assert "ppid=6100" in descendant
+        assert "descendant of orphan PID 6100" in descendant
+
+    def test_command_cap_keeps_distinguishing_flags(self, clean_state, caplog):
+        cmd = ["claude", "--permission-mode", "bypassPermissions", "x" * 120, "--model", "opus"]
+        proc = _fake_proc(pid=6200, ppid=1, cmdline=cmd, create_time=time.time() - 60)
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+            patch.object(session_health, "_increment_orphan_process_counter"),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._reap_orphan_session_processes()
+        assert "--model opus" in caplog.text
+
+    def test_pyright_line_names_the_marker(self, clean_state, caplog):
+        proc = _pyright_proc(marker="dead-session")
+        with caplog.at_level(logging.INFO, logger="agent.session_health"):
+            _reap_with_marker_session([proc], _session(status="completed"))
+        assert "signature=pyright" in caplog.text
+        assert "marker=dead-session" in caplog.text
+
+    def test_drain_escalation_line_carries_command_and_ppid(self, clean_state, caplog):
+        ct = 4242.0
+        proc = _fake_proc(pid=6300, ppid=1, cmdline=["claude", "-p"], create_time=ct)
+        session_health._pending_sigkill_orphans.add((6300, ct))
+        with (
+            patch.object(psutil, "process_iter", return_value=[]),
+            patch.object(session_health, "_psutil_process_for_pid", return_value=proc),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._reap_orphan_session_processes()
+        proc.kill.assert_called_once()
+        line = next(r.getMessage() for r in caplog.records if "Drain: SIGKILL'd" in r.getMessage())
+        assert "cmd=claude -p" in line
+        assert "ppid=1" in line
+        assert "survived SIGTERM" in line
+
+    def test_drain_unreadable_reads_never_skip_the_kill(self, clean_state, caplog):
+        ct = 4242.0
+        proc = _fake_proc(pid=6301, ppid=1, create_time=ct)
+        proc.cmdline.side_effect = psutil.AccessDenied(6301)
+        proc.ppid.side_effect = psutil.AccessDenied(6301)
+        session_health._pending_sigkill_orphans.add((6301, ct))
+        with (
+            patch.object(psutil, "process_iter", return_value=[]),
+            patch.object(session_health, "_psutil_process_for_pid", return_value=proc),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._reap_orphan_session_processes()
+        proc.kill.assert_called_once()
+        assert "cmd=<unreadable>" in caplog.text
+        assert "ppid=<unreadable>" in caplog.text
+
+    def test_descendant_unreadable_reads_never_skip_the_terminate(self, clean_state, caplog):
+        child = _fake_proc(pid=6401, ppid=6400)
+        child.cmdline.side_effect = psutil.AccessDenied(6401)
+        child.ppid.side_effect = psutil.AccessDenied(6401)
+        proc = _fake_proc(pid=6400, ppid=1, children=[child])
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+            patch.object(session_health, "_increment_orphan_process_counter"),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._reap_orphan_session_processes()
+        child.terminate.assert_called_once()
+        assert "Killed descendant PID 6401 (cmd=<unreadable>, ppid=<unreadable>" in caplog.text
+
+    def test_fast_reaper_sigterm_and_sigkill_lines(self, clean_state, caplog):
+        ct = _stale_ct()
+        proc = _fake_proc(pid=6500, ppid=1, cmdline=_BARE_ONESHOT_CMD, create_time=ct)
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+            caplog.at_level(logging.INFO, logger="agent.session_health"),
+        ):
+            session_health._fast_reap_stale_print_oneshots()
+            term = next(
+                r.getMessage() for r in caplog.records if "SIGTERM'd stale" in r.getMessage()
+            )
+            session_health._fast_reap_stale_print_oneshots()
+            kill = next(
+                r.getMessage() for r in caplog.records if "SIGKILL'd surviving" in r.getMessage()
+            )
+        for line in (term, kill):
+            assert "cmd=claude --permission-mode bypassPermissions" in line
+            assert "ppid=1" in line
+            assert "no live owning session" in line
+            assert "age=" in line
