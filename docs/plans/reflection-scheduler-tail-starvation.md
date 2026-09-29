@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-09-29
 tracking: https://github.com/tomcounsell/ai/issues/3580
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-09-29T07:00:48Z
 ---
 
 # Reflection scheduler starves jobs late in the registry
@@ -93,12 +95,28 @@ No relevant external findings. This is an internal scheduling fix. Oldest-due-fi
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (the default-cap Open Question)
+- PM check-ins: 1 (post-deploy RD-1 gate result)
 - Review rounds: 1
 
 ## Prerequisites
 
 No prerequisites. This work has no external dependencies.
+
+## Resolved Decisions
+
+### RD-1: Default cap stays 4 in code; the production revert to 4 is gated on observed deferral data
+
+Resolves former Open Question 1 and the critique CONCERN (Risk & Robustness, Scope & Value).
+
+- **Code default**: `REFLECTION_STARTUP_MAX_CONCURRENT` stays `"4"` in `agent/reflection_scheduler.py` and `.env.example`. The issue's acceptance criteria pin the unit-test bound at cap 4 and keep the startup burst capped at 4, and the #1812 motivation (event-loop saturation) was measured at that value. Changing the throttle default is a separate capacity decision and should be made from production data, which this change is what produces (the new `deferred` count).
+- **Why not revert blindly**: at cap 4, steady-state demand (4.73 per tick) exceeds capacity, so fair ordering moves part of the shortfall onto `circuit-health-gate` (owns the queue_paused and hibernating flags) and `session-recovery-drip` (drips one session per tick). That slows outage recovery. The simulation predicts this, so production has to confirm or refute it before the stopgap `8` is removed.
+- **Gated post-deploy step** (replaces the unconditional revert): after the fix is deployed via `/update`, set the vault `.env` to `4`, restart the reflection worker, and observe `logs/reflection_worker_error.log` for at least 1 h:
+  - `grep "Tick complete: .* deferred by per-tick cap" logs/reflection_worker_error.log` and count ticks with a non-zero deferred count.
+  - Measure the gap between successive `circuit-health-gate` `Completed:` lines.
+  - Confirm `improvement-planner-tick` fires about every 900 s.
+  - **Pass** (deferred count zero on most ticks AND `circuit-health-gate` gaps at most ~120 s AND the planner on cadence): leave the vault at `4`. Issue AC 5 is met as written.
+  - **Fail**: set the vault `.env` back to `5` (the simulation's value that keeps every sub-900 s job within about 1-2 ticks), restart the worker, and file a follow-up issue to raise the code default, with the observed numbers attached. That follow-up must update the comment at `agent/reflection_scheduler.py:48-53` and the `.env.example` placeholder together with the default. This is a **named deviation** from issue AC 5 ("back to 4") and is reported as such in the PR / issue comment, not as routine.
+- The post-deploy observation result (deferred-tick count, worst `circuit-health-gate` gap, planner cadence, and the final vault value) is posted as a comment on #3580.
 
 ## Solution
 
@@ -119,6 +137,7 @@ Tick starts → walk registry (skip paused / running / not due; agent entries di
   - `due_epoch` comes from the existing `reflection_due_epoch(entry, state, now)` already read in the walk. For an `every:` entry with a last run, this is `last_run + interval`, which is at or before the moment the entry became due, so it ages naturally.
   - **Never-run hazard (why `deferred_since` is required):** `compute_next_due` returns `now` for an `every:` entry with no `last_run` (`agent/reflection_schedule.py:155`). Its `due_epoch` is therefore re-stamped to the current tick every tick. With `due_epoch` alone it would always look youngest and would starve under load, which recreates this exact bug for new reflections. `deferred_since` (set to `now` on the first deferral, kept on later deferrals) pins its age.
   - If `due_epoch` is `None` (no schedule; legacy interval path), use `now`. `deferred_since` then ages it the same way.
+- **Dispatch-exception semantics**: a candidate whose `create_task` raises still counts against the cap for that tick (the slot was spent attempting it), is logged at ERROR with `exc_info`, and is carried into the new `_deferred_since` (keeping its earlier value, else `now`). It therefore keeps its pinned age and ranks first next tick, so a never-run entry cannot lose its place because one dispatch attempt failed.
 - **Deferral bookkeeping**: `self._deferred_since` is rebuilt every tick to contain exactly the candidates deferred this tick, keeping each one's earlier value if it was already present. An entry that was dispatched, became paused or running, stopped being due, or left the registry drops out automatically. No separate cleanup path is needed.
 - **Provable bound (for the test and the docs)**: suppose a candidate C is deferred with age key K. Any entry that ranks ahead of C has key ≤ K. Once that entry is dispatched, its next due is at least dispatch time plus its interval, which is later than K, and its deferral entry clears. So each other entry can rank ahead of C at most once in C's deferral episode. C is therefore dispatched within **ceil((N − 1) / cap) ticks of its first deferral**, where N is the number of enabled function-type entries. With production numbers (N = 40, cap 4) that is at most 10 ticks. The simulation's steady-state worst case was about 6.
 - **Logging**:
@@ -131,7 +150,7 @@ Tick starts → walk registry (skip paused / running / not due; agent entries di
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The per-entry `try/except Exception` in `tick()` logs at ERROR with `exc_info`. It must keep covering both phases. An exception while dispatching one candidate must not stop the remaining candidates from being dispatched or recorded as deferred. Add a test where `create_task` raises for one candidate, and assert that the next candidate still dispatches and the error is logged.
+- [ ] The per-entry `try/except Exception` in `tick()` logs at ERROR with `exc_info`. It must keep covering both phases. An exception while dispatching one candidate must not stop the remaining candidates from being dispatched or recorded as deferred. Add a test where `create_task` raises for one candidate, and assert that the next candidate still dispatches, the error is logged, the failed candidate used a cap slot, and it is present in `_deferred_since` with its earlier value (or `now` if new).
 
 ### Empty/Invalid Input Handling
 - [ ] Empty registry: `tick()` returns 0 and `_deferred_since` stays empty.
@@ -142,7 +161,7 @@ Tick starts → walk registry (skip paused / running / not due; agent entries di
 
 ## Test Impact
 
-- [ ] `tests/unit/test_reflection_scheduler.py::TestReflectionScheduler::test_tick_caps_function_dispatches_at_max_concurrent`: no change needed. It must still pass: all candidates are never-run and have equal keys, so the tie-break keeps registry order and exactly `cap` dispatch. Verify it; don't edit it.
+- [ ] `tests/unit/test_reflection_scheduler.py::TestReflectionScheduler::test_tick_caps_function_dispatches_at_max_concurrent`: no change needed. It must still pass: all candidates are never-run and have equal keys, so the tie-break keeps registry order and exactly `cap` dispatch. Verify it; don't edit it. This holds only while every entry resolves to `due_epoch == now` (interval=300 normalized to `every: 300s`, `ran_at` None, `_latest_run_timestamp` returning None), i.e. while the test Redis has no `ReflectionRun` rows for those names. The validator notes this dependency when confirming the test unchanged.
 - [ ] `tests/unit/test_reflection_scheduler.py::TestReflectionScheduler::test_tick_small_batch_under_cap_unaffected`: no change needed. It must still pass.
 - [ ] `tests/unit/test_reflection_scheduler.py::TestReflectionScheduler::test_scheduler_tick_skips_not_due` / `test_scheduler_tick_skips_running` / `test_skip_running_preserves_running_status`: no change needed. The walk's skip logic is untouched.
 - [ ] `tests/unit/test_reflection_scheduler.py::TestRegistryReload::test_tick_reloads_before_evaluating_entries`: no change needed. `reload_if_changed()` still runs first.
@@ -171,7 +190,7 @@ No race conditions identified. `tick()` runs on one asyncio task and is the only
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] Reverting `REFLECTION_STARTUP_MAX_CONCURRENT` from the stopgap `8` back to `4` in the vault `.env` (`~/Desktop/Valor/.env`) and restarting the reflection worker. This must wait until this fix is merged and deployed via `/update`. Reverting earlier starves the tail again. It is listed under Success Criteria as the post-deploy step, with the log check from the issue's acceptance criteria.
+- [ORDERED] Reverting `REFLECTION_STARTUP_MAX_CONCURRENT` from the stopgap `8` back to `4` in the vault `.env` (`~/Desktop/Valor/.env`) and restarting the reflection worker. This must wait until this fix is merged and deployed via `/update`. Reverting earlier starves the tail again. It is listed under Success Criteria as the post-deploy step, gated by the 1 h observation in RD-1: if the gate fails, the vault stays at `5` and a follow-up issue raises the code default (named deviation from issue AC 5).
 - [SEPARATE-SLUG #3571] `cron:` reflections never being due.
 
 ## Update System
@@ -186,6 +205,7 @@ No agent integration is required. This is internal to the reflection worker's sc
 
 - [ ] Update `docs/features/reflections.md` ("Startup-batch concurrency throttle", line ~422) to describe the oldest-due-first dispatch order, the ceil((N−1)/cap)-tick bound, the never-run pinning, the INFO deferral lines, the `deferred` count in `Tick complete`, and that the cap also binds in steady state when demand exceeds it.
 - [ ] Update the inline comment on `REFLECTION_STARTUP_MAX_CONCURRENT` in `agent/reflection_scheduler.py` and the `tick()` docstring.
+- [ ] Update the `.env.example` comment above `REFLECTION_STARTUP_MAX_CONCURRENT` (it also says excess reflections "defer to the next tick") to describe oldest-due-first ordering and the bound. The value stays `4` (RD-1).
 
 ## Success Criteria
 
@@ -195,7 +215,8 @@ No agent integration is required. This is internal to the reflection worker's sc
 - [ ] A deferral episode produces exactly one INFO `Deferring <name>` line and one INFO `dispatched after ... deferred` line (caplog test).
 - [ ] `asyncio.sleep(0)` still follows every function dispatch, and agent-type reflections are still dispatched inline and uncapped.
 - [ ] `docs/features/reflections.md` describes the fair dispatch order.
-- [ ] Post-deploy (ORDERED, see No-Gos): `REFLECTION_STARTUP_MAX_CONCURRENT` is back to `4` in the vault `.env`, the reflection worker is restarted, and `logs/reflection_worker_error.log` shows `improvement-planner-tick` firing about every 900 s. If the Open Question resolves to a different default, use that value instead.
+- [ ] Post-deploy (ORDERED, see No-Gos and RD-1): `REFLECTION_STARTUP_MAX_CONCURRENT` is set to `4` in the vault `.env`, the reflection worker is restarted, and `logs/reflection_worker_error.log` is observed for at least 1 h: `improvement-planner-tick` fires about every 900 s, and the `Tick complete: ... deferred by per-tick cap` count and the worst `circuit-health-gate` `Completed:` gap are recorded.
+- [ ] Post-deploy report: a comment on #3580 states the number of ticks with a non-zero deferred count, the worst `circuit-health-gate` gap, the planner cadence, and the final vault value. If the RD-1 gate failed, the vault is at `5`, a follow-up issue to raise the code default is filed and linked, and the deviation from issue AC 5 is named.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -238,7 +259,8 @@ No agent integration is required. This is internal to the reflection worker's sc
 - When a candidate that was in the previous deferred set is dispatched, log INFO `dispatched after %.0fs deferred by per-tick cap`.
 - Change `start()`'s tick line to `Tick complete: %d reflection(s) enqueued, %d deferred by per-tick cap`, emitted when either count is non-zero.
 - Update the `REFLECTION_STARTUP_MAX_CONCURRENT` comment block and the `tick()` docstring.
-- Add the tests listed in Test Impact. Use per-name `MagicMock` states returned from a patched `Reflection.get_or_create`, patch `time.time` to advance by 61 s per tick, and have the fake `create_task` set the dispatched state's `ran_at = now`. The bound assertion is computed as `math.ceil((N - 1) / REFLECTION_STARTUP_MAX_CONCURRENT)`, not hard-coded.
+- Add the tests listed in Test Impact. Use per-name `MagicMock` states returned from a patched `Reflection.get_or_create`, patch `time.time` to advance by 61 s per tick, and have the fake `create_task` set the dispatched state's `ran_at = now`. Patch `agent.reflection_scheduler._latest_run_timestamp` to return None in every new test, and set `ran_at` explicitly (numeric or None) on every per-name state, so no new test reads `ReflectionRun` rows from the test Redis. The bound assertion is computed as `math.ceil((N - 1) / REFLECTION_STARTUP_MAX_CONCURRENT)`, not hard-coded.
+- A candidate whose dispatch raises counts against the cap and is carried into the new `_deferred_since` (earlier value, else `now`); see Technical Approach.
 
 ### 2. Validate the scheduler change
 - **Task ID**: validate-scheduler
@@ -278,19 +300,20 @@ No agent integration is required. This is internal to the reflection worker's sc
 | Cap retained (#1812) | `grep -c "REFLECTION_STARTUP_MAX_CONCURRENT" agent/reflection_scheduler.py` | output > 0 |
 | Event-loop yield retained (#1812) | `grep -c "asyncio.sleep(0)" agent/reflection_scheduler.py` | output > 0 |
 | Deferral no longer DEBUG-only | `grep -c "Deferring %s (per-tick cap" agent/reflection_scheduler.py` | output > 0 |
+| `.env.example` comment updated | `grep -c -i "oldest-due" .env.example` | output > 0 |
 | Docs describe fair order | `grep -c -i "oldest-due" docs/features/reflections.md` | output > 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness, Scope & Value | The spike shows cap 4 is below steady-state demand (4.73 per tick), so the ORDERED post-deploy revert to 4 knowingly moves the shortfall onto the high-priority short-interval jobs. `circuit-health-gate` manages the queue_paused and hibernating flags and would run about 30% less often and up to ~5 ticks late. `session-recovery-drip` drips one session per tick and loses throughput. Outage recovery gets slower, the trade-off sits only in Open Question 1, and the only post-deploy check is the planner cadence. | pending | Resolve Open Question 1 before build and record the chosen cap and the reason as a resolved decision. The post-deploy step must grep `Tick complete: .* deferred by per-tick cap` in `logs/reflection_worker_error.log` for at least 1 h after the change. If the deferred count is non-zero on most ticks, or `circuit-health-gate` `Completed:` lines are more than ~120 s apart, keep the vault `.env` at >= 5 and file the default change instead of reverting to 4. If the code default changes, update the comment at `agent/reflection_scheduler.py:48-53` and the `.env.example` placeholder too. Add a success criterion that reports the deferred count post-deploy. |
-| NIT | Risk & Robustness | When `ran_at` is None or non-numeric, `_effective_last_run` falls through to `_latest_run_timestamp`, which runs a real `ReflectionRun.query` on the test Redis, so the new multi-tick tests depend on DB contents. | pending | Patch `agent.reflection_scheduler._latest_run_timestamp` to return None in the new tests, and set a numeric (or None) `ran_at` on every per-name state explicitly. |
-| NIT | History & Consistency | The plan does not say whether a candidate whose `create_task` raised uses up a cap slot or keeps its `deferred_since`. Under slice semantics it drops out of the deferred set, so a never-run entry loses its pinned age. | pending | Carry a candidate whose dispatch raised into the new `_deferred_since` (keep its earlier value, else `now`). It still counts against the cap for that tick. |
-| NIT | History & Consistency | `test_tick_caps_function_dispatches_at_max_concurrent` relies on every entry resolving to `due_epoch == now` (interval=300 is normalized to `every: 300s`, `ran_at` is None, and `_latest_run_timestamp` returns None). The tie-break claim holds only while the test Redis has no `ReflectionRun` rows for those names. | pending | No plan change needed. Note it when verifying the test unchanged. |
+| CONCERN | Risk & Robustness, Scope & Value | The spike shows cap 4 is below steady-state demand (4.73 per tick), so the ORDERED post-deploy revert to 4 knowingly moves the shortfall onto the high-priority short-interval jobs. `circuit-health-gate` manages the queue_paused and hibernating flags and would run about 30% less often and up to ~5 ticks late. `session-recovery-drip` drips one session per tick and loses throughput. Outage recovery gets slower, the trade-off sits only in Open Question 1, and the only post-deploy check is the planner cadence. | RD-1 (Resolved Decisions); Success Criteria post-deploy rows; No-Gos ORDERED item | Resolve Open Question 1 before build and record the chosen cap and the reason as a resolved decision. The post-deploy step must grep `Tick complete: .* deferred by per-tick cap` in `logs/reflection_worker_error.log` for at least 1 h after the change. If the deferred count is non-zero on most ticks, or `circuit-health-gate` `Completed:` lines are more than ~120 s apart, keep the vault `.env` at >= 5 and file the default change instead of reverting to 4. If the code default changes, update the comment at `agent/reflection_scheduler.py:48-53` and the `.env.example` placeholder too. Add a success criterion that reports the deferred count post-deploy. |
+| NIT | Risk & Robustness | When `ran_at` is None or non-numeric, `_effective_last_run` falls through to `_latest_run_timestamp`, which runs a real `ReflectionRun.query` on the test Redis, so the new multi-tick tests depend on DB contents. | Step 1 build task (test isolation bullet) | Patch `agent.reflection_scheduler._latest_run_timestamp` to return None in the new tests, and set a numeric (or None) `ran_at` on every per-name state explicitly. |
+| NIT | History & Consistency | The plan does not say whether a candidate whose `create_task` raised uses up a cap slot or keeps its `deferred_since`. Under slice semantics it drops out of the deferred set, so a never-run entry loses its pinned age. | Technical Approach (dispatch-exception semantics); Failure Path Test Strategy; Step 1 | Carry a candidate whose dispatch raised into the new `_deferred_since` (keep its earlier value, else `now`). It still counts against the cap for that tick. |
+| NIT | History & Consistency | `test_tick_caps_function_dispatches_at_max_concurrent` relies on every entry resolving to `due_epoch == now` (interval=300 is normalized to `every: 300s`, `ran_at` is None, and `_latest_run_timestamp` returns None). The tie-break claim holds only while the test Redis has no `ReflectionRun` rows for those names. | Test Impact (existing cap test note) | No plan change needed. Note it when verifying the test unchanged. |
 
 ---
 
 ## Open Questions
 
-1. **Default cap vs. steady-state demand.** The production registry's steady-state demand is about 4.73 function dispatches per tick, which is above the default cap of 4. This fix makes the shortfall fair and bounded (the simulation's worst case is about 6 ticks late for any job), but at cap 4 the 60 s jobs (`circuit-health-gate`, `side-effect-drain`) will sometimes run a few ticks late. At cap 5, the simulation shows every sub-900 s job within about 1-2 ticks. Recommendation: keep the default at 4 as the issue's acceptance criteria require, ship the fair ordering, and use the new `deferred` count in `Tick complete` to decide from production data whether to raise the default later. Should the default instead go to 5 in this change?
+None. Former Open Question 1 (default cap vs. steady-state demand) is resolved as RD-1 under Resolved Decisions.
