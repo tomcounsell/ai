@@ -165,39 +165,191 @@ No relevant external findings. This work is internal: routing, the Popoto ORM, a
 
 ## Appetite
 
-TBD
+**Size:** Large
+
+**Team:** Solo dev (builder lanes), PM, code reviewer
+
+**Interactions:**
+- PM check-ins: 1-2. Two decisions need Tom: the charter §11 digest disposition, and the open questions below.
+- Review rounds: 1-2. The change crosses reflections, runner, `job_tool`, and PM priming.
 
 ## Prerequisites
 
-TBD
+No prerequisites. All of this work uses existing Redis, the Popoto models, and the worker. It needs no new secrets or services.
 
 ## Solution
 
-TBD
+### Key Elements
+
+- **Agent handoff primitive** (`reflections/agent_handoff.py`): the only way reflection-side code gets anything in front of a human. It takes a structured `Finding` and reaches an agent in the right Room. It steers a live session bound to that Room if there is one; otherwise it creates one. It never writes to a chat itself. If it cannot reach an agent, it reports that on the operator surface and never pages a human.
+- **Silent completion for handoff sessions**: a session created by a handoff has no human question to answer, so completing with nothing to say is a valid outcome. For these sessions the runner skips the wrap-up nag and the "I wasn't able to produce a response" fallback.
+- **Truthful reconciler reads**:
+  - Owner resolution uses `get_by_id`, `session_id`, `slug`, and the `dev_agent_id` parent link.
+  - PM targeting is scoped to the Job's Room.
+  - `_shipped_evidence` returns typed evidence: merged / open / closed-unmerged / branch-only, plus the issues each PR closes.
+- **Expectation records that stay resolvable**: `job_tool expectation-add --direction outbound` records the calling session as `holder` and rejects the placeholder owners `dev` and `pm`. PM priming tells the PM to record the agentId the Agent tool returns.
+- **Sender cut-over**: every sender below moves to its recorded disposition in the same PR, and the old senders are deleted.
+- **Guard test**: an AST scan fails on any `valor-telegram` / `tools.valor_telegram` subprocess or `send_*_telegram` call under `reflections/`, `scripts/`, or `tools/improvement.py`. It is proven red against the baseline commit.
+
+### Sender dispositions (AC: each remaining sender has a recorded disposition)
+
+| Sender | Today | Disposition | After |
+|---|---|---|---|
+| `expectation_reconciler` T2 (shipped evidence, no PM) | PM instruction pasted to humans | **agent-handled** | `hand_off` to the Job's Room with typed evidence; the agent discharges or re-owns |
+| `expectation_reconciler` T1 (attempts exhausted) / T3 (no PM, no slug) | "Needs a human." with IDs | **agent-handled** | `hand_off` stating "recovery budget spent" / "no respawnable slug". The agent asks the human, in the persona, only if a decision is really needed |
+| `sdlc_progress` "auto-resume disabled" | page | **operator surface** | finding + summary only (it is config state) |
+| `sdlc_progress` "budget exhausted" / "resume failed" | page with raw error | **agent-handled** | `hand_off` to the lane project's `Eng:` Room with the lane, PR, issue and error as evidence |
+| `sentry_triage` digest | host page (fails silently in the cloud routine) | **operator surface** | summary/log only; Class C/D items already become GitHub issues |
+| `stall_advisory` | host page (already disabled) | **operator surface** | delete the Telegram branch and the `stall_advisory_telegram_enabled` param; dashboard events stay |
+| `improvement_assumption_digest` | host page, "asks nothing" | **persona path (default; see Open Question 1)** | `hand_off` of the digest to the valor `Eng:` Room, briefed to deliver it as a status report per charter §11 in the persona. Operator surface too: the full text goes in the reflection summary/log |
+| `tools/improvement.py` charter amendment | raw page | **persona path** | `hand_off` of the amendment request; the agent asks Tom plainly for authorization (charter §12) |
+| `docs_auditor` zero-diff / withheld fixes | page | **operator surface** | summary only; the withheld fixes are already filed issues |
+| `docs_auditor` PR opened | page "Review required" | **agent-handled** | `hand_off` to the audited repo's `Eng:` Room; the agent reviews and escalates only if a human merge decision is needed |
+| `memory_consolidation._flag_contradiction` | raw memory IDs to chat | **operator surface** | keep the `logs/memory-contradictions.log` write (it becomes the primary path) and add a count to the reflection summary |
+| `sdlc_upvote_lanes` announce | raw `--no-read-the-room` post, anchor for the session | **agent-handled** | create the eng session in the `Eng:` Room first, with no anchor; its brief says to announce the pickup in its first message, which goes through the persona path |
+| `sdlc_upvote_lanes` retractions | raw post with raw error | **operator surface** | finding + summary |
+| `agents/system_health_digest` | calls nonexistent `AgentSession.create_and_enqueue`; the brief forces "send via valor-telegram to Eng: Valor" | **agent-handled** | `hand_off` of the anomalies to the host `Eng:` Room; drop the forced send and the chat name |
+| `pm_briefings`, `email_cs._ping_human` (raw outbox) | raw outbox | out of scope | #3589 |
+
+### Flow
+
+**Reflection finds something** → `hand_off(Finding)` → **live session in the target Room?** → steer it → the agent decides at its next turn. If there is no live session: create a handoff session in the Room → the agent acts / discharges / stays silent → **only if a human decision is needed** → the persona message goes through `TelegramRelayOutputHandler` → the human sees a plain-words ask.
+
+### Technical Approach
+
+- **`Finding` and `hand_off`** (`reflections/agent_handoff.py`):
+  - `Finding` is a frozen dataclass with these fields: `source`, `project` (the dict), `room_id`, `facts: list[str]`, `evidence: dict`, `suggested_action: str`, `job_id: str | None`, `expectation_id: str | None`, `holder: str | None`, `dedup_key: str`.
+  - `hand_off(finding) -> HandoffResult(kind: "steered" | "created" | "unreachable", session_id: str | None, reason: str | None)`.
+  - It never raises. It renders the brief with a fixed framing: this came from a scheduled reflection; no human asked; judge the evidence; act, fix, or stay silent; if a human decision is needed, say which decision in plain words, with no internal IDs or commands. The facts and evidence follow as data.
+- **Room targeting**:
+  - A Job-scoped finding targets `job.room_id`.
+  - A project-level finding targets `room_id(project_key, "telegram:<chat_id>")`, with the id from `resolve_eng_group(project)`.
+  - A `system` or non-Telegram Room, or a project with no `Eng:` group, cannot carry a human-facing ask. `hand_off` returns `unreachable("no-human-room")` and the caller records an operator finding. Email Rooms stay unsupported; the reconciler only sees Telegram Rooms today.
+- **Steer target** (`_live_session_in_room`):
+  - Candidates are non-terminal, non-ledger eng AgentSessions with `room_id_for_session(r) == room_id`.
+  - Preference order: the recorded `holder`, matched by `get_by_id` or `session_id`; then the newest `updated_at`.
+  - No project-wide fallback, which meets the AC "never steers a session unrelated to the Job".
+- **Create**:
+  - Enqueue through `agent.agent_session_queue._push_agent_session` (the same core `tools/valor_session.create_session` uses), with the chat id parsed from the Room, `session_type="eng"`, `priority="low"`, `telegram_message_id=0`, and `extra_context_overrides={"origin": "reflection_handoff", "handoff_source": source, "job_id": ..., "expectation_id": ...}`.
+  - The builder checks whether the executor's synthetic slug for slugless eng sessions (`agent/session_executor.py:1413-1417`) provisions a worktree for these sessions. A handoff session that only reads evidence and runs `job_tool` must not cost a worktree. If it does, gate the synthetic slug on `origin != "reflection_handoff"`.
+- **Dedup**: callers keep their own dedup keys. The reconciler keeps its `(job, eid)` cooldown/attempts/sentinel keys, and the sentinel now guards "handed off once at the exhausted rung" instead of "paged once".
+- **Silent completion** (`agent/session_runner/runner.py`): when `extra_context.get("origin") == "reflection_handoff"` and a PM turn completes with an empty `[/complete]` payload, record it as a legitimate silent completion. No wrap-up retry (`:1125-1131`), no fallback text (`:2056-2059`), and one INFO log with a system-Room append for traceability. The rule keys on the explicit origin marker and nothing else.
+- **Reconciler rewrite** (`reflections/expectation_reconciler.py`):
+  - `_owner_rows` uses `get_by_id(owner)`, `session_id`, `slug`, and `dev_agent_id == "agent-" + owner` scoped to the project. For an Agent-tool subagent, the parent PM row stands in as the owner's liveness claim.
+  - `_lane_slug` returns `None` for the reserved placeholders `dev` and `pm`, so there is no `session/dev` probe and no respawn with slug `dev`.
+  - `_shipped_evidence` returns a `ShippedEvidence(kind, pr_number, closes_issues, branch)` dataclass or `None`, from `gh pr list --head <branch> --state all --json number,state,closingIssuesReferences`. `kind` is picked in the order merged > open > closed-unmerged > branch-only. `closed_unmerged` does **not** count as shipped and does not block respawn by itself. It goes into the handoff as evidence ("PR #N was closed without merging") and the agent decides; no auto-respawn over a deliberately closed PR.
+  - `_live_pm_session` is replaced by `agent_handoff._live_session_in_room(job.room_id, holder)`.
+  - Every former `_escalate_once` site becomes a `hand_off`.
+  - The `attempts_exhausted` annotation order is kept (hand off first, then annotate), with the same rationale: a handoff that failed must not be masked.
+- **`job_tool`** (`tools/job_tool.py`):
+  - Outbound `expectation-add` passes `holder=<caller agent_session_id>` into `Job.add_expectation`.
+  - It refuses `--owner` values in `{"dev", "pm"}` with a loud `JobToolError` that says to record the lane slug or the agentId the Agent tool returned.
+  - `.claude/commands/roles/prime-pm-role.md:70` is updated to match.
+- **Removals**:
+  - `send_eng_telegram`, `send_host_eng_telegram`, `_send_telegram_transport`
+  - `resolve_host_eng_chat` and `FALLBACK_ENG_CHAT`, if unused after the cut. `docs_auditor._resolve_notify_chat` then resolves a project dict instead.
+  - `docs_auditor._send_telegram_notification`
+  - the `memory_consolidation` subprocess
+  - the `sdlc_upvote_lanes` `_run_send` / `_announce` / `_retract` and `telegram_message_id` anchoring
+  - the `stall_advisory` Telegram branch
+- **Existing-row repair**: none. Existing rows with holder `"pm"` and owner `dev` are handled at read time. Holder `"pm"` matches no row, so targeting falls to the Room's newest live session or creates one. Owner `dev` means no slug, so no respawn, and the finding is handed off with "owner unrecorded" evidence. Popoto schemas do not change (no new fields), so no migration.
 
 ## Failure Path Test Strategy
 
-TBD
+### Exception Handling Coverage
+- [ ] `hand_off` never raises. Each boundary (Room resolution, session query, `steer_session`, `_push_agent_session`) is tested to return `unreachable` with a `reason` and a `logger.warning`. Tests assert the warning and the `reason`, not just "didn't crash".
+- [ ] The reconciler's per-expectation `except Exception` keeps its test. A test also asserts that an `unreachable` handoff leaves an operator finding (`handoff-unreachable: <eid> <reason>`) and that no chat write happens.
+- [ ] `_shipped_evidence` `gh` failure: the test asserts `None` plus a warning, and that the reconciler then does **not** respawn. A failed evidence read must not look like "no evidence".
+
+### Empty/Invalid Input Handling
+- [ ] `Finding` with empty `facts`, or `room_id` of `system` / an email Room / an unparseable value → `unreachable("no-human-room")`.
+- [ ] `job_tool expectation-add --owner dev|pm|""` → loud refusal.
+- [ ] A handoff session completing with an empty `[/complete]` → silent completion, no fallback text. A **non**-handoff session with the same empty completion still gets the wrap-up and fallback (regression guard).
+
+### Error State Rendering
+- [ ] When the handoff agent decides a human is needed, the message reaches the human through `TelegramRelayOutputHandler.send`. An AI judge (not keywords) scores it on human readability, a named decision, and the absence of UUIDs and shell commands.
+- [ ] When no agent can be reached, the reflection `summary` (visible on the dashboard) says so in words. It is not silently equivalent to "handed off".
 
 ## Test Impact
 
-- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py` — UPDATE: escalation/steer paths (skeleton; detailed list follows)
+- [ ] `tests/unit/reflections/test_reflections_expectation_reconciler.py`: REPLACE the escalation-shaped tests (`test_successful_steer_never_escalates`, `test_attempt_cap_escalates_once_then_stops`, the no-`Eng:`-group suppression test, and the `_escalate_once` monkeypatches) with `hand_off` assertions. ADD owner resolution by agent-session id, `dev_agent_id`, and reserved placeholders; typed `_shipped_evidence` kinds; Room-scoped targeting; and the incident replay.
+- [ ] `tests/unit/reflections/test_reflections_utilities_eng_chat.py`: DELETE the `send_eng_telegram` / `send_host_eng_telegram` / `_send_telegram_transport` cases. UPDATE any `resolve_host_eng_chat` cases (DELETE if the function is removed).
+- [ ] `tests/unit/reflections/test_reflections_utilities_resolve_eng_group.py`: no change; `resolve_eng_group` stays.
+- [ ] `tests/unit/reflections/test_reflections_progress_check.py` and `tests/integration/test_sdlc_stall_auto_resume_e2e.py`: UPDATE the `_send_alert` / `send_eng_telegram` assertions to `hand_off` (budget exhausted / resume failed) and to the operator finding (disabled).
+- [ ] `tests/unit/test_sentry_triage_apply.py`: UPDATE by removing the Telegram-notification assertions and asserting the summary carries the digest.
+- [ ] `tests/unit/reflections/test_stall_advisory_reflection.py` (lines ~179-222) and `tests/integration/test_stall_advisory_e2e.py`: DELETE the `stall_advisory_telegram_enabled` cases. UPDATE to assert no Telegram path exists.
+- [ ] `tests/unit/test_reflection_scheduler.py:1425-1479`: UPDATE the param-passthrough fixtures to a neutral param name (they use `stall_advisory_telegram_enabled` only as an example).
+- [ ] `tests/unit/test_improvement_assumption_digest.py`: UPDATE the default-sender assertions to the `hand_off` path. `CLOSING_LINE` stays pinned.
+- [ ] `tests/unit/test_improvement_investigations.py` (~:360, propose-amendment): UPDATE "Tom notified" to the handoff result.
+- [ ] `tests/unit/test_docs_auditor_substrate.py` and `tests/unit/reflections/test_reflections_docs_auditor_git_surface.py`: UPDATE the `_send_telegram_notification` assertions to the summary (zero-diff) or `hand_off` (PR opened).
+- [ ] `tests/unit/test_memory_consolidation.py`: UPDATE the `_flag_contradiction` tests. The log write is now the primary path and no subprocess runs.
+- [ ] `tests/unit/reflections/test_reflections_upvote_lanes.py`: REPLACE the announce/anchor/retract tests with "session created in the `Eng:` Room with an announce-first brief, no anchor, retraction as a finding".
+- [ ] `tests/unit/test_sustainability.py:826-907`: REPLACE the `create_and_enqueue` mock (the method does not exist) with a `hand_off` assertion. ADD a test that fails if the anomaly path calls an attribute the model lacks (use the real class, not a mock).
+- [ ] `tests/unit/test_job_tool.py`: UPDATE `expectation-add` for the recorded holder. ADD the reserved-owner refusal.
+- [ ] `tests/unit/session_runner/test_runner_turns.py`: ADD silent completion for `origin=reflection_handoff`, plus the unchanged-behavior regression for other sessions.
+- [ ] `tests/unit/test_nightly_regression_tests.py:884-897`: no change. The new guard generalizes it and both stay.
 
 ## Rabbit Holes
 
-TBD
+- **Rebuilding the dashboard to render the system Room inbox.** The operator surface for status-only output is the reflection `summary` and the logs, which the dashboard already shows. A Room-inbox viewer is a separate feature.
+- **Making read-the-room suppress without an anchor, or stop skipping SDLC sessions.** Both gaps are real (spike-1), but silent completion makes the handoff session's silence explicit rather than relying on read-the-room.
+- **Reworking mechanical discharge.** The durability model's "nothing mechanical discharges" rule stays (Open Question 2). This plan only guarantees that an agent is always reachable to author the discharge.
+- **Auto-discovering the Job for Agent-tool subagents through hooks.** Recording the agentId at `expectation-add` time plus the `dev_agent_id` link is enough; a SubagentStart hook that writes expectations is a larger design.
+- **Per-project `sentry_triage` / `stall_advisory` redesigns.** They go to the operator surface as they are.
 
 ## Risks
 
-TBD
+### Risk 1: Handoff sessions spam the Eng group
+**Impact:** Swapping raw pages for many agent posts is still noise.
+**Mitigation:**
+- Silent completion is the default outcome the brief asks for.
+- Caller dedup keys stay: the reconciler's per-(job, eid) cooldown and sentinel, and `sdlc_progress`'s per-(slug, sha) sentinel.
+- The drafter's redundancy filter applies.
+- The incident-replay test asserts zero human-chat writes for a delivered-work case.
+
+### Risk 2: A created handoff session collides with a human conversation in the same Room
+**Impact:** Two sessions answer in one chat.
+**Mitigation:** Creation happens only when no live session exists in the Room. When one exists, the finding is steered into it, and the steering list drains at turn boundaries (`agent/steering.py`).
+
+### Risk 3: Silent completion masks a genuinely broken handoff session
+**Impact:** A session that crashed or produced nothing looks like a deliberate silence.
+**Mitigation:**
+- Silent completion requires a clean `[/complete]` routing. A harness failure still takes the existing failure path.
+- Each silent completion logs `handoff-silent <source> <session_id>`, which is countable on the operator surface.
+
+### Risk 4: Upvote pickup loses its announcement anchor
+**Impact:** The lane's replies are no longer threaded under a pickup message.
+**Mitigation:** The session's first persona message *is* the announcement, and later replies follow the session's normal reply chain. The test asserts the brief requires announcing first.
+
+### Risk 5: Charter §11 conflict
+**Impact:** Removing the digest from Telegram would amend the charter without Tom's authorization (charter §12: only Tom authorizes amendments).
+**Mitigation:** Default to the persona path, so the digest stays in Telegram and is voiced by an agent. The deviation from the issue's AC is raised as Open Question 1 rather than decided by fiat.
 
 ## Race Conditions
 
-TBD
+### Race 1: PM discharges while the reconciler hands off
+**Location:** `reflections/expectation_reconciler.py`, from the per-expectation pass to `hand_off`
+**Trigger:** The PM runs `expectation-remove` between the scan and the handoff.
+**Data prerequisite:** The expectation must still be open when the handoff is issued.
+**State prerequisite:** The Job must be re-fetched immediately before acting.
+**Mitigation:** Keep the existing Race-3 re-fetch (`Job.query.get` plus the open check) directly before `hand_off`. A stale handoff is benign: the agent re-reads the Job with `job_tool show`, and the brief tells it to do that first.
+
+### Race 2: Two ticks or two reflections create two sessions in one Room
+**Location:** `agent_handoff.hand_off` create rung
+**Trigger:** The reconciler and `sdlc_progress` both find the Room empty in the same instant.
+**Data prerequisite:** none
+**State prerequisite:** At most one handoff session per Room should be created per short window.
+**Mitigation:** A raw-Redis bookkeeping claim `handoff:create:{room_id}` (SET NX, short TTL, not Popoto-managed; same exception class as the reconciler keys). A second caller in the window steers the just-created session instead: `_live_session_in_room` sees the pending row, because pending is non-terminal.
+
+### Race 3: The steer target turns terminal between selection and `steer_session`
+**Location:** `hand_off` steer rung
+**Trigger:** The session completes in between.
+**Mitigation:** `steer_session` already rejects terminal sessions. On rejection, `hand_off` falls through to the create rung within the same call.
 
 ## No-Gos (Out of Scope)
 
-TBD
+- [SEPARATE-SLUG #3589] Raw `telegram:outbox:*` writers that fail the same bar (`reflections/pm_briefings/*`, `tools/email_cs/handler.py::_ping_human`, `tools/send_message.py::_legacy_telegram_rpush`). #3588's recon dropped them. The new guard targets the `valor-telegram` side door, and #3589 widens it to raw outbox writes.
+- [EXTERNAL] Amending charter §11 to take the assumption digest out of Telegram. Only Tom can authorize charter changes (charter §12). The plan defaults to the persona path and asks.
 
 ## Update System
 
