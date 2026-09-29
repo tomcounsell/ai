@@ -1,4 +1,4 @@
-"""reflections/agent_handoff.py -- the one sanctioned exit from reflection code toward humans (#3588).
+"""reflections/agent_handoff.py: the one sanctioned exit from reflection code to humans (#3588).
 
 A reflection that finds something never writes to a human chat. It builds a
 structured :class:`Finding` and calls :func:`hand_off`, which reaches an agent
