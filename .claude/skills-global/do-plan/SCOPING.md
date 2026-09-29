@@ -12,6 +12,15 @@ Push back on vague requests. Ask:
 - Who's blocked and how?
 - What's the real breakdown?
 
+### When the issue is fog-forward
+
+Trigger: the issue carries a `## Fog (Not Yet Specified)` section or records blue-sky mode in its body. Here the goal is a direction whose specifics are genuinely unknown, so narrowing it would fabricate certainty. Instead:
+
+- Keep the low resolution. Resolve what can be resolved now (spikes, reading the code).
+- Carry the rest as a **Not Yet Specified** list in the plan. Items graduate into tasks as they clear.
+- When the work spans several interdependent decisions across sessions, **chart a decision map**: one parent issue holding the destination, the decisions made so far, and the open fog, plus one child issue per decision. Resolve one decision at a time, record each result on the map, then re-plan.
+- Tell fog from a grab-bag. One unknown direction is fog: chart it. Several known, unrelated features are a grab-bag: split them (see below).
+
 ## 2. Avoid Grab-Bags
 
 **Bad:** "Redesign the dashboard"

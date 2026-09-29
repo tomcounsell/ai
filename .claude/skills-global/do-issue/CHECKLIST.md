@@ -6,7 +6,7 @@ Run every check before creating the issue. Fix failures — do not skip items.
 
 Run these first. They ask whether the issue should exist at all; every other section asks only whether it is well written. A wrong issue that passes every readability check still costs the next reader a full investigation to disprove — and it reads as authoritative while doing it.
 
-- [ ] **Observed, not inferred** — The issue names what was actually seen: a command and its output, a log line, a failing test, a timeline entry. If the central claim is phrased "could", "would", or "may", it is a hypothesis. Reproduce it, or raise it in the originating discussion and file nothing.
+- [ ] **Observed, not inferred** — The issue names what was actually seen: a command and its output, a log line, a failing test, a timeline entry. If the central claim is phrased "could", "would", or "may", it is a hypothesis. Reproduce it, or raise it in the originating discussion and file nothing. In blue-sky mode this applies to the pain motivating the direction, not to the specifics still in fog; an unobserved "could/would" pain still means file nothing.
 
 - [ ] **Counter-case checked** — If the issue claims a pattern ("systemic", "every", "always", "will recur"), name the instances you checked that could have falsified it, and what they showed. One observation is an anecdote. The cases that did *not* exhibit the behavior are the evidence that decides it.
 
@@ -18,7 +18,7 @@ Run these first. They ask whether the issue should exist at all; every other sec
 
 ## Reconnaissance Checks
 
-- [ ] **Recon performed** — The reconnaissance routine (Step 3) was executed: broad scan completed, concerns identified, parallel fan-out agents dispatched, and findings synthesized. Skip only for trivially simple issues (typo fixes, config changes).
+- [ ] **Recon performed** — The reconnaissance routine (Step 3) was executed: broad scan completed, concerns identified, parallel fan-out agents dispatched, and findings synthesized. Skip only for trivially simple issues (typo fixes, config changes). In blue-sky mode the broad scan plus fan-out on cheap concerns only meets this.
 
 - [ ] **Recon summary present** — The issue body contains a `## Recon Summary` section with the four buckets (Confirmed, Revised, Pre-requisites, Dropped) and at least one concrete item. OR it contains a `## Recon: Skipped` section with justification for why recon was unnecessary.
 
@@ -28,7 +28,7 @@ Run these first. They ask whether the issue should exist at all; every other sec
 
 - [ ] **Stranger test** — Could someone with general software experience but zero knowledge of this codebase understand the issue? Read the title and first paragraph as if you've never seen this repo.
 
-- [ ] **No undefined jargon** — Every project-specific term, system name, or acronym that isn't common software engineering knowledge is defined in the Context blockquote or Definitions table. Common knowledge does NOT need defining (e.g., "REST API", "Redis", "git branch", "CI/CD"). Project-specific concepts DO need defining (e.g., "Observer Agent", "SDLC pipeline", "attractor spec", "steering queue").
+- [ ] **No undefined jargon** — Every project-specific term, system name, or acronym that isn't common software engineering knowledge is defined in the Context blockquote or Definitions table. Common knowledge does NOT need defining (e.g., "REST API", "Redis", "git branch", "CI/CD"). Project-specific concepts DO need defining (e.g., "Observer Agent", "SDLC pipeline", "attractor spec", "steering queue"). In blue-sky mode, terms the exploration exists to pin down may sit in the Fog section instead.
 
 - [ ] **Links present** — Every reference to a file, repo, PR, issue, doc page, or external resource includes a clickable link. No "see the docs" without a URL.
 
@@ -38,7 +38,7 @@ Run these first. They ask whether the issue should exist at all; every other sec
 
 - [ ] **Problem before solution** — The Problem section comes before the Solution Sketch. The reader understands *what's wrong* before learning *what to do about it*.
 
-- [ ] **Measurable acceptance criteria** — Each criterion is verifiable (can be checked off with a yes/no). No vague criteria like "improve quality" — instead, "issues created by the skill pass the pre-publish checklist."
+- [ ] **Measurable acceptance criteria** — Each criterion is verifiable (can be checked off with a yes/no). No vague criteria like "improve quality" — instead, "issues created by the skill pass the pre-publish checklist." In blue-sky mode each criterion is a checkable signal that the fog cleared.
 
 - [ ] **Type label** — Issue has a label: `bug`, `feature`, or `chore`.
 

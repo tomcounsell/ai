@@ -44,6 +44,14 @@ Read the user's description. Identify:
 - **What type**: bug, feature, or chore
 - **What's broken or missing**: the actual problem
 - **Domain terms**: any project-specific names, acronyms, or concepts
+- **What mode**: *well-scoped* (default) or *blue-sky*. If writing verifiable acceptance criteria would require inventing specifics the requester did not give, the issue is blue-sky: a direction worth naming whose specifics are genuinely unknown. Choose blue-sky only when the requester signals exploration; otherwise stay well-scoped so an unattended run never stalls on the choice. Record the chosen mode in the issue body.
+
+**Blue-sky mode.** Premature crispness fabricates certainty nobody has, so this mode keeps the direction at low resolution and says plainly what is unknown. What changes:
+
+- Recon reads the area to ground the direction; run fan-out only for cheap concerns. The `## Recon Summary` keeps its four-bucket shape in both modes.
+- Define the terms you can. Terms the exploration exists to pin down go in the Fog section instead.
+- Acceptance criteria become **signals the fog cleared**: still checkable, but they name what will be known or decided rather than a finished feature.
+- A `## Fog (Not Yet Specified)` section lists the known unknowns and the decisions that hang on each.
 
 ### Step 2: Research Context
 
@@ -101,7 +109,7 @@ Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
 3. **Definitions section** — If the issue uses 2+ domain-specific terms, add a Definitions table. Each term gets a one-line definition and a link to where the reader can learn more.
 
-4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction. **For architectural or structural problems where the root cause is still uncertain, write open questions here instead of approaches — do-plan will not challenge a concrete sketch, it will execute it.**
+4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction. **For architectural or structural problems where the root cause is still uncertain, write open questions here instead of approaches — do-plan will not challenge a concrete sketch, it will execute it. In blue-sky mode, those open questions live in the Fog section.**
 
 5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document." If the context file declares the repo's plan-doc path convention, name the concrete path.
 
