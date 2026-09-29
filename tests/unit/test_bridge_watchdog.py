@@ -1247,3 +1247,131 @@ class TestRunHealthCheckCircuitWiring:
 
         assert result is True
         mock_recovery.assert_called_once_with(2, mock_health.return_value.issues)
+
+
+# --- The watchdog never signals claude / pyright processes (issue #3592) ---
+
+_INTERACTIVE_CLAUDE_PID = 170
+_PYRIGHT_PID = 171
+_PS_TABLE = (
+    "  PID     ELAPSED    RSS COMMAND\n"
+    f"  {_INTERACTIVE_CLAUDE_PID}     03:00:12  568000 "
+    "claude --continue --permission-mode bypassPermissions --model opus\n"
+    f"  {_PYRIGHT_PID}     03:00:12  650000 pyright-langserver --stdio\n"
+)
+
+
+def _fake_subprocess_run(cmd, *args, **kwargs):
+    """Answer every ``ps`` with a table holding a 3h-old interactive claude
+    session and a 3h-old pyright; every other command succeeds silently."""
+    result = MagicMock()
+    result.returncode = 0
+    result.stderr = ""
+    result.stdout = _PS_TABLE if cmd and cmd[0] == "ps" else ""
+    return result
+
+
+def _stat_or_none(path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+class TestWatchdogNeverSignalsClaudeProcesses:
+    """An interactive ``claude`` session or a ``pyright`` older than 2h is never
+    signalled by the watchdog, from the health check or from any recovery level.
+
+    Orphan cleanup belongs to the worker's ownership-gated reapers; the watchdog
+    has no evidence of ownership, only age, so it must not signal these at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _checkout_data_untouched(self):
+        """No test in this class may write the checkout's crash history or
+        recovery lock, the files the live watchdog reads."""
+        from monitoring import bridge_watchdog as bw
+        from monitoring import crash_tracker
+
+        watched = (crash_tracker.CRASH_HISTORY_FILE, bw.RECOVERY_LOCK)
+        before = [_stat_or_none(p) for p in watched]
+        yield
+        assert [_stat_or_none(p) for p in watched] == before
+
+    @staticmethod
+    def _signalled_pids(mock_kill):
+        return {c.args[0] for c in mock_kill.call_args_list if c.args}
+
+    @patch("monitoring.bridge_watchdog.log_crash")
+    @patch("monitoring.bridge_watchdog.assess_scan_health", return_value=(True, ""))
+    @patch("monitoring.bridge_watchdog._get_watchdog_redis")
+    @patch("monitoring.bridge_watchdog.assess_update_flow", return_value=(True, ""))
+    @patch("monitoring.bridge_watchdog.get_recent_crashes", return_value=[])
+    @patch("monitoring.bridge_watchdog.detect_crash_pattern", return_value=(False, None))
+    @patch("monitoring.bridge_watchdog.are_logs_fresh", return_value=True)
+    @patch("monitoring.bridge_watchdog.is_bridge_running", return_value=(True, 1234))
+    @patch("time.sleep")
+    @patch("os.kill")
+    @patch("subprocess.run", side_effect=_fake_subprocess_run)
+    def test_health_check_never_signals_claude_or_pyright(
+        self,
+        mock_run,
+        mock_kill,
+        mock_sleep,
+        mock_running,
+        mock_logs,
+        mock_crash,
+        mock_crashes,
+        mock_update_flow,
+        mock_redis,
+        mock_scan_health,
+        mock_log_crash,
+    ):
+        from monitoring.bridge_watchdog import check_bridge_health
+
+        status = check_bridge_health()
+
+        signalled = self._signalled_pids(mock_kill)
+        assert _INTERACTIVE_CLAUDE_PID not in signalled
+        assert _PYRIGHT_PID not in signalled
+        assert status.healthy is True, f"unexpected issues: {status.issues}"
+        mock_log_crash.assert_not_called()
+
+    @pytest.mark.parametrize("level", [2, 3, 4])
+    @patch("monitoring.bridge_watchdog.log_crash")
+    @patch("monitoring.bridge_watchdog.revert_last_commit", return_value=False)
+    @patch("monitoring.bridge_watchdog.clear_lock_files", return_value=0)
+    @patch("monitoring.bridge_watchdog.restart_bridge", return_value=True)
+    @patch("monitoring.bridge_watchdog.kill_stale_processes", return_value=0)
+    @patch("time.sleep")
+    @patch("os.kill")
+    @patch("subprocess.run", side_effect=_fake_subprocess_run)
+    def test_recovery_never_signals_claude_or_pyright(
+        self,
+        mock_run,
+        mock_kill,
+        mock_sleep,
+        mock_kill_stale,
+        mock_restart,
+        mock_clear_locks,
+        mock_revert,
+        mock_log_crash,
+        level,
+        tmp_path,
+    ):
+        from monitoring import bridge_watchdog as bw
+
+        auto_revert_file = tmp_path / "auto-revert-enabled"
+        if level == 4:
+            auto_revert_file.touch()
+
+        with (
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "recovery-lock"),
+            patch.object(bw, "AUTO_REVERT_ENABLED_FILE", auto_revert_file),
+        ):
+            bw.execute_recovery(level, ["bridge unhealthy"])
+
+        signalled = self._signalled_pids(mock_kill)
+        assert _INTERACTIVE_CLAUDE_PID not in signalled
+        assert _PYRIGHT_PID not in signalled
