@@ -100,7 +100,6 @@ If `PROGRESS.md` exists in `cwd`, the hook includes it as item 3 in the nudge.
 
 ## Cross-References
 
-- Plan: [`docs/plans/postcompact-regrounding-hook.md`](../plans/postcompact-regrounding-hook.md)
 - Hook: `.claude/hooks/post_compact.py`
 - Registration: `.claude/settings.json` (PostCompact key)
 - Tests: `tests/unit/hooks/test_post_compact_hook.py`
