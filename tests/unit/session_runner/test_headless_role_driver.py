@@ -264,6 +264,28 @@ async def test_empty_result_hits_empty_output_guard(tmp_path):
     assert outcome.failure.reason is ExitReason.EMPTY_OUTPUT
 
 
+async def test_empty_result_with_structured_output_is_not_empty(tmp_path):
+    """A turn ending on the StructuredOutput call can carry an empty `result`
+    string; the routed object is the reply and must survive to the runner
+    (dropping it delivered the canned terminal message instead)."""
+    routed = {"route": "user", "message": "Here is the status."}
+
+    async def _fake(message, working_dir, **kwargs):
+        kwargs["on_structured_output"](routed)
+        return ""
+
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-10",
+        working_dir=str(tmp_path),
+        harness_fn=_fake,
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.failure is None
+    assert outcome.structured_output == routed
+    assert json.loads(outcome.reply_text) == routed
+
+
 async def test_binary_missing_classified(tmp_path):
     """The harness's inline binary-not-found marker is classified, not treated
     as a normal reply."""

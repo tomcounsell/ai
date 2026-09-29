@@ -70,8 +70,10 @@ class FakeSession:
         is_sdlc: bool = False,
         telegram_message_id: int | None = None,
         project_key: str | None = None,
+        chat_message_log: list[dict] | None = None,
     ):
         self.session_id = session_id
+        self.chat_message_log = chat_message_log or []
         self.is_sdlc = is_sdlc
         self.telegram_message_id = telegram_message_id
         self.project_key = project_key
@@ -383,6 +385,38 @@ def test_suppress_verdict(monkeypatch):
     verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, FakeSession()))
     assert verdict.action == "suppress"
     assert verdict.reason == "duplicate_answer"
+
+
+def test_suppress_overridden_when_latest_inbound_is_unanswered(monkeypatch):
+    """Haiku must not swallow the only answer to a human's request (it once
+    suppressed a full completion reply 8 minutes after the ask as stale)."""
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "please update the skills"}])
+    _patch_run_typed(monkeypatch, _verdict("suppress", reason="stale_trigger_no_open_context"))
+    session = FakeSession(
+        chat_message_log=[
+            {"direction": "out", "content": "earlier reply"},
+            {"direction": "in", "content": "please update the skills"},
+        ]
+    )
+
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
+    assert verdict.action == "send"
+    assert verdict.reason == "unanswered_trigger"
+    assert session.session_events[-1]["type"] == "rtr.suppress_overridden"
+
+
+def test_suppress_kept_when_latest_inbound_already_answered(monkeypatch):
+    _patch_snapshot(monkeypatch, [{"sender": "Tom", "content": "thanks"}])
+    _patch_run_typed(monkeypatch, _verdict("suppress", reason="duplicate_answer"))
+    session = FakeSession(
+        chat_message_log=[
+            {"direction": "in", "content": "status?"},
+            {"direction": "out", "content": "done"},
+        ]
+    )
+
+    verdict = asyncio.run(read_the_room(_long_draft(), GROUP_CHAT_ID, session))
+    assert verdict.action == "suppress"
 
 
 # === Failure / fail-open tests ==================================================

@@ -588,7 +588,35 @@ async def read_the_room(
     # rewrite available -> nothing to substitute).
     if verdict.action == "trim" and not verdict.revised_text:
         return RoomVerdict(action="send", reason="trim_missing_revised_text")
+
+    # A human asked and nothing has answered yet: the draft IS the answer, so
+    # the room cannot have moved past it. Haiku has read an in-flight answer as
+    # stale chatter and swallowed it behind a 👀, which leaves the asker with
+    # no reply at all. The deterministic stale_trigger path above still wins.
+    if verdict.action == "suppress" and _has_unanswered_inbound(session):
+        _append_event(
+            session,
+            _make_event(
+                "rtr.suppress_overridden",
+                chat_id=chat_id,
+                draft_text=draft_text,
+                reason="unanswered_trigger",
+            ),
+        )
+        return RoomVerdict(action="send", reason="unanswered_trigger")
     return verdict
+
+
+def _has_unanswered_inbound(session: Any) -> bool:
+    """True when the session's latest inbound message has no outbound reply after it."""
+    log = list(getattr(session, "chat_message_log", None) or [])
+    for entry in reversed(log):
+        direction = entry.get("direction") if isinstance(entry, dict) else None
+        if direction == "out":
+            return False
+        if direction == "in":
+            return True
+    return False
 
 
 # Public re-exports so call sites can `from bridge.read_the_room import ...`

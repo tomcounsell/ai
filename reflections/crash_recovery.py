@@ -5,7 +5,7 @@ Callable contract: no arguments, returns:
   {"status": "ok"|"error", "findings": [...], "summary": str}
 
 Periodic reflection that:
-1. Scans recently-terminal sessions (RESUMABLE_STATUSES) for unprocessed signatures
+1. Scans recently-crashed sessions (RESUMABLE_STATUSES minus "completed") for unprocessed signatures
 2. Extracts and upserts crash signatures into the library
 3. Attributes outcomes for already-resumed sessions (crash_outcome_attributed idempotency)
 4. In propose mode (default): logs proposals only, no resume
@@ -135,6 +135,8 @@ def run_crash_recovery() -> dict:
     except ImportError as e:
         return {"status": "error", "findings": [], "summary": f"import error: {e}"}
 
+    crash_statuses = RESUMABLE_STATUSES - {"completed"}
+
     # Canonical Popoto string-boolean coercion helper (#2439) — consolidated
     # here instead of the drifted ImportError-fallback copy this used to carry.
     from agent.session_pickup import _truthy
@@ -238,13 +240,15 @@ def run_crash_recovery() -> dict:
                 e,
             )
 
-    # --- Phase 2: Extract signatures for freshly-terminal sessions ---
-    # These sessions have no crash_signature set and are in RESUMABLE_STATUSES.
+    # --- Phase 2: Extract signatures for freshly-crashed sessions ---
+    # These sessions have no crash_signature set and ended in a crash status.
+    # "completed" is a clean end, not a crash: resuming it injects a synthetic
+    # "continue" the human never sent and re-runs finished work.
     fresh_terminal = [
         s
         for s in recent
         if not getattr(s, "crash_signature", None)
-        and s.status in RESUMABLE_STATUSES
+        and s.status in crash_statuses
         and not _truthy(getattr(s, "crash_outcome_attributed", None))
     ]
 
@@ -419,7 +423,7 @@ def run_crash_recovery() -> dict:
                     )
                     continue
 
-                if fresh_session.status not in RESUMABLE_STATUSES:
+                if fresh_session.status not in crash_statuses:
                     logger.debug(
                         "crash_recovery: session %s status changed to %s before auto-resume — "
                         "skipping (already handled)",

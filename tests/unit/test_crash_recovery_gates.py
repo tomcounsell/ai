@@ -216,18 +216,34 @@ class TestResumableSessionFilterReachesUpdatedAt:
         test from processing (and potentially auto-resuming) unrelated
         sessions left behind by other concurrently-running tests.
         """
+        outcome = self._run_with_session(status="failed", tag="reach")
+        assert outcome["status"] == "ok"
+        assert outcome["session_id"] in outcome["seen"], (
+            "a session with an aware, in-window updated_at must reach "
+            "fresh_terminal processing (i.e. survive the resumable-session filter)"
+        )
+
+    def test_completed_session_is_never_crash_processed(self):
+        """A cleanly `completed` session is not a crash. Treating it as one
+        auto-resumed finished sessions with a synthetic "continue" the human
+        never sent, which the PM read as approval to start new work."""
+        outcome = self._run_with_session(status="completed", tag="completed")
+        assert outcome["status"] == "ok"
+        assert outcome["session_id"] not in outcome["seen"]
+
+    @staticmethod
+    def _run_with_session(*, status: str, tag: str) -> dict:
         import uuid
         from datetime import UTC, datetime, timedelta
 
         from models.agent_session import AgentSession
-        from models.session_lifecycle import RESUMABLE_STATUSES
 
         uid = uuid.uuid4().hex[:8]
-        session_id = f"crash-recovery-reach-{uid}"
+        session_id = f"crash-recovery-{tag}-{uid}"
         session = AgentSession.create(
             session_id=session_id,
             project_key=f"test-crash-recovery-{uid}",
-            status=next(iter(RESUMABLE_STATUSES)),
+            status=status,
             chat_id=f"crash-recovery-chat-{uid}",
             working_dir="/tmp/test-crash-recovery",
         )
@@ -256,8 +272,4 @@ class TestResumableSessionFilterReachesUpdatedAt:
         finally:
             session.delete()
 
-        assert result["status"] == "ok"
-        assert session_id in seen_session_ids, (
-            "a session with an aware, in-window updated_at must reach "
-            "fresh_terminal processing (i.e. survive the resumable-session filter)"
-        )
+        return {"status": result["status"], "session_id": session_id, "seen": seen_session_ids}

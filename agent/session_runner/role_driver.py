@@ -21,6 +21,7 @@ role paths: it does not read ``CLAUDE_CODE_OAUTH_TOKEN``.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -533,6 +534,13 @@ class HeadlessRoleDriver:
             outcome.reply_text = reply
             outcome.failure = TurnFailure(ExitReason.HEADLESS_BINARY_MISSING)
             return outcome
+
+        # A turn that ends on the StructuredOutput tool call can carry an empty
+        # `result` string; the schema-validated object IS the reply, so it must
+        # not be classified as empty output (that path dropped a routed reply
+        # and delivered the canned terminal message instead).
+        if not reply and turn_result.structured_output:
+            reply = json.dumps(turn_result.structured_output)
 
         # Empty-output guard: no result event, no accumulated text.
         if not reply:
