@@ -71,6 +71,15 @@ stat -f %i .claude/skills-global/<name>/SKILL.md ~/.claude/skills/<name>/SKILL.m
 
 Differing inodes mean the live copy is stale; `/update` re-establishes every link.
 
+### Pausing skills sync on one machine
+
+A machine can opt out of the `~/.claude/skills/` half of the sync with a local marker file, `~/.local/state/valor/skip-skills-sync`. While it exists, `/update` skips skills hardlinking, the old dir-symlink migration, stale-skill cleanup, and `RENAMED_REMOVALS` entries of kind `skills`, and reports one `skipped` action for `~/.claude/skills`. Commands, agents, hooks, and everything else in `/update` still run. The marker lives outside the repo and the vault, so it affects only the machine that created it.
+
+```bash
+mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync   # pause
+rm ~/.local/state/valor/skip-skills-sync                                       # resume
+```
+
 ## Skill Liveness and Husks
 
 A skill is *live* if and only if its directory holds a `SKILL.md` file. Directory

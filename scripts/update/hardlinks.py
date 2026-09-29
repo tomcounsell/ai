@@ -595,6 +595,23 @@ def user_hooks_root_is_repo_aliased(
     return None
 
 
+def _skills_sync_paused() -> bool:
+    """True if this machine has opted out of syncing ~/.claude/skills.
+
+    Per-machine only: gated by a local marker file that is never synced (not
+    in the iCloud vault, not in this repo), so pausing here has no effect on
+    the rest of the fleet. Everything else in /update — git pull,
+    commands/agents/hooks sync, service restarts — still runs normally;
+    delete the marker to resume.
+
+    To pause/resume on a given machine:
+        mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync   # pause
+        rm ~/.local/state/valor/skip-skills-sync                                       # resume
+    A machine without the marker syncs skills normally.
+    """
+    return (Path.home() / ".local" / "state" / "valor" / "skip-skills-sync").exists()
+
+
 def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     """Hardlink project .claude/{skills,commands,agents} files to ~/.claude/.
 
@@ -606,13 +623,25 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     """
     result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
+    skills_paused = _skills_sync_paused()
+
+    if skills_paused:
+        result.actions.append(
+            LinkAction(
+                "",
+                "~/.claude/skills",
+                "skipped",
+                "skills sync paused (~/.local/state/valor/skip-skills-sync present)",
+            )
+        )
+        result.skipped += 1
 
     # Migrate old directory-symlink layout: ~/.claude/skills used to be a symlink
     # to .claude/skills/. Now .claude/skills/ is project-only and globally-shared
     # skills live in .claude/skills-global/. If the symlink is still in place,
     # remove it so _sync_skills can create a real directory with proper hardlinks.
     user_skills = user_claude / "skills"
-    if user_skills.is_symlink():
+    if user_skills.is_symlink() and not skills_paused:
         user_skills.unlink()
         result.actions.append(
             LinkAction("", "~/.claude/skills", "removed", "migrated from dir-symlink to hardlinks")
@@ -624,7 +653,8 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     # the comment there for why the distance is the whole problem (issue #2567).
 
     # Sync globally-shared skills from skills-global/ (not skills/, which is project-only).
-    _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
+    if not skills_paused:
+        _sync_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
 
     # Sync commands: each is a .md file.
     # Commands are slash-command aliases — always shared.
@@ -650,7 +680,10 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
 
     # Clean up stale hardlinks that no longer have a source
     _cleanup_stale_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
-    _cleanup_stale_skills(project_dir / ".claude" / "skills-global", user_claude / "skills", result)
+    if not skills_paused:
+        _cleanup_stale_skills(
+            project_dir / ".claude" / "skills-global", user_claude / "skills", result
+        )
     _cleanup_stale_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
     # Sync hook registration (manifest-driven, both scopes). Load once so
@@ -1028,8 +1061,11 @@ def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncR
         )
         result.skipped += 1
 
+    skills_paused = _skills_sync_paused()
     for kind, old_name in RENAMED_REMOVALS:
         if kind == "hooks" and hooks_aliased is not None:
+            continue
+        if kind == "skills" and skills_paused:
             continue
         target = user_claude / kind / old_name
         if not target.exists():
