@@ -290,10 +290,14 @@ session-ensure`, owns the per-issue lock for the WHOLE run:
   assembly live-fetches the PR head (`_fetch_pr_head_sha`,
   `context["pr_head_sha"]`); the router compares it to the head SHA the
   verdict attributes to, surfaced as `_meta.latest_review_head_sha` — the same
-  freshness definition `tools/merge_predicate` enforces. A mismatch, a verdict
-  attributable to no head SHA, or a failed lookup (fail-closed: `pr_head_sha=""` +
-  `pr_head_sha_lookup_failed=true`, never omitted) routes to `/do-pr-review`
-  at the new head instead of merging.
+  freshness definition `tools/merge_predicate` enforces. When the SHAs differ,
+  context assembly also classifies the drift (`context["review_head_drift"]`,
+  pinned to the exact reviewed/head pair); a `docs_only` drift counts as fresh,
+  so the mandatory DOCS commit does not force a re-review (see
+  [sdlc-review-drift-classifier.md](sdlc-review-drift-classifier.md)). Any
+  other mismatch, a verdict attributable to no head SHA, or a failed lookup
+  (fail-closed: `pr_head_sha=""` + `pr_head_sha_lookup_failed=true`, never
+  omitted) routes to `/do-pr-review` at the new head instead of merging.
 
 ## `_meta` Fields
 
