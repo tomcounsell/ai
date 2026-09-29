@@ -188,7 +188,11 @@ class TestFailedRotationEscalates:
         monkeypatch.setattr(docs_auditor, "_git_diff_quiet", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_hand_off_pr_review",
+            lambda *a, **kw: docs_auditor.HandoffResult("created", "sess"),
+        )
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
         result = docs_auditor.run_docs_auditor()
@@ -242,7 +246,11 @@ class TestWithheldTitleUnwrap:
         monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_hand_off_pr_review",
+            lambda *a, **kw: docs_auditor.HandoffResult("created", "sess"),
+        )
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
         result = docs_auditor.run_docs_auditor()
@@ -397,7 +405,11 @@ class TestFailedRestoreReporting:
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
         monkeypatch.setattr(docs_auditor, "_push_branch_and_pr", lambda *a, **kw: None)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_hand_off_pr_review",
+            lambda *a, **kw: docs_auditor.HandoffResult("created", "sess"),
+        )
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", lambda finding, root: True)
 
         result = docs_auditor.run_docs_auditor()
@@ -466,11 +478,11 @@ class TestWriteWindowRestore:
             filed.append(finding)
             return True
 
-        telegram_calls: list[str] = []
+        handoff_calls: list[str] = []
         monkeypatch.setattr(
             docs_auditor,
-            "_send_telegram_notification",
-            lambda msg, **kw: telegram_calls.append(msg) or True,
+            "_hand_off_pr_review",
+            lambda *a, **kw: handoff_calls.append(a[1]) or docs_auditor.HandoffResult("created"),
         )
         rotation_hash_calls: list[list[str]] = []
         monkeypatch.setattr(
@@ -504,7 +516,7 @@ class TestWriteWindowRestore:
         assert result["status"] == "error"
         assert "injected" in result["summary"]
         # No success Telegram, no rotation-hash stamp on an aborted run.
-        assert telegram_calls == []
+        assert handoff_calls == []
         assert rotation_hash_calls == []
 
     # -- Injection point 2: exception inside the withheld-filing loop -------
@@ -877,7 +889,11 @@ class TestGuardFiredNoWorkingTreeWrite:
         monkeypatch.setattr(docs_auditor, "_daily_pr_cap_reached", lambda root: True)
         monkeypatch.setattr(docs_auditor, "_has_open_pr_for_slug", lambda slug, root: False)
         monkeypatch.setattr(docs_auditor, "audit", fake_audit)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_hand_off_pr_review",
+            lambda *a, **kw: docs_auditor.HandoffResult("created", "sess"),
+        )
 
         result = docs_auditor.run_docs_auditor()
 
@@ -970,7 +986,11 @@ class TestWithheldFilingCap:
         monkeypatch.setattr(docs_auditor, "_git_dirty", lambda root: False)
         monkeypatch.setattr(docs_auditor, "_run_vault_drift_detection", lambda pk: 0)
         monkeypatch.setattr(docs_auditor, "audit", lambda **kw: audit_result)
-        monkeypatch.setattr(docs_auditor, "_send_telegram_notification", lambda msg, **kw: True)
+        monkeypatch.setattr(
+            docs_auditor,
+            "_hand_off_pr_review",
+            lambda *a, **kw: docs_auditor.HandoffResult("created", "sess"),
+        )
         monkeypatch.setattr(docs_auditor, "_file_issue_if_new", fake_file_issue)
 
         with caplog.at_level("WARNING", logger="reflections.docs_auditor"):

@@ -117,9 +117,7 @@ UPVOTE_ENTRY_TIMEOUT_S = 1500
 # sync` is the dominant term: every pickup is a cold worktree (the lane slug
 # is unique per issue, so get_or_create_worktree never reuses one).
 UPVOTE_CREATE_WORST_CASE_S = settings.timeouts.uv_sync_s + settings.timeouts.git_subprocess_s
-UPVOTE_PICKUP_WORST_CASE_S = (
-    2 * UPVOTE_GH_TIMEOUT_S + UPVOTE_CREATE_WORST_CASE_S
-)
+UPVOTE_PICKUP_WORST_CASE_S = 2 * UPVOTE_GH_TIMEOUT_S + UPVOTE_CREATE_WORST_CASE_S
 
 _FAILED_KEY_TEMPLATE = "upvote:pickup:failed:{repo}:{issue_number}"
 

@@ -7,7 +7,7 @@ Covers:
   - dry-run mode makes zero PUT calls
   - apply mode performs the right PUT per tier
   - missing/empty issue id short-circuits without calling Sentry
-  - Telegram digest renders auto-actioned counts + failure detail
+  - digest (findings) renders auto-actioned counts + failure detail
 """
 
 from __future__ import annotations
@@ -166,8 +166,13 @@ def _stub_issue(issue_id: str, short_id: str, title: str, count: int = 5) -> dic
     }
 
 
+def _digest(result: dict) -> str:
+    """The operator-surface digest: the ``digest:`` findings of a triage result."""
+    return "\n".join(f[len("digest: ") :] for f in result["findings"] if f.startswith("digest: "))
+
+
 def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub auth token + Telegram so triage runs without external side effects.
+    """Stub auth token so triage runs without external side effects.
 
     Delta-state is stubbed to "state exists, nothing seen before" so every
     current Class C/D issue counts as new — tests that exercise the
@@ -175,7 +180,6 @@ def _patch_common(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
     monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
     monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
     # Neutralize the intra-project release-sha ownership filter for the
@@ -279,7 +283,7 @@ def test_per_issue_failure_does_not_abort_run(monkeypatch: pytest.MonkeyPatch) -
 def test_digest_contains_auto_actioned_counts_and_failure_detail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Telegram digest should surface auto-action counts + failure details."""
+    """The operator-surface digest should surface auto-action counts + failure details."""
     monkeypatch.setenv("SENTRY_TRIAGE_APPLY", "1")
     _patch_common(monkeypatch)
 
@@ -289,13 +293,6 @@ def test_digest_contains_auto_actioned_counts_and_failure_detail(
     ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    captured: dict[str, str] = {}
-
-    def capture_tg(msg: str) -> None:
-        captured["msg"] = msg
-
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", capture_tg)
-
     def fake_put(url: str, **kwargs):  # noqa: ANN001
         issue_id = url.split("/issues/")[1].rstrip("/")
         if issue_id == "2":
@@ -303,9 +300,9 @@ def test_digest_contains_auto_actioned_counts_and_failure_detail(
         return _mock_resp(200, "{}")
 
     with patch.object(sentry_triage.requests, "put", side_effect=fake_put):
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
-    msg = captured.get("msg", "")
+    msg = _digest(result)
     assert "Auto-actioned" in msg
     assert "A=1/1" in msg
     assert "B=0/1" in msg
@@ -329,18 +326,11 @@ def test_dry_run_digest_marks_no_state_changes(monkeypatch: pytest.MonkeyPatch) 
     ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    captured: dict[str, str] = {}
-    monkeypatch.setattr(
-        sentry_triage,
-        "_send_telegram_notification",
-        lambda m: captured.update(msg=m),
-    )
-
     with patch.object(sentry_triage.requests, "put") as mock_put:
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
     mock_put.assert_not_called()
-    msg = captured["msg"]
+    msg = _digest(result)
     assert "Would auto-action" in msg
     assert "[dry run — no Sentry state changes]" in msg
 
@@ -354,18 +344,11 @@ def test_no_auto_actionable_issues_omits_block(monkeypatch: pytest.MonkeyPatch) 
     d_issue = _stub_issue("1", "PROJ-D1", "weird thing happened", count=3)
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: [d_issue])
 
-    captured: dict[str, str] = {}
-    monkeypatch.setattr(
-        sentry_triage,
-        "_send_telegram_notification",
-        lambda m: captured.update(msg=m),
-    )
-
     with patch.object(sentry_triage.requests, "put") as mock_put:
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
     mock_put.assert_not_called()
-    msg = captured["msg"]
+    msg = _digest(result)
     assert "Auto-actioned" not in msg
     assert "Would auto-action" not in msg
 
@@ -373,7 +356,7 @@ def test_no_auto_actionable_issues_omits_block(monkeypatch: pytest.MonkeyPatch) 
 def test_all_clear_suppressed_when_nothing_needs_attention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exception-only delivery: pure noise/transient/stale auto-actions send NO Telegram.
+    """Exception-only delivery: pure noise/transient/stale auto-actions record NO digest.
 
     Issues that were fully auto-actioned into tiers A/B/E (and no C/D, no
     failures) require no human input, so the daily all-clear ping is suppressed.
@@ -390,21 +373,18 @@ def test_all_clear_suppressed_when_nothing_needs_attention(
     ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put") as mock_put:
         mock_put.return_value = _mock_resp(200, "{}")
         result = sentry_triage.run_sentry_triage()
 
-    # Auto-actions still ran (3 PUTs), but no Telegram message was sent.
+    # Auto-actions still ran (3 PUTs), but no digest was recorded.
     assert mock_put.call_count == 3
-    assert sent == []
+    assert _digest(result) == ""
     assert result["status"] == "ok"
 
 
 def test_actionable_issue_triggers_notification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A Class C (actionable) issue must still produce a Telegram notification."""
+    """A Class C (actionable) issue must still produce a digest."""
     monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
     _patch_common(monkeypatch)
 
@@ -412,14 +392,10 @@ def test_actionable_issue_triggers_notification(monkeypatch: pytest.MonkeyPatch)
     issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put"):
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
-    assert len(sent) == 1
-    assert "Sentry triage" in sent[0]
+    assert "Sentry triage" in _digest(result)
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +407,7 @@ def test_actionable_issue_triggers_notification(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_first_run_seeds_silently(monkeypatch: pytest.MonkeyPatch) -> None:
-    """First run (no prior state) seeds the seen-set and sends NO notification."""
+    """First run (no prior state) seeds the seen-set and records NO digest."""
     monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
     _patch_common(monkeypatch)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: None)  # no state file yet
@@ -442,18 +418,15 @@ def test_first_run_seeds_silently(monkeypatch: pytest.MonkeyPatch) -> None:
     issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]  # tier C
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put"):
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
-    assert sent == []  # seeded, not announced
+    assert _digest(result) == ""  # seeded, not announced
     assert saved == [{"PROJ-C1"}]  # current pile persisted for next time
 
 
 def test_static_backlog_is_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unchanged C/D backlog (already seen last run) sends NO notification."""
+    """An unchanged C/D backlog (already seen last run) records NO digest."""
     monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
     _patch_common(monkeypatch)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: {"PROJ-C1", "PROJ-D1"})
@@ -464,13 +437,10 @@ def test_static_backlog_is_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put"):
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
-    assert sent == []  # nothing new — stay silent
+    assert _digest(result) == ""  # nothing new — stay silent
 
 
 def test_new_issue_since_last_run_notifies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -485,14 +455,10 @@ def test_new_issue_since_last_run_notifies(monkeypatch: pytest.MonkeyPatch) -> N
     ]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put"):
-        sentry_triage.run_sentry_triage()
+        result = sentry_triage.run_sentry_triage()
 
-    assert len(sent) == 1
-    assert "(1 new)" in sent[0]  # header advertises the new-issue count
+    assert "(1 new)" in _digest(result)  # header advertises the new-issue count
 
 
 def test_seen_ids_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -661,16 +627,13 @@ def test_owned_issue_passes_filter_and_is_classified(monkeypatch: pytest.MonkeyP
     issues = [_stub_issue("1", "PROJ-C1", "NullPointer in checkout", count=5000)]
     monkeypatch.setattr(sentry_triage, "_fetch_unresolved_issues", lambda *_a: issues)
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with patch.object(sentry_triage.requests, "put"):
         result = sentry_triage.run_sentry_triage()
 
     assert result["status"] == "ok"
     # The owned issue survived the filter and was classified as Class C.
     assert any("Class C" in f for f in result["findings"])
-    assert len(sent) == 1
+    assert "Sentry triage" in _digest(result)
 
 
 def test_foreign_issue_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -751,16 +714,13 @@ def test_all_foreign_fires_safety_net_warning(
         sentry_triage, "_fetch_unresolved_issues", lambda *_a: [foreign_a, foreign_b]
     )
 
-    sent: list[str] = []
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda m: sent.append(m))
-
     with caplog.at_level("WARNING", logger="reflections.sentry_triage"):
         with patch.object(sentry_triage.requests, "put"):
             result = sentry_triage.run_sentry_triage()
 
     assert any("dropped ALL 2 issues" in rec.message for rec in caplog.records)
     assert result["status"] == "ok"
-    assert sent == []  # nothing owned → nothing to notify
+    assert _digest(result) == ""  # nothing owned → nothing to report
 
 
 # ---------------------------------------------------------------------------
@@ -913,7 +873,6 @@ def test_run_triage_drops_cotenant_before_filing(monkeypatch: pytest.MonkeyPatch
     # Reuse the common stubs but DO NOT neutralize the release filter here.
     monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
     monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
     monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
     # Exercise the real release filter here, but not a real network git fetch.
@@ -1012,7 +971,6 @@ def test_run_triage_calls_git_fetch_before_release_filter(
     monkeypatch.delenv("SENTRY_TRIAGE_APPLY", raising=False)
     monkeypatch.setattr(sentry_triage, "_get_auth_token", lambda: "test-token")
     monkeypatch.setattr(sentry_triage, "_get_org_slug", lambda: "test-org")
-    monkeypatch.setattr(sentry_triage, "_send_telegram_notification", lambda _m: None)
     monkeypatch.setattr(sentry_triage, "_load_seen_ids", lambda: set())
     monkeypatch.setattr(sentry_triage, "_save_seen_ids", lambda _ids: None)
 

@@ -491,7 +491,7 @@ class TestCreate:
         assert any("insufficient run budget" in f for f in result["findings"])
 
     def test_budget_early_return_when_already_expired(self, monkeypatch):
-        lab = _Lab(monkeypatch)
+        _Lab(monkeypatch)
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() - 1))
         # "ok" (not "skipped") -- the budget-exhausted finding was actually
         # evaluated and is worth surfacing, so run_per_project_audit must not

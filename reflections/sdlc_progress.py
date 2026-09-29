@@ -699,10 +699,10 @@ def _escalation_exists(slug: str, sha: str) -> bool | None:
 
 
 def _escalation_set(slug: str, sha: str) -> bool:
-    """``SET NX`` the escalation key. True = this caller may page the human.
+    """``SET NX`` the escalation key. True = this caller recorded the handoff.
 
-    False means either the human was already told about this head sha, or Redis
-    is unavailable — in both cases nothing is sent.
+    False means either the head sha was already handed off, or Redis is
+    unavailable.
     """
     key = _ESCALATED_KEY.format(slug=slug, sha=sha)
     try:

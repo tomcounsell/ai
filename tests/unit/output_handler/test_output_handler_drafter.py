@@ -130,7 +130,9 @@ class TestDrafterInHandler:
 class TestVerbatimPayload:
     """A session carrying ``verbatim_payload`` delivers it byte-exact (#3588)."""
 
-    PAYLOAD = "Improvement assumption digest\n\n- one\n- two\n\nThis is a status report. It asks nothing."
+    PAYLOAD = (
+        "Improvement assumption digest\n\n- one\n- two\n\nThis is a status report. It asks nothing."
+    )
 
     def _handler(self):
         from agent.output_handler import TelegramRelayOutputHandler
@@ -150,7 +152,9 @@ class TestVerbatimPayload:
         mock_draft = AsyncMock()
         session = self._session(verbatim_payload=self.PAYLOAD)
         with patch("bridge.message_drafter.draft_message", mock_draft):
-            asyncio.run(handler.send("123", "Sending the digest now, a paraphrase.", 0, session=session))
+            asyncio.run(
+                handler.send("123", "Sending the digest now, a paraphrase.", 0, session=session)
+            )
         mock_draft.assert_not_awaited()
         handler._redis.rpush.assert_called_once()
         payload = json.loads(handler._redis.rpush.call_args[0][1])
@@ -164,9 +168,7 @@ class TestVerbatimPayload:
         drafted = MessageDraft(text="drafted", full_output_file=None, artifacts={})
         mock_draft = AsyncMock(return_value=drafted)
         with patch("bridge.message_drafter.draft_message", mock_draft):
-            asyncio.run(
-                handler.send("123", "Plain reply? Yes.", 0, session=self._session())
-            )
+            asyncio.run(handler.send("123", "Plain reply? Yes.", 0, session=self._session()))
         mock_draft.assert_awaited_once()
         assert json.loads(handler._redis.rpush.call_args[0][1])["text"] == "drafted"
 

@@ -2590,15 +2590,9 @@ def run_docs_auditor() -> dict:
             # human review before the PR opens — every rotation PR still
             # requires a human merge, but the withheld count must reach every
             # surface this function produces so the human reviewing it sees
-            # it, not just a log line: findings, the returned summary,
-            # Telegram, and the PR body.
-            # Telegram has two mutually exclusive senders, and a run can also
-            # reach neither. Three cases: files were touched — step 9 sends
-            # the pass summary; nothing was touched but fixes were withheld —
-            # the zero-diff early return sends the withheld alert, the
-            # loudest case and one step 9 can never reach; nothing was
-            # touched and nothing was withheld — a clean zero-diff run, which
-            # stays silent.
+            # it, not just a log line: findings, the returned summary, the
+            # handoff facts, and the PR body. A zero-diff run reports on the
+            # operator surface only; a PR-opened run hands the PR to an agent.
             withheld: list[dict] = result.get("withheld", [])
             fixes_withheld: int = result.get("fixes_withheld", 0)
             withheld_note = (
@@ -2653,14 +2647,11 @@ def run_docs_auditor() -> dict:
                 _update_rotation_hash(project_key, [str(primary)])
                 # Withheld fixes are already filed issues; the finding below and the
                 # summary are the operator record. Nothing is sent to a chat.
-                suppressed_note = ""
                 zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
                 return {
                     "status": "skipped",
                     "findings": zero_diff_findings,
-                    "summary": (
-                        f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"
-                    ),
+                    "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
                 }
 
             # 7. Push branch + PR. The guards moved to the preflight, so a

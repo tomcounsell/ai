@@ -49,9 +49,9 @@ pytestmark = [pytest.mark.sdlc]
 
 _PASS = object()  # get_hook sentinel: "fall through to the backing store"
 
-# Captured before any fixture patches it, so the one test that exercises the
-# real Telegram subprocess boundary can restore it.
-_REAL_SEND_ALERT = sdlc_progress._send_alert
+# Captured before any fixture patches it, so the test that exercises the real
+# handoff resolution (no Eng: room) can restore it.
+_REAL_HAND_OFF = sdlc_progress._hand_off_escalation
 
 
 class _FakeRedis:
@@ -364,9 +364,12 @@ def lab(fake_redis, fake_query, fake_ledger, owns_project, monkeypatch):
     lab = _Lab(fake_redis, fake_query)
     lab.ledger = fake_ledger
 
-    monkeypatch.setattr(
-        sdlc_progress, "_send_alert", lambda project_dict, msg: lab.alerts.append(msg) or True
-    )
+    def _hand_off(*, slug, sha, reason, **kw):
+        lab.alerts.append(reason)
+        sdlc_progress._escalation_set(slug, sha)
+        return True, f"handed-off: created {slug}@{sha[:8]}"
+
+    monkeypatch.setattr(sdlc_progress, "_hand_off_escalation", _hand_off)
 
     def _steer(session_id, message):
         lab.steers.append((session_id, message))
@@ -838,14 +841,13 @@ def test_a_capped_lane_leaves_no_cooldown_key_claimed(lab, stub_workdir, stale_l
     assert [sid for sid, _ in lab.steers] == ["eng-a", "eng-b"]
 
 
-def test_escalation_volume_with_resume_disabled_is_one_page_per_visible_lane(
+def test_resume_disabled_is_a_finding_per_visible_lane_never_a_handoff(
     lab, stub_workdir, stale_lanes, monkeypatch
 ):
     """Risk 4, pinned rather than discovered in production.
 
-    ``SDLC_STALL_RESUME_ENABLED=false`` is NOT a dry-run mode: it escalates
-    once per newly-visible lane, above the cap, and each escalation key then
-    suppresses action on that ``(slug, sha)`` for its full TTL.
+    ``SDLC_STALL_RESUME_ENABLED=false`` is config state, not a decision: each
+    visible lane gets a dashboard finding and no agent is handed anything.
     """
     monkeypatch.setenv("SDLC_STALL_RESUME_ENABLED", "false")
     stale_lanes["prs"] = [
@@ -855,9 +857,10 @@ def test_escalation_volume_with_resume_disabled_is_one_page_per_visible_lane(
     ]
     lab.query.by_project = [_Row("eng-live", status="running", slug="lane-one")]
 
-    sdlc_progress._check_project_stalls(_AI_PROJECT)
+    result = sdlc_progress._check_project_stalls(_AI_PROJECT)
 
-    assert len(lab.alerts) == 3
+    assert lab.alerts == []
+    assert sum(f.startswith("auto-resume-disabled:") for f in result["findings"]) == 3
     assert (lab.steers, lab.resumes, lab.creates) == ([], [], [])
 
 
@@ -1295,7 +1298,7 @@ def test_many_ticks_over_one_sha_produce_exactly_one_human_message(lab, stub_wor
         lab.redis.advance(3600)
 
     assert len(lab.alerts) == 1, f"expected exactly one escalation, got {lab.alerts}"
-    assert "auto-resume failed after" in lab.alerts[0]
+    assert "exhausted" in lab.alerts[0]
     assert len(lab.steers) == sdlc_progress._max_attempts()
 
 
@@ -1315,33 +1318,29 @@ def test_attempt_budget_exhaustion_escalates_once_then_goes_silent(lab, stub_wor
     assert lab.steers == [], "an exhausted budget must stop acting, not keep steering"
 
 
-def test_unresolvable_project_suppresses_and_reports_without_counting(
+def test_unresolvable_project_reports_unreachable_without_counting(
     lab, stub_workdir, stalled_pr, monkeypatch
 ):
-    """A suppressed page (no Eng: group configured) must reach findings and
-    summary without incrementing the escalated counter — the split the
-    ``_escalate`` closure exists to make (Task 7)."""
-    monkeypatch.setattr(sdlc_progress, "_send_alert", _REAL_SEND_ALERT)
+    """A project with no Eng: group has no human room: the handoff is unreachable,
+    which must reach findings and summary without incrementing the escalated
+    counter, and must not set the once-per-SHA sentinel."""
+    monkeypatch.setattr(sdlc_progress, "_hand_off_escalation", _REAL_HAND_OFF)
     lab.redis.set(
         sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"),
         str(sdlc_progress._max_attempts()),
     )
 
-    # _PROJECT carries no telegram config, so send_eng_telegram resolves
-    # nothing and _send_alert returns False without ever calling subprocess.
     result = sdlc_progress._check_project_stalls(_PROJECT)
 
-    assert "0 escalated" in result["summary"]
-    assert any(f.startswith("alert-suppressed:") for f in result["findings"])
-    assert not any(f.startswith("escalated") for f in result["findings"])
+    assert "0 handed off" in result["summary"]
+    assert any(f.startswith("handoff-unreachable:") for f in result["findings"])
+    assert not any(f.startswith("handed-off") for f in result["findings"])
+    assert sdlc_progress._escalation_exists("sdlc-1395", "abc123def456") is False
 
 
-def test_escalation_redis_unavailable_sends_nothing(lab, stub_workdir, stalled_pr):
-    """UPDATE: retargeted from the deleted alert key to the escalation key.
-
-    Redis unavailable for the ``SET NX`` guard → do not send. Under-alerting
-    during a flap beats spamming during one.
-    """
+def test_escalation_sentinel_write_failure_keeps_the_handoff(lab, stub_workdir, stalled_pr):
+    """The handoff is single-winner through its enqueue idempotency key, so a
+    Redis flap on the once-per-SHA sentinel loses only the tick-level dedup."""
     lab.redis.set(
         sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"),
         str(sdlc_progress._max_attempts()),
@@ -1350,7 +1349,7 @@ def test_escalation_redis_unavailable_sends_nothing(lab, stub_workdir, stalled_p
 
     sdlc_progress._check_project_stalls(_PROJECT)
 
-    assert lab.alerts == []
+    assert lab.alerts == ["attempt budget exhausted"]
 
 
 def test_existing_escalation_key_stops_the_ladder_acting(lab, stub_workdir, stalled_pr):
@@ -1836,52 +1835,22 @@ def test_target_query_failure_takes_no_action(lab, stub_workdir, stalled_pr):
     assert "gate-unknown: target-query sdlc-1395" in result["findings"]
 
 
-def test_valor_telegram_missing_does_not_break_the_tick(lab, stub_workdir, stalled_pr, monkeypatch):
-    """The escalation path swallows a missing CLI and the reflection still returns ok."""
-    # Put the REAL _send_alert back so the subprocess boundary is the thing under test.
-    monkeypatch.setattr(sdlc_progress, "_send_alert", _REAL_SEND_ALERT)
-    lab.redis.set(
-        sdlc_progress._ATTEMPTS_KEY.format(slug="sdlc-1395", sha="abc123def456"),
-        str(sdlc_progress._max_attempts()),
-    )
-    # _send_alert now delegates to reflections.utilities.send_eng_telegram,
-    # which owns its own subprocess.run reference — that is the boundary to
-    # patch, not sdlc_progress's module-level subprocess.
-    monkeypatch.setattr(
-        reflections.utilities.subprocess,
-        "run",
-        MagicMock(side_effect=FileNotFoundError("valor-telegram")),
-    )
-
-    # _PROJECT carries no telegram config, so send_eng_telegram would suppress
-    # before ever reaching subprocess.run — a project with a configured Eng:
-    # group is what puts the real subprocess boundary under test here.
-    project_with_eng_group = {
-        **_PROJECT,
-        "telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}},
-    }
-    result = sdlc_progress._check_project_stalls(project_with_eng_group)
-    assert result["status"] == "ok"
-
-
 # ---------------------------------------------------------------------------
 # Break-glass
 # ---------------------------------------------------------------------------
 
 
-def test_resume_disabled_escalates_once_and_acts_on_nothing(
+def test_resume_disabled_reports_a_finding_and_acts_on_nothing(
     lab, stub_workdir, stalled_pr, monkeypatch
 ):
     monkeypatch.setenv("SDLC_STALL_RESUME_ENABLED", "false")
     lab.query.by_project = [_Row("eng-live", status="running")]
 
-    sdlc_progress._check_project_stalls(_PROJECT)
-    lab.redis.advance(3600)
-    sdlc_progress._check_project_stalls(_PROJECT)
+    result = sdlc_progress._check_project_stalls(_PROJECT)
 
     assert (lab.steers, lab.creates) == ([], [])
-    assert len(lab.alerts) == 1
-    assert "auto-resume disabled" in lab.alerts[0]
+    assert lab.alerts == []
+    assert any(f.startswith("auto-resume-disabled:") for f in result["findings"])
 
 
 # ---------------------------------------------------------------------------
@@ -2006,16 +1975,6 @@ def test_git_log_failure_returns_none(monkeypatch):
     assert sdlc_progress._last_commit("/tmp", "session/sdlc-1") is None
 
 
-def test_send_alert_swallows_filenotfound(monkeypatch):
-    monkeypatch.setattr(
-        reflections.utilities.subprocess,
-        "run",
-        MagicMock(side_effect=FileNotFoundError("valor-telegram")),
-    )
-    project = {"telegram": {"groups": {"Eng: Valor": {"chat_id": -1003449100931}}}}
-    sdlc_progress._send_alert(project, "hello")  # must not raise
-
-
 # ---------------------------------------------------------------------------
 # Return shape contract — unchanged
 # ---------------------------------------------------------------------------
@@ -2032,7 +1991,7 @@ def test_check_project_returns_canonical_shape(lab, stub_workdir, monkeypatch):
 def test_summary_carries_per_rung_counters(lab, stub_workdir, monkeypatch):
     monkeypatch.setattr(sdlc_progress, "_list_open_lane_prs", lambda cwd: [])
     summary = sdlc_progress._check_project_stalls(_PROJECT)["summary"]
-    for rung in ("steered", "resumed", "created", "escalated"):
+    for rung in ("steered", "resumed", "created", "handed off"):
         assert rung in summary
 
 
