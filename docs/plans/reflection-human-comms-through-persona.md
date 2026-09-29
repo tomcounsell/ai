@@ -353,33 +353,165 @@ No prerequisites. All of this work uses existing Redis, the Popoto models, and t
 
 ## Update System
 
-TBD
+- No new dependencies, services, secrets, or launchd plists.
+- `config/reflections.yaml` and the vault copy `~/Desktop/Valor/reflections.yaml`: remove the `stall_advisory_telegram_enabled` param from the `stall-advisory` entry. `/update`'s `sync_reflections_yaml` (`scripts/update/env_sync.py:146`) copies the vault file into `config/`. The vault edit is a [ORDERED] step: first the code change that stops reading the param, then the vault edit. A stale key is ignored by the loader, so the order is safe either way.
+- No Popoto schema change, so no migration. The worker must be restarted after deploy (`./scripts/valor-service.sh restart`) so the runner picks up silent completion and the reflections pick up `hand_off`. `/update` already does this.
 
 ## Agent Integration
 
-TBD
+- No new CLI or MCP tool. `hand_off` is an internal Python API that the reflections call inside the worker process.
+- `tools/job_tool.py expectation-add` changes behavior: it records the caller as holder and rejects `--owner dev|pm`. `.claude/commands/roles/prime-pm-role.md` (~:70) must say to record the lane slug or the agentId returned by the Agent tool. The PM prime is injected by the headless runner, so no other registration is needed.
+- Handoff sessions are ordinary eng sessions with `extra_context.origin = "reflection_handoff"`. They use the existing tools (`job_tool`, `gh`, `valor-session`). Their brief comes from `reflections/agent_handoff.py`.
+- Integration test: `tests/integration/test_reflection_agent_handoff.py` (create) enqueues a real handoff session against a `test-` project key on the test Redis db. It asserts that the session row carries the origin marker and the Room's chat id, and that no `telegram:outbox:*` write happened at enqueue time.
 
 ## Documentation
 
-- [ ] Update `docs/features/expectation-reconciler.md` (skeleton; detailed list follows)
+- [ ] Create `docs/features/reflection-agent-handoff.md`: the `Finding` contract, the steer/create/unreachable ladder, Room targeting, silent completion, and the disposition table. Add it to `docs/features/README.md`.
+- [ ] Update `docs/features/expectation-reconciler.md`: handoff instead of escalation, owner resolution, typed shipped evidence, Room-scoped targeting, and the reserved-owner rejection.
+- [ ] Rewrite `docs/features/reflection-telegram-routing.md`. It describes the `send_eng_telegram` consumers being deleted, so it becomes a short page stating the rule "reflections never write to a human chat; see reflection-agent-handoff" plus the `resolve_eng_group` Room resolution. If nothing else remains, delete it and fold the rule into the new page, updating inbound links.
+- [ ] Update `docs/features/message-drafter.md`: handoff sessions complete silently; the persona path is the only human-facing path.
+- [ ] Update `docs/features/docs-auditor.md`: notification dispositions (summary vs. handoff).
+- [ ] Update `docs/features/stall-advisory-classifier.md` and `docs/features/reflections.md`: remove the `stall_advisory_telegram_enabled` param.
+- [ ] Update `.claude/commands/roles/prime-pm-role.md`: expectation-add owner/holder guidance.
 
 ## Success Criteria
 
-TBD
+- [ ] Incident replay: an outbound expectation owned by a placeholder `dev`, whose issue has a merged PR, produces **zero** human-chat writes from the reconciler. A handoff session in the Job's Room receives typed merged-PR evidence. (Maps to AC1 and AC2.)
+- [ ] `_owner_rows` resolves an agent-session id, a `session_id`, a slug, and an Agent-tool agentId through `dev_agent_id`. `dev` and `pm` resolve to nothing and never spawn `session/dev`. (AC3)
+- [ ] `_shipped_evidence` reports merged / open / closed-unmerged / branch-only correctly. Closed-unmerged is never treated as shipped. (AC3)
+- [ ] Reconciler PM targeting never selects a session outside the Job's Room. (AC3)
+- [ ] Every sender in the disposition table is moved, and the table is recorded in `docs/features/reflection-agent-handoff.md`. (AC4)
+- [ ] `grep -rn "send_eng_telegram\|send_host_eng_telegram\|_send_telegram_transport" reflections/ scripts/ tools/` returns nothing.
+- [ ] The guard test fails against baseline `8b95a838a` and passes on the branch. The red run is recorded in the PR body. (AC5)
+- [ ] AI-judge test: a handoff-originated human-facing message scores as plain-words, names a decision, and contains no UUIDs or shell commands. (AC2)
+- [ ] Handoff sessions complete silently. Non-handoff sessions keep the wrap-up nag and fallback message.
+- [ ] `AgentSession.create_and_enqueue` has no remaining caller, and `system_health_digest` anomalies reach `hand_off`.
+- [ ] `tests/unit/` and `tests/integration/` pass via `scripts/pytest-clean.sh`. Ruff is clean.
+- [ ] Documentation updated (see Documentation).
 
 ## Team Orchestration
 
-TBD
+The lead orchestrates and never builds directly.
+
+### Team Members
+
+- **Builder (handoff)**
+  - Name: handoff-builder
+  - Role: `reflections/agent_handoff.py`, runner silent completion, handoff Redis claim
+  - Agent Type: builder
+  - Resume: true
+- **Builder (reconciler)**
+  - Name: reconciler-builder
+  - Role: reconciler reads plus handoff wiring, `job_tool` holder/owner, PM prime
+  - Agent Type: builder
+  - Resume: true
+- **Builder (senders)**
+  - Name: senders-builder
+  - Role: the sender cut-over in the disposition table, deletions, yaml param removal
+  - Agent Type: builder
+  - Resume: true
+- **Test engineer (guards)**
+  - Name: guard-tester
+  - Role: AST guard test (proven red against baseline), incident replay, AI-judge test
+  - Agent Type: test-engineer
+  - Resume: true
+- **Validator**
+  - Name: plan-validator
+  - Role: verifies every Success Criterion and Verification row
+  - Agent Type: validator
+  - Resume: true
+- **Documentarian**
+  - Name: handoff-docs
+  - Role: the Documentation list
+  - Agent Type: documentarian
+  - Resume: true
 
 ## Step by Step Tasks
 
-TBD
+### 1. Handoff primitive
+- **Task ID**: build-handoff
+- **Depends On**: none
+- **Validates**: tests/unit/reflections/test_agent_handoff.py (create), tests/unit/session_runner/test_runner_turns.py, tests/integration/test_reflection_agent_handoff.py (create)
+- **Informed By**: spike-1 (read-the-room skips SDLC; an unanchored suppress falls through), spike-2 (system Room is write-only)
+- **Assigned To**: handoff-builder
+- **Agent Type**: builder
+- **Domain**: Redis/Popoto data, async/concurrency
+- **Parallel**: true
+- Write `Finding`, `HandoffResult`, `hand_off`, `_live_session_in_room`, and the `handoff:create:{room_id}` claim.
+- Enqueue through `_push_agent_session` with the `reflection_handoff` origin. Check the synthetic-slug worktree behavior (`agent/session_executor.py:1413-1417`) and gate it if needed.
+- Add silent completion in `agent/session_runner/runner.py`, keyed on the origin marker.
+
+### 2. Reconciler and job_tool
+- **Task ID**: build-reconciler
+- **Depends On**: build-handoff
+- **Validates**: tests/unit/reflections/test_reflections_expectation_reconciler.py, tests/unit/test_job_tool.py
+- **Informed By**: spike-3 (the owner/holder values in the incident rows)
+- **Assigned To**: reconciler-builder
+- **Agent Type**: builder
+- **Parallel**: true (with build-senders once build-handoff lands)
+- Rewrite `_owner_rows`, `_lane_slug`, and `_shipped_evidence` (typed). Replace `_live_pm_session` and `_escalate_once` with `hand_off`.
+- `job_tool expectation-add`: record the holder and reject reserved owners. Update `prime-pm-role.md`.
+
+### 3. Sender cut-over
+- **Task ID**: build-senders
+- **Depends On**: build-handoff
+- **Validates**: every test file listed under Test Impact except the reconciler and job_tool ones
+- **Assigned To**: senders-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Apply each row of the disposition table.
+- Delete the `send_*_telegram` helpers, `_send_telegram_transport`, `docs_auditor._send_telegram_notification`, the memory_consolidation subprocess, the upvote-lanes send/anchor, and the stall_advisory Telegram branch plus its param. Remove `resolve_host_eng_chat` / `FALLBACK_ENG_CHAT` if no caller remains.
+- Fix `system_health_digest` to call `hand_off`.
+- Remove the param from `config/reflections.yaml`.
+
+### 4. Guard and judge tests
+- **Task ID**: build-guards
+- **Depends On**: build-reconciler, build-senders
+- **Validates**: tests/unit/test_no_reflection_telegram_side_door.py (create), tests/integration/test_reconciler_incident_replay.py (create), tests/integration/test_handoff_message_judge.py (create)
+- **Assigned To**: guard-tester
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- The AST guard over `reflections/`, `scripts/`, and `tools/improvement.py`. Run it against a checkout of `8b95a838a` to prove it red, and record the output.
+- The incident replay and the AI-judge test.
+
+### 5. Validate
+- **Task ID**: validate-all
+- **Depends On**: build-guards
+- **Assigned To**: plan-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every Verification row and check each Success Criterion.
+
+### 6. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-all
+- **Assigned To**: handoff-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Complete the Documentation checklist.
+
+### 7. Final validation
+- **Task ID**: validate-final
+- **Depends On**: document-feature
+- **Assigned To**: plan-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Re-run Verification. Confirm there are no stale doc references (`grep -rn "send_eng_telegram" docs/features` is empty).
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Reflection unit tests | `scripts/pytest-clean.sh tests/unit/reflections/ -q` | exit code 0 |
+| Touched unit tests | `scripts/pytest-clean.sh tests/unit/test_job_tool.py tests/unit/test_sustainability.py tests/unit/test_memory_consolidation.py tests/unit/test_docs_auditor_substrate.py tests/unit/test_sentry_triage_apply.py tests/unit/test_improvement_assumption_digest.py tests/unit/test_improvement_investigations.py tests/unit/test_reflection_scheduler.py tests/unit/session_runner/test_runner_turns.py -q` | exit code 0 |
+| Guard test | `scripts/pytest-clean.sh tests/unit/test_no_reflection_telegram_side_door.py -q` | exit code 0 |
+| Integration | `scripts/pytest-clean.sh tests/integration/test_reflection_agent_handoff.py tests/integration/test_reconciler_incident_replay.py tests/integration/test_handoff_message_judge.py tests/integration/test_sdlc_stall_auto_resume_e2e.py tests/integration/test_stall_advisory_e2e.py -q` | exit code 0 |
+| No side-door senders | `grep -rn "send_eng_telegram\|send_host_eng_telegram\|_send_telegram_transport" reflections/ scripts/ tools/` | exit code 1 |
+| No valor-telegram in reflections | `grep -rn "valor-telegram\|tools.valor_telegram" reflections/ scripts/memory_consolidation.py tools/improvement.py` | exit code 1 |
+| Dead method gone | `grep -rn "create_and_enqueue" reflections/ agent/ models/` | exit code 1 |
+| Param removed | `grep -rn "stall_advisory_telegram_enabled" reflections/ config/ docs/features/` | exit code 1 |
 
 ## Critique Results
 
@@ -390,4 +522,7 @@ TBD
 
 ## Open Questions
 
-TBD
+1. **Charter §11 vs. AC4 (assumption digest).** The charter keeps the three-day digest "as a status report" in Telegram, and only you can amend it. The plan defaults to keeping it in Telegram, delivered by a handoff agent in the persona rather than a raw page. Alternative: amend §11 and move the digest to the operator surface only. Which do you want?
+2. **Mechanical discharge.** The reconciler still never discharges an expectation on its own, even with merged-PR evidence; it hands the evidence to an agent, which discharges. Keep that rule (recommended), or allow automatic discharge when the evidence is `merged` and the PR closes the Job's issue?
+3. **Completion reporting.** Recording outbound work on the Job is fixed here, but lanes and `/do-merge` still never report completion back to the Job, which is why an expectation stays open after a merge. Should that be a separate follow-up issue (recommended), or folded into this plan?
+4. **Handoff target for project-level findings.** The plan targets the project's `Eng:` Room. If a project has no `Eng:` group, the finding becomes operator-only. Is that acceptable, or should those go to the host valor `Eng:` Room?
