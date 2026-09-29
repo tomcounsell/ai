@@ -76,8 +76,6 @@ def run_stall_advisory(params: dict | None = None) -> dict:
             summary:  Human-readable summary string (extended with recovery
                       counts when any kills/dry-runs/catchup-failures occur).
     """
-    params = params or {}
-
     findings: list[dict] = []
 
     try:

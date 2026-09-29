@@ -39,10 +39,13 @@ finding string.
 3. **Steer.** For a finding with no delivery requirement, a live session in the
    Room that is the Job holder or a prior handoff session receives the finding
    as a steering message. A steer cannot change `extra_context`, so a
-   `verbatim_payload` or `requires_delivery` finding never steers.
+   `verbatim_payload` or `requires_delivery` finding never steers, and a live
+   handoff session carrying either is never a steer target (its digest would
+   replace the steered reply).
 4. **Rate cap.** At most `HANDOFF_MAX_LIVE_PER_SOURCE` (default 3, env
    overridable) live handoff sessions per project and source; beyond that the
-   result is `rate-capped`.
+   result is `rate-capped`. The cap is best-effort (count, then create); the
+   idempotency key is the hard dedup.
 5. **Create.** An `eng` session, low priority, in the Room, with
    `extra_context.origin == "reflection_handoff"` and the idempotency key
    `handoff:{source}:{room_id}:{dedup_key}`. The same key returns the bound
@@ -71,7 +74,15 @@ explicit origin marker and ends:
 | Delivery-required handoff ends with nothing to say | `HANDOFF_UNDELIVERED` | `failed` |
 | Handoff session already routed a user-facing message | ordinary exit | ordinary |
 
-A harness-level empty output stays a failure for every session.
+A handoff session never receives the wrap-up turn or the canned human text
+(`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`). A harness-level empty
+output, a harness error, or running out of turns ends as the non-clean anomaly
+`ERROR`, visible to the operator and silent in the Room.
+
+Handoff sessions run in the same synthetic-slug worktree as any slugless eng
+session, so the main-checkout guard applies when a brief leads the agent to fix
+something. They are `priority="low"` and never hold a human message in the
+pending queue.
 
 ## Verbatim delivery
 

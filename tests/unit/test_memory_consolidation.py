@@ -9,8 +9,8 @@ Tests cover:
 - Dry-run: no Redis writes when dry_run=True
 - Empty/single-record groups: handled without calling Haiku
 - JSON parse failure: Haiku returning invalid JSON is skipped gracefully
-- Contradiction flagging: valor-telegram send called; CalledProcessError falls
-  back to logs/memory-contradictions.log
+- Contradiction flagging: logged to logs/memory-contradictions.log, never sent
+  to a chat
 """
 
 import logging
@@ -508,7 +508,7 @@ class TestEmptyGroupHandling:
 
 
 class TestContradictionFlagging:
-    """Contradiction flagging: Telegram send; CalledProcessError → log fallback."""
+    """Contradiction flagging: log file only, no chat delivery."""
 
     def test_contradiction_is_logged_and_never_sent(self):
         """A flagged contradiction goes to the log file; nothing reaches a chat."""

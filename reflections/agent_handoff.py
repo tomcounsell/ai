@@ -32,11 +32,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from config.enums import REFLECTION_HANDOFF_ORIGIN
 from reflections.utilities import machine_owns_project, resolve_eng_group
 
 logger = logging.getLogger("reflections.agent_handoff")
 
-HANDOFF_ORIGIN = "reflection_handoff"
+HANDOFF_ORIGIN = REFLECTION_HANDOFF_ORIGIN
 
 # GRAIN OF SALT: provisional, env-overridable. Chosen as "a handful", not from a
 # measured distribution of handoff volume; retune once real handoff sessions
@@ -70,6 +71,8 @@ class Finding:
 
 @dataclass(frozen=True)
 class HandoffResult:
+    """Outcome of :func:`hand_off`: which rung landed, the session, or why not."""
+
     kind: HandoffKind
     session_id: str | None = None
     reason: str | None = None
@@ -84,7 +87,7 @@ class HandoffResult:
         tag = f" {key}" if key else ""
         if self.delivered:
             return f"handed-off: {self.kind}{tag} {self.session_id}"
-        return f"handoff-unreachable:{tag} {self.reason}".replace(":  ", ": ")
+        return f"handoff-unreachable:{tag} {self.reason}"
 
 
 def _unreachable(reason: str, *, kind: HandoffKind = "unreachable") -> HandoffResult:
@@ -157,6 +160,11 @@ def _is_handoff_row(row) -> bool:
     return (getattr(row, "extra_context", None) or {}).get("origin") == HANDOFF_ORIGIN
 
 
+def _needs_delivery_row(row) -> bool:
+    extra = getattr(row, "extra_context", None) or {}
+    return bool(extra.get("verbatim_payload") or extra.get("handoff_requires_delivery"))
+
+
 def _live_session_in_room(room_id: str, holder: str | None):
     """A live eng session in ``room_id`` that may be steered, or ``None``.
 
@@ -164,7 +172,9 @@ def _live_session_in_room(room_id: str, holder: str | None):
     either the Job's recorded holder or themselves handoff sessions. A live
     human conversation or an SDLC lane PM that merely shares the Room is never
     a candidate. An unresolvable holder (``None``, ``pm``, ``dev``, no match)
-    is no holder match. Preference: the holder, then the newest handoff session.
+    is no holder match. Handoff rows carrying ``verbatim_payload`` or
+    ``handoff_requires_delivery`` are never candidates. Preference: the holder,
+    then the newest handoff session.
     """
     try:
         from agent.session_health import _is_ledger
@@ -194,7 +204,10 @@ def _live_session_in_room(room_id: str, holder: str | None):
                     or getattr(row, "agent_session_id", None) == holder
                 ):
                     return row
-        handoffs = [r for r in live if _is_handoff_row(r)]
+        # A verbatim / delivery-required handoff row replaces the steered
+        # agent's reply with its digest (output_handler), so a finding steered
+        # into it would be dropped: never a steer candidate.
+        handoffs = [r for r in live if _is_handoff_row(r) and not _needs_delivery_row(r)]
         if handoffs:
             return max(handoffs, key=lambda r: to_unix_ts(getattr(r, "updated_at", None)) or 0.0)
         return None
@@ -407,6 +420,9 @@ def _hand_off(finding: Finding) -> HandoffResult:
         if target is not None and _steer(target, _steer_text(finding)):
             return HandoffResult("steered", getattr(target, "session_id", None), None)
 
+    # The per-source cap is best-effort: count-then-create is not atomic, so two
+    # concurrent handoffs from one source can overshoot it by one. The cap bounds
+    # steady-state volume, not a hard limit; the idempotency key is the hard dedup.
     try:
         live = _live_handoff_count(project_key, finding.source)
     except Exception as exc:  # noqa: BLE001

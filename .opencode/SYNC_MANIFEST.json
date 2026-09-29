@@ -25,8 +25,8 @@
   },
   "commands": {
     ".claude/commands/roles/prime-dev-role.md": "f186ddc03e0fa021b88aad849c20b30d9a643332ce4ea56feab735028749bee8",
-    ".claude/commands/roles/prime-pm-codex-role.md": "4dc83027405298b406f2313b4899c4b455caf491782ce9a83e55bba9b2372e9c",
-    ".claude/commands/roles/prime-pm-role.md": "43b5c4374733e124e29af8119ec6a665ce350d857feb07860801fff20c372b7f",
+    ".claude/commands/roles/prime-pm-codex-role.md": "24601328f43aec7a6b959fbf688d89fda77cc1f0b907de49e3b4834e590160db",
+    ".claude/commands/roles/prime-pm-role.md": "cd57cf634ab09e0290c747a1b0fb4eb380b25945ec3d4e6f4d56696df65eed54",
     ".claude/commands/roles/prime-teammate-role.md": "15a59f6f09181909d7d2a22f1552d014ffdf92ea0d8389eac46db76a1ae16875"
   },
   "hooks": {
@@ -50,7 +50,7 @@
     ".claude/hooks/stop.py": "58caf40be369a60e306ae592ed7f4c7f0f01b90ed09e6a74b2e1237608e1f09b",
     ".claude/hooks/subagent_stop.py": "72602851e8cf8a04f242a6822c1ce1b0a54b2a3a00df95e7f42522f2f79c48e6",
     ".claude/hooks/user_prompt_submit.py": "9c15ccf65ff378fa601d815003e56176b269449b4af64e7762993f55b015d467",
-    ".claude/hooks/validators/relink_global_skills.py": "27bd17d97a91888742fc5368c481691c90b0651ce41e80e30622cc5fdf96dd62",
+    ".claude/hooks/validators/relink_global_skills.py": "4dd548944fb77bdac102701b8d2b031eb0f13e6c1cc617390e90b13f83bbeec4",
     ".claude/hooks/validators/validate_commit_message.py": "24a494d0a8aa7ea032e8056e39537566731ff7eccc8d7ea56f30e4e709aae8f8",
     ".claude/hooks/validators/validate_design_system_readonly.py": "8b0946b7348a1c9c6f1f0963ce815a56e6fc033ea7e5df522d79d857f450747f",
     ".claude/hooks/validators/validate_design_system_sync.py": "0ac40e0ad1ed9e2fde7ff5745d3bcfc3fba08c100da71fa6a147e56ada3c57ee",

@@ -179,21 +179,32 @@ class TestShippedWorkGuard:
         assert spy.findings[0].evidence["shipped_kind"] == "closed_unmerged"
         assert "closed without merging" in spy.findings[0].facts[0]
 
-    def test_unreachable_handoff_reports_and_leaves_sentinel_unset(
-        self, owned_project, monkeypatch
+    @pytest.mark.parametrize(
+        "kind,count_text",
+        [
+            ("unreachable", "1 unreachable, 0 rate-capped"),
+            ("rate-capped", "0 unreachable, 1 rate-capped"),
+        ],
+    )
+    def test_undelivered_handoff_reports_and_leaves_expectation_retryable(
+        self, owned_project, monkeypatch, kind, count_text
     ):
-        """No Eng: group / no agent: an operator finding, never a human page, and
-        no sentinel, so a later tick can retry under the cooldown."""
+        """No Eng: group / no agent / rate cap: an operator finding counted in the
+        summary, never a human page, no sentinel, and no exhausted annotation, so
+        a later tick can retry under the cooldown."""
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/capped-lane")
         monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        spy = _HandoffSpy("unreachable")
+        spy = _HandoffSpy(kind)
         monkeypatch.setattr(er, "hand_off", spy)
         result = er._reconcile_project(_project(owned_project))
-        assert "0 handed off" in result["summary"]
+        assert "0 handed off" in result["summary"] and count_text in result["summary"]
         assert any(f.startswith("handoff-unreachable") for f in result["findings"])
         assert er._escalation_exists(job.job_id, eid) is False
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry.get("blocked") is None
 
     def test_unshipped_orphan_respawns_when_no_live_holder(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"

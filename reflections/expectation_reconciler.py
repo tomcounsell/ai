@@ -499,6 +499,7 @@ def _note_handoff(
     retryable rung bumps the attempts key instead.
     """
     if not result.delivered:
+        counts["rate_capped" if result.kind == "rate-capped" else "unreachable"] += 1
         findings.append(result.finding_line(eid))
         return
     counts["steered" if result.kind == "steered" else "handed_off"] += 1
@@ -517,7 +518,7 @@ def _reconcile_project(project: dict) -> dict:
     wd = project.get("working_directory", "")
     project_key = project.get("slug", "?")
     findings: list[str] = []
-    counts = {"steered": 0, "respawned": 0, "handed_off": 0}
+    counts = {"steered": 0, "respawned": 0, "handed_off": 0, "unreachable": 0, "rate_capped": 0}
 
     if not _enabled():
         return {
@@ -623,7 +624,10 @@ def _reconcile_project(project: dict) -> dict:
                         ),
                     )
                     _note_handoff(result, job, eid, findings, counts, mark=True)
-                    _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
+                    if result.delivered:
+                        # An undelivered handoff must retry on a later tick, so
+                        # only a delivered one parks the expectation.
+                        _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
                     continue
                 if not _cooldown_claim(job.job_id, eid):
                     continue
@@ -732,7 +736,8 @@ def _reconcile_project(project: dict) -> dict:
         "summary": (
             f"expectation-reconciler: {len(jobs)} job(s) with open expectations, "
             f"{counts['steered']} steered, {counts['respawned']} respawned, "
-            f"{counts['handed_off']} handed off"
+            f"{counts['handed_off']} handed off, {counts['unreachable']} unreachable, "
+            f"{counts['rate_capped']} rate-capped"
         ),
         "duration": time.time() - t0,
     }

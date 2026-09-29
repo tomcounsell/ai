@@ -1410,12 +1410,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # synthesis exists for is provided by stamping ``exec_cwd`` instead
         # (see the session-phase save block below), which is a plain field.
         is_synthetic_slug = False
-        # A reflection-handoff session only reads evidence and runs job_tool, so
-        # it does not cost a worktree (#3588).
-        _is_handoff_session = (getattr(session, "extra_context", None) or {}).get(
-            "origin"
-        ) == "reflection_handoff"
-        if not slug and getattr(session, "session_type", None) == "eng" and not _is_handoff_session:
+        # Reflection-handoff sessions (#3588) are full-permission eng sessions
+        # whose briefs say "act, fix, or stay silent", so they get the same
+        # synthetic-slug worktree as any slugless eng session: the #887
+        # main-checkout guard must fire for them too.
+        if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
             if _aid_for_slug:
                 slug = f"dev-{_aid_for_slug[:8]}"

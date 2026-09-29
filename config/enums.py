@@ -13,6 +13,10 @@ Usage:
 
 from enum import StrEnum
 
+# ``extra_context["origin"]`` value stamped on sessions created by
+# ``reflections.agent_handoff`` (#3588); the runner and reflections both key on it.
+REFLECTION_HANDOFF_ORIGIN = "reflection_handoff"
+
 
 class SessionType(StrEnum):
     """Discriminator for AgentSession: eng or teammate."""

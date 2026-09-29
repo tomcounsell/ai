@@ -88,6 +88,7 @@ from agent.session_runner.router import (
     validate_structured_route,
 )
 from agent.session_runner.transcript_tailer import last_assistant_text
+from config.enums import REFLECTION_HANDOFF_ORIGIN
 
 logger = logging.getLogger(__name__)
 
@@ -1077,7 +1078,10 @@ class SessionRunner:
                     # format, so exit_message telemetry is unchanged.
                     summary.exit_reason = ExitReason.ERROR
                     summary.exit_message = truncate_exit_message(str(failure))
-                    self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
+                    if not self._is_handoff_session():
+                        # A handoff session's harness error stays an operator
+                        # signal: no context-free page in the Room (#3588).
+                        self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
                     break
                 if failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT:
                     # A harness-level empty output is a failure for every
@@ -1136,7 +1140,15 @@ class SessionRunner:
                 summary.exit_reason is ExitReason.PM_EMPTY_TURN
             )
             if wrapup_trigger and not summary.user_facing_routed:
-                await self._run_wrapup_guard(summary)
+                if self._is_handoff_session():
+                    # No canned human text for a finding nobody asked about:
+                    # a handoff that ran out of turns or produced nothing ends
+                    # as a non-clean anomaly the operator sees (#3588).
+                    if summary.exit_reason in (ExitReason.PM_MAX_TURNS, ExitReason.PM_EMPTY_TURN):
+                        summary.exit_message = summary.exit_message or summary.exit_reason.value
+                        summary.exit_reason = ExitReason.ERROR
+                else:
+                    await self._run_wrapup_guard(summary)
         except Exception as e:  # noqa: BLE001 — terminal classification, never a crash
             logger.error("[runner] session loop raised: %s", e, exc_info=True)
             summary.exit_reason = ExitReason.EXCEPTION
@@ -1916,6 +1928,11 @@ class SessionRunner:
             )
             return False
 
+    def _is_handoff_session(self) -> bool:
+        """True for a session created by ``reflections.agent_handoff``."""
+        extra = getattr(self._agent_session, "extra_context", None)
+        return isinstance(extra, dict) and extra.get("origin") == REFLECTION_HANDOFF_ORIGIN
+
     def _handoff_silent_exit_reason(self) -> ExitReason | None:
         """Exit reason for a reflection-handoff session ending with nothing to say.
 
@@ -1925,9 +1942,9 @@ class SessionRunner:
         ``HANDOFF_UNDELIVERED``; any other handoff is ``HANDOFF_SILENT``. The
         rule keys on the explicit origin marker and nothing else.
         """
-        extra = getattr(self._agent_session, "extra_context", None)
-        if not isinstance(extra, dict) or extra.get("origin") != "reflection_handoff":
+        if not self._is_handoff_session():
             return None
+        extra = self._agent_session.extra_context
         if self._adapter.user_facing_routed:
             return None
         source = extra.get("handoff_source", "?")

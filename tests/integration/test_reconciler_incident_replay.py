@@ -94,7 +94,9 @@ def test_merged_lane_hands_typed_evidence_to_an_agent_and_writes_no_chat(scene, 
     assert '"shipped_kind": "merged"' in brief and '"pr_number": 42' in brief
 
 
-def test_placeholder_owner_hands_off_without_a_chat_write(scene, monkeypatch):
+def test_placeholder_owner_hands_off_unrecorded_owner_evidence_without_a_chat_write(
+    scene, monkeypatch
+):
     from models.agent_session import AgentSession
 
     key, room = scene
@@ -108,3 +110,9 @@ def test_placeholder_owner_hands_off_without_a_chat_write(scene, monkeypatch):
     assert _outbox_keys() == before
     rows = list(AgentSession.query.filter(project_key=key))
     assert len(rows) == 1 and (rows[0].extra_context or {}).get("origin") == ah.HANDOFF_ORIGIN
+    # A placeholder owner names no lane, so there is no slug to probe for a PR:
+    # the agent gets "owner unrecorded" evidence, not typed merged-PR evidence.
+    brief = rows[0].message_text or ""
+    assert "no respawnable lane slug (owner: unrecorded)" in brief
+    assert "deliver the fix" in brief
+    assert "shipped_kind" not in brief

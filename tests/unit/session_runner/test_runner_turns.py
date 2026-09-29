@@ -599,30 +599,44 @@ async def test_handoff_requires_delivery_silence_is_undelivered(script, caplog):
     assert not summary.exit_reason.is_clean
 
 
-async def test_handoff_empty_output_failure_is_not_silent():
-    """A harness EMPTY_OUTPUT failure stays PM_EMPTY_TURN in a handoff session."""
+async def test_handoff_empty_output_failure_is_anomaly_without_human_text():
+    """A harness EMPTY_OUTPUT failure in a handoff session is never silent: it ends
+    as a non-clean anomaly, with no wrap-up turn and no canned human text."""
     failing = HeadlessTurnOutcome(
         reply_text="",
         turn_ended=True,
         turn_end_source="result",
         failure=TurnFailure(ExitReason.EMPTY_OUTPUT, "no output"),
     )
-    runner, _, _, _ = make_runner([failing, ""], session=HandoffSession())
+    runner, deliveries, _, driver = make_runner([failing, ""], session=HandoffSession())
     summary = await runner.run("go")
-    assert summary.exit_reason is not ExitReason.HANDOFF_SILENT
-    assert not summary.exit_reason.is_clean
+    assert summary.exit_reason is ExitReason.ERROR
+    assert not summary.exit_reason.is_clean and summary.exit_reason.is_anomaly
+    assert deliveries == []
+    assert len(driver.calls) == 1
 
 
-async def test_handoff_harness_error_is_error():
+async def test_handoff_harness_error_is_error_without_human_text():
     failing = HeadlessTurnOutcome(
         reply_text="",
         turn_ended=True,
         turn_end_source="result",
         failure=TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, "boom"),
     )
-    runner, _, _, _ = make_runner([failing], session=HandoffSession())
+    runner, deliveries, _, _ = make_runner([failing], session=HandoffSession())
     summary = await runner.run("go")
     assert summary.exit_reason is ExitReason.ERROR
+    assert deliveries == []
+
+
+async def test_handoff_max_turns_is_anomaly_without_wrapup_or_human_text():
+    runner, deliveries, _, driver = make_runner(
+        ["nope", "[/user]\nwrapped"], session=HandoffSession(), max_turns=1
+    )
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.ERROR
+    assert deliveries == []
+    assert len(driver.calls) == 1
 
 
 async def test_non_handoff_empty_turn_unchanged():

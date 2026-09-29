@@ -18,7 +18,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -818,7 +818,7 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
 
         # Replace AgentSession on the module so the local `from models.agent_session import
         # AgentSession` inside sustainability_digest() picks up the stub.
-        fake_session_cls = MagicMock()
+        fake_session_cls = create_autospec(asm.AgentSession)
 
         def capture_hand_off(finding):
             captured["finding"] = finding

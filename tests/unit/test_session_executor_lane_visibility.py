@@ -192,6 +192,32 @@ class TestPreSpawnStamp:
         assert reloaded.live_fence is None
 
 
+class TestHandoffSessionGetsLane:
+    @pytest.mark.asyncio
+    async def test_reflection_handoff_session_gets_synthetic_worktree(
+        self, redis_test_db, tmp_path
+    ):
+        """Handoff briefs say "act, fix, or stay silent", so a handoff session must
+        run in a synthetic-slug worktree (the #887 main-checkout guard needs a slug),
+        never in the shared main checkout (#3588)."""
+        from config.enums import REFLECTION_HANDOFF_ORIGIN
+
+        repo = _make_real_repo(tmp_path)
+        session = _make_eng_session(
+            "lane-vis-handoff",
+            str(repo),
+            priority="low",
+            extra_context={"origin": REFLECTION_HANDOFF_ORIGIN, "handoff_source": "t"},
+        )
+
+        with _patch_runner(), _patch_worktree_real(repo):
+            await _execute_agent_session(session)
+
+        reloaded = AgentSession.get_by_id(session.id)
+        assert reloaded.exec_cwd is not None
+        assert reloaded.exec_cwd.endswith(f".worktrees/{_dev_slug(session)}")
+
+
 # ---------------------------------------------------------------------------
 # 2. Lane-writeback failure is loud, not fatal
 # ---------------------------------------------------------------------------
