@@ -8,7 +8,7 @@ description: 'Handles payment processing, subscriptions, billing, and revenue an
 
   '
 mode: subagent
-model: anthropic/claude-sonnet-4-5
+model: anthropic/claude-sonnet-5-5
 ---
 <!-- opencode-sync: generated from .claude/agents/stripe.md -->
 

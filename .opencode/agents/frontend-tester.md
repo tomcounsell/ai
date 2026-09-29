@@ -3,7 +3,7 @@ description: Frontend web testing specialist that uses BYOB MCP to execute UI te
   scenarios and return structured results. Receives a focused test task (URL + what
   to verify) and returns pass/fail with evidence.
 mode: subagent
-model: anthropic/claude-sonnet-4-5
+model: anthropic/claude-sonnet-5-5
 ---
 <!-- opencode-sync: generated from .claude/agents/frontend-tester.md -->
 

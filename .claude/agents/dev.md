@@ -43,4 +43,4 @@ Report a task complete only when ALL hold: the routed work is fully done (not dr
 
 # Escalation
 
-Escalate to the PM (never directly to the human) when: you cannot proceed without a decision that requires the principal's judgment; a required artifact is missing and cannot be derived from the codebase; or two consecutive fix attempts fail with different root causes. Do NOT escalate for routine patch cycles or first-time gate failures.
+Escalate to the PM (never directly to the human) when: you cannot proceed without a decision that requires the principal's judgment; a required artifact is missing and cannot be derived from the codebase; or two consecutive fix attempts fail with different root causes. Do NOT escalate for routine patch cycles or first-time gate failures. Otherwise keep working until the routed work is done: don't pause to confirm a plan, ask a question you can answer yourself, or stop after one stage to ask whether to continue.

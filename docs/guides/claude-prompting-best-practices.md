@@ -124,7 +124,29 @@ Anthropic is training successive Claude versions to have more genuine values, be
 
 ---
 
-## 5. Quick Reference
+## 5. Claude Sonnet 5.5 Specifics
+
+Source: [Prompting Claude Sonnet 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-sonnet-5-5). Sonnet runs our mechanical SDLC stages (ISSUE, BUILD, TEST, PATCH, DOCS, MERGE), the `validator`, `documentarian`, `frontend-tester`, `sentry` and `stripe` agents, the plan-critique critics, and the direct-API tools behind `config.models.SONNET`. Apply these when writing or editing any of them:
+
+| Behavior | What we do |
+|---|---|
+| At `low`/`medium` effort it checks in before a multipart task is done | Agentic prompts say to keep working until the task is done and stop early only when blocked on a human or before a risky step (`do-sdlc` stage dispatch, `dev` agent, `prime-dev-role`) |
+| It adds unrequested tests, docs and files, more at higher effort | Worker prompts say: when the work is done and checked, stop and report; mention extras instead of doing them (`builder`, `documentarian`) |
+| At `low` effort it can report a change done without running a check | `builder` and `validator` carry the guide's real-check paragraph: tests, type-checker, build, or the changed command; a syntax-only or failed-to-start check does not count |
+| At `xhigh`/`max` it starts its own review rounds and reviewer subagents | Run routine stages at `high` or below; add "don't start extra rounds of review or launch reviewer sub-agents unless asked" if a stage ever runs higher |
+| Open-ended asks ("show me what you can do") turn into builds | Ideation prompts say to give ideas or a plan and stop until told to go ahead |
+| "Include your reasoning in the response" triggers `reasoning_extraction` refusals | Never ask a Sonnet prompt to reproduce its reasoning; a short `rationale` field in a JSON verdict is fine, a transcript of its thinking is not |
+| JSON answers to multi-step tasks skip thinking at low effort | Direct-API callers use adaptive thinking plus "Think the problem through before you answer.", treat `max_tokens` stops as failures, and parse the last JSON value (`tools/llm_reply.py`) |
+| `between_tools` without tools means no thinking at all | Use it only for descriptive output where latency matters (`image_analysis`, `documentation`); reasoning tasks use adaptive thinking |
+| Forced `tool_choice` (`any`/`tool`) returns a 400 | Sonnet callers use `auto`; `email_cs` and `run_typed`'s Anthropic leg stay on Haiku until migrated |
+| Text injected after every tool result reads as prompt injection | Hooks must not emit model-visible text on every tool call; steering arrives as a user turn at turn boundaries, never inside a `tool_result` |
+| Dense charts and technical drawings lose detail | Give the model a crop/zoom or code tool rather than raising effort |
+
+Effort levels are recalibrated relative to Sonnet 5, so re-sweep rather than carrying settings over. Asking the model to "think less" in the prompt does not reliably reduce thinking; lower the effort instead.
+
+---
+
+## 6. Quick Reference
 
 ### System Prompt Checklist
 - [ ] Role statement that assumes competence and scopes the agent's identity

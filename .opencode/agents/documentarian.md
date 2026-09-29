@@ -2,7 +2,7 @@
 description: Documentation specialist with deep knowledge of the full documentation
   structure, ensuring nothing gets missed
 mode: subagent
-model: anthropic/claude-sonnet-4-5
+model: anthropic/claude-sonnet-5-5
 ---
 <!-- opencode-sync: generated from .claude/agents/documentarian.md -->
 

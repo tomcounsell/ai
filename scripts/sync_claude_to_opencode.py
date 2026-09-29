@@ -41,11 +41,11 @@ OPENCODE_DIR = REPO_ROOT / ".opencode"
 # Bump whenever this script's templates or output format change. A version
 # mismatch invalidates the manifest's source-hash skip, forcing a full
 # content-compare pass so stale artifacts from an older generator are refreshed.
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 # Claude model shorthands -> OpenCode provider/model ids
 MODEL_MAP = {
-    "sonnet": "anthropic/claude-sonnet-4-5",
+    "sonnet": "anthropic/claude-sonnet-5-5",
     "haiku": "anthropic/claude-haiku-4-5",
     "opus": "anthropic/claude-opus-4-5",
 }
@@ -219,7 +219,7 @@ def write_opencode_json(permission: dict, opencode_dir: Path = OPENCODE_DIR) -> 
     )
     config = {
         "$schema": "https://opencode.ai/config.json",
-        "model": "anthropic/claude-sonnet-4-5",
+        "model": "anthropic/claude-sonnet-5-5",
         "small_model": "anthropic/claude-haiku-4-5",
         "instructions": ["CLAUDE.md"],
         "permission": permission,
