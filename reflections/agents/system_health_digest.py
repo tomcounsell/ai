@@ -151,8 +151,10 @@ def run() -> None:
                     suggested_action=(
                         "Investigate each anomaly (circuit state per dependency, throttle and "
                         "queue state in Redis, failed sessions in the last 24 hours, active "
-                        "failure clusters). Fix what you can; tell the team in plain words "
-                        "only what still needs a human."
+                        "failure clusters). When you mention circuit states, say OK for closed, "
+                        "DOWN for open and RECOVERING for half-open; never the raw state "
+                        "string. Fix what you can; tell the team in plain words only what "
+                        "still needs a human."
                     ),
                 )
             )

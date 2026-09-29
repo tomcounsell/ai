@@ -149,80 +149,30 @@ class TestPerSessionExceptionIsolation:
 
 
 # ---------------------------------------------------------------------------
-# 3. Telegram flag gate: OFF by default
+# 3. No chat side effects
 # ---------------------------------------------------------------------------
 
 
-class TestTelegramFlagOff:
-    def test_params_none_no_telegram_sent(self, monkeypatch):
-        sess = _fake_session("stalled-s1", status="running")
-        # Provide a stalled session to ensure there's something to alert about.
-        events = []  # no events, long elapsed → will classify as stalled
-
-        with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            _run_with_patched_imports(monkeypatch, [sess], timeline_fn=lambda _: events)
-            mock_alert.assert_not_called()
-
-    def test_params_empty_dict_no_telegram_sent(self, monkeypatch):
-        sess = _fake_session("stalled-s2", status="running")
-        with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            _run_with_patched_imports(monkeypatch, [sess], timeline_fn=lambda _: [], params={})
-            mock_alert.assert_not_called()
-
-    def test_telegram_enabled_false_no_telegram_sent(self, monkeypatch):
-        sess = _fake_session("stalled-s3", status="running")
-        with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            _run_with_patched_imports(
-                monkeypatch,
-                [sess],
-                timeline_fn=lambda _: [],
-                params={"stall_advisory_telegram_enabled": False},
-            )
-            mock_alert.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 4. Telegram flag gate: ON
-# ---------------------------------------------------------------------------
-
-
-class TestTelegramFlagOn:
-    def test_enabled_with_stalled_session_sends_alert(self, monkeypatch):
+class TestNoChatSideEffects:
+    def test_stalled_session_is_a_finding_and_sends_nothing(self, monkeypatch):
         # session aged past the never-started confirm threshold, status=running,
-        # no events → stalled/never_started
+        # no events -> stalled/never_started
         sess = _fake_session("stalled-enabled", status="running")
+        result = _run_with_patched_imports(monkeypatch, [sess], timeline_fn=lambda _: [])
+        assert result["status"] == "warn"
+        assert result["findings"]
+        assert not hasattr(stall_advisory_mod, "_send_alert")
 
-        with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            result = _run_with_patched_imports(
-                monkeypatch,
-                [sess],
-                timeline_fn=lambda _: [],
-                params={"stall_advisory_telegram_enabled": True},
-            )
-            # There should be a finding and an alert should have been sent.
-            assert result["status"] == "warn"
-            mock_alert.assert_called_once()
-
-    def test_enabled_with_all_healthy_sessions_no_alert(self, monkeypatch):
-        # Return a turn_start + recent turn_end so:
-        # 1. has_turn_start=True (never-started branch skipped)
-        # 2. recent_turn_ts < IDLE_SUSPECT_SECS → healthy/recent_turn_activity
+    def test_all_healthy_sessions_ok(self, monkeypatch):
+        # A turn_start + recent turn_end -> healthy/recent_turn_activity
         now = time.time()
         recent_events = [
             {"type": "turn_start", "ts": now - 35},
             {"type": "turn_end", "ts": now - 10},
         ]
         sess = _fake_session("healthy-s", status="running")
-
-        with patch.object(stall_advisory_mod, "_send_alert") as mock_alert:
-            result = _run_with_patched_imports(
-                monkeypatch,
-                [sess],
-                timeline_fn=lambda _: recent_events,
-                params={"stall_advisory_telegram_enabled": True},
-            )
-            assert result["status"] == "ok"
-            mock_alert.assert_not_called()
+        result = _run_with_patched_imports(monkeypatch, [sess], timeline_fn=lambda _: recent_events)
+        assert result["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

@@ -139,7 +139,9 @@ def stalled_lane(monkeypatch):
 
     alerts: list[str] = []
     monkeypatch.setattr(
-        sdlc_progress, "_send_alert", lambda project_dict, msg: alerts.append(msg) or True
+        sdlc_progress,
+        "_hand_off_escalation",
+        lambda **kw: (alerts.append(kw["reason"]) or True, "handed-off"),
     )
     return alerts
 
