@@ -6,7 +6,7 @@ status: Ready
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2340
 revision_applied: true
-revision_applied_at: 2026-09-29T06:13:45Z
+revision_applied_at: 2026-09-29T06:19:59Z
 ---
 
 # Blue-sky / fog-forward goal-setting
@@ -230,8 +230,9 @@ validator run above.
 
 ## Success Criteria
 - [ ] `do-issue` has a documented blue-sky mode with a `## Fog` section; a
-      fog-forward issue still passes the recon gate; CHECKLIST blue-sky variants
-      present for the two checks the mode changes.
+      fog-forward issue still passes the recon gate; CHECKLIST blue-sky readings
+      present for all four affected checks (No undefined jargon, Measurable
+      acceptance criteria, Observed not inferred, Recon performed).
 - [ ] `do-plan` welcomes fog, offers the decision-map affordance, and carries
       the fog-and-model-selection note.
 - [ ] Edited global bodies contain no repo-specific tooling or model names.
@@ -244,15 +245,40 @@ validator run above.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Recon gate passes for the fog-forward dogfood issue | `python .claude/hooks/validators/validate_issue_recon.py 2340` | exit code 0 |
-| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md` | exit code 1 (clean on baseline 37de11f3e) |
+| Global bodies free of repo tooling | Command A (fenced block below the table) | exit code 1 (clean on baseline 37de11f3e) |
 | Blue-sky mode present | `grep -c 'Fog (Not Yet Specified)' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
 | Recon Summary kept in template | `grep -c 'Recon Summary' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
-| CHECKLIST blue-sky readings present, one per check | `grep -i -E '^- \[ \] \*\*(No undefined jargon\|Measurable acceptance criteria\|Observed, not inferred\|Recon performed)\*\*.*blue-sky' .claude/skills-global/do-issue/CHECKLIST.md \| wc -l` | output 4 (each of the four check lines carries its own blue-sky reading) |
+| CHECKLIST blue-sky readings present, one per check | Command B (fenced block below the table) | output 4 (each of the four check lines carries its own blue-sky reading; 0 on the baseline) |
 | Skill audit passes on the edited bodies | `python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-issue && python .claude/skills-global/audit-skills/scripts/audit_skills.py --no-sync --skill do-plan` | exit code 0 (both pass on baseline 37de11f3e) |
 | do-plan SKILL.md within the line limit | `wc -l < .claude/skills-global/do-plan/SKILL.md` | output < 500 |
 | Skill tests green | `scripts/pytest-clean.sh tests/unit/test_skills_audit.py tests/unit/test_update_hardlinks.py tests/unit/test_symlinks.py tests/unit/test_relink_global_skills.py` | exit code 0 |
 | Decision map present | `grep -c -i 'decision map' .claude/skills-global/do-plan/SCOPING.md` | output > 0 |
 | Feature doc indexed | `grep -c 'blue-sky-fog-planning' docs/features/README.md` | output > 0 |
+
+Commands A and B contain regex alternation pipes, so they live outside the
+table: a markdown table forces `|` to be escaped as `\|`, and run verbatim the
+escaped form makes `grep -E` match a literal pipe (a vacuous exit 1 for A, a
+false 0 for B). Run them exactly as written here.
+
+Command A (token grep; must exit 1):
+
+```bash
+git grep -n -E 'sdlc-tool|validate_issue_recon|valor|[Hh]aiku|[Ss]onnet|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md
+```
+
+Before trusting A's exit 1, prove it red: run the same pattern with plain
+`grep -n -E` against a scratch file containing `sdlc-tool`; it must exit 0
+and print the line. (Proven at plan time on 2026-09-29: the scratch file
+matched with exit 0, and the real bodies exit 1 on baseline 37de11f3e.)
+
+Command B (CHECKLIST readings; must print 4):
+
+```bash
+grep -i -E '^- \[ \] \*\*(No undefined jargon|Measurable acceptance criteria|Observed, not inferred|Recon performed)\*\*.*blue-sky' .claude/skills-global/do-issue/CHECKLIST.md | wc -l
+```
+
+(Proven at plan time: against a scratch file with two matching check lines it
+prints 2, so the pattern counts real lines, not a literal pipe.)
 
 ## Team Orchestration
 
@@ -315,9 +341,9 @@ feature doc; there is no parallelizable code.
 
 ## Critique Results
 
-Round 3 (re-critique of revision 3b15ad0ca; sequential lenses, Agent tool unavailable). All round-2 findings are closed: the Verification table now runs the skill audit and checks the line limit, the Test Impact wording is corrected, the SCOPING trigger is stated, the CHECKLIST readings sit on their own lines, the Open Questions section is gone, and one baseline (37de11f3e) is named throughout.
+Round 3 (re-critique of revision 3b15ad0ca; sequential lenses, Agent tool unavailable). Verdict READY TO BUILD (WITH CONCERNS); both findings addressed in the round-3 revision pass. All round-2 findings are closed: the Verification table now runs the skill audit and checks the line limit, the Test Impact wording is corrected, the SCOPING trigger is stated, the CHECKLIST readings sit on their own lines, the Open Questions section is gone, and one baseline (37de11f3e) is named throughout.
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The "Global bodies free of repo tooling" and "CHECKLIST blue-sky readings" rows carry markdown-escaped `\\|` in their commands. Run verbatim, `grep -E` treats `\\|` as a literal pipe, so the token grep exits 1 vacuously (a false green) and the CHECKLIST count returns 0 (a false red). Verified against a file that contains sdlc-tool. | pending | Put both commands in fenced code blocks outside the table, or note that `\\|` is table escaping and means `\|` in the shell. Before trusting the token grep's exit 1, check that it returns 0 against a scratch file containing "sdlc-tool". |
-| NIT | Scope & Value | The Success Criteria bullet says blue-sky variants exist "for the two checks the mode changes", but Solution §1 and Verification require four readings. | pending | Reword it to name all four checks. |
+| CONCERN | Risk & Robustness | The "Global bodies free of repo tooling" and "CHECKLIST blue-sky readings" rows carry markdown-escaped `\\|` in their commands. Run verbatim, `grep -E` treats `\\|` as a literal pipe, so the token grep exits 1 vacuously (a false green) and the CHECKLIST count returns 0 (a false red). Verified against a file that contains sdlc-tool. | Commands A and B moved to fenced blocks below the Verification table, with a prove-red step for A (both proven at plan time) | Put both commands in fenced code blocks outside the table, or note that `\\|` is table escaping and means `\|` in the shell. Before trusting the token grep's exit 1, check that it returns 0 against a scratch file containing "sdlc-tool". |
+| NIT | Scope & Value | The Success Criteria bullet says blue-sky variants exist "for the two checks the mode changes", but Solution §1 and Verification require four readings. | Success Criteria bullet now names all four checks | Reword it to name all four checks. |
