@@ -2654,6 +2654,11 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         source = fresh if fresh is not None else session
         extra_ctx = getattr(source, "extra_context", None) or {}
 
+        from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+        if is_reflection_handoff(source):
+            return False  # no human waiting on a reflection handoff (#3588)
+
         if not extra_ctx.get("deferred_self_draft_pending"):
             # Not silent (#3053): makes "flush ran, nothing pending" distinguishable
             # from "flush never ran" in the logs.
@@ -2972,6 +2977,11 @@ async def _deliver_deferred_self_draft_fallback(
         extra_ctx = getattr(entry, "extra_context", None) or {}
         if not extra_ctx.get("deferred_self_draft_pending"):
             return
+
+        from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+        if is_reflection_handoff(entry):
+            return  # no human waiting on a reflection handoff (#3588)
 
         session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
         project_key = getattr(entry, "project_key", None) or "unknown"

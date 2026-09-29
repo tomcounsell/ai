@@ -1733,3 +1733,18 @@ def test_no_new_terminal_writer_bypasses_outside_lifecycle():
         f"{_KNOWN_BYPASS_FILE}, found {call_count}. A new last-resort bypass "
         f"site must route through the shared helper too."
     )
+
+
+def test_reflection_handoff_completed_flush_sends_nothing(cleanup):
+    """A reflection-handoff session has no human waiting (#3588): a pending
+    deferred self-draft must not flush any canned text to the Room."""
+    sid = f"{SID_PREFIX}handoff-flush"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY)
+    session.extra_context = {**session.extra_context, "origin": "reflection_handoff"}
+    session.save(update_fields=["extra_context"])
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(sid) == 0

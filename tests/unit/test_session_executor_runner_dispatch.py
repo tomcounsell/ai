@@ -203,6 +203,41 @@ class TestExecutorRunnerWiring:
         assert isinstance(wd, str) and wd
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("extra_context", "expected"),
+        [({"origin": "reflection_handoff"}, True), ({}, False)],
+    )
+    async def test_executor_passes_silent_interrupt_only_for_handoff(
+        self, redis_test_db, extra_context, expected
+    ):
+        """The executor suppresses the terminal "stopped" notice for a
+        reflection-handoff session only (#3588). RED if the argument is
+        dropped from the BackgroundTask construction."""
+        import agent
+        from agent.messenger import BackgroundTask as _RealBackgroundTask
+
+        seen: list[bool] = []
+
+        class _SpyBackgroundTask(_RealBackgroundTask):
+            def __init__(self, *args, **kwargs):
+                seen.append(kwargs.get("silent_interrupt", False))
+                super().__init__(*args, **kwargs)
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.extra_context = extra_context
+        session.save(update_fields=["status", "extra_context"])
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch.object(agent, "BackgroundTask", _SpyBackgroundTask),
+        ):
+            await _execute_agent_session(session)
+
+        assert seen == [expected]
+
+    @pytest.mark.asyncio
     async def test_runner_receives_adapter_and_session_env(self, redis_test_db):
         """The runner is constructed over a SessionRunnerAdapter and receives
         the per-session env (SESSION_TYPE for the pre_tool_use PM Bash
@@ -1110,7 +1145,7 @@ class TestSyntheticSlugWorktreePreservation:
         )
 
     @pytest.mark.asyncio
-    async def test_handoff_session_turn_timeout_reclaims_worktree(self, redis_test_db):
+    async def test_handoff_session_turn_timeout_reclaims_worktree(self, redis_test_db, tmp_path):
         """A reflection-handoff session has no reply coming to resume it (#3588),
         so a turn timeout reclaims its worktree like any other terminal exit."""
         import os
@@ -1122,7 +1157,7 @@ class TestSyntheticSlugWorktreePreservation:
         session.save(update_fields=["status", "extra_context"])
 
         slug = f"dev-{session.agent_session_id[:8]}"
-        repo_root = tempfile.mkdtemp()
+        repo_root = str(tmp_path)
         wt_path = os.path.join(repo_root, ".worktrees", slug)
         os.makedirs(wt_path, exist_ok=True)
 
