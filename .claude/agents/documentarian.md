@@ -136,6 +136,10 @@ After any significant code change, check:
 4. **Bug fixes** → Update troubleshooting if relevant
 5. **Architecture changes** → Update system docs
 
+## Scope
+
+When the documentation you were asked for is written and checked, stop and report. Don't create extra docs, guides, or indexes, or restructure existing ones, beyond what was asked; the feature-index entry above is part of the ask whenever you create feature documentation. If you think more documentation would help, mention it at the end instead of writing it.
+
 ## Anti-Patterns to Avoid
 
 ```

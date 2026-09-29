@@ -416,6 +416,7 @@ You are executing ONE SDLC stage for issue #{issue_number} in {repo_path}.
 
 Invoke the Skill tool now: skill "{skill-name-without-slash}", args "{issue_number / pr_number / slug as the skill expects}".
 The skill is the procedure — follow it exactly. Do not improvise the stage yourself.
+Keep working until the stage is done, and only stop early when you cannot go on without the supervisor or before a risky step. When the stage is done and checked, stop and report; do not start work that belongs to a later stage.
 
 Context:
 - Issue: #{issue_number} — {title}

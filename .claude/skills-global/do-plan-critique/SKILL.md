@@ -194,6 +194,7 @@ You are a plan triage agent. Classify this plan as LITE or FULL critique depth.
 LITE = purely internal, non-doctrine, small scope change (one bug fix, one CLI flag, one config key).
 FULL = anything touching critical paths, cross-component changes, new abstractions, architectural decisions.
 Bias to FULL on any ambiguity.
+Think the plan through before you answer.
 Reply with exactly one line: "LITE: <one-line reason>" or "FULL: <one-line reason>".
 
 PLAN:

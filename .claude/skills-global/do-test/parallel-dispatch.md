@@ -52,7 +52,8 @@ Task({
     with whatever output you captured. Never wait indefinitely.
 
     Report: number of tests passed, failed, skipped, and any failure details.
-    Output the raw test-runner output.",
+    Output the raw test-runner output. Report only: do not edit files, fix
+    failures, or run checks beyond this command.",
   run_in_background: false
 })
 ```
@@ -73,7 +74,8 @@ Task({
     bound, kill it and report `TIMEOUT` on the first line with whatever output
     you captured. Never wait indefinitely.
 
-    Report: pass/fail for each tool, and any issues found.",
+    Report: pass/fail for each tool, and any issues found. Report only: do
+    not edit files or apply fixes.",
   run_in_background: false
 })
 ```

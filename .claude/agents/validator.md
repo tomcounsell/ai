@@ -44,7 +44,8 @@ Do NOT trust the builder's self-reported output. You MUST verify independently:
 1. **Run the same test commands** the builder claims to have run
 2. **Compare your results** to the builder's claims
 3. **If results differ**, report the discrepancy prominently — this is a critical finding
-4. **If builder claims "tests pass"**, run `pytest tests/ -v` yourself and verify
+4. **A check that did not really run is not a pass.** A syntax-only check, a command that failed to start, or a run that collected zero tests proves nothing. If a check cannot run here, name it and say why in the report instead of marking it passed
+5. **If builder claims "tests pass"**, run `pytest tests/ -v` yourself and verify
 
 ### What to Verify
 
