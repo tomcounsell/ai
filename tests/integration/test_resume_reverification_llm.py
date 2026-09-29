@@ -197,10 +197,14 @@ def _build_uninterrupted_prompt(rails: str, work_patterns: str) -> str:
 async def _run_model(prompt: str) -> str:
     """Drive the model-under-test once with a real Anthropic call."""
     from agent.memory_extraction import _llm_call
-    from config.models import MODEL_REASONING
+    from config.models import MODEL_FAST
 
+    # Pinned to MODEL_FAST, not MODEL_REASONING: _llm_call goes through
+    # run_typed's Anthropic leg, which uses PydanticAI tool output (forced
+    # tool_choice). Sonnet 5.5 rejects forced tool_choice with a 400, so the
+    # leg cannot serve MODEL_REASONING until #3578 lands.
     reply = await _llm_call(
-        model=MODEL_REASONING,
+        model=MODEL_FAST,
         max_tokens=600,
         messages=[{"role": "user", "content": prompt}],
     )
