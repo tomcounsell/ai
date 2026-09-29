@@ -17,7 +17,9 @@ import json
 import re
 from typing import Any
 
-_FENCE_RE = re.compile(r"```[\w-]*")
+# A code-fence marker line: ``` or ```json etc. alone on its line. Fence-like
+# text inside a JSON string value is never on its own line, so it survives.
+_FENCE_RE = re.compile(r"^[ \t]*```[\w-]*[ \t]*$", re.MULTILINE)
 _DECODER = json.JSONDecoder()
 
 
@@ -77,7 +79,7 @@ def openrouter_text(result: dict, max_tokens: int | None = None) -> str:
 def parse_last_json(text: str) -> Any:
     """Return the last complete JSON object or array in ``text``.
 
-    Code fences are stripped first. Every ``{`` / ``[`` position is tried with
+    Code-fence marker lines are stripped first. Every ``{`` / ``[`` position is tried with
     ``raw_decode``; the value ending at the end of the text wins, otherwise
     the value that ends last (outermost on ties), so nested values and
     trailing prose are both handled.

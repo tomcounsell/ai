@@ -145,6 +145,12 @@ def test_openrouter_text_empty_returns_empty_string(result):
         pytest.param('{"first": 1} then {"second": 2}', {"second": 2}, id="last-value-wins"),
         pytest.param('["a", "b"]', ["a", "b"], id="top-level-array"),
         pytest.param('{"a": 1}\nHope that helps.', {"a": 1}, id="trailing-prose"),
+        pytest.param('{"a": "```x```"}', {"a": "```x```"}, id="fence-inside-string-bare"),
+        pytest.param(
+            'Reasoning.\n  ```json  \n{"reasoning": "run ```pytest``` first"}\n```\n',
+            {"reasoning": "run ```pytest``` first"},
+            id="fence-inside-string-in-fenced-block",
+        ),
     ],
 )
 def test_parse_last_json(text, expected):
