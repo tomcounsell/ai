@@ -34,6 +34,14 @@ import uuid
 
 logger = logging.getLogger(__name__)
 
+# Compare-and-delete: drop the binding only while it still maps to the id the
+# caller observed. Two callers that both saw the same dead row cannot interleave
+# into "A releases and rebinds, then B deletes A's fresh binding".
+_RELEASE_IF_BOUND_LUA = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+    "return redis.call('DEL', KEYS[1]) else return 0 end"
+)
+
 # One day. Long enough that a crash-retry of a reflection tick still finds the
 # binding, short enough that keys do not accumulate.
 IDEMPOTENCY_TTL_SECONDS = 86400
@@ -88,3 +96,20 @@ def release(idempotency_key: str) -> None:
         text_redis().delete(key_for(idempotency_key))
     except Exception as e:  # noqa: BLE001 -- the key ages out on its own
         logger.debug("Enqueue idempotency release failed for %s: %s", idempotency_key, e)
+
+
+def release_if_bound_to(idempotency_key: str, bound_id: str) -> bool:
+    """Drop a binding only if it still maps to ``bound_id`` (compare-and-delete).
+
+    Returns True when this call deleted the binding. False means the key was
+    rebound to a different id (or already gone), so the caller must not assume
+    the key is free and should re-run the enqueue, which then loses or wins the
+    bind against whoever rebound it. Best-effort: a Redis failure returns False.
+    """
+    try:
+        from utils.redis_client import text_redis
+
+        return bool(text_redis().eval(_RELEASE_IF_BOUND_LUA, 1, key_for(idempotency_key), bound_id))
+    except Exception as e:  # noqa: BLE001 -- the key ages out on its own
+        logger.debug("Enqueue idempotency compare-release failed for %s: %s", idempotency_key, e)
+        return False

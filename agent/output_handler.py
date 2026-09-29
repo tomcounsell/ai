@@ -769,21 +769,35 @@ class TelegramRelayOutputHandler:
         steering_deferred = False
         draft = None  # initialized before try so it is always defined for the redundancy filter
         drafter_medium = "email" if transport == "email" else "telegram"
+        # Verbatim payload (#3588): a reflection-handoff session that carries a
+        # deterministic, charter-pinned payload (the assumption digest) signals
+        # "deliver now" with any non-empty reply. The reply's wording is
+        # discarded and the payload is delivered byte-exact, past the drafter
+        # (which strips narration, composes structure, and can withhold).
+        # Redundancy and read-the-room still run on the delivery text.
+        verbatim_payload = (getattr(session, "extra_context", None) or {}).get(
+            "verbatim_payload"
+        )
+        if not (isinstance(verbatim_payload, str) and verbatim_payload.strip() and text.strip()):
+            verbatim_payload = None
         try:
             from bridge.message_drafter import draft_message
 
-            draft = await draft_message(
-                text,
-                session=session,
-                medium=drafter_medium,
-            )
-            # Use the drafter's composed text when non-empty. The drafter
-            # returns verbatim pass-through for short outputs and empty
-            # strings for blocking conditions (needs_self_draft=True).
-            if draft.text:
-                delivery_text = draft.text
-            if draft.full_output_file is not None:
-                drafter_overflow_file = str(draft.full_output_file)
+            if verbatim_payload:
+                delivery_text = verbatim_payload
+            else:
+                draft = await draft_message(
+                    text,
+                    session=session,
+                    medium=drafter_medium,
+                )
+                # Use the drafter's composed text when non-empty. The drafter
+                # returns verbatim pass-through for short outputs and empty
+                # strings for blocking conditions (needs_self_draft=True).
+                if draft.text:
+                    delivery_text = draft.text
+                if draft.full_output_file is not None:
+                    drafter_overflow_file = str(draft.full_output_file)
 
             # ── Context-recall gate (#2694) ──
             # A clean "which PR do you mean?" returns needs_self_draft=False and
@@ -827,7 +841,7 @@ class TelegramRelayOutputHandler:
 
             # An advisory the builder declined to produce (unusable chat id)
             # means the bounce has nothing to tell the PM, so do not bounce.
-            ctx_bounce = bool(ctx_verdict_advised and ctx_advisory)
+            ctx_bounce = bool(ctx_verdict_advised and ctx_advisory) and not verbatim_payload
 
             # ── Self-draft fallback via session steering ──
             # When the delivery validator flags a wire-format violation or an
