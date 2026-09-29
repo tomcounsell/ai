@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -203,9 +203,9 @@ No agent integration is required. This is internal to the reflection worker's sc
 
 ## Documentation
 
-- [ ] Update `docs/features/reflections.md` ("Startup-batch concurrency throttle", line ~422) to describe the oldest-due-first dispatch order, the ceil((N−1)/cap)-tick bound, the never-run pinning, the INFO deferral lines, the `deferred` count in `Tick complete`, and that the cap also binds in steady state when demand exceeds it.
-- [ ] Update the inline comment on `REFLECTION_STARTUP_MAX_CONCURRENT` in `agent/reflection_scheduler.py` and the `tick()` docstring.
-- [ ] Update the `.env.example` comment above `REFLECTION_STARTUP_MAX_CONCURRENT` (it also says excess reflections "defer to the next tick") to describe oldest-due-first ordering and the bound. The value stays `4` (RD-1).
+- [x] Update `docs/features/reflections.md` ("Startup-batch concurrency throttle", line ~422) to describe the oldest-due-first dispatch order, the ceil((N−1)/cap)-tick bound, the never-run pinning, the INFO deferral lines, the `deferred` count in `Tick complete`, and that the cap also binds in steady state when demand exceeds it.
+- [x] Update the inline comment on `REFLECTION_STARTUP_MAX_CONCURRENT` in `agent/reflection_scheduler.py` and the `tick()` docstring.
+- [x] Update the `.env.example` comment above `REFLECTION_STARTUP_MAX_CONCURRENT` (it also says excess reflections "defer to the next tick") to describe oldest-due-first ordering and the bound. The value stays `4` (RD-1).
 
 ## Success Criteria
 
