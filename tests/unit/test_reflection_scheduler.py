@@ -720,6 +720,149 @@ class TestReflectionScheduler:
         assert len(dispatched_names) == count
 
 
+class TestFairDispatch:
+    """Oldest-due-first dispatch under the per-tick cap (#3580)."""
+
+    TICK_SECONDS = 61.0
+
+    def _entries(self, count: int) -> list[ReflectionEntry]:
+        return [
+            ReflectionEntry(
+                name=f"test-fair-{i}",
+                description=f"Fair dispatch reflection {i}",
+                interval=60,
+                priority="low",
+                execution_type="function",
+                callable="agent.reflection_scheduler._get_memory_rss",
+                enabled=True,
+            )
+            for i in range(count)
+        ]
+
+    async def _run_ticks(self, entries, ran_at_by_name, ticks, *, create_task_raises=()):
+        """Drive ``ticks`` ticks; returns (tick number by name of first dispatch, scheduler)."""
+        clock = {"now": 1_000_000.0}
+        states = {}
+        for entry in entries:
+            state = MagicMock()
+            state.ran_at = ran_at_by_name[entry.name]
+            state.last_status = "success"
+            state.is_paused = MagicMock(return_value=False)
+            states[entry.name] = state
+
+        first_dispatch: dict[str, int] = {}
+        current_tick = {"n": 0}
+
+        def fake_create_task(coro, *, name=None):
+            coro.close()
+            short = (name or "").removeprefix("reflection-")
+            if short in create_task_raises:
+                raise RuntimeError("loop closed")
+            states[short].ran_at = clock["now"]
+            first_dispatch.setdefault(short, current_tick["n"])
+            task = MagicMock()
+            task.add_done_callback = MagicMock()
+            return task
+
+        scheduler = ReflectionScheduler()
+        scheduler._entries = entries
+        with (
+            patch(
+                "agent.reflection_scheduler.Reflection.get_or_create",
+                side_effect=lambda name, **kw: states[name],
+            ),
+            patch("agent.reflection_scheduler._latest_run_timestamp", return_value=None),
+            patch("agent.reflection_scheduler.asyncio.create_task", side_effect=fake_create_task),
+            patch("agent.reflection_scheduler.run_reflection"),
+            patch("agent.reflection_scheduler.time.time", side_effect=lambda: clock["now"]),
+        ):
+            for n in range(1, ticks + 1):
+                current_tick["n"] = n
+                await scheduler.tick()
+                clock["now"] += self.TICK_SECONDS
+        return first_dispatch, scheduler
+
+    @pytest.mark.asyncio
+    async def test_tail_entry_dispatched_within_bound_behind_hogs(self):
+        import math
+
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        total = cap * 3 + 1
+        entries = self._entries(total)
+        # Every entry is due on tick 1 with an identical due time, so registry
+        # order alone would starve the tail: 60 s hogs refill the cap each tick.
+        ran_at = {e.name: 1_000_000.0 - 60 for e in entries}
+        bound = math.ceil((total - 1) / cap)
+
+        first, _ = await self._run_ticks(entries, ran_at, bound + 1)
+
+        tail = entries[-1].name
+        assert tail in first, "tail entry was never dispatched"
+        # first deferral is tick 1; dispatched within `bound` ticks of it
+        assert first[tail] - 1 <= bound
+        assert set(first) == {e.name for e in entries}
+
+    @pytest.mark.asyncio
+    async def test_never_run_tail_dispatched_within_bound(self):
+        import math
+
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        total = cap * 3 + 1
+        entries = self._entries(total)
+        ran_at = {e.name: 1_000_000.0 - 60 for e in entries}
+        ran_at[entries[-1].name] = None  # never run: due time re-stamped to now each tick
+        bound = math.ceil((total - 1) / cap)
+
+        first, _ = await self._run_ticks(entries, ran_at, bound + 1)
+
+        tail = entries[-1].name
+        assert tail in first, "never-run tail entry was never dispatched"
+        assert first[tail] - 1 <= bound
+
+    @pytest.mark.asyncio
+    async def test_deferral_logs_once_per_episode(self, caplog):
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        entries = self._entries(cap + 1)
+        ran_at = {e.name: 1_000_000.0 - 60 for e in entries}
+        tail = entries[-1].name
+
+        with caplog.at_level(logging.INFO, logger="agent.reflection_scheduler"):
+            await self._run_ticks(entries, ran_at, 2)
+
+        deferring = [r for r in caplog.records if f"Deferring {tail} " in r.getMessage()]
+        dispatched = [r for r in caplog.records if f"{tail} dispatched after" in r.getMessage()]
+        assert len(deferring) == 1
+        assert len(dispatched) == 1
+        assert deferring[0].levelno == logging.INFO
+        assert dispatched[0].levelno == logging.INFO
+
+    @pytest.mark.asyncio
+    async def test_dispatch_exception_spends_slot_and_keeps_deferred_age(self, caplog):
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        entries = self._entries(cap + 2)
+        ran_at = {e.name: 1_000_000.0 - 60 for e in entries}
+        failing = entries[0].name
+
+        with caplog.at_level(logging.ERROR, logger="agent.reflection_scheduler"):
+            first, scheduler = await self._run_ticks(
+                entries, ran_at, 1, create_task_raises=(failing,)
+            )
+
+        assert failing not in first
+        # the failed attempt used a slot: cap - 1 successes, the rest deferred
+        assert len(first) == cap - 1
+        assert any("Error dispatching reflection" in r.getMessage() for r in caplog.records)
+        assert failing in scheduler._deferred_since
+        assert len(scheduler._deferred_since) == len(entries) - cap + 1
+
+    @pytest.mark.asyncio
+    async def test_empty_registry_has_no_deferrals(self):
+        scheduler = ReflectionScheduler()
+        scheduler._entries = []
+        assert await scheduler.tick() == 0
+        assert scheduler._deferred_since == {}
+
+
 # === Registry File Integrity Tests ===
 
 
