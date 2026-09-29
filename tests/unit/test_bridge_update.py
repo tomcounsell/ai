@@ -272,15 +272,21 @@ async def test_notice_reaches_telegram_on_clean_run(update_env, tg_client, event
 
 
 def test_force_update_summary_keeps_the_pause_note():
-    """#3581: /update --force keyword-filters run.py output; the pause NOTE survives."""
+    """#3581: /update --force keyword-filters run.py output; the pause NOTE survives.
+
+    Lines follow run.py's real order: the pull step logs before the hardlink sync.
+    """
+    from scripts.update.hardlinks import SKILLS_PAUSED_DETAIL
+
+    note = f"NOTE: {SKILLS_PAUSED_DETAIL}"
     stdout = (
+        "[update] Already up to date (abc1234)\n"
         "[update] Syncing .claude hardlinks...\n"
-        "[update] NOTE: skills sync paused (~/.local/state/valor/skip-skills-sync present)\n"
-        "[update] Already up to date\n"
+        f"[update] {note}\n"
     )
     assert bridge_update._force_update_steps(stdout) == [
-        "NOTE: skills sync paused (~/.local/state/valor/skip-skills-sync present)",
-        "Already up to date",
+        "Already up to date (abc1234)",
+        note,
     ]
 
 
