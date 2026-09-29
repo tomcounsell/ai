@@ -1,12 +1,10 @@
 ---
-title: Blue-sky / fog-forward goal-setting — exploratory do-issue mode + do-chart decision-map skill
+title: Blue-sky / fog-forward goal-setting — exploratory do-issue mode + fog in do-plan
 slug: blue-sky-fog-planning
 type: feature
 status: Ready
-appetite: Medium
+appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2340
-revision_applied: true
-revision_applied_at: 2026-07-24T15:41:56Z
 ---
 
 # Blue-sky / fog-forward goal-setting
@@ -16,236 +14,180 @@ revision_applied_at: 2026-07-24T15:41:56Z
 Our SDLC on-ramp only supports *well-scoped* work. `do-issue` demands defined
 terms and verifiable acceptance criteria ("Think Like a Teacher"); `do-plan`
 narrows a request toward a single plan. When the owner has a **loose, blue-sky,
-foggy** goal — a direction he wants to name without a locked spec — the skills
+foggy** goal (a direction he wants to name without a locked spec), the skills
 push back and ask him to narrow it before the system engages. Premature
 crispness fabricates certainty we don't have.
 
 There is also no affordance for work that is **too big or unclear for one
 session**: no way to say "this is one decision among many, resolve it, then
 re-survey." Wayfinder ([mattpocock/skills](https://github.com/mattpocock/skills/blob/main/skills/engineering/wayfinder/SKILL.md))
-names this problem and solves it with a *map* of one-at-a-time *decision
+names this problem and answers it with a *map* of one-at-a-time *decision
 tickets*.
 
-**Desired outcome:** blue-sky goal-setting is a first-class supported mode, fog
-(in-scope territory we can't yet specify) has an explicit home and a way to
-graduate out, and a decision-map affordance exists for multi-session foggy work.
+Source issue: #2340 (itself filed in the fog-forward style as a dogfood).
 
-Source issue: #2340 (itself filed in the new fog-forward style as a dogfood).
+## Scope of this plan (partial: Refs #2340, not Closes)
 
-## Recon Summary (from #2340, re-verified)
+This plan ships the part of #2340 that has no open owner decision:
 
-- `do-issue` is crispness-biased; single one-line uncertainty concession in
-  Step 4. Verified in `.claude/skills-global/do-issue/SKILL.md`.
-- `do-plan` Phase 1.5 **Spike Resolution** already runs prototype/research
-  spikes in worktrees — the "prototype ticket" affordance is latent, not
-  missing. Verified in `.claude/skills-global/do-plan/SKILL.md`.
-- Wayfinder has **no** model-selection guidance — "fog and model selection" is
-  net-new (owner's idea), not a port. Verified against the fetched SKILL.
-- New `.claude/skills-global/{dir}/SKILL.md` dirs auto-sync to every machine via
-  `scripts/update/hardlinks.py::sync_claude_dirs()`; renames need a
-  `RENAMED_REMOVALS` entry, but a brand-new dir needs none.
+1. `do-issue` blue-sky mode.
+2. `do-plan` welcomes fog, with a lightweight route-charting affordance
+   (a parent map issue plus one-decision-per-issue children, using plain `gh`).
+3. Fog-and-model-selection guidance.
+4. A feature doc.
+
+**[EXTERNAL] Deferred to a follow-up under #2340:** a dedicated charting skill (the full
+Wayfinder-style map discipline). The July revision of this plan recommended a
+new global skill (working name `do-chart`) and made its **name an owner
+decision** that must precede building it, since the name threads through the
+dir, skill-context file, labels, docs, and cross-links. That decision has not
+been made, so the skill is out of this PR. #2340 stays open for it; the PR says
+`Refs #2340` and names what remains.
+
+## Recon Summary (from #2340, re-verified 2026-09-29)
+
+- `do-issue` is still crispness-biased: its only uncertainty concession is the
+  Step 4 "write open questions instead of approaches" line.
+- `do-plan` Phase 1.5 Spike Resolution still runs prototype/research spikes in
+  worktrees, so the "prototype ticket" affordance is latent, not missing.
+- `do-plan` Phase 0 now treats the recon gate as a repo-declared mechanism
+  (generic body; this repo's gate is `.claude/hooks/validators/validate_issue_recon.py`,
+  which requires a `## Recon Summary` with ≥1 bucket item or `## Recon: Skipped`).
+  Blue-sky issues must keep the Recon Summary shape.
 
 ## Freshness Check
 
-**Disposition: Unchanged.** Issue #2340 filed today (2026-07-24); baseline
-commit `f79cea679`. No commits have landed on the two target skills since. The
-file:line claims above were read directly at plan time. Proceed.
+**Disposition: Revised.** The July WIP commit on `session/dev-da3457d4`
+(draft PR #3577) was written against a July baseline. Since then do-issue gained
+Step 3.5 "Try to Kill the Issue" and Falsification Checks, and do-plan's
+Phase 0 was genericized (the recon gate is now a context-file declaration).
+The July diff also names repo-specific tooling (`validate_issue_recon.py`) and
+specific model families in global skill bodies, and leans on long anti-pattern
+lists. Rather than rebase it, the change is **redone on current main** in a new
+lane (`session/blue-sky-fog-planning`); PR #3577 is closed as superseded.
 
-## Decision: Wayfinder as its own skill vs folded into do-plan
-
-**Recommendation: a NEW global skill (`do-chart`, working name) for the
-map/decision-ticket charting, plus a lightweight fog affordance folded into
-`do-issue` and `do-plan`.**
-
-Justification — **altitude and discipline**:
-- `do-issue`/`do-plan` operate on **one work item**: they produce a spec/plan
-  and run to completion within a session.
-- Wayfinder operates **one altitude above**: it charts a *route across many
-  future work items and multiple sessions*, and its explicit product is
-  **decisions, not deliverables**. Its core discipline — *one decision per
-  session*, a *persistent map issue*, *fog graduation* — directly contradicts
-  do-plan's "produce a finished plan this session." Folding it in would give
-  do-plan two conflicting operating modes.
-- Therefore a separate skill is cleaner. We adapt Wayfinder's ticket types to
-  tools we already have (no new sub-skill tree):
-
-  | Wayfinder ticket | Our tool |
-  |---|---|
-  | research (AFK) | `Explore` / `general-purpose` subagent |
-  | prototype (HITL) | `do-plan` worktree spike / builder-in-worktree |
-  | grilling (HITL) | `/ask-me` skill |
-  | task | manual prerequisite issue |
-
-**Open owner decision (surfaced to PM):** the skill NAME. Working name
-`do-chart` (it charts the route/map). Alternatives: `do-wayfinder`, `do-map`,
-`do-survey`. Build proceeds under `do-chart` as provisional; a rename is a
-trivial, reversible follow-up (dir rename + `RENAMED_REMOVALS` entry).
+The Opus 5.5 skills audit (`docs/audits/opus-5-5-skills/`, #3565) has open
+recommendations for these same skills (do-issue RECON headless stop, label
+default, start marker; do-plan stash block, kebab slugs). They are independent
+bug fixes with their own lanes and are **not** folded in here; this change only
+adds fog affordances and does not touch the lines those fixes target.
 
 ## Solution
 
-Three coordinated changes, all documentation/skills (no runtime code):
+All edits are skill markdown under `.claude/skills-global/`, kept generic per
+`docs/features/skill-context-convention.md` (no repo tooling, no model names;
+say what to do rather than enumerate failure modes).
 
 ### 1. `do-issue` — first-class blue-sky mode
-- Add a **Step 0: Mode Select** — *well-scoped* (default; bugs, defined
-  features) vs *exploratory / blue-sky* (a direction with acknowledged fog).
-  Give 2-3 sentence selection criteria.
-- In blue-sky mode:
-  - Recon fan-out is **lighter** (read the affected area; skip the multi-agent
-    fan-out unless a concern is cheap to resolve) **but the `## Recon Summary`
-    section is NON-NEGOTIABLE**: blue-sky issues STILL emit the four-bucket
-    summary (Confirmed / Revised / Pre-requisites / Dropped) with ≥1 item —
-    lighter *content*, identical *shape*. This is a hard contract: the
-    ISSUE→PLAN gate `.claude/hooks/validators/validate_issue_recon.py` exits 2
-    (blocks `/do-plan`) without it. `## Recon: Skipped` is NOT a valid escape
-    hatch for blue-sky work (that's for trivial issues, not exploratory ones).
-    Add a one-line note in `SKILL.md` Step 3 making this explicit. The dogfood
-    issue #2340 already follows this pattern (full four-bucket summary), proving
-    it composes.
-  - Definitions/terms still encouraged but **not blocking**.
-  - Acceptance Criteria reframed as **"signals the fog cleared"** rather than
-    verifiable checkboxes.
-  - A **`## Fog (Not Yet Specified)`** section becomes a first-class,
-    required-in-this-mode part of the template: known unknowns + suspected
-    decisions that hang on open questions.
-- `ISSUE_TEMPLATE.md`: add the conditional `## Fog (Not Yet Specified)` section
-  and the fog-clearing framing for Acceptance Criteria.
-- **`CHECKLIST.md` — make mode-aware (required, was missing from earlier draft).**
-  Three hard checks that blue-sky mode softens must branch on well-scoped vs
-  blue-sky instead of being silently violated:
-  - *Measurable acceptance criteria* → in blue-sky mode, criteria are
-    "fog-clearing signals," not yes/no checkboxes.
-  - *No undefined jargon* → in blue-sky mode, definitions are encouraged, not
-    blocking.
-  - *Recon summary present* → unchanged: still REQUIRED in both modes (four
-    buckets). This item stays a hard check.
-- Anti-Patterns: add **"Premature crispness"** for exploratory work (balancing,
-  not replacing, the existing "vague problem statements" which still governs
-  well-scoped issues).
-- Cross-link: point to `do-chart` when the direction is too big for one session.
+- `SKILL.md` Step 1 gains a **mode** decision: *well-scoped* (default) or
+  *blue-sky* (a direction whose specifics are genuinely unknown). One short
+  criterion: if writing verifiable acceptance criteria would require inventing
+  specifics the requester did not give, it is blue-sky; when unsure, ask.
+- A short **Blue-sky mode** subsection states what changes:
+  - Recon reads the area to ground the direction; fan-out only for cheap
+    concerns. The `## Recon Summary` keeps its four-bucket shape in both modes.
+  - Definitions: define what you can; terms the exploration exists to pin down
+    go in the Fog section.
+  - Acceptance criteria become **signals the fog cleared** (still checkable).
+  - A `## Fog (Not Yet Specified)` section lists known unknowns and the
+    decisions that hang on them.
+- Step 4 rule 4 (open questions instead of approaches) cross-references the Fog
+  section.
+- `ISSUE_TEMPLATE.md`: conditional `## Fog (Not Yet Specified)` section; an
+  acceptance-criteria comment explaining the blue-sky framing.
+- `CHECKLIST.md`: the two checks blue-sky mode changes (**No undefined jargon**,
+  **Measurable acceptance criteria**) each carry a one-line blue-sky variant.
+  Recon and falsification checks are unchanged in both modes.
 
-### 2. `do-plan` — welcome fog, don't narrow it away
-- `SKILL.md` Phase 1 "Narrow the problem": if the issue is fog-forward (has a
-  `## Fog` section), do **not** force-narrow; chart the route instead — resolve
-  what can be resolved, keep the rest as an explicit "Not yet specified" list,
-  and recommend spinning a `do-chart` map if scope exceeds one session.
-- `SCOPING.md`: add a **"Fog is legitimate"** principle — deliberately staying
-  at low resolution is valid for exploratory issues.
-- **Fog and model selection**: a short note (Phase 1.5 spikes) — route
-  survey/research spikes to cheap/fast models (Haiku); reserve stronger models
-  (Opus/Sonnet) for the load-bearing decision.
+### 2. `do-plan` — chart fog instead of narrowing it away
+- `SCOPING.md` §1 gains **"When the issue is fog-forward"**: keep the low
+  resolution, resolve what can be resolved, carry the rest as a
+  **Not Yet Specified** list in the plan that graduates into tasks as it clears.
+  For work spanning several interdependent decisions across sessions, **chart a
+  decision map**: one parent issue (destination, decisions so far, open fog) and
+  one child issue per decision, resolved one at a time with the result recorded
+  on the map, then re-plan. Distinguish fog (one unknown direction: chart it)
+  from a grab-bag (several known features: split it).
+- `SKILL.md` Phase 1 step 2 points to that SCOPING section for fog-forward issues.
+- `SKILL.md` Phase 1.5 gains **fog and model selection**: survey/research
+  spikes go to the cheapest capable model; the plan author's strongest
+  reasoning goes to the load-bearing decision the fog hangs on.
 
-### 3. New global skill `do-chart` (working name)
-- `.claude/skills-global/do-chart/SKILL.md` — generic body following the
-  skill-context convention (probe sentence for `.claude/skill-context/do-chart.md`,
-  generic `git`/`gh` baseline).
-- Adapts Wayfinder to our GitHub workflow:
-  - **Map** = a parent issue labeled `chart:map`, body sections: Destination,
-    Notes, Decisions so far, Not yet specified (fog), Out of scope.
-  - **Decision tickets** = child issues labeled `chart:decision` + a type
-    (`research`/`prototype`/`grilling`/`task`), mapped to our tools (table
-    above).
-  - **Discipline**: one decision per session (except research); post resolution
-    as a comment, close the ticket, append to Decisions-so-far, graduate fog.
-  - **Fog and model selection** guidance included.
-- `.claude/skill-context/do-chart.md` — repo-specific layer: `chart:*` label
-  creation via `gh`, `GH_REPO` targeting, `sdlc-tool` markers, how to spawn
-  `Explore`/spike agents for ticket types.
-- Sync: new dir under `skills-global/` auto-propagates via `hardlinks.py` — no
-  `RENAMED_REMOVALS` needed (brand new). Verify against the sync invariant test.
+### 3. Docs
+- `docs/features/blue-sky-fog-planning.md` describing the mode, the Fog section,
+  decision maps, model selection, and the deferred charting skill.
+- Entry in `docs/features/README.md`.
 
 ## Data Flow
 
-N/A — no runtime data flow. This changes skill markdown read by the agent at
-skill-invocation time. The only "flow" is: owner request → `do-issue` (mode
-select) → issue with `## Fog` → `do-plan` (charts fog / recommends `do-chart`)
-→ optionally `do-chart` map + decision tickets → back to `do-plan`/`do-build`
-per decision.
+No runtime data flow; skill markdown read at invocation time. Flow of work:
+owner request → `do-issue` (mode) → issue with `## Fog` → `do-plan` (charts fog;
+recommends a decision map when the work spans sessions) → per-decision issues →
+`do-plan`/`do-build` as each clears.
 
 ## Documentation
-- [ ] Create `docs/features/blue-sky-fog-planning.md` documenting the
-      exploratory `do-issue` mode, the fog concept, `do-chart`, and fog-and-
-      model-selection guidance.
-- [ ] Add an entry to `docs/features/README.md` index table.
-- [ ] Create `.claude/skill-context/do-chart.md` (repo-specific addendum).
+- [ ] Create `docs/features/blue-sky-fog-planning.md`.
+- [ ] Add it to `docs/features/README.md`.
 
 ## Update System
-No update-script logic changes required. The new `do-chart` skill dir under
-`.claude/skills-global/` is picked up automatically by the existing
-`sync_claude_dirs()` hardlink wiring on the next `/update`; adding a directory
-with a `SKILL.md` is the only requirement (no registration step). No new
-dependencies or config files.
+No update-script changes. Edited files already live under
+`.claude/skills-global/` and propagate through the existing hardlinks on
+`/update`. No new skill directory, so no `RENAMED_REMOVALS` entry.
 
 ## Agent Integration
-No agent-integration code required — no new CLI entry point in `pyproject.toml`
-and no bridge import. `do-chart` is a slash-command skill the agent invokes like
-any other `/do-*` skill; `do-issue`/`do-plan` edits are in-place skill-body
-changes. The agent reaches all three through the existing skill surface.
+None. In-place edits to existing skill bodies reached through the existing
+skill surface.
 
 ## Test Impact
-- [ ] `tests/unit/test_update_hardlinks.py` skill-sync invariant tests — VERIFY
-      still pass with the new `do-chart` dir. Confirmed via critique that no test
-      enumerates the live skill set in a way an *added* dir would trip
-      (`test_renamed_removals_covers_deleted_skills` walks git deletions only).
-      No UPDATE expected.
-- [ ] Add a focused unit test asserting `do-chart/SKILL.md` exists with valid
-      frontmatter (`name`, `description`) and carries the skill-context probe
-      sentence — ADD as a new test.
-- [ ] Manually re-run `validate_issue_recon.py` against a fog-forward issue
-      shape (e.g. #2340) to CONFIRM the mode-aware blue-sky path still passes the
-      ISSUE→PLAN gate (four-bucket Recon Summary preserved).
-No existing behavioral tests touch `do-issue`/`do-plan` bodies (they are
-markdown); the risk surface is the sync invariant + the recon gate.
+No existing test asserts on these skill bodies' fog/mode wording. Verification:
+- [ ] `python .claude/hooks/validators/validate_issue_recon.py 2340` passes
+      (the fog-forward dogfood issue satisfies the ISSUE→PLAN gate).
+- [ ] Existing skill lint/coupling tests that scan `skills-global` bodies stay
+      green (run the tests that reference `skills-global` by grep; e.g. skill
+      frontmatter / coupling guards).
+- [ ] Grep the edited global bodies for repo-specific tokens
+      (`sdlc-tool`, `validate_issue_recon`, `valor`, model family names): none.
 
 ## Failure Path Test Strategy
-The failure mode that matters: the new skill dir breaks the machine-wide sync
-invariant (a project-only skill accidentally becoming a sync destination, or a
-malformed SKILL.md). Covered by running the existing
-`test_no_project_only_skill_is_a_sync_destination` (and sibling sync tests) plus
-the new frontmatter/probe guard. Markdown skill-body edits have no runtime
-failure path to exercise beyond "does the skill still parse / is the probe
-sentence present" — asserted by the `do-skills-audit` coupling guard
-(`rule_13_coupling_signals`) which we run against the edited bodies.
+The only failure mode is a global body regressing to repo coupling or breaking
+the recon-gate contract; both are covered by the verification greps and the
+validator run above.
 
 ## No-Gos
-- **No full Wayfinder port.** We do NOT import its `/research`, `/prototype`,
-  `/grilling`, `/domain-modeling` sub-skill tree. Justification: *separate slug*
-  — those are meaningfully different features; we adapt to existing tools
-  instead. (Legitimate No-Go: separate slug.)
-- **No new GitHub labels beyond `chart:map` / `chart:decision`.** Created lazily
-  by `do-chart` via `gh label create` at first use, not pre-provisioned.
-- **No changes to the SDLC router (`/sdlc`) stage graph** in this PR. `do-chart`
-  is invoked directly, not wired as a pipeline stage. (Legitimate No-Go:
-  separate slug — router integration is its own future decision.)
+- **[EXTERNAL] The dedicated charting skill** ( blocked on the owner's naming
+  decision; tracked on #2340).
+- **No full Wayfinder port** of its sub-skill tree; existing tools cover the
+  ticket types (Explore/general-purpose agents for research, do-plan worktree
+  spikes for prototypes, `/ask-me` for grilling).
+- **No validators or hooks for the Fog section**: re-imposing crispness on the
+  exploratory mode would defeat it.
+- **No audit-recommendation fixes** for these skills (own lanes).
+- **No `/sdlc` router changes.**
 
 ## Rabbit Holes
-- **Rebuilding Wayfinder faithfully** — its sub-skill tree is a deep well; the
-  adaptation-to-existing-tools table is the boundary.
-- **Over-formalizing fog** — the `## Fog` section is prose + a bullet list, not
-  a schema. Resist adding validators/hooks that would re-impose crispness on the
-  exploratory mode (that would defeat the point).
-- **Router integration** — tempting to wire `do-chart` into `/sdlc`. Out of
-  scope; it's a standalone charting skill for now.
+- Over-formalizing fog into a schema.
+- Writing long anti-pattern lists for blue-sky mode; state the mode's rules.
 
 ## Success Criteria
-- [ ] `do-issue` blue-sky mode is a first-class documented path with a
-      `## Fog` section; an ill-defined goal files without being narrowed first,
-      AND still passes `validate_issue_recon.py` (four-bucket Recon Summary
-      preserved). `CHECKLIST.md` is mode-aware (no silent hard-check violations).
-- [ ] `do-plan` welcomes fog (SCOPING "Fog is legitimate") and recommends
-      `do-chart` for multi-session work; fog-and-model-selection note present.
-- [ ] `do-chart` skill exists, follows the skill-context convention, and its
-      dir satisfies the sync invariant (test green).
-- [ ] The own-skill-vs-fold-in decision is recorded with justification; owner
-      signs off on the final name.
-- [ ] `docs/features/blue-sky-fog-planning.md` + README index entry created.
-- [ ] `python -m ruff check` clean; targeted tests green.
+- [ ] `do-issue` has a documented blue-sky mode with a `## Fog` section; a
+      fog-forward issue still passes the recon gate; CHECKLIST blue-sky variants
+      present for the two checks the mode changes.
+- [ ] `do-plan` welcomes fog, offers the decision-map affordance, and carries
+      the fog-and-model-selection note.
+- [ ] Edited global bodies contain no repo-specific tooling or model names.
+- [ ] Feature doc and README entry exist.
+- [ ] PR body says `Refs #2340` and lists the deferred charting skill.
+
+## Verification
+
+| Check | Command | Expected |
+|-------|---------|----------|
+| Recon gate passes for the fog-forward dogfood issue | `python .claude/hooks/validators/validate_issue_recon.py 2340` | exit code 0 |
+| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md` | exit code 1 |
+| Blue-sky mode present | `grep -c 'Fog (Not Yet Specified)' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
+| Decision map present | `grep -c -i 'decision map' .claude/skills-global/do-plan/SCOPING.md` | output > 0 |
+| Feature doc indexed | `grep -c 'blue-sky-fog-planning' docs/features/README.md` | output > 0 |
 
 ## Open Questions
-1. **`do-chart` final name** — owner call (`do-chart` / `do-wayfinder` /
-   `do-map` / `do-survey`). **Sequencing (per critique):** the name is threaded
-   through the skill dir, `skill-context/{name}.md`, feature doc, README entry,
-   `{name}:*` labels, and cross-links from `do-issue`/`do-plan`, so a post-build
-   rename is multi-file churn, not trivial. Therefore: the `do-issue` +
-   `do-plan` fog edits (no naming dependency) build FIRST; the new charting
-   skill is created only AFTER the owner picks the name. Both land in the same
-   PR/branch.
+1. **Charting skill name** (owner): `do-chart` / `do-wayfinder` / `do-map` /
+   `do-survey`. Needed before the follow-up; not needed for this plan.
