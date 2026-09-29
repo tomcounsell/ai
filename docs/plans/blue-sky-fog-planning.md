@@ -5,6 +5,8 @@ type: feature
 status: Ready
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/2340
+revision_applied: true
+revision_applied_at: 2026-09-29T06:06:53Z
 ---
 
 # Blue-sky / fog-forward goal-setting
@@ -93,7 +95,9 @@ say what to do rather than enumerate failure modes).
 - `SKILL.md` Step 1 gains a **mode** decision: *well-scoped* (default) or
   *blue-sky* (a direction whose specifics are genuinely unknown). One short
   criterion: if writing verifiable acceptance criteria would require inventing
-  specifics the requester did not give, it is blue-sky; when unsure, ask.
+  specifics the requester did not give, it is blue-sky. Default to
+  well-scoped unless the requester signals exploration (so an unattended run
+  never stalls on the choice), and record the chosen mode in the issue body.
 - A short **Blue-sky mode** subsection states what changes:
   - Recon reads the area to ground the direction; fan-out only for cheap
     concerns. The `## Recon Summary` keeps its four-bucket shape in both modes.
@@ -108,7 +112,13 @@ say what to do rather than enumerate failure modes).
   acceptance-criteria comment explaining the blue-sky framing.
 - `CHECKLIST.md`: the two checks blue-sky mode changes (**No undefined jargon**,
   **Measurable acceptance criteria**) each carry a one-line blue-sky variant.
-  Recon and falsification checks are unchanged in both modes.
+  Two further checks get a one-line blue-sky reading so the checklist does not
+  kill every blue-sky issue: **Observed, not inferred** applies to the pain
+  motivating the direction, not to the specifics still in fog (the kill
+  criterion stays in force for that pain: an unobserved "could/would" pain
+  still means file nothing); **Recon performed** is met by the broad scan plus
+  fan-out on cheap concerns only. **Not already decided** and the remaining
+  falsification checks apply unchanged in both modes.
 
 ### 2. `do-plan` — chart fog instead of narrowing it away
 - `SCOPING.md` §1 gains **"When the issue is fog-forward"**: keep the low
@@ -126,8 +136,21 @@ say what to do rather than enumerate failure modes).
 
 ### 3. Docs
 - `docs/features/blue-sky-fog-planning.md` describing the mode, the Fog section,
-  decision maps, model selection, and the deferred charting skill.
+  decision maps, model selection, and the deferred charting skill. It states
+  that the charting skill, once built, absorbs and replaces the SCOPING
+  decision-map guidance, so the two never coexist as divergent sources.
 - Entry in `docs/features/README.md`.
+
+## Prior Art
+
+- **Draft PR #3577** (`[WIP] Blue-sky/fog mode in do-issue + fog and model
+  selection in do-plan`, open): the July attempt at this same change. Written
+  against a pre-Step-3.5 do-issue and a pre-genericized do-plan, and it puts
+  repo tooling and model family names into global bodies. Superseded by this
+  plan's redo on current main; closed by the build once the new PR exists
+  (task `close-superseded-pr`).
+- **Wayfinder** (mattpocock/skills): external source of the decision-map idea;
+  borrowed as a lightweight affordance only (see No-Gos).
 
 ## Data Flow
 
@@ -151,13 +174,19 @@ skill surface.
 
 ## Test Impact
 No existing test asserts on these skill bodies' fog/mode wording. Verification:
-- [ ] `python .claude/hooks/validators/validate_issue_recon.py 2340` passes
-      (the fog-forward dogfood issue satisfies the ISSUE→PLAN gate).
-- [ ] Existing skill lint/coupling tests that scan `skills-global` bodies stay
-      green (run the tests that reference `skills-global` by grep; e.g. skill
-      frontmatter / coupling guards).
-- [ ] Grep the edited global bodies for repo-specific tokens
-      (`sdlc-tool`, `validate_issue_recon`, `valor`, model family names): none.
+- [ ] `python .claude/hooks/validators/validate_issue_recon.py 2340` passes.
+      This is a regression smoke check only (it already exits 0 on the
+      baseline with an unedited validator); the real evidence that blue-sky
+      issues keep satisfying the gate is that `ISSUE_TEMPLATE.md` keeps
+      `## Recon Summary` in both modes (Verification row below).
+- [ ] Skill lint/coupling tests that scan `skills-global` bodies stay green,
+      run via `scripts/pytest-clean.sh`: `tests/unit/test_skills_audit.py`
+      (has a `do-issue` entry), `tests/unit/test_update_hardlinks.py`,
+      `tests/unit/test_symlinks.py`, `tests/unit/test_relink_global_skills.py`.
+      No UPDATE/DELETE/REPLACE expected: none asserts on fog/mode wording.
+- [ ] Grep every edited global body (do-issue/, do-plan/SCOPING.md,
+      do-plan/SKILL.md) for repo-specific tokens (`sdlc-tool`,
+      `validate_issue_recon`, `valor`, model family names): none.
 
 ## Failure Path Test Strategy
 The only failure mode is a global body regressing to repo coupling or breaking
@@ -195,21 +224,83 @@ validator run above.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Recon gate passes for the fog-forward dogfood issue | `python .claude/hooks/validators/validate_issue_recon.py 2340` | exit code 0 |
-| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md` | exit code 1 |
+| Global bodies free of repo tooling | `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md` | exit code 1 (clean on baseline b6d7696ad) |
 | Blue-sky mode present | `grep -c 'Fog (Not Yet Specified)' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
+| Recon Summary kept in template | `grep -c 'Recon Summary' .claude/skills-global/do-issue/ISSUE_TEMPLATE.md` | output > 0 |
+| CHECKLIST blue-sky readings present | `grep -c -i 'blue-sky' .claude/skills-global/do-issue/CHECKLIST.md` | output >= 4 (jargon, acceptance criteria, observed, recon) |
+| Skill tests green | `scripts/pytest-clean.sh tests/unit/test_skills_audit.py tests/unit/test_update_hardlinks.py tests/unit/test_symlinks.py tests/unit/test_relink_global_skills.py` | exit code 0 |
 | Decision map present | `grep -c -i 'decision map' .claude/skills-global/do-plan/SCOPING.md` | output > 0 |
 | Feature doc indexed | `grep -c 'blue-sky-fog-planning' docs/features/README.md` | output > 0 |
+
+## Team Orchestration
+
+One builder, sequential, then a validator. Every edit is skill markdown or a
+feature doc; there is no parallelizable code.
+
+### Team Members
+
+- **Builder (fog-skills)**
+  - Name: fog-builder
+  - Role: edit the do-issue and do-plan global skill bodies and write the feature doc
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (fog-skills)**
+  - Name: fog-validator
+  - Role: run every Verification row and the skill tests
+  - Agent Type: validator
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Fog affordances in the skill bodies
+- **Task ID**: build-fog-skills
+- **Depends On**: none
+- **Validates**: tests/unit/test_skills_audit.py, tests/unit/test_update_hardlinks.py
+- **Assigned To**: fog-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- do-issue `SKILL.md`: Step 1 mode decision (default well-scoped, record mode), Blue-sky mode subsection, Step 4 rule 4 cross-reference (Solution §1).
+- do-issue `ISSUE_TEMPLATE.md`: conditional `## Fog (Not Yet Specified)`, blue-sky acceptance-criteria comment; `## Recon Summary` unchanged.
+- do-issue `CHECKLIST.md`: blue-sky variants for No undefined jargon, Measurable acceptance criteria, Observed not inferred, Recon performed.
+- do-plan `SCOPING.md` §1 "When the issue is fog-forward" with the decision map; `SKILL.md` Phase 1 step 2 pointer and Phase 1.5 fog-and-model-selection note (Solution §2), with no model family names.
+- Edit files in place (Edit tool), never replace-and-rename, so the `~/.claude/skills/` hardlinks survive.
+
+### 2. Feature doc
+- **Task ID**: build-docs
+- **Depends On**: build-fog-skills
+- **Assigned To**: fog-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `docs/features/blue-sky-fog-planning.md` (Solution §3, including the charting-skill-absorbs-decision-map statement) and index it in `docs/features/README.md`.
+
+### 3. Final validation
+- **Task ID**: validate-all
+- **Depends On**: build-fog-skills, build-docs
+- **Assigned To**: fog-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run every row of the Verification table; report pass/fail per row.
+
+### 4. Close the superseded draft
+- **Task ID**: close-superseded-pr
+- **Depends On**: validate-all, and the new PR existing
+- **Assigned To**: orchestrator (the do-build lead, after PR creation)
+- **Agent Type**: n/a
+- **Parallel**: false
+- `gh pr close 3577 --comment "Superseded by #<new PR number>, which redoes this change on current main."`
+- The PR body says `Refs #2340` (never a closing keyword) and names the deferred charting skill.
 
 ## Critique Results
 
 | Severity | Critics | Finding | Addressed By | Implementation Note |
 |----------|---------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | Solution says "Recon and falsification checks are unchanged in both modes", but CHECKLIST "Observed, not inferred" (kill criterion: a could/would claim means file nothing) and "Recon performed ... parallel fan-out agents dispatched" contradict blue-sky mode (a direction, not an observed defect; fan-out only for cheap concerns). A literal build leaves a checklist that kills every blue-sky issue. | pending | Add a one-line blue-sky reading: "Observed, not inferred" applies to the pain motivating the direction, not the unknown specifics; "Not already decided" applies unchanged; "Recon performed" is met by the broad scan plus fan-out on cheap concerns only. Keep the kill criterion for the motivating pain. Fix the "unchanged" sentence in Solution §1 and add a Verification grep for the blue-sky variant in CHECKLIST.md. |
-| CONCERN | Scope & Value | The repo-token Verification grep covers do-issue/ and do-plan/SCOPING.md only, but the fog-and-model-selection note goes in do-plan/SKILL.md Phase 1.5, the edit most likely to leak a model family name; the grep also omits `valor`, which Test Impact lists. The success criterion is unverified where it is at risk. | pending | Use `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md`, expect exit 1. do-plan/SKILL.md is clean for these tokens on the current baseline, so widening causes no pre-existing red. |
-| CONCERN | History & Consistency | No Step by Step Tasks or Team Orchestration section (do-build step 9 parses both), and the Success Criterion "Draft PR #3577 closed as superseded" maps to no Solution item or task. Prior Art is also absent (#3577 appears only under Freshness Check). | pending | Add a small sequential task list for one builder: build-fog-skills (do-issue SKILL/TEMPLATE/CHECKLIST, do-plan SCOPING/SKILL), build-docs (feature doc + README), validate-all (every Verification row plus `scripts/pytest-clean.sh` on tests that grep `skills-global`, e.g. tests/unit/test_update_hardlinks.py, tests/unit/test_symlinks.py). The #3577 closure is an orchestrator step after the new PR exists: `gh pr close 3577 --comment "Superseded by #<new>"`. Add a Prior Art line for #3577. |
-| NIT | Risk & Robustness | "When unsure, ask" can stall an unattended do-issue run under /sdlc. | pending | Default to well-scoped unless the requester signals exploration; record the chosen mode in the issue body. |
-| NIT | Scope & Value | The SCOPING decision-map section is a light form of the deferred charting skill and may diverge from it later. | pending | Have the feature doc state that the charting skill will absorb and replace the SCOPING decision-map guidance. |
-| NIT | History & Consistency | `validate_issue_recon.py 2340` already exits 0 on the baseline with an unedited validator, so it proves nothing about the new template. | pending | Keep it as a regression smoke check; the real evidence is that ISSUE_TEMPLATE keeps `## Recon Summary` in both modes. |
+| CONCERN | Risk & Robustness | Solution says "Recon and falsification checks are unchanged in both modes", but CHECKLIST "Observed, not inferred" (kill criterion: a could/would claim means file nothing) and "Recon performed ... parallel fan-out agents dispatched" contradict blue-sky mode (a direction, not an observed defect; fan-out only for cheap concerns). A literal build leaves a checklist that kills every blue-sky issue. | Solution §1 CHECKLIST paragraph; Verification row "CHECKLIST blue-sky readings" | Add a one-line blue-sky reading: "Observed, not inferred" applies to the pain motivating the direction, not the unknown specifics; "Not already decided" applies unchanged; "Recon performed" is met by the broad scan plus fan-out on cheap concerns only. Keep the kill criterion for the motivating pain. Fix the "unchanged" sentence in Solution §1 and add a Verification grep for the blue-sky variant in CHECKLIST.md. |
+| CONCERN | Scope & Value | The repo-token Verification grep covers do-issue/ and do-plan/SCOPING.md only, but the fog-and-model-selection note goes in do-plan/SKILL.md Phase 1.5, the edit most likely to leak a model family name; the grep also omits `valor`, which Test Impact lists. The success criterion is unverified where it is at risk. | Verification "Global bodies free of repo tooling" row; Test Impact | Use `git grep -n -E 'sdlc-tool\|validate_issue_recon\|valor\|[Hh]aiku\|[Ss]onnet\|Opus' -- .claude/skills-global/do-issue .claude/skills-global/do-plan/SCOPING.md .claude/skills-global/do-plan/SKILL.md`, expect exit 1. do-plan/SKILL.md is clean for these tokens on the current baseline, so widening causes no pre-existing red. |
+| CONCERN | History & Consistency | No Step by Step Tasks or Team Orchestration section (do-build step 9 parses both), and the Success Criterion "Draft PR #3577 closed as superseded" maps to no Solution item or task. Prior Art is also absent (#3577 appears only under Freshness Check). | Prior Art; Team Orchestration; Step by Step Tasks (close-superseded-pr) | Add a small sequential task list for one builder: build-fog-skills (do-issue SKILL/TEMPLATE/CHECKLIST, do-plan SCOPING/SKILL), build-docs (feature doc + README), validate-all (every Verification row plus `scripts/pytest-clean.sh` on tests that grep `skills-global`, e.g. tests/unit/test_update_hardlinks.py, tests/unit/test_symlinks.py). The #3577 closure is an orchestrator step after the new PR exists: `gh pr close 3577 --comment "Superseded by #<new>"`. Add a Prior Art line for #3577. |
+| NIT | Risk & Robustness | "When unsure, ask" can stall an unattended do-issue run under /sdlc. | Solution §1 mode decision | Default to well-scoped unless the requester signals exploration; record the chosen mode in the issue body. |
+| NIT | Scope & Value | The SCOPING decision-map section is a light form of the deferred charting skill and may diverge from it later. | Solution §3 | Have the feature doc state that the charting skill will absorb and replace the SCOPING decision-map guidance. |
+| NIT | History & Consistency | `validate_issue_recon.py 2340` already exits 0 on the baseline with an unedited validator, so it proves nothing about the new template. | Test Impact; Verification row "Recon Summary kept in template" | Keep it as a regression smoke check; the real evidence is that ISSUE_TEMPLATE keeps `## Recon Summary` in both modes. |
 
 ## Open Questions
 1. **Charting skill name** (owner): `do-chart` / `do-wayfinder` / `do-map` /
