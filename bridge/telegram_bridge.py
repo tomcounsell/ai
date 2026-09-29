@@ -166,7 +166,7 @@ from bridge.routing import (  # noqa: E402
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
-from config.enums import PersonaType  # noqa: E402
+from config.enums import PersonaType, is_reflection_handoff  # noqa: E402
 
 # Maximum age (seconds) of a pending session that can absorb follow-up messages.
 # Messages arriving within this window attach to the pending session via the
@@ -1067,6 +1067,7 @@ async def _ack_steering_routed(
     log_context: str,
     room_id: str | None = None,
     context_advisory: str | None = None,
+    session=None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
 
@@ -1150,8 +1151,15 @@ async def _ack_steering_routed(
     is_abort = text.strip().lower() in ABORT_KEYWORDS
     # human_sender: a human steered into a silent reflection-handoff session
     # now waits, so its failure/timeout/interrupt notices must reach them (#3588).
+    # Gated on the caller's in-memory row (`session`) so ordinary sessions do no
+    # lookup: the stamp scans the unindexed session_id field (~2.4s).
     push_steering_message(
-        session_id, text, sender_name, is_abort=is_abort, room_id=room_id, human_sender=True
+        session_id,
+        text,
+        sender_name,
+        is_abort=is_abort,
+        room_id=room_id,
+        human_sender=is_reflection_handoff(session),
     )
 
     # An answer typed into the chat closes the question just as a tap does. The
@@ -2138,6 +2146,7 @@ async def main():
                             f"{session_id}"
                         ),
                         room_id=room_id_for_session(_target.session),
+                        session=_target.session,
                     )
                     return
 
@@ -2159,6 +2168,7 @@ async def main():
                             f"(age={_target.pending_age_s:.1f}s)"
                         ),
                         room_id=room_id_for_session(_target.session),
+                        session=_target.session,
                     )
                     return
 
@@ -2176,6 +2186,7 @@ async def main():
                             f"live {_target.matched_status} session {session_id}"
                         ),
                         room_id=room_id_for_session(_target.session),
+                        session=_target.session,
                     )
                     return
 
@@ -2363,7 +2374,9 @@ async def main():
                                 # No session row in hand — `guard_sessions` is only
                                 # tested for truthiness, so any `[0]` here would be an
                                 # arbitrary pick that could derive the wrong Room.
-                                # Fall back to the legacy session key.
+                                # Fall back to the legacy session key. The same
+                                # missing row means no handoff stamp: the guard only
+                                # fires for fresh chat sessions, never a handoff.
                                 room_id=None,
                             )
                             return
@@ -2489,6 +2502,7 @@ async def main():
                                     f"{fresh_session.session_id}"
                                 ),
                                 room_id=room_id_for_session(fresh_session),
+                                session=fresh_session,
                                 # #2694: ONLY this call site passes an advisory.
                                 context_advisory=_ctx_recall_advisory,
                             )
@@ -2927,7 +2941,7 @@ async def main():
                 f"[Edit] {edited_text}",
                 sender_name,
                 room_id=room_id_for_session(session),
-                human_sender=True,
+                human_sender=is_reflection_handoff(session),
             )
             logger.info(
                 f"[edit] Steered edit into {session.status} session {session_id} "
@@ -2965,7 +2979,7 @@ async def main():
                     f"[Edit] {edited_text}",
                     sender_name,
                     room_id=room_id_for_session(active_edit),
-                    human_sender=True,
+                    human_sender=is_reflection_handoff(active_edit),
                 )
                 logger.info(
                     f"[edit] Steered duplicate edit into existing session {new_session_id} "

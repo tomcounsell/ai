@@ -35,11 +35,12 @@ abort:
   from, read from the transient ``_leg`` stamp ``pop_all_steering_messages``
   applies.
 
-The writer never looks a session up: ``room_id`` is derived by the caller via
+The writer never looks a session up on the hot path: ``room_id`` is derived by the caller via
 ``models.room.room_id_for_session`` (pure attribute reads). An internal
 ``AgentSession`` query by ``session_id`` costs ~2.4s — the field is unindexed,
 so resolving it scans every session hash — and this module sits on the
-inbound-Telegram fast path. Keep this module free of any model-layer import.
+inbound-Telegram fast path. The one exception is the opt-in ``human_sender``
+stamp, which callers set only for reflection-handoff sessions.
 
 Every drain consumer dual-reads: the session key FIRST, then the Room key when
 a ``room_id`` is provided.
@@ -305,14 +306,23 @@ def push_steering_message(
             the Room leg's age bound measures time since origination rather
             than time since the last re-push. An originating caller passes
             nothing and gets ``time.time()``.
-        human_sender: True when ``text`` is a human's own message. This is the
-            single chokepoint where a human steer is recorded: it stamps
-            ``human_steered`` onto a live reflection-handoff session
+        human_sender: True when ``text`` is a human's own message aimed at a
+            reflection-handoff session. The stamp is the single place a human
+            steer is recorded: it sets ``human_steered`` on the live row
             (:func:`mark_handoff_human_steered`) so its failure/timeout/interrupt
-            notices reach the human (#3588). Requeues of drained messages and
-            system advisories leave it False.
+            notices reach the human (#3588). It COSTS a session scan (~2.4s,
+            ``session_id`` is unindexed) and runs synchronously, so callers
+            pass ``is_reflection_handoff(row)`` from the row they already hold:
+            ordinary sessions never set it and do no lookup. Requeues of
+            drained messages and system pushes (including
+            ``valor-session steer``) leave it False.
     """
     r = _get_redis()
+
+    # Stamp BEFORE the push so a fast drain never reads the row pre-stamp. A
+    # stamp whose push then fails is harmless: a human did send the message.
+    if human_sender:
+        mark_handoff_human_steered(session_id)
 
     # Auto-detect abort keywords
     if not is_abort and text.strip().lower() in ABORT_KEYWORDS:
@@ -345,8 +355,6 @@ def push_steering_message(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
         f"{text[:80]!r} (from {sender}){target_suffix}{front_suffix}"
     )
-    if human_sender:
-        mark_handoff_human_steered(session_id)
     return payload
 
 

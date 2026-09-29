@@ -1932,6 +1932,22 @@ def test_push_steering_message_stamps_human_sender_on_handoff(cleanup):
         clear_steering_queue(sid)
 
 
+def test_runner_handoff_check_reads_row_live(cleanup):
+    """The runner's `_is_handoff_session` holds a stale copy after a human steer
+    lands mid-run; it must consult the persisted row (#3588)."""
+    from types import SimpleNamespace
+
+    from agent.session_runner.runner import SessionRunner
+    from agent.steering import mark_handoff_human_steered
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-runner", cleanup)
+    fake_runner = SimpleNamespace(_agent_session=session)
+    assert SessionRunner._is_handoff_session(fake_runner) is True
+
+    assert mark_handoff_human_steered(session.session_id) is True
+    assert SessionRunner._is_handoff_session(fake_runner) is False
+
+
 @pytest.mark.asyncio
 async def test_executor_reads_handoff_state_live_at_send_time(cleanup):
     """The executor's in-memory session predates a human steer; both the empty-output

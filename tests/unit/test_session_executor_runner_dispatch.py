@@ -217,9 +217,11 @@ class TestExecutorRunnerWiring:
         from agent.messenger import BackgroundTask as _RealBackgroundTask
 
         seen: list[bool] = []
+        silent_fns: list = []
 
         class _SpyBackgroundTask(_RealBackgroundTask):
             def __init__(self, *args, **kwargs):
+                silent_fns.append(kwargs["silent"])
                 seen.append(bool(kwargs["silent"]()))
                 super().__init__(*args, **kwargs)
 
@@ -236,6 +238,18 @@ class TestExecutorRunnerWiring:
             await _execute_agent_session(session)
 
         assert seen == [expected]
+
+        if expected:
+            # A human steer lands mid-run: the in-memory `session` is stale, so
+            # `silent` must re-read the persisted row. RED if it regresses to
+            # the non-live check or a value computed once.
+            from agent.steering import mark_handoff_human_steered
+
+            # The run finished the row; put it back to live so the stamp applies.
+            session.status = "running"
+            session.save(update_fields=["status"])
+            assert mark_handoff_human_steered(session.session_id) is True
+            assert silent_fns[0]() is False
 
     @pytest.mark.asyncio
     async def test_runner_receives_adapter_and_session_env(self, redis_test_db):

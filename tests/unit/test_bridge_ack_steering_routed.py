@@ -87,7 +87,7 @@ class TestSteerBranch:
             "Alice",
             is_abort=False,
             room_id="test|system",
-            human_sender=True,
+            human_sender=False,
         )
         assert push.call_args_list[1] == call(
             "sess-1",
@@ -102,6 +102,31 @@ class TestSteerBranch:
         args, _ = react.await_args
         assert args[3] == "\U0001f440"  # 👀
         rec.assert_awaited_once_with(12345, 67890)
+
+
+class TestHandoffStamp:
+    @pytest.mark.asyncio
+    async def test_handoff_session_requests_the_human_stamp(self):
+        """The ack path gates the stamp on the caller's row (#3588)."""
+        event, message = _make_event_message()
+        handoff = MagicMock()
+        handoff.extra_context = {"origin": "reflection_handoff"}
+        with (
+            patch("bridge.telegram_bridge.push_steering_message") as push,
+            patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
+            patch("bridge.telegram_bridge.record_telegram_message_handled", new_callable=AsyncMock),
+        ):
+            await _ack_steering_routed(
+                MagicMock(),
+                event,
+                message,
+                session_id="sess-1",
+                sender_name="Alice",
+                text="hello",
+                log_context="[test]",
+                session=handoff,
+            )
+        assert push.call_args.kwargs["human_sender"] is True
 
 
 class TestAbortBranch:
@@ -132,7 +157,7 @@ class TestAbortBranch:
         # An abort is demoted to the legacy leg regardless of room_id, so
         # the None default (no room_id passed) pins the legacy leg.
         push.assert_called_once_with(
-            "sess-1", "stop", "Alice", is_abort=True, room_id=None, human_sender=True
+            "sess-1", "stop", "Alice", is_abort=True, room_id=None, human_sender=False
         )
         react.assert_awaited_once()
         args, _ = react.await_args
@@ -163,7 +188,7 @@ class TestAbortBranch:
         # is_abort should still be detected after strip + lower; abort lands
         # on the legacy leg (room_id=None), never a Room leg.
         push.assert_called_once_with(
-            "sess-1", "  STOP  ", "Alice", is_abort=True, room_id=None, human_sender=True
+            "sess-1", "  STOP  ", "Alice", is_abort=True, room_id=None, human_sender=False
         )
 
 
@@ -254,7 +279,7 @@ class TestMediaEnrichment:
             "Alice",
             is_abort=False,
             room_id="test|system",
-            human_sender=True,
+            human_sender=False,
         )
 
     @pytest.mark.asyncio
@@ -288,7 +313,7 @@ class TestMediaEnrichment:
 
         expected = "[User sent an image]\nImage description: cat\n\ncheck this out"
         push.assert_called_once_with(
-            "sess-1", expected, "Alice", is_abort=False, room_id="test|system", human_sender=True
+            "sess-1", expected, "Alice", is_abort=False, room_id="test|system", human_sender=False
         )
 
     @pytest.mark.asyncio
@@ -321,7 +346,7 @@ class TestMediaEnrichment:
 
         proc.assert_not_awaited()
         push.assert_called_once_with(
-            "sess-1", "hello", "Alice", is_abort=False, room_id="test|system", human_sender=True
+            "sess-1", "hello", "Alice", is_abort=False, room_id="test|system", human_sender=False
         )
 
     @pytest.mark.asyncio
@@ -361,7 +386,7 @@ class TestMediaEnrichment:
             "Alice",
             is_abort=False,
             room_id="test|system",
-            human_sender=True,
+            human_sender=False,
         )
         rec.assert_awaited_once()
 
@@ -414,7 +439,7 @@ class TestMediaEnrichment:
             "Alice",
             is_abort=False,
             room_id="test|system",
-            human_sender=True,
+            human_sender=False,
         )
         rec.assert_awaited_once()
 

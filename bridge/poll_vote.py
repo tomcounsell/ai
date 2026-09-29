@@ -41,6 +41,7 @@ from bridge.poll_registry import (
     release_poll_claim,
     takeover_poll_claim,
 )
+from config.enums import is_reflection_handoff
 
 #: The literal final option, re-exported from its single definition in
 #: ``tools.ask_poll`` (the producer that writes the label onto the poll).
@@ -284,7 +285,7 @@ async def _dispatch_answer(client, *, poll_id, row: dict, chosen: str) -> None:
             steer_text,
             sender_name,
             room_id=room_id_for_session(target.session),
-            human_sender=True,
+            human_sender=is_reflection_handoff(target.session),
         )
         # Marked immediately after the side effect and before anything else that
         # can throw, so a later exception cannot release the claim and re-run it.

@@ -103,9 +103,14 @@ will resume it.
 ## Human steer lifts the silence
 
 A human who steers into a running handoff session is waiting, so silence would
-strand them. The bridge stamps `extra_context["human_steered"]` on the row
-(`agent.steering.mark_handoff_human_steered`, called from the steering ack and
-the edit-steer path), and `is_reflection_handoff` returns False from then on.
+strand them. `push_steering_message(..., human_sender=True)` stamps
+`extra_context["human_steered"]` on the row (`agent.steering.mark_handoff_human_steered`)
+before pushing, and `is_reflection_handoff` returns False from then on. Four
+human bridge paths pass the flag: the message ack, the live edit, the duplicate
+edit and the poll vote. Each passes `is_reflection_handoff(row)` from the row it
+already holds, so ordinary sessions never pay the unindexed session scan the
+stamp performs. System pushes (advisories, requeues, `valor-session steer`)
+leave it unset.
 The executor and runner re-read the row through `is_reflection_handoff_live`,
 so a steer landing mid-run applies to the notices that follow it.
 
