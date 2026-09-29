@@ -2304,3 +2304,98 @@ def test_sync_iterm_it2_skips_without_iterm_or_existing_it2(tmp_path, fake_home)
 
     assert hardlinks.sync_iterm_it2(it2).skipped == 1
     assert existing.read_text() == "pip-installed"
+
+
+def _pause_skills_sync(home: Path) -> None:
+    marker = home / hardlinks.SKILLS_SYNC_PAUSE_MARKER
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+
+
+def test_paused_skills_sync_leaves_user_skills_untouched(fake_project, fake_home):
+    """With the per-machine marker (#3581), a divergent local skill survives /update
+    and commands/agents still sync."""
+    src_skill = fake_project / ".claude" / "skills-global" / "demo"
+    src_skill.mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("repo\n")
+    (fake_project / ".claude" / "commands" / "cmd.md").write_text("cmd\n")
+    dst_skill = fake_home / ".claude" / "skills" / "demo"
+    dst_skill.mkdir(parents=True)
+    (dst_skill / "SKILL.md").write_text("local-edit\n")
+    _pause_skills_sync(fake_home)
+
+    result = hardlinks.sync_claude_dirs(fake_project)
+
+    assert (dst_skill / "SKILL.md").read_text() == "local-edit\n"
+    assert (fake_home / ".claude" / "commands" / "cmd.md").exists()
+    paused = [a for a in result.actions if a.error == hardlinks.SKILLS_PAUSED_DETAIL]
+    assert [a.action for a in paused] == ["skipped"]
+
+
+def test_unpaused_skills_sync_replaces_divergent_local_skill(fake_project, fake_home):
+    """Without the marker, the repo copy wins, as before."""
+    src_skill = fake_project / ".claude" / "skills-global" / "demo"
+    src_skill.mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("repo\n")
+    dst_skill = fake_home / ".claude" / "skills" / "demo"
+    dst_skill.mkdir(parents=True)
+    (dst_skill / "SKILL.md").write_text("local-edit\n")
+
+    result = hardlinks.sync_claude_dirs(fake_project)
+
+    assert (dst_skill / "SKILL.md").samefile(src_skill / "SKILL.md")
+    assert not any(a.error == hardlinks.SKILLS_PAUSED_DETAIL for a in result.actions)
+
+
+def test_paused_skills_sync_keeps_dir_symlink_layout(fake_project, fake_home, tmp_path):
+    """The dir-symlink migration is part of the skills half and is paused too."""
+    (fake_project / ".claude" / "skills-global").mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (fake_home / ".claude").mkdir()
+    (fake_home / ".claude" / "skills").symlink_to(target)
+    _pause_skills_sync(fake_home)
+
+    hardlinks.sync_claude_dirs(fake_project)
+
+    assert (fake_home / ".claude" / "skills").is_symlink()
+
+
+def test_paused_skills_sync_skips_skill_renamed_removals(fake_project, fake_home):
+    """Skills-kind RENAMED_REMOVALS entries are not acted on while paused."""
+    (fake_project / ".claude" / "skills-global").mkdir(parents=True)
+    user_claude = fake_home / ".claude"
+    _kind, name = _ISSUE_2065_ORPHANS[0]
+    orphan = user_claude / "skills" / name
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("stale orphan\n")
+    _pause_skills_sync(fake_home)
+
+    hardlinks._cleanup_renamed(user_claude, fake_project, hardlinks.HardlinkSyncResult())
+
+    assert orphan.exists()
+
+
+def test_paused_skills_sync_skips_stale_skill_cleanup(fake_project, fake_home):
+    """Stale-skill cleanup is part of the skills half: while paused, neither a
+    renamed-away skill dir nor an intra-dir orphan file is removed."""
+    src_skill = fake_project / ".claude" / "skills-global" / "demo"
+    src_skill.mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("repo\n")
+    orphan_src = src_skill / "extra.md"
+    orphan_src.write_text("extra\n")
+    hardlinks.sync_claude_dirs(fake_project)
+
+    user_skills = fake_home / ".claude" / "skills"
+    # A dir left by an old name, still hardlinked to a live source SKILL.md.
+    stale_dir = user_skills / "old-demo"
+    stale_dir.mkdir()
+    os.link(src_skill / "SKILL.md", stale_dir / "SKILL.md")
+    # An intra-dir orphan: the source file is gone, the destination copy remains.
+    orphan_src.unlink()
+    _pause_skills_sync(fake_home)
+
+    hardlinks.sync_claude_dirs(fake_project)
+
+    assert (stale_dir / "SKILL.md").exists(), "stale-skill cleanup ran while paused"
+    assert (user_skills / "demo" / "extra.md").exists(), "orphan pruned while paused"

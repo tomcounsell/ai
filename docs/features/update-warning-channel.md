@@ -76,6 +76,10 @@ Suppression without retrieval is how a real condition goes dark. Four surfaces a
 
 The trailer's leading token is `SUPPRESSED_PREFIX`, a constant defined once in `scripts/update/warn_state.py` and imported by both `run.py` (the composer) and `bridge/update.py` (the reader/forwarder) — an independently-spelled prefix on each side is the exact producer/consumer drift that produced Defect 2, and it must not be reintroduced here. It deliberately carries neither `⚠️` nor any of the four legacy prefixes, so `extract_update_warnings` is inert to it — tested directly, including immediately after a real `(N warnings)` block, so the parser is proven inert while already in a matching state.
 
+## Notices: visible, never a warning
+
+Some conditions are deliberate operator choices that must stay visible without being treated as something to fix. `run.py` collects them in `UpdateResult.notices` and renders one `  ℹ️ {notice}` line per entry after the summary, outside the success/failure `if/elif/else`, just like the trailer. The leading token is `NOTICE_PREFIX`, defined in `scripts/update/warn_state.py` next to `SUPPRESSED_PREFIX` and imported by both `run.py` and `bridge/update.py`. `extract_update_warnings` is inert to it, so a notice never queues a fix session. `handle_update_command` forwards notice lines onto the Telegram reply, and the `--force` summary keeps the matching `[update] NOTE:` log line. The one notice today is the per-machine skills-sync pause (see [`skills-global.md`](skills-global.md#pausing-skills-sync-on-one-machine)), reported on every run that performs the hardlink sync; `--verify` skips that sync and carries no notice. On a clean unattended cron run a notice lands only in `logs/update.log` (stdout): a notice alone never opens the `data/update.txt` write gate, which stays reserved for failures, warnings, and suppressed conditions. When one of those opens it, the buffered `[update] NOTE:` line is written there too. A reply rebuilt at boot after a bridge restart carries neither notices nor the trailer yet ([#3584](https://github.com/tomcounsell/ai/issues/3584)).
+
 ## Where the trailer reaches a reader — and where it cannot
 
 | Path | Trigger | Reader at emission time | Surface after #2845 |
@@ -88,7 +92,7 @@ Pull-only on the unattended path is deliberate, not a gap: pushing there would n
 ## Tests
 
 - `tests/unit/test_update_warning_extraction.py` — `extract_update_warnings` (all forms, the count cross-check, adversarial green transcripts) and `_queue_fix_session` (legibility, empty inputs, exception swallowing).
-- `tests/unit/test_bridge_update.py` — the #1898 regression, the `failed=` keyword-argument change, and Task 5's trailer-forwarding tests (`test_suppressed_trailer_reaches_telegram_on_clean_run`, `test_suppressed_prefix_constant_is_shared`, `test_suppressed_trailer_extracts_as_zero_warnings`).
+- `tests/unit/test_bridge_update.py` — the #1898 regression, the `failed=` keyword-argument change, and Task 5's trailer-forwarding tests (`test_suppressed_trailer_reaches_telegram_on_clean_run`, `test_suppressed_prefix_constant_is_shared`, `test_suppressed_trailer_extracts_as_zero_warnings`), and the notice tests (`test_notice_reaches_telegram_on_clean_run`, `test_force_update_summary_keeps_the_pause_note`). `tests/unit/test_update_hardlink_reporting.py` covers the notice's production in `run.py`.
 - `tests/unit/test_update_cron_summary.py` — the failure-branch warnings render and the trailer's composition/write-gate behavior.
 - `tests/unit/test_update_warn_state.py` — `should_emit`/`active`/`_main` and the `SUPPRESSED_PREFIX` constant.
 - `tests/unit/test_update_append_warning.py` — the newline-collapse helpers and the README N² dedup fix.

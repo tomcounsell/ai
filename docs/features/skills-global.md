@@ -71,6 +71,15 @@ stat -f %i .claude/skills-global/<name>/SKILL.md ~/.claude/skills/<name>/SKILL.m
 
 Differing inodes mean the live copy is stale; `/update` re-establishes every link.
 
+### Pausing skills sync on one machine
+
+A machine can opt out of the `~/.claude/skills/` half of the sync with a local marker file, `~/.local/state/valor/skip-skills-sync`. While it exists, `/update` skips skills hardlinking, the old dir-symlink migration, stale-skill cleanup, and `RENAMED_REMOVALS` entries of kind `skills`, and reports a `skills sync paused` notice on every run (an `ℹ️` line in the cron summary), so a forgotten marker cannot leave the machine on stale skills silently. It is a notice, not a warning: the Telegram `/update` reply shows it (except when the update restarts the bridge: that reply is rebuilt at boot and omits it, tracked in [#3584](https://github.com/tomcounsell/ai/issues/3584)), but never queues a fix session for it. `/update --verify` skips the whole hardlink sync, so it does not report the pause. The `relink_global_skills` PostToolUse hook honors the same marker and stops relinking edited `skills-global` files into `~/.claude/skills/`. Commands, agents, hooks, and everything else in `/update` still run. The marker lives outside the repo and the vault, so it affects only the machine that created it.
+
+```bash
+mkdir -p ~/.local/state/valor && touch ~/.local/state/valor/skip-skills-sync   # pause
+rm ~/.local/state/valor/skip-skills-sync                                       # resume
+```
+
 ## Skill Liveness and Husks
 
 A skill is *live* if and only if its directory holds a `SKILL.md` file. Directory

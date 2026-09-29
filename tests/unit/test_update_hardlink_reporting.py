@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from update import hardlinks  # noqa: E402
-from update.run import UpdateResult, report_hardlink_actions  # noqa: E402
+from update.run import UpdateResult, notice_lines, report_hardlink_actions  # noqa: E402
 
 
 def _result(*actions):
@@ -101,3 +101,42 @@ class TestNoHardlinkResult:
 
         assert result.errors == []
         assert result.warnings == []
+
+
+class TestSkillsSyncPauseIsANoticeNotAWarning:
+    def _paused(self):
+        result = _result(
+            hardlinks.LinkAction("", "~/.claude/skills", "skipped", hardlinks.SKILLS_PAUSED_DETAIL)
+        )
+        report_hardlink_actions(result, False)
+        return result
+
+    def test_pause_is_recorded_as_a_notice(self):
+        """#3581: a forgotten marker must not hide behind a clean report."""
+        result = self._paused()
+
+        assert result.notices == [hardlinks.SKILLS_PAUSED_DETAIL]
+        assert result.warnings == []
+        assert result.errors == []
+
+    def test_pause_never_queues_an_update_fix_session(self):
+        """The Telegram /update path queues a "diagnose and fix" session for
+        every warning it parses; its likely fix would delete the marker."""
+        from bridge.update import extract_update_warnings
+
+        lines = notice_lines(self._paused())
+
+        assert lines and hardlinks.SKILLS_PAUSED_DETAIL in lines[0]
+        assert extract_update_warnings(["update successful", *lines]) == []
+
+    def test_notice_is_inert_beside_warnings_and_failures(self):
+        """Every cron summary shape: the notice adds nothing to what the
+        parser returns and does not break the declared-count cross-check."""
+        from bridge.update import extract_update_warnings
+
+        lines = notice_lines(self._paused())
+
+        warned = ["up to date at abc1234 (1 warning)", "  ⚠️ disk low", *lines]
+        assert extract_update_warnings(warned) == ["disk low"]
+        failed = ["update failed at abc1234", "  - pull failed", *lines]
+        assert extract_update_warnings(failed) == ["pull failed"]

@@ -202,6 +202,11 @@ class UpdateResult:
     # "unchanged since first warning" in the same run (Race 3's inverse
     # hazard — should_emit writes its signature the instant it returns True).
     warn_keys_emitted: set[str] = field(default_factory=set)
+    # Deliberate operator states, such as a paused skills sync (#3581). Said on
+    # every run but never counted as warnings: the Telegram /update path queues
+    # a "diagnose and fix" session for any warning, and its likely "fix" for a
+    # deliberate state is to undo it.
+    notices: list[str] = field(default_factory=list)
 
 
 def _append_warning(result: UpdateResult, text: str) -> None:
@@ -278,6 +283,18 @@ def report_hardlink_actions(result: UpdateResult, v: bool) -> None:
             if action.action == "skipped" and hardlinks.SELF_CHECK_DETAIL in (action.error or ""):
                 log(f"WARN: {action.error}", v, always=True)
                 _append_warning(result, action.error or "")
+            # A deliberate per-machine pause (#3581): a notice, not a warning.
+            # Said on every run so a forgotten marker cannot leave the machine
+            # on stale skills behind a clean report.
+            elif action.action == "skipped" and action.error == hardlinks.SKILLS_PAUSED_DETAIL:
+                log(f"NOTE: {action.error}", v, always=True)
+                result.notices.append(action.error)
+
+
+def notice_lines(result: UpdateResult) -> list[str]:
+    """The cron summary's notice bullets. Deliberately not the warning glyph,
+    so bridge/update.py's extract_update_warnings never reads them as work."""
+    return [f"  {warn_state.NOTICE_PREFIX} {notice}" for notice in result.notices]
 
 
 def _append_error(result: UpdateResult, text: str) -> None:
@@ -3253,6 +3270,8 @@ def main() -> int:
                 status += f"\n  ⚠️ {warn}"
         else:
             status = "update successful"
+        for line in notice_lines(result):
+            status += "\n" + line
 
         # Suppressed-condition trailer (Risk 4): whatever warn_state.active()
         # holds, minus the keys that emitted THIS run (Race 3's inverse

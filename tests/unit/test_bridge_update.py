@@ -257,6 +257,39 @@ async def test_suppressed_prefix_constant_is_shared(update_env, tg_client, event
     assert trailer in message
 
 
+@pytest.mark.asyncio
+async def test_notice_reaches_telegram_on_clean_run(update_env, tg_client, event):
+    """#3581: a paused skills sync must not read as a plain "update OK" in
+    chat, and a notice alone must not spawn a fix session."""
+    from scripts.update.warn_state import NOTICE_PREFIX
+
+    notice = f"{NOTICE_PREFIX} skills sync paused (~/.local/state/valor/skip-skills-sync present)"
+    update_env["stdout"] = f"update successful\n  {notice}\n"
+    await bridge_update.handle_update_command(tg_client, event)
+    message = _final_message(tg_client)
+    assert notice in message
+    bridge_update._queue_fix_session.assert_not_awaited()
+
+
+def test_force_update_summary_keeps_the_pause_note():
+    """#3581: /update --force keyword-filters run.py output; the pause NOTE survives.
+
+    Lines follow run.py's real order: the pull step logs before the hardlink sync.
+    """
+    from scripts.update.hardlinks import SKILLS_PAUSED_DETAIL
+
+    note = f"NOTE: {SKILLS_PAUSED_DETAIL}"
+    stdout = (
+        "[update] Already up to date (abc1234)\n"
+        "[update] Syncing .claude hardlinks...\n"
+        f"[update] {note}\n"
+    )
+    assert bridge_update._force_update_steps(stdout) == [
+        "Already up to date (abc1234)",
+        note,
+    ]
+
+
 def test_suppressed_trailer_extracts_as_zero_warnings():
     """The load-bearing half of the inertness claim (critique round 9): fed
     through extract_update_warnings, the REAL trailer (built from the real
