@@ -47,6 +47,26 @@ def owned_project(monkeypatch):
         j.delete()
 
 
+class _HandoffSpy:
+    """Records every Finding the reconciler hands off; returns a canned result."""
+
+    def __init__(self, kind="created"):
+        self.kind = kind
+        self.findings: list = []
+
+    def __call__(self, finding):
+        self.findings.append(finding)
+        if self.kind in ("created", "steered"):
+            return er.HandoffResult(self.kind, "sess-1", None)
+        return er.HandoffResult(self.kind, None, "no-human-room")
+
+
+def _evidence(kind="merged", pr=42, closes=(7,)):
+    return er.ShippedEvidence(
+        kind=kind, branch="session/x", pr_number=pr, closes_issues=list(closes)
+    )
+
+
 class _NoSubprocess:
     def __call__(self, *args, **kwargs):  # pragma: no cover - failure surface
         raise AssertionError(f"subprocess spawned on a no-op tick: {args}")
@@ -81,7 +101,7 @@ class TestNoOpTick:
         """Min-age gate: a just-spawned lane's expectation is not acted on."""
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "lane-fresh", age_hours=0.0)
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert result["status"] == "ok"
@@ -91,7 +111,7 @@ class TestNoOpTick:
         """A row claiming life is respawn-blocking (never discharge evidence)."""
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "lane-live")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: False)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: False)
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert result["findings"] == []
@@ -108,8 +128,8 @@ class TestCorruptGoal:
         job.goal = corrupt_bytes
         job.save()
 
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
-        monkeypatch.setattr(er, "_steer", lambda *a, **k: pytest.fail("steered a corrupt Job"))
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
+        monkeypatch.setattr(er, "hand_off", lambda *a, **k: pytest.fail("handed off a corrupt Job"))
         monkeypatch.setattr(
             er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned from a corrupt Job")
         )
@@ -124,75 +144,74 @@ class TestCorruptGoal:
 
 
 class TestShippedWorkGuard:
-    def test_shipped_work_is_steered_never_respawned(self, owned_project, monkeypatch):
+    def test_shipped_work_is_handed_off_never_respawned(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/shipped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
-        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: "PR #42 (merged)")
-        steered: list[str] = []
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: object())
-        monkeypatch.setattr(er, "_steer", lambda _s, m: steered.append(m) or True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
+        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: _evidence())
+        spy = _HandoffSpy("steered")
+        monkeypatch.setattr(er, "hand_off", spy)
         monkeypatch.setattr(
             er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned shipped work")
         )
         result = er._reconcile_project(_project(owned_project))
-        assert any("steered-evidence" in f for f in result["findings"])
-        assert len(steered) == 1
-        assert "PR #42" in steered[0]
-        assert "expectation-remove" in steered[0]
+        assert len(spy.findings) == 1
+        finding = spy.findings[0]
+        assert finding.room_id == rid and finding.expectation_id == eid
+        assert finding.evidence["shipped_kind"] == "merged"
+        assert finding.evidence["closes_issues"] == [7]
+        assert any("handed-off: steered" in f for f in result["findings"])
         # Never discharged mechanically: the expectation is still open.
         fresh = Job.query.get(id=job.id, room_id=rid)
         assert any(e["id"] == eid for e in fresh.open_expectations(direction="outbound"))
 
-    def test_successful_steer_never_escalates(self, owned_project, monkeypatch):
-        """The site-480 short-circuit: a successful steer must not also page.
-
-        Pins the nested-else restructure (as opposed to a hoisted unpack
-        above the steer check, which would call ``_escalate_once`` — and
-        burn its ``SET NX`` sentinel — unconditionally).
-        """
+    def test_closed_unmerged_pr_is_evidence_not_a_respawn(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
-        _mint_job_with_outbound(rid, "session/shipped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
-        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: "PR #42 (merged)")
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: object())
-        monkeypatch.setattr(er, "_steer", lambda _s, m: True)
-        # Note: the per-expectation loop swallows exceptions (log-and-continue),
-        # so a pytest.fail() raised from inside a monkeypatched _escalate_once
-        # would be silently caught rather than failing the test. Spy instead.
-        escalate_calls: list[tuple] = []
+        _mint_job_with_outbound(rid, "session/closed-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(
-            er,
-            "_escalate_once",
-            lambda *a: (escalate_calls.append(a), (True, None))[1],
+            er, "_shipped_evidence", lambda _wd, _s: _evidence("closed_unmerged", closes=())
         )
-        result = er._reconcile_project(_project(owned_project))
-        assert "0 escalated" in result["summary"]
-        assert not any("escalated-evidence" in f for f in result["findings"])
-        assert escalate_calls == []
+        spy = _HandoffSpy("created")
+        monkeypatch.setattr(er, "hand_off", spy)
+        monkeypatch.setattr(er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned"))
+        er._reconcile_project(_project(owned_project))
+        assert spy.findings[0].evidence["shipped_kind"] == "closed_unmerged"
+        assert "closed without merging" in spy.findings[0].facts[0]
 
-    def test_unresolvable_project_suppresses_and_reports_without_counting(
-        self, owned_project, monkeypatch
+    @pytest.mark.parametrize(
+        "kind,count_text",
+        [
+            ("unreachable", "1 unreachable, 0 rate-capped"),
+            ("rate-capped", "0 unreachable, 1 rate-capped"),
+        ],
+    )
+    def test_undelivered_handoff_reports_and_leaves_expectation_retryable(
+        self, owned_project, monkeypatch, kind, count_text
     ):
-        """An escalation site reached with no configured Eng: group must
-        report the suppression and must not count a page that never sent."""
+        """No Eng: group / no agent / rate cap: an operator finding counted in the
+        summary, never a human page, no sentinel, and no exhausted annotation, so
+        a later tick can retry under the cooldown."""
         rid = f"{owned_project}|telegram:1"
-        _mint_job_with_outbound(rid, "session/capped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        job, eid = _mint_job_with_outbound(rid, "session/capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        # _project() carries no "telegram" key, so send_eng_telegram (the real
-        # function, unmocked here) resolves nothing and returns False.
+        spy = _HandoffSpy(kind)
+        monkeypatch.setattr(er, "hand_off", spy)
         result = er._reconcile_project(_project(owned_project))
-        assert "0 escalated" in result["summary"]
-        assert any(f.startswith("alert-suppressed:") for f in result["findings"])
-        assert not any(f.startswith("escalated:") for f in result["findings"])
+        assert "0 handed off" in result["summary"] and count_text in result["summary"]
+        assert any(f.startswith("handoff-unreachable") for f in result["findings"])
+        assert er._escalation_exists(job.job_id, eid) is False
+        fresh = Job.query.get(id=job.id, room_id=rid)
+        entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
+        assert entry.get("blocked") is None
 
-    def test_unshipped_orphan_respawns_when_no_pm(self, owned_project, monkeypatch):
+    def test_unshipped_orphan_respawns_when_no_live_holder(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/dead-lane", what="deliver the migration PR")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: None)
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: None)
+        monkeypatch.setattr(er.agent_handoff, "_live_session_in_room", lambda _r, _h: None)
         respawns: list[tuple] = []
         monkeypatch.setattr(
             er, "_respawn_lane", lambda pk, slug, what, jid: respawns.append((slug, what)) or True
@@ -201,20 +220,60 @@ class TestShippedWorkGuard:
         assert any("respawned" in f for f in result["findings"])
         assert respawns == [("dead-lane", "deliver the migration PR")]
 
-    def test_unshipped_orphan_prefers_steering_a_live_pm(self, owned_project, monkeypatch):
+    def test_unshipped_orphan_prefers_steering_a_live_holder(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/dead-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: None)
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: object())
-        steered: list[str] = []
-        monkeypatch.setattr(er, "_steer", lambda _s, m: steered.append(m) or True)
+        monkeypatch.setattr(er.agent_handoff, "_live_session_in_room", lambda _r, _h: object())
+        spy = _HandoffSpy("steered")
+        monkeypatch.setattr(er, "hand_off", spy)
         monkeypatch.setattr(
-            er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned despite live PM")
+            er, "_respawn_lane", lambda *a, **k: pytest.fail("respawned despite live holder")
         )
         result = er._reconcile_project(_project(owned_project))
-        assert any("steered-orphan" in f for f in result["findings"])
-        assert len(steered) == 1
+        assert any("handed-off: steered" in f for f in result["findings"])
+        assert len(spy.findings) == 1
+
+
+class TestOwnerResolution:
+    def test_placeholder_owners_have_no_lane_slug(self):
+        assert er._lane_slug("dev") is None
+        assert er._lane_slug("pm") is None
+        assert er._lane_slug("session/dev") is None
+        assert er._lane_slug("session/real-lane") == "real-lane"
+
+    def test_shipped_evidence_picks_merged_over_closed(self, monkeypatch):
+        import json
+        import subprocess
+
+        payload = [
+            {"number": 1, "state": "CLOSED", "closingIssuesReferences": []},
+            {"number": 2, "state": "MERGED", "closingIssuesReferences": [{"number": 9}]},
+        ]
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
+
+        monkeypatch.setattr(er.subprocess, "run", fake_run)
+        ev = er._shipped_evidence("/tmp", "x")
+        assert ev.kind == "merged" and ev.pr_number == 2 and ev.closes_issues == [9]
+        assert ev.counts_as_shipped
+
+    def test_closed_unmerged_does_not_count_as_shipped(self, monkeypatch):
+        import json
+        import subprocess
+
+        payload = [{"number": 3, "state": "CLOSED", "closingIssuesReferences": []}]
+        monkeypatch.setattr(
+            er.subprocess,
+            "run",
+            lambda cmd, **kw: subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps(payload), stderr=""
+            ),
+        )
+        ev = er._shipped_evidence("/tmp", "x")
+        assert ev.kind == "closed_unmerged" and not ev.counts_as_shipped
 
 
 class TestLadderBookkeeping:
@@ -222,7 +281,7 @@ class TestLadderBookkeeping:
         """Race 3: re-fetch before acting; the PM's discharge wins."""
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/raced-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         original_claim = er._cooldown_claim
 
         def claim_then_discharge(job_id, e):
@@ -236,31 +295,39 @@ class TestLadderBookkeeping:
         result = er._reconcile_project(_project(owned_project))
         assert not any("steered" in f or "respawned" in f for f in result["findings"])
 
-    def test_attempt_cap_escalates_once_then_stops(self, owned_project, monkeypatch):
+    def test_exhausted_rung_undelivered_handoff_retries_once_per_cooldown(
+        self, owned_project, monkeypatch
+    ):
+        """An undelivered handoff at the exhausted rung is paced by the cooldown:
+        a second tick inside the window does not call hand_off again (#3588)."""
+        rid = f"{owned_project}|telegram:1"
+        _mint_job_with_outbound(rid, "session/capped-lane")
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
+        monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
+        spy = _HandoffSpy("unreachable")
+        monkeypatch.setattr(er, "hand_off", spy)
+        er._reconcile_project(_project(owned_project))
+        er._reconcile_project(_project(owned_project))
+        assert len(spy.findings) == 1
+
+    def test_attempt_cap_hands_off_once_then_stops(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/capped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        pages: list[str] = []
-        monkeypatch.setattr(
-            er,
-            "_escalate_once",
-            lambda p, j, e, m: (
-                (pages.append(m) or (True, None)) if len(pages) == 0 else (False, None)
-            ),
-        )
+        spy = _HandoffSpy("created")
+        monkeypatch.setattr(er, "hand_off", spy)
         first = er._reconcile_project(_project(owned_project))
-        assert any("escalated" in f for f in first["findings"])
-        second = er._reconcile_project(_project(owned_project))
-        assert not any("escalated" in f for f in second["findings"])
-        assert len(pages) == 1
+        assert any("handed-off: created" in f for f in first["findings"])
+        er._reconcile_project(_project(owned_project))
+        assert len(spy.findings) == 1
 
     def test_per_expectation_failure_logs_and_continues(self, owned_project, monkeypatch, caplog):
         """Every except in the loop: warn and keep going, never raise."""
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/exploding-lane")
 
-        def boom(_o):
+        def boom(_o, _p=None):
             raise RuntimeError("owner query exploded")
 
         monkeypatch.setattr(er, "_owner_is_gone", boom)
@@ -272,7 +339,7 @@ class TestLadderBookkeeping:
     def test_unknown_owner_liveness_declines(self, owned_project, monkeypatch):
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/unknown-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: None)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: None)
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert any("gate-unknown: owner-liveness" in f for f in result["findings"])
@@ -287,7 +354,9 @@ class TestBlockedAnnotation:
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/blocked-lane")
         job.block_expectation(eid, code="needs_human", by="pm")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("acted on a blocked row"))
+        monkeypatch.setattr(
+            er, "_owner_is_gone", lambda _o, _p=None: pytest.fail("acted on a blocked row")
+        )
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert f"blocked: {eid} needs_human" in result["findings"]
@@ -298,7 +367,7 @@ class TestBlockedAnnotation:
         job, eid = _mint_job_with_outbound(rid, "session/crashed-lane")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert f"blocked: {eid} attempts_exhausted" in result["findings"]
@@ -315,7 +384,9 @@ class TestBlockedAnnotation:
         job, eid = _mint_job_with_outbound(rid, "session/still-alive-lane")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("liveness gate reached"))
+        monkeypatch.setattr(
+            er, "_owner_is_gone", lambda _o, _p=None: pytest.fail("liveness gate reached")
+        )
         monkeypatch.setattr(er.subprocess, "run", _NoSubprocess())
         result = er._reconcile_project(_project(owned_project))
         assert f"blocked: {eid} attempts_exhausted" in result["findings"]
@@ -329,7 +400,7 @@ class TestBlockedAnnotation:
         _mint_job_with_outbound(rid, "session/unknown-escalation-lane")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: None)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         result = er._reconcile_project(_project(owned_project))
         assert not any("blocked:" in f for f in result["findings"])
         assert not any("gate-unknown" in f for f in result["findings"])
@@ -339,7 +410,7 @@ class TestBlockedAnnotation:
         _mint_job_with_outbound(rid, "session/under-budget-lane")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: 0)
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         result = er._reconcile_project(_project(owned_project))
         assert not any("blocked:" in f for f in result["findings"])
 
@@ -348,7 +419,7 @@ class TestBlockedAnnotation:
         _mint_job_with_outbound(rid, "session/unreadable-attempts-lane")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: None)
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         result = er._reconcile_project(_project(owned_project))
         assert not any("blocked:" in f for f in result["findings"])
         assert not any("gate-unknown" in f for f in result["findings"])
@@ -359,7 +430,9 @@ class TestBlockedAnnotation:
         job.block_expectation(eid, code="attempts_exhausted", by="reconciler")
         monkeypatch.setattr(er, "_escalation_exists", lambda _j, _e: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: pytest.fail("acted on a blocked row"))
+        monkeypatch.setattr(
+            er, "_owner_is_gone", lambda _o, _p=None: pytest.fail("acted on a blocked row")
+        )
         result = er._reconcile_project(_project(owned_project))
         # The already-annotated row is caught by the earlier skip-with-finding
         # branch, not re-processed by Site A.
@@ -367,65 +440,62 @@ class TestBlockedAnnotation:
         assert result["findings"].count(f"blocked: {eid} attempts_exhausted") == 1
 
     def test_annotation_attributed_to_reconciler(self, owned_project, monkeypatch):
-        """Site B: a fresh escalation on the attempts-cap branch writes the
+        """Site B: a fresh handoff on the attempts-cap branch writes the
         annotation, and it is attributed to the reconciler itself."""
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/capped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        pages: list[str] = []
-        monkeypatch.setattr(
-            er, "_escalate_once", lambda p, j, e, m: (pages.append(m), (True, None))[1]
-        )
-        result = er._reconcile_project(_project(owned_project))
-        assert any("escalated" in f for f in result["findings"])
+        monkeypatch.setattr(er, "hand_off", _HandoffSpy("created"))
+        er._reconcile_project(_project(owned_project))
         fresh = Job.query.get(id=job.id, room_id=rid)
         entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
         assert entry["blocked"]["code"] == "attempts_exhausted"
         assert entry["blocked"]["by"] == "reconciler"
 
-    def test_refused_annotation_write_still_escalates(self, owned_project, monkeypatch):
-        """Escalate-first is load-bearing: even if the annotation write fails,
-        the page must already have gone out."""
+    def test_refused_annotation_write_still_hands_off(self, owned_project, monkeypatch):
+        """Hand-off-first is load-bearing: even if the annotation write fails,
+        the finding must already have gone to an agent."""
         rid = f"{owned_project}|telegram:1"
         _mint_job_with_outbound(rid, "session/capped-lane-2")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_attempts_count", lambda _j, _e: er._max_attempts())
-        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
+        spy = _HandoffSpy("created")
+        monkeypatch.setattr(er, "hand_off", spy)
         monkeypatch.setattr(
             er,
             "_annotate_attempts_exhausted",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("annotation write exploded")),
         )
-        result = er._reconcile_project(_project(owned_project))
-        assert any("escalated" in f for f in result["findings"])
+        er._reconcile_project(_project(owned_project))
+        assert len(spy.findings) == 1
 
-    def test_no_annotation_from_evidence_escalation(self, owned_project, monkeypatch):
-        """The `:523`-style evidence-escalation site never annotates: attempts
-        remain and the row is still re-steerable."""
+    def test_no_annotation_from_evidence_handoff(self, owned_project, monkeypatch):
+        """The shipped-evidence site never annotates: attempts remain and the
+        row is still re-steerable."""
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "session/shipped-capped-lane")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
-        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: "PR #7 (merged)")
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: None)
-        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
-        result = er._reconcile_project(_project(owned_project))
-        assert any("escalated-evidence" in f for f in result["findings"])
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
+        monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: _evidence(pr=7))
+        monkeypatch.setattr(er, "hand_off", _HandoffSpy("created"))
+        er._reconcile_project(_project(owned_project))
         fresh = Job.query.get(id=job.id, room_id=rid)
         entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
         assert entry.get("blocked") is None
 
-    def test_no_annotation_from_no_pm_escalation(self, owned_project, monkeypatch):
-        """The `:554`-style no-PM/no-slug escalation site never annotates."""
+    def test_no_annotation_from_no_slug_handoff(self, owned_project, monkeypatch):
+        """The no-holder/no-slug site never annotates."""
         rid = f"{owned_project}|telegram:1"
         job, eid = _mint_job_with_outbound(rid, "not-a-lane-slug")
-        monkeypatch.setattr(er, "_owner_is_gone", lambda _o: True)
+        monkeypatch.setattr(er, "_owner_is_gone", lambda _o, _p=None: True)
         monkeypatch.setattr(er, "_shipped_evidence", lambda _wd, _s: None)
-        monkeypatch.setattr(er, "_live_pm_session", lambda _k, _h: None)
-        monkeypatch.setattr(er, "_lane_slug", lambda _o: None)
-        monkeypatch.setattr(er, "_escalate_once", lambda p, j, e, m: (True, None))
+        monkeypatch.setattr(er.agent_handoff, "_live_session_in_room", lambda _r, _h: None)
+        monkeypatch.setattr(er, "_lane_slug", lambda _o, _p=None: None)
+        spy = _HandoffSpy("created")
+        monkeypatch.setattr(er, "hand_off", spy)
         result = er._reconcile_project(_project(owned_project))
-        assert any(f.startswith("escalated:") for f in result["findings"])
+        assert any("handed-off: created" in f for f in result["findings"])
+        assert "unrecorded" in spy.findings[0].facts[0]
         fresh = Job.query.get(id=job.id, room_id=rid)
         entry = next(e for e in fresh.open_expectations(direction="outbound") if e["id"] == eid)
         assert entry.get("blocked") is None

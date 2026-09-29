@@ -1733,3 +1733,240 @@ def test_no_new_terminal_writer_bypasses_outside_lifecycle():
         f"{_KNOWN_BYPASS_FILE}, found {call_count}. A new last-resort bypass "
         f"site must route through the shared helper too."
     )
+
+
+def _make_handoff(sid, cleanup, *, text=ORIGINAL_REPLY, requires_delivery=False, **extra):
+    cleanup.append(sid)
+    session = _make_session(sid, text=text)
+    session.extra_context = {
+        **session.extra_context,
+        "origin": "reflection_handoff",
+        **({"handoff_requires_delivery": True} if requires_delivery else {}),
+        **extra,
+    }
+    session.save(update_fields=["extra_context"])
+    return session
+
+
+def test_reflection_handoff_completed_flush_delivers_agents_own_text(cleanup):
+    """A handoff session's held text is the agent's OWN reply (#3588): it is
+    delivered, not swallowed with the canned substitutes."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-flush", cleanup, requires_delivery=True)
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    assert flush_deferred_self_draft_sync(session, "completed") is True
+    assert _outbox_count(session.session_id) == 1
+
+
+def test_reflection_handoff_completed_flush_withholds_canned_substitute(cleanup, caplog):
+    """No held text means the flush would send the canned "couldn't finish"
+    text: a handoff withholds it, and a delivery-required one logs WARNING."""
+    session = _make_handoff(
+        f"{SID_PREFIX}handoff-flush-canned", cleanup, text=None, requires_delivery=True
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with caplog.at_level("WARNING"):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+    assert any("handoff-undelivered" in r.getMessage() for r in caplog.records)
+
+
+def test_reflection_handoff_completed_flush_withholds_narration_fallback(cleanup):
+    """A narration-only held draft would be replaced by canned narration text."""
+    session = _make_handoff(
+        f"{SID_PREFIX}handoff-flush-narration",
+        cleanup,
+        text="Let me check the logs and then look at the config.",
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch("bridge.message_quality.is_narration_only", return_value=True):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_human_steered_handoff_flush_delivers_like_any_session(cleanup):
+    """Once a human steered the session it is no longer silent: even the canned
+    substitute is sent."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-human", cleanup, text=None, human_steered=True)
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    assert flush_deferred_self_draft_sync(session, "completed") is True
+    assert _outbox_count(session.session_id) == 1
+
+
+def test_mark_handoff_human_steered_lifts_silence(cleanup):
+    """A human steer stamps the handoff row so every chokepoint treats it as
+    a normal session (#3588)."""
+    from agent.steering import mark_handoff_human_steered
+    from config.enums import is_reflection_handoff, is_reflection_handoff_live
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-mark", cleanup)
+    assert is_reflection_handoff_live(session) is True
+
+    assert mark_handoff_human_steered(session.session_id) is True
+
+    # The caller's in-memory copy is stale; the live check re-reads the row.
+    assert is_reflection_handoff(session) is True
+    assert is_reflection_handoff_live(session) is False
+    # Idempotent.
+    assert mark_handoff_human_steered(session.session_id) is False
+
+
+def test_mark_handoff_human_steered_ignores_ordinary_sessions(cleanup):
+    from agent.steering import mark_handoff_human_steered
+
+    sid = f"{SID_PREFIX}ordinary-mark"
+    cleanup.append(sid)
+    _make_session(sid)
+    assert mark_handoff_human_steered(sid) is False
+
+
+@pytest.mark.asyncio
+async def test_reflection_handoff_async_fallback_sends_nothing(cleanup):
+    """The async email fallback must not speak for a reflection-handoff
+    session (#3588), even with a pending deferred self-draft."""
+    from agent.session_health import _deliver_deferred_self_draft_fallback
+
+    sid = f"{SID_PREFIX}handoff-async-fallback"
+    cleanup.append(sid)
+    session = _make_session(sid, text=ORIGINAL_REPLY, transport="email", chat_id="a@example.com")
+    session.extra_context = {**session.extra_context, "origin": "reflection_handoff"}
+    session.save(update_fields=["extra_context"])
+
+    with patch(
+        "agent.output_handler.deliver_system_notice",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as mock_notice:
+        await _deliver_deferred_self_draft_fallback(session)
+
+    mock_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_system_notice_chokepoint_suppresses_handoff():
+    """deliver_system_notice and _deliver_oneshot_dedup_notice (which covers the
+    tool-timeout degraded and terminal-interrupt notices) never send for a
+    reflection-handoff session, and do not burn the dedup key (#3588)."""
+    from types import SimpleNamespace
+
+    from agent.output_handler import deliver_system_notice
+    from agent.session_health import (
+        _deliver_oneshot_dedup_notice,
+        _deliver_terminal_interrupt_notice,
+        _deliver_tool_timeout_degraded_notice,
+    )
+
+    entry = SimpleNamespace(
+        session_id="test-handoff-chokepoint",
+        project_key="test-handoff",
+        chat_id="1",
+        telegram_message_id=1,
+        extra_context={"origin": "reflection_handoff"},
+    )
+    send_cb = AsyncMock()
+    with (
+        patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)),
+        patch("popoto.redis_db.POPOTO_REDIS_DB") as redis_mock,
+    ):
+        assert await deliver_system_notice(entry, "canned") is False
+        assert (
+            await _deliver_oneshot_dedup_notice(entry, dedup_key="k", ttl=5, message="canned")
+            is False
+        )
+        assert await _deliver_tool_timeout_degraded_notice(entry, "some-tool") is False
+        await _deliver_terminal_interrupt_notice(entry)
+
+    send_cb.assert_not_awaited()
+    redis_mock.set.assert_not_called()
+
+
+def test_reflection_handoff_flush_withholds_when_scrub_empties_text(cleanup):
+    """Scrubbing that empties the held text (dead path only) would ship the canned
+    "no longer available" line: a handoff withholds it instead (#3588)."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-scrub", cleanup, text="/tmp/gone/file.txt")
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch(
+        "bridge.message_drafter.convert_local_paths_to_attachments",
+        return_value=("", [], 1, 0),
+    ):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_reflection_handoff_flush_withholds_promise_gated_substitute(cleanup):
+    """A promise-gated draft is replaced by canned text, not the agent's reply:
+    a handoff withholds the substitute (#3588)."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-promise", cleanup)
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch("agent.session_health._gate_terminal_promise", return_value="canned substitute"):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_push_steering_message_stamps_human_sender_on_handoff(cleanup):
+    """The single steering chokepoint stamps a human steer; a non-human push
+    (advisory, requeue) leaves the handoff session silent (#3588)."""
+    from agent.steering import clear_steering_queue, push_steering_message
+    from config.enums import is_reflection_handoff_live
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-chokepoint", cleanup)
+    sid = session.session_id
+    try:
+        push_steering_message(sid, "advisory", "intake-classifier")
+        assert is_reflection_handoff_live(session) is True
+
+        push_steering_message(sid, "hello there", "Valor", human_sender=True)
+        assert is_reflection_handoff_live(session) is False
+    finally:
+        clear_steering_queue(sid)
+
+
+def test_runner_handoff_check_reads_row_live(cleanup):
+    """The runner's `_is_handoff_session` holds a stale copy after a human steer
+    lands mid-run; it must consult the persisted row (#3588)."""
+    from types import SimpleNamespace
+
+    from agent.session_runner.runner import SessionRunner
+    from agent.steering import mark_handoff_human_steered
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-runner", cleanup)
+    fake_runner = SimpleNamespace(_agent_session=session)
+    assert SessionRunner._is_handoff_session(fake_runner) is True
+
+    assert mark_handoff_human_steered(session.session_id) is True
+    assert SessionRunner._is_handoff_session(fake_runner) is False
+
+
+@pytest.mark.asyncio
+async def test_executor_reads_handoff_state_live_at_send_time(cleanup):
+    """The executor's in-memory session predates a human steer; both the empty-output
+    fallback and the failure notice must consult the fresh row (#3588)."""
+    from agent.session_executor import _deliver_empty_output_fallback, _maybe_send_failure_notice
+    from agent.steering import mark_handoff_human_steered
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-live", cleanup)
+    send_cb = AsyncMock()
+
+    assert await _deliver_empty_output_fallback(session, None, send_cb) is False
+    send_cb.assert_not_awaited()
+
+    assert mark_handoff_human_steered(session.session_id) is True
+    # `session` is now stale (still looks like a silent handoff in memory).
+    assert await _deliver_empty_output_fallback(session, None, send_cb) is True
+    send_cb.assert_awaited_once()
+
+    messenger = AsyncMock()
+    messenger._send_callback = AsyncMock()
+    await _maybe_send_failure_notice(messenger, session.session_id, session)
+    messenger._send_callback.assert_awaited()

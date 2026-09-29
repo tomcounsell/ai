@@ -175,6 +175,7 @@ class BackgroundTask:
         acknowledgment_timeout: float = 180.0,  # 3 minutes
         working_dir: str | None = None,
         project_key: str | None = None,
+        silent: bool | Callable[[], bool] = False,
     ):
         """Construct a BackgroundTask.
 
@@ -197,8 +198,14 @@ class BackgroundTask:
                 TestMessengerArchitecturalBoundary``. When ``None``, the
                 counter falls back to the bare ``session-health:cwd_vanished``
                 key (mirrors the orphan-reap fallback shape).
+            silent: When truthy the canned human-facing notices (the terminal
+                "stopped" interrupt notice and the canned error messages) are
+                never sent. Set for reflection-handoff sessions (#3588), which
+                have no human waiting in the Room. A callable is evaluated at
+                send time, so a human steer landing mid-run lifts the silence.
         """
         self.messenger = messenger
+        self._silent = silent
         self.acknowledgment_timeout = acknowledgment_timeout
         # Issue #1357: track the SDK subprocess's CWD so the watchdog can
         # detect a vanished worktree mid-run. Empty string is treated as None
@@ -291,7 +298,7 @@ class BackgroundTask:
                 from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
 
                 _reason = get_cancel_reason(self.messenger.session_id)
-                if _reason == "no_resume":
+                if _reason == "no_resume" and not self._is_silent():
                     _should_send = True
                     try:
                         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
@@ -345,7 +352,11 @@ class BackgroundTask:
             self._completed_at = utc_now()
 
             err_str = str(e)
-            if any(
+            if self._is_silent():
+                # No human waits on a reflection handoff: the failure stays an
+                # operator signal (#3588).
+                logger.error(f"[{self.messenger.session_id}] Background task failed: {e}")
+            elif any(
                 sig in err_str
                 for sig in (
                     "Separator is not found, and chunk exceed the limit",
@@ -368,6 +379,10 @@ class BackgroundTask:
             # Cancel watchdog if still running
             if self._watchdog_task and not self._watchdog_task.done():
                 self._watchdog_task.cancel()
+
+    def _is_silent(self) -> bool:
+        """True when canned human-facing notices are suppressed for this task."""
+        return bool(self._silent() if callable(self._silent) else self._silent)
 
     # Tunable for tests (issue #1357). Production stays at 60s; the
     # integration test monkeypatches this to 1s to exercise the

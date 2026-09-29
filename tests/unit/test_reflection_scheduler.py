@@ -1421,14 +1421,12 @@ class TestExecuteFunctionReflectionParams:
         def fake_func(params: dict | None = None) -> None:
             received["params"] = params
 
-        entry = self._make_entry(
-            "some.module.fake_func", params={"stall_advisory_telegram_enabled": True}
-        )
+        entry = self._make_entry("some.module.fake_func", params={"some_feature_flag": True})
 
         with patch("agent.reflection_scheduler._resolve_callable", return_value=fake_func):
             asyncio.run(execute_function_reflection(entry))
 
-        assert received["params"] == {"stall_advisory_telegram_enabled": True}
+        assert received["params"] == {"some_feature_flag": True}
 
     def test_zero_arg_callable_receives_no_params(self):
         """Zero-arg callables continue to be called without arguments (backward compat)."""
@@ -1468,7 +1466,7 @@ reflections:
     callable: reflections.stall_advisory.run_stall_advisory
     enabled: true
     params:
-      stall_advisory_telegram_enabled: true
+      some_feature_flag: true
 """
         registry_file = tmp_path / "reflections.yaml"
         registry_file.write_text(yaml_content)
@@ -1476,7 +1474,7 @@ reflections:
         entries = load_registry(path=registry_file)
 
         assert len(entries) == 1
-        assert entries[0].params == {"stall_advisory_telegram_enabled": True}
+        assert entries[0].params == {"some_feature_flag": True}
 
 
 # === Required-fields Predicate Tests ===

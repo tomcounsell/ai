@@ -11,9 +11,10 @@ exist yet, on a schedule, with no further human input beyond adding the
 A human adds the `upvote` label to an issue (already documented as
 "Pre-approved for autonomous SDLC pickup" in the GitHub label itself, and in
 `CLAUDE.md`'s Issue Labels table). Within the next scheduled tick, the
-reflection announces the pickup in that project's `Eng: X` Telegram group,
-creates an Eng session anchored to that announcement, and lets `/sdlc` route
-the appropriate stage.
+reflection creates an Eng session in that project's `Eng: X` Room and lets
+`/sdlc` route the appropriate stage. The session's brief tells it to announce
+the pickup in its first message, which reaches the human through the persona
+path.
 
 The reflection never mutates the label and never closes the issue. `upvote`
 is a human-owned signal in both directions, and it remains attached after
@@ -127,7 +128,7 @@ call is gated before it starts rather than after:
   asserted by test) keeps the scheduler's own timeout from ever firing
   against a tick that is still legitimately running.
 - `UPVOTE_PICKUP_WORST_CASE_S` (740s with today's defaults) is the whole
-  uninterruptible tail of one pickup: two `gh`/send calls, the anchor wait,
+  uninterruptible tail of one pickup: two `gh` calls
   and `create_session`'s cold-worktree `uv sync`
   (`UPVOTE_CREATE_WORST_CASE_S = settings.timeouts.uv_sync_s +
   settings.timeouts.git_subprocess_s` — **derived**, never a fresh literal,
@@ -143,88 +144,19 @@ call is gated before it starts rather than after:
   `UPVOTE_RUN_BUDGET_S` (and the entry timeout, which must stay above it),
   not removing the admission check.
 
-## Announce-then-create, and the ack primitive
+## Create-then-announce through the persona
 
-**Ordering:** announce first, capture the sent message id via a new relay
-ack, then create — chosen over create-then-announce (loses the anchor) and
-create-then-patch (races the worker's session claim against the anchor
-write). The only failure mode is a phantom promise (announcement lands,
-`create_session` fails); it is handled explicitly with a threaded
-retraction, not tolerated silently.
+The reflection sends nothing to Telegram. It creates the Eng session in the
+project's `Eng: X` Room (resolved by numeric `chat_id`) with no reply anchor;
+the brief asks the session to announce the pickup in its first message. That
+message goes through the drafter like every other agent message, so the
+words the human reads are the persona's. See
+[Reflection Agent Handoff](reflection-agent-handoff.md).
 
-**The ack primitive (`bridge/outbox_ack.py`):** `tools/valor_telegram.py`'s
-`send` never learned the Telegram message id it produced — it only enqueues
-onto `telegram:outbox:{session_id}` and returns. `bridge/outbox_ack.py` is a
-new **leaf** module (imports only the shared Redis client, no Telethon) that
-owns `telegram:sent:{session_id}` as a single-consumer, delete-on-read Redis
-list with a short TTL: `publish_sent_message_id` (relay-side writer,
-opt-in — gated on the outbox payload's `ack_sent_id` flag, so ordinary
-traffic is unaffected) and `await_sent_message_id` (producer-side reader, a
-bounded blocking poll). It is a leaf specifically so the reflection process,
-which per design has no Telegram client, never gains one transitively by
-importing it.
-
-**Sending goes through the one existing sender** —
-`[sys.executable, "-m", "tools.valor_telegram", "send", …]`, invoked as a
-module and never as the bare `valor-telegram` console script (the on-PATH
-shim is stale on this machine, issue #2566, and crashes on import outside
-the launchd-pinned PATH). This keeps the promise gate, linkify, and the
-4096-char guard on the one send path that already owns them; the reflection
-builds no `telegram:outbox:*` payload of its own. Every send carries
-`--no-read-the-room` (an inherited `VALOR_SESSION_ID` would otherwise arm
-Read-the-Room, whose `suppress` verdict enqueues a *reaction* instead of the
-message and still exits 0) and an explicitly scrubbed subprocess `env`
-(`VALOR_SESSION_ID`, `TELEGRAM_REPLY_TO`, `AGENT_SESSION_ID` all removed —
-an inherited `TELEGRAM_REPLY_TO` would thread the announcement into an
-unrelated message in a different chat). Exit 0 means "enqueued", never
-"delivered"; only the ack confirms delivery.
-
-**Two bounded degradations, both visible in the findings, never silent:**
-
-- **Ack timeout** (`UPVOTE_ANCHOR_WAIT_S`, default 20s): the lane still
-  starts, unanchored (`telegram_message_id=0`), and the finding reads as an
-  *unconfirmed delivery*, not a cosmetic threading miss — the send may not
-  have landed at all.
-- **Create failure**: writes a clock-expiring backoff key
-  (`upvote:pickup:failed:{repo}:{N}`, `SETEX`/`GET` on a plain non-Popoto
-  string namespace — not the raw-Redis-on-Popoto-keys rule, and not a claim
-  key) and posts a threaded retraction. The retraction argv is built
-  unconditionally with `--reply-to` spliced in **only when the anchor is
-  truthy** — both degradations can co-occur (ack timeout *and* create
-  failure), and the anchor can legitimately be `0`. The retraction uses a
-  distinct `{producer_id}-retract` id so its own ack bookkeeping never
-  cross-talks with the announcement's.
-
-## `create_session(telegram_message_id=...)`
-
-`tools/valor_session.py::create_session` gained `telegram_message_id: int =
-0`, replacing the literal `0` previously hardcoded at the
-`_push_agent_session` call site. Purely additive — every existing caller's
-behavior is unchanged. Once the worker starts the session,
-`agent/sdk_client.py` exports it as `TELEGRAM_REPLY_TO`, so every outbound
-message from the lane threads under the announcement.
-
-**CLI debugging path** (no `valor-session` console script ships —
-`pyproject.toml`'s `[project.scripts]` has no such entry despite CLAUDE.md's
-docstring examples assuming one; see `## No-Gos` follow-up below): a human
-reproduces an anchored start by hand with
-
-```bash
-.venv/bin/python -m tools.valor_session create --telegram-message-id <id> --chat-id <eng chat id> --role eng --message "…"
-```
-
-This exercises the `create_session` plumbing only — not `resolve_eng_group`,
-not the send path, not the relay ack. It is not a substitute for the
-scratch-issue end-to-end dry run below.
-
-## Restart required after merge
-
-Both processes must restart for anchoring to work at all: the bridge writes
-the ack (`bridge/telegram_relay.py` → `bridge/outbox_ack.py`), the
-reflection worker reads it. If only one restarts, anchoring silently
-degrades to `telegram_message_id=0` — the lane still starts, but nothing
-threads. After merge: `/update` → `./scripts/valor-service.sh restart` plus
-a reflection-worker restart.
+**Create failure** writes a clock-expiring backoff key
+(`upvote:pickup:failed:{repo}:{N}`, `SETEX`/`GET` on a plain non-Popoto
+string namespace, not a claim key) and records a finding for the operator
+surface. There is no announcement to retract, so no message goes to the human.
 
 ## Scratch-issue dry run (merge-time verification record)
 

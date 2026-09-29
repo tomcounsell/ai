@@ -153,7 +153,25 @@ class TestBranchPerKind:
 
         push.assert_called_once()
         assert push.call_args.kwargs["room_id"] == "proj:room"
+        # `_target` is a mock row; a non-handoff session must not request the stamp
+        assert push.call_args.kwargs["human_sender"] is False
         assert "Approach A" in push.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_handoff_session_steer_requests_the_human_stamp(self, registry):
+        """A vote into a silent reflection-handoff session is a human steer and
+        must request the stamp (#3588). RED if `human_sender` is dropped."""
+        target = _target(AnswerTargetKind.LIVE)
+        target.session.extra_context = {"origin": "reflection_handoff"}
+        with (
+            patch("bridge.poll_vote.resolve_answer_target", return_value=target),
+            patch("agent.steering.push_steering_message") as push,
+            patch("models.room.room_id_for_session", return_value="proj:room"),
+            patch("bridge.response.close_poll", new_callable=AsyncMock),
+        ):
+            await translate_poll_vote(_client_returning(_voters((0, 1))), "poll-1")
+
+        assert push.call_args.kwargs["human_sender"] is True
 
     @pytest.mark.asyncio
     async def test_session_without_project_key_takes_the_legacy_leg(self, registry):

@@ -25,6 +25,7 @@ from agent.session_runner.router import (
 # is clean AND wrapup-eligible) or none (turn-level slugs like empty_output
 # are translated by the runner before reaching summary classification).
 EXPECTED_CLEAN = {
+    "handoff_silent",
     "pm_complete",
     "pm_user",
     "pm_needs_human",
@@ -48,6 +49,9 @@ EXPECTED_ANOMALY = {
     # downgraded to this non-clean anomaly at the finalization chokepoint so
     # _runner_final_status returns "failed" instead of a false "completed".
     "pm_user_subagent_live",
+    # A delivery-required reflection handoff that ended without reaching the
+    # human is a failure, never a quiet success.
+    "handoff_undelivered",
 }
 
 # The full pinned vocabulary. Byte-identical to the pre-enum strings.
@@ -61,6 +65,8 @@ EXPECTED_VALUES = {
     "pm_floor_delivered",
     "pm_no_user_message",
     "pm_empty_turn",
+    "handoff_silent",
+    "handoff_undelivered",
     "pm_max_turns",
     "steer_abort",
     "turn_timeout",

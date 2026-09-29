@@ -13,9 +13,7 @@ Periodic reflection that:
    kill the session + re-enqueue via valor-catchup. Actuation is unconditional
    (issue #1855) — the consecutive-observation counter and run/per-session kill
    budgets are the safety mechanism, not a dry-run flag.
-5. Optionally sends a Telegram alert when findings are present and
-   params["stall_advisory_telegram_enabled"] is True
-6. Returns status="warn" when any suspect/stalled sessions found, "ok" otherwise
+5. Returns status="warn" when any suspect/stalled sessions found, "ok" otherwise
 
 Per-session exception isolation: classification errors are logged at debug and
 skipped — the reflection always completes and returns a summary.
@@ -40,7 +38,6 @@ import logging
 import subprocess
 
 from reflections.redis_access import get_project_key, get_redis
-from reflections.utilities import send_host_eng_telegram
 
 logger = logging.getLogger("reflections.stall_advisory")
 
@@ -68,8 +65,7 @@ def run_stall_advisory(params: dict | None = None) -> dict:
 
     Args:
         params: Optional configuration dict. Recognized keys:
-            stall_advisory_telegram_enabled (bool, default False):
-                When True and findings are present, send a Telegram alert.
+            (none; the reflection takes no parameters and writes to no chat)
 
     Returns:
         Dict with keys:
@@ -80,9 +76,6 @@ def run_stall_advisory(params: dict | None = None) -> dict:
             summary:  Human-readable summary string (extended with recovery
                       counts when any kills/dry-runs/catchup-failures occur).
     """
-    params = params or {}
-    telegram_enabled = bool(params.get("stall_advisory_telegram_enabled", False))
-
     findings: list[dict] = []
 
     try:
@@ -210,17 +203,6 @@ def run_stall_advisory(params: dict | None = None) -> dict:
 
     # Determine status
     status = "warn" if (stalled_count > 0 or suspect_count > 0) else "ok"
-
-    # Telegram alert: only when enabled AND there are findings (no all-clear spam)
-    if telegram_enabled and findings:
-        problem_parts = []
-        if stalled_count:
-            problem_parts.append(f"{stalled_count} stalled")
-        if suspect_count:
-            problem_parts.append(f"{suspect_count} suspect")
-        problem_desc = ", ".join(problem_parts)
-        message = f"[stall-advisory] {problem_desc} session(s) detected. {summary}"
-        _send_alert(message)
 
     return {"status": status, "findings": findings, "summary": summary}
 
@@ -447,20 +429,3 @@ def _reset_consec(r, project_key, session_id) -> None:
         r.delete(f"{project_key}:stall-recovery:consec:{session_id}")
     except Exception as exc:
         logger.debug("[stall-recovery] consec reset failed for %s: %r", session_id, exc)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _send_alert(message: str) -> None:
-    """Best-effort Telegram alert to this checkout's own Eng: group.
-
-    ``run_stall_advisory`` never calls ``load_local_projects()`` (spike-2):
-    it classifies sessions globally via ``AgentSession.query.filter(...)``,
-    with no single project in scope, so the destination is this host's own
-    engineer group via ``send_host_eng_telegram`` rather than a per-project
-    ``Eng:`` lookup.
-    """
-    send_host_eng_telegram(message, logger_prefix="stall_advisory")

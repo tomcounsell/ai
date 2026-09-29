@@ -2402,6 +2402,18 @@ async def _deliver_oneshot_dedup_notice(
         delivery failed.
     """
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+    from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+    if is_reflection_handoff(entry):
+        # No human waits on a reflection handoff (#3588): every canned one-shot
+        # notice (degraded, interrupt) is suppressed here, before the dedup key
+        # is burned.
+        logger.debug(
+            "[session-health] one-shot notice suppressed for reflection handoff %s (key=%s)",
+            session_id,
+            dedup_key,
+        )
+        return False
     try:
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
@@ -2584,6 +2596,29 @@ def _gate_terminal_promise(message: str, *, transport: str, session_id: str | No
         return message
 
 
+def _handoff_flush_undelivered(source, session_id, reason: str) -> bool:
+    """Record that a reflection-handoff flush had no agent-authored text to send.
+
+    A handoff session's own held text is delivered like any other session's;
+    only the canned substitutes (fallback, narration, promise-gate, dead-path
+    notice) are withheld, since no human waits on a finding nobody asked about
+    (#3588). A delivery-required handoff losing its message is a WARNING.
+    Returns ``False`` (nothing delivered).
+    """
+    extra = getattr(source, "extra_context", None) or {}
+    if extra.get("handoff_requires_delivery"):
+        logger.warning(
+            "[session-health] handoff-undelivered %s: held self-draft not delivered (%s)",
+            session_id,
+            reason,
+        )
+    else:
+        logger.info(
+            "[session-health] handoff self-draft not delivered for %s (%s)", session_id, reason
+        )
+    return False
+
+
 def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> bool:
     """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
 
@@ -2650,6 +2685,10 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         fresh = get_authoritative_session(session_id)
         source = fresh if fresh is not None else session
         extra_ctx = getattr(source, "extra_context", None) or {}
+
+        from config.enums import is_reflection_handoff  # noqa: PLC0415
+
+        handoff = is_reflection_handoff(source)
 
         if not extra_ctx.get("deferred_self_draft_pending"):
             # Not silent (#3053): makes "flush ran, nothing pending" distinguishable
@@ -2769,6 +2808,8 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
                 )
 
                 if is_narration_only(scrubbed[:500]):
+                    if handoff:
+                        return _handoff_flush_undelivered(source, session_id, "narration-only")
                     message = NARRATION_FALLBACK_MESSAGE
                 else:
                     message = scrubbed
@@ -2783,6 +2824,8 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             if not message.strip():
                 if attached:
                     message = ", ".join(os.path.basename(p) for p in attached)
+                elif handoff:
+                    return _handoff_flush_undelivered(source, session_id, "empty after scrub")
                 else:
                     message = "(the referenced file is no longer available)"
 
@@ -2790,9 +2833,15 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
             # promise-flagged draft that lost the self-draft race must not be
             # delivered verbatim on terminal paths — substitute the honest
             # fallback instead (no live agent exists to self-draft a rewrite).
-            message = _gate_terminal_promise(
+            _gated = _gate_terminal_promise(
                 message, transport=transport or "telegram", session_id=session_id
             )
+            if handoff and _gated != message:
+                # The substitute is canned text, not the agent's own reply.
+                return _handoff_flush_undelivered(source, session_id, "promise-gated")
+            message = _gated
+        elif handoff:
+            return _handoff_flush_undelivered(source, session_id, "no held text")
         else:
             message = "I couldn't finish responding to that — please try again."
 
@@ -2970,7 +3019,15 @@ async def _deliver_deferred_self_draft_fallback(
         if not extra_ctx.get("deferred_self_draft_pending"):
             return
 
+        from config.enums import is_reflection_handoff  # noqa: PLC0415
+
         session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+        if is_reflection_handoff(entry):
+            # Handoff sessions run on the telegram transport, whose held text
+            # `flush_deferred_self_draft_sync` delivers. This helper is the
+            # email-only path, and `deliver_system_notice` suppresses every
+            # system-authored send for a silent handoff (#3588).
+            return
         project_key = getattr(entry, "project_key", None) or "unknown"
 
         # Atomic dedup: only the first caller sends the fallback (1 h window).

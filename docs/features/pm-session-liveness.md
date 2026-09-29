@@ -316,16 +316,18 @@ on it, keyed on `(slug, head-sha)`:
 10. **Rung 4: escalate.** The dispatched action failed for a non-benign
     reason, so escalate once and stop.
 
-Escalation sends a single Telegram alert to the stalled lane's own project
-`Eng:` group, addressed by numeric `chat_id` (`_send_alert` →
-`reflections.utilities.send_eng_telegram`, via the `valor-telegram` CLI —
-see [`reflection-telegram-routing.md`](reflection-telegram-routing.md)), and
-writes the Redis dedup key `sdlc:stall:escalated:{slug}:{sha}` (`SET NX`, TTL
-`SDLC_STALL_ESCALATION_TTL_DAYS`) so a human hears about a given head sha at
-most once, no matter how many ticks keep hitting the exhausted-budget or
-action-failed rung. When no `Eng:` group resolves for the project, the page
-is suppressed rather than misrouted to `Eng: Valor`; the suppression still
-reaches the reflection's `findings`/`summary`.
+Escalation hands one `Finding` to an agent in the stalled lane's own
+project `Eng:` Room (`_hand_off_escalation` →
+`reflections.agent_handoff.hand_off`); the lane, PR, issue and error travel
+as evidence. The agent recovers the lane if it can and asks a human in plain
+words only if a decision is needed. The Redis dedup key
+`sdlc:stall:escalated:{slug}:{sha}` (`SET NX`, TTL
+`SDLC_STALL_ESCALATION_TTL_DAYS`) is written only after a delivered handoff,
+so a given head sha is handed off at most once, while an unreachable handoff
+(no `Eng:` group, ownership, rate cap) retries on a later tick and reaches
+the reflection's `findings`/`summary`. "Auto-resume disabled" is config state
+and stays on the operator surface. See
+[Reflection Agent Handoff](reflection-agent-handoff.md).
 
 Every rung's outcome is classified and, on success or failure, charges the
 `(slug, sha)` attempt counter: a steer that lands but doesn't move the

@@ -18,19 +18,26 @@ Per open outbound expectation older than ``EXPECTATION_MIN_AGE_HOURS``:
     3  shipped-work guard (the sole cross-actor collision guard — Race 2):
        re-read git/GitHub for ``session/<slug>`` — an open/merged PR or a
        pushed branch means the work is visible outside the session model.
-       Shipped work is NEVER respawned; the evidence goes to a PM for
-       deliberate discharge (``tools/job_tool expectation-remove``).
+       Shipped work is NEVER respawned; typed evidence (merged / open /
+       closed-unmerged / branch-only, plus the issues the PR closes) goes to
+       an agent for deliberate discharge (``tools/job_tool expectation-remove``).
     4  the ladder, keyed ``(job_id, expectation_id)``:
-       escalation key already set     -> stop acting entirely
-       attempts >= max                -> escalate once, stop
-       action cooldown live           -> skip this tick
-       live PM session                -> steer it with the evidence
-       no live PM, work unshipped     -> respawn the lane with the recorded
-                                         ``what`` (create_session, lane slug)
-       action failed                  -> escalate once, stop
+       handed-off sentinel already set -> stop acting entirely
+       attempts >= max                 -> hand off once, stop
+       action cooldown live            -> skip this tick
+       live holder session             -> steer it via ``agent_handoff.hand_off``
+       no holder, work unshipped       -> respawn the lane with the recorded
+                                          ``what`` (create_session, lane slug)
+       no slug / respawn failed        -> hand off once, stop
+
+Nothing here writes to a human chat. Every finding goes through
+``reflections.agent_handoff.hand_off``: an agent in the Job's Room judges it and
+speaks to a human, in persona, only when a decision is needed. A handoff that
+cannot reach an agent is an operator-surface finding and leaves the sentinel
+unset, so it retries once per cooldown window.
 
 Nothing here ever discharges an expectation, takes a lock, or writes
-anything outside its own raw-Redis bookkeeping keys — expectations are
+anything outside its own raw-Redis bookkeeping keys and the handoff — expectations are
 readable ownership records; a second PM reads and decides (#2704).
 
 The attempts TTL is floored at the escalation TTL
@@ -59,15 +66,17 @@ import logging
 import os
 import subprocess
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from config.settings import settings
+from reflections import agent_handoff
+from reflections.agent_handoff import Finding, HandoffResult, hand_off
 from reflections.utilities import (
     _get_redis,
     machine_owns_project,
     run_per_project_audit,
-    send_eng_telegram,
 )
 
 logger = logging.getLogger("reflections.expectation_reconciler")
@@ -199,45 +208,71 @@ def _annotate_attempts_exhausted(job_id: str, room_id: str, job_row_id: str, eid
         )
 
 
-def _escalate_once(project: dict, job_id: str, eid: str, message: str) -> tuple[bool, str | None]:
-    """Page the project's operator at most once per (job, expectation).
+def _mark_handed_off(job_id: str, eid: str) -> None:
+    """Write the once-only sentinel: an agent has this (job, expectation) at the exhausted rung.
 
-    Returns ``(sent, suppression_finding)``:
-      - burned sentinel or Redis unreadable: ``(False, None)`` — nothing to
-        report, nothing to count (unchanged behavior, just re-typed).
-      - a page was sent: ``(True, None)``.
-      - the sentinel claimed but no ``Eng:`` group resolved for the project:
-        ``(False, "alert-suppressed: ...")`` — the caller threads this into
-        ``findings`` without incrementing its escalation counter.
+    Written only after a delivered handoff (``steered`` / ``created``). An
+    unreachable or rate-capped handoff leaves it unset and relies on the
+    cooldown key, so a transient failure retries after the cooldown instead of
+    being suppressed for the sentinel's whole TTL.
     """
     key = _ESCALATED_KEY.format(job=job_id, eid=eid)
     try:
-        if not _get_redis().set(key, "1", nx=True, ex=_escalation_ttl_seconds()):
-            return False, None
+        _get_redis().set(key, "1", nx=True, ex=_escalation_ttl_seconds())
     except Exception as exc:  # noqa: BLE001
-        logger.warning("expectation_reconciler: escalation set failed for %s: %s", key, exc)
-        return False, None
-    sent = send_eng_telegram(project, message, logger_prefix="expectation_reconciler")
-    if sent:
-        return True, None
-    project_key = project.get("slug", "?")
-    return False, f"alert-suppressed: no Eng: group for {project_key} ({eid})"
+        logger.warning("expectation_reconciler: sentinel set failed for %s: %s", key, exc)
+
+
+def _handoff(
+    project: dict,
+    job,
+    entry: dict,
+    *,
+    rung: str,
+    facts: list[str],
+    evidence: dict,
+    suggested_action: str,
+) -> HandoffResult:
+    """Hand one reconciler finding to an agent in the Job's Room."""
+    eid = str(entry.get("id") or "")
+    return hand_off(
+        Finding(
+            source="expectation_reconciler",
+            project=project,
+            room_id=job.room_id,
+            facts=facts,
+            evidence=evidence,
+            suggested_action=suggested_action,
+            job_id=job.job_id,
+            expectation_id=eid,
+            holder=str(entry.get("holder") or "") or None,
+            dedup_key=f"{job.job_id}:{eid}:{rung}",
+        )
+    )
 
 
 # --- Owner liveness (a session row is a claim, not proof — #2705) -----------
 
 
-def _owner_rows(owner: str) -> list[Any]:
+def _owner_rows(owner: str, project_key: str | None = None) -> list[Any]:
     """AgentSession rows matching the recorded owner (session id or slug)."""
     from models.agent_session import AgentSession
 
     rows: list[Any] = []
     slug = owner[len("session/") :] if owner.startswith("session/") else owner
-    for kwargs in (
-        {"session_id": owner},
-        {"agent_session_id": owner},
-        {"slug": slug},
-    ):
+    try:
+        by_id = AgentSession.get_by_id(owner)
+        if by_id is not None:
+            rows.append(by_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("expectation_reconciler: owner get_by_id failed: %s", exc)
+    queries = [{"session_id": owner}, {"slug": slug}]
+    if project_key:
+        # dev_agent_id is a plain Field: Popoto's client-side filter needs an
+        # indexed param (project_key) alongside it. An Agent-tool subagent has
+        # no row of its own; its parent PM row stands in as the liveness claim.
+        queries.append({"dev_agent_id": f"agent-{owner}", "project_key": project_key})
+    for kwargs in queries:
         try:
             rows.extend(AgentSession.query.filter(**kwargs))
         except Exception as exc:  # noqa: BLE001
@@ -245,7 +280,7 @@ def _owner_rows(owner: str) -> list[Any]:
     return rows
 
 
-def _owner_is_gone(owner: str) -> bool | None:
+def _owner_is_gone(owner: str, project_key: str | None = None) -> bool | None:
     """True = no live claim for the owner, False = a row claims life, None = unknown.
 
     A non-terminal row is respawn-blocking only — never discharge evidence.
@@ -255,7 +290,7 @@ def _owner_is_gone(owner: str) -> bool | None:
     try:
         from models.session_lifecycle import TERMINAL_STATUSES
 
-        rows = _owner_rows(owner)
+        rows = _owner_rows(owner, project_key)
         if not rows:
             return True
         return all(getattr(r, "status", None) in TERMINAL_STATUSES for r in rows)
@@ -296,12 +331,17 @@ def _record_shipped_work_evidence(
         logger.debug("expectation_reconciler: shipped-work evidence write failed: %s", exc)
 
 
-def _lane_slug(owner: str) -> str | None:
-    """Best-effort branch slug for the recorded owner."""
+_RESERVED_OWNERS = frozenset({"dev", "pm"})
+
+
+def _lane_slug(owner: str, project_key: str | None = None) -> str | None:
+    """Best-effort branch slug for the recorded owner (None for a role placeholder)."""
     slug = owner[len("session/") :] if owner.startswith("session/") else owner
+    if slug.strip().lower() in _RESERVED_OWNERS:
+        return None
     # Session ids look like {chat}_{millis}; slugs are word-ish.
     if not slug or slug.replace("_", "").isdigit():
-        rows = _owner_rows(owner)
+        rows = _owner_rows(owner, project_key)
         for row in rows:
             row_slug = getattr(row, "slug", None)
             if row_slug:
@@ -310,12 +350,50 @@ def _lane_slug(owner: str) -> str | None:
     return slug
 
 
-def _shipped_evidence(wd: str, slug: str | None) -> str | None:
+@dataclass(frozen=True)
+class ShippedEvidence:
+    """What git/GitHub shows for a lane's branch. ``kind`` is picked merged > open >
+    closed-unmerged > branch-only."""
+
+    kind: str  # "merged" | "open" | "closed_unmerged" | "branch_only"
+    branch: str
+    pr_number: int | None = None
+    closes_issues: list[int] = field(default_factory=list)
+    sha: str | None = None
+
+    @property
+    def counts_as_shipped(self) -> bool:
+        """A PR closed without merging is a deliberate decision, not shipped work."""
+        return self.kind != "closed_unmerged"
+
+    def describe(self) -> str:
+        if self.kind == "branch_only":
+            return f"pushed branch {self.branch} @ {self.sha}"
+        state = {
+            "merged": "merged",
+            "open": "open",
+            "closed_unmerged": "closed without merging",
+        }[self.kind]
+        text = f"PR #{self.pr_number} ({state}) on {self.branch}"
+        if self.closes_issues:
+            text += ", closes " + ", ".join(f"#{n}" for n in self.closes_issues)
+        return text
+
+
+_KIND_ORDER = ("merged", "open", "closed_unmerged")
+
+
+def _pr_kind(state: str) -> str:
+    state = (state or "").upper()
+    return {"MERGED": "merged", "OPEN": "open"}.get(state, "closed_unmerged")
+
+
+def _shipped_evidence(wd: str, slug: str | None) -> ShippedEvidence | None:
     """Fresh git/GitHub read: visible work for ``session/<slug>``, or None.
 
     Re-read immediately before any respawn decision (Race 2): when another
-    actor's work is visible — an open/merged PR or a pushed branch — the
-    reconciler declines to respawn and routes the evidence to a PM instead.
+    actor's work is visible the reconciler declines to respawn and hands the
+    typed evidence to an agent instead.
     """
     if not slug:
         return None
@@ -323,7 +401,17 @@ def _shipped_evidence(wd: str, slug: str | None) -> str | None:
     timeout = int(settings.timeouts.git_subprocess_s)
     try:
         proc = subprocess.run(
-            ["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state"],
+            [
+                "gh",
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "all",
+                "--json",
+                "number,state,closingIssuesReferences",
+            ],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -333,8 +421,18 @@ def _shipped_evidence(wd: str, slug: str | None) -> str | None:
         if proc.returncode == 0:
             prs = json.loads(proc.stdout or "[]")
             if prs:
-                pr = prs[0]
-                return f"PR #{pr.get('number')} ({pr.get('state', '?').lower()}) on {branch}"
+                best = min(prs, key=lambda pr: _KIND_ORDER.index(_pr_kind(pr.get("state", ""))))
+                closes = [
+                    int(ref["number"])
+                    for ref in (best.get("closingIssuesReferences") or [])
+                    if isinstance(ref, dict) and ref.get("number") is not None
+                ]
+                return ShippedEvidence(
+                    kind=_pr_kind(best.get("state", "")),
+                    branch=branch,
+                    pr_number=best.get("number"),
+                    closes_issues=closes,
+                )
     except Exception as exc:  # noqa: BLE001
         logger.warning("expectation_reconciler: gh pr list failed for %s: %s", branch, exc)
     try:
@@ -347,51 +445,15 @@ def _shipped_evidence(wd: str, slug: str | None) -> str | None:
             cwd=wd,
         )
         if proc.returncode == 0 and (proc.stdout or "").strip():
-            sha = proc.stdout.split()[0][:8]
-            return f"pushed branch {branch} @ {sha}"
+            return ShippedEvidence(
+                kind="branch_only", branch=branch, sha=proc.stdout.split()[0][:8]
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("expectation_reconciler: git ls-remote failed for %s: %s", branch, exc)
     return None
 
 
-# --- PM target + actions ----------------------------------------------------
-
-
-def _live_pm_session(project_key: str, holder: str):
-    """A live eng session to steer: the recorded holder first, else the most
-    recently updated live non-ledger eng session in the project."""
-    try:
-        from agent.session_health import _is_ledger
-        from models.agent_session import AgentSession
-        from models.session_lifecycle import NON_TERMINAL_STATUSES
-        from utils.utc import to_unix_ts
-
-        rows = list(AgentSession.query.filter(project_key=project_key, session_type="eng"))
-        live = [
-            r
-            for r in rows
-            if getattr(r, "status", None) in NON_TERMINAL_STATUSES and not _is_ledger(r)
-        ]
-        if not live:
-            return None
-        for row in live:
-            if holder in (getattr(row, "session_id", None), getattr(row, "agent_session_id", None)):
-                return row
-        return max(live, key=lambda r: to_unix_ts(getattr(r, "updated_at", None)) or 0.0)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("expectation_reconciler: PM target query failed: %s", exc)
-        return None
-
-
-def _steer(session, message: str) -> bool:
-    try:
-        from agent.session_executor import steer_session
-
-        result = steer_session(getattr(session, "session_id", "") or "", message)
-        return bool(result.get("success"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("expectation_reconciler: steer failed: %s", exc)
-        return False
+# --- Respawn ----------------------------------------------------------------
 
 
 def _respawn_lane(project_key: str, slug: str, what: str, job_id: str) -> bool:
@@ -427,6 +489,27 @@ def _entry_age_seconds(entry: dict, now: float) -> float | None:
         return None
 
 
+def _note_handoff(
+    result: HandoffResult, job, eid: str, findings: list[str], counts: dict, *, mark: bool
+) -> None:
+    """Record a handoff result on the operator surface and in the bookkeeping keys.
+
+    Only a delivered handoff (``steered`` / ``created``) counts. ``mark=True``
+    (the once-only rungs) also writes the sentinel; a steered handoff at a
+    retryable rung bumps the attempts key instead.
+    """
+    if not result.delivered:
+        counts["rate_capped" if result.kind == "rate-capped" else "unreachable"] += 1
+        findings.append(result.finding_line(eid))
+        return
+    counts["steered" if result.kind == "steered" else "handed_off"] += 1
+    findings.append(result.finding_line(eid))
+    if mark:
+        _mark_handed_off(job.job_id, eid)
+    else:
+        _bump_attempts(job.job_id, eid)
+
+
 # --- Per-project body -------------------------------------------------------
 
 
@@ -435,7 +518,7 @@ def _reconcile_project(project: dict) -> dict:
     wd = project.get("working_directory", "")
     project_key = project.get("slug", "?")
     findings: list[str] = []
-    counts = {"steered": 0, "respawned": 0, "escalated": 0}
+    counts = {"steered": 0, "respawned": 0, "handed_off": 0, "unreachable": 0, "rate_capped": 0}
 
     if not _enabled():
         return {
@@ -507,7 +590,7 @@ def _reconcile_project(project: dict) -> dict:
                     findings.append(f"blocked: {eid} attempts_exhausted")
                     continue
 
-                gone = _owner_is_gone(owner)
+                gone = _owner_is_gone(owner, project_key)
                 if gone is None:
                     findings.append(f"gate-unknown: owner-liveness {owner}")
                     continue
@@ -521,22 +604,34 @@ def _reconcile_project(project: dict) -> dict:
                     findings.append(f"gate-unknown: attempts-read {eid}")
                     continue
                 what = str(entry.get("what") or "")
-                slug = _lane_slug(owner)
+                slug = _lane_slug(owner, project_key)
+                base_evidence = {"expected": what, "lane_owner": owner or "unrecorded"}
                 if attempts >= _max_attempts():
-                    sent, sup = _escalate_once(
+                    # The cooldown paces an undelivered handoff at this rung: it
+                    # retries once per cooldown window, not once per tick.
+                    if not _cooldown_claim(job.job_id, eid):
+                        continue
+                    result = _handoff(
                         project,
-                        job.job_id,
-                        eid,
-                        f"[{project_key}] Orphaned expectation on Job {job.job_id}: "
-                        f"lane {owner} is gone, {attempts} recovery attempt(s) spent. "
-                        f"Expected: {what!r}. Needs a human.",
+                        job,
+                        entry,
+                        rung="exhausted",
+                        facts=[
+                            f"The lane that owed {what!r} is gone and the recovery budget "
+                            f"({attempts} attempt(s)) is spent."
+                        ],
+                        evidence={**base_evidence, "attempts": attempts},
+                        suggested_action=(
+                            "Decide whether the work still matters. Discharge the expectation if "
+                            "it is moot, recover the lane yourself, or ask the human one plain "
+                            "question if only they can decide."
+                        ),
                     )
-                    if sent:
-                        counts["escalated"] += 1
-                        findings.append(f"escalated: {eid}")
-                    elif sup:
-                        findings.append(sup)
-                    _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
+                    _note_handoff(result, job, eid, findings, counts, mark=True)
+                    if result.delivered:
+                        # An undelivered handoff must retry after the cooldown,
+                        # so only a delivered one parks the expectation.
+                        _annotate_attempts_exhausted(job.job_id, job.room_id, job.id, eid)
                     continue
                 if not _cooldown_claim(job.job_id, eid):
                     continue
@@ -548,48 +643,66 @@ def _reconcile_project(project: dict) -> dict:
                 ):
                     continue  # discharged (or gone) since the scan — the PM won
 
-                evidence = _shipped_evidence(wd, slug)
-                pm = _live_pm_session(project_key, str(entry.get("holder") or ""))
+                shipped = _shipped_evidence(wd, slug)
+                holder = str(entry.get("holder") or "")
 
-                if evidence is not None:
-                    _record_shipped_work_evidence(project_key, job.job_id, eid, owner, evidence)
-                    # Shipped work is never respawned: evidence goes to a PM
-                    # for deliberate discharge.
-                    message = (
-                        f"Lane {owner} (Job {job.job_id}) is gone but its work is "
-                        f"visible: {evidence}. Verify delivery of {what!r} and "
-                        f"discharge the expectation: python -m tools.job_tool "
-                        f"expectation-remove --job-id {job.job_id} --expectation-id {eid}"
+                if shipped is not None and shipped.counts_as_shipped:
+                    _record_shipped_work_evidence(
+                        project_key, job.job_id, eid, owner, shipped.describe()
                     )
-                    if pm is not None and _steer(pm, message):
-                        counts["steered"] += 1
-                        findings.append(f"steered-evidence: {eid} ({evidence})")
-                        _bump_attempts(job.job_id, eid)
-                    else:
-                        sent, sup = _escalate_once(
-                            project, job.job_id, eid, f"[{project_key}] {message}"
-                        )
-                        if sent:
-                            counts["escalated"] += 1
-                            findings.append(f"escalated-evidence: {eid}")
-                        elif sup:
-                            findings.append(sup)
+
+                if shipped is not None:
+                    # Shipped work is never respawned: typed evidence goes to an
+                    # agent, which verifies delivery and discharges. A PR closed
+                    # without merging is evidence too, never an auto-respawn.
+                    result = _handoff(
+                        project,
+                        job,
+                        entry,
+                        rung=f"shipped:{shipped.kind}:{shipped.pr_number or shipped.sha}",
+                        facts=[
+                            f"The lane that owed {what!r} is gone, but its work is visible: "
+                            f"{shipped.describe()}."
+                        ],
+                        evidence={
+                            **base_evidence,
+                            "shipped_kind": shipped.kind,
+                            "pr_number": shipped.pr_number,
+                            "closes_issues": shipped.closes_issues,
+                            "branch": shipped.branch,
+                        },
+                        suggested_action=(
+                            "Verify the work was delivered, then discharge the expectation "
+                            "(expectation-remove). A PR closed without merging was a deliberate "
+                            "decision: do not respawn over it."
+                            if shipped.kind == "closed_unmerged"
+                            else "Verify the work was delivered, then discharge the expectation "
+                            "(expectation-remove)."
+                        ),
+                    )
+                    _note_handoff(result, job, eid, findings, counts, mark=False)
                     continue
 
-                # Unshipped, owner gone: steer a live PM to re-own; else
-                # respawn the lane from the recorded `what`.
-                if pm is not None:
-                    message = (
-                        f"Lane {owner} (Job {job.job_id}) died with no visible work. "
-                        f"It owed: {what!r}. Re-own it: respawn the lane "
-                        f"(valor-session create --job-id {job.job_id} "
-                        f'--expect-what "{what}") or discharge the expectation '
-                        f"(expectation-remove --expectation-id {eid}) if it is moot."
+                # Unshipped, owner gone: a live session that holds the Job re-owns
+                # it; else respawn the lane from the recorded `what`.
+                if agent_handoff._live_session_in_room(job.room_id, holder) is not None:
+                    result = _handoff(
+                        project,
+                        job,
+                        entry,
+                        rung="orphan-live",
+                        facts=[
+                            f"The lane that owed {what!r} died with no visible work "
+                            f"(no PR, no pushed branch)."
+                        ],
+                        evidence=base_evidence,
+                        suggested_action=(
+                            "Re-own it: respawn the lane, or discharge the expectation if it is "
+                            "moot."
+                        ),
                     )
-                    if _steer(pm, message):
-                        counts["steered"] += 1
-                        findings.append(f"steered-orphan: {eid}")
-                        _bump_attempts(job.job_id, eid)
+                    if result.delivered:
+                        _note_handoff(result, job, eid, findings, counts, mark=False)
                         continue
                 if slug and _respawn_lane(project_key, slug, what, job.job_id):
                     counts["respawned"] += 1
@@ -597,19 +710,23 @@ def _reconcile_project(project: dict) -> dict:
                     _bump_attempts(job.job_id, eid)
                     continue
                 _bump_attempts(job.job_id, eid)
-                sent, sup = _escalate_once(
+                result = _handoff(
                     project,
-                    job.job_id,
-                    eid,
-                    f"[{project_key}] Orphaned expectation on Job {job.job_id}: lane "
-                    f"{owner} gone, no live PM to steer and no respawnable slug. "
-                    f"Expected: {what!r}. Needs a human.",
+                    job,
+                    entry,
+                    rung="no-respawn",
+                    facts=[
+                        f"The lane that owed {what!r} is gone. No live session holds this Job "
+                        f"and there is no respawnable lane slug (owner: "
+                        f"{owner if slug else 'unrecorded'})."
+                    ],
+                    evidence=base_evidence,
+                    suggested_action=(
+                        "Decide whether to start the work again under a new lane, discharge the "
+                        "expectation if it is moot, or ask the human one plain question."
+                    ),
                 )
-                if sent:
-                    counts["escalated"] += 1
-                    findings.append(f"escalated: {eid}")
-                elif sup:
-                    findings.append(sup)
+                _note_handoff(result, job, eid, findings, counts, mark=True)
             except Exception as exc:  # noqa: BLE001 — one expectation never stops the pass
                 logger.warning(
                     "expectation_reconciler: per-expectation pass failed on job %s: %s",
@@ -623,7 +740,8 @@ def _reconcile_project(project: dict) -> dict:
         "summary": (
             f"expectation-reconciler: {len(jobs)} job(s) with open expectations, "
             f"{counts['steered']} steered, {counts['respawned']} respawned, "
-            f"{counts['escalated']} escalated"
+            f"{counts['handed_off']} handed off, {counts['unreachable']} unreachable, "
+            f"{counts['rate_capped']} rate-capped"
         ),
         "duration": time.time() - t0,
     }

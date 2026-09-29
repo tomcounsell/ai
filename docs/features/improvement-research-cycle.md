@@ -517,7 +517,7 @@ delivered digest); and the fixed closing line:
 > This is a status report. It asks nothing. Silence validates none of the
 > above; each assumption stands until evidence overturns it.
 
-The message goes through `send_host_eng_telegram`. Every user-authored string
+The digest goes through `hand_off_digest` (`Finding(verbatim_payload=..., requires_delivery=True)` to the host `Eng:` Room): an agent session in the Valor persona replies with anything non-empty and the output handler delivers the digest byte-exact, closing line included. A session that ends silent exits `handoff_undelivered` and the sender reports `digest-not-delivered`. The full text is also logged and returned as `digest` on the operator surface. See [Reflection Agent Handoff](reflection-agent-handoff.md). Every user-authored string
 renders inside double quotes; every other line is a statement, and a test
 asserts no `?` appears outside a quoted body and no poll or `AskUserQuestion`
 symbol is imported. An empty digest sends nothing and reports

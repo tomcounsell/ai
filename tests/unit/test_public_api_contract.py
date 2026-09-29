@@ -42,7 +42,8 @@ PUBLIC_API_SIGNATURES: dict[tuple[str, str], str] = {
     ("agent.steering", "push_steering_message"): (
         "(session_id: 'str', text: 'str', sender: 'str', is_abort: 'bool' = False, "
         "target_agent: 'str | None' = None, front: 'bool' = False, "
-        "room_id: 'str | None' = None, timestamp: 'float | None' = None) -> 'str'"
+        "room_id: 'str | None' = None, timestamp: 'float | None' = None, "
+        "human_sender: 'bool' = False) -> 'str'"
     ),
     # room_id added DELIBERATELY (issue #2494 Task 11 phase 1): the steering
     # dual-read consumer drains the legacy session key first, then the Room

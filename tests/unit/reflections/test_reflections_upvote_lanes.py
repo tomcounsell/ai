@@ -64,10 +64,6 @@ class _Lab:
 
     def __init__(self, monkeypatch):
         self.mp = monkeypatch
-        self.send_calls: list[list[str]] = []
-        self.send_envs: list[dict] = []
-        self.send_rc = 0
-        self.ack_value: int | None = 999
         self.create_result = MagicMock(success=True, error=None)
         self.create_calls: list[dict] = []
 
@@ -81,17 +77,6 @@ class _Lab:
         monkeypatch.setattr(m, "_ledger_has_recorded_stage", lambda repo, n: False)
         monkeypatch.setattr(m, "_lock_says_live", lambda n: False)
         monkeypatch.setattr(m, "_has_pr_on_branch", lambda repo, n, cwd: None)
-
-        def fake_run_send(argv):
-            self.send_calls.append(list(argv))
-            return self.send_rc
-
-        monkeypatch.setattr(m, "_run_send", fake_run_send)
-
-        def fake_await(producer_id, timeout_s):
-            return self.ack_value
-
-        monkeypatch.setattr("bridge.outbox_ack.await_sent_message_id", fake_await)
 
         def fake_create_session(**kwargs):
             self.create_calls.append(kwargs)
@@ -461,48 +446,27 @@ class TestCeilings:
 
 
 # ---------------------------------------------------------------------------
-# Anchor happy path / timeout / create failure / retraction
+# Create path: no side-door send, no anchor
 # ---------------------------------------------------------------------------
 
 
-class TestAnchorAndCreate:
-    def test_happy_path_creates_anchored_session(self, monkeypatch):
+class TestCreate:
+    def test_happy_path_creates_unanchored_session_that_announces_itself(self, monkeypatch):
         lab = _Lab(monkeypatch)
-        lab.ack_value = 4242
         monkeypatch.setattr(
             m, "_gh_issue_list", lambda *a, **k: [_issue(1, "2026-08-01T00:00:00Z")]
         )
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
         assert len(lab.create_calls) == 1
-        assert lab.create_calls[0]["telegram_message_id"] == 4242
-        assert lab.create_calls[0]["chat_id"] == "-100123"
-        assert lab.create_calls[0]["slug"] == "sdlc-1"
+        call = lab.create_calls[0]
+        assert "telegram_message_id" not in call
+        assert call["chat_id"] == "-100123"
+        assert call["slug"] == "sdlc-1"
+        assert "picking up this issue" in call["message"]
         assert any("started SDLC lane" in f for f in result["findings"])
 
-    def test_anchor_timeout_still_starts_unanchored_with_finding(self, monkeypatch):
+    def test_create_failure_writes_backoff_and_reports_finding_only(self, monkeypatch):
         lab = _Lab(monkeypatch)
-        lab.ack_value = None
-        monkeypatch.setattr(
-            m, "_gh_issue_list", lambda *a, **k: [_issue(1, "2026-08-01T00:00:00Z")]
-        )
-        result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
-        assert len(lab.create_calls) == 1
-        assert lab.create_calls[0]["telegram_message_id"] == 0
-        assert any("delivery unconfirmed" in f for f in result["findings"])
-
-    def test_announce_failure_no_create_no_finding_of_success(self, monkeypatch):
-        lab = _Lab(monkeypatch)
-        lab.send_rc = 1
-        monkeypatch.setattr(
-            m, "_gh_issue_list", lambda *a, **k: [_issue(1, "2026-08-01T00:00:00Z")]
-        )
-        result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
-        assert lab.create_calls == []
-        assert any("announcement send failed" in f for f in result["findings"])
-
-    def test_create_failure_writes_backoff_and_retracts_with_reply_to(self, monkeypatch):
-        lab = _Lab(monkeypatch)
-        lab.ack_value = 555
         lab.create_result = MagicMock(success=False, error="boom")
         backoff_writes = []
         monkeypatch.setattr(
@@ -514,33 +478,7 @@ class TestAnchorAndCreate:
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
 
         assert backoff_writes and backoff_writes[0][:2] == ("tomcounsell/ai", 1)
-        # Two sends: the announcement, then the retraction, and the
-        # retraction must carry --reply-to since anchor (555) was truthy.
-        assert len(lab.send_calls) == 2
-        retraction_argv = lab.send_calls[1]
-        assert "--reply-to" in retraction_argv
-        assert retraction_argv[retraction_argv.index("--reply-to") + 1] == "555"
         assert any("create_session failed" in f for f in result["findings"])
-
-    def test_create_failure_with_unconfirmed_anchor_omits_reply_to(self, monkeypatch):
-        """Both degradations co-occurring (cycle-5 CONCERN): ack timeout +
-        create failure. The retraction must still be sent, without --reply-to
-        since the anchor was never confirmed (falsy)."""
-        lab = _Lab(monkeypatch)
-        lab.ack_value = None
-        lab.create_result = MagicMock(success=False, error="boom")
-        monkeypatch.setattr(m, "_set_failed_backoff", lambda *a: None)
-        monkeypatch.setattr(
-            m, "_gh_issue_list", lambda *a, **k: [_issue(1, "2026-08-01T00:00:00Z")]
-        )
-        m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
-
-        assert len(lab.send_calls) == 2
-        retraction_argv = lab.send_calls[1]
-        assert "--reply-to" not in retraction_argv
-        # Distinct producer id for the retraction (Race 3).
-        session_id_idx = retraction_argv.index("--session-id") + 1
-        assert retraction_argv[session_id_idx].endswith("-retract")
 
     def test_admission_check_defers_when_budget_insufficient(self, monkeypatch):
         lab = _Lab(monkeypatch)
@@ -549,19 +487,17 @@ class TestAnchorAndCreate:
         )
         tight_deadline = time.monotonic() + (m.UPVOTE_PICKUP_WORST_CASE_S / 2)
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=tight_deadline))
-        assert lab.send_calls == []
         assert lab.create_calls == []
         assert any("insufficient run budget" in f for f in result["findings"])
 
     def test_budget_early_return_when_already_expired(self, monkeypatch):
-        lab = _Lab(monkeypatch)
+        _Lab(monkeypatch)
         result = m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() - 1))
         # "ok" (not "skipped") -- the budget-exhausted finding was actually
         # evaluated and is worth surfacing, so run_per_project_audit must not
         # silently drop it (it drops findings whenever status == "skipped").
         assert result["status"] == "ok"
         assert "budget exhausted; project not scanned" in result["findings"]
-        assert lab.send_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -591,57 +527,13 @@ class TestTwoConsecutiveTicks:
 # ---------------------------------------------------------------------------
 
 
-class TestSendPath:
-    def test_send_argv_shape_and_no_outbox_write(self, monkeypatch):
-        lab = _Lab(monkeypatch)
-        monkeypatch.setattr(
-            m, "_gh_issue_list", lambda *a, **k: [_issue(1, "2026-08-01T00:00:00Z")]
-        )
-        m._pick_up_upvoted(_project(), state=m._RunState(deadline=time.monotonic() + 1000))
-
-        announce_argv = lab.send_calls[0]
-        assert "--session-id" in announce_argv
-        assert "--ack-sent-id" in announce_argv
-        assert "--no-read-the-room" in announce_argv
-        assert "send" in announce_argv
-
+class TestNoSideDoorSend:
+    def test_module_has_no_telegram_send_path(self):
         with open(m.__file__) as fh:
             source = fh.read()
         assert "telegram:outbox" not in source
-        assert '"valor-telegram"' not in source and "'valor-telegram'" not in source
-
-    def test_run_send_pins_interpreter_and_scrubs_env(self, monkeypatch):
-        captured = {}
-
-        def fake_subprocess_run(argv, **kwargs):
-            captured["argv"] = argv
-            captured["env"] = kwargs.get("env")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        monkeypatch.setenv("VALOR_SESSION_ID", "some-session")
-        monkeypatch.setenv("TELEGRAM_REPLY_TO", "999")
-        monkeypatch.setenv("AGENT_SESSION_ID", "agt_123")
-        monkeypatch.setattr(m.subprocess, "run", fake_subprocess_run)
-
-        m._run_send(["send", "--chat", "-1", "text"])
-
-        assert captured["argv"][0] == m.sys.executable
-        assert captured["argv"][1] == "-m"
-        assert captured["argv"][2] == "tools.valor_telegram"
-        env = captured["env"]
-        assert "VALOR_SESSION_ID" not in env
-        assert "TELEGRAM_REPLY_TO" not in env
-        assert "AGENT_SESSION_ID" not in env
-
-    def test_run_send_timeout_expired_treated_as_failure(self, monkeypatch):
-        import subprocess as sp
-
-        def raise_timeout(*a, **k):
-            raise sp.TimeoutExpired(cmd="x", timeout=1)
-
-        monkeypatch.setattr(m.subprocess, "run", raise_timeout)
-        rc = m._run_send(["send", "--chat", "-1", "text"])
-        assert rc != 0
+        assert "valor_telegram" not in source and "valor-telegram" not in source
+        assert not hasattr(m, "_run_send")
 
 
 # ---------------------------------------------------------------------------

@@ -82,7 +82,12 @@ class TestSteerBranch:
         # never appended to the human's text.
         assert len(push.call_args_list) == 2
         assert push.call_args_list[0] == call(
-            "sess-1", "please update the readme", "Alice", is_abort=False, room_id="test|system"
+            "sess-1",
+            "please update the readme",
+            "Alice",
+            is_abort=False,
+            room_id="test|system",
+            human_sender=False,
         )
         assert push.call_args_list[1] == call(
             "sess-1",
@@ -97,6 +102,31 @@ class TestSteerBranch:
         args, _ = react.await_args
         assert args[3] == "\U0001f440"  # 👀
         rec.assert_awaited_once_with(12345, 67890)
+
+
+class TestHandoffStamp:
+    @pytest.mark.asyncio
+    async def test_handoff_session_requests_the_human_stamp(self):
+        """The ack path gates the stamp on the caller's row (#3588)."""
+        event, message = _make_event_message()
+        handoff = MagicMock()
+        handoff.extra_context = {"origin": "reflection_handoff"}
+        with (
+            patch("bridge.telegram_bridge.push_steering_message") as push,
+            patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
+            patch("bridge.telegram_bridge.record_telegram_message_handled", new_callable=AsyncMock),
+        ):
+            await _ack_steering_routed(
+                MagicMock(),
+                event,
+                message,
+                session_id="sess-1",
+                sender_name="Alice",
+                text="hello",
+                log_context="[test]",
+                session=handoff,
+            )
+        assert push.call_args.kwargs["human_sender"] is True
 
 
 class TestAbortBranch:
@@ -126,7 +156,9 @@ class TestAbortBranch:
 
         # An abort is demoted to the legacy leg regardless of room_id, so
         # the None default (no room_id passed) pins the legacy leg.
-        push.assert_called_once_with("sess-1", "stop", "Alice", is_abort=True, room_id=None)
+        push.assert_called_once_with(
+            "sess-1", "stop", "Alice", is_abort=True, room_id=None, human_sender=False
+        )
         react.assert_awaited_once()
         args, _ = react.await_args
         assert args[3] == "\U0001fae1"  # 🫡
@@ -155,7 +187,9 @@ class TestAbortBranch:
             )
         # is_abort should still be detected after strip + lower; abort lands
         # on the legacy leg (room_id=None), never a Room leg.
-        push.assert_called_once_with("sess-1", "  STOP  ", "Alice", is_abort=True, room_id=None)
+        push.assert_called_once_with(
+            "sess-1", "  STOP  ", "Alice", is_abort=True, room_id=None, human_sender=False
+        )
 
 
 class TestDefensiveReaction:
@@ -245,6 +279,7 @@ class TestMediaEnrichment:
             "Alice",
             is_abort=False,
             room_id="test|system",
+            human_sender=False,
         )
 
     @pytest.mark.asyncio
@@ -278,7 +313,7 @@ class TestMediaEnrichment:
 
         expected = "[User sent an image]\nImage description: cat\n\ncheck this out"
         push.assert_called_once_with(
-            "sess-1", expected, "Alice", is_abort=False, room_id="test|system"
+            "sess-1", expected, "Alice", is_abort=False, room_id="test|system", human_sender=False
         )
 
     @pytest.mark.asyncio
@@ -311,7 +346,7 @@ class TestMediaEnrichment:
 
         proc.assert_not_awaited()
         push.assert_called_once_with(
-            "sess-1", "hello", "Alice", is_abort=False, room_id="test|system"
+            "sess-1", "hello", "Alice", is_abort=False, room_id="test|system", human_sender=False
         )
 
     @pytest.mark.asyncio
@@ -346,7 +381,12 @@ class TestMediaEnrichment:
 
         # Push still happens with the sentinel (defensive fallback).
         push.assert_called_once_with(
-            "sess-1", "--file attachment only--", "Alice", is_abort=False, room_id="test|system"
+            "sess-1",
+            "--file attachment only--",
+            "Alice",
+            is_abort=False,
+            room_id="test|system",
+            human_sender=False,
         )
         rec.assert_awaited_once()
 
@@ -394,7 +434,12 @@ class TestMediaEnrichment:
             )
 
         push.assert_called_once_with(
-            "sess-1", "[Document content: hi]", "Alice", is_abort=False, room_id="test|system"
+            "sess-1",
+            "[Document content: hi]",
+            "Alice",
+            is_abort=False,
+            room_id="test|system",
+            human_sender=False,
         )
         rec.assert_awaited_once()
 
@@ -522,3 +567,61 @@ class TestMediaEnrichment:
             )
 
         assert call_order == ["push", "react"]
+
+
+def _bridge_calls(name: str) -> list:
+    """Every call node to ``name`` (bare-name callee) in bridge/telegram_bridge.py."""
+    import ast
+
+    import bridge.telegram_bridge as bridge_module
+
+    tree = ast.parse(Path(bridge_module.__file__).read_text())
+    return [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
+    ]
+
+
+def _kwarg(call_node, name: str):
+    return next((k.value for k in call_node.keywords if k.arg == name), None)
+
+
+def test_ack_steering_routed_call_sites_pass_session():
+    """Every call site that holds a session row must pass ``session=`` (#3588).
+
+    Without it the handoff human-steer stamp is silently skipped. The single
+    exception is the in-memory coalescing guard, which has no row in hand and is
+    identified by its ``session_id=guard_session_id`` argument.
+    """
+    import ast
+
+    calls = _bridge_calls("_ack_steering_routed")
+    assert len(calls) >= 5, "expected the bridge's steering call sites to be found"
+    missing = []
+    for c in calls:
+        if _kwarg(c, "session") is not None:
+            continue
+        sid = _kwarg(c, "session_id")
+        if isinstance(sid, ast.Name) and sid.id == "guard_session_id":
+            continue
+        missing.append(c.lineno)
+    assert not missing, f"_ack_steering_routed calls missing session= at lines {missing}"
+
+
+def test_human_steer_push_sites_pass_human_sender():
+    """Every push of human text (helper, live-edit, duplicate-edit) passes ``human_sender=``.
+
+    The classifier's context advisory is machine-authored (constant sender name)
+    and is exempt.
+    """
+    import ast
+
+    missing = []
+    for c in _bridge_calls("push_steering_message"):
+        sender = c.args[2] if len(c.args) > 2 else None
+        if isinstance(sender, ast.Constant):
+            continue
+        if _kwarg(c, "human_sender") is None:
+            missing.append(c.lineno)
+    assert not missing, f"push_steering_message calls missing human_sender= at lines {missing}"

@@ -27,7 +27,11 @@ from agent.worktree_manager import (
     WORKTREES_DIR,
     validate_workspace,
 )
-from config.enums import ClassificationType, SessionType
+from config.enums import (
+    ClassificationType,
+    SessionType,
+    is_reflection_handoff_live,
+)
 from config.project_key_resolver import resolve_project_key
 from config.settings import settings
 from models.agent_session import AgentSession
@@ -975,7 +979,7 @@ def steer_session(session_id: str, message: str) -> dict:
         return {"success": False, "session_id": session_id, "error": str(e)}
 
 
-async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
+async def _maybe_send_failure_notice(messenger, session_id: str, session=None) -> None:
     """Best-effort user-facing notice on a running->failed transition (#1877 defect #2).
 
     Mirrors the CancelledError best-effort interrupted-message pattern. Guarantees:
@@ -996,6 +1000,11 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
     try:
         from agent.cancel_reason import get_cancel_reason
         from agent.notification_copy import FAILURE_NOTICE
+
+        # A reflection-handoff session has no human waiting (#3588): its
+        # failure stays an operator signal.
+        if session is not None and is_reflection_handoff_live(session):
+            return
 
         # Cross-class dedup collision (critique concern): a killer that already
         # owns a *no-resume* exit narrative must not be double-messaged. The
@@ -1170,6 +1179,28 @@ def _last_resort_flush_and_fail(session: AgentSession, status: str) -> None:
             last_resort_err,
             exc_info=True,
         )
+
+
+async def _deliver_empty_output_fallback(session, agent_session, send_cb) -> bool:
+    """Send the "produced no output" fallback, except for a silent reflection handoff.
+
+    A handoff session has no human waiting (#3588), so nothing is sent and the
+    log says so. Returns True when the fallback was sent.
+    """
+    silent_handoff = is_reflection_handoff_live(session)
+    logger.warning(
+        f"[{session.project_key}] Empty output and nudge cap reached — "
+        + ("reflection handoff, no fallback sent" if silent_handoff else "delivering fallback")
+    )
+    if silent_handoff:
+        return False
+    await send_cb(
+        session.chat_id,
+        "The task completed but produced no output. Please re-trigger if you expected results.",
+        session.telegram_message_id,
+        agent_session,
+    )
+    return True
 
 
 def prepend_trigger_attachments(
@@ -1410,6 +1441,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # synthesis exists for is provided by stamping ``exec_cwd`` instead
         # (see the session-phase save block below), which is a plain field.
         is_synthetic_slug = False
+        # Reflection-handoff sessions (#3588) are full-permission eng sessions
+        # whose briefs say "act, fix, or stay silent", so they get the same
+        # synthetic-slug worktree as any slugless eng session: the #887
+        # main-checkout guard must fire for them too.
         if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
             if _aid_for_slug:
@@ -1920,17 +1955,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 chat_state.defer_reaction = True
 
             elif action == "deliver_fallback":
-                logger.warning(
-                    f"[{session.project_key}] Empty output and nudge cap "
-                    f"reached — delivering fallback"
-                )
-                await send_cb(
-                    session.chat_id,
-                    "The task completed but produced no output. "
-                    "Please re-trigger if you expected results.",
-                    session.telegram_message_id,
-                    agent_session,
-                )
+                await _deliver_empty_output_fallback(session, agent_session, send_cb)
                 chat_state.completion_sent = True
 
             elif action == "deliver":
@@ -2534,6 +2559,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             messenger=messenger,
             working_dir=str(working_dir),
             project_key=getattr(session, "project_key", None),
+            silent=lambda: is_reflection_handoff_live(session),
         )
         # `send_result=False` is the right call: the runner adapter publishes
         # `[/user]` and `[/complete]` payloads mid-loop through the bridge
@@ -2620,7 +2646,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # used to be silent — no Telegram message at all. Best-effort, deduped,
         # and never blocking finalization; see `_maybe_send_failure_notice`.
         if task.error and not chat_state.defer_reaction:
-            await _maybe_send_failure_notice(messenger, session.session_id)
+            await _maybe_send_failure_notice(messenger, session.session_id, session)
 
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
@@ -3052,7 +3078,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     if _runner_exit_reason_local is not None
                     else getattr(_agent_session_for_cleanup, "exit_reason", None)
                 )
-                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT
+                # A handoff session's timeout has no reply coming to resume it,
+                # so its worktree is reclaimed like any other terminal exit.
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT and (
+                    not is_reflection_handoff_live(session)
+                )
                 if _wd is not None:
                     # Pre-finalize guard (#3176). Its one remaining job is
                     # the CANCELLED exit: `_finalize_if_still_running` at the

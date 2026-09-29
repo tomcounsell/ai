@@ -88,6 +88,7 @@ from agent.session_runner.router import (
     validate_structured_route,
 )
 from agent.session_runner.transcript_tailer import last_assistant_text
+from config.enums import is_reflection_handoff_live
 
 logger = logging.getLogger(__name__)
 
@@ -1024,7 +1025,8 @@ class SessionRunner:
                 # -- Steering boundary drain (D4 + boundary case of Race 1) --
                 steers, abort = self._drain_steering_boundary()
                 if abort:
-                    self._adapter.on_user_payload(STEER_ABORT_USER_MESSAGE)
+                    if not self._is_handoff_session():
+                        self._adapter.on_user_payload(STEER_ABORT_USER_MESSAGE)
                     summary.exit_reason = ExitReason.STEER_ABORT
                     break
                 if steers:
@@ -1054,7 +1056,9 @@ class SessionRunner:
                             if handle.kill_cause == TIMEOUT_KILL_CAUSE_ABSOLUTE
                             else TIMEOUT_NEEDS_ATTENTION_MESSAGE
                         )
-                        if _claim_timeout_notice(
+                        # A handoff session has no human waiting: its timeout
+                        # stays an operator signal, never a page (#3588).
+                        if not self._is_handoff_session() and _claim_timeout_notice(
                             str(getattr(self._agent_session, "session_id", "") or ""),
                             str(getattr(self._agent_session, "id", "") or ""),
                         ):
@@ -1077,14 +1081,25 @@ class SessionRunner:
                     # format, so exit_message telemetry is unchanged.
                     summary.exit_reason = ExitReason.ERROR
                     summary.exit_message = truncate_exit_message(str(failure))
-                    self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
+                    if not self._is_handoff_session():
+                        # A handoff session's harness error stays an operator
+                        # signal: no context-free page in the Room (#3588).
+                        self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
                     break
-                if (failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT) or not (
-                    outcome.reply_text or ""
-                ).strip():
-                    # Empty/whitespace-only PM turn → wrap-up guard, never an
-                    # infinite loop (plan Failure Path).
+                if failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT:
+                    # A harness-level empty output is a failure for every
+                    # session, handoff or not.
                     summary.exit_reason = ExitReason.PM_EMPTY_TURN
+                    break
+                if not (outcome.reply_text or "").strip():
+                    # Empty/whitespace-only PM turn → wrap-up guard, never an
+                    # infinite loop (plan Failure Path). A reflection-handoff
+                    # session that judged there was nothing to say ends
+                    # silently instead (failure is None here by the branches
+                    # above).
+                    summary.exit_reason = (
+                        self._handoff_silent_exit_reason() or ExitReason.PM_EMPTY_TURN
+                    )
                     break
 
                 # -- Genuine turn end ----------------------------------------
@@ -1128,7 +1143,15 @@ class SessionRunner:
                 summary.exit_reason is ExitReason.PM_EMPTY_TURN
             )
             if wrapup_trigger and not summary.user_facing_routed:
-                await self._run_wrapup_guard(summary)
+                if self._is_handoff_session():
+                    # No canned human text for a finding nobody asked about:
+                    # a handoff that ran out of turns or produced nothing ends
+                    # as a non-clean anomaly the operator sees (#3588).
+                    if summary.exit_reason in (ExitReason.PM_MAX_TURNS, ExitReason.PM_EMPTY_TURN):
+                        summary.exit_message = summary.exit_message or summary.exit_reason.value
+                        summary.exit_reason = ExitReason.ERROR
+                else:
+                    await self._run_wrapup_guard(summary)
         except Exception as e:  # noqa: BLE001 — terminal classification, never a crash
             logger.error("[runner] session loop raised: %s", e, exc_info=True)
             summary.exit_reason = ExitReason.EXCEPTION
@@ -1908,6 +1931,32 @@ class SessionRunner:
             )
             return False
 
+    def _is_handoff_session(self) -> bool:
+        """True for a session created by ``reflections.agent_handoff``."""
+        return is_reflection_handoff_live(self._agent_session)
+
+    def _handoff_silent_exit_reason(self) -> ExitReason | None:
+        """Exit reason for a reflection-handoff session ending with nothing to say.
+
+        ``None`` for every other session, and for a handoff session that has
+        already routed a user-facing message (its empty ending is then an
+        ordinary one). A delivery-required handoff that ends silent is
+        ``HANDOFF_UNDELIVERED``; any other handoff is ``HANDOFF_SILENT``. The
+        rule keys on the explicit origin marker and nothing else.
+        """
+        if not self._is_handoff_session():
+            return None
+        extra = self._agent_session.extra_context
+        if self._adapter.user_facing_routed:
+            return None
+        source = extra.get("handoff_source", "?")
+        sid = getattr(self._agent_session, "session_id", "?")
+        if extra.get("handoff_requires_delivery"):
+            logger.warning("handoff-undelivered %s %s", source, sid)
+            return ExitReason.HANDOFF_UNDELIVERED
+        logger.info("handoff-silent %s %s", source, sid)
+        return ExitReason.HANDOFF_SILENT
+
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
@@ -1981,6 +2030,14 @@ class SessionRunner:
             payload = classification.payload or ""
             if payload:
                 self._adapter.on_complete_payload(payload, classification.file_paths)
+            else:
+                # An empty [/complete] in a reflection-handoff session is the
+                # agent judging there is nothing to say.
+                silent = self._handoff_silent_exit_reason()
+                if silent is not None:
+                    return _RouteDecision(
+                        should_break=True, exit_reason=silent, compliance_miss=miss
+                    )
             return _RouteDecision(
                 should_break=True, exit_reason=ExitReason.PM_COMPLETE, compliance_miss=miss
             )

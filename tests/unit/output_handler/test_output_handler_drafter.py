@@ -127,6 +127,52 @@ class TestDrafterInHandler:
         handler._redis.rpush.assert_called_once()
 
 
+class TestVerbatimPayload:
+    """A session carrying ``verbatim_payload`` delivers it byte-exact (#3588)."""
+
+    PAYLOAD = (
+        "Improvement assumption digest\n\n- one\n- two\n\nThis is a status report. It asks nothing."
+    )
+
+    def _handler(self):
+        from agent.output_handler import TelegramRelayOutputHandler
+
+        h = TelegramRelayOutputHandler()
+        h._redis = MagicMock()
+        return h
+
+    def _session(self, **extra):
+        session = MagicMock()
+        session.session_id = "sess-verbatim"
+        session.extra_context = extra
+        return session
+
+    def test_paraphrased_reply_delivers_payload_and_skips_drafter(self):
+        handler = self._handler()
+        mock_draft = AsyncMock()
+        session = self._session(verbatim_payload=self.PAYLOAD)
+        with patch("bridge.message_drafter.draft_message", mock_draft):
+            asyncio.run(
+                handler.send("123", "Sending the digest now, a paraphrase.", 0, session=session)
+            )
+        mock_draft.assert_not_awaited()
+        handler._redis.rpush.assert_called_once()
+        payload = json.loads(handler._redis.rpush.call_args[0][1])
+        assert payload["text"] == self.PAYLOAD
+        assert payload["text"].endswith("This is a status report. It asks nothing.")
+
+    def test_no_verbatim_payload_runs_drafter_as_before(self):
+        from bridge.message_drafter import MessageDraft
+
+        handler = self._handler()
+        drafted = MessageDraft(text="drafted", full_output_file=None, artifacts={})
+        mock_draft = AsyncMock(return_value=drafted)
+        with patch("bridge.message_drafter.draft_message", mock_draft):
+            asyncio.run(handler.send("123", "Plain reply? Yes.", 0, session=self._session()))
+        mock_draft.assert_awaited_once()
+        assert json.loads(handler._redis.rpush.call_args[0][1])["text"] == "drafted"
+
+
 class TestDrafterFailureRecovery:
     """Tests for restored drafter-failure recovery paths (PR #1077 review tech debt).
 

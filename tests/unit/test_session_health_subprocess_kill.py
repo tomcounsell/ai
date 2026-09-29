@@ -649,6 +649,24 @@ class TestDeliverTerminalInterruptNotice:
             f"interrupted-sent:{entry.session_id}", "1", nx=True, ex=120
         )
 
+    def test_handoff_session_gets_no_terminal_notice(self):
+        """A reflection-handoff session has no human waiting (#3588)."""
+        send_cb = AsyncMock()
+        entry = _terminal_entry(
+            session_id="sess-handoff", extra_context={"origin": "reflection_handoff"}
+        )
+        redis_db = MagicMock()
+        redis_db.set = MagicMock(return_value=True)
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
+            patch("agent.agent_session_queue._resolve_callbacks", return_value=(send_cb, None)),
+        ):
+            asyncio.run(session_health._deliver_terminal_interrupt_notice(entry))
+
+        send_cb.assert_not_awaited()
+        redis_db.set.assert_not_called()
+
     def test_escalation_send_deduped_when_interrupted_sent_already_held(self):
         """The shared `interrupted-sent` key is already held (a send site fired
         earlier) → the escalation helper sends nothing (no double message)."""

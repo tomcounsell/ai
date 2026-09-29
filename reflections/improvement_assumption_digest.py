@@ -362,6 +362,41 @@ def _write_watermark(project_key: str, newest: datetime) -> None:
     )
 
 
+def hand_off_digest(message: str, *, logger_prefix: str = LOGGER_PREFIX) -> bool:
+    """Hand the rendered digest to an agent session in the host ``Eng:`` Room.
+
+    The payload is delivered verbatim by the output handler once the agent
+    replies with anything non-empty; the agent's own wording is discarded. The
+    finding is delivery-required: a session that ends silent exits
+    ``HANDOFF_UNDELIVERED``. Returns ``True`` only when an agent has it.
+    """
+    import hashlib
+
+    from reflections.agent_handoff import Finding, hand_off, project_eng_room_id
+    from reflections.utilities import resolve_project_for_repo
+
+    project = resolve_project_for_repo()
+    room = project_eng_room_id(project) if project else None
+    if project is None or room is None:
+        logger.warning("%s: no host Eng: Room; digest not delivered", logger_prefix)
+        return False
+    digest_id = hashlib.sha256(message.encode("utf-8")).hexdigest()[:12]
+    result = hand_off(
+        Finding(
+            source="improvement_assumption_digest",
+            project=project,
+            room_id=room,
+            facts=["The improvement controller's assumption digest is ready for the CEO."],
+            dedup_key=f"{datetime.now(UTC).date().isoformat()}:{digest_id}",
+            verbatim_payload=message,
+            requires_delivery=True,
+        )
+    )
+    if not result.delivered:
+        logger.warning("%s: digest handoff %s: %s", logger_prefix, result.kind, result.reason)
+    return result.delivered
+
+
 def run_improvement_assumption_digest(
     *, sender=None, now: datetime | None = None, project_key: str | None = None
 ) -> dict:
@@ -370,9 +405,12 @@ def run_improvement_assumption_digest(
     Gated on ``ImprovementSettings.enabled`` like the other improvement
     reflections: ``False`` returns ``status="skipped"`` and reads nothing.
     ``sender(message, *, logger_prefix) -> bool`` defaults to
-    ``send_host_eng_telegram``; a sender answering ``False`` records
-    ``digest-not-delivered`` and leaves the watermark and the pending
-    overruns untouched. An empty digest sends nothing and is a success.
+    ``hand_off_digest``: the digest goes to an agent session in the host
+    ``Eng:`` Room in the Valor persona and is delivered verbatim (charter
+    section 11). A sender answering ``False`` records ``digest-not-delivered``
+    and leaves the watermark and the pending overruns untouched. An empty
+    digest sends nothing and is a success. The full text is logged and
+    returned as ``digest`` for the operator surface.
     """
     t0 = time.time()
     from config.settings import settings
@@ -394,9 +432,7 @@ def run_improvement_assumption_digest(
     project_key = project_key or get_project_key()
     now = now or datetime.now(UTC)
     if sender is None:
-        from reflections.utilities import send_host_eng_telegram
-
-        sender = send_host_eng_telegram
+        sender = hand_off_digest
 
     try:
         since = _read_watermark(project_key)
@@ -425,6 +461,7 @@ def run_improvement_assumption_digest(
         }
 
     message = render_digest(inputs, now=now)
+    logger.info("%s: digest text:\n%s", LOGGER_PREFIX, message)
     delivered = bool(sender(message, logger_prefix=LOGGER_PREFIX))
     if not delivered:
         logger.warning("%s: digest not delivered; watermark left at %s", LOGGER_PREFIX, since)
@@ -453,6 +490,7 @@ def run_improvement_assumption_digest(
             f"resources_acquired={counts['resources_acquired']} overruns={counts['overruns']}"
         ),
         "counts": counts,
+        "digest": message,
         "sent": True,
         "watermark": watermark.isoformat() if watermark else None,
         "duration": time.time() - t0,

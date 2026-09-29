@@ -9,8 +9,8 @@ Tests cover:
 - Dry-run: no Redis writes when dry_run=True
 - Empty/single-record groups: handled without calling Haiku
 - JSON parse failure: Haiku returning invalid JSON is skipped gracefully
-- Contradiction flagging: valor-telegram send called; CalledProcessError falls
-  back to logs/memory-contradictions.log
+- Contradiction flagging: logged to logs/memory-contradictions.log, never sent
+  to a chat
 """
 
 import logging
@@ -508,10 +508,10 @@ class TestEmptyGroupHandling:
 
 
 class TestContradictionFlagging:
-    """Contradiction flagging: Telegram send; CalledProcessError → log fallback."""
+    """Contradiction flagging: log file only, no chat delivery."""
 
-    def test_contradiction_sends_telegram_notification(self):
-        """When a contradiction is flagged, valor-telegram send is called."""
+    def test_contradiction_is_logged_and_never_sent(self):
+        """A flagged contradiction goes to the log file; nothing reaches a chat."""
         rec_1 = _make_record("cont-1", "Always use mocks for speed", category="correction")
         rec_2 = _make_record("cont-2", "Never use mocks, always real DB", category="correction")
 
@@ -534,101 +534,12 @@ class TestContradictionFlagging:
                 "scripts.memory_consolidation._call_haiku",
                 return_value=haiku_response,
             ),
-            patch(
-                "scripts.memory_consolidation.resolve_host_eng_chat",
-                return_value="-1003449100931",
-            ),
-            patch("scripts.memory_consolidation.subprocess.run") as mock_subprocess,
-        ):
-            from scripts.memory_consolidation import run_consolidation
-
-            result = run_consolidation(project_key="test", dry_run=True)
-
-        # subprocess.run called with valor-telegram send, addressed by the
-        # resolved chat_id (not read from the real, ambient projects.json).
-        mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
-        assert "valor-telegram" in call_args
-        assert "send" in call_args
-        assert "-1003449100931" in call_args
-        assert result["flagged_contradictions"] == 1
-
-    def test_contradiction_suppressed_when_no_eng_group_resolves(self):
-        """No destination resolved -> no subprocess call, no log write."""
-        rec_1 = _make_record("sup-1", "Always use mocks", category="correction")
-        rec_2 = _make_record("sup-2", "Never use mocks", category="correction")
-
-        haiku_response = {
-            "actions": [
-                {
-                    "action": "flag_contradiction",
-                    "ids": ["sup-1", "sup-2"],
-                    "rationale": "Opposing guidance",
-                }
-            ]
-        }
-
-        with (
-            patch(
-                "scripts.memory_consolidation._load_active_memories",
-                return_value=[rec_1, rec_2],
-            ),
-            patch(
-                "scripts.memory_consolidation._call_haiku",
-                return_value=haiku_response,
-            ),
-            patch("scripts.memory_consolidation.resolve_host_eng_chat", return_value=None),
-            patch("scripts.memory_consolidation.subprocess.run") as mock_subprocess,
             patch("scripts.memory_consolidation._write_contradiction_log") as mock_write_log,
         ):
-            from scripts.memory_consolidation import run_consolidation
+            import scripts.memory_consolidation as mc
 
-            result = run_consolidation(project_key="test", dry_run=True)
+            result = mc.run_consolidation(project_key="test", dry_run=True)
 
-        mock_subprocess.assert_not_called()
-        mock_write_log.assert_not_called()
-        assert result["flagged_contradictions"] == 1
-
-    def test_contradiction_telegram_failure_writes_log_file(self, tmp_path):
-        """When valor-telegram raises CalledProcessError, write to memory-contradictions.log."""
-        import subprocess as subprocess_module
-
-        rec_1 = _make_record("clog-1", "Always use mocks", category="correction")
-        rec_2 = _make_record("clog-2", "Never use mocks", category="correction")
-
-        haiku_response = {
-            "actions": [
-                {
-                    "action": "flag_contradiction",
-                    "ids": ["clog-1", "clog-2"],
-                    "rationale": "Opposing guidance",
-                }
-            ]
-        }
-
-        fake_log = tmp_path / "logs" / "memory-contradictions.log"
-        fake_log.parent.mkdir(parents=True)
-
-        def mock_run(*args, **kwargs):
-            raise subprocess_module.CalledProcessError(1, "valor-telegram")
-
-        with (
-            patch(
-                "scripts.memory_consolidation._load_active_memories",
-                return_value=[rec_1, rec_2],
-            ),
-            patch(
-                "scripts.memory_consolidation._call_haiku",
-                return_value=haiku_response,
-            ),
-            patch("scripts.memory_consolidation.subprocess.run", side_effect=mock_run),
-            patch("scripts.memory_consolidation._write_contradiction_log") as mock_write_log,
-        ):
-            from scripts.memory_consolidation import run_consolidation
-
-            # Should not raise
-            result = run_consolidation(project_key="test", dry_run=True)
-
-        # Fallback log writer must be called
+        assert not hasattr(mc, "subprocess")
         mock_write_log.assert_called_once()
         assert result["flagged_contradictions"] == 1

@@ -203,6 +203,55 @@ class TestExecutorRunnerWiring:
         assert isinstance(wd, str) and wd
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("extra_context", "expected"),
+        [({"origin": "reflection_handoff"}, True), ({}, False)],
+    )
+    async def test_executor_passes_silent_only_for_handoff(
+        self, redis_test_db, extra_context, expected
+    ):
+        """The executor silences the canned notices for a
+        reflection-handoff session only (#3588). RED if the argument is
+        dropped from the BackgroundTask construction."""
+        import agent
+        from agent.messenger import BackgroundTask as _RealBackgroundTask
+
+        seen: list[bool] = []
+        silent_fns: list = []
+
+        class _SpyBackgroundTask(_RealBackgroundTask):
+            def __init__(self, *args, **kwargs):
+                silent_fns.append(kwargs["silent"])
+                seen.append(bool(kwargs["silent"]()))
+                super().__init__(*args, **kwargs)
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.extra_context = extra_context
+        session.save(update_fields=["status", "extra_context"])
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch.object(agent, "BackgroundTask", _SpyBackgroundTask),
+        ):
+            await _execute_agent_session(session)
+
+        assert seen == [expected]
+
+        if expected:
+            # A human steer lands mid-run: the in-memory `session` is stale, so
+            # `silent` must re-read the persisted row. RED if it regresses to
+            # the non-live check or a value computed once.
+            from agent.steering import mark_handoff_human_steered
+
+            # The run finished the row; put it back to live so the stamp applies.
+            session.status = "running"
+            session.save(update_fields=["status"])
+            assert mark_handoff_human_steered(session.session_id) is True
+            assert silent_fns[0]() is False
+
+    @pytest.mark.asyncio
     async def test_runner_receives_adapter_and_session_env(self, redis_test_db):
         """The runner is constructed over a SessionRunnerAdapter and receives
         the per-session env (SESSION_TYPE for the pre_tool_use PM Bash
@@ -1108,6 +1157,55 @@ class TestSyntheticSlugWorktreePreservation:
             f"exit_reason={exit_reason!r}: expected worktree on disk="
             f"{expect_worktree_on_disk}, got {os.path.isdir(wt_path)}"
         )
+
+    @pytest.mark.asyncio
+    async def test_handoff_session_turn_timeout_reclaims_worktree(self, redis_test_db, tmp_path):
+        """A reflection-handoff session has no reply coming to resume it (#3588),
+        so a turn timeout reclaims its worktree like any other terminal exit."""
+        import os
+        import shutil
+
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.extra_context = {"origin": "reflection_handoff"}
+        session.save(update_fields=["status", "extra_context"])
+
+        slug = f"dev-{session.agent_session_id[:8]}"
+        repo_root = str(tmp_path)
+        wt_path = os.path.join(repo_root, ".worktrees", slug)
+        os.makedirs(wt_path, exist_ok=True)
+
+        def _fake_cleanup_after_merge(root, cleaned_slug):
+            shutil.rmtree(os.path.join(str(root), ".worktrees", cleaned_slug), ignore_errors=True)
+            return {"slug": cleaned_slug, "worktree_removed": True, "errors": []}
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        def _on_run(fake_runner: FakeSessionRunner) -> None:
+            agent_session = fake_runner.init_kwargs.get("agent_session")
+            if agent_session is not None:
+                agent_session.exit_reason = "turn_timeout"
+
+        FakeSessionRunner.on_run = staticmethod(_on_run)
+
+        with (
+            _patch_runner(),
+            patch("agent.worktree_manager.get_or_create_worktree", return_value=wt_path),
+            patch("agent.worktree_manager.verify_worktree_branch", return_value=None),
+            patch("agent.worktree_manager.resolve_main_repo_root", return_value=repo_root),
+            patch("agent.worktree_manager.cleanup_after_merge", _fake_cleanup_after_merge),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        assert not os.path.isdir(wt_path), "handoff timeout leaked its worktree"
 
     @pytest.mark.asyncio
     async def test_stale_persisted_turn_timeout_does_not_skip_cleanup(self, redis_test_db):

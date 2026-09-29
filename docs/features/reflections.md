@@ -53,7 +53,7 @@ reflections:
 | `auto_delete_after_run` | bool | One-shot reflections (`at:` schedule) — record self-cleans on success. Default: `false`. |
 | `retry_policy` | dict | Optional override of `{max_retries, backoff_seconds, max_consecutive_failures_before_pause}`. See [Failure Tracking](#failure-tracking). |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
-| `params` | dict | Optional arbitrary kwargs forwarded to the callable when it declares a `params` keyword argument. The scheduler uses `inspect.signature` to detect whether the callable accepts `params`; if not, it is called without it. Use for feature flags and per-reflection tunables (e.g., `stall_advisory_telegram_enabled: false`). |
+| `params` | dict | Optional arbitrary kwargs forwarded to the callable when it declares a `params` keyword argument. The scheduler uses `inspect.signature` to detect whether the callable accepts `params`; if not, it is called without it. Use for feature flags and per-reflection tunables. |
 
 **Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are not used in source, comments, or docs.
 
@@ -225,7 +225,7 @@ ever rewrites the real per-machine copy produced by `install_reflection_worker.s
 | `session-count-throttle` | 1 hour | normal | function | Count sessions in last hour; write throttle level |
 | `failure-loop-detector` | 1 hour | normal | function | Scan failed sessions; file one GitHub issue per novel error cluster |
 | `session-recovery-drip` | 30 sec | high | function | Drip one paused_circuit or paused session back to pending per tick (paused_circuit first) |
-| `system-health-digest` | daily | low | agent | Daily Telegram health summary **(disabled — spawns agent)** |
+| `system-health-digest` | daily | low | agent | Daily health check; anomalies are handed to an agent in the host `Eng:` Room **(disabled — spawns agent)** |
 | `memory-dedup` | daily | normal | function | LLM-based semantic memory consolidation; apply mode via `params={"apply": true}` in `reflections.yaml`, `MEMORY_DEDUP_APPLY` env kill-switch wins when set |
 | `sentry-issue-triage` | daily | low | agent | Triage unresolved Sentry issues across projects (disabled) |
 
@@ -385,7 +385,7 @@ Per-run rows carry a tiered TTL keyed off the parent's frequency (7d for `every:
 | `log_only` (default) | Write to worker log + `last_run_summary`. No external delivery. | shipped |
 | `dashboard_only` | `last_run_summary` is surfaced on `dashboard.json`'s reflections section; no log/memory/telegram side effect. | shipped |
 | `memory:<importance>` | Write a Memory record at the given importance (0.0–10.0); the agent picks it up via subconscious recall. | deferred |
-| `telegram:<chat>` | Send the run summary to a Telegram chat (resolved through `projects.json`). On chat-resolution failure: `WARNING` log + `delivery_error` field on the `ReflectionRun` row, run still `success`. | deferred |
+| `telegram:<chat>` | Send the run summary to a Telegram chat (resolved through `projects.json`). On chat-resolution failure: `WARNING` log + `delivery_error` field on the `ReflectionRun` row, run still `success`. This is the scheduler's own delivery surface; reflection callables themselves never write to human chat and hand findings to agents through [Reflection Agent Handoff](reflection-agent-handoff.md). | deferred |
 
 **Telegram payload synthesis:** the dispatch path uses synthetic `session_id="reflection:<name>"` so outbox payloads are distinguishable from agent-session sends and don't collide with real session IDs.
 

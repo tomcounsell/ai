@@ -35,11 +35,12 @@ abort:
   from, read from the transient ``_leg`` stamp ``pop_all_steering_messages``
   applies.
 
-The writer never looks a session up: ``room_id`` is derived by the caller via
+The writer never looks a session up on the hot path: ``room_id`` is derived by the caller via
 ``models.room.room_id_for_session`` (pure attribute reads). An internal
 ``AgentSession`` query by ``session_id`` costs ~2.4s — the field is unindexed,
 so resolving it scans every session hash — and this module sits on the
-inbound-Telegram fast path. Keep this module free of any model-layer import.
+inbound-Telegram fast path. The one exception is the opt-in ``human_sender``
+stamp, which callers set only for reflection-handoff sessions.
 
 Every drain consumer dual-reads: the session key FIRST, then the Room key when
 a ``room_id`` is provided.
@@ -264,6 +265,7 @@ def push_steering_message(
     front: bool = False,
     room_id: str | None = None,
     timestamp: float | None = None,
+    human_sender: bool = False,
 ) -> str:
     """Push a message to a steering queue — the Room leg, or the legacy leg.
 
@@ -304,8 +306,23 @@ def push_steering_message(
             the Room leg's age bound measures time since origination rather
             than time since the last re-push. An originating caller passes
             nothing and gets ``time.time()``.
+        human_sender: True when ``text`` is a human's own message aimed at a
+            reflection-handoff session. The stamp is the single place a human
+            steer is recorded: it sets ``human_steered`` on the live row
+            (:func:`mark_handoff_human_steered`) so its failure/timeout/interrupt
+            notices reach the human (#3588). It COSTS a session scan (~2.4s,
+            ``session_id`` is unindexed) and runs synchronously, so callers
+            pass ``is_reflection_handoff(row)`` from the row they already hold:
+            ordinary sessions never set it and do no lookup. Requeues of
+            drained messages and system pushes (including
+            ``valor-session steer``) leave it False.
     """
     r = _get_redis()
+
+    # Stamp BEFORE the push so a fast drain never reads the row pre-stamp. A
+    # stamp whose push then fails is harmless: a human did send the message.
+    if human_sender:
+        mark_handoff_human_steered(session_id)
 
     # Auto-detect abort keywords
     if not is_abort and text.strip().lower() in ABORT_KEYWORDS:
@@ -596,3 +613,36 @@ def reset_self_draft_attempts(session_id: str) -> None:
     key = _self_draft_attempts_key(session_id)
     r.delete(key)
     logger.debug("[steering] Reset self-draft attempts for %s", session_id)
+
+
+def mark_handoff_human_steered(session_id: str) -> bool:
+    """Stamp a human steer onto a live reflection-handoff session (#3588).
+
+    A handoff session is silent because no human waits on it. A human message
+    steered into one changes that: the flag makes ``is_reflection_handoff``
+    False so failure, timeout and interrupt notices reach the human. Returns
+    True when a row was stamped; never raises.
+    """
+    try:
+        from config.enums import (  # noqa: PLC0415
+            HUMAN_STEERED_KEY,
+            REFLECTION_HANDOFF_ORIGIN,
+        )
+        from models.agent_session import AgentSession  # noqa: PLC0415
+        from models.session_lifecycle import NON_TERMINAL_STATUSES  # noqa: PLC0415
+
+        stamped = False
+        for row in AgentSession.rows_for_session_id(session_id):
+            extra = dict(getattr(row, "extra_context", None) or {})
+            if extra.get("origin") != REFLECTION_HANDOFF_ORIGIN or extra.get(HUMAN_STEERED_KEY):
+                continue
+            if getattr(row, "status", None) not in NON_TERMINAL_STATUSES:
+                continue
+            extra[HUMAN_STEERED_KEY] = True
+            row.extra_context = extra
+            row.save(update_fields=["extra_context", "updated_at"])
+            stamped = True
+        return stamped
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[steering] mark_handoff_human_steered failed for %s: %s", session_id, e)
+        return False

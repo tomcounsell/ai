@@ -18,7 +18,7 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -814,16 +814,16 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
         r.exists.return_value = 0  # queue not paused
         r.scard.return_value = 0  # no fingerprint clusters
 
-        captured_command = {}
+        captured = {}
 
         # Replace AgentSession on the module so the local `from models.agent_session import
         # AgentSession` inside sustainability_digest() picks up the stub.
-        fake_session_cls = MagicMock()
+        fake_session_cls = create_autospec(asm.AgentSession)
 
-        def capture_enqueue(**kwargs):
-            captured_command["command"] = kwargs.get("message_text", "")
+        def capture_hand_off(finding):
+            captured["finding"] = finding
+            return MagicMock(kind="created")
 
-        fake_session_cls.create_and_enqueue.side_effect = capture_enqueue
         fake_session_cls.query.filter.return_value = []  # no sessions → failed_24h = 0
 
         with (
@@ -832,6 +832,12 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
                 "reflections.agents.system_health_digest.get_project_key", return_value="testproj"
             ),
             patch.object(asm, "AgentSession", fake_session_cls),
+            patch(
+                "reflections.utilities.resolve_project_for_repo",
+                return_value={"slug": "testproj"},
+            ),
+            patch("reflections.agent_handoff.project_eng_room_id", return_value="room-1"),
+            patch("reflections.agent_handoff.hand_off", side_effect=capture_hand_off),
             patch.dict(
                 sys.modules,
                 {
@@ -842,10 +848,9 @@ class TestDigestAnomalyPromptPlainLanguage(unittest.TestCase):
         ):
             sustainability_digest()
 
-        command = captured_command.get("command", "")
-        self.assertNotEqual(
-            command, "", "create_and_enqueue was not called — anomaly path not reached"
-        )
+        finding = captured.get("finding")
+        self.assertIsNotNone(finding, "hand_off was not called — anomaly path not reached")
+        command = "\n".join(finding.facts) + "\n" + finding.suggested_action
 
         # (a) The anomaly text must NOT contain the raw "not CLOSED" enum string
         self.assertNotIn(
@@ -892,6 +897,7 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
                 "reflections.agents.system_health_digest.get_project_key", return_value="testproj"
             ),
             patch.object(asm, "AgentSession", fake_session_cls),
+            patch("reflections.agent_handoff.hand_off") as hand_off,
             patch.dict(
                 sys.modules,
                 {
@@ -902,9 +908,8 @@ class TestDigestSilentWhenNominal(unittest.TestCase):
         ):
             sustainability_digest()
 
-        # Silent on healthy: no agent session enqueued. There is no Telegram
-        # path left on the nominal branch — it logs and returns.
-        fake_session_cls.create_and_enqueue.assert_not_called()
+        # Silent on healthy: no handoff. The nominal branch logs and returns.
+        hand_off.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

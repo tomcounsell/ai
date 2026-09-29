@@ -33,19 +33,12 @@ from pathlib import Path
 
 from config.machine import get_machine_display_name
 from config.settings import settings
-from reflections.utilities import (
-    FALLBACK_ENG_CHAT,  # noqa: F401 -- re-exported for docs_auditor.FALLBACK_ENG_CHAT readers
-    load_local_projects,
-    resolve_host_eng_chat,
-)
+from reflections.agent_handoff import Finding, HandoffResult, hand_off, project_eng_room_id
+from reflections.utilities import load_local_projects, resolve_project_for_repo
 
 logger = logging.getLogger("reflections.docs_auditor")
 
 PROJECT_ROOT = Path(__file__).parent.parent
-
-# FALLBACK_ENG_CHAT now lives in reflections/utilities.py (#3072); re-exported
-# here (via the import above) so any external reader of
-# docs_auditor.FALLBACK_ENG_CHAT still resolves.
 
 # ---------------------------------------------------------------------------
 # Module-level configuration
@@ -1547,67 +1540,59 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Telegram notification (destination resolved from the audited repo root)
+# Agent handoff for an opened rotation PR (no direct chat write, #3588)
 # ---------------------------------------------------------------------------
 
 
-def _resolve_notify_chat(repo_root: Path) -> str | None:
-    """Map the audited repo root to a ``--chat`` destination, or ``None``.
+def _hand_off_pr_review(
+    slug: str,
+    pr_url: str,
+    files_touched: list[str],
+    fixes_applied: int,
+    fixes_withheld: int,
+    *,
+    repo_root: Path | None = None,
+) -> HandoffResult:
+    """Hand the opened rotation PR to an agent in the audited repo's ``Eng:`` Room.
 
-    Delegates to ``reflections.utilities.resolve_host_eng_chat`` (#3072),
-    which carries the full ladder and reasoning this function used to own.
-    Passes this module's own bindings through explicitly — read here, in a
-    body that lives in ``docs_auditor``, so
-    ``patch("reflections.docs_auditor.load_local_projects", ...)`` and
-    ``patch("reflections.docs_auditor.PROJECT_ROOT", ...)`` both still land on
-    the value actually used.
-    """
-    return resolve_host_eng_chat(
-        repo_root, load_projects=load_local_projects, project_root=PROJECT_ROOT
-    )
-
-
-def _send_telegram_notification(message: str, *, repo_root: Path | None = None) -> bool:
-    """Best-effort Telegram notification, addressed by the audited repo root.
-
-    Resolves the destination via ``_resolve_notify_chat((repo_root or
-    PROJECT_ROOT).resolve())`` — computed here, not defaulted in the
-    signature, so a test that patches the module-level ``PROJECT_ROOT``
-    global is honored at call time rather than at import time.
-
-    Returns ``False`` **only** when no destination resolved — no subprocess
-    is invoked in that case. Every other path, including a swallowed
-    ``FileNotFoundError``/``TimeoutExpired``/``Exception`` or a non-zero
-    ``valor-telegram`` exit code, returns ``True``: a destination was
-    resolved and a send was attempted, so the caller's "no Eng: group
-    configured" finding text stays accurate only for the ``False`` case.
+    The agent reviews the PR and asks a human only if a merge decision is
+    really needed. ``load_local_projects`` / ``PROJECT_ROOT`` are read here so
+    a caller that patches this module's bindings is honored at call time.
+    A repo with no registered project or no ``Eng:`` group yields
+    ``unreachable``; the caller records that on the operator surface.
     """
     root = (repo_root or PROJECT_ROOT).resolve()
-    chat = _resolve_notify_chat(root)
-    if chat is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["valor-telegram", "send", "--chat", chat, message],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.git_subprocess_s,
-            check=False,
+    project = resolve_project_for_repo(
+        root, load_projects=load_local_projects, project_root=PROJECT_ROOT
+    )
+    room = project_eng_room_id(project) if project else None
+    if project is None or room is None:
+        return HandoffResult("unreachable", None, f"no Eng: group for {root}")
+    facts = [
+        f"The docs auditor opened a rotation PR for {slug}: {len(files_touched)} file(s), "
+        f"{fixes_applied} fix(es).",
+        f"PR: {pr_url}",
+        f"It is closed unmerged after {STALE_PR_AGE_DAYS} days if nobody reviews it.",
+    ]
+    if fixes_withheld:
+        facts.append(
+            f"{fixes_withheld} fix(es) were withheld because the target path is absent; "
+            "issues are already filed for them."
         )
-        if proc.returncode != 0:
-            logger.warning(
-                "docs_auditor: valor-telegram exited %s for chat %s: %s",
-                proc.returncode,
-                chat,
-                (proc.stderr or "")[:200],
-            )
-    except FileNotFoundError:
-        logger.warning("docs_auditor: valor-telegram not on PATH; skipping Telegram notify")
-    except subprocess.TimeoutExpired:
-        logger.warning("docs_auditor: valor-telegram send timed out")
-    except Exception as e:
-        logger.warning(f"docs_auditor: valor-telegram send failed: {e}")
-    return True
+    return hand_off(
+        Finding(
+            source="docs_auditor",
+            project=project,
+            room_id=room,
+            facts=facts,
+            evidence={"pr_url": pr_url, "files": list(files_touched)},
+            suggested_action=(
+                "Review the PR. If it is sound and a human merge decision is needed, ask for "
+                "it in plain words; otherwise say nothing."
+            ),
+            dedup_key=f"{root}:{pr_url.rstrip('/').rsplit('/', 1)[-1]}",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2605,15 +2590,9 @@ def run_docs_auditor() -> dict:
             # human review before the PR opens — every rotation PR still
             # requires a human merge, but the withheld count must reach every
             # surface this function produces so the human reviewing it sees
-            # it, not just a log line: findings, the returned summary,
-            # Telegram, and the PR body.
-            # Telegram has two mutually exclusive senders, and a run can also
-            # reach neither. Three cases: files were touched — step 9 sends
-            # the pass summary; nothing was touched but fixes were withheld —
-            # the zero-diff early return sends the withheld alert, the
-            # loudest case and one step 9 can never reach; nothing was
-            # touched and nothing was withheld — a clean zero-diff run, which
-            # stays silent.
+            # it, not just a log line: findings, the returned summary, the
+            # handoff facts, and the PR body. A zero-diff run reports on the
+            # operator surface only; a PR-opened run hands the PR to an agent.
             withheld: list[dict] = result.get("withheld", [])
             fixes_withheld: int = result.get("fixes_withheld", 0)
             withheld_note = (
@@ -2666,36 +2645,13 @@ def run_docs_auditor() -> dict:
             # 6. Zero-diff gate
             if not files_touched or _git_diff_quiet(PROJECT_ROOT):
                 _update_rotation_hash(project_key, [str(primary)])
-                # Initialized unconditionally (mirroring withheld_note above):
-                # the summary f-string below interpolates this on every
-                # zero-diff return, including the clean path where the notify
-                # call never runs. Assigning it only inside the
-                # `if fixes_withheld:` guard would raise NameError on that
-                # common path, which the enclosing `except Exception` would
-                # silently convert into {"status": "error"}.
-                suppressed_note = ""
+                # Withheld fixes are already filed issues; the finding below and the
+                # summary are the operator record. Nothing is sent to a chat.
                 zero_diff_findings = [f"docs-auditor: zero-diff for {primary}{withheld_note}"]
-                if fixes_withheld:
-                    sent = _send_telegram_notification(
-                        f"docs-auditor pass for {slug}: zero-diff, no PR"
-                        f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; "
-                        "nothing was written and no PR was opened to review them",
-                        repo_root=PROJECT_ROOT,
-                    )
-                    if not sent:
-                        suppressed_note = (
-                            f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
-                        )
-                        zero_diff_findings.append(
-                            f"docs-auditor: Telegram notification suppressed — no Eng: "
-                            f"group for {PROJECT_ROOT}"
-                        )
                 return {
                     "status": "skipped",
                     "findings": zero_diff_findings,
-                    "summary": (
-                        f"docs-auditor: zero-diff ({slug}){withheld_note}{suppressed_note}"
-                    ),
+                    "summary": f"docs-auditor: zero-diff ({slug}){withheld_note}",
                 }
 
             # 7. Push branch + PR. The guards moved to the preflight, so a
@@ -2759,32 +2715,22 @@ def run_docs_auditor() -> dict:
         except Exception as e:
             logger.warning(f"docs_auditor: refresh_docs_in_memory hook failed: {e}")
 
-        # 9. Telegram notification. Every rotation PR requires a human merge —
-        # `/do-merge` — and is closed unmerged at STALE_PR_AGE_DAYS if nobody
-        # acts, which is the intended "nobody cared" outcome, not a failure mode.
-        msg = (
-            f"docs-auditor pass for {slug}: "
-            f"{len(files_touched)} files, {result.get('fixes_applied', 0)} fixes"
-            + (
-                f"\n⚠️ {fixes_withheld} fix(es) withheld — target path absent; see the "
-                "filed issue(s) for details"
-                if fixes_withheld
-                else ""
-            )
-            + f"\nPR: {pr_url}"
-            + f"\nReview required — closed unmerged after {STALE_PR_AGE_DAYS} days if unreviewed."
-        )
-        # Initialized unconditionally even though the sender is called
-        # unconditionally on this path — mirrors the zero-diff path's
-        # initialize-first rule so neither branch can leave this name unbound.
+        # 9. Agent handoff. Every rotation PR requires a human merge (`/do-merge`)
+        # and is closed unmerged at STALE_PR_AGE_DAYS if nobody acts, which is the
+        # intended "nobody cared" outcome, not a failure mode. An agent in the
+        # audited repo's Eng: Room reviews it and asks a human only if needed.
         suppressed_note = ""
-        sent = _send_telegram_notification(msg, repo_root=PROJECT_ROOT)
-        if not sent:
-            suppressed_note = f" [Telegram suppressed: no Eng: group for {PROJECT_ROOT}]"
-            findings.append(
-                f"docs-auditor: Telegram notification suppressed for PR {pr_url} — "
-                f"no Eng: group for {PROJECT_ROOT}"
-            )
+        handoff = _hand_off_pr_review(
+            slug,
+            pr_url,
+            files_touched,
+            result.get("fixes_applied", 0),
+            fixes_withheld,
+            repo_root=PROJECT_ROOT,
+        )
+        if not handoff.delivered:
+            suppressed_note = f" [handoff unreachable: {handoff.reason}]"
+            findings.append(f"docs-auditor: PR {pr_url} not handed to an agent: {handoff.reason}")
 
         # 10. Update rotation hash for all touched files
         _update_rotation_hash(project_key, files_touched)

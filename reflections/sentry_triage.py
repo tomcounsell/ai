@@ -4,13 +4,15 @@ reflections/sentry_triage.py — Sentry issue triage reflection callable.
 Queries the Sentry API for unresolved issues across all projects in the org,
 classifies them (A–E), files GitHub issues for actionable ones, and updates
 Sentry state for A/B/E (gated by SENTRY_TRIAGE_APPLY env var, default off).
-Telegram delivery is delta-based and exception-only: a summary is sent ONLY
-when a genuinely NEW Class C/D issue appears since the previous run, or an
-auto-action fails. The Class C/D human-review pile is a STANDING backlog — in
-dry-run nothing drains it, so re-announcing the same pile every day is pure
-noise. The set of already-surfaced C/D short-ids is persisted between runs; a
-static backlog stays silent (live status is always on the dashboard), and the
+The digest is operator-surface only (the reflection's findings and summary on
+the dashboard, plus the log); nothing here writes to a chat. It is delta-based
+and exception-only: the digest is recorded ONLY when a genuinely NEW Class C/D
+issue appears since the previous run, or an auto-action fails. The Class C/D
+human-review pile is a STANDING backlog — in dry-run nothing drains it, so
+re-announcing the same pile every day is pure noise. The set of already-surfaced
+C/D short-ids is persisted between runs; a static backlog stays silent, and the
 first run seeds that set silently rather than replaying the whole backlog.
+Class C/D items that matter already become GitHub issues.
 
 Classification:
   A — Ignore: test/mock/harness noise        -> Sentry status=ignored (permanent)
@@ -41,7 +43,7 @@ from pathlib import Path
 import requests
 
 from config.settings import settings
-from reflections.utilities import PROJECT_ROOT, load_local_projects, send_host_eng_telegram
+from reflections.utilities import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.sentry_triage")
 
@@ -694,24 +696,12 @@ def _update_sentry_issue(issue_id: str, auth_token: str, payload: dict) -> tuple
     return False, f"HTTP {resp.status_code}: {body_snippet}"
 
 
-def _send_telegram_notification(message: str) -> None:
-    """Best-effort Telegram notification to this checkout's own Eng: group.
-
-    This is a fleet-wide digest with no single project in scope (spike-2:
-    ``load_local_projects()`` elsewhere in this module resolves a
-    ``working_directory`` for ``gh issue create``, unrelated to this send),
-    so the destination is this host's own engineer group via
-    ``send_host_eng_telegram`` rather than a per-project ``Eng:`` lookup.
-    """
-    send_host_eng_telegram(message, logger_prefix="sentry_triage")
-
-
 def run_sentry_triage() -> dict:
     """Triage unresolved Sentry issues across all projects.
 
     Queries the Sentry API, classifies each issue (A–E), files GitHub
-    issues for actionable bugs (dry-run by default), and sends a summary
-    to Telegram.
+    issues for actionable bugs (dry-run by default), and records a digest
+    on the operator surface.
 
     Returns:
         Dict with status, findings, and summary.
@@ -992,8 +982,8 @@ def run_sentry_triage() -> dict:
             "duration": elapsed,
         }
 
-    # Telegram summary (concise). Lead with the new-issue count so it's clear why
-    # the otherwise-silent triage spoke up.
+    # Digest (concise). Lead with the new-issue count so it's clear why the
+    # otherwise-silent triage spoke up.
     new_suffix = f" ({len(new_cd_ids)} new)" if new_cd_ids else ""
     tg_lines = [f"Sentry triage: {len(issues)} issues{new_suffix}"]
     for cls_label, cls_key in [
@@ -1025,7 +1015,8 @@ def run_sentry_triage() -> dict:
         tg_lines.append("[dry run — no Sentry state changes]")
     if apply_on:
         tg_lines.append("[LIVE — Sentry state changes applied]")
-    _send_telegram_notification("\n".join(tg_lines))
+    findings.extend(f"digest: {line.strip()}" for line in tg_lines)
+    logger.info("sentry_triage digest:\n%s", "\n".join(tg_lines))
 
     return {
         "status": "ok",

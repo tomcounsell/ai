@@ -147,9 +147,9 @@ executes on every cloud pass, just inertly:
 |----------|----------------------|----------------------------|
 | `_load_seen_ids()` | Reads `data/sentry_triage_seen.json` to compute which Sentry issue IDs are new since last run | Reads a path that doesn't exist in a fresh clone → returns `None` → the run takes the first-run "seed silently" branch |
 | `_save_seen_ids()` | Persists the current issue-ID set back to `data/sentry_triage_seen.json` for the next run's delta | Writes into the throwaway clone's filesystem — discarded when the cloud sandbox tears down after the run |
-| `_send_telegram_notification()` | Shells out to `valor-telegram send` to push a delta summary to Telegram | `valor-telegram` is not on PATH in the cloud clone → the subprocess call raises `FileNotFoundError`, which is swallowed by the existing exception handling |
+| Delta digest (`digest:` findings and summary) | Records new Class C/D issues and failed auto-actions on the operator surface (dashboard and log). It sends nothing to a chat: a finding that needs an agent goes through `reflections.agent_handoff.hand_off` (#3588) | Recorded into the throwaway clone's run result and discarded; nothing is sent |
 
-**These three functions are reachable-but-inert dead code in the cloud, not
+**These three paths are reachable-but-inert in the cloud, not
 retired.** They are still load-bearing for the local `/sentry` on-demand
 path, which is untouched and continues to use them normally.
 

@@ -3,11 +3,10 @@
 Start-half sibling to `reflections/sdlc_progress.py`'s recovery-half: this
 reflection starts lanes that do not exist yet, rather than unsticking lanes
 that do. Per project, per tick: pick the single oldest open `upvote`-labeled
-issue that has no live/started/recorded lane, announce the pickup in that
-project's `Eng: X` Telegram group, capture the announcement's message id via
-the relay ack (`bridge/outbox_ack.py`), and create an Eng session anchored to
-it (`create_session(telegram_message_id=...)`) so every subsequent message
-threads under the announcement.
+issue that has no live/started/recorded lane and create an Eng session in that
+project's `Eng: X` Room. This module sends nothing to Telegram itself: the
+session's brief tells it to announce the pickup in its first message, so the
+words reaching the human are the persona's.
 
 Invariants (also asserted by anti-criteria in the tracking plan):
 
@@ -48,7 +47,6 @@ import functools
 import logging
 import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 
@@ -79,13 +77,6 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return float(default)
-
-
 # Per-project ceiling on concurrently live auto-started lanes. Provisional:
 # sized so a single project cannot monopolize the worker, not a measured
 # optimum. Env: UPVOTE_LANE_MAX_LIVE.
@@ -103,18 +94,11 @@ UPVOTE_LANE_MAX_LIVE_MACHINE = _env_int("UPVOTE_LANE_MAX_LIVE_MACHINE", 5)
 # UPVOTE_CANDIDATE_SCAN_MAX.
 UPVOTE_CANDIDATE_SCAN_MAX = _env_int("UPVOTE_CANDIDATE_SCAN_MAX", 10)
 
-# Bounded wait for the relay ack after an announcement. Provisional. Env:
-# UPVOTE_ANCHOR_WAIT_S.
-UPVOTE_ANCHOR_WAIT_S = _env_float("UPVOTE_ANCHOR_WAIT_S", 20.0)
-_ANCHOR_POLL_INTERVAL_S = 0.25
-
 # How long a self-observed create-failure suppresses re-announcing the same
 # issue. Provisional. Env: UPVOTE_FAILURE_BACKOFF_S.
 UPVOTE_FAILURE_BACKOFF_S = _env_int("UPVOTE_FAILURE_BACKOFF_S", 3600)
 
-# Per-subprocess-call timeout (gh CLI calls and the valor-telegram send
-# calls, the latter of which also covers a promise-gate LLM round-trip).
-# Provisional. Env: UPVOTE_GH_TIMEOUT_S.
+# Per-subprocess-call timeout for gh CLI calls. Provisional. Env: UPVOTE_GH_TIMEOUT_S.
 UPVOTE_GH_TIMEOUT_S = _env_int("UPVOTE_GH_TIMEOUT_S", 30)
 
 # Wall-clock deadline for the whole run, captured once at the top of
@@ -133,9 +117,7 @@ UPVOTE_ENTRY_TIMEOUT_S = 1500
 # sync` is the dominant term: every pickup is a cold worktree (the lane slug
 # is unique per issue, so get_or_create_worktree never reuses one).
 UPVOTE_CREATE_WORST_CASE_S = settings.timeouts.uv_sync_s + settings.timeouts.git_subprocess_s
-UPVOTE_PICKUP_WORST_CASE_S = (
-    2 * UPVOTE_GH_TIMEOUT_S + UPVOTE_ANCHOR_WAIT_S + UPVOTE_CREATE_WORST_CASE_S
-)
+UPVOTE_PICKUP_WORST_CASE_S = 2 * UPVOTE_GH_TIMEOUT_S + UPVOTE_CREATE_WORST_CASE_S
 
 _FAILED_KEY_TEMPLATE = "upvote:pickup:failed:{repo}:{issue_number}"
 
@@ -160,94 +142,6 @@ class _RunState:
 
 def _budget_remaining(state: _RunState) -> float:
     return state.deadline - time.monotonic()
-
-
-# ---------------------------------------------------------------------------
-# Subprocess helpers
-# ---------------------------------------------------------------------------
-
-
-def _scrubbed_env() -> dict[str, str]:
-    """Explicit env for the send subprocess -- never inherited wholesale.
-
-    An inherited VALOR_SESSION_ID arms Read-the-Room (whose `suppress`
-    verdict enqueues a reaction instead of the message and still exits 0);
-    an inherited TELEGRAM_REPLY_TO threads the announcement under an
-    unrelated message in a different chat; AGENT_SESSION_ID misattributes
-    ownership. All three are stripped.
-    """
-    return {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("VALOR_SESSION_ID", "TELEGRAM_REPLY_TO", "AGENT_SESSION_ID")
-    }
-
-
-def _run_send(argv: list[str]) -> int:
-    """Run a `python -m tools.valor_telegram send` invocation. Returns exit code.
-
-    Interpreter-pinned via sys.executable -- never the bare `valor-telegram`
-    console script, whose PATH shim is stale on this machine (issue #2566)
-    and crashes on import outside the launchd-pinned PATH. TimeoutExpired is
-    caught explicitly (it is not a CalledProcessError subclass) and treated
-    like a non-zero exit.
-    """
-    full_argv = [sys.executable, "-m", "tools.valor_telegram", *argv]
-    try:
-        proc = subprocess.run(
-            full_argv,
-            capture_output=True,
-            text=True,
-            timeout=UPVOTE_GH_TIMEOUT_S,
-            env=_scrubbed_env(),
-        )
-        if proc.returncode != 0:
-            logger.warning(
-                "sdlc_upvote_lanes: send failed rc=%s stderr=%s",
-                proc.returncode,
-                (proc.stderr or "")[:300],
-            )
-        return proc.returncode
-    except subprocess.TimeoutExpired:
-        logger.warning("sdlc_upvote_lanes: send timed out after %ss", UPVOTE_GH_TIMEOUT_S)
-        return 124
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sdlc_upvote_lanes: send raised: %s", exc)
-        return 1
-
-
-def _announce(chat_id: int, producer_id: str, text: str) -> int:
-    return _run_send(
-        [
-            "send",
-            "--chat",
-            str(chat_id),
-            "--session-id",
-            producer_id,
-            "--ack-sent-id",
-            "--no-read-the-room",
-            text,
-        ]
-    )
-
-
-def _retract(chat_id: int, producer_id: str, anchor: int | None, text: str) -> int:
-    """Send the threaded retraction. `anchor` may be falsy (0 or None) when the
-    ack never arrived -- splice --reply-to in only when truthy, and use a
-    distinct '-retract' producer id so this send's own outbox/ack keys never
-    cross-talk with the announcement's (Race 3)."""
-    argv = [
-        "send",
-        "--chat",
-        str(chat_id),
-        "--session-id",
-        f"{producer_id}-retract",
-        "--no-read-the-room",
-        text,
-    ]
-    if anchor:
-        argv[-1:-1] = ["--reply-to", str(anchor)]
-    return _run_send(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +339,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         # to see in the aggregated report, not a legitimate no-op like the
         # machine-ownership check above.
         return {"status": "ok", "findings": ["no Eng: group configured"]}
-    eng_group_name, eng_chat_id = eng_group
+    _, eng_chat_id = eng_group
 
     repo = _project_repo(project)
     if repo is None:
@@ -506,7 +400,6 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         # point the reflection has actually committed to a pickup.
         slug = resolve_lane_slug(issue_number, target_repo=repo) or mint_lane_slug(issue_number)
         title = candidate.get("title") or ""
-        url = candidate.get("url") or ""
 
         own_session, cross_project_collision = _non_terminal_session_for(slug, project_key)
         if cross_project_collision:
@@ -539,7 +432,7 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
                 )
             continue  # gate 4
 
-        # Admission check (§B) -- before announcing, because create_session
+        # Admission check (§B) -- before creating, because create_session
         # is uninterruptible once it starts.
         if _budget_remaining(state) < UPVOTE_PICKUP_WORST_CASE_S:
             findings.append(
@@ -548,38 +441,12 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
             )
             break
 
-        producer_id = f"upvote-{project_key}-{issue_number}-{int(time.time())}"
-        announce_text = f"Picking up issue #{issue_number} for SDLC: {title}\n{url}"
-        rc = _announce(eng_chat_id, producer_id, announce_text)
-        if rc != 0:
-            findings.append(
-                f"announcement send failed (rc={rc}) for issue #{issue_number}; started nothing"
-            )
-            continue
-
-        from bridge.outbox_ack import await_sent_message_id
-
-        anchor = await_sent_message_id(producer_id, UPVOTE_ANCHOR_WAIT_S)
-        unconfirmed_delivery = anchor is None
-        if unconfirmed_delivery:
-            anchor = 0
-            findings.append(
-                f"issue #{issue_number}: delivery unconfirmed "
-                f"(no ack within {UPVOTE_ANCHOR_WAIT_S}s) -- starting unanchored"
-            )
-
         # Race 1: re-read gates 1 and 3 immediately before create.
         own_session, _ = _non_terminal_session_for(slug, project_key)
         live_recheck = _lock_says_live(issue_number)
         if own_session is not None or live_recheck is True or live_recheck is None:
-            _retract(
-                eng_chat_id,
-                producer_id,
-                anchor,
-                f"Issue #{issue_number} was picked up by another lane just now.",
-            )
             findings.append(
-                f"issue #{issue_number}: another lane started during the anchor wait (benign)"
+                f"issue #{issue_number}: another lane started during the re-check (benign)"
             )
             continue
 
@@ -597,7 +464,8 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
         session_message = (
             f"Run the next SDLC stage for issue #{issue_number}: {title}. This issue is "
             "labeled `upvote` (pre-approved for autonomous pickup). Invoke `/sdlc` and let "
-            "the router choose the stage."
+            "the router choose the stage. Open by telling the team in this chat, in your own "
+            "words, that you are picking up this issue."
         )
 
         from tools.valor_session import create_session
@@ -610,7 +478,6 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
                 project_key=project_key,
                 session_type="eng",
                 chat_id=str(eng_chat_id),
-                telegram_message_id=anchor,
             )
             create_success = bool(getattr(result, "success", False))
             create_error = getattr(result, "error", None)
@@ -620,13 +487,6 @@ def _pick_up_upvoted(project: dict, *, state: _RunState) -> dict:
 
         if not create_success:
             _set_failed_backoff(repo, issue_number, create_error or "unknown error")
-            _retract(
-                eng_chat_id,
-                producer_id,
-                anchor,
-                f"Could not start the SDLC lane for issue #{issue_number}: "
-                f"{create_error}. Retrying on the next tick.",
-            )
             findings.append(f"create_session failed for issue #{issue_number}: {create_error}")
             continue
 

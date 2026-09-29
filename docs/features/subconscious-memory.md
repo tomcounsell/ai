@@ -808,7 +808,7 @@ To re-activate a superseded record, clear its `superseded_by` field. The Existen
 4. Validate: reject merges with `importance >= 7.0`, fewer than 2 IDs, or unknown IDs.
 5. **Dry-run mode (default):** log proposed actions to `logs/reflections.log`, no Redis writes.
 6. **Apply mode:** write merged record via `Memory.safe_save(agent_id="consolidation", source="system")`, then mark originals superseded. Guard `m.save()` return value — `WriteFilterMixin` may return `False` silently.
-7. Contradictions: send Telegram notification via `valor-telegram send`; fall back to `logs/memory-contradictions.log` if bridge is down.
+7. Contradictions: written to `logs/memory-contradictions.log` and counted in the reflection summary (operator surface); nothing is sent to human chat.
 
 ### Safety Rails
 
