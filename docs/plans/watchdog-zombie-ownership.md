@@ -383,6 +383,22 @@ Both tables are machine-parsed (`agent/verification_parser.py`), which splits ce
 | CONCERN | Risk & Robustness | Step 1 Case B calls `execute_recovery` for levels 2, 3 and 4 patching only `kill_stale_processes`, `restart_bridge`, `clear_lock_files` (plus `AUTO_REVERT_ENABLED_FILE` / `revert_last_commit` at level 4). `execute_recovery` writes and unlinks the real `RECOVERY_LOCK` (`monitoring/bridge_watchdog.py:999-1054`), and the level-4 revert-False path reaches `_recovery_exhausted` -> `log_crash`, which appends a crash event to `data/crash_history.jsonl` of the checkout running the test (no fixture isolates `CRASH_HISTORY_FILE`). Post-merge, a test run from `~/src/ai` injects phantom crashes into the file the live watchdog reads via `get_recent_crashes` / `detect_crash_pattern`, and briefly plants a recovery lock `run_health_check` reads at `:1119`. | Step 1 Case B / Case A / isolation check | Isolate Case B as the sibling `test_revert_failure_routes_to_recovery_exhausted` does: `patch.object(bw, "RECOVERY_LOCK", tmp_path / "recovery-lock")`, `patch.object(bw, "AUTO_REVERT_ENABLED_FILE", <touched tmp_path file>)`, and `@patch("monitoring.bridge_watchdog.log_crash")`. Patching `revert_last_commit` alone is not enough: returning False routes to `_recovery_exhausted`, which calls the real `log_crash`. Case A needs `log_crash` patched only if it ever runs the bridge-dead branch. |
 | NIT | History & Consistency | `_is_pyright_executable` checks only the basename of `cmdline[1]`, so `python -m pyright` (`cmdline[1]` is `-m`, a form the prior round's note named) and the npm-resolved `node .../node_modules/pyright/langserver.index.js` form are not matched. Misses fail safe (leak not reaped); nothing in the repo configures a worker harness to spawn pyright. | Technical Approach pyright gate 1; Test Impact `_is_pyright_executable` table test | Also accept `cmdline[1] == "-m"` with `cmdline[2]` in {`pyright`, `pyright-langserver`}, and a `langserver.index.js` / `index.js` script whose parent directory is `pyright`; or state that only the `.bin/pyright-langserver` shebang form is covered. |
 
+### Accepted Residual Concerns (round 3, bound 3)
+
+The with-concerns revision + re-critique loop reached its bound. The concerns
+below were carried into BUILD unresolved and are accepted on the record.
+
+- **Case B filesystem side effects** — `execute_recovery` levels 2-4 write the real
+  `RECOVERY_LOCK` and the level-4 revert-False path reaches `log_crash`, which appends to the
+  running checkout's `data/crash_history.jsonl`. Accepted because: CONCERN is non-blocking, and
+  the round-3 revision folded the exact isolation into Step 1 (tmp_path `RECOVERY_LOCK`,
+  tmp_path `AUTO_REVERT_ENABLED_FILE`, patched `log_crash`); the build verifies it with a
+  before/after check of `data/`.
+- **Narrow pyright executable shapes (NIT)** — `python -m pyright` and the npm-resolved
+  `node .../node_modules/pyright/langserver.index.js` forms. Accepted because: the revision
+  widened `_is_pyright_executable` to both shapes, and any remaining miss fails safe (a leak is
+  not reaped, nothing is wrongly killed).
+
 ---
 
 ## Open Questions
