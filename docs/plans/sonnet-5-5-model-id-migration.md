@@ -174,7 +174,9 @@ Unchanged: `run_typed` → router → `agent/llm/backends/anthropic.py::call` �
   | `image_analysis` | `thinking: {"type": "between_tools"}` | 4096 | Descriptive output; latency matters. Headroom for the OpenRouter default thinking |
 
 - **Prompt tweak for the JSON tools**: replace "Only output valid JSON, nothing else." with an instruction to think the problem through and end the reply with the JSON object. Per the Sonnet 5.5 guide, this is the pattern `parse_last_json` expects.
-- **`agent/llm/backends/anthropic.py`**: `agent_kwargs = {"output_type": stack.NativeOutput(output_type)}`, mirroring the Ollama leg, so no forced `tool_choice` is ever sent.
+- **`tests/integration/test_resume_reverification_llm.py::_run_model`**: pin `model=MODEL_FAST` (was `MODEL_REASONING`), with a comment that the `run_typed` Anthropic leg keeps PydanticAI tool output (forced `tool_choice`), which Sonnet 5.5 rejects. `agent/llm/backends/anthropic.py` is not changed.
+- **Follow-up issue**: file "run_typed Anthropic leg cannot serve Sonnet 5.5" carrying spike-3 and critique concern 1 (cold-call grammar-compile latency against the 3s bridge gates), and link it from the PR.
+- **Timeouts**: `test_judge`'s OpenRouter `timeout=60` becomes 120, and `anthropic.Anthropic(...)` gets `timeout=120`, matching the other three tools (critique concern 2).
 - **Metering**: add `"claude-sonnet-5-5": {"usd_per_mtoken_in": 2.0, "usd_per_mtoken_out": 10.0}` to `PRICE_TABLE`, citing the OpenRouter listing. Bump `PRICE_TABLE_RETRIEVED_AT`. The `claude-sonnet-4-5` row stays, because it is still a correct price for that model.
 - **`tools/email_cs/agents.py`**: add a comment at the `tool_choice={"type": "any"}` site. It says forced tool choice is rejected by Sonnet 5.5, and that a move off Haiku needs `tool_choice: auto` plus strict tools and a recheck of the escalation gate.
 
@@ -207,12 +209,11 @@ Caller → tool builds request (thinking choice, sized `max_tokens`) → Anthrop
 ## Test Impact
 
 - [ ] `tests/unit/test_harness_context_usage_log.py::test_alias_and_full_id_both_resolve[sonnet-claude-sonnet-4-5-20250929]`: UPDATE the parametrized full id to `claude-sonnet-5-5`.
-- [ ] `tests/unit/test_llm_backend_anthropic.py`: UPDATE any assertion or fake that relies on tool-output mode (FunctionModel answers) so it answers in native-output form. Existing slot, timeout, and cancel tests keep their assertions.
-- [ ] `tests/unit/test_llm_wrapper.py`: UPDATE only if a test inspects the Anthropic leg's `Agent` kwargs. Otherwise unchanged; the leg is faked at the `call` boundary.
+- [ ] `tests/unit/test_llm_backend_anthropic.py`, `tests/unit/test_llm_wrapper.py`, `tests/unit/test_llm_stack_compat.py`, `tests/unit/test_llm_stack_degraded_start.py`: unchanged. The Anthropic leg keeps tool-output mode.
 - [ ] `tests/unit/test_paid_inference_meter.py`: unchanged. It asserts the `claude-sonnet-4-5` row, which stays. ADD a case for `claude-sonnet-5-5` pricing.
 - [ ] `tests/tools/test_test_judge.py`: unchanged assertions. These are live tests on `anthropic_api_key` and now exercise Sonnet 5.5; they must pass.
 - [ ] `tests/tools/test_image_analysis.py`: unchanged assertions. These are live tests on `openrouter_api_key` and now exercise `anthropic/claude-sonnet-5.5`; they must pass.
-- [ ] `tests/integration/test_resume_reverification_llm.py`: unchanged. It passes once the Anthropic leg uses `NativeOutput` (today it would 400 on Sonnet 5.5).
+- [ ] `tests/integration/test_resume_reverification_llm.py`: UPDATE `_run_model` to `MODEL_FAST`. It must pass (on Sonnet 5.5 via `MODEL_REASONING` it would 400).
 - [ ] New `tests/unit/test_llm_reply.py`: CREATE (see Success Criteria).
 
 ## Rabbit Holes
@@ -224,13 +225,9 @@ Caller → tool builds request (thinking choice, sized `max_tokens`) → Anthrop
 
 ## Risks
 
-### Risk 1: `NativeOutput` changes behavior for the production Haiku sites on the Anthropic leg
-**Impact:** A site whose output schema uses JSON-schema features that Anthropic structured outputs rejects, or that validates differently in native mode, starts raising `LLMCallError(validation|transport)`. The wrapper's fallback or fail-safe then answers where Haiku answered before.
-**Mitigation:**
-- The builder enumerates every declared `Backend.ANTHROPIC` site's output type (`agent.llm.tasks.declared_sites()`).
-- It runs one live Haiku call per distinct output type through the leg with `NativeOutput`.
-- It runs `tests/unit/test_llm_*.py` and the `tests/integration/test_*_llm.py` suites.
-- Any output type that fails blocks the build and is reported, never special-cased by model name.
+### Risk 1: A future caller routes a Sonnet 5.5 model through `run_typed`'s Anthropic leg
+**Impact:** The call 400s on forced `tool_choice` and the wrapper's fallback or fail-safe answers.
+**Mitigation:** No production route passes a Sonnet model into the leg today (Data Flow grep). The follow-up issue owns making the leg serve Sonnet 5.5, including the latency check against the 3s bridge gates.
 
 ### Risk 2: Chosen effort levels are too low or too high
 **Impact:** Judge accuracy drops (too low), or latency and cost rise (too high).
@@ -242,7 +239,7 @@ Caller → tool builds request (thinking choice, sized `max_tokens`) → Anthrop
 
 ## Race Conditions
 
-No race conditions identified. Every change is a synchronous request/response transformation or a constant. The Anthropic leg's slot, timeout, and cancellation handling are untouched; only the `output_type` wrapper passed to `Agent` changes.
+No race conditions identified. Every change is a synchronous request/response transformation or a constant. The `run_typed` Anthropic leg is untouched.
 
 ## No-Gos (Out of Scope)
 
@@ -254,11 +251,11 @@ No update system changes required. The change is constants, one internal helper 
 
 ## Agent Integration
 
-No agent integration required. The four tools keep their existing entry points: the `pyproject.toml [project.scripts]` CLIs and direct imports, with unchanged signatures and return shapes. `run_typed` callers are unaffected apart from the leg's output mode.
+No agent integration required. The four tools keep their existing entry points: the `pyproject.toml [project.scripts]` CLIs and direct imports, with unchanged signatures and return shapes. `run_typed` callers are unaffected.
 
 ## Documentation
 
-- [ ] Update `docs/features/nonharness-llm-wrapper.md`: the Anthropic leg now passes `stack.NativeOutput(output_type)`. State why (Sonnet 5.5 rejects forced `tool_choice`), next to the existing Ollama-leg rationale.
+- [ ] Update `docs/features/nonharness-llm-wrapper.md`: note that the Anthropic leg uses PydanticAI tool output (forced `tool_choice`), which Sonnet 5.5 rejects, so the leg serves Haiku only until the follow-up issue lands.
 - [ ] Create `docs/features/direct-api-reply-handling.md`: the `tools/llm_reply.py` contract (text blocks only, truncation is failure, last JSON value) and the per-tool thinking/effort/`max_tokens` table.
 - [ ] Add `direct-api-reply-handling.md` to the `docs/features/README.md` index table.
 - [ ] Update `docs/features/config-architecture.md` wherever it names the Sonnet model or version.
@@ -268,7 +265,7 @@ No agent integration required. The four tools keep their existing entry points: 
 - [ ] `SONNET == "claude-sonnet-5-5"` and `MODEL_REASONING == SONNET`. `MODEL_INFO[SONNET]["name"] == "Claude Sonnet 5.5"` with context window 1,000,000. `get_model_context_window("sonnet") == 1_000_000`.
 - [ ] `OPENROUTER_SONNET == "anthropic/claude-sonnet-5.5"`, with a comment citing the listing check. `tests/unit/test_models.py::test_other_openrouter_ids_warn_when_unlisted` emits no warning for it.
 - [ ] `PRICE_TABLE["claude-sonnet-5-5"]` is present at $2 / $10.
-- [ ] No request in `tools/` or `agent/llm/` sends `thinking: {"type": "disabled"}`, `budget_tokens`, or a forced `tool_choice` to a Sonnet 5.5 model.
+- [ ] No request in `tools/` or `agent/llm/` sends `thinking: {"type": "disabled"}`, `budget_tokens`, or a forced `tool_choice` to a Sonnet 5.5 model. No code passes `MODEL_REASONING` or `SONNET` into `run_typed`.
 - [ ] None of the four tools reads `content[0]`. All go through `tools/llm_reply.py`.
 - [ ] `test_judge` and `image_tagging` parse with `parse_last_json` and fail on truncation. `tests/unit/test_llm_reply.py` covers:
   - reasoning prose before the JSON
@@ -279,7 +276,7 @@ No agent integration required. The four tools keep their existing entry points: 
   - nested JSON
   - no JSON
 - [ ] Each of the four tools runs once live on Sonnet 5.5 with a non-trivial input and returns a correct, complete result, with output recorded in the PR. The OpenRouter fallback runs once for one tool.
-- [ ] `tests/integration/test_resume_reverification_llm.py` passes on `MODEL_REASONING = claude-sonnet-5-5`.
+- [ ] `tests/integration/test_resume_reverification_llm.py` passes with `_run_model` pinned to `MODEL_FAST`, and the follow-up issue for the leg is filed and linked from the PR.
 - [ ] `tools/email_cs/agents.py` carries the forced-tool-choice incompatibility comment.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -291,12 +288,6 @@ No agent integration required. The four tools keep their existing entry points: 
 - **Builder (models-and-helper)**
   - Name: models-builder
   - Role: `config/models.py`, `tools/llm_reply.py`, the four tools, the price table, and the email_cs comment
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (anthropic-leg)**
-  - Name: leg-builder
-  - Role: `agent/llm/backends/anthropic.py` `NativeOutput` switch plus the Risk 1 live verification across declared Anthropic sites
   - Agent Type: builder
   - Resume: true
 
@@ -338,22 +329,22 @@ No agent integration required. The four tools keep their existing entry points: 
 - Add the `claude-sonnet-5-5` row and the new retrieved-at date to `PRICE_TABLE`, plus a meter test case.
 - Add the comment in `tools/email_cs/agents.py`.
 - Update the `test_harness_context_usage_log.py` parametrization.
+- Raise `test_judge` timeouts to 120 on both paths.
 
-### 3. Anthropic leg native output
-- **Task ID**: build-anthropic-leg
+### 3. Pin the run_typed consumer and file the follow-up
+- **Task ID**: build-pin-reverification
 - **Depends On**: none
-- **Validates**: tests/unit/test_llm_backend_anthropic.py, tests/unit/test_llm_wrapper.py, tests/integration/test_resume_reverification_llm.py
-- **Informed By**: spike-3
-- **Assigned To**: leg-builder
+- **Validates**: tests/integration/test_resume_reverification_llm.py
+- **Informed By**: spike-3, Open Question 2 resolution
+- **Assigned To**: models-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Wrap `output_type` in `stack.NativeOutput(...)` in `agent/llm/backends/anthropic.py`, and update the module docstring.
-- Enumerate the declared `Backend.ANTHROPIC` sites' output types and run one live Haiku call per distinct type through the leg. Report any failure (Risk 1) rather than special-casing it.
-- Update `tests/unit/test_llm_backend_anthropic.py` fakes if they assume tool-output mode.
+- Pin `_run_model` in `tests/integration/test_resume_reverification_llm.py` to `MODEL_FAST`, with a comment naming the forced-`tool_choice` incompatibility.
+- File the follow-up issue "run_typed Anthropic leg cannot serve Sonnet 5.5" (spike-3 finding, critique concern 1 latency check).
 
 ### 4. Validate
 - **Task ID**: validate-migration
-- **Depends On**: build-models, build-anthropic-leg
+- **Depends On**: build-models, build-pin-reverification
 - **Assigned To**: migration-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -381,29 +372,29 @@ No agent integration required. The four tools keep their existing entry points: 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Reply helper tests | `scripts/pytest-clean.sh tests/unit/test_llm_reply.py -q` | exit code 0 |
-| Registry and meter tests | `scripts/pytest-clean.sh tests/unit/test_harness_context_usage_log.py tests/unit/test_paid_inference_meter.py tests/unit/test_llm_backend_anthropic.py tests/unit/test_llm_wrapper.py -q` | exit code 0 |
+| Registry and meter tests | `scripts/pytest-clean.sh tests/unit/test_harness_context_usage_log.py tests/unit/test_paid_inference_meter.py tests/unit/test_models.py -q` | exit code 0 |
 | Sonnet constant | `.venv/bin/python -c "import config.models as m; print(m.SONNET, m.OPENROUTER_SONNET, m.get_model_context_window('sonnet'))"` | output contains claude-sonnet-5-5 anthropic/claude-sonnet-5.5 1000000 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| No content[0] reads in the four tools | `grep -rnE "content\"?,? ?\[\{\}\]\)\[0\]\|content\[0\]" tools/test_judge tools/documentation tools/image_analysis tools/image_tagging \| wc -l` | match count == 0 |
-| No disabled thinking or forced tool choice on Sonnet paths | `grep -rnE "\"disabled\"\|budget_tokens" tools/test_judge tools/documentation tools/image_analysis tools/image_tagging agent/llm \| wc -l` | match count == 0 |
-| Anthropic leg uses native output | `grep -c "NativeOutput(output_type)" agent/llm/backends/anthropic.py` | output > 0 |
+| No content[0] reads in the four tools | `grep -rn -e 'content", \[{}\])\[0\]' -e 'content\[0\]' tools/test_judge tools/documentation tools/image_analysis tools/image_tagging \| wc -l` | match count == 0 |
+| No disabled thinking, budget_tokens, or tool_choice in the four tools | `grep -rn -e '"disabled"' -e budget_tokens -e tool_choice tools/test_judge tools/documentation tools/image_analysis tools/image_tagging \| wc -l` | match count == 0 |
+| No Sonnet model into run_typed | `grep -rn -e 'model=MODEL_REASONING[,)]' -e 'model=SONNET[,)]' agent tools bridge worker tests/integration/test_resume_reverification_llm.py \| wc -l` | match count == 0 |
 | SONNET_4 removed | `grep -rn "SONNET_4" --include=*.py config tools agent \| wc -l` | match count == 0 |
 
 ## Critique Results
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| CONCERN | Risk & Robustness | The NativeOutput leg switch reaches every Anthropic-backed run_typed site, including 3s no-retry bridge gates (read_the_room RTR_SDK_TIMEOUT=3.0, context_recall sdk_timeout=3.0). Strict structured outputs add first-request grammar-compile latency, and Risk 1 checks validation only. | pending | For each Backend.ANTHROPIC DeclaredSite, time a cold and a warm call with its output type under NativeOutput. A cold call at or above the site's sdk_timeout blocks the build and goes to the PM. Also flag output types with dict[...] fields (strict mode requires additionalProperties false). |
-| CONCERN | Risk & Robustness | max_tokens goes from 1024 to 8192 with thinking on, but test_judge keeps its OpenRouter timeout=60 (tools/test_judge/__init__.py:148) and sets no SDK client timeout, so a long thinking reply on that path becomes a timeout error. | pending | Raise timeout=60 to 120 to match the other three tools, and pass timeout=120 to anthropic.Anthropic(...). 8192 is below the SDK non-streaming guard. |
-| CONCERN | History & Consistency | The Verification greps use a backslash-escaped pipe inside grep -E, which macOS grep treats as a literal pipe: the content[0] check prints 0 today against 4 known reads, so it passes on the known-bad baseline. The forced-tool_choice anti-criterion has no check. | pending | Use -e alternation: grep -rnE -e 'content"?, ?\[\{\}\]\)\[0\]' -e 'content\[0\]' <four tool dirs> (expect 4 on 1defbad24, then 0). Add -e tool_choice to the disabled/budget_tokens grep over the four tools and agent/llm. |
-| CONCERN | History & Consistency | Test Impact says test_llm_wrapper.py is faked at the call boundary, but _install_function_model swaps AnthropicModel under the real leg, and _tool_response answers via info.output_tools[0], which is empty under NativeOutput. test_llm_stack_compat.py and test_llm_stack_degraded_start.py use the same helper and are not listed. | pending | Mark all four FunctionModel test files UPDATE and add them to the Verification pytest row. Under NativeOutput, answer ModelResponse(parts=[TextPart(content=json.dumps(args))]); info.output_tools is [] and info.output_object carries the schema. |
-| NIT | Scope & Value | None of the four migrated tools meters spend. PRICE_TABLE is read only via record_receipt from tools/cross_vendor_judge.py, so the new row is harmless but off-path. | pending | Keep it as a one-line addition with its test. |
-| NIT | Scope & Value | No production run_typed route uses MODEL_REASONING, so the leg switch is forward capability whose blast radius lands on the Haiku sites. Open Question 2 surfaces this. | pending | Record the PM answer to Open Question 2 in the plan before build. |
+| CONCERN | Risk & Robustness | The NativeOutput leg switch reaches every Anthropic-backed run_typed site, including 3s no-retry bridge gates (read_the_room RTR_SDK_TIMEOUT=3.0, context_recall sdk_timeout=3.0). Strict structured outputs add first-request grammar-compile latency, and Risk 1 checks validation only. | Open Question 2 resolution: leg unchanged, test pinned to MODEL_FAST, follow-up issue | For each Backend.ANTHROPIC DeclaredSite, time a cold and a warm call with its output type under NativeOutput. A cold call at or above the site's sdk_timeout blocks the build and goes to the PM. Also flag output types with dict[...] fields (strict mode requires additionalProperties false). |
+| CONCERN | Risk & Robustness | max_tokens goes from 1024 to 8192 with thinking on, but test_judge keeps its OpenRouter timeout=60 (tools/test_judge/__init__.py:148) and sets no SDK client timeout, so a long thinking reply on that path becomes a timeout error. | Solution (Timeouts), Task 2 | Raise timeout=60 to 120 to match the other three tools, and pass timeout=120 to anthropic.Anthropic(...). 8192 is below the SDK non-streaming guard. |
+| CONCERN | History & Consistency | The Verification greps use a backslash-escaped pipe inside grep -E, which macOS grep treats as a literal pipe: the content[0] check prints 0 today against 4 known reads, so it passes on the known-bad baseline. The forced-tool_choice anti-criterion has no check. | Verification rows rewritten with -e alternation plus a tool_choice check | Use -e alternation: grep -rnE -e 'content"?, ?\[\{\}\]\)\[0\]' -e 'content\[0\]' <four tool dirs> (expect 4 on 1defbad24, then 0). Add -e tool_choice to the disabled/budget_tokens grep over the four tools and agent/llm. |
+| CONCERN | History & Consistency | Test Impact says test_llm_wrapper.py is faked at the call boundary, but _install_function_model swaps AnthropicModel under the real leg, and _tool_response answers via info.output_tools[0], which is empty under NativeOutput. test_llm_stack_compat.py and test_llm_stack_degraded_start.py use the same helper and are not listed. | Moot: the leg is unchanged, so the FunctionModel fakes stay valid | Under NativeOutput, answer ModelResponse(parts=[TextPart(content=json.dumps(args))]); info.output_tools is [] and info.output_object carries the schema. |
+| NIT | Scope & Value | None of the four migrated tools meters spend. PRICE_TABLE is read only via record_receipt from tools/cross_vendor_judge.py, so the new row is harmless but off-path. | Solution (Metering), Task 2 | Keep it as a one-line addition with its test. |
+| NIT | Scope & Value | No production run_typed route uses MODEL_REASONING, so the leg switch is forward capability whose blast radius lands on the Haiku sites. Open Question 2 surfaces this. | Open Question 2 resolved: leg left alone | Record the PM answer to Open Question 2 in the plan before build. |
 
 ---
 
 ## Open Questions
 
 1. **Effort defaults.** The plan picks `medium` for `test_judge`, `low` for `image_tagging`, and `between_tools` for `documentation` and `image_analysis`, validated by a live smoke rather than an eval sweep. Is that bar acceptable, or do you want a small scored sweep before merge?
-2. **Anthropic leg scope.** The plan switches the `run_typed` Anthropic leg to `NativeOutput` for every model, Haiku production sites included, gated on a live per-output-type check. That is the only way the leg can serve Sonnet 5.5. The narrower alternative is to leave the leg alone and pin the one integration test to Haiku, which leaves `run_typed` unable to reach any Sonnet 5.5 route. The plan recommends the switch.
+2. **Anthropic leg scope.** Resolved: leave the `run_typed` Anthropic leg alone, pin the one integration test to `MODEL_FAST`, and file a follow-up issue for making the leg serve Sonnet 5.5.
