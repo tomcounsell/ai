@@ -126,12 +126,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # Settle past any mid-boot process (a bridge/worker restarted by this run,
     # the watchdog, or launchd) so a restart in flight cannot degrade the
-    # verdict to `unknown`. A skipped bridge is never waited on.
+    # verdict to `unknown`. Never wait on a process whose verdict is already
+    # decided: a skipped bridge is discarded below, and a worker the --since
+    # poll gave up on is forced `stale` below — settling either only burns
+    # the shell's time budget.
+    settle_skip: tuple[str, ...] = ()
+    if skip_bridge:
+        settle_skip += ("bridge",)
+    if forced_worker_stale:
+        settle_skip += ("worker",)
     results = service.verify_running_release_settled(
         project_dir,
         head_short,
         machine_check,
-        settle_skip=("bridge",) if skip_bridge else (),
+        settle_skip=settle_skip,
     )
     if skip_bridge:
         results.pop("bridge", None)

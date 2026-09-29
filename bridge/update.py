@@ -178,11 +178,26 @@ def _tail_with_elision(stdout: str, stderr: str, cap: int) -> str:
 UPDATE_POLL_ATTEMPTS = 15
 UPDATE_POLL_INTERVAL_SECONDS = 2
 
-# Shell subprocess budget: the historical 120s shell allowance plus the full
-# 30s verify-poll window the shell's terminal verify_release step may burn —
-# a near-limit worker-relevant update must not TimeoutExpired despite
-# succeeding.
-UPDATE_SHELL_TIMEOUT_SECONDS = 120 + UPDATE_POLL_ATTEMPTS * UPDATE_POLL_INTERVAL_SECONDS
+# The historical shell allowance, before the terminal verify_release step's waits.
+UPDATE_SHELL_BASE_SECONDS = 120
+
+
+def update_shell_timeout_seconds() -> float:
+    """Shell subprocess budget for /update.
+
+    The historical 120s shell allowance, plus the two waits the shell's
+    terminal ``verify_release`` step may burn in sequence: the full 30s
+    ``--since`` worker-beacon poll, then the boot-beacon settle window
+    (``settings.timeouts.beacon_settle_timeout_s``, read at call time so an
+    env override moves the budget with it). A near-limit update that restarts
+    a process mid-verify must not ``TimeoutExpired`` despite succeeding.
+    """
+    return (
+        UPDATE_SHELL_BASE_SECONDS
+        + UPDATE_POLL_ATTEMPTS * UPDATE_POLL_INTERVAL_SECONDS
+        + settings.timeouts.beacon_settle_timeout_s
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +378,7 @@ async def handle_update_command(tg_client, event):
     env["UPDATE_REPORT_CHAT_ID"] = str(event.chat_id)
     env["UPDATE_REPORT_REPLY_TO"] = str(event.message.id)
 
+    shell_timeout_s = update_shell_timeout_seconds()
     try:
         subprocess_start_ts = time.time()
         result = subprocess.run(
@@ -370,7 +386,7 @@ async def handle_update_command(tg_client, event):
             cwd=str(_PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=UPDATE_SHELL_TIMEOUT_SECONDS,
+            timeout=shell_timeout_s,
             env=env,
         )
         stdout = result.stdout.strip()
@@ -494,7 +510,7 @@ async def handle_update_command(tg_client, event):
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
-            f"{machine} - update timed out after {UPDATE_SHELL_TIMEOUT_SECONDS}s",
+            f"{machine} - update timed out after {shell_timeout_s:.0f}s",
         )
     except Exception as e:
         logger.error(f"[update] /update failed: {e}")

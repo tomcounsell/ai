@@ -1390,9 +1390,14 @@ def verify_running_release_settled(
     restarting when /update reached its verify step lands on a real
     ``matches``/``stale`` verdict instead of an unactionable ``unknown``.
 
-    ``settle_skip`` names processes never waited on (a deliberately
-    about-to-restart bridge under ``--skip-bridge``: its verdict is discarded
-    anyway, so waiting for it buys nothing). A terminal unknown returns
+    ``timeout_s`` is also the mid-boot age limit: a process that started
+    ``timeout_s`` or more seconds ago is a terminal ``unknown`` and is never
+    waited on, so the poll cannot outlast the window it was sized for.
+
+    ``settle_skip`` names processes never waited on because the caller has
+    already decided their verdict (a deliberately about-to-restart bridge
+    under ``--skip-bridge``, or a worker the ``--since`` beacon poll forced
+    ``stale``): waiting for them buys nothing. A terminal unknown returns
     immediately — this never sleeps on a beacon that cannot arrive.
     """
     if timeout_s is None or interval_s is None:
