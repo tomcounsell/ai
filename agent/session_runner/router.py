@@ -431,6 +431,14 @@ class ExitReason(StrEnum):
     PM_USER_SUBAGENT_LIVE = ("pm_user_subagent_live", False, False, True)
     PM_MAX_TURNS = ("pm_max_turns", False, True, False)
     PM_EMPTY_TURN = ("pm_empty_turn", False, False, False)
+    # Reflection-handoff sessions (extra_context origin == "reflection_handoff")
+    # carry a finding no human asked about, so ending with nothing to say is a
+    # legitimate judgment: clean, no wrap-up turn, no fallback message.
+    HANDOFF_SILENT = ("handoff_silent", True, False, False)
+    # A delivery-required handoff (the assumption digest, a charter-amendment
+    # ask) that ended without reaching the human is a failure, not a judgment:
+    # non-clean anomaly, so the session finalizes `failed`.
+    HANDOFF_UNDELIVERED = ("handoff_undelivered", False, False, True)
     TURN_TIMEOUT = ("turn_timeout", False, False, False)
     PM_NO_USER_MESSAGE = ("pm_no_user_message", False, False, True)
     EXCEPTION = ("exception", False, False, True)

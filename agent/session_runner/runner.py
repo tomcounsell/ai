@@ -1079,12 +1079,20 @@ class SessionRunner:
                     summary.exit_message = truncate_exit_message(str(failure))
                     self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
                     break
-                if (failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT) or not (
-                    outcome.reply_text or ""
-                ).strip():
-                    # Empty/whitespace-only PM turn → wrap-up guard, never an
-                    # infinite loop (plan Failure Path).
+                if failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT:
+                    # A harness-level empty output is a failure for every
+                    # session, handoff or not.
                     summary.exit_reason = ExitReason.PM_EMPTY_TURN
+                    break
+                if not (outcome.reply_text or "").strip():
+                    # Empty/whitespace-only PM turn → wrap-up guard, never an
+                    # infinite loop (plan Failure Path). A reflection-handoff
+                    # session that judged there was nothing to say ends
+                    # silently instead (failure is None here by the branches
+                    # above).
+                    summary.exit_reason = (
+                        self._handoff_silent_exit_reason() or ExitReason.PM_EMPTY_TURN
+                    )
                     break
 
                 # -- Genuine turn end ----------------------------------------
@@ -1908,6 +1916,28 @@ class SessionRunner:
             )
             return False
 
+    def _handoff_silent_exit_reason(self) -> ExitReason | None:
+        """Exit reason for a reflection-handoff session ending with nothing to say.
+
+        ``None`` for every other session, and for a handoff session that has
+        already routed a user-facing message (its empty ending is then an
+        ordinary one). A delivery-required handoff that ends silent is
+        ``HANDOFF_UNDELIVERED``; any other handoff is ``HANDOFF_SILENT``. The
+        rule keys on the explicit origin marker and nothing else.
+        """
+        extra = getattr(self._agent_session, "extra_context", None)
+        if not isinstance(extra, dict) or extra.get("origin") != "reflection_handoff":
+            return None
+        if self._adapter.user_facing_routed:
+            return None
+        source = extra.get("handoff_source", "?")
+        sid = getattr(self._agent_session, "session_id", "?")
+        if extra.get("handoff_requires_delivery"):
+            logger.warning("handoff-undelivered %s %s", source, sid)
+            return ExitReason.HANDOFF_UNDELIVERED
+        logger.info("handoff-silent %s %s", source, sid)
+        return ExitReason.HANDOFF_SILENT
+
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
@@ -1981,6 +2011,14 @@ class SessionRunner:
             payload = classification.payload or ""
             if payload:
                 self._adapter.on_complete_payload(payload, classification.file_paths)
+            else:
+                # An empty [/complete] in a reflection-handoff session is the
+                # agent judging there is nothing to say.
+                silent = self._handoff_silent_exit_reason()
+                if silent is not None:
+                    return _RouteDecision(
+                        should_break=True, exit_reason=silent, compliance_miss=miss
+                    )
             return _RouteDecision(
                 should_break=True, exit_reason=ExitReason.PM_COMPLETE, compliance_miss=miss
             )

@@ -556,3 +556,88 @@ def test_session_events_list_is_not_count_trimmed():
     # Oldest entry retained, not trimmed away.
     assert any(e.get("n") == 0 for e in events if e["type"] == "runner_turn")
     assert events[-1]["n"] == 29
+
+
+# --------------------------------------------------------------------------
+# Reflection-handoff silent completion (#3588)
+# --------------------------------------------------------------------------
+
+
+class HandoffSession(FakeSession):
+    def __init__(self, **extra):
+        super().__init__()
+        self.extra_context = {"origin": "reflection_handoff", "handoff_source": "t", **extra}
+
+
+def _empty_complete_outcome():
+    return "[/complete]"
+
+
+@pytest.mark.parametrize("script", [[""], ["   \n\t"], ["[/complete]"]])
+async def test_handoff_session_empty_ending_is_silent(script):
+    """An empty turn or an empty [/complete] in a handoff session ends
+    HANDOFF_SILENT: no wrap-up turn, no fallback message."""
+    runner, deliveries, _, driver = make_runner(script, session=HandoffSession())
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.HANDOFF_SILENT
+    assert deliveries == []
+    assert len(driver.calls) == 1
+    assert OPERATOR_TERMINAL_MESSAGE not in deliveries
+
+
+@pytest.mark.parametrize("script", [[""], ["[/complete]"]])
+async def test_handoff_requires_delivery_silence_is_undelivered(script, caplog):
+    runner, deliveries, _, driver = make_runner(
+        script, session=HandoffSession(handoff_requires_delivery=True)
+    )
+    with caplog.at_level("WARNING"):
+        summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.HANDOFF_UNDELIVERED
+    assert deliveries == []
+    assert len(driver.calls) == 1
+    assert "handoff-undelivered" in caplog.text
+    assert not summary.exit_reason.is_clean
+
+
+async def test_handoff_empty_output_failure_is_not_silent():
+    """A harness EMPTY_OUTPUT failure stays PM_EMPTY_TURN in a handoff session."""
+    failing = HeadlessTurnOutcome(
+        reply_text="",
+        turn_ended=True,
+        turn_end_source="result",
+        failure=TurnFailure(ExitReason.EMPTY_OUTPUT, "no output"),
+    )
+    runner, _, _, _ = make_runner([failing, ""], session=HandoffSession())
+    summary = await runner.run("go")
+    assert summary.exit_reason is not ExitReason.HANDOFF_SILENT
+    assert not summary.exit_reason.is_clean
+
+
+async def test_handoff_harness_error_is_error():
+    failing = HeadlessTurnOutcome(
+        reply_text="",
+        turn_ended=True,
+        turn_end_source="result",
+        failure=TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, "boom"),
+    )
+    runner, _, _, _ = make_runner([failing], session=HandoffSession())
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.ERROR
+
+
+async def test_non_handoff_empty_turn_unchanged():
+    """A session without the origin marker keeps wrap-up + fallback."""
+    runner, deliveries, _, driver = make_runner(["", ""])
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.PM_NO_USER_MESSAGE
+    assert deliveries == [OPERATOR_TERMINAL_MESSAGE]
+    assert len(driver.calls) == 2
+
+
+async def test_handoff_silent_with_subagent_in_flight_is_downgraded(monkeypatch):
+    """The #2420 fail-closed downgrade still applies to a silent handoff exit."""
+    monkeypatch.setattr("agent.session_runner.runner.subagent_in_flight", lambda *a, **k: True)
+    runner, _, _, driver = make_runner([""], session=HandoffSession())
+    driver.claude_session_id = "claude-sid"
+    summary = await runner.run("go")
+    assert summary.exit_reason is ExitReason.PM_USER_SUBAGENT_LIVE
