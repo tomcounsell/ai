@@ -2374,3 +2374,28 @@ def test_paused_skills_sync_skips_skill_renamed_removals(fake_project, fake_home
     hardlinks._cleanup_renamed(user_claude, fake_project, hardlinks.HardlinkSyncResult())
 
     assert orphan.exists()
+
+
+def test_paused_skills_sync_skips_stale_skill_cleanup(fake_project, fake_home):
+    """Stale-skill cleanup is part of the skills half: while paused, neither a
+    renamed-away skill dir nor an intra-dir orphan file is removed."""
+    src_skill = fake_project / ".claude" / "skills-global" / "demo"
+    src_skill.mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("repo\n")
+    orphan_src = src_skill / "extra.md"
+    orphan_src.write_text("extra\n")
+    hardlinks.sync_claude_dirs(fake_project)
+
+    user_skills = fake_home / ".claude" / "skills"
+    # A dir left by an old name, still hardlinked to a live source SKILL.md.
+    stale_dir = user_skills / "old-demo"
+    stale_dir.mkdir()
+    os.link(src_skill / "SKILL.md", stale_dir / "SKILL.md")
+    # An intra-dir orphan: the source file is gone, the destination copy remains.
+    orphan_src.unlink()
+    _pause_skills_sync(fake_home)
+
+    hardlinks.sync_claude_dirs(fake_project)
+
+    assert (stale_dir / "SKILL.md").exists(), "stale-skill cleanup ran while paused"
+    assert (user_skills / "demo" / "extra.md").exists(), "orphan pruned while paused"
