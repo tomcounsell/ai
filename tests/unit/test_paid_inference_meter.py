@@ -133,6 +133,18 @@ class TestSettleFromResponse:
         # claude-sonnet-4-5: $3/Mtoken in -> exactly $3 for 1M prompt tokens.
         assert status_dict(pk)["settled_usd"] == pytest.approx(3.0)
 
+    def test_estimated_from_tokens_uses_sonnet_5_5_row(self):
+        pk = fresh_pk()
+        r = reserve(pk, 1.0, purpose="rsi", daily_paid_inference_usd=10.0)
+        response = FakeResponseAttr(
+            FakeUsageAttr(cost=None, prompt_tokens=1_000_000, completion_tokens=100_000),
+            model="claude-sonnet-5-5",
+        )
+        settle_from_response(pk, r.reservation_id, response)
+        # claude-sonnet-5-5: $2/Mtoken in + $10/Mtoken out -> $2 + $1 (the
+        # Sonnet-class fallback rate would give $4.50).
+        assert status_dict(pk)["settled_usd"] == pytest.approx(3.0)
+
     def test_response_with_no_usage_at_all_leaves_the_reservation_open(self):
         pk = fresh_pk()
         r = reserve(pk, 1.0, purpose="rsi", daily_paid_inference_usd=10.0)

@@ -120,6 +120,10 @@ async def run_action_agent(
                 max_tokens=_MAX_TOKENS,
                 system=_ACTION_SYSTEM,
                 tools=tools,
+                # Forced tool choice ("any"/"tool") is rejected by Sonnet 5.5
+                # (400). Moving this call off Haiku needs tool_choice "auto"
+                # plus strict tools, and a recheck of the escalation gate that
+                # treats a missing tool_use as a draft.
                 tool_choice={"type": "any"},
                 messages=[{"role": "user", "content": prompt}],
             )

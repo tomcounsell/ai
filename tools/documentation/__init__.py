@@ -12,6 +12,7 @@ import requests
 
 from agent.llm.tasks import Backend, LLMTask, TaskKind
 from config.models import MODEL_REASONING, OPENROUTER_SONNET, OPENROUTER_URL
+from tools.llm_reply import ReplyTruncated, anthropic_text, openrouter_text
 
 # Thinking: documentation generation over raw HTTP (Anthropic, OpenRouter fallback).
 # Fail-safe: an ``{"error": ...}`` dict on timeout, transport, or any other error.
@@ -25,6 +26,11 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 # Documentation generation needs reasoning capability
 DEFAULT_MODEL = MODEL_REASONING
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
+
+# Prose generation needs no multi-step reasoning: the Anthropic request thinks
+# only between tool calls (i.e. not at all here). MAX_TOKENS still leaves
+# headroom for OpenRouter, where thinking stays on by default.
+MAX_TOKENS = 8192
 
 
 class DocumentationError(Exception):
@@ -100,7 +106,8 @@ def generate_docs(
                 },
                 json={
                     "model": DEFAULT_MODEL,
-                    "max_tokens": 4096,
+                    "max_tokens": MAX_TOKENS,
+                    "thinking": {"type": "between_tools"},
                     "messages": [{"role": "user", "content": prompt}],
                 },
                 timeout=120,
@@ -115,7 +122,7 @@ def generate_docs(
                 json={
                     "model": DEFAULT_MODEL_OPENROUTER,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 4096,
+                    "max_tokens": MAX_TOKENS,
                 },
                 timeout=120,
             )
@@ -125,9 +132,9 @@ def generate_docs(
 
         # Extract content based on API
         if use_anthropic:
-            text = result.get("content", [{}])[0].get("text", "")
+            text = anthropic_text(result, max_tokens=MAX_TOKENS)
         else:
-            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            text = openrouter_text(result, max_tokens=MAX_TOKENS)
 
         if not text:
             return {"error": "No response from AI"}
@@ -139,6 +146,8 @@ def generate_docs(
             "format": ("markdown" if doc_type in ("readme", "api", "changelog") else style),
         }
 
+    except ReplyTruncated as e:
+        return {"error": str(e)}
     except requests.exceptions.Timeout:
         return {"error": "Documentation request timed out"}
     except requests.exceptions.RequestException as e:

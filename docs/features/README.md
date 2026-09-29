@@ -64,6 +64,7 @@ Feature documentation for the Valor AI system. Each document describes an implem
 | [Deployment](deployment.md) | Multi-instance deployment configuration with per-machine project routing. | Shipped |
 | [Design Audit](do-design-audit.md) | Audit web UI against 10 premium design criteria with severity ratings. | Shipped |
 | [Design-System Tooling](design-system-tooling.md) | One-way `.pen` → DESIGN.md + brand.css + source.css + DTCG/Tailwind exports generator, with drift + read-only validators and an escape-hatch env var. | Shipped |
+| [Direct-API Reply Handling](direct-api-reply-handling.md) | `tools/llm_reply.py` extracts text blocks only from direct Anthropic and OpenRouter replies, treats truncation as failure (`ReplyTruncated`), and parses the last complete JSON value; the four direct-API tools each carry a documented thinking, effort, and `max_tokens` setting for Claude Sonnet 5.5. | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration. | Shipped |
 | [Do-Build AI Evaluator](do-build-ai-evaluator.md) | AI semantic evaluator step in /do-build: reads plan acceptance criteria, compares against the git diff, and returns PASS/PARTIAL/FAIL verdicts with evidence. | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers, called automatically by do-build. | Shipped |

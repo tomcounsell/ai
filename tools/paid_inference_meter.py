@@ -45,11 +45,15 @@ KEY_EXPIRY_SECONDS = 30 * 86400
 REFUSAL_NO_FORECAST = "INVALID_AMOUNT"
 REFUSAL_EXHAUSTED = "day_exhausted"
 
-#: Price table retrieved 2026-09-14 from public per-provider pricing pages;
+#: Price table retrieved 2026-09-29 from public per-provider pricing pages;
 #: USD per million tokens. Used only when a response carries no
 #: ``usage.cost`` -- see the module docstring's two-branch settlement.
-PRICE_TABLE_RETRIEVED_AT = "2026-09-14"
+#: ``claude-sonnet-5-5`` is from the OpenRouter public listing
+#: (https://openrouter.ai/api/v1/models, ``anthropic/claude-sonnet-5.5``:
+#: prompt $0.000002 / completion $0.00001 per token).
+PRICE_TABLE_RETRIEVED_AT = "2026-09-29"
 PRICE_TABLE: dict[str, dict[str, float]] = {
+    "claude-sonnet-5-5": {"usd_per_mtoken_in": 2.0, "usd_per_mtoken_out": 10.0},
     "claude-sonnet-4-5": {"usd_per_mtoken_in": 3.0, "usd_per_mtoken_out": 15.0},
     "claude-opus-4-1": {"usd_per_mtoken_in": 15.0, "usd_per_mtoken_out": 75.0},
     "gpt-5": {"usd_per_mtoken_in": 5.0, "usd_per_mtoken_out": 15.0},
