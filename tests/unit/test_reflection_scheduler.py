@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -784,8 +785,6 @@ class TestFairDispatch:
 
     @pytest.mark.asyncio
     async def test_tail_entry_dispatched_within_bound_behind_hogs(self):
-        import math
-
         cap = REFLECTION_STARTUP_MAX_CONCURRENT
         total = cap * 3 + 1
         entries = self._entries(total)
@@ -804,8 +803,6 @@ class TestFairDispatch:
 
     @pytest.mark.asyncio
     async def test_never_run_tail_dispatched_within_bound(self):
-        import math
-
         cap = REFLECTION_STARTUP_MAX_CONCURRENT
         total = cap * 3 + 1
         entries = self._entries(total)
@@ -839,21 +836,55 @@ class TestFairDispatch:
     @pytest.mark.asyncio
     async def test_dispatch_exception_spends_slot_and_keeps_deferred_age(self, caplog):
         cap = REFLECTION_STARTUP_MAX_CONCURRENT
-        entries = self._entries(cap + 2)
+        entries = self._entries(cap + 1)
         ran_at = {e.name: 1_000_000.0 - 60 for e in entries}
-        failing = entries[0].name
+        failing = entries[-1].name  # last in registry order: deferred on tick 1
+        tick1_epoch = 1_000_000.0
 
         with caplog.at_level(logging.ERROR, logger="agent.reflection_scheduler"):
             first, scheduler = await self._run_ticks(
-                entries, ran_at, 1, create_task_raises=(failing,)
+                entries, ran_at, 2, create_task_raises=(failing,)
             )
 
+        # tick 2: `failing` is oldest, gets the first slot, and raises
         assert failing not in first
-        # the failed attempt used a slot: cap - 1 successes, the rest deferred
-        assert len(first) == cap - 1
         assert any("Error dispatching reflection" in r.getMessage() for r in caplog.records)
-        assert failing in scheduler._deferred_since
-        assert len(scheduler._deferred_since) == len(entries) - cap + 1
+        # the failed dispatch keeps the tick-1 deferral epoch, not tick 2's `now`
+        assert scheduler._deferred_since[failing] == tick1_epoch
+        # the failed attempt used a slot: of the cap re-due hogs, one is pushed off
+        assert len(scheduler._deferred_since) == 2
+
+    @pytest.mark.asyncio
+    async def test_duplicate_registry_name_dispatched_once_per_tick(self, caplog):
+        entries = self._entries(1) * 2
+        ran_at = {entries[0].name: 1_000_000.0 - 60}
+        dispatches: list[str] = []
+
+        def fake_create_task(coro, *, name=None):
+            coro.close()
+            dispatches.append(name or "")
+            task = MagicMock()
+            task.add_done_callback = MagicMock()
+            return task
+
+        state = MagicMock()
+        state.ran_at = ran_at[entries[0].name]
+        state.last_status = "success"
+        state.is_paused = MagicMock(return_value=False)
+        scheduler = ReflectionScheduler()
+        scheduler._entries = entries
+        with (
+            caplog.at_level(logging.WARNING, logger="agent.reflection_scheduler"),
+            patch("agent.reflection_scheduler.Reflection.get_or_create", return_value=state),
+            patch("agent.reflection_scheduler._latest_run_timestamp", return_value=None),
+            patch("agent.reflection_scheduler.asyncio.create_task", side_effect=fake_create_task),
+            patch("agent.reflection_scheduler.run_reflection"),
+            patch("agent.reflection_scheduler.time.time", return_value=1_000_000.0),
+        ):
+            assert await scheduler.tick() == 1
+
+        assert dispatches == [f"reflection-{entries[0].name}"]
+        assert any("Skipping duplicate registry entry" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_empty_registry_has_no_deferrals(self):

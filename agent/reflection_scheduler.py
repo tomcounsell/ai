@@ -956,9 +956,12 @@ class ReflectionScheduler:
         Due function-type reflections are collected during the registry walk and
         dispatched afterwards, oldest-due first (ties broken by registry order),
         up to ``REFLECTION_STARTUP_MAX_CONCURRENT``. The rest are deferred and
-        rank first on later ticks. Absent dispatch failures, every due function
-        reflection is dispatched within ceil((N - 1) / cap) ticks of its first
-        deferral, where N is the number of enabled function-type entries.
+        rank first on later ticks. Absent dispatch failures, and provided no
+        entry stays due after it runs, every due function reflection is
+        dispatched within ceil((N - 1) / cap) ticks of its first deferral, where
+        N is the number of enabled function-type entries. A same-named duplicate
+        registry entry is skipped with a warning so one tick never dispatches a
+        reflection twice.
         Agent-type reflections are awaited inline and are not capped.
 
         Returns:
@@ -973,6 +976,7 @@ class ReflectionScheduler:
         enqueued = 0
         # Due function-type reflections: (registry index, entry, state, due_epoch).
         candidates: list[tuple[int, ReflectionEntry, Reflection, float | None]] = []
+        collected: set[str] = set()
 
         for index, entry in enumerate(self._entries):
             try:
@@ -1017,6 +1021,16 @@ class ReflectionScheduler:
 
                 # Execute or enqueue
                 if entry.execution_type == "function":
+                    # Dispatch is deferred until after the walk, so a duplicate
+                    # name would read the same not-yet-started state and be
+                    # dispatched twice in this tick.
+                    if entry.name in collected:
+                        logger.warning(
+                            "[reflection] Skipping duplicate registry entry %s this tick",
+                            entry.name,
+                        )
+                        continue
+                    collected.add(entry.name)
                     candidates.append((index, entry, state, due_epoch))
                     continue
                 else:
@@ -1051,7 +1065,9 @@ class ReflectionScheduler:
         previously_deferred = self._deferred_since
         deferred: dict[str, float] = {}
 
-        def age_key(candidate):
+        def age_key(
+            candidate: tuple[int, ReflectionEntry, Reflection, float | None],
+        ) -> tuple[float, int]:
             index, entry, _state, due_epoch = candidate
             age = due_epoch if due_epoch is not None else now
             return (min(age, previously_deferred.get(entry.name, float("inf"))), index)
