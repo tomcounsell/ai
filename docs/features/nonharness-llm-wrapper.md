@@ -84,6 +84,8 @@ The hotfix #1055 / #1111 invariant lives here: `agent/anthropic_client.py` holds
 4. That client is injected into PydanticAI: `AnthropicProvider(anthropic_client=client)` -> `AnthropicModel(route.model, provider=...)` -> `Agent(model, output_type=output_type, system_prompt=system)`.
 5. The slot releases on `__aexit__`.
 
+The leg uses PydanticAI's tool output (a forced `tool_choice`). Claude Sonnet 5.5 rejects a forced `tool_choice` with a 400, so this leg serves Haiku only; no route passes `SONNET` or `MODEL_REASONING` to `run_typed`. Making the leg serve Sonnet 5.5 means switching it to native output, as the Ollama leg already does; that work is tracked in [#3578](https://github.com/tomcounsell/ai/issues/3578).
+
 The leg publishes how long it waited for the slot through `slot_wait_ms`, a `ContextVar` set the moment the slot is held, so a caller that audits queue time (`bridge/promise_gate.py`'s `queue_wait_ms` audit column) resets it before `run_typed` and reads it after. It stays at whatever the caller set when the slot was never acquired.
 
 ### The Ollama leg (`backends/ollama.py`)
