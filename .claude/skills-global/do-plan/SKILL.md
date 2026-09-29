@@ -112,7 +112,7 @@ Gather relevant external context before planning. This surfaces current document
    1. Read the full issue body (not just the title). Extract the Problem, Desired Outcome, and any Acceptance Criteria checklist items verbatim.
    2. Read the `## Recon Summary` section of the issue if present. Extract the "Confirmed," "Revised," "Pre-requisites," and "Dropped" buckets — these are direct inputs to the plan's Solution and No-Gos sections.
    3. Follow every cited sibling issue or PR referenced in the issue body. For each, summarize its relevance to the current work in one sentence. Record these under Prior Art.
-2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
+2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed). If the issue carries a `## Fog (Not Yet Specified)` section or records blue-sky mode, do not narrow the fog away: follow "When the issue is fog-forward" in `SCOPING.md`.
 3. **Blast radius analysis** - If the change involves code modifications, map the affected files. If the context file declares a blast-radius / code-impact tool, run it and route its results to plan sections (modify → **Solution**, dependency → **Risks**, test → **Success Criteria**, config → **Solution**, docs → **Documentation**, tangential coupling → **Rabbit Holes**). Otherwise use `git grep` and `Grep`/`Glob` over the symbols and paths the issue names to estimate the blast radius by hand. Skip if the change is purely documentation or process-related.
 
 4. **Prior art search** - Search closed issues and merged PRs for related work. This prevents
@@ -208,6 +208,8 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
 5. **Prototype isolation** - Prototype spikes MUST use `isolation: "worktree"` to avoid repo pollution. Each spike returns a yes/no/finding — no committed code, no half-implementations
 6. **Collect results** - Aggregate spike findings into the `## Spike Results` section of the plan
 7. **Filter Open Questions** - Only assumptions that spikes couldn't resolve go into Open Questions for the human
+
+**Fog and model selection:** for a fog-forward issue, send survey and research spikes to the cheapest capable model, and spend the plan author's strongest reasoning on the load-bearing decision the fog hangs on.
 
 **Skip if:** No verifiable assumptions identified, or all assumptions require human judgment (business decisions, priority calls).
 
