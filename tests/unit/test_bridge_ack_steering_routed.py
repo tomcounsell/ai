@@ -567,3 +567,61 @@ class TestMediaEnrichment:
             )
 
         assert call_order == ["push", "react"]
+
+
+def _bridge_calls(name: str) -> list:
+    """Every call node to ``name`` (bare-name callee) in bridge/telegram_bridge.py."""
+    import ast
+
+    import bridge.telegram_bridge as bridge_module
+
+    tree = ast.parse(Path(bridge_module.__file__).read_text())
+    return [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
+    ]
+
+
+def _kwarg(call_node, name: str):
+    return next((k.value for k in call_node.keywords if k.arg == name), None)
+
+
+def test_ack_steering_routed_call_sites_pass_session():
+    """Every call site that holds a session row must pass ``session=`` (#3588).
+
+    Without it the handoff human-steer stamp is silently skipped. The single
+    exception is the in-memory coalescing guard, which has no row in hand and is
+    identified by its ``session_id=guard_session_id`` argument.
+    """
+    import ast
+
+    calls = _bridge_calls("_ack_steering_routed")
+    assert len(calls) >= 5, "expected the bridge's steering call sites to be found"
+    missing = []
+    for c in calls:
+        if _kwarg(c, "session") is not None:
+            continue
+        sid = _kwarg(c, "session_id")
+        if isinstance(sid, ast.Name) and sid.id == "guard_session_id":
+            continue
+        missing.append(c.lineno)
+    assert not missing, f"_ack_steering_routed calls missing session= at lines {missing}"
+
+
+def test_human_steer_push_sites_pass_human_sender():
+    """Every push of human text (helper, live-edit, duplicate-edit) passes ``human_sender=``.
+
+    The classifier's context advisory is machine-authored (constant sender name)
+    and is exempt.
+    """
+    import ast
+
+    missing = []
+    for c in _bridge_calls("push_steering_message"):
+        sender = c.args[2] if len(c.args) > 2 else None
+        if isinstance(sender, ast.Constant):
+            continue
+        if _kwarg(c, "human_sender") is None:
+            missing.append(c.lineno)
+    assert not missing, f"push_steering_message calls missing human_sender= at lines {missing}"

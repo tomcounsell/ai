@@ -28,12 +28,16 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 
 from config.machine import get_machine_name
 from config.settings import settings
 from utils.utc import to_unix_ts, utc_iso, utc_now
+
+if TYPE_CHECKING:
+    from models.agent_session import AgentSession
 
 # Load environment variables FIRST before any env checks.
 # Under launchd (VALOR_LAUNCHD=1), env vars are injected directly into the plist
@@ -1067,7 +1071,7 @@ async def _ack_steering_routed(
     log_context: str,
     room_id: str | None = None,
     context_advisory: str | None = None,
-    session=None,
+    session: "AgentSession | None" = None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
 
@@ -1078,6 +1082,11 @@ async def _ack_steering_routed(
     Caller is responsible for ``return`` after this call. ``log_context``
     must NOT include the trailing ``(steer|abort)`` suffix — the helper
     appends it from the resolved abort detection.
+
+    ``session`` is the caller's in-memory AgentSession row for the target. It
+    gates the handoff human-steer stamp (``human_sender``): a reflection-handoff
+    session is stamped without any Redis lookup. ``None`` (no row in hand, e.g.
+    the in-memory coalescing guard) means no stamp.
 
     ``room_id`` is the Room composite the caller derived from the session row
     it selected, via ``models.room.room_id_for_session``. A caller holding no
