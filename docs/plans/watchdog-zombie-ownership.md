@@ -105,27 +105,75 @@ No prerequisites — this work has no external dependencies.
 
 ## Solution
 
-(filled below)
+### Key Elements
+
+- **Delete the watchdog zombie sweep.** The watchdog stops enumerating, classifying, counting, or signalling `claude`/`pyright` processes, both in the per-tick health check and in recovery levels 2-4. This answers the issue's open question: the cleanup is no longer needed in the watchdog, because the worker is the sole execution engine and already reaps its own orphans behind ownership gates.
+- **Worker reapers stay the sole owner of orphan cleanup, unchanged in what they kill.** `_reap_orphan_session_processes` and `_fast_reap_stale_print_oneshots` keep their existing gates (PPID==1 or orphaned `sh -c` parent, Claude/MCP or stale-one-shot signature, no live owning AgentSession, `create_time` PID-reuse fence).
+- **Evidence-bearing kill logs.** Every signal the worker reapers send is logged with the full command (capped by a named constant), the parent PID, and the evidence behind the verdict.
+
+### Flow
+
+Interactive `claude` session runs for 5h → watchdog ticks every 60s → watchdog checks bridge process, logs, crash pattern, update flow, scan health → never looks at the `claude` process → session keeps running.
+
+Worker dies mid-turn → its `claude -p` reparents to launchd (PPID==1) → worker restarts (launchd KeepAlive) → startup orphan reap finds PPID==1 + no live owning session → SIGTERM, staged SIGKILL → log line names command, `ppid=1`, and "no live owning session".
+
+### Technical Approach
+
+- In `monitoring/bridge_watchdog.py`, delete: `ZOMBIE_THRESHOLD_SECONDS`, `SOFT_INSTANCE_LIMIT`, `ZOMBIE_PROCESS_PATTERNS`, `ZOMBIE_PROCESS_EXCLUDES`, `_parse_elapsed_time` (its only caller is `_enumerate_claude_processes`), `_enumerate_claude_processes`, `classify_zombies`, `kill_zombie_processes`, `_kill_detected_zombies`; the "Check 4: Zombie process detection" block in `check_bridge_health()`; the four `HealthStatus` zombie/instance fields and the `__post_init__` that only defaults `zombie_pids`; the `_kill_detected_zombies()` calls in `execute_recovery()` levels 2, 3, 4; the zombie/instance lines in `--check-only`. Update the module docstring's level list ("Kill stale processes + restart" stays; it refers to `kill_stale_processes`, the bridge-PID sweep, which is untouched) and the inline level comments ("Kill stale + zombie processes" becomes "Kill stale bridge processes").
+- Consequence to accept, not paper over: with the sweep gone, a dead bridge is level 1 (restart) rather than being bumped to level 2 by an unrelated old `claude` process. That is the correct level; the bridge spawns no `claude` subprocess (only `bridge/routing.py:1735`, a customer-id resolver), so no `claude` process has any bearing on bridge health.
+- In `agent/session_health.py::_reap_orphan_session_processes`, extend the `[orphan-reap] Killed PID` log line to include `ppid`, the orphan route (`ppid==1` or `orphaned sh -c wrapper ppid=<N>`), and the ownership evidence (`no owning session`, or `owning session <id> status=<s> heartbeat_age=<n>s` when a session was found but failed `_session_is_alive`). Capture the orphan route as a local when the gate at the PPID check passes, so the log reports what the gate actually decided rather than re-deriving it.
+- In `_fast_reap_stale_print_oneshots`, extend both the SIGTERM and SIGKILL log lines with `ppid=1`, the process age in seconds, and `owner=not-live` (the `_oneshot_owner_is_live` result). That helper deliberately folds "no live owner" and "lookup timed out" into one `False` (fail toward reapable); the log reports that single verdict and the helper's contract stays as is.
+- Command text in both reapers' log lines uses a new module constant `ORPHAN_KILL_LOG_CMD_CHARS = 500` instead of the current `[:100]` slice, so the command is recognisable (the 100-char cut drops the flags that distinguish an interactive session from a harness).
+- `pyright`: no sweep matches it after this change. A `pyright` spawned under a worker harness dies with the harness (the session runner signals the whole process group, and the hourly reaper walks descendants before killing a parent). A `pyright` under a human's editor or terminal session is the human's process. This satisfies the "pyright reviewed under the same rule" criterion: the system kills only what it owns.
 
 ## Failure Path Test Strategy
 
-(filled below)
+### Exception Handling Coverage
+- [ ] The watchdog code being deleted contains the only exception handlers in scope on the watchdog side; no handler is added. The worker reapers' existing per-PID `except` blocks are unchanged; the log-line edits sit inside the existing `try` bodies and add no new handler. Add no test for unchanged handlers.
+
+### Empty/Invalid Input Handling
+- [ ] The enriched log lines must not raise when the owning session is `None`, when `last_heartbeat_at` is `None`, or when `cmdline` is empty. Covered by the reaper log-line tests below (session `None` case and session-with-no-heartbeat case).
+
+### Error State Rendering
+- [ ] No user-visible output changes except `--check-only`, whose zombie lines are removed. `TestCheckOnlyOutput` asserts the remaining fields still print and that no "Zombie" / "Active claude instances" text appears.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_bridge_watchdog.py` — UPDATE (details below)
+- [ ] `tests/unit/test_bridge_watchdog.py::TestParseElapsedTime` — DELETE: function removed.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestEnumerateClaudeProcesses` — DELETE: function removed.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestClassifyZombies` — DELETE: function removed.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestKillZombieProcesses` — DELETE: function removed.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestHealthStatus::test_default_zombie_fields` and `::test_zombie_fields_populated` — DELETE: fields removed. `::test_alert_signal_fields_settable` — UPDATE only if it passes zombie kwargs.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestCheckBridgeHealthZombieIntegration` — REPLACE: `test_populates_zombie_data` and `test_no_zombies_still_populates` become the new never-signals-claude regression test (see Step 2); `test_a_wedged_update_flow_makes_the_bridge_unhealthy` — UPDATE: drop the `kill_zombie_processes` / `_enumerate_claude_processes` patches, keep the assertion, and move it to a class whose name does not mention zombies.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestCheckOnlyOutput` (3 tests) — UPDATE: drop zombie/instance kwargs; replace `test_check_only_includes_zombie_section`, `test_check_only_with_zombies`, `test_check_only_instance_limit_warning` with one test asserting the zombie and active-instance lines are absent.
+- [ ] `tests/unit/test_bridge_watchdog.py::TestRecoveryExhaustedFallback::test_revert_failure_routes_to_recovery_exhausted` — UPDATE: drop the `_kill_detected_zombies` patch.
+- [ ] `tests/unit/test_reconciler_scan_health.py` (lines ~327 and ~541) — UPDATE: drop the `_enumerate_claude_processes` patch from both `with` blocks (patching a deleted attribute raises `AttributeError`).
+- [ ] Worker reaper tests that assert on the `[orphan-reap] Killed PID` or `[fast-oneshot-reap]` log text — UPDATE if any match the exact old format; the builder locates them with `git grep -n "orphan-reap\] Killed\|fast-oneshot-reap\] SIG" tests`.
 
 ## Rabbit Holes
 
-(filled below)
+- **Making the watchdog ownership-aware instead of deleting the sweep** (reading `find_live_session_by_pid`, walking process trees, checking TTYs). It would duplicate the worker's gates in a second process with a second liveness opinion, the exact pattern the issue calls out. Delete, don't patch.
+- **Tightening the worker reaper's `_CLAUDE_CMDLINE_RE`.** Its second branch matches any non-`-p` `claude ... --permission-mode bypassPermissions`, which includes interactive sessions. It is gated on PPID==1 (or an orphaned wrapper) plus no live owning session. A terminal or tmux `claude` has a live shell parent and is never a candidate. Changing that regex is a separate design question with its own history (#1271, #1632); leave it.
+- **Recovering the true identity of the 186 historical kills.** The log never recorded command lines; there is nothing to recover.
+- **Adding a memory-pressure alarm to replace the "active instance" warning.** `SOFT_INSTANCE_LIMIT` counted human sessions as load and was never acted on. If memory pressure needs watching, that is its own issue.
 
 ## Risks
 
-(filled below)
+### Risk 1: A genuinely orphaned worker `claude -p` lingers longer
+**Impact:** with the watchdog gone, an orphaned harness waits for the worker's next reap. The fast reaper runs every health-loop tick for stale one-shots; the full reaper runs at worker startup and hourly. If the worker is down (e.g. `worker-disable`), orphans persist until it returns.
+**Mitigation:** the worker going down is itself the event that orphans harnesses, and launchd `KeepAlive` restarts it, whereupon the startup reap runs. A deliberately disabled worker is an operator choice. The old sweep would also have left orphans for up to 2h, so the worst case for an enabled worker (next tick) is faster than today.
+
+### Risk 2: Test or tooling still patches a deleted attribute
+**Impact:** `patch("monitoring.bridge_watchdog._enumerate_claude_processes")` raises `AttributeError` at test time.
+**Mitigation:** Test Impact enumerates both known files; Verification includes a `git grep` sweep for every removed symbol across the repo, which must return nothing.
+
+### Risk 3: A human process with PPID==1 matches the worker reaper
+**Impact:** an interactive `claude --permission-mode bypassPermissions` whose shell parent died (reparented to launchd, no TTY) could be reaped by the worker.
+**Mitigation:** this is unchanged by the plan and matches the issue's own standard of positive orphan evidence (parent gone, no owning session). The enriched log line makes any such kill attributable. Noted, not changed (see Rabbit Holes).
 
 ## Race Conditions
 
-(filled below)
+No race conditions introduced. The change removes a second, uncoordinated killer (the watchdog) that raced the worker reapers over the same PIDs; after it, only the worker signals these processes. The log-line edits read values already captured in the same loop iteration (`ppid`, `create_time`, `cmdline`, the resolved `session`) and add no new shared state.
 
 ## No-Gos (Out of Scope)
 
