@@ -996,7 +996,6 @@ async def _maybe_send_failure_notice(messenger, session_id: str, session=None) -
     try:
         from agent.cancel_reason import get_cancel_reason
         from agent.notification_copy import FAILURE_NOTICE
-        from config.enums import is_reflection_handoff
 
         # A reflection-handoff session has no human waiting (#3588): its
         # failure stays an operator signal.
@@ -2544,6 +2543,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             messenger=messenger,
             working_dir=str(working_dir),
             project_key=getattr(session, "project_key", None),
+            silent_interrupt=is_reflection_handoff(session),
         )
         # `send_result=False` is the right call: the runner adapter publishes
         # `[/user]` and `[/complete]` payloads mid-loop through the bridge
@@ -3064,9 +3064,8 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
                 # A handoff session's timeout has no reply coming to resume it,
                 # so its worktree is reclaimed like any other terminal exit.
-                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT and not (
-                    _agent_session_for_cleanup is not None
-                    and is_reflection_handoff(_agent_session_for_cleanup)
+                _turn_timed_out = _exit_reason_for_cleanup == ExitReason.TURN_TIMEOUT and (
+                    not is_reflection_handoff(session)
                 )
                 if _wd is not None:
                     # Pre-finalize guard (#3176). Its one remaining job is

@@ -206,3 +206,23 @@ class TestFlapProtection:
             "won't resume automatically" in call.args[0]
             for call in messenger._send_callback.await_args_list
         )
+
+
+class TestSilentInterrupt:
+    """A reflection-handoff session (#3588) never pages the Room on a terminal cancel."""
+
+    async def test_silent_interrupt_suppresses_no_resume_notice(self, messenger, send_callback):
+        task = BackgroundTask(
+            messenger=messenger, acknowledgment_timeout=5.0, silent_interrupt=True
+        )
+        with (
+            _cancel_reason_patch("no_resume"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_mock(acquired=True)),
+        ):
+            await task.run(_cancelling_coro(), send_result=True)
+            await asyncio.sleep(0.05)
+            task._task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task._task
+
+        send_callback.assert_not_awaited()

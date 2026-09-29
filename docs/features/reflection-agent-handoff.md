@@ -76,7 +76,7 @@ explicit origin marker and ends:
 
 A handoff session never receives the wrap-up turn or any canned human text
 (`OPERATOR_TERMINAL_MESSAGE`, `RUNNER_ERROR_USER_MESSAGE`, the turn-timeout and
-steer-abort notices, the executor failure notice, the interrupt notice). A
+steer-abort notices, the executor failure notice, the terminal "stopped" interrupt notice, which the executor suppresses via `BackgroundTask(silent_interrupt=True)`). A
 harness-level empty output, a harness error, or running out of turns ends as the
 non-clean anomaly `ERROR`; a turn timeout ends `TURN_TIMEOUT` (`failed`). All are
 visible to the operator and silent in the Room. A timed-out handoff session's

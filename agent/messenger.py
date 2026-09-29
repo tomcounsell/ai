@@ -175,6 +175,7 @@ class BackgroundTask:
         acknowledgment_timeout: float = 180.0,  # 3 minutes
         working_dir: str | None = None,
         project_key: str | None = None,
+        silent_interrupt: bool = False,
     ):
         """Construct a BackgroundTask.
 
@@ -197,8 +198,12 @@ class BackgroundTask:
                 TestMessengerArchitecturalBoundary``. When ``None``, the
                 counter falls back to the bare ``session-health:cwd_vanished``
                 key (mirrors the orphan-reap fallback shape).
+            silent_interrupt: When True the terminal "stopped" interrupt notice
+                is never sent. Set for reflection-handoff sessions (#3588),
+                which have no human waiting in the Room.
         """
         self.messenger = messenger
+        self._silent_interrupt = silent_interrupt
         self.acknowledgment_timeout = acknowledgment_timeout
         # Issue #1357: track the SDK subprocess's CWD so the watchdog can
         # detect a vanished worktree mid-run. Empty string is treated as None
@@ -291,7 +296,7 @@ class BackgroundTask:
                 from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
 
                 _reason = get_cancel_reason(self.messenger.session_id)
-                if _reason == "no_resume":
+                if _reason == "no_resume" and not self._silent_interrupt:
                     _should_send = True
                     try:
                         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
