@@ -317,4 +317,4 @@ CLI surface.
 
 ## Open Questions
 
-(filled below)
+None. The issue's one open question (is the watchdog sweep still needed?) is answered by recon: the worker's ownership-gated reapers already own orphan cleanup, so the sweep is deleted rather than patched.
