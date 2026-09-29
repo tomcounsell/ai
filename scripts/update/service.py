@@ -1441,6 +1441,8 @@ def verify_running_release_settled(
     results = verify_running_release(project_dir, head_sha, machine_check)
     while _needs_settle(results) and time.monotonic() < deadline:
         logger.info("verify_running_release: process still mid-boot — polling for a fresh beacon")
-        time.sleep(interval_s)
+        # Never sleep past the deadline: an interval coarser than the time left
+        # would overshoot the window, and with it /update's shell budget.
+        time.sleep(min(interval_s, max(0.0, deadline - time.monotonic())))
         results = verify_running_release(project_dir, head_sha, machine_check)
     return results

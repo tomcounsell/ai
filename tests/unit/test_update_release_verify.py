@@ -291,6 +291,32 @@ def test_settle_gives_up_at_the_timeout(repo, live_processes, monkeypatch):
     assert elapsed < timeout_s + 2.0  # the deadline ended it
 
 
+def test_settle_sleep_never_overshoots_the_deadline(repo, live_processes, monkeypatch):
+    """An interval coarser than the window is clamped to the time left."""
+    real_sleep = time.sleep
+    monkeypatch.setattr(
+        service,
+        "get_process_start_ts",
+        lambda pid: time.time() if pid == 4242 else PROC_START_TS,
+    )
+    sleeps: list[float] = []
+
+    def _sleep(seconds):
+        sleeps.append(seconds)
+        real_sleep(seconds)
+
+    monkeypatch.setattr(service.time, "sleep", _sleep)
+    timeout_s, interval_s = 0.3, 30.0
+    started = time.monotonic()
+    results = service.verify_running_release_settled(
+        repo, get_short_sha(repo), FULL_MACHINE_CHECK, timeout_s=timeout_s, interval_s=interval_s
+    )
+    elapsed = time.monotonic() - started
+    assert results["bridge"]["classification"] == "unknown"
+    assert sleeps and all(s <= timeout_s for s in sleeps)
+    assert elapsed < timeout_s + 2.0
+
+
 def test_settle_never_waits_on_own_ancestor(repo, live_processes, monkeypatch):
     """A bridge-hosted /update blocks the bridge's own event loop while this
     verify runs, so a mid-boot bridge that is our ancestor cannot write its
