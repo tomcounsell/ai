@@ -11,6 +11,7 @@ failure-finalize block calls when `task.error` is set. Requirements:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -124,8 +125,6 @@ async def test_redis_unavailable_still_sends():
 @pytest.mark.asyncio
 async def test_reflection_handoff_session_gets_no_failure_notice():
     """A reflection-handoff session has no human waiting (#3588): no send at all."""
-    from types import SimpleNamespace
-
     messenger = _messenger()
     handoff = SimpleNamespace(extra_context={"origin": "reflection_handoff"})
     redis = _redis_setnx(True)
@@ -139,9 +138,6 @@ async def test_reflection_handoff_session_gets_no_failure_notice():
     redis.set.assert_not_called()
 
 
-from types import SimpleNamespace as SimpleNamespaceCompat  # noqa: E402
-
-
 @pytest.mark.asyncio
 async def test_empty_output_fallback_logs_truthfully_for_handoff(caplog):
     """The empty-output branch says "no fallback sent" and sends nothing for a
@@ -152,7 +148,7 @@ async def test_empty_output_fallback_logs_truthfully_for_handoff(caplog):
 
     send_cb = AsyncMock()
     base = dict(project_key="p", chat_id="1", telegram_message_id=2)
-    handoff = SimpleNamespaceCompat(extra_context={"origin": "reflection_handoff"}, **base)
+    handoff = SimpleNamespace(extra_context={"origin": "reflection_handoff"}, **base)
     with caplog.at_level("WARNING"):
         assert await _deliver_empty_output_fallback(handoff, None, send_cb) is False
     send_cb.assert_not_awaited()
@@ -160,7 +156,7 @@ async def test_empty_output_fallback_logs_truthfully_for_handoff(caplog):
     assert "delivering fallback" not in caplog.text
 
     caplog.clear()
-    ordinary = SimpleNamespaceCompat(extra_context={}, **base)
+    ordinary = SimpleNamespace(extra_context={}, **base)
     with caplog.at_level("WARNING"):
         assert await _deliver_empty_output_fallback(ordinary, None, send_cb) is True
     send_cb.assert_awaited_once()

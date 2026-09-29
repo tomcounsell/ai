@@ -284,6 +284,7 @@ async def _dispatch_answer(client, *, poll_id, row: dict, chosen: str) -> None:
             steer_text,
             sender_name,
             room_id=room_id_for_session(target.session),
+            human_sender=True,
         )
         # Marked immediately after the side effect and before anything else that
         # can throw, so a later exception cannot release the claim and re-run it.

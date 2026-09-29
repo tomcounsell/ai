@@ -11,6 +11,7 @@ Usage:
         ...
 """
 
+import logging
 from enum import StrEnum
 
 # ``extra_context["origin"]`` value stamped on sessions created by
@@ -52,7 +53,10 @@ def is_reflection_handoff_live(session: object) -> bool:
         from models.agent_session import AgentSession  # noqa: PLC0415
 
         row = AgentSession.get_by_id(getattr(session, "id", None))
-    except Exception:  # noqa: BLE001 -- staleness fallback, never raises
+    except Exception as e:  # noqa: BLE001 -- staleness fallback, never raises
+        logging.getLogger(__name__).warning(
+            "[handoff] live re-read of session failed, using in-memory copy: %s", e
+        )
         return True
     return True if row is None else is_reflection_handoff(row)
 

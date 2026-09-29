@@ -264,6 +264,7 @@ def push_steering_message(
     front: bool = False,
     room_id: str | None = None,
     timestamp: float | None = None,
+    human_sender: bool = False,
 ) -> str:
     """Push a message to a steering queue — the Room leg, or the legacy leg.
 
@@ -304,6 +305,12 @@ def push_steering_message(
             the Room leg's age bound measures time since origination rather
             than time since the last re-push. An originating caller passes
             nothing and gets ``time.time()``.
+        human_sender: True when ``text`` is a human's own message. This is the
+            single chokepoint where a human steer is recorded: it stamps
+            ``human_steered`` onto a live reflection-handoff session
+            (:func:`mark_handoff_human_steered`) so its failure/timeout/interrupt
+            notices reach the human (#3588). Requeues of drained messages and
+            system advisories leave it False.
     """
     r = _get_redis()
 
@@ -338,6 +345,8 @@ def push_steering_message(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
         f"{text[:80]!r} (from {sender}){target_suffix}{front_suffix}"
     )
+    if human_sender:
+        mark_handoff_human_steered(session_id)
     return payload
 
 
@@ -623,7 +632,7 @@ def mark_handoff_human_steered(session_id: str) -> bool:
                 continue
             extra[HUMAN_STEERED_KEY] = True
             row.extra_context = extra
-            row.save(update_fields=["extra_context"])
+            row.save(update_fields=["extra_context", "updated_at"])
             stamped = True
         return stamped
     except Exception as e:  # noqa: BLE001

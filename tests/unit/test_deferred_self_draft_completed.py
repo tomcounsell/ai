@@ -1885,3 +1885,72 @@ async def test_deliver_system_notice_chokepoint_suppresses_handoff():
 
     send_cb.assert_not_awaited()
     redis_mock.set.assert_not_called()
+
+
+def test_reflection_handoff_flush_withholds_when_scrub_empties_text(cleanup):
+    """Scrubbing that empties the held text (dead path only) would ship the canned
+    "no longer available" line: a handoff withholds it instead (#3588)."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-scrub", cleanup, text="/tmp/gone/file.txt")
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch(
+        "bridge.message_drafter.convert_local_paths_to_attachments",
+        return_value=("", [], 1, 0),
+    ):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_reflection_handoff_flush_withholds_promise_gated_substitute(cleanup):
+    """A promise-gated draft is replaced by canned text, not the agent's reply:
+    a handoff withholds the substitute (#3588)."""
+    session = _make_handoff(f"{SID_PREFIX}handoff-promise", cleanup)
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    with patch("agent.session_health._gate_terminal_promise", return_value="canned substitute"):
+        assert flush_deferred_self_draft_sync(session, "completed") is False
+    assert _outbox_count(session.session_id) == 0
+
+
+def test_push_steering_message_stamps_human_sender_on_handoff(cleanup):
+    """The single steering chokepoint stamps a human steer; a non-human push
+    (advisory, requeue) leaves the handoff session silent (#3588)."""
+    from agent.steering import clear_steering_queue, push_steering_message
+    from config.enums import is_reflection_handoff_live
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-chokepoint", cleanup)
+    sid = session.session_id
+    try:
+        push_steering_message(sid, "advisory", "intake-classifier")
+        assert is_reflection_handoff_live(session) is True
+
+        push_steering_message(sid, "hello there", "Valor", human_sender=True)
+        assert is_reflection_handoff_live(session) is False
+    finally:
+        clear_steering_queue(sid)
+
+
+@pytest.mark.asyncio
+async def test_executor_reads_handoff_state_live_at_send_time(cleanup):
+    """The executor's in-memory session predates a human steer; both the empty-output
+    fallback and the failure notice must consult the fresh row (#3588)."""
+    from agent.session_executor import _deliver_empty_output_fallback, _maybe_send_failure_notice
+    from agent.steering import mark_handoff_human_steered
+
+    session = _make_handoff(f"{SID_PREFIX}handoff-live", cleanup)
+    send_cb = AsyncMock()
+
+    assert await _deliver_empty_output_fallback(session, None, send_cb) is False
+    send_cb.assert_not_awaited()
+
+    assert mark_handoff_human_steered(session.session_id) is True
+    # `session` is now stale (still looks like a silent handoff in memory).
+    assert await _deliver_empty_output_fallback(session, None, send_cb) is True
+    send_cb.assert_awaited_once()
+
+    messenger = AsyncMock()
+    messenger._send_callback = AsyncMock()
+    await _maybe_send_failure_notice(messenger, session.session_id, session)
+    messenger._send_callback.assert_awaited()
