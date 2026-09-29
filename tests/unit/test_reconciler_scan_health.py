@@ -324,7 +324,6 @@ def test_sustained_total_fault_alerts_but_never_escalates_recovery_level():
         patch("monitoring.bridge_watchdog.are_logs_fresh", return_value=True),
         patch("monitoring.bridge_watchdog.detect_crash_pattern", return_value=(False, None)),
         patch("monitoring.bridge_watchdog.get_recent_crashes", return_value=[]),
-        patch("monitoring.bridge_watchdog._enumerate_claude_processes", return_value=[]),
         patch("monitoring.bridge_watchdog.assess_update_flow", return_value=(True, "")),
         patch("monitoring.bridge_watchdog._get_watchdog_redis", return_value=_redis()),
     ):
@@ -538,7 +537,6 @@ def test_scan_health_failure_cannot_discard_a_wedge_verdict():
         patch("monitoring.bridge_watchdog.are_logs_fresh", return_value=True),
         patch("monitoring.bridge_watchdog.detect_crash_pattern", return_value=(False, None)),
         patch("monitoring.bridge_watchdog.get_recent_crashes", return_value=[]),
-        patch("monitoring.bridge_watchdog._enumerate_claude_processes", return_value=[]),
         patch(
             "monitoring.bridge_watchdog.assess_update_flow",
             return_value=(False, "bridge_update_loop_wedged"),

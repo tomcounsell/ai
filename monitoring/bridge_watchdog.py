@@ -130,8 +130,6 @@ UPDATE_PENDING_REPORT = DATA_DIR / "update-pending-report"
 # Thresholds
 LOG_STALENESS_THRESHOLD = 300  # 5 minutes - logs older than this are stale
 WATCHDOG_INTERVAL = 60  # Check every 60 seconds (hardcoded per plan)
-ZOMBIE_THRESHOLD_SECONDS = 7200  # 2 hours - processes older than this are zombies
-SOFT_INSTANCE_LIMIT = 5  # Warn when more than this many active claude processes
 
 # Update-flow / wedged-detector thresholds
 UPDATE_STALENESS_CEILING = 4 * 3600  # 4 hours — primary ceiling for absolute staleness
@@ -161,13 +159,6 @@ CRASH_STORM_THRESHOLD = int(os.environ.get("CRASH_STORM_THRESHOLD", "5"))
 # a genuinely broken bridge. See docs/plans/bridge_watchdog_level_5_livelock.md.
 WEDGE_DOMINANCE_FRACTION = float(os.environ.get("WEDGE_DOMINANCE_FRACTION", "0.9"))
 
-# Process name patterns to scan for zombies.
-# ZOMBIE_PROCESS_EXCLUDES filters out Claude Desktop app helper processes.
-ZOMBIE_PROCESS_PATTERNS = ("claude ", "pyright")
-
-# Patterns to exclude from process matching (Desktop app helpers)
-ZOMBIE_PROCESS_EXCLUDES = ("Claude.app", "Claude Helper")
-
 
 @dataclass
 class HealthStatus:
@@ -181,10 +172,6 @@ class HealthStatus:
     # 0 = healthy, 1-4 = escalation action level (5/alert is a separate
     # signal — see human_alert_needed)
     recovery_level: int
-    zombie_count: int = 0
-    zombie_pids: list[int] | None = None
-    zombie_memory_mb: float = 0.0
-    active_claude_count: int = 0
     update_flow_live: bool = True  # default True preserves existing tests
     update_flow_issue: str = ""
     # issue #2396: crash-count signal split from the action level. A storm no
@@ -199,10 +186,6 @@ class HealthStatus:
     # contributes to recovery_level.
     scan_health_ok: bool = True
     scan_health_issue: str = ""
-
-    def __post_init__(self):
-        if self.zombie_pids is None:
-            self.zombie_pids = []
 
 
 def is_bridge_running() -> tuple[bool, int | None]:
@@ -531,170 +514,6 @@ def are_logs_fresh() -> bool:
         return False
 
 
-def _parse_elapsed_time(etime_str: str) -> int:
-    """Convert ps etime format to seconds.
-
-    Handles formats:
-    - MM:SS (e.g., "05:23")
-    - HH:MM:SS (e.g., "01:05:23")
-    - D-HH:MM:SS (e.g., "2-01:05:23")
-    - DD-HH:MM:SS (e.g., "12-01:05:23")
-    """
-    etime_str = etime_str.strip()
-    days = 0
-
-    if "-" in etime_str:
-        day_part, time_part = etime_str.split("-", 1)
-        days = int(day_part)
-    else:
-        time_part = etime_str
-
-    parts = time_part.split(":")
-    if len(parts) == 2:
-        hours, minutes, seconds = 0, int(parts[0]), int(parts[1])
-    elif len(parts) == 3:
-        hours, minutes, seconds = int(parts[0]), int(parts[1]), int(parts[2])
-    else:
-        raise ValueError(f"Unexpected etime format: {etime_str}")
-
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
-
-
-def _enumerate_claude_processes() -> list[dict]:
-    """Enumerate all claude and pyright processes system-wide.
-
-    Returns list of dicts with keys: pid, etime_seconds, rss_mb, command
-    """
-    try:
-        result = subprocess.run(
-            ["ps", "-eo", "pid,etime,rss,command"],
-            capture_output=True,
-            text=True,
-            timeout=settings.timeouts.subprocess_default_s,
-        )
-        if result.returncode != 0:
-            logger.warning(f"ps command failed: {result.stderr}")
-            return []
-    except Exception as e:
-        logger.warning(f"Failed to enumerate processes: {e}")
-        return []
-
-    processes = []
-    for line in result.stdout.strip().split("\n")[1:]:  # Skip header
-        line = line.strip()
-        if not line:
-            continue
-
-        # Check if this line matches any of our target patterns
-        matched = False
-        for pattern in ZOMBIE_PROCESS_PATTERNS:
-            if pattern in line:
-                matched = True
-                break
-        if not matched:
-            continue
-
-        # Exclude Desktop app helper processes
-        if any(excl in line for excl in ZOMBIE_PROCESS_EXCLUDES):
-            continue
-
-        # Parse: PID ETIME RSS COMMAND...
-        parts = line.split(None, 3)
-        if len(parts) < 4:
-            logger.debug(f"Skipping malformed ps line: {line}")
-            continue
-
-        try:
-            pid = int(parts[0])
-            etime_seconds = _parse_elapsed_time(parts[1])
-            rss_kb = int(parts[2])
-            command = parts[3]
-
-            # Skip the watchdog itself and grep processes
-            if "bridge_watchdog" in command or "grep" in command:
-                continue
-
-            processes.append(
-                {
-                    "pid": pid,
-                    "etime_seconds": etime_seconds,
-                    "rss_mb": round(rss_kb / 1024, 1),
-                    "command": command[:200],  # Truncate long commands
-                }
-            )
-        except (ValueError, IndexError) as e:
-            logger.debug(f"Skipping unparseable ps line: {line} ({e})")
-            continue
-
-    return processes
-
-
-def classify_zombies(
-    processes: list[dict],
-    threshold_seconds: int = ZOMBIE_THRESHOLD_SECONDS,
-) -> tuple[list[dict], list[dict]]:
-    """Classify processes as zombies or active.
-
-    Returns (zombies, active) where each is a list of process dicts.
-    Zombies are processes with elapsed time exceeding the threshold.
-    """
-    zombies = []
-    active = []
-
-    for proc in processes:
-        if proc["etime_seconds"] >= threshold_seconds:
-            zombies.append(proc)
-        else:
-            active.append(proc)
-
-    return zombies, active
-
-
-def kill_zombie_processes(zombies: list[dict]) -> int:
-    """Kill identified zombie processes with SIGTERM -> SIGKILL escalation.
-
-    Returns count of processes successfully killed.
-    """
-    import signal
-
-    killed = 0
-    for proc in zombies:
-        pid = proc["pid"]
-        try:
-            # First try SIGTERM for graceful shutdown
-            os.kill(pid, signal.SIGTERM)
-            logger.info(
-                f"Sent SIGTERM to zombie process {pid} "
-                f"(age: {proc['etime_seconds']}s, mem: {proc['rss_mb']}MB)"
-            )
-
-            # Wait up to 3 seconds for process to exit
-            for _ in range(6):
-                time.sleep(0.5)
-                try:
-                    os.kill(pid, 0)  # Check if still alive
-                except ProcessLookupError:
-                    killed += 1
-                    logger.info(f"Zombie process {pid} exited after SIGTERM")
-                    break
-            else:
-                # Process still alive, escalate to SIGKILL
-                os.kill(pid, signal.SIGKILL)
-                killed += 1
-                logger.info(f"Sent SIGKILL to zombie process {pid}")
-
-        except ProcessLookupError:
-            # Process already gone between detection and kill
-            logger.debug(f"Zombie process {pid} already exited")
-            killed += 1
-        except PermissionError:
-            logger.warning(f"Permission denied killing zombie process {pid}")
-        except Exception as e:
-            logger.error(f"Error killing zombie process {pid}: {e}")
-
-    return killed
-
-
 def check_bridge_health() -> HealthStatus:
     """Assess bridge health and determine recovery level needed."""
     issues = []
@@ -746,36 +565,7 @@ def check_bridge_health() -> HealthStatus:
             # restart keeps running every tick with no attempt ceiling.
             restart_circuit_open = True
 
-    # Check 4: Zombie process detection
-    all_processes = _enumerate_claude_processes()
-    zombies, active = classify_zombies(all_processes)
-
-    zombie_count = len(zombies)
-    zombie_pids = [z["pid"] for z in zombies]
-    zombie_memory_mb = round(sum(z["rss_mb"] for z in zombies), 1)
-    active_claude_count = len(active)
-
-    if zombie_count > 0:
-        if running and logs_fresh:
-            # Bridge is healthy — just kill zombies directly, don't restart
-            killed = kill_zombie_processes(zombies)
-            issues.append(
-                f"{zombie_count} zombie process(es) cleaned up "
-                f"({killed} killed, memory freed: {zombie_memory_mb}MB)"
-            )
-            # Do NOT escalate — bridge is fine, zombies are handled
-        else:
-            issues.append(
-                f"{zombie_count} zombie process(es) detected "
-                f"(PIDs: {zombie_pids}, memory: {zombie_memory_mb}MB)"
-            )
-            recovery_level = max(recovery_level, 2)
-
-    if active_claude_count > SOFT_INSTANCE_LIMIT:
-        logger.warning(
-            f"High concurrent claude instance count: {active_claude_count} "
-            f"(soft limit: {SOFT_INSTANCE_LIMIT})"
-        )
+    # The watchdog never signals claude processes; the worker's orphan reapers own that.
 
     # Check 5: Update-flow / wedged detector (only meaningful when process is up)
     update_flow_live = True
@@ -829,10 +619,6 @@ def check_bridge_health() -> HealthStatus:
         no_crash_pattern=not crash_pattern,
         issues=issues,
         recovery_level=recovery_level,
-        zombie_count=zombie_count,
-        zombie_pids=zombie_pids,
-        zombie_memory_mb=zombie_memory_mb,
-        active_claude_count=active_claude_count,
         update_flow_live=update_flow_live,
         update_flow_issue=update_flow_issue,
         human_alert_needed=human_alert_needed,
@@ -955,16 +741,6 @@ def _hostname() -> str:
     return platform.node()
 
 
-def _kill_detected_zombies() -> int:
-    """Detect and kill zombie claude/pyright processes. Returns count killed."""
-    processes = _enumerate_claude_processes()
-    zombies, _ = classify_zombies(processes)
-    if zombies:
-        logger.info(f"Found {len(zombies)} zombie process(es) to kill")
-        return kill_zombie_processes(zombies)
-    return 0
-
-
 def _recovery_exhausted(issues: list[str]) -> bool:
     """Log critical failure when levels 1-4 are exhausted.
 
@@ -1013,16 +789,14 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
             return restart_bridge()
 
         elif level == 2:
-            # Kill stale + zombie processes + restart
+            # Kill stale bridge processes + restart
             kill_stale_processes()
-            _kill_detected_zombies()
             time.sleep(2)
             return restart_bridge()
 
         elif level == 3:
-            # Clear locks + kill zombies + restart
+            # Kill stale bridge processes + clear locks + restart
             kill_stale_processes()
-            _kill_detected_zombies()
             clear_lock_files()
             time.sleep(2)
             return restart_bridge()
@@ -1034,7 +808,6 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
                 return _recovery_exhausted(issues)
 
             kill_stale_processes()
-            _kill_detected_zombies()
             clear_lock_files()
 
             if revert_last_commit():
@@ -1243,16 +1016,6 @@ def main():
         if status.issues:
             print(f"Issues: {', '.join(status.issues)}")
         print(f"Recovery level: {status.recovery_level}")
-        print(f"Zombie processes: {status.zombie_count}")
-        if status.zombie_pids:
-            print(f"Zombie PIDs: {status.zombie_pids}")
-            print(f"Zombie memory: {status.zombie_memory_mb}MB")
-        print(f"Active claude instances: {status.active_claude_count}")
-        if status.active_claude_count > SOFT_INSTANCE_LIMIT:
-            print(
-                f"WARNING: Active instances exceed soft limit "
-                f"({status.active_claude_count} > {SOFT_INSTANCE_LIMIT})"
-            )
         print(f"Update flow live: {status.update_flow_live}")
         if not status.update_flow_live:
             print(f"Update flow issue: {status.update_flow_issue}")

@@ -1,357 +1,20 @@
-"""Unit tests for bridge watchdog zombie process detection and cleanup."""
+"""Unit tests for the bridge watchdog health check, recovery, and alert wiring."""
 
-import signal
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from monitoring.bridge_watchdog import (
-    SOFT_INSTANCE_LIMIT,
-    ZOMBIE_THRESHOLD_SECONDS,
     HealthStatus,
-    _enumerate_claude_processes,
-    _parse_elapsed_time,
     check_bridge_health,
-    classify_zombies,
-    kill_zombie_processes,
 )
 from monitoring.crash_tracker import CrashEvent
-
-# --- _parse_elapsed_time tests ---
-
-
-class TestParseElapsedTime:
-    """Tests for ps etime format parsing."""
-
-    def test_mm_ss(self):
-        assert _parse_elapsed_time("05:23") == 5 * 60 + 23
-
-    def test_hh_mm_ss(self):
-        assert _parse_elapsed_time("01:05:23") == 1 * 3600 + 5 * 60 + 23
-
-    def test_d_hh_mm_ss(self):
-        assert _parse_elapsed_time("2-01:05:23") == 2 * 86400 + 1 * 3600 + 5 * 60 + 23
-
-    def test_dd_hh_mm_ss(self):
-        assert _parse_elapsed_time("12-01:05:23") == 12 * 86400 + 1 * 3600 + 5 * 60 + 23
-
-    def test_zero(self):
-        assert _parse_elapsed_time("00:00") == 0
-
-    def test_just_seconds(self):
-        assert _parse_elapsed_time("00:42") == 42
-
-    def test_leading_whitespace(self):
-        assert _parse_elapsed_time("  05:23") == 5 * 60 + 23
-
-    def test_trailing_whitespace(self):
-        assert _parse_elapsed_time("05:23  ") == 5 * 60 + 23
-
-    def test_one_day_zero_time(self):
-        assert _parse_elapsed_time("1-00:00:00") == 86400
-
-    def test_invalid_format_raises(self):
-        with pytest.raises(ValueError):
-            _parse_elapsed_time("invalid")
-
-    def test_too_many_colons_raises(self):
-        with pytest.raises(ValueError):
-            _parse_elapsed_time("1:2:3:4")
-
-
-# --- _enumerate_claude_processes tests ---
-
-
-class TestEnumerateClaudeProcesses:
-    """Tests for process enumeration via ps."""
-
-    SAMPLE_PS_OUTPUT = """\
-  PID   ELAPSED  RSS COMMAND
-12345    05:23 102400 claude --dangerously-skip-permissions
-12346 1-02:30:00 524288 claude --dangerously-skip-permissions
-12347    15:00  51200 /usr/local/bin/pyright --watch
-99999    01:00  10240 /usr/bin/python3 some_other_process
-"""
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_enumerates_claude_and_pyright(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=self.SAMPLE_PS_OUTPUT,
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        # Should find claude and pyright, not some_other_process
-        assert len(procs) == 3
-        pids = [p["pid"] for p in procs]
-        assert 12345 in pids
-        assert 12346 in pids
-        assert 12347 in pids
-        assert 99999 not in pids
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_parses_memory_correctly(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=self.SAMPLE_PS_OUTPUT,
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        # 102400 KB = 100.0 MB
-        claude_proc = next(p for p in procs if p["pid"] == 12345)
-        assert claude_proc["rss_mb"] == 100.0
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_parses_etime_correctly(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=self.SAMPLE_PS_OUTPUT,
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        old_proc = next(p for p in procs if p["pid"] == 12346)
-        # 1 day + 2h + 30min = 95400s
-        assert old_proc["etime_seconds"] == 86400 + 2 * 3600 + 30 * 60
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_ps_failure_returns_empty(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="error",
-        )
-        procs = _enumerate_claude_processes()
-        assert procs == []
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_ps_exception_returns_empty(self, mock_run):
-        mock_run.side_effect = Exception("timeout")
-        procs = _enumerate_claude_processes()
-        assert procs == []
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_skips_malformed_lines(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=(
-                "  PID   ELAPSED  RSS COMMAND\nbadline\n"
-                "12345    05:23 102400 claude --dangerously-skip-permissions\n"
-            ),
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        # badline is skipped, but it doesn't match pattern anyway
-        # The claude line should parse
-        assert len(procs) == 1
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_skips_bridge_watchdog_itself(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=(
-                "  PID   ELAPSED  RSS COMMAND\n"
-                "12345    05:23 102400 "
-                "python monitoring/bridge_watchdog.py --check-only\n"
-            ),
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        assert len(procs) == 0
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_skips_grep_processes(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="  PID   ELAPSED  RSS COMMAND\n12345    05:23 102400 grep -E claude\n",
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        assert len(procs) == 0
-
-    @patch("monitoring.bridge_watchdog.subprocess.run")
-    def test_no_matching_processes(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=(
-                "  PID   ELAPSED  RSS COMMAND\n12345    05:23 102400 /usr/bin/python3 myapp.py\n"
-            ),
-            stderr="",
-        )
-        procs = _enumerate_claude_processes()
-        assert procs == []
-
-
-# --- classify_zombies tests ---
-
-
-class TestClassifyZombies:
-    """Tests for zombie vs active classification."""
-
-    def test_separates_zombies_from_active(self):
-        processes = [
-            {"pid": 1, "etime_seconds": 100, "rss_mb": 50.0, "command": "claude"},
-            {"pid": 2, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"},
-            {"pid": 3, "etime_seconds": 7199, "rss_mb": 100.0, "command": "claude"},
-        ]
-        zombies, active = classify_zombies(processes)
-        assert len(zombies) == 1
-        assert zombies[0]["pid"] == 2
-        assert len(active) == 2
-
-    def test_exact_threshold_is_zombie(self):
-        processes = [
-            {
-                "pid": 1,
-                "etime_seconds": ZOMBIE_THRESHOLD_SECONDS,
-                "rss_mb": 50.0,
-                "command": "claude",
-            },
-        ]
-        zombies, active = classify_zombies(processes)
-        assert len(zombies) == 1
-        assert len(active) == 0
-
-    def test_just_below_threshold_is_active(self):
-        processes = [
-            {
-                "pid": 1,
-                "etime_seconds": ZOMBIE_THRESHOLD_SECONDS - 1,
-                "rss_mb": 50.0,
-                "command": "claude",
-            },
-        ]
-        zombies, active = classify_zombies(processes)
-        assert len(zombies) == 0
-        assert len(active) == 1
-
-    def test_empty_list(self):
-        zombies, active = classify_zombies([])
-        assert zombies == []
-        assert active == []
-
-    def test_custom_threshold(self):
-        processes = [
-            {"pid": 1, "etime_seconds": 600, "rss_mb": 50.0, "command": "claude"},
-        ]
-        zombies, active = classify_zombies(processes, threshold_seconds=300)
-        assert len(zombies) == 1
-
-    def test_all_zombies(self):
-        processes = [
-            {"pid": 1, "etime_seconds": 10000, "rss_mb": 50.0, "command": "claude"},
-            {"pid": 2, "etime_seconds": 20000, "rss_mb": 100.0, "command": "pyright"},
-        ]
-        zombies, active = classify_zombies(processes)
-        assert len(zombies) == 2
-        assert len(active) == 0
-
-    def test_all_active(self):
-        processes = [
-            {"pid": 1, "etime_seconds": 100, "rss_mb": 50.0, "command": "claude"},
-            {"pid": 2, "etime_seconds": 200, "rss_mb": 100.0, "command": "pyright"},
-        ]
-        zombies, active = classify_zombies(processes)
-        assert len(zombies) == 0
-        assert len(active) == 2
-
-
-# --- kill_zombie_processes tests ---
-
-
-class TestKillZombieProcesses:
-    """Tests for zombie process killing with SIGTERM/SIGKILL escalation."""
-
-    @patch("monitoring.bridge_watchdog.time.sleep")
-    @patch("monitoring.bridge_watchdog.os.kill")
-    def test_sigterm_kills_process(self, mock_kill, mock_sleep):
-        """Process exits after SIGTERM."""
-        zombies = [{"pid": 12345, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"}]
-
-        # First call: SIGTERM, second call (os.kill(pid, 0)): ProcessLookupError
-        mock_kill.side_effect = [None, ProcessLookupError()]
-
-        killed = kill_zombie_processes(zombies)
-        assert killed == 1
-        mock_kill.assert_any_call(12345, signal.SIGTERM)
-
-    @patch("monitoring.bridge_watchdog.time.sleep")
-    @patch("monitoring.bridge_watchdog.os.kill")
-    def test_escalates_to_sigkill(self, mock_kill, mock_sleep):
-        """Process survives SIGTERM, gets SIGKILL."""
-        zombies = [{"pid": 12345, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"}]
-
-        # SIGTERM succeeds, all 6 os.kill(pid, 0) succeed (process alive), then SIGKILL
-        mock_kill.side_effect = [None, None, None, None, None, None, None, None]
-
-        killed = kill_zombie_processes(zombies)
-        assert killed == 1
-        mock_kill.assert_any_call(12345, signal.SIGTERM)
-        mock_kill.assert_any_call(12345, signal.SIGKILL)
-
-    @patch("monitoring.bridge_watchdog.time.sleep")
-    @patch("monitoring.bridge_watchdog.os.kill")
-    def test_process_already_gone(self, mock_kill, mock_sleep):
-        """Process died between detection and kill attempt."""
-        zombies = [{"pid": 12345, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"}]
-
-        mock_kill.side_effect = ProcessLookupError()
-
-        killed = kill_zombie_processes(zombies)
-        assert killed == 1  # Still counts as "handled"
-
-    @patch("monitoring.bridge_watchdog.time.sleep")
-    @patch("monitoring.bridge_watchdog.os.kill")
-    def test_permission_denied(self, mock_kill, mock_sleep):
-        """Cannot kill process owned by another user."""
-        zombies = [{"pid": 12345, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"}]
-
-        mock_kill.side_effect = PermissionError()
-
-        killed = kill_zombie_processes(zombies)
-        assert killed == 0
-
-    @patch("monitoring.bridge_watchdog.time.sleep")
-    @patch("monitoring.bridge_watchdog.os.kill")
-    def test_multiple_zombies(self, mock_kill, mock_sleep):
-        """Kills multiple zombie processes."""
-        zombies = [
-            {"pid": 100, "etime_seconds": 8000, "rss_mb": 500.0, "command": "claude"},
-            {"pid": 200, "etime_seconds": 9000, "rss_mb": 300.0, "command": "pyright"},
-        ]
-
-        # Both exit after SIGTERM
-        mock_kill.side_effect = [None, ProcessLookupError(), None, ProcessLookupError()]
-
-        killed = kill_zombie_processes(zombies)
-        assert killed == 2
-
-    def test_empty_zombie_list(self):
-        """No zombies to kill."""
-        killed = kill_zombie_processes([])
-        assert killed == 0
-
 
 # --- HealthStatus tests ---
 
 
 class TestHealthStatus:
     """Tests for extended HealthStatus dataclass."""
-
-    def test_default_zombie_fields(self):
-        status = HealthStatus(
-            healthy=True,
-            process_running=True,
-            logs_fresh=True,
-            no_crash_pattern=True,
-            issues=[],
-            recovery_level=0,
-        )
-        assert status.zombie_count == 0
-        assert status.zombie_pids == []
-        assert status.zombie_memory_mb == 0.0
-        assert status.active_claude_count == 0
-        assert status.human_alert_needed is False
-        assert status.restart_circuit_open is False
 
     def test_alert_signal_fields_settable(self):
         """issue #2396: human_alert_needed / restart_circuit_open are independent
@@ -370,120 +33,20 @@ class TestHealthStatus:
         assert status.human_alert_needed is True
         assert status.restart_circuit_open is True
 
-    def test_zombie_fields_populated(self):
-        status = HealthStatus(
-            healthy=False,
-            process_running=True,
-            logs_fresh=True,
-            no_crash_pattern=True,
-            issues=["2 zombies"],
-            recovery_level=0,
-            zombie_count=2,
-            zombie_pids=[123, 456],
-            zombie_memory_mb=1750.5,
-            active_claude_count=3,
-        )
-        assert status.zombie_count == 2
-        assert status.zombie_pids == [123, 456]
-        assert status.zombie_memory_mb == 1750.5
-        assert status.active_claude_count == 3
-
 
 # --- check_bridge_health integration ---
 
 
-class TestCheckBridgeHealthZombieIntegration:
-    """Tests that check_bridge_health populates zombie fields.
-
-    Two collaborators here reach off the process and must stay mocked:
+class TestCheckBridgeHealthUpdateFlow:
+    """Tests that check_bridge_health reports the update-flow verdict.
 
     ``assess_update_flow`` runs against the real watchdog Redis, so its verdict
     is a property of whichever machine happens to run the suite. On a host with
-    no bridge it reports the update loop wedged, which appends an issue and makes
-    ``healthy`` False for a reason unrelated to zombies.
-
-    ``kill_zombie_processes`` calls ``os.kill`` for real. The fixtures below name
-    pid 200, so leaving it unmocked sends SIGTERM to whatever process holds that
-    pid on the machine running the suite.
+    no bridge it reports the update loop wedged, which makes ``healthy`` False
+    for a reason unrelated to the input under test, so it stays mocked.
     """
 
     @patch("monitoring.bridge_watchdog.assess_update_flow")
-    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
-    @patch("monitoring.bridge_watchdog.get_recent_crashes")
-    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
-    @patch("monitoring.bridge_watchdog.are_logs_fresh")
-    @patch("monitoring.bridge_watchdog.is_bridge_running")
-    def test_populates_zombie_data(
-        self,
-        mock_running,
-        mock_logs,
-        mock_crash,
-        mock_crashes,
-        mock_enumerate,
-        mock_kill,
-        mock_update_flow,
-    ):
-        from monitoring.bridge_watchdog import check_bridge_health
-
-        mock_running.return_value = (True, 1234)
-        mock_logs.return_value = True
-        mock_crash.return_value = (False, None)
-        mock_crashes.return_value = []
-        mock_update_flow.return_value = (True, "")
-        mock_kill.return_value = 1
-        mock_enumerate.return_value = [
-            {"pid": 100, "etime_seconds": 100, "rss_mb": 50.0, "command": "claude"},
-            {"pid": 200, "etime_seconds": 10000, "rss_mb": 600.0, "command": "claude"},
-        ]
-
-        status = check_bridge_health()
-        assert status.zombie_count == 1
-        assert status.zombie_pids == [200]
-        assert status.zombie_memory_mb == 600.0
-        assert status.active_claude_count == 1
-        # The zombie is routed to the killer rather than merely counted, and no
-        # real signal leaves the test.
-        assert [z["pid"] for z in mock_kill.call_args.args[0]] == [200]
-
-    @patch("monitoring.bridge_watchdog.assess_update_flow")
-    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
-    @patch("monitoring.bridge_watchdog.get_recent_crashes")
-    @patch("monitoring.bridge_watchdog.detect_crash_pattern")
-    @patch("monitoring.bridge_watchdog.are_logs_fresh")
-    @patch("monitoring.bridge_watchdog.is_bridge_running")
-    def test_no_zombies_still_populates(
-        self,
-        mock_running,
-        mock_logs,
-        mock_crash,
-        mock_crashes,
-        mock_enumerate,
-        mock_kill,
-        mock_update_flow,
-    ):
-        from monitoring.bridge_watchdog import check_bridge_health
-
-        mock_running.return_value = (True, 1234)
-        mock_logs.return_value = True
-        mock_crash.return_value = (False, None)
-        mock_crashes.return_value = []
-        mock_update_flow.return_value = (True, "")
-        mock_enumerate.return_value = []
-
-        status = check_bridge_health()
-        assert status.zombie_count == 0
-        assert status.zombie_pids == []
-        assert status.active_claude_count == 0
-        # Every issue-producing check is now stubbed to its healthy answer, so
-        # `healthy` is a statement about this input rather than about the host.
-        assert status.healthy is True, f"unexpected issues: {status.issues}"
-        mock_kill.assert_not_called()
-
-    @patch("monitoring.bridge_watchdog.assess_update_flow")
-    @patch("monitoring.bridge_watchdog.kill_zombie_processes")
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
@@ -494,20 +57,15 @@ class TestCheckBridgeHealthZombieIntegration:
         mock_logs,
         mock_crash,
         mock_crashes,
-        mock_enumerate,
-        mock_kill,
         mock_update_flow,
     ):
-        """The complement of the test above, so stubbing `assess_update_flow`
-        cannot pass by making the wedge check unreachable. Same healthy input,
-        only the update-flow verdict flipped."""
+        """A wedged update-flow verdict makes an otherwise healthy bridge unhealthy."""
         from monitoring.bridge_watchdog import check_bridge_health
 
         mock_running.return_value = (True, 1234)
         mock_logs.return_value = True
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
-        mock_enumerate.return_value = []
         mock_update_flow.return_value = (False, "update loop wedged: test")
 
         status = check_bridge_health()
@@ -519,10 +77,10 @@ class TestCheckBridgeHealthZombieIntegration:
 
 
 class TestCheckOnlyOutput:
-    """Tests for --check-only output format including zombie data."""
+    """Tests for --check-only output format."""
 
     @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_check_only_includes_zombie_section(self, mock_health, capsys, tmp_path):
+    def test_check_only_output_has_no_process_sweep_lines(self, mock_health, capsys):
         from monitoring import bridge_watchdog as bw
 
         mock_health.return_value = HealthStatus(
@@ -532,74 +90,18 @@ class TestCheckOnlyOutput:
             no_crash_pattern=True,
             issues=[],
             recovery_level=0,
-            zombie_count=0,
-            zombie_pids=[],
-            zombie_memory_mb=0.0,
-            active_claude_count=2,
         )
 
-        with (
-            patch("sys.argv", ["bridge_watchdog.py", "--check-only"]),
-        ):
+        with patch("sys.argv", ["bridge_watchdog.py", "--check-only"]):
             result = bw.main()
 
         output = capsys.readouterr().out
-        assert "Zombie processes: 0" in output
-        assert "Active claude instances: 2" in output
+        assert "Process running: True" in output
         assert "Human alert needed: False" in output
         assert "Restart circuit open: False" in output
+        assert "Zombie" not in output
+        assert "Active claude instances" not in output
         assert result == 0
-
-    @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_check_only_with_zombies(self, mock_health, capsys):
-        from monitoring.bridge_watchdog import main
-
-        mock_health.return_value = HealthStatus(
-            healthy=False,
-            process_running=True,
-            logs_fresh=True,
-            no_crash_pattern=True,
-            issues=["2 zombie process(es) detected"],
-            recovery_level=0,
-            zombie_count=2,
-            zombie_pids=[123, 456],
-            zombie_memory_mb=1750.5,
-            active_claude_count=3,
-        )
-
-        with patch("sys.argv", ["bridge_watchdog.py", "--check-only"]):
-            result = main()
-
-        output = capsys.readouterr().out
-        assert "Zombie processes: 2" in output
-        assert "Zombie PIDs: [123, 456]" in output
-        assert "Zombie memory: 1750.5MB" in output
-        assert "Active claude instances: 3" in output
-        assert result == 1  # Not healthy due to zombies
-
-    @patch("monitoring.bridge_watchdog.check_bridge_health")
-    def test_check_only_instance_limit_warning(self, mock_health, capsys):
-        from monitoring.bridge_watchdog import main
-
-        mock_health.return_value = HealthStatus(
-            healthy=True,
-            process_running=True,
-            logs_fresh=True,
-            no_crash_pattern=True,
-            issues=[],
-            recovery_level=0,
-            zombie_count=0,
-            zombie_pids=[],
-            zombie_memory_mb=0.0,
-            active_claude_count=SOFT_INSTANCE_LIMIT + 1,
-        )
-
-        with patch("sys.argv", ["bridge_watchdog.py", "--check-only"]):
-            main()
-
-        output = capsys.readouterr().out
-        assert "WARNING" in output
-        assert "soft limit" in output
 
 
 # --- Crash detection on bridge death ---
@@ -608,7 +110,6 @@ class TestCheckOnlyOutput:
 class TestCrashDetectionOnBridgeDeath:
     """Tests that check_bridge_health calls log_crash when bridge is dead."""
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
@@ -621,21 +122,18 @@ class TestCrashDetectionOnBridgeDeath:
         mock_logs,
         mock_crash,
         mock_crashes,
-        mock_enumerate,
     ):
         """When bridge is not running, check_bridge_health calls log_crash."""
         mock_running.return_value = (False, None)
         mock_logs.return_value = False
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
         assert not status.process_running
         mock_log_crash.assert_called_once_with("bridge_dead_on_watchdog_check")
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
@@ -648,21 +146,18 @@ class TestCrashDetectionOnBridgeDeath:
         mock_logs,
         mock_crash,
         mock_crashes,
-        mock_enumerate,
     ):
         """When bridge is running, log_crash should NOT be called."""
         mock_running.return_value = (True, 1234)
         mock_logs.return_value = True
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
         assert status.process_running
         mock_log_crash.assert_not_called()
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
@@ -675,14 +170,12 @@ class TestCrashDetectionOnBridgeDeath:
         mock_logs,
         mock_crash,
         mock_crashes,
-        mock_enumerate,
     ):
         """If log_crash raises, check_bridge_health should still return."""
         mock_running.return_value = (False, None)
         mock_logs.return_value = False
         mock_crash.return_value = (False, None)
         mock_crashes.return_value = []
-        mock_enumerate.return_value = []
         mock_log_crash.side_effect = Exception("Redis connection failed")
 
         # Should not raise
@@ -1003,13 +496,12 @@ class TestCrashStormActionAlertSplit:
     recovery_level to a no-op 5 -- it sets human_alert_needed and
     (reason-aware) restart_circuit_open instead."""
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
     @patch("monitoring.bridge_watchdog.is_bridge_running")
     def test_wedge_dominated_crash_storm_livelock_regression(
-        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+        self, mock_running, mock_logs, mock_crash, mock_crashes
     ):
         """SC1: a large all-wedge storm (12 crashes, well above the threshold)
         never opens the circuit and never suppresses the action level -- there
@@ -1021,7 +513,6 @@ class TestCrashStormActionAlertSplit:
         mock_crash.return_value = (False, None)
         now = _time.time()
         mock_crashes.return_value = [_wedge_crash(now - i) for i in range(12)]
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
@@ -1031,14 +522,11 @@ class TestCrashStormActionAlertSplit:
         # the other checks computed (0 here, since nothing else fired).
         assert status.recovery_level in (0, 1, 2, 3, 4)
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
     @patch("monitoring.bridge_watchdog.is_bridge_running")
-    def test_non_wedge_storm_opens_circuit(
-        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
-    ):
+    def test_non_wedge_storm_opens_circuit(self, mock_running, mock_logs, mock_crash, mock_crashes):
         """C2: a storm of non-wedge crashes opens restart_circuit_open while
         still requesting a human alert (today's throttle is preserved)."""
         import time as _time
@@ -1048,20 +536,18 @@ class TestCrashStormActionAlertSplit:
         mock_crash.return_value = (False, None)
         now = _time.time()
         mock_crashes.return_value = [_other_crash(now - i) for i in range(5)]
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
         assert status.human_alert_needed is True
         assert status.restart_circuit_open is True
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
     @patch("monitoring.bridge_watchdog.is_bridge_running")
     def test_mixed_50_50_storm_opens_circuit(
-        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+        self, mock_running, mock_logs, mock_crash, mock_crashes
     ):
         """Re-critique blocker: WEDGE_DOMINANCE_FRACTION = 0.9 means a bare
         50/50 mixed storm (3 wedge + 3 non-wedge) is NOT wedge-dominated and
@@ -1075,20 +561,18 @@ class TestCrashStormActionAlertSplit:
         mock_crashes.return_value = [_wedge_crash(now - i) for i in range(3)] + [
             _other_crash(now - i) for i in range(3)
         ]
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
         assert status.human_alert_needed is True
         assert status.restart_circuit_open is True
 
-    @patch("monitoring.bridge_watchdog._enumerate_claude_processes")
     @patch("monitoring.bridge_watchdog.get_recent_crashes")
     @patch("monitoring.bridge_watchdog.detect_crash_pattern")
     @patch("monitoring.bridge_watchdog.are_logs_fresh")
     @patch("monitoring.bridge_watchdog.is_bridge_running")
     def test_below_threshold_no_alert_no_circuit(
-        self, mock_running, mock_logs, mock_crash, mock_crashes, mock_enumerate
+        self, mock_running, mock_logs, mock_crash, mock_crashes
     ):
         """Fewer than CRASH_STORM_THRESHOLD crashes: neither signal fires."""
         import time as _time
@@ -1098,7 +582,6 @@ class TestCrashStormActionAlertSplit:
         mock_crash.return_value = (False, None)
         now = _time.time()
         mock_crashes.return_value = [_other_crash(now)]
-        mock_enumerate.return_value = []
 
         status = check_bridge_health()
 
@@ -1158,12 +641,10 @@ class TestRecoveryExhaustedFallback:
     @patch("monitoring.bridge_watchdog.revert_last_commit")
     @patch("monitoring.bridge_watchdog.restart_bridge")
     @patch("monitoring.bridge_watchdog.kill_stale_processes")
-    @patch("monitoring.bridge_watchdog._kill_detected_zombies")
     @patch("monitoring.bridge_watchdog.clear_lock_files")
     def test_revert_failure_routes_to_recovery_exhausted(
         self,
         mock_clear_locks,
-        mock_kill_zombies,
         mock_kill_stale,
         mock_restart,
         mock_revert,
