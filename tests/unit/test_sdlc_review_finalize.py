@@ -553,6 +553,35 @@ class TestFinalize:
         with pytest.raises(ReviewFinalizeError, match="REVIEW_HEAD_DRIFT"):
             self._finalize_with_reviewed_head(drift)
 
+    @pytest.mark.parametrize(
+        "bad",
+        ["d" * 7, "d" * 39, "d" * 41, "HEAD", "main", "refs/heads/main", "g" * 40, ""],
+    )
+    def test_reviewed_head_must_be_a_full_sha(self, bad):
+        """Known-bad: a short SHA or a ref would be stored as head_sha and then
+        rejected by every reader. Refused by name before any lease read, gh
+        call, or write."""
+        with (
+            patch("tools._sdlc_utils.resolve_ledger_lease") as mock_lease,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha") as mock_sha,
+            patch("tools.sdlc_review_drift.classify_head_drift") as mock_classify,
+            patch("tools.sdlc_verdict.record_verdict") as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker") as mock_marker,
+        ):
+            with pytest.raises(ReviewFinalizeError, match="REVIEWED_HEAD_INVALID"):
+                finalize(
+                    pr=1,
+                    issue_number=42,
+                    verdict="APPROVED",
+                    run_id="run-1",
+                    reviewed_head=bad,
+                )
+        mock_lease.assert_not_called()
+        mock_sha.assert_not_called()
+        mock_classify.assert_not_called()
+        mock_record.assert_not_called()
+        mock_marker.assert_not_called()
+
     def test_reviewed_head_equal_to_live_head_skips_classification(self):
         lease_ok, revalidate_ok = self._patch_lease_ok()
         with (

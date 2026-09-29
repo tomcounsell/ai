@@ -572,15 +572,54 @@ def test_verdict_freshness_blocks_on_stale_head_sha_field(monkeypatch):
 
     failed: list[str] = []
     notes: list[str] = []
-    # #3228: a mismatch is classified before it is refused. Stub the
-    # classifier to "code" so this stays hermetic and keeps testing the refusal.
+    # #3228: a mismatch is classified before it is refused. Stub the repo slug
+    # and the classifier so this is hermetic (no real `gh`) and pins the
+    # code-drift leg specifically, not whichever leg the network produced.
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", lambda root: "o/r")
     monkeypatch.setattr(
         "tools.sdlc_review_drift.classify_head_drift", lambda *a, **k: "code", raising=True
     )
     mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
-    assert any(
-        "REVIEW verdict predates PR head commit (head_sha trailer mismatch" in f for f in failed
+    assert len(failed) == 1
+    assert failed[0].startswith("REVIEW verdict predates PR head commit (head_sha trailer mismatch")
+    assert "classified 'code'" in failed[0]
+    assert notes == []
+
+
+def test_verdict_freshness_refuses_when_repo_slug_unavailable(monkeypatch):
+    """#3228: without the repo slug the drift cannot be classified. The leg
+    fails closed on the named trailer-mismatch refusal and never reaches the
+    classifier."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: {
+            "verdict": "APPROVED",
+            "head_sha": _OLD,
+            "recorded_at": _DATE,
+        },
     )
+    monkeypatch.setattr(mp, "_gh_latest_commit", lambda pr, root: {"sha": _NEW, "date": _DATE})
+
+    def _slug_fails(root):
+        raise RuntimeError("gh repo view failed while resolving repo name")
+
+    monkeypatch.setattr(mp, "_gh_repo_name_with_owner", _slug_fails)
+
+    def _classifier_must_not_run(*a, **k):
+        raise AssertionError("classifier ran without a repo slug")
+
+    monkeypatch.setattr(
+        "tools.sdlc_review_drift.classify_head_drift", _classifier_must_not_run, raising=True
+    )
+
+    failed: list[str] = []
+    notes: list[str] = []
+    mp._check_verdict_freshness(990033, 990029, REPO_ROOT, failed, notes)
+    assert len(failed) == 1
+    assert failed[0].startswith("REVIEW verdict predates PR head commit (head_sha trailer mismatch")
+    assert "repo slug unavailable to classify post-review drift" in failed[0]
+    assert "gh repo view failed" in failed[0]
     assert notes == []
 
 

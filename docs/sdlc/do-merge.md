@@ -55,8 +55,12 @@ generic steps as follows:
     that differs from the live head is tolerated only when
     `tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only`: the
     live head strictly descends from the reviewed SHA and every changed path
-    is under `docs/` (excluding `docs/sdlc/`) or a top-level `*.md` other than
-    `CLAUDE.md`/`AGENTS.md`. Code drift, a force-push, or an `unknown`
+    is a prose or image file under `docs/` (`.md`, `.markdown`, `.rst`,
+    `.txt`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`; never `docs/sdlc/`) or
+    a top-level `*.md`, and no path is named `CLAUDE.md`, `CLAUDE.local.md`,
+    or `AGENTS.md` at any depth (all matched case-insensitively). Any other
+    file under `docs/`, such as an mkdocs `docs/hooks.py`, is code. Code
+    drift, a force-push, or an `unknown`
     classification is stale, and a stale APPROVED verdict FAILS with
     `REVIEW verdict predates PR head commit`. The
     PR's current head SHA is resolved git-first via
@@ -332,8 +336,10 @@ prevents. Do not re-implement the filter inline here; the same check runs in
 the merge-guard hook, so a stale approval that slips past the skill still
 blocks at the choke point. A trailer mismatch is tolerated when
 `tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only` (a
-strictly descending range whose paths are all under `docs/` excluding
-`docs/sdlc/`, or top-level `*.md` other than `CLAUDE.md`/`AGENTS.md`), so the
+strictly descending range whose paths are all prose or image files under
+`docs/` outside `docs/sdlc/`, or top-level `*.md`, with no `CLAUDE.md`,
+`CLAUDE.local.md`, or `AGENTS.md` at any depth; see
+[`docs/features/sdlc-review-drift-classifier.md`](../features/sdlc-review-drift-classifier.md)), so the
 mandatory post-review DOCS commit does not stale the approval (#3228). Code
 drift, a force-push, and an `unknown` classification still refuse; the remedy
 is a fresh `/do-pr-review`, never a re-run of `finalize`.

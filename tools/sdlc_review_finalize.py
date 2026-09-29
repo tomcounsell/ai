@@ -94,6 +94,7 @@ exemption either.
 from __future__ import annotations
 
 import logging
+import re
 
 from tools._sdlc_utils import (
     _HEAD_SHA_TRAILER_RE,
@@ -104,6 +105,9 @@ from tools._sdlc_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A full commit SHA, the only shape `--reviewed-head` may take (#3228).
+_FULL_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40}\Z")
 
 
 def _strip_head_sha_trailer(verdict: str) -> str:
@@ -451,7 +455,9 @@ def finalize(
             it is recorded instead -- but only if the drift from it to the
             live head is documentation-only; anything else raises
             ``REVIEW_HEAD_DRIFT`` (the reviewed code is not what is on the
-            branch). Omitted, the live head is recorded as before.
+            branch). It must be a full 40-hex SHA, else
+            ``REVIEWED_HEAD_INVALID`` is raised before anything is read or
+            written. Omitted, the live head is recorded as before.
 
     Returns:
         The :func:`check_review_persistence` result dict on success
@@ -478,6 +484,19 @@ def finalize(
         raise ReviewFinalizeError(
             "REVIEW_VERDICT_MISSING: verdict is empty/whitespace; refusing to "
             "finalize with no partial write"
+        )
+
+    if reviewed_head is not None and (
+        not isinstance(reviewed_head, str) or not _FULL_SHA_RE.match(reviewed_head.strip())
+    ):
+        # #3228: the reviewed head is STORED as the verdict's head_sha, and
+        # every reader compares it to a full 40-hex head. A short SHA or a ref
+        # name would be written and then rejected by every consumer, so refuse
+        # it here, before any `gh` call, lease read, or write.
+        raise ReviewFinalizeError(
+            f"REVIEWED_HEAD_INVALID: --reviewed-head {reviewed_head!r} is not a full "
+            "40-character hex commit SHA; pass the exact SHA the reviewer read "
+            "(`git rev-parse HEAD` before any review-side commit). Nothing was written."
         )
 
     if not _verdict_is_recognized(normalize_verdict(verdict)):

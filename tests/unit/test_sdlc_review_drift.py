@@ -18,6 +18,7 @@ import pytest
 
 from tools.sdlc_review_drift import (
     _COMPARE_FILE_CAP,
+    _COMPARE_TIMEOUT,
     classify_head_drift,
     is_docs_only_path,
 )
@@ -45,6 +46,16 @@ class TestIsDocsOnlyPath:
             "docs/features/merge-gate.md",
             "README.md",
             "CHANGELOG.md",
+            # Every allowlisted prose/image extension under docs/.
+            "docs/guide.markdown",
+            "docs/api/index.rst",
+            "docs/notes.txt",
+            "docs/images/flow.png",
+            "docs/images/flow.jpg",
+            "docs/images/flow.jpeg",
+            "docs/images/flow.gif",
+            "docs/images/flow.webp",
+            "docs/images/SHOT.PNG",
         ],
     )
     def test_documentation(self, path):
@@ -67,6 +78,30 @@ class TestIsDocsOnlyPath:
             "AGENTS.md",
             # Nested *.md outside a docs directory is not waved through.
             "src/popoto/NOTES.md",
+            # Executable or config files under docs/ are code: popoto's
+            # docs/hooks.py is an executed mkdocs hook (mkdocs.yml `hooks:`).
+            "docs/hooks.py",
+            "docs/scripts/build_index.py",
+            "docs/conf.py",
+            "docs/macros.js",
+            "docs/theme/main.html",
+            "docs/overrides.css",
+            "docs/snippets.yml",
+            "docs/diagram.svg",
+            "docs/Makefile",
+            # Instruction surfaces match case-insensitively and at any depth:
+            # on a case-insensitive filesystem these are the files the harness
+            # loads.
+            "claude.md",
+            "Claude.md",
+            "agents.md",
+            "CLAUDE.local.md",
+            "claude.local.md",
+            "docs/CLAUDE.md",
+            "docs/features/AGENTS.md",
+            "docs/claude.local.md",
+            "docs/SDLC/do-merge.md",
+            "docs/Sdlc/do-build.md",
             "",
         ],
     )
@@ -87,7 +122,16 @@ class TestClassifyHeadDrift:
         ):
             assert classify_head_drift(_BASE, _HEAD, "o/r") == "docs_only"
 
-    @pytest.mark.parametrize("path", ["docs/sdlc/do-merge.md", "CLAUDE.md"])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "docs/sdlc/do-merge.md",
+            "CLAUDE.md",
+            "docs/SDLC/do-merge.md",
+            "docs/CLAUDE.md",
+            "CLAUDE.local.md",
+        ],
+    )
     def test_instruction_surface_edit_is_code(self, path):
         """A post-review edit to a file agents load as instructions changes
         behaviour, so it invalidates the verdict like a source change."""
@@ -109,6 +153,15 @@ class TestClassifyHeadDrift:
         """Force-push / rebase: the reviewed commit is not in the head's
         history, so "only docs changed since" is not even well-formed."""
         with patch("subprocess.run", return_value=_compare(status, ["docs/x.md"])):
+            assert classify_head_drift(_BASE, _HEAD, "o/r") == "code"
+
+    def test_executable_under_docs_is_code(self):
+        """Known-bad: a post-review edit to an executed file that happens to
+        live under docs/ (an mkdocs hook) must not ride a stale approval."""
+        with patch(
+            "subprocess.run",
+            return_value=_compare("ahead", ["docs/features/x.md", "docs/hooks.py"]),
+        ):
             assert classify_head_drift(_BASE, _HEAD, "o/r") == "code"
 
     def test_rename_out_of_docs_is_code(self):
@@ -141,6 +194,15 @@ class TestClassifyHeadDrift:
     def test_timeout_is_unknown(self):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 20)):
             assert classify_head_drift(_BASE, _HEAD, "o/r") == "unknown"
+
+    def test_compare_timeout_leaves_merge_guard_headroom(self):
+        """The compare runs inside the merge-guard hook (20s budget) after the
+        predicate's other gh calls, so its own timeout must be a small slice
+        of that budget and must be what subprocess.run is handed."""
+        assert _COMPARE_TIMEOUT <= 8
+        with patch("subprocess.run", return_value=_compare("ahead", ["docs/x.md"])) as run:
+            classify_head_drift(_BASE, _HEAD, "o/r")
+        assert run.call_args.kwargs["timeout"] == _COMPARE_TIMEOUT
 
     def test_unparseable_payload_is_unknown(self):
         proc = MagicMock()

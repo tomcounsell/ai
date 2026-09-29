@@ -16,8 +16,9 @@ merges became manual authorizations.
 commit whose entire diff is documentation does not invalidate a code review,
 so it stops counting as staleness. Everything else still fails closed:
 
-- a changed path outside :data:`DOCS_ONLY_PREFIXES` is ``"code"`` — including a
-  docstring fix inside a source file. That file was not in the reviewed diff,
+- a changed path that :func:`is_docs_only_path` rejects is ``"code"`` —
+  including a docstring fix inside a source file, and any non-prose file under
+  ``docs/``. That file was not in the reviewed diff,
   and the honest remedy is to re-run REVIEW, not to widen the rule.
 - a head that does not strictly DESCEND from the reviewed SHA is ``"code"``.
   This is the force-push / rebase case: the reviewed commit is no longer in the
@@ -51,25 +52,44 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-_SUBPROCESS_TIMEOUT = 20
+# The compare call's timeout, kept well under the merge-guard hook's budget.
+# `tools/merge_predicate.py` runs in-process inside the PreToolUse Bash
+# dispatcher (`.claude/hooks/manifest.toml`, `dispatch_pre_tool_use_bash`,
+# `timeout = 20`). On a trailer mismatch the predicate has already spent its
+# other `gh` round-trips (PR view, verdict read, latest commit) and adds a
+# `gh repo view` before this call. A compare that ran to 20s would let the
+# harness kill the hook before "unknown" could be returned, which reads as a
+# hook crash rather than a named refusal. 5s is ample for one compare request
+# (typically well under 1s) and leaves the rest of the budget to the other
+# calls; a timeout here is "unknown", which fails closed.
+_COMPARE_TIMEOUT = 5
 
 # The GitHub compare API returns at most 300 file entries. A range at or above
 # that cap may be silently truncated, and a truncated list cannot prove
 # docs-only. See _classify_files.
 _COMPARE_FILE_CAP = 300
 
-# Directory prefixes whose contents are documentation.
+# Directory prefixes whose contents may be documentation.
 #
 # The test is "could this file change what an agent or program DOES?" A file
-# that is read as instructions at runtime is code for review purposes, however
-# much it looks like prose. So the rule accepts prose directories and carves
-# out every documentation-shaped path that is actually an instruction surface:
+# that is executed, or read as instructions at runtime, is code for review
+# purposes, however much it looks like prose or however docs-shaped its
+# directory is. So the rule accepts only prose and image files under `docs/`
+# and carves out every documentation-shaped path that is an instruction surface:
 #
+# - Under `docs/`, only :data:`DOCS_ONLY_EXTENSIONS` count. Everything else is
+#   code: `docs/hooks.py` is an executed mkdocs hook in some projects, and
+#   `docs/scripts/*.py` exist too. The merge gate serves every project, so the
+#   rule cannot assume `docs/` holds only prose. SVG is deliberately absent:
+#   it can carry script.
 # - `docs/sdlc/` is excluded from `docs/`: those files are the repo-specific
 #   addenda the SDLC skills load and follow (docs/features/skill-context-convention.md).
-# - `CLAUDE.md` / `AGENTS.md` are excluded from top-level `*.md`: agent harnesses
-#   load them as standing instructions, and the worker parses CLAUDE.md headings
-#   into prompts.
+# - A file named `CLAUDE.md`, `CLAUDE.local.md`, or `AGENTS.md` is excluded AT
+#   ANY DEPTH: agent harnesses load them as standing instructions (nested ones
+#   for their subtree), and the worker parses CLAUDE.md headings into prompts.
+# - The instruction-surface checks compare lowercased paths, because on a
+#   case-insensitive filesystem (macOS default) `claude.md` and `docs/SDLC/`
+#   are the same files the harness loads.
 # - `.claude/` is never documentation (skills, commands, agents, hooks), nor are
 #   `mkdocs.yml`, `.github/`, or `tests/`.
 #
@@ -77,27 +97,43 @@ _COMPARE_FILE_CAP = 300
 # REVIEW re-runs, which is the strict-equality behaviour this module otherwise
 # relaxes. Erring toward re-review is the fail-closed direction.
 DOCS_ONLY_PREFIXES = ("docs/",)
+DOCS_ONLY_EXTENSIONS = (
+    ".md",
+    ".markdown",
+    ".rst",
+    ".txt",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+)
 _INSTRUCTION_PREFIXES = ("docs/sdlc/",)
-_INSTRUCTION_TOP_LEVEL = frozenset({"CLAUDE.md", "AGENTS.md"})
+_INSTRUCTION_BASENAMES = frozenset({"claude.md", "claude.local.md", "agents.md"})
 
 
 def is_docs_only_path(path: str) -> bool:
     """Return True iff ``path`` is documentation by the rule above.
 
-    Accepts anything under :data:`DOCS_ONLY_PREFIXES` except the instruction
-    surfaces carved out of it, plus any TOP-LEVEL ``*.md`` (``README.md``,
-    ``CHANGELOG.md``) except ``CLAUDE.md`` / ``AGENTS.md``. The top-level
-    restriction is the point: a nested ``*.md`` is waved through only when its
-    directory is already a documentation directory, so a behaviour-bearing
-    ``.claude/skills/x/SKILL.md`` is code.
+    Accepts a file under :data:`DOCS_ONLY_PREFIXES` whose extension is in
+    :data:`DOCS_ONLY_EXTENSIONS`, plus any TOP-LEVEL ``*.md`` (``README.md``,
+    ``CHANGELOG.md``), minus the instruction surfaces: ``docs/sdlc/`` and any
+    file named ``CLAUDE.md`` / ``CLAUDE.local.md`` / ``AGENTS.md`` at any depth,
+    all matched case-insensitively. The top-level restriction is the point: a
+    nested ``*.md`` is waved through only when its directory is already a
+    documentation directory, so a behaviour-bearing ``.claude/skills/x/SKILL.md``
+    is code.
     """
     if not isinstance(path, str) or not path:
         return False
-    if path.startswith(_INSTRUCTION_PREFIXES) or path in _INSTRUCTION_TOP_LEVEL:
+    lowered = path.lower()
+    if lowered.startswith(_INSTRUCTION_PREFIXES):
+        return False
+    if lowered.rsplit("/", 1)[-1] in _INSTRUCTION_BASENAMES:
         return False
     if path.startswith(DOCS_ONLY_PREFIXES):
-        return True
-    return "/" not in path and path.endswith(".md")
+        return lowered.endswith(DOCS_ONLY_EXTENSIONS)
+    return "/" not in path and lowered.endswith(".md")
 
 
 def _classify_files(files: list) -> str:
@@ -173,7 +209,7 @@ def classify_head_drift(
             cmd,
             capture_output=True,
             text=True,
-            timeout=_SUBPROCESS_TIMEOUT,
+            timeout=_COMPARE_TIMEOUT,
             cwd=repo_root or None,
         )
     except Exception as e:

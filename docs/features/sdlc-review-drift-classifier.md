@@ -17,15 +17,31 @@ checkout holding either commit.
 | `code` | Any non-documentation path, or status `behind` / `diverged` (force-push, rebase) | stale |
 | `unknown` | Any error, timeout, unparseable payload, or a file list at the 300-entry cap | stale |
 
-**What counts as documentation** (`is_docs_only_path`): anything under `docs/`
-except `docs/sdlc/`, plus top-level `*.md` except `CLAUDE.md` and `AGENTS.md`.
-The excluded paths are instruction surfaces that agents load at runtime, as are
-`.claude/`, `.github/`, `tests/`, and every source file (a docstring edit in a
-`.py` file is code drift). Erring toward re-review is the fail-closed direction.
+**What counts as documentation** (`is_docs_only_path`): a file under `docs/`
+with a prose or image extension (`.md`, `.markdown`, `.rst`, `.txt`, `.png`,
+`.jpg`, `.jpeg`, `.gif`, `.webp`), plus top-level `*.md`. Every other file
+under `docs/` is code: some projects execute `docs/hooks.py` as an mkdocs hook
+or keep scripts in `docs/scripts/`, and the merge gate serves every project.
+SVG is absent from the list because it can carry script.
+
+Instruction surfaces are excluded even when they look like prose, matched
+case-insensitively (on macOS `claude.md` and `docs/SDLC/` are the files the
+harness loads): anything under `docs/sdlc/`, and any file named `CLAUDE.md`,
+`CLAUDE.local.md`, or `AGENTS.md` at any depth. `.claude/`, `.github/`,
+`tests/`, and every source file are code too (a docstring edit in a `.py` file
+is code drift). Erring toward re-review is the fail-closed direction.
+
+The compare call times out after 5 seconds. The merge predicate runs inside
+the PreToolUse Bash dispatcher hook, whose budget is 20 seconds
+(`.claude/hooks/manifest.toml`), after its other `gh` calls. A longer compare
+could let the harness kill the hook before `unknown` is returned. A timeout
+reads as `unknown`, which is stale.
 
 ## Consumers
 
-All three share the one classifier, so they cannot disagree:
+All three share one classifier and one fail-closed rule. A consumer that
+cannot resolve the repo slug reads `unknown` and stays strict, so two consumers
+can briefly disagree only in the safe direction:
 
 - **Merge predicate, group (c)** (`tools/merge_predicate.py::_check_verdict_freshness`):
   a trailer mismatch passes only on `docs_only`. See `docs/sdlc/do-merge.md`.
