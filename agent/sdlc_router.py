@@ -1439,7 +1439,8 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
       unattributable verdict is re-reviewed at the current head, never trusted
       as fresh (re-review records a fresh verdict WITH the trailer, so this
       converges; loop-bound by G4)
-    - trailer present → stale iff it differs (case-insensitive) from the head
+    - trailer present → stale iff it differs (case-insensitive) from the head,
+      unless ``context["review_head_drift"]`` proves the drift docs-only (#3228)
     """
     if "pr_head_sha" not in context:
         return False
@@ -1456,7 +1457,9 @@ def _review_verdict_head_is_stale(stage_states: dict, meta: dict, context: dict)
     recorded_head = _latest_review_head_sha(stage_states, meta)
     if not recorded_head:
         return True
-    return recorded_head.lower() != head_sha.lower()
+    if recorded_head.lower() == head_sha.lower():
+        return False
+    return not _review_head_drift_is_docs_only(recorded_head, head_sha, context)
 
 
 def _review_verdict_head_is_verified_fresh(stage_states: dict, meta: dict, context: dict) -> bool:
@@ -1488,7 +1491,34 @@ def _review_verdict_head_is_verified_fresh(stage_states: dict, meta: dict, conte
     recorded_head = _latest_review_head_sha(stage_states, meta)
     if not recorded_head:
         return False  # unattributable verdict is never "verified fresh"
-    return recorded_head.lower() == head_sha.lower()
+    if recorded_head.lower() == head_sha.lower():
+        return True
+    return _review_head_drift_is_docs_only(recorded_head, head_sha, context)
+
+
+def _review_head_drift_is_docs_only(recorded_head: str, head_sha: str, context: dict) -> bool:
+    """Return True iff the context proves only documentation changed since review.
+
+    #3228: ``/do-docs`` is a mandatory post-REVIEW stage that commits, so strict
+    SHA equality made every APPROVED verdict stale at MERGE. The classification
+    itself (``tools/sdlc_review_drift.py``, via the GitHub compare API) happens in
+    ``tools/sdlc_next_skill._build_context``, because the router makes no ``gh``
+    calls. This only accepts it, and only when the signal was computed for
+    exactly this reviewed SHA and this head: a mismatched, missing, or
+    malformed signal, or any class other than ``"docs_only"``, is False, so the
+    verdict stays stale and routes to re-review. Agrees with the Group (c)
+    freshness leg in ``tools/merge_predicate``.
+    """
+    signal = context.get("review_head_drift")
+    if not isinstance(signal, dict):
+        return False
+    reviewed = signal.get("reviewed")
+    head = signal.get("head")
+    if not isinstance(reviewed, str) or not isinstance(head, str):
+        return False
+    if reviewed.lower() != recorded_head.lower() or head.lower() != head_sha.lower():
+        return False
+    return signal.get("drift") == "docs_only"
 
 
 def _review_verdict_is_stale(stage_states: dict) -> bool:

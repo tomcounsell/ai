@@ -155,6 +155,7 @@ class TestFinalizeSelfcheckRoundTrip:
             "approved": True,
             "trailer_matches_head": True,
             "marker_completed": True,
+            "head_drift": "identical",
             "reason": None,
         }
 
@@ -258,6 +259,7 @@ class TestFinalizeSelfcheckRoundTrip:
             "approved": False,
             "trailer_matches_head": False,
             "marker_completed": False,
+            "head_drift": None,
             "reason": "REVIEW_VERDICT_MISSING",
         }
 

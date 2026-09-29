@@ -94,6 +94,7 @@ exemption either.
 from __future__ import annotations
 
 import logging
+import re
 
 from tools._sdlc_utils import (
     _HEAD_SHA_TRAILER_RE,
@@ -104,6 +105,9 @@ from tools._sdlc_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A full commit SHA, the only shape `--reviewed-head` may take (#3228).
+_FULL_SHA_RE = re.compile(r"\A[0-9a-fA-F]{40}\Z")
 
 
 def _strip_head_sha_trailer(verdict: str) -> str:
@@ -237,8 +241,19 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
             "approved": bool,
             "trailer_matches_head": bool,
             "marker_completed": bool,
+            "head_drift": str | None,  # identical|docs_only|code|unknown
             "reason": str | None,  # one of the named errors, or None
         }
+
+    ``head_drift`` (#3228) is populated only on the APPROVED path, and
+    reports WHY ``trailer_matches_head`` reads as it does: ``"identical"`` when
+    the recorded SHA IS the live head, ``"docs_only"`` when the head moved but
+    every path changed since the reviewed commit is documentation (tolerated —
+    ``/do-docs`` is a mandatory post-REVIEW stage that commits), and
+    ``"code"``/``"unknown"`` when the drift is refused. It is ``None`` whenever
+    the check never got far enough to classify. The tolerance is reported
+    rather than silent so an operator reading ``ok: true`` can see that the
+    verdict's SHA and the live head are different commits.
 
     ``ok`` is the verdict of the WHOLE check, not the conjunction of the three
     booleans below it (#2548). Those booleans report which sub-checks were run
@@ -263,6 +278,7 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         "approved": False,
         "trailer_matches_head": False,
         "marker_completed": False,
+        "head_drift": None,
         "reason": None,
     }
 
@@ -323,6 +339,23 @@ def check_review_persistence(pr: int, issue_number: int, run_id: str | None = No
         recorded_head = head_sha_of_record(verdict_record)
         if recorded_head and recorded_head.lower() == head_sha.lower():
             result["trailer_matches_head"] = True
+            result["head_drift"] = "identical"
+        elif recorded_head:
+            # Documentation-only drift is not staleness (#3228). `/do-docs`
+            # is a MANDATORY post-REVIEW stage that commits, so strict equality
+            # here failed on every lane and forced a human authorization. The
+            # classifier is fail-CLOSED: anything but a strictly-descending,
+            # all-documentation range reads as stale. See
+            # tools/sdlc_review_drift.py for why "unknown" is not leniency.
+            from tools.sdlc_review_drift import classify_head_drift
+
+            drift = classify_head_drift(recorded_head, head_sha, repo or "")
+            result["head_drift"] = drift
+            if drift == "docs_only":
+                result["trailer_matches_head"] = True
+            else:
+                result["reason"] = "REVIEW_TRAILER_MISSING"
+                return result
         else:
             result["reason"] = "REVIEW_TRAILER_MISSING"
             return result
@@ -386,6 +419,7 @@ def finalize(
     run_id: str | None,
     blockers: int | None = None,
     tech_debt: int | None = None,
+    reviewed_head: str | None = None,
 ) -> dict:
     """Record verdict + head_sha + REVIEW marker, then verify all three landed.
 
@@ -414,6 +448,16 @@ def finalize(
         run_id: The caller's run identity (``sdlc-tool session-ensure``).
         blockers: Optional blocker count.
         tech_debt: Optional tech-debt count.
+        reviewed_head: The head SHA the reviewer actually read (#3228). The
+            APPROVED path of ``/do-pr-review`` may push its own plan-checkbox
+            commit before finalizing, so the live head is then a commit no
+            reviewer inspected. When given and different from the live head,
+            it is recorded instead -- but only if the drift from it to the
+            live head is documentation-only; anything else raises
+            ``REVIEW_HEAD_DRIFT`` (the reviewed code is not what is on the
+            branch). It must be a full 40-hex SHA, else
+            ``REVIEWED_HEAD_INVALID`` is raised before anything is read or
+            written. Omitted, the live head is recorded as before.
 
     Returns:
         The :func:`check_review_persistence` result dict on success
@@ -440,6 +484,19 @@ def finalize(
         raise ReviewFinalizeError(
             "REVIEW_VERDICT_MISSING: verdict is empty/whitespace; refusing to "
             "finalize with no partial write"
+        )
+
+    if reviewed_head is not None and (
+        not isinstance(reviewed_head, str) or not _FULL_SHA_RE.match(reviewed_head.strip())
+    ):
+        # #3228: the reviewed head is STORED as the verdict's head_sha, and
+        # every reader compares it to a full 40-hex head. A short SHA or a ref
+        # name would be written and then rejected by every consumer, so refuse
+        # it here, before any `gh` call, lease read, or write.
+        raise ReviewFinalizeError(
+            f"REVIEWED_HEAD_INVALID: --reviewed-head {reviewed_head!r} is not a full "
+            "40-character hex commit SHA; pass the exact SHA the reviewer read "
+            "(`git rev-parse HEAD` before any review-side commit). Nothing was written."
         )
 
     if not _verdict_is_recognized(normalize_verdict(verdict)):
@@ -514,6 +571,23 @@ def finalize(
         # already-trailered verdict untouched.
         embedded = head_sha_of_text(verdict)
         recorded_head = embedded or head_sha
+        if not embedded and reviewed_head and reviewed_head.strip().lower() != head_sha.lower():
+            # #3228: pin the verdict to the commit the reviewer read, never to
+            # the reviewer's own post-review commit -- and only when everything
+            # between the two is documentation. Fail-closed like every other
+            # consumer of the classifier.
+            from tools.sdlc_review_drift import classify_head_drift
+
+            reviewed_head = reviewed_head.strip()
+            drift = classify_head_drift(reviewed_head, head_sha, target_repo)
+            if drift != "docs_only":
+                raise ReviewFinalizeError(
+                    f"REVIEW_HEAD_DRIFT: the PR head {head_sha[:7]} moved since the "
+                    f"reviewed head {reviewed_head[:7]} and the drift is {drift!r}, not "
+                    "documentation-only; re-run /do-pr-review at the live head. "
+                    "Nothing was written."
+                )
+            recorded_head = reviewed_head
         bare_verdict = _strip_head_sha_trailer(verdict)
     else:
         # Non-APPROVED verdicts carry no trailer by design (plan No-Gos), but
@@ -610,6 +684,7 @@ def _cli_finalize(args) -> dict:
         run_id=args.run_id,
         blockers=args.blockers,
         tech_debt=args.tech_debt,
+        reviewed_head=args.reviewed_head,
     )
 
 

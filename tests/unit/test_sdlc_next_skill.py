@@ -1464,6 +1464,72 @@ class TestPrHeadShaContext:
         assert called == []
 
 
+class TestReviewHeadDriftContext:
+    """#3228: _build_context classifies post-review drift for the router, which
+    makes no gh calls. The signal names the exact SHA pair it was computed for."""
+
+    _REVIEWED = "a" * 40
+    _HEAD = "b" * 40
+
+    def _states(self, head_sha):
+        return {
+            "REVIEW": "completed",
+            "_verdicts": {"REVIEW": {"verdict": "APPROVED", "head_sha": head_sha}},
+        }
+
+    def _build(self, monkeypatch, reviewed, drift="docs_only"):
+        calls = []
+
+        def _classify(base, head, repo, repo_root=None):
+            calls.append((base, head, repo))
+            return drift
+
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: self._HEAD
+        )
+        monkeypatch.setattr("tools.sdlc_review_drift.classify_head_drift", _classify)
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=3228,
+            stage_states=self._states(reviewed),
+            meta={"pr_number": 42, "_resolved_target_repo": "o/r"},
+        )
+        return context, calls
+
+    @pytest.mark.parametrize("drift", ["docs_only", "code", "unknown"])
+    def test_signal_carries_the_classified_pair(self, monkeypatch, drift):
+        context, calls = self._build(monkeypatch, self._REVIEWED, drift)
+        assert calls == [(self._REVIEWED, self._HEAD, "o/r")]
+        assert context["review_head_drift"] == {
+            "reviewed": self._REVIEWED,
+            "head": self._HEAD,
+            "drift": drift,
+        }
+
+    def test_no_signal_when_reviewed_sha_is_head(self, monkeypatch):
+        context, calls = self._build(monkeypatch, self._HEAD)
+        assert "review_head_drift" not in context
+        assert calls == []
+
+    def test_classifier_exception_fails_closed(self, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("compare exploded")
+
+        monkeypatch.setattr("tools.lane_identity.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            sdlc_next_skill, "_fetch_pr_head_sha", lambda pr_number, repo=None: self._HEAD
+        )
+        monkeypatch.setattr("tools.sdlc_review_drift.classify_head_drift", _boom)
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=3228,
+            stage_states=self._states(self._REVIEWED),
+            meta={"pr_number": 42},
+        )
+        assert context["review_head_drift"]["drift"] == "unknown"
+
+
 class TestLedgerDurabilityRecovery:
     """Issue #2395: an empty PipelineLedger for an issue that actually has
     durable state (committed plan, open PR, review) must not be silently

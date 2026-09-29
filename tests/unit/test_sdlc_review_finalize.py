@@ -56,6 +56,7 @@ class TestCheckReviewPersistence:
             "approved": False,
             "trailer_matches_head": False,
             "marker_completed": False,
+            "head_drift": None,
             "reason": "REVIEW_VERDICT_MISSING",
         }
 
@@ -103,11 +104,77 @@ class TestCheckReviewPersistence:
             patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
             patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
             patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            # #3228: a mismatch is now classified before it is refused.
+            # Stub the classifier so this stays hermetic (it shells out to gh).
+            patch("tools.sdlc_review_drift.classify_head_drift", return_value="code"),
         ):
             result = check_review_persistence(pr=1, issue_number=42)
 
         assert result["trailer_matches_head"] is False
+        assert result["head_drift"] == "code"
         assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_docs_only_drift_after_review_is_not_staleness(self):
+        """#3228 acceptance criterion 2: `/do-docs` is a MANDATORY stage
+        that commits after REVIEW, so the head has always moved by the time
+        `/do-merge` self-checks. When everything it moved past is
+        documentation, the verdict is still fresh and the lane merges without a
+        human authorizing a trailer mismatch."""
+        reviewed = "b" * 40
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={reviewed}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_drift.classify_head_drift", return_value="docs_only"
+            ) as classify,
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is True
+        assert result["trailer_matches_head"] is True
+        assert result["head_drift"] == "docs_only"
+        # Classified against the RECORDED sha and the LIVE head, in that order.
+        assert classify.call_args.args[0] == reviewed
+        assert classify.call_args.args[1] == _HEAD_SHA
+
+    def test_unknown_drift_is_treated_exactly_like_code_drift(self):
+        """ "unknown" exists to make the operator message honest, never to make
+        the gate lenient: an unclassifiable range refuses like code drift."""
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={'b' * 40}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_review_drift.classify_head_drift", return_value="unknown"),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is False
+        assert result["trailer_matches_head"] is False
+        assert result["head_drift"] == "unknown"
+        assert result["reason"] == "REVIEW_TRAILER_MISSING"
+
+    def test_identical_head_reports_no_drift(self):
+        verdict = f"APPROVED REVIEW_CONTEXT head_sha={_HEAD_SHA}"
+        with (
+            patch("tools.sdlc_stage_query._resolve_issue_record", return_value=object()),
+            patch("tools.sdlc_verdict.get_verdict", return_value={"verdict": verdict}),
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_stage_query.query_stage_states", return_value={"REVIEW": "completed"}
+            ),
+            patch("tools._sdlc_marker_telemetry.marker_ok_write_count", return_value=1),
+        ):
+            result = check_review_persistence(pr=1, issue_number=42)
+
+        assert result["ok"] is True
+        assert result["head_drift"] == "identical"
 
     def test_approved_verdict_trailer_matches_but_marker_not_completed(self):
         """Failure #3 in the incident: verdict + trailer good, marker never set."""
@@ -148,6 +215,7 @@ class TestCheckReviewPersistence:
             "approved": True,
             "trailer_matches_head": True,
             "marker_completed": True,
+            "head_drift": "identical",
             "reason": None,
         }
 
@@ -439,6 +507,108 @@ class TestFinalize:
 
         assert mock_sha.call_args.kwargs.get("repo") == "yudame/psyoptimal"
 
+    _REVIEWED = "d" * 40
+
+    def _finalize_with_reviewed_head(self, drift):
+        """Run the APPROVED path where the live head moved past the reviewed
+        head (the reviewer's own checkbox commit); returns (record mock, classify mock)."""
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch(
+                "tools.sdlc_review_drift.classify_head_drift", return_value=drift
+            ) as mock_classify,
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch(
+                "tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}
+            ) as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)),
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(
+                pr=1,
+                issue_number=42,
+                verdict="APPROVED",
+                run_id="run-1",
+                reviewed_head=self._REVIEWED,
+            )
+        return mock_record, mock_classify
+
+    def test_reviewed_head_is_recorded_across_docs_only_drift(self):
+        """#3228 AC2: the recorded head is the commit the reviewer inspected,
+        not the reviewer's own post-review checkbox commit."""
+        mock_record, mock_classify = self._finalize_with_reviewed_head("docs_only")
+        assert mock_classify.call_args.args[:3] == (self._REVIEWED, _HEAD_SHA, "o/r")
+        assert mock_record.call_args.kwargs["head_sha"] == self._REVIEWED
+
+    @pytest.mark.parametrize("drift", ["code", "unknown"])
+    def test_reviewed_head_refused_when_code_moved(self, drift):
+        """Known-bad: code changed between the reviewed head and the live head.
+        Recording either SHA would approve code nobody reviewed."""
+        with pytest.raises(ReviewFinalizeError, match="REVIEW_HEAD_DRIFT"):
+            self._finalize_with_reviewed_head(drift)
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["d" * 7, "d" * 39, "d" * 41, "HEAD", "main", "refs/heads/main", "g" * 40, ""],
+    )
+    def test_reviewed_head_must_be_a_full_sha(self, bad):
+        """Known-bad: a short SHA or a ref would be stored as head_sha and then
+        rejected by every reader. Refused by name before any lease read, gh
+        call, or write."""
+        with (
+            patch("tools._sdlc_utils.resolve_ledger_lease") as mock_lease,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha") as mock_sha,
+            patch("tools.sdlc_review_drift.classify_head_drift") as mock_classify,
+            patch("tools.sdlc_verdict.record_verdict") as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker") as mock_marker,
+        ):
+            with pytest.raises(ReviewFinalizeError, match="REVIEWED_HEAD_INVALID"):
+                finalize(
+                    pr=1,
+                    issue_number=42,
+                    verdict="APPROVED",
+                    run_id="run-1",
+                    reviewed_head=bad,
+                )
+        mock_lease.assert_not_called()
+        mock_sha.assert_not_called()
+        mock_classify.assert_not_called()
+        mock_record.assert_not_called()
+        mock_marker.assert_not_called()
+
+    def test_reviewed_head_equal_to_live_head_skips_classification(self):
+        lease_ok, revalidate_ok = self._patch_lease_ok()
+        with (
+            lease_ok,
+            revalidate_ok,
+            patch("tools.sdlc_review_finalize._fetch_pr_head_sha", return_value=_HEAD_SHA),
+            patch("tools.sdlc_review_drift.classify_head_drift") as mock_classify,
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=MagicMock()),
+            patch(
+                "tools.sdlc_verdict.record_verdict", return_value={"verdict": "APPROVED"}
+            ) as mock_record,
+            patch("tools.sdlc_stage_marker.write_marker", return_value=({}, 0)),
+            patch(
+                "tools.sdlc_review_finalize.check_review_persistence",
+                return_value={"ok": True, "reason": None},
+            ),
+        ):
+            finalize(
+                pr=1,
+                issue_number=42,
+                verdict="APPROVED",
+                run_id="run-1",
+                reviewed_head=_HEAD_SHA.upper(),
+            )
+        mock_classify.assert_not_called()
+        assert mock_record.call_args.kwargs["head_sha"] == _HEAD_SHA
+
     def test_lease_lost_between_resolve_and_write_refuses(self):
         with (
             patch("tools._sdlc_utils.resolve_ledger_lease", return_value=("o/r", None)),
@@ -650,6 +820,7 @@ class TestCliEntryPoints:
             blockers=None,
             tech_debt=None,
             run_id="run-1",
+            reviewed_head=None,
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -676,6 +847,7 @@ class TestCliEntryPoints:
             run_id="run-1",
             blockers=None,
             tech_debt=None,
+            reviewed_head=None,
         )
 
     def test_cli_selfcheck_never_raises_and_returns_check_result(self):

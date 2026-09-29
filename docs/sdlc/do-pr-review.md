@@ -107,7 +107,13 @@ authoritative session selector:
 # --blocker-count / --tech-debt-count take integer COUNTS, not findings text.
 # Findings go in the review posted to the PR. Omit for "not assessed"; 0 means
 # "assessed, none found".
-sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
+#
+# --reviewed-head is the HEAD_SHA captured before reading the diff
+# (code-review.md), NOT the live head: Step 2.5's plan-checkbox commit has
+# already moved the branch, and the verdict must pin the commit you inspected.
+# finalize records it when only documentation changed since, and refuses with
+# REVIEW_HEAD_DRIFT otherwise (#3228).
+sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "APPROVED" --reviewed-head "$HEAD_SHA" --blocker-count 0 --tech-debt-count 0 --run-id "$RUN_ID"
 # Findings:
 sdlc-tool verdict finalize --pr "$PR_NUMBER" --issue-number "$ISSUE_NUMBER" --verdict "CHANGES REQUESTED" --blocker-count $BLOCKERS --tech-debt-count $TECH_DEBT --run-id "$RUN_ID"
 # Preflight short-circuits:

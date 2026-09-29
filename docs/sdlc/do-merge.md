@@ -51,8 +51,18 @@ generic steps as follows:
     latest commit — via the head SHA the verdict attributes to
     (`head_sha_of_record()`: the record's `head_sha` field, else a
     `REVIEW_CONTEXT head_sha=` trailer in the verdict text) when resolvable,
-    else recorded-at timestamp vs latest-commit committer date. A stale
-    APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`. The
+    else recorded-at timestamp vs latest-commit committer date. A trailer
+    that differs from the live head is tolerated only when
+    `tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only`: the
+    live head strictly descends from the reviewed SHA and every changed path
+    is a prose or image file under `docs/` (`.md`, `.markdown`, `.rst`,
+    `.txt`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`; never `docs/sdlc/`) or
+    a top-level `*.md`, and no path is named `CLAUDE.md`, `CLAUDE.local.md`,
+    or `AGENTS.md` at any depth (all matched case-insensitively). Any other
+    file under `docs/`, such as an mkdocs `docs/hooks.py`, is code. Code
+    drift, a force-push, or an `unknown`
+    classification is stale, and a stale APPROVED verdict FAILS with
+    `REVIEW verdict predates PR head commit`. The
     PR's current head SHA is resolved git-first via
     `tools/pr_head_resolver.py::resolve_pr_head_sha` (`git ls-remote
     refs/pull/N/head`, no shared cache with `gh`), so a stale `gh` head read
@@ -324,9 +334,15 @@ commit's `committer.date`. Missing latest-commit data fails closed — a silent
 fallback would defeat the exact stale-Approved-after-force-push bug this check
 prevents. Do not re-implement the filter inline here; the same check runs in
 the merge-guard hook, so a stale approval that slips past the skill still
-blocks at the choke point. A stale-but-safe diff (docs-only re-push after
-approval) needs a fresh review or a matching-trailer re-record — the predicate
-does not re-admit prior approvals by diff shape.
+blocks at the choke point. A trailer mismatch is tolerated when
+`tools/sdlc_review_drift.py::classify_head_drift` reports `docs_only` (a
+strictly descending range whose paths are all prose or image files under
+`docs/` outside `docs/sdlc/`, or top-level `*.md`, with no `CLAUDE.md`,
+`CLAUDE.local.md`, or `AGENTS.md` at any depth; see
+[`docs/features/sdlc-review-drift-classifier.md`](../features/sdlc-review-drift-classifier.md)), so the
+mandatory post-review DOCS commit does not stale the approval (#3228). Code
+drift, a force-push, and an `unknown` classification still refuse; the remedy
+is a fresh `/do-pr-review`, never a re-run of `finalize`.
 
 ### Lockfile Sync Check
 
