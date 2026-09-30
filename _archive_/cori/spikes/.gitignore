@@ -1,0 +1,8 @@
+.venv/
+.pgdata*/
+*.log
+*.jsonl
+__pycache__/
+.hypothesis/
+.pytest_cache/
+results/
