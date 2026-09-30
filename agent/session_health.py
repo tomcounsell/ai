@@ -6802,20 +6802,13 @@ def _reap_orphan_session_processes() -> int:
             else:
                 continue
 
-            # === Per-PID heartbeat gate ===
-            # Durability plan #2494: forward scan over the non-terminal status
-            # index (``find_live_session_by_pid``) resolves ownership without a
-            # pid index. #2518: pass the psutil-observed ``create_time`` so the
-            # match is fenced — a live row holding a recycled ``exec_pid`` must
-            # not confer ownership of an unrelated process. ``or None`` because
-            # the read above coerces a missing value to ``0.0``, and 0.0 would
-            # mismatch every recorded fence instead of falling back to pid-only.
-            # Ownership proof (#3592): whatever the signature, a process is a
-            # candidate only if its environment carries a worker ownership
-            # marker. Age, PPID and cmdline shape are not ownership; an
-            # operator's interactive `claude --continue ...` whose terminal
-            # died is PPID 1 and matches the claude signature, but carries no
-            # marker, so it is never signalled. Unreadable env fails closed.
+            # === Ownership proof (#3592) ===
+            # Whatever the signature, a process is a candidate only if its
+            # environment carries a worker ownership marker. Age, PPID and
+            # cmdline shape are not ownership; an operator's interactive
+            # `claude --continue ...` whose terminal died is PPID 1 and matches
+            # the claude signature, but carries no marker, so it is never
+            # signalled. Unreadable env fails closed.
             owner_marker = _worker_ownership_marker(proc)
             if owner_marker is None:
                 logger.debug(
@@ -6839,6 +6832,14 @@ def _reap_orphan_session_processes() -> int:
                         )
                         continue
             else:
+                # === Per-PID heartbeat gate ===
+                # Durability plan #2494: forward scan over the non-terminal status
+                # index (``find_live_session_by_pid``) resolves ownership without a
+                # pid index. #2518: pass the psutil-observed ``create_time`` so the
+                # match is fenced — a live row holding a recycled ``exec_pid`` must
+                # not confer ownership of an unrelated process. ``or None`` because
+                # the read above coerces a missing value to ``0.0``, and 0.0 would
+                # mismatch every recorded fence instead of falling back to pid-only.
                 session = AgentSession.find_live_session_by_pid(pid, create_time or None)
             if session is None and is_mcp:
                 # MCP servers don't have a direct fence mapping. Try the parent:

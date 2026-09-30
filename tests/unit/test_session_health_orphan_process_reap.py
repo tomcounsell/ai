@@ -1202,6 +1202,28 @@ class TestPyrightOwnershipGate:
         assert _reap_with_marker_session([proc], None) == 1
         proc.terminate.assert_called_once()
 
+    def test_harness_owner_marker_only_is_terminated_without_session_lookup(self, clean_state):
+        """A pyright whose only proof is VALOR_HARNESS_OWNER_PID is still worker-owned.
+
+        The harness stamps that marker into every `claude` it spawns and each
+        child inherits it, so it proves ownership; there is no session id to
+        look up, so the orphaned pyright is reaped without a session lookup.
+        """
+        from agent.session_runner.hook_edge import HARNESS_OWNER_ENV
+
+        proc = _pyright_proc(marker=None)
+        proc.environ.return_value = {HARNESS_OWNER_ENV: "4242"}
+        strict = MagicMock()
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(session_health.AgentSession, "get_by_id_strict", strict),
+            patch.object(session_health, "_increment_orphan_process_counter"),
+        ):
+            killed = session_health._reap_orphan_session_processes()
+        assert killed == 1
+        proc.terminate.assert_called_once()
+        strict.assert_not_called()
+
     @pytest.mark.parametrize("marker", [None, ""])
     def test_missing_or_empty_marker_is_left_alone(self, clean_state, marker):
         proc = _pyright_proc(marker=marker)
