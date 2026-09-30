@@ -67,6 +67,9 @@ def clean_state():
         pass
 
 
+_WORKER_ENV = {"VALOR_HARNESS_OWNER_PID": "4242"}
+
+
 def _fake_proc(
     *,
     pid: int,
@@ -75,11 +78,15 @@ def _fake_proc(
     create_time: float = 1000.0,
     children=None,
     parent_pid: int | None = None,
+    environ: dict | None = None,
 ):
     """Build a fake psutil.Process-like object.
 
     The default cmdline mirrors the real `claude` CLI invocation (psutil's
     cmdline returns argv with the absolute path to the bundled binary).
+    The default environment carries the harness ownership marker every
+    worker spawn stamps (#3592); pass ``environ={}`` for a process the worker
+    did not spawn, such as an operator's interactive ``claude``.
     """
     cmd = cmdline or [
         "/usr/local/lib/node_modules/@anthropic-ai/claude-code/claude_agent_sdk/_bundled/claude",
@@ -92,6 +99,7 @@ def _fake_proc(
     proc.cmdline.return_value = cmd
     proc.create_time.return_value = create_time
     proc.children.return_value = children or []
+    proc.environ.return_value = _WORKER_ENV if environ is None else environ
     if parent_pid is not None:
         parent = MagicMock(spec=psutil.Process)
         parent.pid = parent_pid
@@ -566,15 +574,9 @@ class TestStalePrintOneshotFastKill:
         assert killed == 0
         proc.terminate.assert_not_called()
 
-    def test_interactive_bare_claude_without_session_is_reaped(self, clean_state):
-        """An orphaned PTY TUI `claude` process (no owning session) IS reaped.
-
-        This is the D2 fix in action: before broadening, this cmdline shape
-        never matched any signature, so a PTY child of a dead/crashed
-        session ran forever, ungated. Now it matches the general is_claude
-        signature and — with no live session found and PPID==1 — is reaped
-        through the normal (heartbeat-gated, non-fast-kill) path.
-        """
+    def test_worker_spawned_bare_claude_without_session_is_reaped(self, clean_state):
+        """A worker-spawned PTY TUI `claude` (ownership marker in its env) with
+        no owning session and PPID==1 IS reaped (D2, issue #1817)."""
         proc = _fake_proc(pid=2103, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
@@ -585,6 +587,107 @@ class TestStalePrintOneshotFastKill:
 
         assert killed == 1
         proc.terminate.assert_called_once()
+
+
+class TestOperatorClaudeNeverSignalled:
+    """An operator's interactive ``claude --continue ...`` whose terminal died is
+    PPID 1, old, and matches the claude signature, but its environment carries
+    no worker ownership marker. Neither reaper may ever signal it (#3592)."""
+
+    _OPERATOR_CMD = [
+        "claude",
+        "--continue",
+        "--permission-mode",
+        "bypassPermissions",
+        "--model",
+        "opus",
+    ]
+    _OPERATOR_ONESHOT_CMD = [
+        "claude",
+        "-p",
+        "summarize this",
+        "--permission-mode",
+        "bypassPermissions",
+    ]
+
+    @pytest.mark.parametrize(
+        "environ",
+        [{}, {"HOME": "/Users/op", "TERM": "xterm"}, {"AGENT_SESSION_ID": ""}],
+        ids=["empty", "operator-shell", "blank-marker"],
+    )
+    def test_hourly_reaper_never_signals_unmarked_claude(self, clean_state, environ):
+        proc = _fake_proc(
+            pid=2201, ppid=1, cmdline=self._OPERATOR_CMD, create_time=_stale_ct(), environ=environ
+        )
+        assert session_health._CLAUDE_CMDLINE_RE.search(" ".join(self._OPERATOR_CMD))
+
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+        ):
+            killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
+
+    def test_unreadable_environ_fails_closed(self, clean_state):
+        proc = _fake_proc(pid=2202, ppid=1, cmdline=self._OPERATOR_CMD, create_time=_stale_ct())
+        proc.environ.side_effect = psutil.AccessDenied(2202)
+
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+        ):
+            killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_fast_reaper_never_signals_unmarked_stale_oneshot(self, clean_state):
+        proc = _fake_proc(
+            pid=2203,
+            ppid=1,
+            cmdline=self._OPERATOR_ONESHOT_CMD,
+            create_time=_stale_ct(),
+            environ={},
+        )
+        assert session_health._is_stale_print_oneshot(self._OPERATOR_ONESHOT_CMD, _stale_ct())
+
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(session_health, "_oneshot_owner_is_live", return_value=False),
+        ):
+            first = session_health._fast_reap_stale_print_oneshots()
+            second = session_health._fast_reap_stale_print_oneshots()
+
+        assert first == second == 0
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
+
+    def test_hourly_reaper_never_signals_unmarked_stale_oneshot(self, clean_state):
+        proc = _fake_proc(
+            pid=2204,
+            ppid=1,
+            cmdline=self._OPERATOR_ONESHOT_CMD,
+            create_time=_stale_ct(),
+            environ={},
+        )
+
+        with (
+            patch.object(psutil, "process_iter", return_value=[proc]),
+            patch.object(
+                session_health.AgentSession, "find_live_session_by_pid", return_value=None
+            ),
+        ):
+            killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
 
     def test_headless_oneshot_never_matched_by_broadened_claude_signature(self, clean_state):
         """A headless `claude -p` one-shot must NOT match the broadened
@@ -1253,7 +1356,7 @@ class TestKillLogEvidence:
         with caplog.at_level(logging.INFO, logger="agent.session_health"):
             _reap_with_marker_session([proc], _session(status="completed"))
         assert "signature=pyright" in caplog.text
-        assert "marker=dead-session" in caplog.text
+        assert "marker=AGENT_SESSION_ID=dead-session" in caplog.text
 
     def test_drain_escalation_line_carries_command_and_ppid(self, clean_state, caplog):
         ct = 4242.0

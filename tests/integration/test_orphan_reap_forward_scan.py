@@ -111,6 +111,8 @@ def _fake_proc(*, pid, create_time, ppid=1, cmdline=None):
     proc.create_time.return_value = create_time
     proc.children.return_value = []
     proc.parent.return_value = None
+    # Worker-spawned: carries the harness ownership marker (#3592).
+    proc.environ.return_value = {"VALOR_HARNESS_OWNER_PID": "4242"}
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
     return proc

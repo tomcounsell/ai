@@ -6547,6 +6547,34 @@ def _describe_proc_for_log(proc) -> tuple[str, str]:
     return cmd, ppid
 
 
+def _worker_ownership_marker(proc) -> str | None:
+    """Return the worker ownership marker in ``proc``'s environment, or None.
+
+    Both orphan reapers signal a process only with proof this system spawned
+    it (#3592). Every worker ``claude`` spawn carries ``AGENT_SESSION_ID``
+    (session turns) or ``HARNESS_OWNER_ENV`` (every harness spawn, including
+    sessionless drafter calls and the health probe), and each child inherits
+    them. An operator's interactive ``claude`` carries neither.
+
+    The result is ``"AGENT_SESSION_ID=<id>"`` or ``"VALOR_HARNESS_OWNER_PID=<pid>"``,
+    session id first because it names an owner the reaper can look up. None
+    means no proof, including when the environment cannot be read: the caller
+    must leave the process alone. Never raises.
+    """
+    from agent.session_runner.hook_edge import HARNESS_OWNER_ENV
+
+    try:
+        environ = proc.environ()
+    except Exception as e:  # noqa: BLE001  # swallow-ok: unreadable env is "no proof"
+        logger.debug("[orphan-reap] PID %s environ() unreadable: %s", getattr(proc, "pid", "?"), e)
+        return None
+    for name in ("AGENT_SESSION_ID", HARNESS_OWNER_ENV):
+        value = environ.get(name)
+        if isinstance(value, str) and value:
+            return f"{name}={value}"
+    return None
+
+
 def _oneshot_owner_is_live(pid: int | None, create_time: float | None = None) -> bool:
     """True if ``pid`` is the harness of a currently-live session (issue #2149).
 
@@ -6691,7 +6719,7 @@ def _reap_orphan_session_processes() -> int:
             logger.info(
                 "[orphan-reap] Drain: SIGKILL'd PID %d (escalation, cmd=%s, ppid=%s, "
                 "evidence=survived SIGTERM, create_time matched; ownership verdict logged "
-                "on the earlier Killed line)",
+                "on this PID's earlier [orphan-reap] Killed or [fast-oneshot-reap] SIGTERM'd line)",
                 pid,
                 drain_cmd,
                 drain_ppid,
@@ -6782,31 +6810,34 @@ def _reap_orphan_session_processes() -> int:
             # not confer ownership of an unrelated process. ``or None`` because
             # the read above coerces a missing value to ``0.0``, and 0.0 would
             # mismatch every recorded fence instead of falling back to pid-only.
-            pyright_marker = ""
+            # Ownership proof (#3592): whatever the signature, a process is a
+            # candidate only if its environment carries a worker ownership
+            # marker. Age, PPID and cmdline shape are not ownership; an
+            # operator's interactive `claude --continue ...` whose terminal
+            # died is PPID 1 and matches the claude signature, but carries no
+            # marker, so it is never signalled. Unreadable env fails closed.
+            owner_marker = _worker_ownership_marker(proc)
+            if owner_marker is None:
+                logger.debug(
+                    "[orphan-reap] PID %d matched but carries no ownership marker, leaving alone",
+                    pid,
+                )
+                continue
             if is_pyright:
                 # A pyright never has a matching exec_pid, so the pid lookup can
-                # neither vouch for nor against it. Ownership must come from the
-                # process itself: the worker injects AGENT_SESSION_ID into the
-                # harness env and every child inherits it. Every read failure
-                # fails closed (leave the process alone); a human's or editor's
-                # pyright carries no marker and is never a candidate.
-                try:
-                    marker = proc.environ().get("AGENT_SESSION_ID")
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("[orphan-reap] pyright PID %d environ() unreadable: %s", pid, e)
-                    continue
-                if not isinstance(marker, str) or not marker:
-                    continue
-                try:
-                    session = AgentSession.get_by_id_strict(marker)
-                except Exception as e:  # noqa: BLE001
-                    logger.debug(
-                        "[orphan-reap] pyright PID %d marker lookup failed: %s — leaving alone",
-                        pid,
-                        e,
-                    )
-                    continue
-                pyright_marker = marker
+                # neither vouch for nor against it; its liveness comes from the
+                # session its marker names. A lookup error fails closed.
+                session = None
+                if owner_marker.startswith("AGENT_SESSION_ID="):
+                    try:
+                        session = AgentSession.get_by_id_strict(owner_marker.partition("=")[2])
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(
+                            "[orphan-reap] pyright PID %d marker lookup failed: %s, leaving alone",
+                            pid,
+                            e,
+                        )
+                        continue
             else:
                 session = AgentSession.find_live_session_by_pid(pid, create_time or None)
             if session is None and is_mcp:
@@ -6863,8 +6894,7 @@ def _reap_orphan_session_processes() -> int:
                 signature = "stale-oneshot"
             evidence = (
                 f"route={orphan_route}; signature={signature}; "
-                f"{_orphan_owner_evidence(session)}"
-                + (f"; marker={pyright_marker}" if pyright_marker else "")
+                f"{_orphan_owner_evidence(session)}" + f"; marker={owner_marker}"
             )
             log_cmd = cmdline_str[:ORPHAN_LOG_CMDLINE_MAX_CHARS]
             try:
@@ -6993,6 +7023,12 @@ def _fast_reap_stale_print_oneshots() -> int:
                     continue
 
                 staged = (pid, create_time)
+                # Ownership proof (#3592): age and PPID 1 do not make a process
+                # ours. Without a worker marker in its env it is left alone.
+                owner_marker = _worker_ownership_marker(proc)
+                if owner_marker is None:
+                    _pending_sigkill_orphans.discard(staged)
+                    continue
                 if _oneshot_owner_is_live(pid, create_time or None):
                     # Issue #2149: this PID is a live session's `claude -p`
                     # harness (a legitimate multi-minute PM turn), not an
@@ -7011,6 +7047,7 @@ def _fast_reap_stale_print_oneshots() -> int:
                 evidence = (
                     f"stale --print one-shot age={int(time.time() - create_time)}s "
                     f"(> {ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS}s), ppid=1, "
+                    f"marker={owner_marker}, "
                     "no live owning session (or owner lookup unresolved)"
                 )
                 if staged in _pending_sigkill_orphans:
