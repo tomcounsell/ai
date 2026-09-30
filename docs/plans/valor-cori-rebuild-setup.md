@@ -121,7 +121,7 @@ draft; step 3 materializes it.
 | `bridges/` | Self-contained comms modules: `telegram/`, `email/`, later others. I/O and the outbox only. Each conforms to one port in `core/`. No routing, triage, or judgement lives here | `core/` ports only |
 | `harnesses/` | Wrappers and logic for running work via a harness: Claude Code, Codex, Pi, and any future one. Turn execution, session resume, transcript capture, per-harness skill rendering | `core/` |
 | `skills/` | Versioned skills. Structure deferred until Tom's requirements are gathered. Holds a README naming that deferral and nothing else in this phase | deferred |
-| `cron/` | Every scheduled task and runner. Replaces `reflections/`. launchd plists and the jobs they run. Every job is a budgeted objective, never a bare script | `core/` |
+| `routines/` | Every scheduled task and runner. Replaces `reflections/`. launchd plists and the routines they run. Every routine is a budgeted objective, never a bare script | `core/` |
 | `tools/` | Non-core components and vendor-dependent tooling. Anything the core can run without. A tool declares its effect class and reaches the world through the broker | `core/` |
 | `api/` | Programmatic interfaces: MCP servers, any HTTP surface. Reserved; README only in this phase | `core/` |
 | `ui/` | The read-only dashboard | `core/` read models only |
@@ -198,7 +198,7 @@ quo only.
 
 One agent. For each directory in the table above, create it with a README
 whose sections are: Scope, Imports (what it may import and what may import
-it), Effect classes it may hold (for `tools/`, `bridges/`, `cron/`), and
+it), Effect classes it may hold (for `tools/`, `bridges/`, `routines/`), and
 Not here (what looks like it belongs but does not). The Not-here section is
 the one that prevents the guard-of-guards pattern from returning, so it is
 required, not optional.
@@ -251,7 +251,7 @@ Target docs:
 | `docs/data.md` | Postgres as a document store: the events table, JSONB documents, how state is rendered per turn, why no relational lattice | cori migrations and architecture, plus Tom's decision |
 | `docs/persona.md` | The one identity: voice, conduct, what may leave under Valor's name | `_archive_/config/identity.json`, `config/personas/`, `_archive_/cori/VOICE.md` |
 | `docs/harnesses.md` | The harness port and the per-harness wrappers | `_archive_/worker/`, `_archive_/docs/features/headless-session-runner.md` |
-| `docs/cron.md` | Scheduled work as budgeted objectives under launchd | `_archive_/reflections/`, launchd plists |
+| `docs/routines.md` | Scheduled work as budgeted objectives under launchd | `_archive_/reflections/`, launchd plists |
 | `docs/emulator.md` | The outward-facing fitness function: historical human-originated requests from repos Valor contributes to, labelled by the human merge or review decision, proxies scored by cheap judgement, run on every skill change | this conversation; no archived source |
 | `docs/machine.md` | The M4 Air: what runs resident, what runs on demand, the RAM budget per component | new |
 | `docs/conventions/*.md` | Only the conventions the triage marks `rewrite` | archive |
@@ -285,7 +285,7 @@ already known to need Tom's answer:
    build, one blind verification per component, and no findings ledger.
 2. **Order.** Recommended: `core/` kernel and data first, `bridges/` second
    (re-seated on the port, ideally unchanged), `harnesses/` third,
-   `persona/` and `cron/` fourth, `tools/` on demand, `memory/` last when
+   `persona/` and `routines/` fourth, `tools/` on demand, `memory/` last when
    popoto ships Postgres.
 3. **Skills.** Tom's requirements for the versioned skill system and the
    cross-repo refactoring skills. Gathered before `skills/` is designed.
