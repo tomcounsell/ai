@@ -106,6 +106,23 @@ Mandatory, verified, and never a place to spend surplus energy.
    first-class, carry provenance, and reach every session and agent.
    Autonomy shrinks automatically on evidence and grows only by Tom's
    decision.
+- **Governance is restrained by structure, not sentiment.** Before any
+   check, gate, hook, validator, review round, or approval step is added, the
+   change names the mission item it serves and the incident that already
+   happened without it; missing either, it is not added. A bug fix never
+   adds a guard; it fixes the code. Adding governance is an `act`-class
+   effect: the Brief carries a `governance_grant` field, default none, and a
+   diff that adds any of the above needs Tom's tap, one approval per
+   instance, through the same approval surface as a merge or a send. Every
+   guard is ledgered with the incident it prevents, the mission item it
+   serves, and a ninety-day expiry; a guard that has not fired by expiry is
+   deleted by default. The blind verifier asks one Jev-class boolean over
+   every diff, "does this add a check, gate, hook, round, or review step",
+   and a yes with no grant is a refused merge. The same paragraph, in the
+   same words, sits at the top of `CLAUDE.md`, in the persona rendered into
+   every turn, and in the Not-here section of every directory README. No
+   restraint skill, no hook that blocks hooks, no governance dashboard: each
+   is the disease presenting as the cure.
 - **Docs describe reality.** Enforced by a blind verifier reading the doc as
    the contract and by cheap judgement sweeps, never by the model grading its
    own narration.
@@ -297,7 +314,9 @@ its code already carries the four bounds a demonstration needs:
 | Effect classes on the broker | `broker/actions.py`, spike 05 | Nothing irreversible leaves without Tom's tap |
 
 One Opus agent lifts these into `core/` with the identity mode removed, on
-Postgres as a document store, and with nothing else: no objective tree
+Postgres as a document store, with `governance_grant` (default none) added
+to the Brief schema so the constraint above is a kernel fact from the first
+turn, and with nothing else: no objective tree
 beyond a single task record, no verifier, no scribe, no space model. It is
 done when a script can start a task with a budget, run one `claude -p` turn
 through the gateway, record an effect, be stopped mid-turn, and show the
@@ -320,8 +339,11 @@ Recorded, in `docs/plans/rebuild-demonstration.md`:
 - money spent, and what the judgement layer would have taken off a frontier
   model.
 
-The demonstration is also the first emulator case and the first entry in
-the exemplar or corrections ledger, whichever it earns.
+The demonstration is also the first emulator case. Before it starts, Tom's
+instruction to restrain governance is entered as correction number one,
+global scope, source class `direct`, and the demonstration verifies that it
+renders into the supervisor's prompt and into every brief it dispatches. If
+it does not, the ledger is broken, and that is learned on entry one.
 
 ## Step 5: write the docs the demonstration showed were needed
 
