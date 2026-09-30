@@ -8,9 +8,12 @@ status: draft
 # Valor rebuild, setup phase
 
 **Scope of this plan:** the setup phase only. It ends when the branch holds a
-rewritten README, the new top-level directories with their scope READMEs, the
-rewritten docs, and nothing else. The rebuild itself is planned afterward, in
-conversation, from those docs.
+rewritten README, the new top-level directories with their scope READMEs, a
+minimal kernel that bounds one demonstration, the record of that
+demonstration, and the docs the demonstration showed were needed. The rebuild
+itself is planned afterward, in conversation, from that experience and those
+docs. Rewriting hundreds of documents before demonstrating the builder would
+make documentation the first product again.
 
 **Authored:** 2026-09-30, from a conversation with Tom. Every decision below
 that came from him is marked as his. Everything else is a recommendation and
@@ -49,26 +52,90 @@ Cori's build process, however, reproduced Valor's ceremony within eleven days
 (339 commits, 148 logged findings, 53 review-round commits, 15 session crashes
 that lost a builder or validator). The design survives; the process does not.
 
-## Goals, as aligned
+## Mission, constraints, evidence
 
-Ranked. Everything in the rebuild traces to one of these or is not built.
+Ranked goals invited the system to optimize toward whichever goal sat first,
+and with corrigibility first that is a system that spends indefinitely on
+becoming more governed. The split below replaces the ranking. Corrigibility
+is a set of guarantees to verify, not a direction to push.
 
-1. **Corrigible.** Stoppable at any instant with nothing lost, bounded in
-   spend and effect, legible after the fact, and correctable by a ledger every
-   session reads. It stops itself when stopping is needed. Autonomy shrinks
-   automatically on evidence and grows only by Tom's decision.
-2. **Work arrives and meets expectations.** Judged by Tom, sparsely:
-   corrections, a thumbs up, an anecdote. Never a count the system can
-   perform against. The corrections ledger is the primary quality signal.
-3. **Capability grows without slow degradation.** Guarded structurally, not
-   measured, because the tail is hundreds of PRs long. Ceremony stays out of
-   the product.
-4. **Docs match reality.** Enforced by a blind verifier reading the doc as the
-   contract, and by cheap judgement sweeps over every doc, never by the model
-   grading its own narration.
-5. **Cost bounded, ceiling moving.** Every task carries a money budget.
-   Cheaper capability (Jev-class judgement, contributor-tier models) lowers
-   the ceiling rather than expanding scope.
+### Mission
+
+Turn Tom's intent into working things worth using. Own the journey from an
+incomplete idea to a finished result, exercise taste along the way, and
+compound the ability to build. Concretely:
+
+1. **Own outcomes across the whole job.** "Build this" includes understanding
+   the problem, inspecting what exists, choosing an approach, implementing,
+   testing actual use, delivering within authority, and resolving discovered
+   defects. Tom never coordinates the gaps between those steps.
+2. **Contribute taste and invention.** Identify the simpler design, challenge
+   an unnecessary requirement, produce a concrete alternative when the brief
+   leaves room. Meeting expectations is the floor.
+3. **Absorb ambiguity through making.** For reversible decisions: inspect,
+   infer, prototype, show. Ask only when the answer materially changes the
+   outcome or the authority required. An unclear brief produces a useful
+   first version before it produces a questionnaire.
+4. **Make larger undertakings tractable.** Capability growth means Tom can
+   delegate increasingly substantial problems with less supervision: a
+   feature, then a workflow, then a product.
+5. **Compound leverage through completed work.** Each project may leave
+   behind a tool, a tested technique, a reusable component, or knowledge of
+   Tom's preferences. Extraction happens only on a demonstrated second need,
+   never on a first, and anything unused after ninety days is deleted by
+   default. This is the constraint that keeps `tools/` and `skills/` from
+   regrowing the archive.
+6. **Spend attention as carefully as money.** A task carries an attention
+   budget beside its dollar budget. Valor carries routine decisions,
+   investigates failures, and brings consequential choices with evidence and
+   a recommendation. Requiring Tom to adjudicate internal process is a
+   product defect.
+
+### Constraints
+
+Mandatory, verified, and never a place to spend surplus energy.
+
+- **Bounded authority and spend.** Every task carries a money budget and an
+   effect ceiling, conserved down the tree. A classifier decides what a
+   thing is; the kernel decides what it may do. Cheaper capability does not
+   lower the ceiling: it buys better outcomes or lets Tom authorize larger
+   undertakings within the same budget. Scope expansion is Tom's choice;
+   capability gains create that choice.
+- **Reliable stop, recovery, and correction.** Stop is immediate and lossless.
+   A ledger the system cannot edit records every effect. Corrections are
+   first-class, carry provenance, and reach every session and agent.
+   Autonomy shrinks automatically on evidence and grows only by Tom's
+   decision.
+- **Docs describe reality.** Enforced by a blind verifier reading the doc as
+   the contract and by cheap judgement sweeps, never by the model grading its
+   own narration.
+
+### Evidence
+
+What counts as knowing the mission is being met:
+
+- **Working results in real use.** The thing runs, someone uses it, and
+   defects found in use get resolved without Tom coordinating.
+- **Tom's feedback, both directions.** The corrections ledger records what
+   went wrong. An exemplar ledger, same store and a distinct source class,
+   records work Tom loved and why: an excellent simplification, good taste,
+   initiative, unusually complete delivery. Without the second, the system
+   learns to avoid mistakes and never learns to build anything exceptional.
+- **Independent checks.** Blind verification, the emulator's human-labelled
+   cases, and the audit sample.
+- **Attention spent.** Decisions escalated to Tom per finished task, logged
+   from the first demonstration onward. It is the one outcome number the
+   system cannot perform against: escalating less while failing shows up in
+   the result.
+
+### The acceptance question
+
+Can Tom give Valor a consequential, imperfectly specified goal and return to
+something that works, reflects good judgement, and needs less of his
+attention than doing it himself?
+
+Every mechanism in the rebuild answers to that question. Successfully
+navigating an SDLC does not.
 
 ## Decisions recorded from Tom
 
@@ -104,8 +171,8 @@ Ranked. Everything in the rebuild traces to one of these or is not built.
   identity field.
 - **Three tiers.** Deterministic kernel for authority. Jev-class judgement
   for every decision that is not authority, confidence-gated to a human.
-  Frontier agents for the hard work, scarce and budgeted. A classifier
-  decides what a thing is; it never decides what a thing may do.
+  Frontier agents for the hard work, budgeted. A classifier decides what a
+  thing is; it never decides what a thing may do.
 
 ## Target top-level structure
 
@@ -174,13 +241,14 @@ never edits the hooks.
 ## Step 2: rewrite the README
 
 One agent. Sources: `_archive_/README.md`, `_archive_/cori/README.md`,
-`_archive_/cori/docs/architecture.md`, and the Goals and Constraints sections
+`_archive_/cori/docs/architecture.md`, and the Mission and Constraints sections
 of this plan.
 
 The README says, in this order and in under 200 lines:
 
 1. What Valor is: one AI employee with one identity, running on one Mac,
-   corrigible by construction.
+   corrigible by construction, and the mission statement verbatim from this
+   plan.
 2. The corrigibility commitments, taken from cori's README and re-stated for
    Valor: stoppable, bounded, legible, correctable. The RICE table survives
    with its last column ("what enforcement cannot do") intact. Cori's
@@ -210,92 +278,136 @@ Add a `tests/README.md` stating the rule: real Postgres, real containers,
 real bridges on test accounts, no mocks, and every test declares its live
 spend.
 
-## Step 4: rewrite the docs
+## Step 4: a minimal kernel and one demonstration
 
-Opus subagents, in two passes. Tom approves the output of the first pass
-before the second starts.
+The builder is demonstrated before the docs are written. This step exists
+so the architecture is informed by where Tom still had to act as project
+manager, rather than by what the archive says the system was.
+
+### The minimal kernel
+
+Pulled from `_archive_/cori/`, not written fresh. Cori's spikes proved and
+its code already carries the four bounds a demonstration needs:
+
+| Bound | Source in the archive | What it gives the demonstration |
+|---|---|---|
+| Money budget, conserved | `gateway/budget.py`, spike 01 | Every model call metered against a committed number |
+| Lossless stop | `kernel/runs.py`, spike 03 | Tom can kill it at any instant and nothing is lost |
+| Effect ledger | `broker/ledger.py`, `kernel/events.py` | A record the system cannot edit |
+| Effect classes on the broker | `broker/actions.py`, spike 05 | Nothing irreversible leaves without Tom's tap |
+
+One Opus agent lifts these into `core/` with the identity mode removed, on
+Postgres as a document store, and with nothing else: no objective tree
+beyond a single task record, no verifier, no scribe, no space model. It is
+done when a script can start a task with a budget, run one `claude -p` turn
+through the gateway, record an effect, be stopped mid-turn, and show the
+ledger.
+
+### The demonstration
+
+Tom picks one meaningful request with real ambiguity, from his actual work,
+not from the backlog. Valor carries it to a usable result inside the minimal
+kernel. Tom does nothing except answer questions Valor chooses to ask.
+
+Recorded, in `docs/plans/rebuild-demonstration.md`:
+
+- the request as given, verbatim;
+- every question Valor asked, and whether the answer changed the outcome or
+  the authority required (the attention log);
+- every point where Tom had to act as project manager anyway;
+- what was delivered, whether it was used, and what Tom would have done
+  differently;
+- money spent, and what the judgement layer would have taken off a frontier
+  model.
+
+The demonstration is also the first emulator case and the first entry in
+the exemplar or corrections ledger, whichever it earns.
+
+## Step 5: write the docs the demonstration showed were needed
+
+Opus subagents, in two passes. Tom approves the first before the second
+starts. The demonstration record is the primary input; the archive is
+reference.
 
 ### Pass 1: triage
 
-One agent reads every file under `_archive_/docs/features/` (304),
-`_archive_/docs/conventions/`, `_archive_/docs/sdlc/`, and
-`_archive_/cori/docs/`, and produces `docs/plans/rebuild-doc-triage.md`: one
-row per source doc with a disposition and a one-line reason.
+One agent reads the demonstration record first, then every file under
+`_archive_/docs/features/` (304), `_archive_/docs/conventions/`,
+`_archive_/docs/sdlc/`, and `_archive_/cori/docs/`, and produces
+`docs/plans/rebuild-doc-triage.md`: one row per source doc with a
+disposition and a one-line reason.
 
-The survival rule: a doc survives only if a bridge, the SDLC state machine,
-or one of the five goals depends on the mechanism it describes. Everything
-else is rederived from the architecture doc or dropped. The expected outcome
-is under thirty survivors from the 304 feature docs, and a rewrite of the
-four cori docs into the architecture set.
+The survival rule: a doc survives only if the demonstration needed the
+mechanism it describes, or a bridge or the SDLC state machine depends on it,
+or it states a constraint from this plan. Everything else is rederived from
+the architecture doc or dropped. Expected outcome: under thirty survivors
+from the 304 feature docs, and a rewrite of the four cori docs into the
+architecture set.
 
-Dispositions: `rewrite` (mechanism survives, doc is rewritten against the new
-structure), `fold` (content merges into a named target doc), `drop`.
+Dispositions: `rewrite`, `fold` (into a named target), `drop`.
 
 ### Pass 2: write
 
-One agent per target doc, in parallel, each briefed with: the target doc's
-purpose from the list below, the survivor rows that feed it, the Goals and
-Constraints of this plan, and the writing rules. Agents never read each
-other's output; a final agent runs a consistency pass across the set.
+One agent per target doc, in parallel, each briefed with the target's
+purpose, the survivor rows that feed it, the demonstration record, the
+Mission, Constraints, and Evidence sections of this plan, and the writing
+rules. Agents never read each other's output; a final agent runs a
+consistency pass.
 
 Target docs:
 
 | Doc | Holds | Primary source |
 |---|---|---|
-| `docs/architecture.md` | The kernel and control loop: supervisor turn, objective tree, budgets, effect classes, broker, approvals, ledger, stop, the three execution records, verification, the judgement tier | `_archive_/cori/docs/architecture.md`, with the identity mode and every "Cori" reference removed and the judgement tier added |
+| `docs/architecture.md` | The kernel and control loop: supervisor turn, objective tree, budgets, effect classes, broker, approvals, ledger, stop, execution records, verification, the judgement tier | `_archive_/cori/docs/architecture.md`, identity mode and every "Cori" reference removed, judgement tier added, revised by what the demonstration showed |
 | `docs/tech-stack.md` | What each part is built from, with a status on every choice, and the M4 Air constraints | `_archive_/cori/docs/tech-stack.md` |
-| `docs/goals.md` | The five goals, ranked, and how each is guarded or measured | this plan |
-| `docs/judgement-layer.md` | The task taxonomy, router, decisions port, calibration discipline (error-cost tiers and reference-arm agreement), confidence gating to the human, the boundary with the kernel, the ten use shapes mapped to where they land | `_archive_/agent/llm/tasks.py`, `router.py`, `backends/decisions.py`, `_archive_/docs/features/llm-task-taxonomy.md` |
-| `docs/sdlc-state-machine.md` | The states, stages, verdicts, and gates as a typed state model, and the rule that stages are skills and the state machine is core | `_archive_/agent/pipeline_state.py`, `goal_gates.py`, `tools/sdlc_verdict.py`, `_archive_/.claude/skills-global/do-sdlc/SKILL.md` |
-| `docs/bridges/telegram.md`, `docs/bridges/email.md` | The port each bridge conforms to, what it does, what it never does | `_archive_/bridge/telegram_bridge.py`, `telegram_relay.py`, `email_bridge.py`, `email_relay.py`, and their feature docs |
-| `docs/data.md` | Postgres as a document store: the events table, JSONB documents, how state is rendered per turn, why no relational lattice | cori migrations and architecture, plus Tom's decision |
+| `docs/mission.md` | Mission, constraints, evidence, the acceptance question, the attention log | this plan |
+| `docs/judgement-layer.md` | Task taxonomy, router, decisions port, calibration discipline, confidence gating, the boundary with the kernel, the ten use shapes | `_archive_/agent/llm/tasks.py`, `router.py`, `backends/decisions.py`, `_archive_/docs/features/llm-task-taxonomy.md` |
+| `docs/sdlc-state-machine.md` | States, stages, verdicts, and gates as a typed state model; stages are skills, the state machine is core | `_archive_/agent/pipeline_state.py`, `goal_gates.py`, `tools/sdlc_verdict.py`, `_archive_/.claude/skills-global/do-sdlc/SKILL.md` |
+| `docs/bridges/telegram.md`, `docs/bridges/email.md` | The port each bridge conforms to, what it does, what it never does | `_archive_/bridge/telegram_bridge.py`, `telegram_relay.py`, `email_bridge.py`, `email_relay.py` |
+| `docs/data.md` | Postgres as a document store: events table, JSONB documents, per-turn rendering, why no relational lattice | cori migrations and architecture, Tom's decision |
 | `docs/persona.md` | The one identity: voice, conduct, what may leave under Valor's name | `_archive_/config/identity.json`, `config/personas/`, `_archive_/cori/VOICE.md` |
-| `docs/harnesses.md` | The harness port and the per-harness wrappers | `_archive_/worker/`, `_archive_/docs/features/headless-session-runner.md` |
+| `docs/harnesses.md` | The harness port and per-harness wrappers | `_archive_/worker/`, `_archive_/docs/features/headless-session-runner.md` |
 | `docs/routines.md` | Scheduled work as budgeted objectives under launchd | `_archive_/reflections/`, launchd plists |
-| `docs/emulator.md` | The outward-facing fitness function: historical human-originated requests from repos Valor contributes to, labelled by the human merge or review decision, proxies scored by cheap judgement, run on every skill change | this conversation; no archived source |
+| `docs/emulator.md` | The outward-facing fitness function: human-originated historical requests, labelled by the human merge or review decision, proxies scored by cheap judgement, run on every skill change, seeded by the demonstration | this conversation |
 | `docs/machine.md` | The M4 Air: what runs resident, what runs on demand, the RAM budget per component | new |
 | `docs/conventions/*.md` | Only the conventions the triage marks `rewrite` | archive |
 
 Writing rules for every agent:
 
 - Describe the new status quo only. No history, no "previously", no
-  migration notes, no references to any `_archive_/` path in the final text.
-- Every mechanism names the goal it serves. A mechanism that serves none is
-  cut from the doc, and the agent says so in its report.
+  migration notes, no `_archive_/` path in the final text.
+- Every mechanism names the mission item it serves or the constraint it
+  enforces. A mechanism that serves neither is cut, and the agent says so.
 - Every design assumption cites `REFERENCES.md` or is marked as a gap.
 - No em dashes. No AI-writing tells. Say what is true, not what is not.
 - "Cori" never appears. "Corrigible" does.
-- Under 600 lines per doc. The archive's 700-line feature docs are the
-  pattern being left behind.
+- Under 600 lines per doc.
 
-The consistency agent checks: one vocabulary across the set (objective,
-task, turn, effect class, budget, ledger, space or whatever replaces it),
-no two docs owning the same mechanism, every directory README pointing at
-the doc that governs it.
+The consistency agent checks: one vocabulary across the set, no two docs
+owning the same mechanism, every directory README pointing at the doc that
+governs it.
 
-## Step 5: plan the rebuild, in conversation
+## Step 6: plan the rebuild, in conversation
 
-Not executed by an agent. Inputs are the docs from step 4. The questions
-already known to need Tom's answer:
+Not executed by an agent. Inputs are the demonstration record and the docs.
+Questions already known to need Tom's answer:
 
-1. **Orchestration.** Who runs the rebuild: a lead agent on this machine
-   with builders in worktrees (cori's `build-m0` shape), or one session per
-   component driven by Tom? Cori's history says the lead-builder-reviewer-
-   validator chain reproduces ceremony; the alternative is one plan, one
-   build, one blind verification per component, and no findings ledger.
-2. **Order.** Recommended: `core/` kernel and data first, `bridges/` second
-   (re-seated on the port, ideally unchanged), `harnesses/` third,
-   `persona/` and `routines/` fourth, `tools/` on demand, `memory/` last when
-   popoto ships Postgres.
+1. **Orchestration.** A lead agent with builders in worktrees (cori's
+   `build-m0` shape), or one session per component driven by Tom? Cori's
+   history says the lead-builder-reviewer-validator chain reproduces
+   ceremony; the alternative is one plan, one build, one blind verification
+   per component, and no findings ledger.
+2. **Order.** Recommended: `core/` kernel and data first, `bridges/`
+   second, `harnesses/` third, `persona/` and `routines/` fourth, `tools/`
+   on demand, `memory/` last when popoto ships Postgres.
 3. **Skills.** Tom's requirements for the versioned skill system and the
-   cross-repo refactoring skills. Gathered before `skills/` is designed.
-4. **Emulator seeding.** Which repos, which date range, how the
-   human-originated filter is applied, and the budget per run.
-5. **Judgement vendor.** Jev as the primary decisions leg; which open-weight
-   equivalent sits behind the port as the fallback, and where it runs given
-   16 GB.
-6. **Archive deletion.** The commit that removes `_archive_/`, after Tom
-   confirms the docs are sufficient to rebuild from.
+   cross-repo refactoring skills, gathered before `skills/` is designed.
+4. **Emulator seeding.** Repos, date range, the human-originated filter,
+   budget per run.
+5. **Judgement vendor.** Jev as the primary decisions leg; the open-weight
+   fallback behind the port, and where it runs given 16 GB.
+6. **Archive deletion.** After Tom confirms the docs and the demonstration
+   are sufficient to rebuild from.
 
 ## Execution
 
@@ -303,11 +415,13 @@ already known to need Tom's answer:
 |---|---|---|
 | 0 | this session | branch exists on origin |
 | 1 | one Opus agent | `git ls-files` outside `_archive_/` matches the exception list; cori copy present with `SOURCE.md` |
-| 2 | one Opus agent | README under 200 lines, no "cori", directory map matches step 3 |
+| 2 | one Opus agent | README under 200 lines, no "cori", mission verbatim, directory map matches step 3 |
 | 3 | one Opus agent | every directory has a README with all four sections; `site/` restored byte-identical |
-| 4, pass 1 | one Opus agent | triage table covers every source file; Tom approves |
-| 4, pass 2 | one Opus agent per target doc, then one consistency agent | writing rules hold; consistency report has no open items |
-| 5 | Tom and this session | a rebuild plan doc exists |
+| 4, kernel | one Opus agent | the start, turn, effect, stop, ledger script runs end to end on Postgres |
+| 4, demonstration | Valor inside the kernel; Tom observing | demonstration record complete, attention log filled |
+| 5, pass 1 | one Opus agent | triage table covers every source file; Tom approves |
+| 5, pass 2 | one Opus agent per target doc, then one consistency agent | writing rules hold; consistency report has no open items |
+| 6 | Tom and this session | a rebuild plan doc exists |
 
 Each agent's brief carries: this plan in full, the step it owns, and the
 verification it must pass before it reports. No agent runs a step it was not
@@ -316,4 +430,5 @@ briefed for, and no agent edits this plan.
 ## Not in this plan
 
 The rebuild itself. Continuity of the running system. Cutover. The skills
-system. Memory. Any code beyond what step 1 and step 3 move.
+system. Memory. Any code beyond what step 1 and step 3 move and the minimal
+kernel step 4 lifts from the archive.
