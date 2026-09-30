@@ -43,7 +43,7 @@ from agent.session_runner.harness.claude_diagnostics import (
     classify_harness_early_exit,
     describe_harness_exit_for_sentry,
 )
-from agent.session_runner.hook_edge import HEADLESS_ENV_OVERRIDES
+from agent.session_runner.hook_edge import HARNESS_OWNER_ENV, HEADLESS_ENV_OVERRIDES
 from agent.tool_cost_attribution import ToolCostAttributor, merge_tool_cost_snapshots
 from config.enums import ClassificationType
 
@@ -514,6 +514,9 @@ async def get_response_via_harness(
     # Force wide COLUMNS so Claude Code CLI doesn't narrow-wrap result text
     # (mid-hyphen breaks observed in drafted messages when launched without a TTY).
     proc_env["COLUMNS"] = "999"
+    # Ownership proof for the worker's orphan reapers (#3592). Stamped last so
+    # no caller-supplied env can drop it.
+    proc_env[HARNESS_OWNER_ENV] = str(os.getpid())
 
     # Apply context budget unconditionally. On resumed turns with a typical
     # small message this is a no-op (one length comparison). On first turns
@@ -1573,6 +1576,7 @@ async def verify_harness_health(harness_name: str) -> bool:
         # auth vars" guarantee. Build an explicit stripped env and emit the
         # sanitized spawn diagnostic here too (scoped to the claude health probe).
         health_env = stripped_harness_env(os.environ)
+        health_env[HARNESS_OWNER_ENV] = str(os.getpid())
         try:
             _spawn_diag = build_spawn_diagnostic(
                 test_cmd,

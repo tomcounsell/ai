@@ -197,6 +197,15 @@ ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
 # reapable (see the ownership-gate helper below).
 ORPHAN_OWNER_LOOKUP_TIMEOUT_SECONDS = 2.0
 
+# Cap on the command text in every orphan-reap kill log line. GRAIN OF SALT:
+# provisional/tunable (``ORPHAN_LOG_CMDLINE_MAX_CHARS`` env override). Long enough
+# to keep the flags that tell an interactive session from a harness
+# (``--permission-mode``, ``-p``), which a 100-char slice dropped, short enough
+# that one line stays readable.
+ORPHAN_LOG_CMDLINE_MAX_CHARS = int(os.environ.get("ORPHAN_LOG_CMDLINE_MAX_CHARS", "240"))
+
+_UNREADABLE = "<unreadable>"
+
 # Single-worker executor backing the bounded ownership lookup above. Module-level
 # so the thread is created once and reused across reap passes rather than
 # per-call. Never resized; the lookup is strictly serialized behind the 2s
@@ -6447,6 +6456,125 @@ def _session_is_alive(session) -> bool:
     return age < ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS
 
 
+def _orphan_owner_evidence(session) -> str:
+    """Describe the owning-session evidence behind an orphan verdict. Never raises.
+
+    Built BEFORE the kill so a formatting failure can never cost the Killed log
+    line or the counter increment that follow it. Mirrors the heartbeat branches
+    ``_session_is_alive`` handles (tz-aware or naive ``datetime``, float epoch,
+    ``None``); any unexpected input collapses to a fixed string.
+    """
+    try:
+        if session is None:
+            return "no owning session"
+        sid = getattr(session, "agent_session_id", None) or "<no-id>"
+        status = getattr(session, "status", None)
+        hb = getattr(session, "last_heartbeat_at", None)
+        if hb is None:
+            hb_desc = "never heartbeated"
+        else:
+            if isinstance(hb, datetime):
+                if hb.tzinfo is None:
+                    hb = hb.replace(tzinfo=UTC)
+                age = (datetime.now(UTC) - hb).total_seconds()
+            else:
+                age = time.time() - float(hb)
+            hb_desc = f"heartbeat {int(age)}s ago"
+        return f"owning session {sid} status={status} {hb_desc}, not live"
+    except Exception:  # noqa: BLE001  # swallow-ok: evidence is best-effort, must never raise
+        return "owning session <unreadable>"
+
+
+_PYRIGHT_NAMES = frozenset({"pyright", "pyright-langserver"})
+_PYRIGHT_SCRIPT_NAMES = frozenset(
+    {"pyright", "pyright.js", "pyright-langserver", "pyright-langserver.js"}
+)
+_PYRIGHT_NPM_ENTRYPOINTS = frozenset({"langserver.index.js", "index.js"})
+_PYTHON_INTERPRETER_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
+
+
+def _is_pyright_executable(cmdline) -> bool:
+    """True if ``cmdline`` is a pyright executable, by argv shape and never by substring.
+
+    Accepted shapes, and no others:
+      - direct: basename of argv[0] is ``pyright`` / ``pyright-langserver``
+        (optionally ``.js``);
+      - interpreter + script: argv[0] is ``node`` / ``python*`` and argv[1] is
+        either a ``pyright`` / ``pyright-langserver`` script (``.bin`` shebang
+        shape) or a ``langserver.index.js`` / ``index.js`` whose parent directory
+        is named ``pyright`` (npm-resolved shape);
+      - module form: argv[0] is ``python*``, argv[1] is ``-m``, argv[2] is
+        ``pyright`` / ``pyright-langserver``.
+    Only argv[0..2] are inspected. Short or malformed cmdlines return False.
+    """
+    try:
+        argv = [str(x) for x in cmdline[:3]]
+    except Exception:  # noqa: BLE001  # swallow-ok: malformed cmdline is simply not pyright
+        return False
+    if not argv:
+        return False
+    exe = argv[0].rsplit("/", 1)[-1]
+    if exe in _PYRIGHT_SCRIPT_NAMES:
+        return True
+    is_python = bool(_PYTHON_INTERPRETER_RE.match(exe))
+    if exe != "node" and not is_python:
+        return False
+    if len(argv) < 2:
+        return False
+    if is_python and argv[1] == "-m":
+        return len(argv) >= 3 and argv[2] in _PYRIGHT_NAMES
+    parts = argv[1].rsplit("/", 2)
+    base = parts[-1]
+    if base in _PYRIGHT_SCRIPT_NAMES:
+        return True
+    return base in _PYRIGHT_NPM_ENTRYPOINTS and len(parts) >= 2 and parts[-2] == "pyright"
+
+
+def _describe_proc_for_log(proc) -> tuple[str, str]:
+    """Return ``(command, ppid)`` text for a kill log line. Never raises.
+
+    Each read is guarded on its own and falls back to ``<unreadable>``, so a
+    process that already changed state cannot make the caller skip its kill.
+    """
+    try:
+        cmd = " ".join(str(x) for x in proc.cmdline())[:ORPHAN_LOG_CMDLINE_MAX_CHARS]
+    except Exception:  # noqa: BLE001  # swallow-ok: log detail only
+        cmd = _UNREADABLE
+    try:
+        ppid = str(proc.ppid())
+    except Exception:  # noqa: BLE001  # swallow-ok: log detail only
+        ppid = _UNREADABLE
+    return cmd, ppid
+
+
+def _worker_ownership_marker(proc) -> str | None:
+    """Return the worker ownership marker in ``proc``'s environment, or None.
+
+    Both orphan reapers signal a process only with proof this system spawned
+    it (#3592). Every worker ``claude`` spawn carries ``AGENT_SESSION_ID``
+    (session turns) or ``HARNESS_OWNER_ENV`` (every harness spawn, including
+    sessionless drafter calls and the health probe), and each child inherits
+    them. An operator's interactive ``claude`` carries neither.
+
+    The result is ``"AGENT_SESSION_ID=<id>"`` or ``"VALOR_HARNESS_OWNER_PID=<pid>"``,
+    session id first because it names an owner the reaper can look up. None
+    means no proof, including when the environment cannot be read: the caller
+    must leave the process alone. Never raises.
+    """
+    from agent.session_runner.hook_edge import HARNESS_OWNER_ENV
+
+    try:
+        environ = proc.environ()
+    except Exception as e:  # noqa: BLE001  # swallow-ok: unreadable env is "no proof"
+        logger.debug("[orphan-reap] PID %s environ() unreadable: %s", getattr(proc, "pid", "?"), e)
+        return None
+    for name in ("AGENT_SESSION_ID", HARNESS_OWNER_ENV):
+        value = environ.get(name)
+        if isinstance(value, str) and value:
+            return f"{name}={value}"
+    return None
+
+
 def _oneshot_owner_is_live(pid: int | None, create_time: float | None = None) -> bool:
     """True if ``pid`` is the harness of a currently-live session (issue #2149).
 
@@ -6585,9 +6713,17 @@ def _reap_orphan_session_processes() -> int:
                 staged_create_time,
             )
             continue
+        drain_cmd, drain_ppid = _describe_proc_for_log(proc)
         try:
             proc.kill()
-            logger.info("[orphan-reap] Drain: SIGKILL'd PID %d (escalation)", pid)
+            logger.info(
+                "[orphan-reap] Drain: SIGKILL'd PID %d (escalation, cmd=%s, ppid=%s, "
+                "evidence=survived SIGTERM, create_time matched; ownership verdict logged "
+                "on this PID's earlier [orphan-reap] Killed or [fast-oneshot-reap] SIGTERM'd line)",
+                pid,
+                drain_cmd,
+                drain_ppid,
+            )
         except psutil.NoSuchProcess:
             pass
         except Exception as e:
@@ -6650,7 +6786,8 @@ def _reap_orphan_session_processes() -> int:
             is_claude = bool(_CLAUDE_CMDLINE_RE.search(cmdline_str))
             is_mcp = bool(_MCP_SERVER_CMDLINE_RE.search(cmdline_str))
             is_stale_oneshot = _is_stale_print_oneshot(cmdline, create_time)
-            if not (is_claude or is_mcp or is_stale_oneshot):
+            is_pyright = _is_pyright_executable(cmdline)
+            if not (is_claude or is_mcp or is_stale_oneshot or is_pyright):
                 continue
 
             # Orphan gate: PPID==1, OR (issue #1632 mode 1b) the immediate
@@ -6658,18 +6795,52 @@ def _reap_orphan_session_processes() -> int:
             # alive only because it is blocked waiting on this child forever.
             # The wrapper lookup runs only for signature-matched processes, so
             # the per-tick psutil cost is a handful of parent reads at most.
-            if ppid != 1 and not _parent_is_orphaned_shell_wrapper(ppid):
+            if ppid == 1:
+                orphan_route = "ppid=1"
+            elif _parent_is_orphaned_shell_wrapper(ppid):
+                orphan_route = f"parent {ppid} is an orphaned sh -c wrapper"
+            else:
                 continue
 
-            # === Per-PID heartbeat gate ===
-            # Durability plan #2494: forward scan over the non-terminal status
-            # index (``find_live_session_by_pid``) resolves ownership without a
-            # pid index. #2518: pass the psutil-observed ``create_time`` so the
-            # match is fenced — a live row holding a recycled ``exec_pid`` must
-            # not confer ownership of an unrelated process. ``or None`` because
-            # the read above coerces a missing value to ``0.0``, and 0.0 would
-            # mismatch every recorded fence instead of falling back to pid-only.
-            session = AgentSession.find_live_session_by_pid(pid, create_time or None)
+            # === Ownership proof (#3592) ===
+            # Whatever the signature, a process is a candidate only if its
+            # environment carries a worker ownership marker. Age, PPID and
+            # cmdline shape are not ownership; an operator's interactive
+            # `claude --continue ...` whose terminal died is PPID 1 and matches
+            # the claude signature, but carries no marker, so it is never
+            # signalled. Unreadable env fails closed.
+            owner_marker = _worker_ownership_marker(proc)
+            if owner_marker is None:
+                logger.debug(
+                    "[orphan-reap] PID %d matched but carries no ownership marker, leaving alone",
+                    pid,
+                )
+                continue
+            if is_pyright:
+                # A pyright never has a matching exec_pid, so the pid lookup can
+                # neither vouch for nor against it; its liveness comes from the
+                # session its marker names. A lookup error fails closed.
+                session = None
+                if owner_marker.startswith("AGENT_SESSION_ID="):
+                    try:
+                        session = AgentSession.get_by_id_strict(owner_marker.partition("=")[2])
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug(
+                            "[orphan-reap] pyright PID %d marker lookup failed: %s, leaving alone",
+                            pid,
+                            e,
+                        )
+                        continue
+            else:
+                # === Per-PID heartbeat gate ===
+                # Durability plan #2494: forward scan over the non-terminal status
+                # index (``find_live_session_by_pid``) resolves ownership without a
+                # pid index. #2518: pass the psutil-observed ``create_time`` so the
+                # match is fenced — a live row holding a recycled ``exec_pid`` must
+                # not confer ownership of an unrelated process. ``or None`` because
+                # the read above coerces a missing value to ``0.0``, and 0.0 would
+                # mismatch every recorded fence instead of falling back to pid-only.
+                session = AgentSession.find_live_session_by_pid(pid, create_time or None)
             if session is None and is_mcp:
                 # MCP servers don't have a direct fence mapping. Try the parent:
                 # if it resolves to a live session, inherit that decision.
@@ -6711,6 +6882,27 @@ def _reap_orphan_session_processes() -> int:
                 logger.debug("[orphan-reap] children() failed for PID %d: %s", pid, e)
                 descendants = []
 
+            # Build the evidence BEFORE the kill (the helper cannot raise), so the
+            # Killed line and the counter increment below can never be lost to a
+            # formatting error.
+            if is_pyright:
+                signature = "pyright"
+            elif is_claude:
+                signature = "claude"
+            elif is_mcp:
+                signature = "mcp"
+            else:
+                signature = "stale-oneshot"
+            evidence = (
+                f"route={orphan_route}; signature={signature}; "
+                f"{_orphan_owner_evidence(session)}" + f"; marker={owner_marker}"
+            )
+            log_cmd = cmdline_str[:ORPHAN_LOG_CMDLINE_MAX_CHARS]
+            try:
+                owning_id = getattr(session, "agent_session_id", None) if session else None
+            except Exception:  # noqa: BLE001  # swallow-ok: log detail only
+                owning_id = None
+
             try:
                 proc.terminate()
             except psutil.NoSuchProcess:
@@ -6723,6 +6915,7 @@ def _reap_orphan_session_processes() -> int:
             for d in descendants:
                 d_pid = None
                 d_ct = 0.0
+                d_cmd, d_ppid = _describe_proc_for_log(d)
                 try:
                     d_pid = d.pid
                     d_ct = d.create_time()
@@ -6734,15 +6927,26 @@ def _reap_orphan_session_processes() -> int:
                     continue
                 if d_pid is not None:
                     _pending_sigkill_orphans.add((d_pid, d_ct))
+                logger.info(
+                    "[orphan-reap] Killed descendant PID %s (cmd=%s, ppid=%s, "
+                    "evidence=descendant of orphan PID %d: %s)",
+                    d_pid,
+                    d_cmd,
+                    d_ppid,
+                    pid,
+                    evidence,
+                )
 
             parent_kills += 1
-            owning_id = getattr(session, "agent_session_id", None) if session else None
             logger.info(
-                "[orphan-reap] Killed PID %d (cmd=%s, owning_session=%s, descendants=%d)",
+                "[orphan-reap] Killed PID %d (cmd=%s, ppid=%d, owning_session=%s, "
+                "descendants=%d, evidence=%s)",
                 pid,
-                cmdline_str[:100],
+                log_cmd,
+                ppid,
                 owning_id or "<unknown>",
                 len(descendants),
+                evidence,
             )
 
             _increment_orphan_process_counter(session)
@@ -6820,6 +7024,12 @@ def _fast_reap_stale_print_oneshots() -> int:
                     continue
 
                 staged = (pid, create_time)
+                # Ownership proof (#3592): age and PPID 1 do not make a process
+                # ours. Without a worker marker in its env it is left alone.
+                owner_marker = _worker_ownership_marker(proc)
+                if owner_marker is None:
+                    _pending_sigkill_orphans.discard(staged)
+                    continue
                 if _oneshot_owner_is_live(pid, create_time or None):
                     # Issue #2149: this PID is a live session's `claude -p`
                     # harness (a legitimate multi-minute PM turn), not an
@@ -6831,19 +7041,37 @@ def _fast_reap_stale_print_oneshots() -> int:
                         pid,
                     )
                     continue
+                # Evidence is built before the signal; `_oneshot_owner_is_live`
+                # folds "no live owner" and "lookup timed out" into one False
+                # (fail toward reapable), and the line reports that verdict.
+                log_cmd = " ".join(str(x) for x in cmdline)[:ORPHAN_LOG_CMDLINE_MAX_CHARS]
+                evidence = (
+                    f"stale --print one-shot age={int(time.time() - create_time)}s "
+                    f"(> {ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS}s), ppid=1, "
+                    f"marker={owner_marker}, "
+                    "no live owning session (or owner lookup unresolved)"
+                )
                 if staged in _pending_sigkill_orphans:
                     proc.kill()
                     _pending_sigkill_orphans.discard(staged)
                     logger.info(
-                        "[fast-oneshot-reap] SIGKILL'd surviving stale one-shot PID %d", pid
+                        "[fast-oneshot-reap] SIGKILL'd surviving stale one-shot PID %d "
+                        "(cmd=%s, ppid=%s, evidence=survived SIGTERM; %s)",
+                        pid,
+                        log_cmd,
+                        ppid,
+                        evidence,
                     )
                 else:
                     proc.terminate()
                     _pending_sigkill_orphans.add(staged)
                     logger.info(
-                        "[fast-oneshot-reap] SIGTERM'd stale --print one-shot PID %d (cmd=%s)",
+                        "[fast-oneshot-reap] SIGTERM'd stale --print one-shot PID %d "
+                        "(cmd=%s, ppid=%s, evidence=%s)",
                         pid,
-                        " ".join(str(x) for x in cmdline)[:100],
+                        log_cmd,
+                        ppid,
+                        evidence,
                     )
                 reaped += 1
                 _increment_orphan_process_counter(None)

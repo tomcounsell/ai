@@ -59,6 +59,15 @@ logger = logging.getLogger(__name__)
 # per-session env overlay alongside ``AGENT_SESSION_ID``.
 EDGE_FILE_ENV = "SESSION_RUNNER_HOOK_EDGE_FILE"
 
+# Ownership marker the harness stamps into every ``claude`` it spawns, set to
+# the spawning Python process's PID (#3592). The worker's orphan reapers signal
+# a process only when its environment proves this system spawned it: either
+# this marker or ``AGENT_SESSION_ID`` (session turns carry both). It covers the
+# spawns that have no session to name, such as drafter calls and the harness
+# health probe. An operator's interactive ``claude`` carries neither, so it is
+# never a reap candidate. Children (MCP servers, pyright) inherit it.
+HARNESS_OWNER_ENV = "VALOR_HARNESS_OWNER_PID"
+
 # Env overrides every headless ``claude -p`` spawn must carry via a CLI
 # ``--settings`` source (file or inline JSON) — the ONLY settings layer that
 # outranks the fleet-wide user settings. Deliberately NOT a plain subprocess

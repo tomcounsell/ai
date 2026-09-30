@@ -66,30 +66,19 @@ site). See [Watchdog Log Isolation](watchdog-log-isolation.md) for the full Data
 - Process running — `is_bridge_running()` calls `tools.process_lookup.find_python_service_pids(script_suffix="bridge/telegram_bridge.py")` (#3164), not `pgrep`: BSD `pgrep` on macOS excludes the calling process and all of its ancestors from the match list unless `-a` is passed, which is not a portable fix (`-a` means "print the full command line" on Linux/procps). This lookup is ancestor-safe, so a bridge-hosted caller (an agent session) sees its own ancestor bridge correctly.
 - Logs fresh (written within 5 minutes)
 - No crash pattern detected
-- Zombie process detection (claude/pyright processes idle > 2 hours)
-- Concurrent instance count (warns when exceeding soft limit of 5)
 
-**Zombie Process Detection**:
-
-Claude Code CLI subprocesses can become orphaned when their parent session ends abnormally (timeout, crash, network disconnect). These zombie processes persist indefinitely, accumulating memory pressure. The watchdog detects them using `ps -eo pid,etime,rss,command` and classifies processes as zombies when their elapsed time exceeds `ZOMBIE_THRESHOLD_SECONDS` (default: 7200 = 2 hours).
-
-- `_enumerate_claude_processes()` scans for all `claude` and `pyright` processes system-wide
-- `classify_zombies()` separates zombies from active processes based on elapsed time
-- `kill_zombie_processes()` uses SIGTERM with 3-second grace period, escalating to SIGKILL
-- Active instance count is tracked; a warning is logged when it exceeds `SOFT_INSTANCE_LIMIT` (default: 5)
-
-The `--check-only` output includes zombie count, PIDs, memory usage, and active instance count.
+The watchdog never signals a `claude` or `pyright` process. It has no evidence of ownership (only age would be available), and an interactive session or SDLC supervisor looks identical to an orphan by age alone. Orphan cleanup belongs to the worker reapers, which prove ownership first (see below).
 
 **4-Level Recovery Escalation, plus a decoupled crash-storm signal:**
 
 | Level | Condition | Action |
 |-------|-----------|--------|
 | 1 | Process not running | Log crash event via `crash_tracker.log_crash("bridge_dead_on_watchdog_check")` + simple restart (launchd) |
-| 2 | Process running but logs stale — or update loop wedged | Kill stale + kill zombies + restart (the bridge always catches up missed messages on startup — see below) |
-| 3 | Lock files present | Kill stale + kill zombies + clear locks + restart |
-| 4 | Crash pattern detected | Kill stale + kill zombies + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to `_recovery_exhausted()`, which logs `CRITICAL` and records `log_crash("Recovery exhausted")` |
+| 2 | Process running but logs stale — or update loop wedged | Kill stale bridge processes + restart (the bridge always catches up missed messages on startup — see below) |
+| 3 | Lock files present | Kill stale bridge processes + clear locks + restart |
+| 4 | Crash pattern detected | Kill stale bridge processes + clear locks + revert HEAD + restart (if enabled); if auto-revert is disabled or the revert fails, falls through to `_recovery_exhausted()`, which logs `CRITICAL` and records `log_crash("Recovery exhausted")` |
 
-Levels 2-4's "Kill stale" step calls `kill_stale_processes()`, which deliberately stays on `pgrep -f telegram_bridge.py` rather than the ancestor-safe `tools.process_lookup` lookup used by the health check above (#3164). It SIGKILLs every match, so `pgrep`'s exclusion of the caller's own ancestors is load-bearing here, not a bug: an ancestor-safe lookup in this `os.kill` path would let a bridge-descended caller (an agent session) kill its own live ancestor bridge. Do not convert this call site.
+Levels 2-4's "Kill stale" step calls `kill_stale_processes()`, which deliberately stays on `pgrep -f telegram_bridge.py` rather than the ancestor-safe `tools.process_lookup` lookup used by the health check above (#3164). `pgrep`'s exclusion of the caller's own ancestors is load-bearing here, not a bug: an ancestor-safe lookup in this `os.kill` path would let a bridge-descended caller (an agent session) kill its own live ancestor bridge. Do not convert this call site. `pgrep` only supplies candidates, though. A candidate is SIGKILLed only if `find_python_service_pids(script_suffix="bridge/telegram_bridge.py")` also identifies it as a Python interpreter running the bridge script, so a `claude`, `vim` or `tail` command line that merely names the file is never killed.
 
 `recovery_level` has no level 5. Two independent signals are computed alongside `recovery_level`, both on `HealthStatus`:
 
@@ -98,8 +87,6 @@ Levels 2-4's "Kill stale" step calls `kill_stale_processes()`, which deliberatel
 **The watchdog records; it does not deliver.** The durable crash-storm signal is the `CRITICAL` line in `logs/watchdog.log` and `log_crash()`, written synchronously in the watchdog process on every tick regardless of the state of Redis, the worker, or the bridge. Read it with `python monitoring/bridge_watchdog.py --check-only` or `tail logs/watchdog.log`. Any push notification must originate from a transport that does not depend on the worker or an LLM turn.
 
 - **`restart_circuit_open`** — a reason-aware restart throttle for *non-wedge* storms. `CrashEvent.reason` classifies each crash; when the storm is not wedge-dominated (`wedge_count < len(recent_crashes) * WEDGE_DOMINANCE_FRACTION`, default fraction `0.9` — a bare `0.5` majority would let a 50/50 wedge+real-bug storm through), `restart_circuit_open` is set and `run_health_check()` skips `execute_recovery()` for that tick entirely. A **wedge-dominated** storm always leaves this False, so the wedge detector's capped restart (level 2, `launchctl kickstart` with `catch_up=True`) keeps running every tick with no attempt ceiling. The exemption rests on a wedge verdict being trustworthy: the detector requires positive recovery evidence and resets its silence clock on restart. Each restart is a SIGKILL plus a full startup dialog scan, so an un-throttled loop over a *false* verdict is not cheap.
-
-Zombie cleanup is integrated into recovery levels 2+ to free memory before restarting.
 
 ### 3a. Update-Loop Wedged Detector
 
@@ -236,7 +223,7 @@ When a worker dies ungracefully (panic, SIGKILL, restart-without-graceful-shutdo
 
 **Distinction from sibling reapers**:
 - vs. the in-process reaper: the in-process reaper iterates `_active_sessions` (handles known to THIS worker) and asks "is the owning row terminal?". It cannot detect orphans whose parent worker is gone — that gap is what the cross-process reap covers.
-- vs. `monitoring/bridge_watchdog.py::kill_zombie_processes()`: the watchdog runs every 60s and kills `claude`/`pyright` processes older than 2h via raw `os.kill`. The cross-process reap runs every 60min, scopes by PPID==1 + heartbeat-stale + signature, walks descendant trees, and uses psutil for PID-reuse safety. Both swallow `ProcessLookupError`/`NoSuchProcess` so double-kill is safe.
+- Orphan ownership: the worker reapers are the only component that signals `claude` (and worker-spawned `pyright`) processes. `_reap_orphan_session_processes` runs at worker startup and every 60min; `_fast_reap_stale_print_oneshots` runs every health-loop tick. Both require proof of ownership in the process's own environment (`AGENT_SESSION_ID`, or `VALOR_HARNESS_OWNER_PID`, which the harness stamps into every `claude` it spawns and every child inherits), failing closed when the environment is unreadable, so an operator's interactive `claude` is never a candidate. Both also require PPID==1 (or an orphaned `sh -c` parent) and no live owning AgentSession, and use psutil `create_time` for PID-reuse safety. Each SIGTERM and SIGKILL these two reapers send is logged with the command, parent PID, ownership marker, and evidence.
 
 **Worker process reaping is intentionally OUT OF SCOPE.** Stranded sibling workers are reparented by launchd already; the worker-signature + PPID==1 filter would self-suicide every live worker on every reflection tick. See [agent-session-health-monitor.md](agent-session-health-monitor.md) for the canonical write-up of all three orphan reapers.
 
