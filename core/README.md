@@ -1,0 +1,38 @@
+# core
+
+The kernel and the control loop. Authority lives here and nowhere else.
+
+## Scope
+
+- Objective tree and the task record, with a money budget conserved down the tree.
+- Effect classes and the broker every effect passes through.
+- Approvals: the record of Tom's tap on an `act`, with his literal message as provenance.
+- The ledger: append-only, written by the kernel, never editable by an agent.
+- Steering and lossless stop.
+- The supervisor turn and the prompt it builds.
+- The SDLC state machine as a typed state model. Stages are skills; the states, verdicts, and transitions are here.
+- The judgement layer's task taxonomy and router, and the decisions port.
+- Ports that `bridges/`, `harnesses/`, and `memory/` conform to.
+- One typed settings module. Secrets stay in Keychain and the vault `.env`.
+- State lives in Postgres as JSONB documents plus an append-only events table.
+
+No LLM call decides authority here. A classifier decides what a thing is; the kernel decides what it may do.
+
+## Imports
+
+- May import: the standard library and third-party libraries. Nothing else in this repository.
+- Imported by: every other code directory. `bridges/` and `memory/` import only the ports.
+
+## Effect classes
+
+Effect classes are defined in `core/`: `read` (no effect), `propose` (reversible: sandbox writes, branches, drafts, anything that can be withdrawn), and `act` (irreversible or money: merge, send, pay, deploy). The kernel enforces them: a child's ceiling never exceeds its parent's, and every `act` needs Tom, per action. Core holds the definitions and the enforcement, and performs no effect of its own outside the broker.
+
+## Not here
+
+**Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, or approval step is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance is an `act`-class effect: the Brief carries a `governance_grant` field, default none, and a diff that adds any of the above needs Tom's tap, one approval per instance, through the same approval surface as a merge or a send. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is deleted by default. The blind verifier asks one Jev-class boolean over every diff, "does this add a check, gate, hook, round, or review step", and a yes with no grant is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
+
+- Vendor clients, harness wrappers, and comms I/O. Those are `tools/`, `harnesses/`, and `bridges/`.
+- Persona text. That is `persona/`; core renders it.
+- Stage logic for the SDLC (how to plan, build, review). Stages are skills.
+- A model call that grants, widens, or refuses authority. Judgement classifies; the kernel decides.
+- Relational schemas with a foreign-key lattice.
