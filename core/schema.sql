@@ -1,0 +1,58 @@
+-- Kernel state: JSONB documents plus one append-only events table.
+-- Applied by the database owner. The kernel connects as valor_kernel, which
+-- may read and insert and nothing else. No foreign keys: a row names what it
+-- belongs to by id inside its payload.
+
+CREATE TABLE IF NOT EXISTS documents (
+    kind       text        NOT NULL,
+    id         text        NOT NULL,
+    body       jsonb       NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (kind, id)
+);
+
+-- The ledger. Every budget movement, turn, stop, effect, and approval is a
+-- row here, and a row is never changed.
+CREATE TABLE IF NOT EXISTS events (
+    id      bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    task_id text        NOT NULL,
+    type    text        NOT NULL,
+    payload jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    at      timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS events_task_idx ON events (task_id, id);
+CREATE INDEX IF NOT EXISTS events_payload_gin ON events USING gin (payload jsonb_path_ops);
+
+-- One reservation and one charge per gateway call, one of each effect row
+-- per effect, and an approval consumed by at most one intent. These make
+-- every fold over the ledger total.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_call_row
+    ON events (type, (payload->>'call_id'))
+    WHERE type IN ('gateway.reserved', 'gateway.charged');
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_effect_row
+    ON events (type, (payload->>'effect_id'))
+    WHERE type IN ('effect.held', 'effect.intent', 'effect.outcome', 'effect.refused');
+CREATE UNIQUE INDEX IF NOT EXISTS events_approval_used_once
+    ON events ((payload->>'approval_id'))
+    WHERE type = 'effect.intent' AND payload->>'approval_id' IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_stop
+    ON events (task_id) WHERE type = 'task.stopped';
+
+CREATE OR REPLACE FUNCTION reject_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only: % refused', TG_TABLE_NAME, TG_OP;
+END
+$$;
+
+DROP TRIGGER IF EXISTS events_append_only ON events;
+CREATE TRIGGER events_append_only BEFORE UPDATE OR DELETE ON events
+    FOR EACH ROW EXECUTE FUNCTION reject_mutation();
+DROP TRIGGER IF EXISTS events_no_truncate ON events;
+CREATE TRIGGER events_no_truncate BEFORE TRUNCATE ON events
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
+
+-- Grants are the first lock, the triggers the second.
+REVOKE ALL ON events, documents FROM PUBLIC;
+GRANT SELECT, INSERT ON events TO valor_kernel;
+GRANT SELECT, INSERT ON documents TO valor_kernel;

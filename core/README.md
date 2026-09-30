@@ -36,3 +36,8 @@ Effect classes are defined in `core/`: `read` (no effect), `propose` (reversible
 - Stage logic for the SDLC (how to plan, build, review). Stages are skills.
 - A model call that grants, widens, or refuses authority. Judgement classifies; the kernel decides.
 - Relational schemas with a foreign-key lattice.
+
+## Entry points
+
+- `python -m core migrate` creates the `valor_kernel` role, the `valor_rebuild` database, and the schema in `core/schema.sql`. `python -m core --help` lists the rest: `status`, `ledger`, `stop`, `pending`, `approve`.
+- `scripts/kernel_smoke.py` runs the kernel end to end: a task with a budget, one `claude -p` turn through the gateway, a `propose` effect, an `act` effect held for Tom's approval, a second task stopped mid-turn, and the ledger.
