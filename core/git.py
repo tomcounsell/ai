@@ -13,6 +13,9 @@ name drivers; a driver's program comes from config. So every call:
   directories only and a time limit (`settings.git_timeout_s`);
 - reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
+- ignores replace refs and grafts (`GIT_NO_REPLACE_OBJECTS=1`,
+  `GIT_GRAFT_FILE=/dev/null`), which a turn can write and which are not
+  config;
 - pins hooks, the fsmonitor, the credential helper, the SSH command, the
   proxy command, the askpass program, the global attributes file, automatic
   gc, the `ext::` transport, and push's tag following, submodule recursion,
@@ -74,6 +77,11 @@ def env() -> dict[str, str]:
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_PAGER": "cat",
+        # A turn owns `.git/refs/replace/` and `.git/info/grafts`, which are
+        # not config: without these a replace ref or a graft could make a
+        # code commit read as docs only, or a merge read as landed.
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_GRAFT_FILE": "/dev/null",
     }
 
 
