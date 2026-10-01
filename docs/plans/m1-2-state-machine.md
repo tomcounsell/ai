@@ -16,18 +16,24 @@ coordinates the gaps between steps, and nothing merges on a model's say-so
 doc differ, this plan fixes the doc in the same build.
 
 Stakes: this replaces the kernel's state fold, adds constraints to the
-ledger's schema, and moves the merge decision into the broker, all in the
-kernel itself, so `critique_rounds: 2`, `review_rounds: 2`.
+ledger's schema, writes permanent guard rows to the real ledger, and moves
+the merge decision into the broker, all in the kernel itself, so
+`critique_rounds: 2`, `review_rounds: 2`.
 
 ## What is true today (checked, not assumed)
 
 - `tasks.status` folds four states (`live`, `waiting for Tom`,
-  `delivered`, `stopped`). `session.run` loops turns until one of them
-  changes. `session.record` writes `task.delivered` the moment a turn
-  leaves `done.md`.
+  `delivered`, `stopped`), with precedence stopped, then a delivery not
+  reopened by feedback, then an unanswered question, then live.
+  `session.run` loops turns until the state changes. `session.record`
+  writes `task.delivered` the moment a turn leaves `done.md`.
 - `broker.Action.adds_governance` is a constructor argument. Nothing in
   `core/`, `tools/`, or `scripts/` ever sets it; `signals.collect` never
-  reads it from an effect file. Only tests set it.
+  reads it from an effect file. Only tests set it. The broker refuses such
+  an action when the Brief carries no `governance_grant`.
+- `broker.release` reads the approval in one transaction and `_perform`
+  writes `effect.intent` in another, so a row can land between the check
+  and the intent.
 - `signals.PROTOCOL` names `push_branch` by hand. `signals.CLARIFY` tells
   the turn to write `question.md` "if you have no such questions", which
   makes a clarify turn with nothing to ask indistinguishable from one that
@@ -35,18 +41,24 @@ kernel itself, so `critique_rounds: 2`, `review_rounds: 2`.
 - `session.next_prompt` holds the feedback framing ("Tom reviewed your
   delivery and, as project manager, ...") and the "Tom answered your
   question" framing.
-- `tools/push_branch.py` holds the only pinned git runner (hooks, fsmonitor,
-  credential helper, and SSH command disabled). The kernel will need the
-  same pinning to read a candidate's head and a plan file from a workspace
-  the turn can write.
+- `tools/push_branch.py` pushes to the remote named `origin` as the
+  workspace's `.git/config` defines it. The turn can rewrite that file
+  (the URL, a `pushurl`, a `url.*.insteadOf` rule), so today the
+  destination of an approved push is under the turn's control. Its pinned
+  git runner (hooks, fsmonitor, credential helper, SSH command disabled)
+  is the only one in the repository.
 - `Brief` is rebuilt from the task document with `Brief(**body)`, so any
   field a legacy document lacks needs a default.
 - The real ledger `valor_rebuild` (read-only check, 2026-10-01): 1,416 rows,
   22 tasks, 18 event types. 21 `task.delivered`, 8 `question.asked` and 8
   answered, 5 `feedback.given`, 2 `task.stopped`, 19 held effects (17
-  `push_branch`, 2 `outbox_send`). No turn id repeats on `turn.started`,
-  `turn.ended`, or `turn.collected`. Four tasks have no workspace; six
-  have no `mode`.
+  `push_branch`, 2 `outbox_send`), none still pending. No turn id repeats
+  on `turn.started`, `turn.ended`, or `turn.collected`. Four tasks have no
+  workspace; six have no `mode`. The `corrections` stream shares the
+  events table but has no task document.
+- The replay and demonstration workspaces sit on a work branch (for
+  example `valor/work`) at the base commit, with `origin`'s `main` at that
+  same base.
 - Hypothesis is not installed in the kernel checkout's venv, and
   `pyproject.toml`'s dev group holds only pytest.
 - `scripts/replay.py` and `scripts/role_play_tom.py` read `status["state"]`
@@ -66,7 +78,8 @@ that runs the runner registered for the current state.
 | `clarify`, `plan`, `build`, `patch` | the working session (Claude Code, `.valor/` signals) | built here |
 | `critique` | none | fresh session, 1.4 |
 | `checks.test`, `checks.review`, `checks.docs` | none | 1.4 |
-| `waiting`, `merge`, `merged`, `stopped` | nothing runs; the router returns | |
+| `waiting`, `merged`, `stopped` | nothing runs; the router returns | |
+| `merge` | the router requests the merge effect if it is missing, then returns | built here |
 
 **The seam.** `core/router.py` takes a mapping from `State` or `Check` to a
 runner, passed in by the composition root (`core/__main__.py`), never a
@@ -77,23 +90,28 @@ returns `no runner`, names what is missing, writes nothing, and prints the
 command that records the verdict by hand. 1.3 and 1.4 add entries to the
 mapping and change nothing in the router.
 
-**Manual verdicts.** `python -m core verdict TASK STAGE VERDICT` records a
-verdict for a stage whose runner does not exist yet (`judge`, `critique`,
-`test`, `review`, `docs`), with `leg: "manual"` and provenance (`by`, `via`,
-`at`, `role_played`), refused unless the task is in that state. It is how a
-real task crosses `critique` and `checks` before 1.4, and it is never
-called by the router or any script. A manual verdict is attention Tom
-spent, so it is an attention entry of its own kind. This is the bridge for
-the judge as well: `start --mode bare|clarify` records the verdict
-`precise` or `thin` with `leg: "manual"` and the starter's provenance in
-the same transaction as `task.started`. Without `--mode`, the task waits in
-`judge` and `run` says so. 1.3 deletes `--mode` and registers the judge
-runner; the row type stays.
+**Manual verdicts, a stand-in that closes itself.** `python -m core verdict
+TASK STAGE VERDICT` records a verdict for a stage with no runner (`judge`,
+`critique`, `test`, `review`, `docs`), with `leg: "manual"` and provenance
+(`by`, `via`, `at`, `role_played`), refused unless the task is in that
+stage. It adds no checkpoint: each of those stages is already in the
+granted pipeline, and the command only lets a person play one until its
+runner exists. It refuses a stage that the composition root's runner
+mapping covers, so the stand-in closes on its own as runners arrive, and
+1.3 (judge) and 1.4 (critique, test, review, docs) each delete their
+stage from it; 1.4 deletes the command. The router and scripts never call
+it. A manual verdict is attention spent, so it is an attention entry of
+its own kind, counted apart.
+
+The judge uses the same stand-in: `start --mode bare|clarify` records
+`judge.decided` `precise` or `thin` with `leg: "manual"` and the starter's
+provenance in the same transaction as `task.started`. Without `--mode`,
+the task waits in `judge` and `run` says so. 1.3 deletes `--mode`.
 
 Why manual rows rather than skipping states: the predicate reads rows, so a
 merge before 1.4 needs real `test.decided`, `review.decided`, and
-`docs.decided` rows, and a row Tom (or the driving session, marked
-role-played) wrote is honest about who decided. Skipping would be the
+`docs.decided` rows, and a row a person wrote, marked role-played when a
+stand-in wrote it, is honest about who decided. Skipping would be the
 router faking a verdict.
 
 ## What will be built, per Done item
@@ -113,103 +131,141 @@ Pure code, no I/O, importing only the standard library.
   state named on the `question.asked` row. `idle` and `failed` stay put.
   Any state goes to `stopped` on `task.stopped`; nothing leaves it.
 - `Candidate(sha, turn_id)`, `Finding(source, kind, text)`,
-  `CheckVerdict`, `Checks`, `Loops(critique_rounds, review_rounds)`.
+  `CheckVerdict`, `Checks`, `Loops(critique_rounds, review_rounds)`,
+  `Instance(id, path, hunk)` for a governance instance.
 - `Fold`, the result of `fold(rows)`: `state`, `legacy`, `return_to` (in
-  `waiting`), `plan` (the current `plan.written`), `loops` (the plan's
-  counts, raised by any critique, never lowered), `candidate`, `checks`
-  (verdicts keyed to the current candidate only), `counts` since the
-  window opened (critique revisions, review send-backs, repair round
+  `waiting`), `plan` (the current `plan.written`), `loops`, `candidate`,
+  `checks` (verdicts keyed to the current candidate only), `counts` since
+  the window opened (critique revisions, review send-backs, repair round
   spent), `entry` (the row that moved the task into its current state,
   which the next turn's prompt is built from), `delivery` (the latest
-  `task.delivered`), `governance` (instances and which are granted), and
-  `ignored` (rows that were not a transition from the state they arrived
-  in, with why).
+  `task.delivered`), `governance` (the current candidate's instances and
+  which are granted), `merge_effect` (the held merge effect for the
+  current candidate, if any, and its state), and `ignored` (rows that
+  were not a transition from the state they arrived in, with why).
 - `fold` is total: it reads rows in id order, applies a row only when it is
   a transition from the current state, and ignores (and lists) everything
   else, including rows missing fields and rows of unknown types. It never
-  raises.
+  raises. In particular it ignores a `turn.collected` whose `state` is not
+  the current state (a turn started in a state the task has since left),
+  and a `critique.decided` whose `plan_sha256` is not the current plan's.
 - **Loop window.** Counts restart at `task.started` and at every
-  `feedback.given`, as the doc says. Critique: a `revise` goes to `plan`
-  while revisions in the window are fewer than `critique_rounds`, else to
-  `build` with its findings as the build's entry. Review and repair rounds
-  as in the join below.
+  `feedback.given`, as the doc says. `loops` is the larger, per count, of
+  the current plan's value and every raise a critique made in the window,
+  so a revised plan cannot lower a count a critique raised. A raise
+  applies to the verdict carrying it: a `revise` that raises
+  `critique_rounds` from 0 to 1 is itself sent back to `plan`. A `revise`
+  goes to `plan` while revisions in the window are fewer than
+  `critique_rounds`, else to `build` with its findings as the build's
+  entry.
 - **The join**, `join(checks, loops, counts) -> JoinResult`: the doc's
-  seven rows, read in order, giving `merge` (passed, did not pass, with
-  gaps, governance refused) or `patch` (with every finding of all three
-  branches), and which count it spends. It runs inside the fold the moment
-  the third verdict for the current candidate lands. No row records the
-  join itself: it is a function of the verdict rows, so it cannot disagree
-  with them.
-- **Governance refused** at the join means review said
-  `governance_refused`, or docs answered its governance boolean yes with an
-  instance not yet granted (decided by default, see below), so a rule added
-  in a doc reaches Tom the same way as one added in code.
-- **`governance_granted`** in `merge` happens when every governance
-  instance of the current candidate has a `guard.granted` row on the task.
-  It returns to `checks` with the review verdict cleared and the test and
+  seven rows, read in the table's order, first match wins:
+  1. review `pass`, test `pass`, docs passing: `merge`, passed;
+  2. review `governance_refused`: `merge`, governance refused;
+  3. review `changes`, a review round left: `patch`;
+  4. review `changes`, none left: `merge`, did not pass;
+  5. review `pass`, test `red` or `gaps` or docs `changes`, repair round
+     unspent: `patch`;
+  6. review `pass`, test `red` or docs `changes`, repair round spent:
+     `merge`, did not pass;
+  7. review `pass`, test `gaps`, docs passing, repair round spent: `merge`,
+     with the gaps.
+  Row 2 reads review only, as the spec's table does; docs answering its
+  governance boolean yes does not change the join's row. It changes what
+  Tom is asked in `merge` (below). The join runs inside the fold the
+  moment the third verdict for the current candidate lands. No row records
+  the join itself: it is a function of the verdict rows, so it cannot
+  disagree with them. The review loop guard fires on row 3 and on row 5
+  (see Guards).
+- **`governance_granted`** in `merge` after row 2 happens when every
+  instance the refused review named has a `guard.granted` on the task. It
+  returns to `checks` with the review verdict cleared and the test and
   docs verdicts kept, so only review runs again. A partial grant stays in
   `merge`.
 - **Merged.** `merge` goes to `merged` on a done `effect.outcome` of the
-  held merge effect whose payload names the current candidate. A failed
+  merge effect whose payload names the current candidate. A failed
   outcome stays in `merge` (the approval it consumed is spent; Tom taps
   again).
-- `merge_predicate(fold, rows, effect) -> list[str]`, the five terms of
-  the doc, each a named failure when it does not hold. Term 1 also fails
-  when the merge effect's payload names a candidate other than the current
-  one. Term 4 reads `docs.decided`: its head is the merge payload's
-  `head_sha`, its commits run from the candidate's sha to that head, and
-  every changed path is a `.md` file or under a path the plan names in
-  `doc_paths`. Term 5 is an `approval.granted` for this effect id and
-  payload digest with no `effect.intent` using it. Deterministic: rows
-  exist or they do not.
+- `merge_predicate(fold, rows, effect, facts) -> list[str]`, the five
+  terms of the doc, each a named failure when it does not hold. `facts`
+  are what the broker reads from git at release (item 8). Term 1 also
+  fails when the merge effect's payload names a candidate other than the
+  current one. Term 2: review `pass`, and every governance instance named
+  by the current review verdict has a `guard.granted` on the task. Term 4:
+  docs `updated` or `no_change`; its recorded head is the payload's
+  `head_sha`; per `facts`, the candidate's sha is an ancestor of that
+  head, no merge commit lies between them, and every path in `git diff
+  --no-renames --name-only` between them is a `.md` file or under a path
+  the plan names in `doc_paths`; and every instance the docs verdict named
+  has a `guard.granted`. Term 5: an `approval.granted` for this effect id
+  and payload digest with no `effect.intent` using it. Each term reads a
+  row or a git fact; no model call decides.
 
 ### 2. Legacy tasks in the real ledger
 
 `task.started` gains `"sdlc": 1`. A task whose `task.started` lacks it is
-legacy, and the fold maps it with the rule the old kernel used, read-only:
-stopped is `stopped`; an unanswered question is `waiting` (returning to
-`build`); a delivery not reopened by feedback is `merge`; feedback after a
-delivery is `patch`; any turn otherwise is `build`; no turn is `judge`.
-`Fold.legacy` is true. The router, `answer`, `feedback`, `verdict`, and
-`grant` refuse a legacy task ("predates the state machine"); `status`,
-`ledger`, `stop`, `approve`, and `release` work as before, so a held push
-from a replay can still be released. No row is rewritten, which is
-data.md's rule: the reader carries the old shape forward.
+legacy, and the fold maps it with the old fold's own precedence,
+read-only: `stopped` if stopped; else `merge` if a delivery has not been
+reopened by later feedback; else `waiting` (returning to `build`) if a
+question is unanswered; else `patch` if feedback followed a delivery; else
+`build` if any turn ran; else `judge`. `Fold.legacy` is true. The router,
+`answer`, `feedback`, `verdict`, and `grant` refuse a legacy task
+("predates the state machine"); `status`, `ledger`, `stop`, `approve`, and
+`release` work as before, so a legacy held push can still be released. No
+row is rewritten, which is data.md's rule: the reader carries the old
+shape forward.
 
 The old four-state fold is kept only in a test, as the oracle the legacy
 mapping is checked against (the way `MONEY_SQL` is kept in
-`test_migrate_history.py`).
+`test_migrate_history.py`). Tasks are the ids in `documents` where `kind =
+'task'`; the `corrections` and `guards` streams are not tasks and are never
+folded as one.
 
 ### 3. Event types, payloads, and constraints
 
-New or changed rows. Every verdict field is checked at write by one
-`CHECK` constraint, `events_verdict_in_enum`, so a verdict outside its
-enum is refused by Postgres whatever code writes it; `machine.VERDICTS` and
-the constraint are compared by a test so they cannot drift. Adding a
-`CHECK` scans the table and rewrites no row, which
-`test_migrate_history.py` proves on a copy of the real ledger.
+New or changed rows:
 
 | Type | Writer | Payload | Constraint |
 |---|---|---|---|
-| `task.started` | `tasks.start` | as today, plus `sdlc: 1`, `target_branch`, `base_sha` | |
+| `task.started` | `tasks.start` | as today, plus `sdlc: 1`, `target_branch`, `origin_url`, `base_sha` | |
 | `judge.decided` | `tasks.start` (manual), the judge runner in 1.3 | `verdict` (`precise`, `thin`), `leg`, `judgement_id` (null when manual), `guard_id` (when `thin`), provenance when manual | enum; `events_one_judge` unique on `task_id` |
-| `turn.collected` | `session` | as today, plus `state` (the state the turn ran in), `verdict`, `candidate` `{sha, turn_id}` when `candidate`, `errors` (signals that did not count, and why) | enum per `state`, null allowed for legacy rows; `events_one_turn_row` unique on `(type, turn_id)` for `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` |
+| `turn.started` | `runs` | as today, plus `state` | `events_one_turn_row` |
+| `turn.collected` | `session` | as today, plus `state`, `verdict`, `candidate` `{sha, turn_id}` when `candidate`, `errors` (signals that did not count, and why) | verdict in the enum for its state, and non-null whenever `state` is present (legacy rows have neither); `events_one_turn_row` unique on `(type, turn_id)` for `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` |
 | `question.asked` | `session` | as today, plus `state` (where `answered` returns) | |
 | `plan.written` | `session` | `turn_id`, `path`, `commit`, `sha256` of the file at that commit, `stakes`, `critique_rounds`, `review_rounds`, `scope` (each addition with the debt it pays), `doc_paths` | both counts in 0..2 |
 | `critique.decided` | `verdict` CLI (manual), the critique runner in 1.4 | `plan_sha256`, `verdict` (`sound`, `revise`), `findings`, `raised` (either count), `leg`, `model`, `usd_micros`, `guard_id` (when `revise`), provenance when manual | enum; raised counts in 0..2 |
-| `test.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `red`, `gaps`), `command`, `failures`, `behaviors`, `leg`, `model`, `usd_micros`, `guard_id` (breadth), provenance when manual | enum |
-| `review.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `changes`, `governance_refused`), `findings` (each with a kind, `debt` among them), `governance` `{adds, instances: [{id, hunk, summary, incident, mission_item}]}`, `leg`, `model`, `usd_micros`, `guard_id` (review loop), provenance when manual | enum |
-| `docs.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`updated`, `no_change`, `changes`), `head`, `commits` (each sha with its paths), `findings`, `governance` as review, `leg`, provenance when manual | enum |
-| `task.delivered` | the verdict writer whose row completes a join that goes to `merge` | `candidate`, `outcome` (`passed`, `gaps`, `did_not_pass`, `governance_refused`), `summary` (the candidate turn's `done.md`), the three verdict event ids, `findings`, `gaps`, `scope` | |
+| `test.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `red`, `gaps`), `command`, `failures`, `behaviors`, `leg`, `model`, `usd_micros`, `guard_id` (breadth, when behaviors are listed), provenance when manual | enum |
+| `review.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `changes`, `governance_refused`), `findings` (each with a kind, `debt` among them), `governance` `{adds, instances: [{id, path, hunk, summary, incident, mission_item}]}`, `leg`, `model`, `usd_micros`, `guard_id` (review loop, on a verdict that completes join row 3 or 5), provenance when manual | enum |
+| `docs.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`updated`, `no_change`, `changes`), `head`, `paths` (from `git diff --no-renames --name-only`), `findings`, `governance` as review, `leg`, provenance when manual | enum |
+| `task.delivered` | the verdict writer whose row completes a join that goes to `merge` | `candidate`, `outcome` (`passed`, `gaps`, `did_not_pass`, `governance_refused`), `summary` (the candidate turn's `done.md`), the three verdict event ids, `findings`, `gaps`, `scope`, instances awaiting a tap | |
 | `feedback.given` | `session.feedback` | as today, plus `candidate` | |
-| `guard.granted` | `migrate` (the seeded guards, on the `guards` stream), `guards.grant` (a governance instance, on the task) | `guard_id`, `name`, `incident`, `mission_items`, `granted_at`, `expires` (granted plus ninety days), `note` (Tom's literal message), provenance; on a task also `instance_id` and `candidate` | `events_one_guard` unique on `guard_id` |
+| `guard.granted` | `migrate` (the seeded guards, on the `guards` stream), `guards.grant` (a governance instance, on the task) | `guard_id`, `name`, `incident`, `mission_items`, `granted_at`, `expires` (granted plus ninety days), `note` (Tom's literal message), provenance; on a task also `instance_id` and the `candidate` it was granted on | `events_one_guard` unique on `guard_id` |
+
+**The enum constraint.** One `CHECK` constraint, `events_verdict_in_enum`,
+generated from `machine.VERDICTS` by `machine.constraint_sql()`, so the
+enum lives in one place. `db.migrate` applies it after `schema.sql` in a
+`DO` block that reads `pg_constraint`: absent, it is added; present with
+the same definition, nothing happens; present with a different definition
+(a later milestone changed `VERDICTS`), it is dropped and added in the same
+transaction. Adding a `CHECK` scans the table and rewrites no row, which
+`test_migrate_history.py` proves on a copy of the real ledger. A verdict
+outside its enum is refused by Postgres whatever code writes it.
+
+**Governance instance ids.** `id` is the SHA-256 of the instance's path
+and the hunk's added lines, without line numbers, so a review rerun on the
+same candidate, or a later candidate whose hunk did not change, names the
+same id. A `guard.granted` binds to the instance id, not to the candidate:
+an unchanged hunk stays granted across patches, and a changed hunk is a new
+instance needing a new tap. The candidate it was first granted on is
+recorded for the record only.
 
 A writer that would write a row the fold would ignore refuses instead:
-`answer` needs `waiting`; `feedback` needs `merge` or `merged`; `verdict`
-needs the task in that stage (and in `checks`, a current candidate); `grant`
-needs `merge` with an ungranted instance. Each takes the task's advisory
-lock, folds, checks, and appends in one transaction, as `answer` does
-today.
+`answer` needs `waiting`; `feedback` needs `merge` or `merged` and no merge
+effect with an intent and no outcome; `verdict` needs the task in that
+stage (and in `checks`, a current candidate); `grant` needs `merge` and an
+instance of the current candidate's review or docs verdict without a
+grant. Each takes the task's advisory lock, folds, checks, and appends in
+one transaction, as `answer` does today.
 
 ### 4. Verdict writers and the join's effects: `core/verdicts.py` (new)
 
@@ -218,17 +274,38 @@ lock. A review verdict that answers its governance boolean yes with an
 instance not yet granted must be `governance_refused`; a `pass` with an
 ungranted instance is refused at write, so the rows cannot say two things.
 After appending a check verdict the writer folds again; if the join just
-went to `merge`, it appends `task.delivered` in the same transaction, then
-(outside it, as the broker always works) requests the merge effect when
-the delivery passed or passed with gaps. A delivery that did not pass, or
-whose governance was refused, requests no merge: no predicate could
-release it. Tom's options there are `feedback`, `grant`, or `stop`.
+went to `merge`, it appends `task.delivered` in the same transaction.
+
+The merge effect is requested by `pipeline.ensure_merge` (in this module),
+called after that transaction commits and by the router on every run that
+finds the task in `merge`: when the delivery passed or passed with gaps
+and the fold shows no held, in-flight, or done merge effect for the
+current candidate, it requests one. The broker's idempotency key makes a
+repeat request return the same effect, so a crash between `task.delivered`
+and the request leaves nothing stranded: the next `run` requests it. A
+delivery that did not pass, or whose review refused governance, requests
+no merge, since no predicate could release it; Tom's options there are
+`feedback`, `grant`, or `stop`. When the merge is refused at request
+because a docs instance awaits a tap, the delivery names it, and the next
+`run` after Tom's `grant` requests it again (a refused effect is not a
+prior outcome to the broker).
 
 The manual docs verdict takes `--head` (default the candidate's sha) and
-records the commits and their paths as `git log --name-only` reports them
-in the task's workspace, refusing a head that does not descend from the
-candidate. It does not drop commits outside doc paths; that is 1.4's docs
-runner. The predicate refuses the merge instead (term 4).
+records the paths `git diff --no-renames --name-only` reports between the
+candidate and that head, refusing a head that does not descend from the
+candidate or a range holding a merge commit. It does not drop commits
+outside doc paths; that is 1.4's docs runner. The predicate refuses the
+merge instead (term 4), recomputing the paths at release.
+
+**Limitation, stated in the doc.** Before 1.4 there is no separate docs
+checkout, so manual docs commits sit in the builder's workspace on top of
+the candidate. If the join sends the work to `patch`, those commits ride
+into the next candidate, where the spec says docs commits belong to their
+candidate and are not merged after a send-back. 1.4's docs session in its
+own checkout ends this.
+
+The verdict CLI registers the merge performer before it writes, since the
+writer may request the merge.
 
 ### 5. The working-session runner: `core/session.py`
 
@@ -238,7 +315,7 @@ the effects report. Changed:
 
 - It runs one state's turns (`clarify`, `plan`, `build`, `patch`) and
   returns when the fold leaves that state, so the router decides what runs
-  next.
+  next. `turn.started` records the state the turn runs in.
 - `next_prompt` builds the prompt from `Fold.entry` as data under a short
   label: the instruction, Tom's answer, the critique's findings, every
   finding of the join, or Tom's feedback; `Continue.` once a turn in the
@@ -250,84 +327,135 @@ the effects report. Changed:
   - `plan`: `.valor/plan.json` (new) names the plan file and carries the
     stakes, both counts, scope additions, and `doc_paths`. The kernel reads
     the file at the workspace's HEAD through `core/git.py`; a plan not
-    committed there, or counts outside 0..2, is an entry in `errors` and no
-    verdict (`idle`), and the next prompt says why. Valid: `plan.written`
+    committed there, or counts outside 0..2, is an entry in `errors` and
+    the verdict `idle`, and the next prompt says why. Valid: `plan.written`
     in the same transaction, verdict `planned`.
-  - `build`, `patch`: `done.md` is `candidate`, with the head sha read
-    through `core/git.py` and the turn id. No `task.delivered`.
+  - `build`, `patch`: `done.md` with a clean tree (`git status
+    --porcelain` empty; `.valor/` is excluded already) is `candidate`, with
+    the head sha and the turn id. A dirty tree is an `errors` entry and
+    `idle`, and the next prompt says what is uncommitted. No
+    `task.delivered`.
   - Any of them: `question.md` is `asked` and wins over the others in the
     same turn, as today. A signal that means nothing in the state (say
-    `done.md` during `plan`) goes to `errors` and is not acted on. Neither
-    signal is `idle`; a turn that did not finish and left neither is
-    `failed`. Signals a failed turn left still count, as today.
+    `done.md` during `plan`) goes to `errors`. Neither signal is `idle`; a
+    turn that did not finish and left neither is `failed`. Signals a failed
+    turn left still count, as today.
+  - An effect file whose action type is `merge` is recorded with the error
+    "the merge is the kernel's to request" and never reaches the broker.
 - `feedback` is taken in `merge` and `merged` only, carries the candidate,
   and opens a new loop window.
 
 ### 6. The router: `core/router.py` (new) and `python -m core run`
 
-Each call folds, then: `waiting`, `merge`, `merged`, `stopped`, and legacy
-tasks return at once with one status line; a state with a runner runs it
+A run first takes a session-scoped `pg_try_advisory_lock` on `run:<task>`
+on a connection it holds for the whole run; if another run holds it, it
+returns `already running` and does nothing. Then it folds, and: `waiting`,
+`merged`, `stopped`, and legacy tasks return at once with one status line;
+`merge` calls `ensure_merge` and returns; a state with a runner runs it
 and folds again; a state without one returns `no runner`. In `checks` it
 runs each branch still missing a verdict for the current candidate, one at
 a time (the Air's one turn slot), and returns `no runner` naming the
 branches it could not run. Budget exhaustion, two idle turns, and a failed
-turn return as today. The run loop never writes a verdict itself.
+turn return as today. The router never writes a verdict.
 
 `status` returns the fold: `state` is now the machine state's name, plus
 `legacy`, `return_to`, `plan`, `loops`, `counts`, `candidate`, `checks`,
 `governance`, `delivered`, alongside today's money, turns, effects, and
 attention. `scripts/replay.py` and `scripts/role_play_tom.py` change in the
 same commit: `waiting` replaces `waiting for Tom`, `merge` replaces
-`delivered`, and a `no runner` line ends the run with that outcome rather
+`delivered`, the driver releases a held `merge` the way it releases a
+local push, and a `no runner` line ends the run with that outcome rather
 than looping to the run cap. So no replay can finish between 1.2 and 1.4;
 the takeover gate in 1.5 is where replays run the whole pipeline.
 
 ### 7. Guards: `core/guards.py` (new)
 
-- **Seeded.** `db.migrate` seeds, on the `guards` stream, once each (the
-  unique index and an advisory lock make a second migrate a no-op, like
-  correction 1): `intake.underspecified` (the judge),
-  `checks.test.breadth`, `critique.loop`, `review.loop`, and
-  `join.repair_round` (see Questions). Each carries the incidents and
-  mission items the state machine doc and judgement-layer.md give it,
-  `granted_at` 2026-10-01, `expires` 2026-12-30, Tom's note quoting his
-  2026-10-01 decision, and provenance `by: tom`, `via: "the 2026-10-01
-  pipeline decision, seeded by migrate"`.
-- **Firing.** A verdict row that holds or redirects work names the guard
-  it fires under (`guard_id` on `judge.decided` `thin`, `critique.decided`
-  `revise` that goes back to `plan`, `test.decided` with listed behaviors,
-  and the check verdict that completes a join sending work to `patch`
-  names `review.loop` or `join.repair_round`). Deleting an
-  expired guard is a routine for milestone 4; 1.2 only records.
-- **Granting an instance.** `python -m core grant TASK INSTANCE --note
-  "..." [--incident T] [--mission-item N] [--by --via --role-played]` is
-  Tom's tap on one governance instance, the same shape and provenance as
-  `approve`. It writes `guard.granted` on the task with the expiry ninety
-  days out. Incident and mission item default to what the review's
-  instance named; a grant missing either is refused, which is the
-  governance paragraph's own rule ("missing either, it is not added"), not
-  a new one.
+**Seeded.** `db.migrate` seeds these on the `guards` stream, once each (the
+unique index and an advisory lock make a second migrate a no-op, like
+correction 1). Each row carries the fields below, `note` quoting Tom's
+2026-10-01 pipeline decision ("Every stage is a checkpoint ... the plan
+sets the loops"), and provenance `by: tom`, `via: "the 2026-10-01 pipeline
+decision, seeded by migrate"`, `role_played: false`. These rows are
+permanent in the real ledger, so the text is taken from the docs, with the
+source named in the row.
 
-### 8. The broker's governance flag
+| `guard_id` | What it holds or redirects | Incident (as the docs give it) | Mission items | Granted | Expires | Source |
+|---|---|---|---|---|---|---|
+| `intake.underspecified` | routes a request judged thin to `clarify` | psyoptimal #894 (task `32f800bce8a2`: two feedback rounds for three decisions one message would have settled); popoto #191 bare (fidelity 1, 3 of 11 hidden tests); popoto #188 bare (built a feature Tom did not want) | 3, 6 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `judge`, Guard record; judgement-layer.md, The guard entry; mission.md, How the first numbers are read |
+| `checks.test.breadth` | a green suite with untested behaviors is `gaps`, which sends work to `patch` | every replay wrote fewer tests than its reference: #872 missed the archived-team guards, #191 the list key name and hash exclusion, the demonstration 10 tests against the reference's 35; on popoto #633 the clarify arm broke a bound in an existing test and was accepted | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `checks.test`, Why and Guard record for breadth |
+| `critique.loop` | a `revise` sends the plan back to `plan` | popoto #633: the clarify arm built on a wrong premise nothing read before code existed, and correctness fell from 5 to 2 | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `critique`, Why |
+| `review.loop` | a join sends work to `patch` on review `changes` (row 3) or in the repair round (row 5) | the Sonnet stand-in accepted popoto #191 bare at fidelity 1 and #633 with the stale-cache bug moved, not removed | 1 | 2026-10-01 | 2026-12-30 | sdlc-state-machine.md, `checks.review`, Why ("rounds beyond it are guards under Tom's 2026-10-01 grant") |
 
-`Action` loses `adds_governance`. `broker.request` computes it: for a
-`merge` action, true when the review or docs verdict for the candidate the
-payload names answered its governance boolean yes; for every other action,
-false. The requester cannot set it in code, and an effect file never could.
-A merge that adds governance with any instance lacking a `guard.granted`
-is refused at request. `release` of a `merge` effect evaluates
-`merge_predicate` under the task lock in the same transaction that writes
-`effect.intent`, so no feedback or new candidate can land between the check
-and the intent; a failing predicate raises `MergeRefused` naming the terms,
-writes nothing, and leaves the approval unused. `effect.held` keeps
-recording `adds_governance`, now as the broker computed it.
+The repair round is not a guard of its own: it fires under `review.loop`
+(the driving session's decision, reversible). The single review per
+candidate is a constraint of the setup plan with no expiry and is not
+seeded.
+
+**Firing.** A verdict row that holds or redirects work names the guard it
+fires under: `judge.decided` `thin`; `critique.decided` `revise` that goes
+back to `plan`; `test.decided` with listed behaviors; and the check verdict
+that completes join row 3 or 5. Deleting an expired guard is a routine for
+milestone 4; 1.2 only records.
+
+**Granting an instance.** `python -m core grant TASK INSTANCE --note "..."
+[--incident T] [--mission-item N] [--via V]` is Tom's tap on one
+governance instance. It has no `--by` and no `--role-played`: a governance
+grant is Tom's, written `by: tom`, `role_played: false`, and a stand-in
+has no way to make one. It writes `guard.granted` on the task, bound to the
+instance id, expiring ninety days out. Incident and mission item default
+to what the verdict's instance named; a grant missing either is refused,
+which is the governance paragraph's own rule ("missing either, it is not
+added"), not a new one.
+
+**Tom's tap is required and sufficient** (driving session's decision,
+reversible, flagged for Tom): a governance instance merges only with its
+own `guard.granted`, and the Brief's `governance_grant` neither substitutes
+for that tap nor is needed beside it. The broker's current refusal ("the
+Brief carries no `governance_grant`") becomes "an instance has no grant",
+and the `test_kernel.py` assertion that names `governance_grant` changes
+with it. The build amends predicate term 2 in
+`docs/sdlc-state-machine.md` to say this. The governance paragraph itself
+is not edited anywhere; it stays verbatim.
+
+### 8. The broker: the governance flag, the merge, and one transaction
+
+- `Action` loses `adds_governance`. `broker.request` computes it: for a
+  `merge` action, true when the review or docs verdict for the candidate
+  the payload names answered its governance boolean yes; for every other
+  action, false. A merge that adds governance with any instance lacking a
+  `guard.granted` is refused at request. `effect.held` keeps recording
+  `adds_governance`, now as the broker computed it.
+- **The merge destination is the kernel's, not the turn's.** At start, the
+  kernel resolves `origin`'s push URL in the workspace (before any turn
+  has run) and records it as `origin_url` on the Brief and `task.started`.
+  The merge payload carries `url`, `target_branch`, `head_sha`, and the
+  candidate, so Tom's approval digest binds all of them. The performer
+  pushes `head_sha` to `refs/heads/<target_branch>` at that URL, never with
+  force, and refuses when the workspace's config holds any `pushurl` or any
+  `url.*.insteadOf` or `url.*.pushInsteadOf` rule, since those rewrite even
+  an explicit URL. `push_branch` does the same (recorded URL, same
+  refusal) and refuses the task's `target_branch` as its target, so the
+  only way onto the target branch is the merge and its predicate.
+- **`target_branch`** is `--target-branch` at start, defaulting to
+  `origin`'s `HEAD` symbolic ref as `git ls-remote --symref` reports it;
+  when that cannot be resolved, start refuses and asks for the flag.
+  Start also refuses a workspace on a detached `HEAD`. `base_sha` is the
+  workspace's `HEAD` at start (1.4's test branch runs the suite there).
+- **`release` in one transaction.** Today the approval is read in one
+  transaction and the intent written in another. `release` becomes: take
+  the task lock; read the held effect, any prior outcome, the stop fence,
+  and the unused approval; for a `merge`, read the git facts (ancestry,
+  merge commits, `git diff --no-renames --name-only` from the candidate to
+  the head) and evaluate `merge_predicate`; write `effect.intent`; commit.
+  The performer runs after the commit and the outcome lands in its own
+  transaction, which keeps intent before outcome. A failing predicate
+  raises `MergeRefused` naming the terms, writes nothing, and leaves the
+  approval unused. No feedback or new candidate can land between the
+  check and the intent, and feedback is refused while the merge's intent
+  has no outcome.
 
 The merge performer is `tools/push_branch.py`'s push with action type
-`merge`: it pushes the payload's `head_sha` (the docs head, or the
-candidate's sha) to the Brief's `target_branch` on the workspace's
-`origin`, never with force. `target_branch` is `--target-branch` at start,
-defaulting to the branch checked out in the workspace then; `base_sha` is
-that branch's head then (1.4's test branch runs the suite there).
+`merge` and no `usage` line (turns are not offered it).
 
 ### 9. Stage files: `skills/sdlc/`
 
@@ -337,26 +465,42 @@ goal and exit evidence (the signal file and the row it becomes), not
 steps, and `channel.md`, the `.valor/` convention. `tasks.dispatch`
 renders, after the Brief head and corrections: `channel.md` with the
 effects list generated from the registered performers that offer a
-`usage` line (the merge performer offers none: the kernel requests it),
-then the file for the current state. The plan's path and commit go in the
-Brief head once one exists. `critique.md`, `review.md`, and `docs.md` are
-written now so there is one file per stage; 1.4's fresh sessions render
-them. `judge` is a classifier prompt (judgement-layer.md, 1.3) and `merge`
-is the kernel's, so neither has a file. `skills/README.md` says the
-directory holds these plain files until the versioned system is designed.
+`usage` line, then the file for the current state. The plan's path and
+commit go in the Brief head once one exists. `critique.md`, `review.md`,
+and `docs.md` are written now so there is one file per stage; 1.4's fresh
+sessions render them. `judge` is a classifier prompt (judgement-layer.md,
+1.3) and `merge` is the kernel's, so neither has a file. `skills/README.md`
+says the directory holds these plain files until the versioned system is
+designed.
 
 ### 10. Shared pinned git: `core/git.py` (new)
 
 The pinned runner moves from `tools/push_branch.py` to `core/git.py`
-(`head`, `show`, `is_ancestor`, `changed_paths`), and the performer
-imports it. The kernel reads a workspace the turn can write, so every read
-pins hooks, fsmonitor, credential helper, and SSH command the same way.
+(`head`, `branch`, `show`, `is_ancestor`, `merges_between`, `diff_paths`,
+`clean`, `push_url`, `rewrite_rules`), and the performers import it. The
+kernel reads a workspace the turn can write, so every read pins hooks,
+fsmonitor, credential helper, and SSH command the same way.
+
+### 11. Hypothesis
+
+Added to the dev group in `pyproject.toml`, with `uv.lock` regenerated and
+committed beside it. The build, test, and review stages run the suite from
+this worktree's own venv, `~/src/valor-rebuild-m12/.venv` (made by `uv sync`
+here), so the kernel checkout's venv is not touched:
+
+    cd ~/src/valor-rebuild-m12 && VALOR_TEST_DB=valor_rebuild_test_m12 \
+        .venv/bin/python -m pytest -q tests
+
+The property test imports Hypothesis directly; it is not skipped when the
+package is missing.
 
 ## Tech debt paid
 
 | Debt | What pays it |
 |---|---|
 | `adds_governance` settable by any requester and set by none | computed by the broker from verdict rows (item 8) |
+| an approved push's destination is under the turn's control | the recorded URL, bound into the digest, and the rewrite refusal (item 8) |
+| `release` checks and writes the intent in two transactions | one transaction under the task lock (item 8) |
 | `CLARIFY` tells Valor to write `question.md` with no question | `clarify.md` and `no_question.md` give `no_material_question` its own evidence |
 | `PROTOCOL` hard-codes `push_branch` | the effects list is rendered from registered performers |
 | `done.md` writes `task.delivered` at once | it is a candidate; `task.delivered` comes from the join |
@@ -368,26 +512,34 @@ pins hooks, fsmonitor, credential helper, and SSH command the same way.
 ## Tests that show it works
 
 New `tests/test_machine.py` (pure fold, no database) and
-`tests/test_pipeline.py` (real Postgres, real git, scripted turns as in
-`test_session.py`). All spend $0 except the two `VALOR_LIVE` files.
+`tests/test_pipeline.py` (real Postgres, real git, real bare origins,
+scripted turns as in `test_session.py`). All spend $0 except the two
+`VALOR_LIVE` files.
 
 **The model and the join.**
 - Every row of the join table, parametrized, through the pure fold; and
-  one row (`changes` with a round left) end to end through the router with
-  manual verdicts.
+  one row (`changes` with a round left) end to end through the router and
+  the `verdict` CLI as a subprocess.
+- Precedence: review `changes` with a round left and docs answering
+  governance yes goes to `patch` (row 3, since row 2 reads review only);
+  review `governance_refused` with test `red` goes to `merge` (row 2
+  before row 5).
 - A verdict outside its enum is refused at write: a raw `INSERT` as
   `valor_kernel` of each verdict type with a bad value raises
-  `CheckViolation`; each value in `VERDICTS` is accepted; plan counts of 3
-  and a critique raise of 3 are refused. `VERDICTS` matches the constraint
-  text.
+  `CheckViolation`; each value in `VERDICTS` is accepted; a
+  `turn.collected` with a `state` and no verdict is refused; plan counts of
+  3 and a critique raise of 3 are refused. Migrating twice leaves one
+  constraint, and changing `VERDICTS` in a scratch database replaces it.
 - A second `judge.decided` and a second `turn.collected` for one turn are
   refused by their unique indexes.
 
 **Loops.**
 - `critique_rounds` 0, 1, 2 against a run of `revise` verdicts: the
   number of returns to `plan`, and the findings carried into the build's
-  first prompt once exhausted. A critique raise from 1 to 2 gives a second
+  first prompt once exhausted. A `revise` raising 0 to 1 is itself sent
+  back; a revised plan stating 0 after a raise to 2 still gets the second
   revision; a "raise" to 0 lowers nothing.
+- A critique of an older plan digest is ignored.
 - `review_rounds` 0, 1, 2 against a run of `changes`: patches before
   `merge` never exceed `review_rounds` plus one, and the last delivery is
   `did_not_pass` with every finding.
@@ -404,28 +556,48 @@ New `tests/test_machine.py` (pure fold, no database) and
 - A patch that answers findings with reasons and no code change (same sha,
   new turn id) is a new candidate: the old verdicts are stale and all three
   branches are missing again.
+- A `done.md` with uncommitted changes is not a candidate; the next prompt
+  names what is uncommitted.
+- A `turn.collected` whose state the task has left is ignored.
 - `governance_granted` reruns only review: after the grant, test and docs
   verdicts stand, the router reports only `review` missing, and the next
   review verdict completes the join. A grant of one of two instances stays
-  in `merge`.
+  in `merge`. After a patch that leaves the granted hunk unchanged, the
+  instance id is the same and stays granted; a changed hunk needs a new
+  tap.
 
-**The merge predicate.**
-- All five terms hold: release pushes the head to the target branch of a
-  real bare origin.
-- Each term failing alone refuses the release with that term named and
-  nothing written: no docs verdict; review `pass` with an ungranted
-  governance instance (refused at write, so built by raw insert); test
-  `red`; `gaps` with the repair round unspent; docs commits touching
-  `core/x.py` (outside doc paths), and the same path accepted when the
-  plan names it in `doc_paths`; docs head not the payload's head; no
-  approval.
+**The merge predicate and the destination.**
+- All five terms hold: release pushes the head to the target branch of the
+  recorded bare origin.
+- Each term failing alone refuses the release with that term named,
+  nothing written, and the approval still unused: no docs verdict; review
+  `pass` with an ungranted instance (built by raw insert, since the writer
+  refuses it); test `red`; `gaps` with the repair round unspent; docs
+  paths touching `core/x.py`, and the same path accepted when the plan
+  names it in `doc_paths`; a merge commit between the candidate and the
+  docs head; a rename from `core/x.py` to `docs/x.md` (the old path counts);
+  docs head not the payload's head; no approval.
 - An approval for a different digest: the merge effect of candidate 1 is
   approved, feedback produces candidate 2 and its merge effect; candidate
   2's effect does not release on candidate 1's approval (term 5), and
   candidate 1's effect does not release although approved (term 1).
-- The broker computes the governance flag: an effect file carrying
-  `adds_governance` gets an effect recorded with `false`; a merge whose
-  review named an ungranted instance is refused at request.
+- The destination: after start, the turn sets `origin`'s URL, a
+  `pushurl`, or a `url.*.insteadOf` rule in the workspace; the merge
+  refuses (rewrite rules) or pushes only to the recorded URL, and the
+  stranger repository receives nothing. `push_branch` to the target branch
+  is refused. An effect file with action type `merge` is recorded with its
+  error and never reaches the broker.
+- Start: the target branch defaults to `origin`'s `HEAD` (in a workspace
+  on a work branch, it is `main`, not the work branch); a detached `HEAD`
+  is refused.
+- The governance flag: an effect file carrying `adds_governance` gets an
+  effect recorded with `false`; a merge whose review named an ungranted
+  instance is refused at request; a task whose Brief carries a
+  `governance_grant` still needs the tap.
+- A crash between `task.delivered` and the merge request (the writer is
+  stopped after its transaction): the next `run` requests the merge, and a
+  second `run` returns the same effect.
+- Feedback is refused while the merge's intent has no outcome.
 
 **States and Tom's rows.**
 - A stopped task in every state (each of the eleven reached by its own
@@ -444,62 +616,75 @@ New `tests/test_machine.py` (pure fold, no database) and
   and the starter's provenance; `start` without `--mode` leaves the task in
   `judge`, and `run` returns `no runner` naming `judge` and writing nothing.
   Likewise at `critique` and in `checks`.
+- `verdict` refuses a stage the runner mapping covers (a test mapping with
+  a critique runner), and refuses a stage the task is not in.
+- `grant` has no `--by` or `--role-played`; its row says `by: tom`,
+  `role_played: false`; a grant without an incident is refused.
+- Two `run` processes on one task: the second returns `already running`
+  and starts no turn.
 - Stage rendering: the dispatched Brief carries `channel.md` and the
   current state's file, changes when the state does, and lists every
   registered performer offering a `usage` line and not `merge`.
 
-**Totality, by property.** Hypothesis (added to the dev group) generates
-ledgers of well-formed rows, rows with wrong or missing fields, unknown
-types, stale verdicts, and legacy-shaped starts. For every prefix: `fold`
-returns exactly one `State` and does not raise; `stopped` is absorbing;
-`checks` holds verdicts for the current candidate only; patches before a
-`merge` never exceed `review_rounds` plus one.
+**Totality, by property.** Hypothesis generates ledgers of well-formed
+rows, rows with wrong or missing fields, unknown types, stale verdicts,
+turns collected in a state already left, and legacy-shaped starts. For
+every prefix: `fold` returns exactly one `State` and does not raise;
+`stopped` is absorbing; `checks` holds verdicts for the current candidate
+only; patches before a `merge` never exceed `review_rounds` plus one.
 
-**Legacy.** A synthetic ledger holding every legacy shape folds to the old
-oracle's mapping. In `test_migrate_history.py`, every task of the copy of
-the real ledger folds without raising, is `legacy`, and matches the oracle
-(skipped where the machine has no `valor_rebuild`). The router, `answer`,
-and `feedback` refuse a legacy task; `release` of its held push still
-works.
+**Legacy.** A synthetic ledger holding every legacy shape, including one
+where a delivery and an unanswered question coexist (the old precedence
+says `delivered`), folds to the old oracle's mapping. A synthetic legacy
+task with a held `push_branch` is approved and released. In
+`test_migrate_history.py`, every task document of the copy of the real
+ledger folds without raising, is `legacy`, and matches the oracle (skipped
+where the machine has no `valor_rebuild`). The router, `answer`, and
+`feedback` refuse a legacy task.
 
-**Guards.** A fresh migrate holds the five seeded guards once each, with
-incident, mission items, and expiry 2026-12-30; a second migrate adds
-none; `grant` without an incident is refused.
+**Guards.** A fresh migrate holds the four seeded guards once each, with
+the incident, mission items, grant date, and expiry of the table above; a
+second migrate adds none.
 
 **Kept green.** `test_replay.py`, `test_kernel.py` (its governance tests
-now build the flag from a review verdict), `test_attention.py` (with
-`verdict` and `grant` entries counted apart), `test_session.py` (rewritten
-for states), `test_migrate_history.py` (the new constraint and indexes on
-the copy, no row or file node changed). `test_live_session.py` drives a
-real `claude -p` task from `start --mode bare` through plan, manual
-critique and checks, merge, and release; `test_live_turn.py` drops its
-`adds_governance` request. Both stay behind `VALOR_LIVE=1` and are run once
-at build within their declared spend.
+now build the flag from a review verdict, and the grant assertion names
+the missing tap), `test_attention.py` (with `verdict` and `grant` entries
+counted apart), `test_session.py` (rewritten for states),
+`test_migrate_history.py` (the new constraint and indexes on the copy, no
+row or file node changed). `test_live_session.py` drives a real `claude -p`
+task from `start --mode bare` through plan, manual critique and checks,
+merge, and release; `test_live_turn.py` drops its `adds_governance`
+request. Both stay behind `VALOR_LIVE=1` and are run once at build within
+their declared spend.
 
 ## Docs the build makes true
 
 `docs/sdlc-state-machine.md` (What exists; the `VERDICTS` change; the
-manual leg; the stage file names), `docs/data.md` (event types, the new
+manual leg and when it closes; predicate term 2; the docs-commit
+limitation; stage file names), `docs/data.md` (event types, the new
 indexes and the constraint, the fold section, legacy shapes),
-`docs/architecture.md` (state; flow; failure table rows that say design),
-`docs/harnesses.md` (signal files, prompts, skill rendering),
-`docs/judgement-layer.md` and `docs/persona.md` (`CLARIFY` and `PROTOCOL`
-references), `docs/tech-stack.md` (Hypothesis in use), `core/README.md`,
-`skills/README.md`, `tests/README.md` if its index names files.
+`docs/architecture.md` (state; flow; the merge destination; failure table
+rows that say design), `docs/harnesses.md` (signal files, prompts, skill
+rendering), `docs/judgement-layer.md` and `docs/persona.md` (`CLARIFY` and
+`PROTOCOL` references), `docs/tech-stack.md` (Hypothesis in use),
+`core/README.md`, `skills/README.md`, `tools/README.md`, `tests/README.md`
+if its index names files. The governance paragraph is not edited in any of
+them.
 
 ## Out of scope
 
 - The judgement port and every real judge, breadth, or governance call
-  (1.3); `--mode` is deleted there.
+  (1.3); `--mode` and the `judge` stage of `verdict` are deleted there.
 - Fresh-session critique, review, and docs runners, the suite runner,
-  dropping docs commits outside doc paths, workspace provisioning, the
-  container verifier, the GitHub credential (1.4).
+  dropping docs commits outside doc paths, the docs checkout, workspace
+  provisioning, the container verifier, the GitHub credential (1.4); the
+  `verdict` command is deleted there.
 - The emulator and the takeover gate (1.5). No replay finishes until 1.4.
 - The resident process and the supervisor (milestone 2); bridges and the
   tap cards (milestone 2).
 - The versioned skill system; deleting expired guards (a milestone 4
-  routine); any listing of guards beyond `ledger guards` (no governance
-  dashboard).
+  routine); any listing of guards beyond `python -m core ledger guards`
+  (no governance dashboard).
 - Concurrent branches in `checks`: the router runs them one at a time,
   which the doc allows with identical semantics.
 
@@ -508,28 +693,23 @@ references), `docs/tech-stack.md` (Hypothesis in use), `core/README.md`,
 Not done by the builder. At merge, in the kernel checkout: `uv sync` (adds
 Hypothesis to the dev group), then `python -m core migrate` on the real
 ledger, which adds the constraint and indexes (no row rewritten, shown on
-the copy) and seeds the five guards. The build's tests run from a venv in
-this worktree (`uv sync` here) so the kernel checkout's venv is not
-touched.
+the copy) and seeds the four guards of the table, permanently.
 
 ## Questions for Tom (assumed answers; the build proceeds on them)
 
-1. **A manual verdict command until 1.4.** Without it no real task can
-   pass `critique` or reach `merge` before 1.4. Assumed: yes, as
-   `python -m core verdict`, each row `leg: manual` with provenance and
-   counted as attention.
-2. **The Brief's `governance_grant` and per-instance taps.** CLAUDE.md asks
-   for one tap per instance; the predicate doc says "the Brief carries a
-   grant and Tom tapped each instance". Assumed: a `guard.granted` per
-   instance is what the predicate and the broker require, and the Brief's
-   field is shown to the reviewer as Tom's advance intent, not a
-   substitute for the taps. Tom's tap in `merge` grants even when the
-   Brief says none, as the doc's `governance_granted` flow describes.
-3. **The repair round as its own guard.** It redirects work and the doc's
-   list names only the critique and review loops. Assumed: seeded as
-   `join.repair_round` under the same 2026-10-01 grant and expiry.
+1. **A manual verdict command until 1.4.** Agreed by the driving session:
+   yes, closing stage by stage as runners land.
+2. **The Brief's `governance_grant` and per-instance taps.** Decided by the
+   driving session, flagged for Tom: the tap is required and sufficient;
+   the Brief's field does not substitute.
+3. **The repair round.** Decided by the driving session: it fires under
+   `review.loop`, not as its own guard.
 4. **`answered` after `clarify` returns to `clarify`**, per the doc, which
-   costs one short resumed turn before `plan`. Assumed: follow the doc.
+   costs one short resumed turn before `plan`. Agreed: follow the doc.
+5. **`review.loop`'s incident.** The doc gives no incident specific to a
+   second review round; the row cites the one the doc places under review
+   (the lenient stand-in on #191 and #633). Assumed right; since the row is
+   permanent, Tom may want different text before rollout.
 
 ## Decided by default (reversible)
 
@@ -539,10 +719,13 @@ touched.
 - `idle` and `failed` in every working-session state's enum.
 - Signals a failed turn left still count, as today.
 - The legacy marker `sdlc: 1` on `task.started`, and the legacy mapping.
-- Enum enforcement as one `CHECK` constraint rather than code alone.
-- Docs answering governance yes with an ungranted instance counts as
-  governance refused at the join.
+- Enum enforcement as one generated `CHECK` constraint rather than code
+  alone.
+- The join follows the spec's table literally; docs governance goes to Tom
+  as an instance awaiting a tap in `merge`, not through the join.
+- A grant binds to the instance id, so an unchanged hunk stays granted
+  across patches.
 - No merge effect is requested for a delivery that did not pass.
-- `--target-branch` defaults to the workspace's branch at start.
+- `--target-branch` defaults to `origin`'s `HEAD`.
 - `start` without `--mode` waits in `judge` (scripts pass `--mode`).
 - Checks branches run one at a time.
