@@ -993,3 +993,37 @@ the copy) and seeds the four guards of the table, permanently.
 - `--target-branch` defaults to `origin`'s `HEAD`.
 - `start` without `--mode` waits in `judge` (scripts pass `--mode`).
 - Checks branches run one at a time.
+
+## Checks on proposed patch 2, and the recommendation to Tom
+
+Candidate `be1388e3e` plus the docs check's commit `b7879fe66`. Iteration
+stopped here, by the driving session's rule, for Tom's decision.
+
+- **Test:** `gaps`. 337 passed, 3 skipped; no regressions. The live tests
+  ran once under `/usr/bin/sandbox-exec` and passed, spending $0.1748.
+- **Review:** `changes`, governance no. The six findings on proposed patch 1
+  are resolved, including a root-owned Command Line Tools git, a
+  three-valued lookup, and an HTTPS push to GitHub that still works with a
+  pinned header.
+- **Docs:** `updated`.
+
+Open, found independently by test and review:
+
+1. Blocking. The turn owns `.git/refs/replace/` and `.git/info/grafts`,
+   which are not config, so the refusal list cannot see them. A replace ref
+   made `diff_paths` report a code commit as docs only, and made `holds`
+   report a merge as landed when it never was. Fix: `GIT_NO_REPLACE_OBJECTS=1`
+   and `GIT_GRAFT_FILE=/dev/null` in `core/git.py`'s `env()` (or
+   `core.useReplaceRefs=false`), consider `objects/info/commit-graph`, and a
+   test for each.
+2. Non-blocking: one deadline for a whole perform, with git in its own
+   process group killed on timeout; drop `DYLD_*` from git's environment;
+   validate `reconcile_after_s` against `git_timeout_s`; refusal tests for
+   `binaries.require` on `ps` and `sandbox-exec`; a test of the
+   `UniqueViolation` path in `_release`.
+
+**Recommendation:** give feedback that applies fix 1 and the non-blocking
+items as one patch, then run test, review, and docs once more. Review found
+a new, smaller class of hole each round (git config programs, then the xcrun
+shim and PATH binaries, then replace refs), each closed when found; the
+kernel's git reads of a workspace a turn controls are where they cluster.
