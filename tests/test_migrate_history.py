@@ -14,8 +14,8 @@ rewriting any row.
 
 Each is checked row for row (`id`, `xmin`, and a digest of the rest),
 table by table (`pg_relation_filenode`), and fold by fold: every task's
-money through `tasks.money` against the computation the kernel used before
-(`REMAINING_SQL`, kept here as the oracle).
+committed, charged, and remaining money through `tasks.status` against the
+computation the kernel used before (`MONEY_SQL`, kept here as the oracle).
 
 Live spend: none.
 """
@@ -41,19 +41,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_raise_row
     ON events ((payload->>'raise_id')) WHERE type = 'budget.raised';
 """
 
-# Remaining money as the kernel computed it before `tasks.money`: the
-# budget from the task's document, minus charges, minus open reservations.
-REMAINING_SQL = """
-SELECT
+# Money as the kernel computed it before `tasks.money`: committed is the
+# budget from the task's document, charged the sum of charges, and remaining
+# committed minus charges minus open reservations (`REMAINING_SQL`).
+MONEY_SQL = """
+SELECT c, ch, c - ch - r FROM (SELECT
   (SELECT (body->>'budget_usd_micros')::bigint FROM documents
-    WHERE kind = 'task' AND id = %(t)s)
-  - COALESCE((SELECT sum((payload->>'usd_micros')::bigint) FROM events
-    WHERE task_id = %(t)s AND type = 'gateway.charged'), 0)
-  - COALESCE((SELECT sum((r.payload->>'usd_micros')::bigint) FROM events r
+    WHERE kind = 'task' AND id = %(t)s) AS c,
+  COALESCE((SELECT sum((payload->>'usd_micros')::bigint) FROM events
+    WHERE task_id = %(t)s AND type = 'gateway.charged'), 0) AS ch,
+  COALESCE((SELECT sum((r.payload->>'usd_micros')::bigint) FROM events r
     WHERE r.task_id = %(t)s AND r.type = 'gateway.reserved'
       AND NOT EXISTS (SELECT 1 FROM events c
         WHERE c.task_id = %(t)s AND c.type = 'gateway.charged'
-          AND c.payload->>'call_id' = r.payload->>'call_id')), 0)
+          AND c.payload->>'call_id' = r.payload->>'call_id')), 0) AS r) AS money
 """
 
 
@@ -89,7 +90,7 @@ def _snapshot(database: str) -> dict:
                 "SELECT pg_relation_filenode('events'), pg_relation_filenode('documents')"
             ).fetchone(),
             "money": {
-                t: conn.execute(REMAINING_SQL, {"t": t}).fetchone()[0]
+                t: tuple(int(v) for v in conn.execute(MONEY_SQL, {"t": t}).fetchone())
                 for (t,) in conn.execute(
                     "SELECT id FROM documents WHERE kind = 'task' ORDER BY id"
                 ).fetchall()
@@ -130,7 +131,11 @@ def _check(database: str, before: dict) -> None:
 
     async def folds():
         async with await db.connect(settings.dsn(database=database)) as conn:
-            return {t: (await tasks.status(conn, t))["remaining_usd_micros"] for t in before["money"]}
+            out = {}
+            for t in before["money"]:
+                s = await tasks.status(conn, t)
+                out[t] = (s["committed_usd_micros"], s["charged_usd_micros"], s["remaining_usd_micros"])
+            return out
 
     assert asyncio.run(folds()) == before["money"]
 
@@ -236,9 +241,11 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
         with _owner(database) as conn:
             types = {r[0] for r in conn.execute("SELECT DISTINCT type FROM events").fetchall()}
         assert {k for k, _ in EVERY_TYPE} | {"task.started", "correction.recorded"} == types
-        # The old computation never saw raises; the new fold adds them, and
-        # differs from the oracle by exactly the raise.
-        before["money"][task] += 500
+        # The old computation never saw raises; the new fold adds them to
+        # committed and remaining, and differs from the oracle by exactly
+        # the raise.
+        committed, charged, remaining = before["money"][task]
+        before["money"][task] = (committed + 500, charged, remaining + 500)
         _migrate_with_change(database, tmp_path)
         _check(database, before)
     finally:

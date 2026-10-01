@@ -163,20 +163,25 @@ def money(rows: list[dict[str, Any]]) -> dict[str, Any]:
     (rows of other types are ignored): committed is the Brief's budget plus
     every raise Tom gave; remaining is committed minus every charge minus
     every open reservation. `budget.reserve` and `status` both call this."""
-    committed = 0
+    budget = 0
+    raised = 0
     charged = 0
     reserved: dict[str, int] = {}
     for row in rows:
         kind, p = row["type"], row["payload"]
         if kind == "task.started":
-            committed += p["budget_usd_micros"]
+            # Set, not added: a task has one `task.started`, which `start`
+            # writes with the task's document, whose primary key refuses a
+            # second start of the same id.
+            budget = p["budget_usd_micros"]
         elif kind == "budget.raised":
-            committed += p["usd_micros"]
+            raised += p["usd_micros"]
         elif kind == "gateway.reserved":
             reserved[p["call_id"]] = p["usd_micros"]
         elif kind == "gateway.charged":
             reserved.pop(p["call_id"], None)
             charged += p["usd_micros"]
+    committed = budget + raised
     return {
         "committed_usd_micros": committed,
         "charged_usd_micros": charged,

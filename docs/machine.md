@@ -304,9 +304,10 @@ edit `pg_hba.conf` or the heap files.
 
 **After a Homebrew major upgrade of Postgres.** The upgrade runs `initdb`
 for a new data directory, whose `pg_hba.conf` trusts every local login
-again. Update the `pg_data_dir` setting to the new directory, then run
-`python -m core secure-login` and check that a login without the password
-file is refused.
+again. Update the `pg_data_dir` setting to the new directory (the nightly
+dump fails, naming both paths, until it matches), then run `python -m core
+secure-login` and check that a login without the password file is
+refused.
 
 ## Backups
 
@@ -317,8 +318,14 @@ blank, and renaming it means changing the setting). Each dump is a
 `pg_dump` custom-format file with a manifest beside it (counts and SHA-256
 digests of the events and documents, read from the dump's own snapshot,
 and the dump's own SHA-256). The newest 30 are kept; the ledger itself is
-kept forever. The dump refuses a missing directory (an unmounted disk) and
-a directory on the cluster's own disk. `python -m core restore DUMP`
+kept forever. The dump refuses a missing directory (an unmounted disk), a
+directory on the cluster's own disk, and a `pg_data_dir` setting that is
+not the cluster's real data directory (read from the server), since both
+turn sandbox profiles deny that setting's path. One dump runs at a time per
+directory, under an exclusive lock on `.valor_rebuild.lock` there: the disk
+is exFAT, which has neither hard links nor an exclusive rename, so the lock
+is what keeps two dumps from taking one name. The directory is synced to
+disk after each dump's renames. `python -m core restore DUMP`
 restores a dump into a scratch cluster under `/tmp`, compares it with its
 manifest, and removes the cluster.
 

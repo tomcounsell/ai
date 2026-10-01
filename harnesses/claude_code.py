@@ -3,6 +3,13 @@
 `turn` builds a single self-contained turn; `workspace_turn` builds one turn
 of a task that works in a directory over several turns.
 
+Every workspace turn runs under a sandbox-exec profile: `workspace_turn`
+refuses, before anything is spawned, a task whose harness settings name
+none, since the profile is what keeps a turn away from the kernel's password
+file, the machine cluster's data directory, and the backup disk. A `turn`
+carries no profile and has no tools by default; it must not be given tools
+without one.
+
 A `turn` runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
 from this machine), no session persistence, and `ANTHROPIC_BASE_URL` set to
 the gateway, so every model call it makes is metered against the task.
@@ -26,6 +33,10 @@ from core.settings import settings
 
 # What `turn` leaves out of the environment it copies.
 DROP_ENV = ("CLAUDE", "ANTHROPIC", "PG", "VALOR_PG")
+
+
+class Unsandboxed(ValueError):
+    """A workspace turn was asked for with no sandbox profile."""
 
 
 def turn(
@@ -107,8 +118,9 @@ def workspace_turn(
     Safe mode keeps this machine's hooks, skills, plugins, CLAUDE.md, and
     MCP servers out; web fetch and web search are off.
 
-    `harness` carries the task's isolation, all optional:
-    `sandbox_profile`, a sandbox-exec profile the whole turn runs under,
+    `harness` carries the task's isolation: `sandbox_profile` (required;
+    without it this raises `Unsandboxed`), a sandbox-exec profile the whole
+    turn runs under,
     given the gateway's port as `GATEWAY_PORT` and the turn's id as
     `VALOR_TURN`, which the profile names its processes by (`core.runs`
     reaps them when the turn ends); `gitconfig`, used as git's global
@@ -116,9 +128,14 @@ def workspace_turn(
     config directory; `env`, variables added to the turn's environment (the
     workspace's own settings, such as where its test database listens);
     `max_output_tokens`, the per-call output cap, which sets the gateway's
-    worst-case reservation for each call.
+    worst-case reservation for each call. The rest are optional.
     """
     harness = harness or {}
+    if not harness.get("sandbox_profile"):
+        raise Unsandboxed(
+            "a workspace turn runs under a sandbox profile; start the task with "
+            "--harness-config naming one (`sandbox_profile`)"
+        )
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
@@ -158,18 +175,16 @@ def workspace_turn(
         if resume:
             argv += ["--resume", resume]
         argv += ["--", prompt]
-        if harness.get("sandbox_profile"):
-            port = urlparse(base_url).port
-            argv = [
-                "sandbox-exec",
-                "-D",
-                f"GATEWAY_PORT={port}",
-                "-D",
-                f"VALOR_TURN={turn_id}",
-                "-f",
-                harness["sandbox_profile"],
-                *argv,
-            ]
+        argv = [
+            "sandbox-exec",
+            "-D",
+            f"GATEWAY_PORT={urlparse(base_url).port}",
+            "-D",
+            f"VALOR_TURN={turn_id}",
+            "-f",
+            harness["sandbox_profile"],
+            *argv,
+        ]
         return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
 
     return build

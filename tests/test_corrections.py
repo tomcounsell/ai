@@ -17,6 +17,7 @@ import pytest
 
 from core import corrections, db, ledger, runs, tasks
 from core.gateway import Gateway
+from core.settings import settings
 from harnesses import claude_code
 from tests.conftest import TEST_DB
 
@@ -166,3 +167,18 @@ def test_the_cli_records_and_lists_corrections(dsn, first):
     listed = cli("corrections")
     assert recorded.startswith("correction ") and "recorded, ledger row" in recorded
     assert listed.index(RESTRAINT) < listed.index("Ask before widening scope.")
+
+
+def test_migrate_names_the_file_when_the_governance_paragraph_is_missing(tmp_path, monkeypatch):
+    source = tmp_path / "CLAUDE.md"
+    source.write_text("# CLAUDE.md\n\nNo paragraph here.\n")
+    monkeypatch.setattr(corrections, "GOVERNANCE_SOURCE", source)
+    with pytest.raises(ValueError, match=f"{source} has no line starting"):
+        corrections.governance_paragraph()
+    database = f"{TEST_DB}_nogov_{os.getpid()}"
+    try:
+        with pytest.raises(ValueError, match="correction 1 is that paragraph"):
+            db.migrate(database, fresh=True)
+    finally:
+        with psycopg.connect(settings.dsn(owner=True, database="postgres"), autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')

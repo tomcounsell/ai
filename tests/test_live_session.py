@@ -6,8 +6,10 @@ gets the branch; every turn's Brief carried the corrections.
 Every turn runs under a sandbox-exec profile that keeps the bare origin
 unwritable and loopback closed except for the gateway.
 
-Live spend: two or three Haiku turns, under $0.10. The task commits $0.25
-because the gateway reserves each call's worst case before it runs. Runs
+Live spend: at most $0.25 per run, the task's committed budget, which the
+gateway never lets it pass. Two or three Haiku turns typically cost under
+$0.10; the task commits more because the gateway reserves each call's
+worst case before it runs. Runs
 only when `VALOR_LIVE=1`.
 """
 
@@ -24,7 +26,7 @@ from core import db, ledger
 from tests.conftest import TEST_DB
 
 pytestmark = [
-    pytest.mark.spend(usd=0.10),
+    pytest.mark.spend(usd=0.25),
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
 ]
 

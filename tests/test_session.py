@@ -11,15 +11,19 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from core import broker, budget, db, ledger, session, signals, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
+from tests.conftest import TEST_DB
 from tools.push_branch import PushBranch
 
 pytestmark = pytest.mark.spend(usd=0)
+
+ROOT = Path(__file__).resolve().parent.parent
 
 # Asks on its first turn; on the turn that opens with Tom's answer, commits
 # the answer, requests a push of that commit, and delivers.
@@ -456,6 +460,33 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     assert command.env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
 
 
+def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_runs(dsn, tmp_path):
+    for harness in (None, {}, {"gitconfig": "/g"}, {"sandbox_profile": ""}):
+        with pytest.raises(claude_code.Unsandboxed):
+            claude_code.workspace_turn("hi", cwd=str(tmp_path), harness=harness)
+
+    async def start():
+        return await new_task(dsn, tmp_path)
+
+    task = run(start())
+    out = subprocess.run(
+        [sys.executable, "-m", "core", "run", task],
+        cwd=ROOT,
+        env={**os.environ, "VALOR_DB": TEST_DB},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode != 0 and "sandbox profile" in out.stderr
+
+    async def rows():
+        async with await db.connect(dsn) as conn:
+            return [r["type"] for r in await ledger.read(conn, task)]
+
+    assert run(rows()) == ["task.started"]  # no turn started, nothing reserved
+    assert not (tmp_path / ".valor").exists()
+
+
 def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(workspace, tmp_path):
     ws, origin = workspace
     marker = tmp_path / "ran"
@@ -485,7 +516,9 @@ def test_a_request_that_starts_with_a_dash_reaches_claude_as_the_prompt(tmp_path
     request = "- Create new flag, separate from the old one"
     for build in (
         claude_code.turn(request, cwd=str(tmp_path)),
-        claude_code.workspace_turn(request, cwd=str(tmp_path), resume="abc"),
+        claude_code.workspace_turn(
+            request, cwd=str(tmp_path), resume="abc", harness={"sandbox_profile": "/p.sb"}
+        ),
     ):
         argv = build("http://127.0.0.1:9/t/x", "# Brief", "turn1").argv
         assert argv[-2:] == ["--", request]

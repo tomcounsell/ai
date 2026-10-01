@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
@@ -162,13 +163,14 @@ def test_a_raise_reopens_an_exhausted_budget_and_one_fold_answers_remaining(dsn)
 
             async def agree():
                 state = await tasks.status(conn, task)
-                seen.append((state["remaining_usd_micros"], await budget.remaining(conn, task)))
+                seen.append(state["remaining_usd_micros"])
                 return state
 
             await budget.reserve(conn, task, _call(task, 1, 900))
             await budget.charge(conn, task, f"{task}-1", 950, {})  # over the reservation, under the budget
             await agree()
-            with pytest.raises(budget.BudgetRefused):
+            # The reservation's refusal reads the same remaining the fold shows.
+            with pytest.raises(budget.BudgetRefused, match="exceeds remaining 50$"):
                 await budget.reserve(conn, task, _call(task, 2, 100))
             await budget.raise_budget(conn, task, 2_000, note="keep going", by="tom")
             await agree()
@@ -178,8 +180,7 @@ def test_a_raise_reopens_an_exhausted_budget_and_one_fold_answers_remaining(dsn)
         return seen, state
 
     seen, state = run(go())
-    assert all(a == b for a, b in seen)
-    assert [a for a, _ in seen] == [50, 2_050, 650]
+    assert seen == [50, 2_050, 650]
     assert state["committed_usd_micros"] == 3_000 and state["charged_usd_micros"] == 2_350
     assert tasks.audit(state) == []  # past the first budget, within the raised one
     (raised,) = [a for a in state["attention"] if a["kind"] == "budget_raise"]
@@ -286,3 +287,76 @@ def test_a_raise_written_without_provenance_folds_and_reads_unknown(dsn):
     p = state["attention"][0]["provenance"]
     assert p["by"] is None and p["via"] is None and p["role_played"] is None and p["at"]
     assert state["attention_counts"]["budget_raise"] == {"total": 1, "role_played": 0, "unknown": 1}
+
+
+# -- unknown tasks, open questions, one start per task -------------------------------
+
+
+def test_an_unknown_task_has_no_money_and_takes_no_raise(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(KeyError):
+                await budget.reserve(conn, "no-such-task", _call("no-such-task", 1, 1))
+            with pytest.raises(KeyError):
+                await budget.raise_budget(conn, "no-such-task", 1_000)
+            rows = await (
+                await conn.execute("SELECT count(*) FROM events WHERE task_id = 'no-such-task'")
+            ).fetchone()
+            return rows[0]
+
+    assert run(go()) == 0
+
+
+@pytest.mark.parametrize(
+    ("task", "amount", "message"),
+    [
+        ("no-such-task", "5", "no task no-such-task"),
+        (None, "0", "more than zero"),
+        (None, "-1", "more than zero"),
+    ],
+)
+def test_the_cli_raise_refuses_an_unknown_task_and_an_amount_not_above_zero(dsn, task, amount, message):
+    if task is None:
+        task = run(new_task(dsn, budget_usd_micros=10))
+    out = cli("budget", "raise", task, amount)
+    assert out.returncode == 1 and message in out.stderr and "Traceback" not in out.stderr
+
+
+def test_an_open_question_is_listed_and_not_counted(dsn):
+    async def go():
+        task = await new_task(dsn, budget_usd_micros=0)
+        async with await db.connect(dsn) as conn:
+            async with conn.transaction():
+                await ledger.append(
+                    conn, task, "question.asked", {"question_id": "q1", "turn_id": "t", "text": "?"}
+                )
+            return await tasks.status(conn, task)
+
+    state = run(go())
+    assert state["state"] == "waiting for Tom"
+    assert [(a["kind"], a["answer"]) for a in state["attention"]] == [("question", None)]
+    assert state["attention_counts"]["question"] == {"total": 0, "role_played": 0, "unknown": 0}
+
+
+def test_a_task_is_started_once_so_its_budget_is_set_not_summed(dsn):
+    """`money` sets the budget from `task.started`: `start` writes that row
+    with the task's document, and the document's primary key refuses a
+    second start of the same id, so no task has two."""
+
+    async def go():
+        brief = tasks.Brief(instruction="once", budget_usd_micros=100)
+        async with await db.connect(dsn) as conn:
+            await tasks.start(conn, brief)
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                await tasks.start(conn, brief)
+            return brief.id, await tasks.status(conn, brief.id)
+
+    task, state = run(go())
+    assert state["committed_usd_micros"] == 100
+    rows = run(_types(dsn, task))
+    assert rows.count("task.started") == 1
+
+
+async def _types(dsn, task):
+    async with await db.connect(dsn) as conn:
+        return [r["type"] for r in await ledger.read(conn, task)]

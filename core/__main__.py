@@ -107,11 +107,15 @@ async def _run_task(task_id: str) -> str:
 
     async with await db.connect() as conn:
         b = await tasks.brief(conn, task_id)
+    from harnesses import claude_code
+
     _performers(b)
     gateway = Gateway()
     await gateway.start()
     try:
         out = await session.run(gateway, task_id, _turn_for)
+    except claude_code.Unsandboxed as exc:
+        raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
         await gateway.close()
     return _status_line(task_id, out)

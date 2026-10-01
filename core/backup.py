@@ -19,6 +19,7 @@ exFAT's `._` AppleDouble files never match a dump's name.
 """
 
 import contextlib
+import fcntl
 import getpass
 import hashlib
 import json
@@ -93,6 +94,31 @@ def _fsync_write(path: Path, text: str) -> None:
         os.fsync(f.fileno())
 
 
+def _fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _check_disks(cluster_data: Path, backup_dir: Path) -> None:
+    """The `pg_data_dir` setting must name the cluster's real data directory,
+    since both turn sandbox profiles deny that setting's path (after a
+    Postgres upgrade it goes stale), and a dump must land on another disk."""
+    expected = Path(settings.pg_data_dir)
+    if not expected.exists() or expected.resolve() != cluster_data.resolve():
+        raise BackupError(
+            f"the pg_data_dir setting ({expected}) is not the cluster's data directory ({cluster_data}); "
+            "the turn sandbox profiles deny the setting's path, so correct the setting "
+            "(after a Postgres upgrade, also run `python -m core secure-login`)"
+        )
+    if os.stat(backup_dir).st_dev == os.stat(cluster_data).st_dev:
+        raise BackupError(
+            f"{backup_dir} is on the same disk as the cluster's data ({cluster_data}); not a backup"
+        )
+
+
 def dump(
     *,
     backup_dir: str | Path | None = None,
@@ -100,67 +126,69 @@ def dump(
     dsn: str | None = None,
     pg_bin: str | None = None,
     keep: int | None = None,
-    data_dir: str | Path | None = None,
     now: datetime | None = None,
 ) -> tuple[Path, dict, list[Path]]:
     """Dump the kernel database, then prune. Returns the dump's path, its
-    manifest, and the files pruned."""
+    manifest, and the files pruned. One dump at a time per database and
+    backup directory, under an exclusive lock on `.<database>.lock` there
+    (the disk is exFAT, which has neither hard links nor an exclusive
+    rename, so the lock is what keeps two dumps from taking one name)."""
     backup_dir = Path(backup_dir or settings.backup_dir)
     database = database or settings.database
     dsn = dsn or settings.dsn(owner=True, database=database)
     pg_bin = Path(pg_bin or settings.pg_bin)
     keep = settings.backup_keep if keep is None else keep
-    data_dir = Path(data_dir or settings.pg_data_dir)
     if not backup_dir.is_dir():
         raise BackupError(f"backup directory {backup_dir} does not exist (is the disk mounted?)")
-    if data_dir.exists() and os.stat(backup_dir).st_dev == os.stat(data_dir).st_dev:
-        raise BackupError(
-            f"{backup_dir} is on the same disk as the cluster's data ({data_dir}); not a backup"
-        )
-    stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-    final = backup_dir / f"{database}-{stamp}.dump"
-    manifest_path = Path(f"{final}.json")
-    partial = Path(f"{final}.partial")
-    if final.exists() or manifest_path.exists():
-        raise BackupError(f"{final} already exists")
-    fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
+    with open(backup_dir / f".{database}.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
+        final = backup_dir / f"{database}-{stamp}.dump"
+        manifest_path = Path(f"{final}.json")
+        partial = Path(f"{final}.partial")
+        if final.exists() or manifest_path.exists():
+            raise BackupError(f"{final} already exists")
         with psycopg.connect(dsn) as conn:
-            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
-            snapshot = conn.execute("SELECT pg_export_snapshot()").fetchone()[0]
-            tables = digests(conn)
-            dumped = subprocess.run(
-                [str(pg_bin / "pg_dump"), "--format=custom", f"--snapshot={snapshot}", f"--dbname={dsn}"],
-                stdout=fd,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
+            _check_disks(Path(conn.execute("SHOW data_directory").fetchone()[0]), backup_dir)
             conn.rollback()
-        if dumped.returncode != 0:
-            raise BackupError(f"pg_dump failed: {dumped.stderr.strip()}")
-        os.fsync(fd)
-    except BaseException:
-        os.close(fd)
-        partial.unlink(missing_ok=True)
-        raise
-    os.close(fd)
-    version = subprocess.run(
-        [str(pg_bin / "pg_dump"), "--version"], capture_output=True, text=True, check=False
-    ).stdout.strip()
-    manifest = {
-        "database": database,
-        "at": stamp,
-        "pg_dump": version,
-        "dump_sha256": file_sha256(partial),
-        "dump_bytes": partial.stat().st_size,
-        **tables,
-    }
-    staged = Path(f"{manifest_path}.partial")
-    _fsync_write(staged, json.dumps(manifest, indent=2) + "\n")
-    os.replace(staged, manifest_path)
-    os.replace(partial, final)
-    return final, manifest, prune(backup_dir, database, keep)
+            fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+                snapshot = conn.execute("SELECT pg_export_snapshot()").fetchone()[0]
+                tables = digests(conn)
+                dumped = subprocess.run(
+                    [str(pg_bin / "pg_dump"), "--format=custom", f"--snapshot={snapshot}", f"--dbname={dsn}"],
+                    stdout=fd,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                conn.rollback()
+                if dumped.returncode != 0:
+                    raise BackupError(f"pg_dump failed: {dumped.stderr.strip()}")
+                os.fsync(fd)
+            except BaseException:
+                os.close(fd)
+                partial.unlink(missing_ok=True)
+                raise
+            os.close(fd)
+        version = subprocess.run(
+            [str(pg_bin / "pg_dump"), "--version"], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        manifest = {
+            "database": database,
+            "at": stamp,
+            "pg_dump": version,
+            "dump_sha256": file_sha256(partial),
+            "dump_bytes": partial.stat().st_size,
+            **tables,
+        }
+        staged = Path(f"{manifest_path}.partial")
+        _fsync_write(staged, json.dumps(manifest, indent=2) + "\n")
+        os.replace(staged, manifest_path)
+        os.replace(partial, final)
+        _fsync_dir(backup_dir)
+        return final, manifest, prune(backup_dir, database, keep)
 
 
 def prune(backup_dir: Path, database: str, keep: int) -> list[Path]:
@@ -200,14 +228,15 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False) -> Cluster:
+def start_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-") -> Cluster:
     """`initdb` and start a throwaway cluster that trusts local logins, the
     way the machine cluster does. Its socket sits in a short directory under
     `/tmp`, since a socket path past 103 bytes does not bind on macOS. With
     `tcp` it also listens on 127.0.0.1 and ::1 at a free port. Its log
-    (`postgres.log` in `root`) prefixes each line with the SQLSTATE."""
+    (`postgres.log` in `root`) prefixes each line with the SQLSTATE. Its
+    directory is `/tmp/<prefix><random>`, so a caller can find its own."""
     pg_bin = Path(pg_bin or settings.pg_bin)
-    root = Path(tempfile.mkdtemp(prefix="vk-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
     data = root / "data"
     owner = getpass.getuser()
     try:
@@ -257,19 +286,24 @@ def stop_cluster(cluster: Cluster, pg_bin: str | Path | None = None) -> None:
 
 
 @contextlib.contextmanager
-def scratch_cluster(pg_bin: str | Path | None = None, *, tcp: bool = False) -> Iterator[Cluster]:
-    cluster = start_cluster(pg_bin, tcp=tcp)
+def scratch_cluster(
+    pg_bin: str | Path | None = None, *, tcp: bool = False, prefix: str = "vk-"
+) -> Iterator[Cluster]:
+    cluster = start_cluster(pg_bin, tcp=tcp, prefix=prefix)
     try:
         yield cluster
     finally:
         stop_cluster(cluster, pg_bin)
 
 
-def restore(dump_path: str | Path, *, pg_bin: str | Path | None = None, keep: bool = False) -> dict:
+def restore(
+    dump_path: str | Path, *, pg_bin: str | Path | None = None, keep: bool = False, prefix: str = "vk-"
+) -> dict:
     """Restore a dump into a scratch cluster and compare it with its
     manifest. Raises `BackupError` on any difference or failure, with the
     cluster removed. Returns a summary, which names the cluster when `keep`
-    leaves it running."""
+    leaves it running. `prefix` names the scratch cluster's directory
+    under `/tmp` (see `start_cluster`)."""
     dump_path = Path(dump_path)
     manifest_path = Path(f"{dump_path}.json")
     if not manifest_path.is_file():
@@ -277,7 +311,7 @@ def restore(dump_path: str | Path, *, pg_bin: str | Path | None = None, keep: bo
     manifest = json.loads(manifest_path.read_text())
     if file_sha256(dump_path) != manifest["dump_sha256"]:
         raise BackupError(f"{dump_path} does not match its manifest's SHA-256 (truncated or altered)")
-    cluster = start_cluster(pg_bin)
+    cluster = start_cluster(pg_bin, prefix=prefix)
     try:
         database = manifest["database"]
         with psycopg.connect(cluster.dsn(), autocommit=True) as conn:

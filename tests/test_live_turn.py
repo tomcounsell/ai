@@ -2,8 +2,10 @@
 mid-stream, and one turn whose reply becomes a `propose` effect done at
 once and an `act` effect held until Tom approves it from the command line.
 
-Live spend: at most $0.05 per run (three Haiku turns under 1,024 and 4,096
-output tokens; the stopped call is charged its full output allowance).
+Live spend: at most $0.15 per run, the three tasks' committed budgets of
+$0.05 each, which the gateway never lets them pass (three Haiku turns
+under 1,024 and 4,096 output tokens typically cost about $0.03; the stopped
+call is charged its full output allowance).
 Runs only when `VALOR_LIVE=1`, so a plain test run spends nothing.
 """
 
@@ -22,7 +24,7 @@ from tests.conftest import TEST_DB
 from tools.workspace import OutboxAppend, WorkspaceWrite
 
 pytestmark = [
-    pytest.mark.spend(usd=0.05),
+    pytest.mark.spend(usd=0.15),
     pytest.mark.skipif(os.environ.get("VALOR_LIVE") != "1", reason="live spend needs VALOR_LIVE=1"),
 ]
 

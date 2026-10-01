@@ -79,7 +79,9 @@ turn takes is `docs/machine.md`'s to state.
 **`turn`** is one self-contained call: no tools by default, no session
 persistence, a system prompt of the persona followed by the Brief. The live
 tests use it. It copies the kernel's environment minus Claude Code's own
-variables and every libpq (`PG*`) and `VALOR_PG*` variable.
+variables and every libpq (`PG*`) and `VALOR_PG*` variable. It runs under no
+sandbox profile, so it can read whatever Tom's user can, the kernel's
+password file included; it must not be given tools without one.
 
 **`workspace_turn`** is one turn of a task that works in a directory, and is
 what a real task runs. Its arguments:
@@ -121,8 +123,10 @@ then sets:
 
 **The task's harness settings** come from `python -m core start
 --harness-config FILE` and are stored on the task: `sandbox_profile`,
-`gitconfig`, `gh_config_dir`, `env`, and `max_output_tokens`. With a
-sandbox profile the wrapper prefixes the argv with `sandbox-exec -D
+`gitconfig`, `gh_config_dir`, `env`, and `max_output_tokens`.
+`sandbox_profile` is required: `workspace_turn` raises `Unsandboxed` for a
+task without one, before anything is spawned or reserved, and `python -m
+core run` reports it. The wrapper prefixes the argv with `sandbox-exec -D
 GATEWAY_PORT=<port> -D VALOR_TURN=<turn id> -f <profile>`.
 
 **The result** is Claude Code's JSON: `result` becomes `text`, and

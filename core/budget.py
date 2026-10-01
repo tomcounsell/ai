@@ -71,31 +71,25 @@ def worst_case(input_tokens: int, max_tokens: int, price: dict) -> int:
     )
 
 
-async def remaining(conn, task_id: str) -> int:
-    """The task's remaining money, folded from its money rows. Call it under
-    the task's lock when the answer decides a write."""
-    rows = await (
-        await conn.execute(
-            "SELECT type, payload FROM events WHERE task_id = %s AND type = ANY(%s) ORDER BY id",
-            (task_id, list(tasks.MONEY_EVENTS)),
-        )
-    ).fetchall()
-    if not any(t == "task.started" for t, _ in rows):
-        raise KeyError(task_id)
-    return tasks.money([{"type": t, "payload": p} for t, p in rows])["remaining_usd_micros"]
-
-
 async def reserve(conn, task_id: str, call: dict) -> str:
     """Reserve `call['usd_micros']` for one model call, or refuse. The
     refusal is a ledger row too. `call` carries `call_id`, `turn_id`,
     `model`, `usd_micros`, `estimated_input`, and `max_tokens`."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
+        rows = await (
+            await conn.execute(
+                "SELECT type, payload FROM events WHERE task_id = %s AND type = ANY(%s) ORDER BY id",
+                (task_id, list(tasks.MONEY_EVENTS)),
+            )
+        ).fetchall()
+        if not any(t == "task.started" for t, _ in rows):
+            raise KeyError(task_id)
         reason = None
         if await tasks.is_stopped(conn, task_id):
             reason = "task stopped"
         else:
-            left = await remaining(conn, task_id)
+            left = tasks.money([{"type": t, "payload": p} for t, p in rows])["remaining_usd_micros"]
             if call["usd_micros"] > left:
                 reason = f"reservation {call['usd_micros']} exceeds remaining {left}"
         if reason is None:

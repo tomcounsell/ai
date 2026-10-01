@@ -5,7 +5,8 @@ Every role logging into a kernel database (`settings.database` and
 placed ahead of everything else in the cluster's `pg_hba.conf`; other
 databases on the cluster keep whatever rules they had. The passwords live in
 one libpq password file (`settings.pg_passfile`, mode 600, outside iCloud
-and the vault), which both turn sandbox profiles deny, and which libpq reads
+and the vault), which both turn sandbox profiles deny (every workspace turn
+runs under one; a bare `turn` has no tools), and which libpq reads
 for every kernel and owner connection, so no kernel process carries a
 password in a string, a DSN, or its environment.
 

@@ -178,6 +178,16 @@ def test_a_password_file_missing_a_role_is_refused_and_named(fresh):
         _secure(cluster, passfile)
 
 
+def test_a_password_file_with_a_different_password_per_database_is_refused(fresh):
+    cluster, passfile = fresh
+    passfile.parent.mkdir(mode=0o700)
+    passfile.write_text(
+        "".join(f"*:*:{d}:{role}:{role}-{d}\n" for role in (KERNEL, OWNER) for d in KERNEL_DBS)
+    )
+    with pytest.raises(credentials.CredentialError, match="no single password"):
+        _secure(cluster, passfile)
+
+
 def test_a_pg_hba_that_would_not_parse_is_put_back_and_never_loaded(fresh):
     cluster, passfile = fresh
     hba = _hba(cluster)
@@ -248,7 +258,9 @@ def test_no_turn_environment_carries_the_credential(monkeypatch, tmp_path):
     monkeypatch.setenv("VALOR_PG_PASSFILE", settings.pg_passfile)
     built = [
         claude_code.turn("hi", cwd=str(tmp_path))("http://127.0.0.1:1/t/x", "brief", "t1"),
-        claude_code.workspace_turn("hi", cwd=str(tmp_path))("http://127.0.0.1:1/t/x", "brief", "t1"),
+        claude_code.workspace_turn("hi", cwd=str(tmp_path), harness={"sandbox_profile": "/p.sb"})(
+            "http://127.0.0.1:1/t/x", "brief", "t1"
+        ),
     ]
     for command in built:
         assert not [k for k in command.env if k.startswith(("PG", "VALOR_PG"))]

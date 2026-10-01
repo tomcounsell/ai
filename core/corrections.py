@@ -34,9 +34,10 @@ GOVERNANCE_SOURCE = Path(__file__).resolve().parent.parent / "CLAUDE.md"
 
 
 def governance_paragraph() -> str:
-    return next(
-        line for line in GOVERNANCE_SOURCE.read_text().splitlines() if line.startswith("**Governance")
-    )
+    for line in GOVERNANCE_SOURCE.read_text().splitlines():
+        if line.startswith("**Governance"):
+            return line
+    raise ValueError(f"{GOVERNANCE_SOURCE} has no line starting **Governance; correction 1 is that paragraph")
 
 
 def payload(

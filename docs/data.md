@@ -399,8 +399,12 @@ How the sandbox is built, and which work runs under `sandbox-exec` and
 which in an Apple container, is `docs/architecture.md`'s.
 
 **What is met, and what still rests on the sandbox.** Met: no role logs
-into a kernel database without the password, and a turn can read neither
-the password file, the cluster's data directory, nor the dumps. Still on
+into a kernel database without the password, and a workspace turn can read
+neither the password file, the cluster's data directory, nor the dumps,
+because every workspace turn runs under a sandbox profile
+(`harnesses/claude_code.py`, `workspace_turn`, refuses a task without
+one). A bare `turn` runs under no profile and has no tools; it must not be
+given tools without one. Still on
 the sandbox: other databases on the cluster (`postgres`, `psyoptimal`)
 trust local logins, so a turn that escaped its profile could log in as the
 superuser to one of them and change a role's password or the server's
