@@ -8,7 +8,7 @@ Terms used throughout: a **tap** is your one-time approval of one specific
 action (a push, a merge, a message). The **gateway** is the local proxy that
 every Claude call goes through so its cost is counted against the task's
 budget. A **cheap judgement model** is a small hosted model (Jev, or OpenAI's
-judgements API) that answers yes/no style questions for under a cent.
+Decisions API) that answers yes/no style questions for under a cent.
 
 ## Blocks the rebuild plan
 
@@ -100,7 +100,7 @@ costs well under $0.05; on #894, asking first would have saved an estimated $1.4
 - **Backup when it is down.** **A.** The same open model hosted by a second provider. **(Recommended)** Uses no Mac memory and works while Valor is busy. **B.** A local copy (about 5 GB) loaded only when Valor is idle; works offline but waits.
 (docs/judgement-layer.md, docs/tech-stack.md, docs/machine.md)
 
-**Primary answered 2026-10-01 by Tom: Jev for now.** OpenAI's Judgements
+**Primary answered 2026-10-01 by Tom: Jev for now.** OpenAI's Decisions
 API for any judgement that needs images, since Jev takes none. The backup
 is still open.
 

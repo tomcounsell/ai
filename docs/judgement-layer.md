@@ -27,8 +27,8 @@ doc is design, and each section says which.
 |---|---|
 | judgement | One closed-label answer from the judgement tier: a label, a probability per label, a confidence, the leg that answered, and its cost |
 | judgement task | The declaration of one place Valor asks a judgement question: its id, question, labels, inputs, error cost, confidence floor, abstain route, and fail-safe label |
-| `JudgementPort` | The one interface in `core/` every judgement call goes through. A vendor's judgements API or the open-weight fallback sits behind it as a leg |
-| leg | One adapter behind the port: the primary (a hosted judgements API) or the fallback (a hosted open-weight model) |
+| `JudgementPort` | The one interface in `core/` every judgement call goes through. A vendor's hosted judgement API or the open-weight fallback sits behind it as a leg |
+| leg | One adapter behind the port: the primary (a hosted judgement API) or the fallback (a hosted open-weight model) |
 | router | The pure function that, for a judgement task, names the primary leg and the fallback leg |
 | calibration record | The measurement that lets a judgement task land: both legs, the same labelled inputs, the same run |
 | abstain | A judgement whose confidence is under the task's floor. The consumer takes the task's declared abstain route |
@@ -37,8 +37,9 @@ doc is design, and each section says which.
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls.
 TypeSafe's Jev is the primary leg, and OpenAI's Decisions API answers the
-judgements that need images, which Jev does not take (Tom, 2026-10-01; [Decisions API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)). The
-port is named so that either one, or the open-weight fallback, can sit
+judgements that need images, which Jev does not take (Tom, 2026-10-01;
+[Decisions API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)).
+The port is named so that either one, or the open-weight fallback, can sit
 behind it without a change to any caller.
 
 ## The boundary with the kernel
