@@ -56,7 +56,7 @@ enforcing outside the model is AI Control [4].
 | Model prices | a table in `core/budget.py` | in use |
 | Model seats | a pinned registry of frontier, reviewer, and judgement seats | chosen, not built |
 | Frontier provider | Anthropic, one provider | in use |
-| Judgement tier | Jev, with OpenAI's Judgements API for judgements that need images; open-weight fallback behind the same port | chosen, not built; fallback host open |
+| Judgement tier | Jev, with OpenAI's Decisions API for judgements that need images; open-weight fallback behind the same port | chosen, not built; fallback host open |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
@@ -309,7 +309,7 @@ What the stack fixes:
 
 **Vendor.** Jev is the primary leg, including for client request text
 (Tom, 2026-10-01). Jev takes no images, so a judgement that needs one goes
-to OpenAI's Judgements API behind the same port. Which open-weight model is
+to OpenAI's Decisions API behind the same port. Which open-weight model is
 the fallback, and where it runs given 16 GB, are **open**. The fallback
 cannot run resident on this machine. The router's design hosts it ([judgement-layer.md](judgement-layer.md));
 the local, load-on-demand alternative is sized in [machine.md](machine.md).

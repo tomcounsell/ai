@@ -96,7 +96,7 @@ and #872 missed the archived-team cases.
 *Example:* "Home page notification if user profile settings not complete"
 gets one quick call that decides "ask before building" or "just build". It
 costs well under $0.05; on #894, asking first would have saved an estimated $1.40 to $1.80 and a feedback round.
-- **Primary.** **A.** Jev. **(Recommended)** The setup plan's pick. **B.** OpenAI's judgements API.
+- **Primary.** **A.** Jev. **(Recommended)** The setup plan's pick. **B.** OpenAI's Decisions API.
 - **Backup when it is down.** **A.** The same open model hosted by a second provider. **(Recommended)** Uses no Mac memory and works while Valor is busy. **B.** A local copy (about 5 GB) loaded only when Valor is idle; works offline but waits.
 (docs/judgement-layer.md, docs/tech-stack.md, docs/machine.md)
 

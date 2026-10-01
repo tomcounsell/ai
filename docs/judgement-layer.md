@@ -36,8 +36,8 @@ doc is design, and each section says which.
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls.
-TypeSafe's Jev is the primary leg, and OpenAI's Judgements API answers the
-judgements that need images, which Jev does not take (Tom, 2026-10-01). The
+TypeSafe's Jev is the primary leg, and OpenAI's Decisions API answers the
+judgements that need images, which Jev does not take (Tom, 2026-10-01; [Decisions API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)). The
 port is named so that either one, or the open-weight fallback, can sit
 behind it without a change to any caller.
 
@@ -122,7 +122,7 @@ call).
 
 1. Every judgement task routes to the primary leg, Jev, with the
    open-weight leg as its fallback. A task whose inputs include an image
-   routes to OpenAI's Judgements API instead, with the same fallback.
+   routes to OpenAI's Decisions API instead, with the same fallback.
 2. The fallback runs once, on the same inputs, when the primary returns a
    transport error, a timeout, a malformed answer, or an abstain.
 3. When both legs fail, the port returns no label and says why. The
@@ -165,7 +165,7 @@ task into its vendor's request and the vendor's answer back into a
   probability; that is the shape the port's `Judgement` mirrors. Request
   text from client repositories goes to Jev like any other input (Tom,
   2026-10-01).
-- **Images: OpenAI's Judgements API.** Jev takes no images, so a judgement
+- **Images: OpenAI's Decisions API.** Jev takes no images, so a judgement
   whose inputs include one goes here (Tom, 2026-10-01). Its request and
   response shapes are not verified here; the adapter is written with the
   first judgement task that needs an image.
