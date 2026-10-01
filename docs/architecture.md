@@ -135,8 +135,8 @@ provider (see Limits).
 - **Overrun is a question to Tom.** A task that runs out ends with what it
   spent, what it produced, and what it asks for; Tom's grant raises the
   root. Exhaustion is never silence.
-- **A deadline.** A hung tool spends no money, so a wall-clock deadline per
-  task catches what money cannot see. Today the idle bound plays that part.
+- **A deadline.** A hung tool spends no money, so a per-task wall-clock
+  deadline catches what money cannot; the idle bound plays that part.
 
 ## Effect classes and the broker
 
@@ -175,13 +175,15 @@ This is the governing constraint as a kernel fact. A `merge` is released
 only when the merge predicate holds, checked in the transaction that
 writes its intent ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
-Four performers exist, run in the kernel's process outside the turn's
-sandbox: `push_branch` (`act`) pushes one named commit to one branch, never
-the target branch, and `merge` (`act`, offered to no turn) pushes a passed
-candidate onto the target branch, both to the origin URL recorded at
-start, never forcing, with git hooks, credential helpers, and SSH command
-pinned off; `workspace_write` (`propose`) and `outbox_send` (`act`) serve
-the tests.
+Four performers run in the kernel's process: `push_branch` (`act`) pushes
+one commit to one branch, never the target branch, and `merge` (`act`,
+offered to no turn) pushes a passed candidate onto it, both to the origin
+URL recorded at start, never forcing; `workspace_write` (`propose`) and
+`outbox_send` (`act`) serve the tests. The kernel runs no program a turn
+chose: its git reads no global config or inherited `GIT_*` variable, pins
+hooks, helpers, pagers, and transports off, and refuses a workspace whose
+own config names a program, redirects a push, or includes other config
+(`core/git.py`).
 
 The constraint it enforces: bounded authority and spend. In the first
 demonstration all three deliveries went out as held pushes that landed only
@@ -367,11 +369,9 @@ first-class, carry provenance, and reach every session and agent.
 
 - **Corrections reaching subagents.** Unverified, a gap
   (rebuild-demonstration.md, Correction 1 rendering, last line).
-- **Withdrawal and supersession.** A correction is withdrawn or replaced by
-  a later row naming it, never by an edit.
-- **Narrower scopes and relevance.** A scope beyond `global`, and
-  rendering by relevance, arrive when a correction needs one or their
-  length costs a turn measurably.
+- **Withdrawal.** A later row naming a correction withdraws or replaces it.
+- **Narrower scopes and relevance.** A scope beyond `global`, and rendering
+  by relevance, arrive when one is needed or length measurably costs a turn.
 
 ## The attention log
 
@@ -564,7 +564,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
 | Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the verifier's boolean over every diff (design) | governing constraint |
-| A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config with includes, rewrites, or a push URL refused | bounded authority |
+| A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome | lossless stop |

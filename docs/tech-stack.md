@@ -456,9 +456,10 @@ remote the turn cannot. Status: **in use**.
 
 - **`push_branch`** (`act`, `tools/push_branch.py`): pushes one commit to
   one branch of the workspace's origin over git, never with `--force`. Git
-  is run with hooks, the fsmonitor, the credential helper, and the SSH
-  command pinned off, because the workspace's git config is the turn's to
-  write. `lookup` reads the remote's branch head to reconcile a dangling
+  runs with no global config, hooks, helpers, pagers, and transports pinned
+  off, and refuses a workspace whose own config names a program, redirects
+  a push, or includes other config, because that config is the turn's to
+  write (`core/git.py`). `lookup` reads the remote's branch head to reconcile a dangling
   intent. It pushes to the origin URL recorded at start and refuses the
   task's target branch.
 - **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a

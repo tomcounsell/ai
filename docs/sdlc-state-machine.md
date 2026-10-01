@@ -346,14 +346,13 @@ turn fails or is stopped leaves no verdict, and the next run starts that
 branch again, and only that one.
 
 **Stale verdicts.** A branch's verdict is its latest row keyed by the
-current candidate, the one on the latest `candidate` verdict. A row keyed
-by an older candidate is stale: it stays in the ledger with its spend, and
-the join and the merge predicate ignore it. A later row for the same branch
-and candidate supersedes an earlier one, which is how a review rerun after
-Tom's governance grant replaces the refused review and leaves the other two
-standing. Keying by the producing turn as well as the SHA means a patch
-that answers findings with reasons and no code change still gets fresh
-checks.
+current candidate, the one on the latest `candidate` verdict. A row keyed by
+an older candidate is stale: it stays in the ledger with its spend, and the
+join and the merge predicate ignore it. A later row for the same branch and
+candidate supersedes an earlier one, which is how a review rerun after Tom's
+governance grant replaces the refused review and leaves the other two
+standing. Keying by the producing turn as well as the SHA means a patch that
+answers findings with reasons and no code change still gets fresh checks.
 
 **Scheduling.** The three run concurrently when the machine has the slots,
 and back to back when it does not, with identical semantics: the join
@@ -425,11 +424,11 @@ removed (rebuild-baseline.md, Review rounds), hence the Opus class.
 
 **What runs.** A fresh session in its own checkout of the candidate. It
 reads the request, the plan, and the diff, and changes only doc paths:
-Markdown files, never one that instructs a turn (a `CLAUDE.md` or
-`AGENTS.md` anywhere, anything under `skills/`, `persona/`, or `.claude/`). A plan cannot widen this: a doc path that let code ride in an
-unreviewed docs commit would be a merge on no review. Its commits sit on top
-of the candidate and touch nothing the test or review branch reads as code,
-so the three cannot conflict.
+Markdown files that instruct no turn, so never a `CLAUDE.md` or `AGENTS.md`
+anywhere nor anything under `skills/`, `persona/`, or `.claude/`
+(`machine.is_doc_path`). A plan cannot widen this: code riding in an
+unreviewed docs commit would be a merge on no review. Its commits sit on
+top of the candidate and touch no code, so the three cannot conflict.
 
 **Exit evidence.** `docs.decided`: the candidate, the head of the docs
 commits on top of it, their paths, and the governance boolean over their
@@ -439,8 +438,7 @@ breaks it, or a doc cannot be made true without a code change. The kernel
 checks the commits' paths when the turn ends: a commit outside the doc paths
 is dropped and recorded as a `changes` finding, since code is the builder's
 to change. Docs commits belong to their candidate: after a send-back they
-are not merged, and the next docs session starts from them and keeps what
-holds.
+are not merged; the next docs session starts from them, keeping what holds.
 
 **Why.** "Docs describe reality": review reads docs as the contract.
 
@@ -543,9 +541,9 @@ an absolute path) and the target branch (the flag, or the branch origin's
 `HEAD` names). The merge's payload carries both with the head and the
 candidate, so Tom's approval binds them, and the push goes to that URL
 whatever the workspace's config says later; a workspace whose own config
-holds an include, a URL rewrite, or a push URL is refused before the
-intent. A turn cannot request a merge, and its `push_branch` cannot target
-the target branch.
+names a program, redirects a push, or includes other config is refused
+(`core/git.py`, `HOSTILE`). A turn cannot request a merge, and its
+`push_branch` cannot target the target branch.
 
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the

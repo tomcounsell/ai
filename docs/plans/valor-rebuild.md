@@ -220,7 +220,7 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
   and recorded as a `changes` finding; a branch whose turn fails or is
   stopped leaves no verdict, and the next run reruns that branch and only
   that one; the docs session works in its own checkout, so docs commits
-  no longer ride into the next candidate after a send-back.
+  do not ride into the next candidate after a send-back.
 - `checks.test` runs the suite at head and base, then the breadth call;
   `test.decided` carries the command, the failures at head that do not
   fail at base, the listed behaviors, and the breadth call's model,

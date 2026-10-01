@@ -227,7 +227,7 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
 | `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
-| `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
+| `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
 `core.signals.collect` reads them, then moves each to
