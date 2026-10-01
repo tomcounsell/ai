@@ -11,7 +11,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from core import corrections, ledger
+from core import corrections, ledger, signals
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
@@ -28,12 +28,18 @@ class Brief:
     review round, or approval step; with none, the broker refuses any action
     that adds governance, and with one, each such action is still `act` and
     waits for his tap.
+
+    `workspace` is the directory a turn works in, `model` the model it runs,
+    and `harness` the harness's own settings for the task (its isolation).
     """
 
     instruction: str
     budget_usd_micros: int
     max_effect_class: str = "propose"
     governance_grant: str | None = None
+    workspace: str | None = None
+    model: str = "haiku"
+    harness: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -81,23 +87,25 @@ async def brief(conn, task_id: str) -> Brief:
 async def dispatch(conn, task_id: str) -> dict[str, Any]:
     """The Brief as a turn receives it: the task's commitments plus every
     correction in force, rendered from the ledger now, never from a copy
-    made when the task started. Returns the text, the correction numbers it
-    carries, and the text's digest."""
+    made when the task started, and for a task with a workspace, how the
+    turn reaches Tom. Returns the text, the correction numbers it carries,
+    and the text's digest."""
     b = await brief(conn, task_id)
     standing = await corrections.in_force(conn)
-    text = "\n\n".join(
-        [
-            (
-                "# Brief\n\n"
-                f"Task: {b.id}\n"
-                f"Instruction: {b.instruction}\n"
-                f"Budget: ${b.budget_usd_micros / 1_000_000:.4f}\n"
-                f"Effect ceiling: {b.max_effect_class}\n"
-                f"Governance grant: {b.governance_grant or 'none'}"
-            ),
-            corrections.render(standing),
-        ]
+    head = (
+        "# Brief\n\n"
+        f"Task: {b.id}\n"
+        f"Instruction: {b.instruction}\n"
+        f"Budget: ${b.budget_usd_micros / 1_000_000:.4f}\n"
+        f"Effect ceiling: {b.max_effect_class}\n"
+        f"Governance grant: {b.governance_grant or 'none'}"
     )
+    if b.workspace:
+        head += f"\nWorkspace: {b.workspace}"
+    sections = [head, corrections.render(standing)]
+    if b.workspace:
+        sections.append(signals.PROTOCOL)
+    text = "\n\n".join(sections)
     return {
         "text": text,
         "corrections": [c["number"] for c in standing],
@@ -140,6 +148,8 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     reserved: dict[str, int] = {}
     turns: dict[str, str | None] = {}
     effects: dict[str, str] = {}
+    attention: list[dict[str, Any]] = []
+    delivered = None
     stopped = False
     for row in rows:
         kind, p = row["type"], row["payload"]
@@ -162,17 +172,35 @@ async def status(conn, task_id: str) -> dict[str, Any]:
             effects[p["effect_id"]] = p["kind"]
         elif kind == "effect.refused":
             effects[p["effect_id"]] = "refused"
+        elif kind == "question.asked":
+            attention.append({"question_id": p["question_id"], "question": p["text"], "answer": None})
+        elif kind == "question.answered":
+            for q in attention:
+                if q["question_id"] == p["question_id"]:
+                    q["answer"] = p["text"]
+        elif kind == "task.delivered":
+            delivered = p["summary"]
         elif kind == "task.stopped":
             stopped = True
+    if stopped:
+        state = "stopped"
+    elif delivered is not None:
+        state = "delivered"
+    elif any(q["answer"] is None for q in attention):
+        state = "waiting for Tom"
+    else:
+        state = "live"
     return {
         "task_id": task_id,
-        "state": "stopped" if stopped else "live",
+        "state": state,
         "committed_usd_micros": committed,
         "charged_usd_micros": charged,
         "open_reservations": reserved,
         "remaining_usd_micros": committed - charged - sum(reserved.values()),
         "turns": turns,
         "effects": effects,
+        "attention": attention,
+        "delivered": delivered,
     }
 
 

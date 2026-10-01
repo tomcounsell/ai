@@ -1,0 +1,244 @@
+"""A task's turns on real Postgres: a question waits for Tom, his answer
+resumes the same session, a delivery settles the task, and a push it
+requested reaches a real bare repository only after his tap.
+
+No model call: each turn is a real Python subprocess that plays Valor's
+part by writing `.valor/` files, the way a `claude -p` turn would.
+"""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+
+from core import broker, budget, db, ledger, session, signals, tasks
+from core.gateway import Gateway
+from harnesses import claude_code
+from tools.push_branch import PushBranch
+
+pytestmark = pytest.mark.spend(usd=0)
+
+# Asks on its first turn; on the turn that opens with Tom's answer, commits
+# the answer, requests a push of that commit, and delivers.
+VALOR = r"""
+import json, pathlib, subprocess, sys
+prompt, resume, brief = sys.argv[1], sys.argv[2], sys.argv[3]
+v = pathlib.Path(".valor")
+(v / "effects").mkdir(parents=True, exist_ok=True)
+log = v / "turns.jsonl"
+with log.open("a") as f:
+    f.write(json.dumps({"prompt": prompt, "resume": resume, "brief": brief}) + "\n")
+if prompt.startswith("Tom answered"):
+    pathlib.Path("greeting.txt").write_text(prompt.splitlines()[-1] + "\n")
+    git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
+    subprocess.run(git + ["add", "greeting.txt"], check=True)
+    subprocess.run(git + ["commit", "-qm", "Greet Tom"], check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    (v / "effects" / "push.json").write_text(json.dumps(
+        {"action_type": "push_branch", "target": "valor/greeting", "payload": {"head_sha": sha}}))
+    (v / "done.md").write_text("greeting.txt says what Tom asked for, committed and offered for push.")
+else:
+    (v / "question.md").write_text("Which greeting do you want?")
+print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+"""
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def git(cwd, *args) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout
+
+
+def turn_for(prompt, resume, b):
+    def build(url, brief):
+        return claude_code.TurnCommand(
+            argv=[sys.executable, "-c", VALOR, prompt, resume or "", brief],
+            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+            cwd=b.workspace,
+            harness="script",
+            parse=claude_code.parse,
+        )
+
+    return build
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    origin = tmp_path / "origin.git"
+    ws = tmp_path / "ws"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "init", "-q", str(ws)], check=True)
+    git(
+        ws,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base",
+    )
+    git(ws, "remote", "add", "origin", str(origin))
+    return ws, origin
+
+
+async def new_task(dsn, ws, **kw) -> str:
+    async with await db.connect(dsn) as conn:
+        return await tasks.start(
+            conn,
+            tasks.Brief(
+                instruction="Write Tom a greeting.",
+                budget_usd_micros=kw.pop("budget_usd_micros", 1_000),
+                max_effect_class="act",
+                workspace=str(ws),
+                **kw,
+            ),
+        )
+
+
+def test_question_answer_delivery_and_a_push_held_for_tom(dsn, workspace):
+    ws, origin = workspace
+    broker.register(PushBranch(ws))
+
+    async def go():
+        task = await new_task(dsn, ws)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        first = await session.run(gateway, task, turn_for, dsn=dsn)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(LookupError):
+                await session.answer(conn, "no-such-task", "x")
+            waiting = await session.run(gateway, task, turn_for, dsn=dsn)  # runs no turn
+            await session.answer(conn, task, "Morning, Tom.")
+            with pytest.raises(LookupError):
+                await session.answer(conn, task, "a second answer to nothing")
+        second = await session.run(gateway, task, turn_for, dsn=dsn)
+        again = await session.run(gateway, task, turn_for, dsn=dsn)  # runs no turn
+        await gateway.close()
+        async with await db.connect(dsn) as conn:
+            held = next(e for e, s in second["state"]["effects"].items() if s == "pending")
+            with pytest.raises(broker.NotApproved):
+                await broker.release(conn, held)
+            before = git(origin, "branch", "--list")
+            await broker.approve(conn, held, note="push it")
+            pushed = await broker.release(conn, held)
+            return task, first, waiting, second, again, before, pushed, await ledger.read(conn, task)
+
+    _, first, waiting, second, again, before, pushed, rows = run(go())
+    assert first["status"] == "waiting" and first["question"]["question"] == "Which greeting do you want?"
+    assert waiting["status"] == "waiting"
+    assert second["status"] == "delivered" and "greeting.txt" in second["state"]["delivered"]
+    assert again["status"] == "delivered"
+    assert before == ""
+    assert pushed.kind == "done"
+    assert git(origin, "rev-parse", "valor/greeting").strip() == git(ws, "rev-parse", "HEAD").strip()
+
+    attention = second["state"]["attention"]
+    assert attention == [
+        {
+            "question_id": attention[0]["question_id"],
+            "question": "Which greeting do you want?",
+            "answer": "Morning, Tom.",
+        }
+    ]
+    answered = next(r["payload"] for r in rows if r["type"] == "question.answered")
+    assert answered["provenance"]["by"] == "tom"
+
+    turns = [json.loads(line) for line in (ws / ".valor" / "turns.jsonl").read_text().splitlines()]
+    assert len(turns) == 2  # the waiting and delivered runs ran no turn
+    assert turns[0]["prompt"] == "Write Tom a greeting." and turns[0]["resume"] == ""
+    assert turns[1]["prompt"] == "Tom answered your question:\n\nMorning, Tom."
+    assert turns[1]["resume"] == "session-1"
+    for t in turns:
+        assert "# Corrections from Tom" in t["brief"] and signals.PROTOCOL in t["brief"]
+    started = [r["payload"] for r in rows if r["type"] == "turn.started"]
+    assert [s["brief"] for s in started] == [t["brief"] for t in turns]
+    assert [
+        r["type"] for r in rows if r["type"] in ("question.asked", "question.answered", "task.delivered")
+    ] == [
+        "question.asked",
+        "question.answered",
+        "task.delivered",
+    ]
+    assert not (ws / ".valor" / "question.md").exists() and not (ws / ".valor" / "done.md").exists()
+
+
+def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_prompt(dsn, tmp_path):
+    (tmp_path / ".valor" / "effects").mkdir(parents=True)
+    (tmp_path / ".valor" / "effects" / "bad.json").write_text("not json")
+    (tmp_path / ".valor" / "effects" / "send.json").write_text(
+        json.dumps({"action_type": "no_such_action", "target": "tom", "payload": {}})
+    )
+
+    async def go():
+        task = await new_task(dsn, tmp_path)
+        found = signals.collect(tmp_path, "turn-1")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(
+                conn,
+                task,
+                "turn.ended",
+                {"turn_id": "turn-1", "outcome": "done", "result": {"session_id": "s"}},
+            )
+            await session.record(conn, task, "turn-1", found)
+            return await session.next_prompt(conn, task), await tasks.status(conn, task)
+
+    (prompt, resume), state = run(go())
+    assert resume == "s" and prompt.startswith("Continue.")
+    assert "bad.json: unreadable request" in prompt
+    assert "no_such_action -> tom" in prompt and "refused: no performer" in prompt
+    assert state["state"] == "live"
+    assert list((tmp_path / ".valor" / "handled" / "turn-1" / "effects").iterdir())
+
+
+def test_a_spent_budget_runs_no_turn(dsn, tmp_path):
+    async def go():
+        task = await new_task(dsn, tmp_path, budget_usd_micros=0)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        out = await session.run(gateway, task, turn_for, dsn=dsn)
+        await gateway.close()
+        return out
+
+    assert run(go())["status"] == "budget exhausted"
+    assert not (tmp_path / ".valor").exists()
+
+
+def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():
+    price = budget.prices("claude-opus-5-5")
+    assert price["input"] == 4_000_000 and price["output"] == 20_000_000
+    assert budget.prices("claude-opus-5-20260101")["input"] == 5_000_000
+    usage = {
+        "cache_creation_input_tokens": 1_000_000,
+        "cache_creation": {"ephemeral_5m_input_tokens": 250_000, "ephemeral_1h_input_tokens": 750_000},
+    }
+    assert budget.cost(usage, price) == round(0.25 * 5_000_000 + 0.75 * 8_000_000)
+    assert budget.cost({"cache_creation_input_tokens": 1_000_000}, price) == 8_000_000
+
+
+def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent")
+    build = claude_code.workspace_turn(
+        "Continue.",
+        cwd="/w",
+        resume="abc",
+        model="opus",
+        harness={"sandbox_profile": "/p.sb", "gitconfig": "/g", "gh_config_dir": "/gh"},
+    )
+    command = build("http://127.0.0.1:4321/t/token", "# Brief")
+    argv = command.argv
+    assert argv[:5] == ["sandbox-exec", "-D", "GATEWAY_PORT=4321", "-f", "/p.sb"]
+    assert argv[argv.index("--resume") + 1] == "abc"
+    assert argv[argv.index("--system-prompt-snapshot") + 1] == "off"
+    assert argv[argv.index("--append-system-prompt") + 1] == "You are Valor.\n\n# Brief"
+    assert "GH_TOKEN" not in command.env and "SSH_AUTH_SOCK" not in command.env
+    assert command.env["GH_CONFIG_DIR"] == "/gh" and command.env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert command.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4321/t/token"

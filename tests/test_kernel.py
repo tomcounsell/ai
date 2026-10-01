@@ -238,7 +238,11 @@ def test_revoke_cuts_a_call_still_waiting_on_the_provider_and_still_charges_it(d
         gateway = Gateway(dsn, upstream="http://10.255.255.1")  # a route that never answers
         await gateway.start()
         base = gateway.issue(task, "turn-1")
-        body = {"model": "claude-haiku-4-5", "max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]}
+        body = {
+            "model": "claude-haiku-4-5",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
 
         async def client():
             async with aiohttp.ClientSession() as http:

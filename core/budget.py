@@ -15,19 +15,16 @@ from math import ceil
 from core import ledger, tasks
 
 # US dollars per million tokens, from the provider's public pricing page.
-# A model absent here is refused: an unpriced call cannot be metered.
+# `cache_write` is the five-minute write (1.25x input); the one-hour write is
+# 2x input and derived in `prices`. A model absent here is refused: an
+# unpriced call cannot be metered.
 PRICES_USD_PER_MTOK = {
+    "claude-opus-5-5": {"input": 4.00, "output": 20.00, "cache_write": 5.00, "cache_read": 0.20},
     "claude-opus-5": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
     "claude-opus-4-8": {"input": 5.00, "output": 25.00, "cache_write": 6.25, "cache_read": 0.50},
+    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},
     "claude-haiku-4-5": {"input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10},
-}
-
-# The provider's usage fields, against the price each is billed at.
-PRICE_OF_FIELD = {
-    "input_tokens": "input",
-    "output_tokens": "output",
-    "cache_creation_input_tokens": "cache_write",
-    "cache_read_input_tokens": "cache_read",
 }
 
 # Bytes per token for the input estimate. An underestimate spends money
@@ -41,17 +38,31 @@ class BudgetRefused(RuntimeError):
 
 def prices(model: str) -> dict[str, int] | None:
     """Micro-dollars per million tokens for a model id, matching a dated id
-    (`claude-haiku-4-5-20251001`) to its undated entry."""
-    for name, table in PRICES_USD_PER_MTOK.items():
-        if model == name or model.startswith(name + "-"):
-            return {k: round(v * 1_000_000) for k, v in table.items()}
-    return None
+    (`claude-haiku-4-5-20251001`) to its undated entry. The longest matching
+    entry wins, so `claude-opus-5-5` never takes `claude-opus-5`'s price."""
+    names = [n for n in PRICES_USD_PER_MTOK if model == n or model.startswith(n + "-")]
+    if not names:
+        return None
+    table = PRICES_USD_PER_MTOK[max(names, key=len)]
+    table = {**table, "cache_write_1h": 2 * table["input"]}
+    return {k: round(v * 1_000_000) for k, v in table.items()}
 
 
 def cost(usage: dict, price: dict[str, int]) -> int:
     """What the provider bills, rounded up per field, so the ledger never
-    records less than the invoice."""
-    return sum(ceil(int(usage.get(f) or 0) * price[p] / 1_000_000) for f, p in PRICE_OF_FIELD.items())
+    records less than the invoice. A cache write counts as a five-minute
+    write only where the usage's `cache_creation` split says so; every other
+    cache write is charged at the one-hour rate."""
+    writes = int(usage.get("cache_creation_input_tokens") or 0)
+    short = min(writes, int((usage.get("cache_creation") or {}).get("ephemeral_5m_input_tokens") or 0))
+    tokens = {
+        "input": int(usage.get("input_tokens") or 0),
+        "output": int(usage.get("output_tokens") or 0),
+        "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+        "cache_write": short,
+        "cache_write_1h": writes - short,
+    }
+    return sum(ceil(n * price[p] / 1_000_000) for p, n in tokens.items())
 
 
 def estimate_input(body: dict) -> int:
@@ -61,7 +72,7 @@ def estimate_input(body: dict) -> int:
 def worst_case(input_tokens: int, max_tokens: int, price: dict[str, int]) -> int:
     """Input at the most expensive input rate plus every output token the
     caller allowed."""
-    return ceil(input_tokens * price["cache_write"] / 1_000_000) + ceil(
+    return ceil(input_tokens * price["cache_write_1h"] / 1_000_000) + ceil(
         max_tokens * price["output"] / 1_000_000
     )
 

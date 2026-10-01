@@ -1,6 +1,9 @@
-"""One `claude -p` turn, pointed at the kernel's gateway.
+"""`claude -p` turns, pointed at the kernel's gateway.
 
-The turn runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
+`turn` builds a single self-contained turn; `workspace_turn` builds one turn
+of a task that works in a directory over several turns.
+
+A `turn` runs with safe mode (no hooks, plugins, MCP servers, or CLAUDE.md
 from this machine), no session persistence, and `ANTHROPIC_BASE_URL` set to
 the gateway, so every model call it makes is metered against the task.
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output, which keeps the
@@ -15,6 +18,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 from core.runs import TurnCommand
 
@@ -76,3 +80,78 @@ def parse(stdout: bytes) -> dict:
         "harness_reported_usd": result.get("total_cost_usd"),
         "session_id": result.get("session_id"),
     }
+
+
+# The environment a workspace turn inherits. Everything else (tokens, SSH and
+# 1Password agents, Claude Code's own session variables) stays behind.
+KEEP_ENV = ("HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LC_ALL", "TERM")
+
+
+def workspace_turn(
+    prompt: str,
+    *,
+    cwd: str,
+    resume: str | None = None,
+    model: str = "haiku",
+    harness: dict | None = None,
+    system_prompt: str = "You are Valor.",
+    max_output_tokens: int = 32000,
+):
+    """A builder for one turn of a task that works in `cwd`.
+
+    The turn keeps Claude Code's own system prompt and tools, with the
+    persona and the dispatched Brief appended and re-rendered on every turn
+    (`--system-prompt-snapshot off`), and resumes `resume` when given. It
+    edits files and runs commands without asking (`bypassPermissions`): the
+    kernel bounds it, not a permission prompt nobody is there to answer.
+    Safe mode keeps this machine's hooks, skills, plugins, CLAUDE.md, and
+    MCP servers out; web fetch and web search are off.
+
+    `harness` carries the task's isolation, all optional:
+    `sandbox_profile`, a sandbox-exec profile the whole turn runs under,
+    given the gateway's port as `GATEWAY_PORT`; `gitconfig`, used as git's
+    global config with the system config ignored; `gh_config_dir`, gh's
+    config directory; `max_output_tokens`, the per-call output cap, which
+    sets the gateway's worst-case reservation for each call.
+    """
+    harness = harness or {}
+    max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
+
+    def build(base_url: str, brief: str) -> TurnCommand:
+        env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
+        env["ANTHROPIC_BASE_URL"] = base_url
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if harness.get("gitconfig"):
+            env["GIT_CONFIG_GLOBAL"] = harness["gitconfig"]
+            env["GIT_CONFIG_NOSYSTEM"] = "1"
+        if harness.get("gh_config_dir"):
+            env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
+        argv = [
+            CLAUDE,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--model",
+            model,
+            "--safe-mode",
+            "--strict-mcp-config",
+            "--permission-mode",
+            "bypassPermissions",
+            "--disallowedTools",
+            "WebFetch",
+            "WebSearch",
+            "--system-prompt-snapshot",
+            "off",
+            "--append-system-prompt",
+            f"{system_prompt}\n\n{brief}",
+        ]
+        if resume:
+            argv += ["--resume", resume]
+        if harness.get("sandbox_profile"):
+            port = urlparse(base_url).port
+            argv = ["sandbox-exec", "-D", f"GATEWAY_PORT={port}", "-f", harness["sandbox_profile"], *argv]
+        return TurnCommand(argv=argv, env=env, cwd=cwd, harness="claude_code", parse=parse)
+
+    return build

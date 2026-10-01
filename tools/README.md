@@ -8,6 +8,11 @@ Non-core components and vendor-dependent tooling.
 - Each tool declares its effect class and reaches the world through the broker.
 - A tool is extracted on a demonstrated second need, never on a first. A tool unused for ninety days is deleted by default.
 
+## Performers
+
+- `workspace.py`: `workspace_write` (`propose`) and `outbox_send` (`act`), local performers for the kernel's own tests and smoke.
+- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its `origin`, never with force, after Tom's tap.
+
 ## Imports
 
 - May import: `core/`.
