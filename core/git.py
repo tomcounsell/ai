@@ -1,10 +1,30 @@
 """Git, read and pushed by the kernel, in a workspace a turn can write.
 
-A turn owns its workspace's `.git/config` and hooks, so nothing they name may
-run or authenticate here: every call pins hooks, the fsmonitor, the
-credential helper, and the SSH command off, and carries no terminal prompt.
-`rewrites` names the config a turn could use to send a push somewhere other
-than the URL the kernel recorded at start.
+The kernel runs outside the turn's sandbox and holds the database
+credential, so no git call here may run a program the turn chose. A turn
+owns its workspace's `.git/config` (and any file it includes), `.git/hooks`,
+`.git/info/attributes`, and the committed `.gitattributes`. Attributes only
+name drivers; a driver's program comes from config. So every call:
+
+- reads no global or system config (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`) and inherits no other `GIT_*` variable;
+- pins hooks, the fsmonitor, the credential helper, the SSH command, the
+  proxy command, the askpass program, the global attributes file, automatic
+  gc, and the `ext::` transport off on its command line, which overrides
+  the repository's config;
+- passes `--no-textconv` and `--no-ext-diff` to every diff, and ignores
+  submodules in `status`;
+- and first refuses the workspace outright (`GitError`) when its local or
+  worktree config holds any key that can name a program, redirect where a
+  push lands, or pull other config in (`HOSTILE`, checked by `hostile`):
+  filter drivers, diff and merge drivers, the fsmonitor, hooks path,
+  pager, editor, askpass, SSH and proxy commands, credential helpers,
+  transport and upload or receive programs, URL rewrites and push URLs,
+  aliases, submodule settings, `core.worktree`, and every include.
+
+Reading config (`git config --list`) runs nothing: it only reads files. A
+workspace whose config the kernel refuses gets no candidate, no instance,
+no git facts, and no push until the turn removes the key.
 
 Imports only the standard library.
 """
@@ -17,27 +37,82 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "false"}
+ENV = {
+    **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_SSH_COMMAND": "false",
+    "GIT_ASKPASS": "/usr/bin/false",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_PAGER": "cat",
+}
 PINNED = [
     "-c", "core.hooksPath=/dev/null",
     "-c", "core.fsmonitor=false",
     "-c", "credential.helper=",
     "-c", "core.sshCommand=false",
+    "-c", "core.gitProxy=",
+    "-c", "core.askPass=/usr/bin/false",
+    "-c", "core.attributesFile=/dev/null",
+    "-c", "core.pager=cat",
+    "-c", "gc.auto=0",
+    "-c", "maintenance.auto=false",
+    "-c", "protocol.ext.allow=never",
+    "-c", "submodule.recurse=false",
 ]  # fmt: skip
+
+# Local or worktree config keys (lowercased) the kernel will not run git
+# under: by prefix, or by a `remote.<name>.` / `diff.<name>.` /
+# `merge.<name>.` suffix.
+HOSTILE_PREFIXES = (
+    "include.", "includeif.", "filter.", "url.", "alias.", "submodule.", "credential",
+    "core.fsmonitor", "core.hookspath", "core.pager", "core.editor", "core.askpass",
+    "core.sshcommand", "core.gitproxy", "core.worktree", "core.attributesfile",
+    "pager.", "sequence.editor", "protocol.", "uploadpack.", "receive.", "gpg.",
+    "diff.external", "ssh.",
+)  # fmt: skip
+HOSTILE_SUFFIXES = (
+    ".textconv", ".command", ".driver", ".pushurl", ".uploadpack", ".receivepack", ".proxy",
+    ".vcs", ".helper",
+)  # fmt: skip
 
 
 class GitError(RuntimeError):
     pass
 
 
-def run(workspace: str | Path, *args: str) -> subprocess.CompletedProcess:
+def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(workspace), *PINNED, *args],
         capture_output=True,
-        text=True,
+        text=text,
         check=False,
         env=ENV,
     )
+
+
+def hostile(workspace: str | Path) -> list[str]:
+    """Every key in the workspace's local or worktree config (includes
+    followed) that the kernel will not run git under."""
+    listed = _git(workspace, "config", "--list", "--show-scope", "--includes")
+    found = []
+    for line in listed.stdout.splitlines():
+        scope, _, entry = line.partition("\t")
+        if scope not in ("local", "worktree"):
+            continue
+        key = entry.split("=", 1)[0].lower()
+        if key.startswith(HOSTILE_PREFIXES) or key.endswith(HOSTILE_SUFFIXES):
+            found.append(f"{scope}: {entry}")
+    return found
+
+
+def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
+    """One git call in the workspace, refused before it runs when the
+    workspace's config is hostile."""
+    found = hostile(workspace)
+    if found:
+        raise GitError("the workspace's git config names what the kernel will not run: " + "; ".join(found))
+    return _git(workspace, *args, text=text)
 
 
 def out(workspace: str | Path, *args: str) -> str:
@@ -48,7 +123,13 @@ def out(workspace: str | Path, *args: str) -> str:
 
 
 def is_repo(workspace: str | Path | None) -> bool:
-    return bool(workspace) and run(workspace, "rev-parse", "--git-dir").returncode == 0
+    """Whether the directory is a git repository; reads nothing the turn
+    controls beyond what `git rev-parse` needs to find it."""
+    return (
+        bool(workspace)
+        and Path(workspace).is_dir()
+        and _git(workspace, "rev-parse", "--git-dir").returncode == 0
+    )
 
 
 def head(workspace: str | Path) -> str | None:
@@ -63,12 +144,8 @@ def branch(workspace: str | Path) -> str | None:
 
 
 def show(workspace: str | Path, rev: str, path: str) -> bytes | None:
-    done = subprocess.run(
-        ["git", "-C", str(workspace), *PINNED, "show", f"{rev}:{path}"],
-        capture_output=True,
-        check=False,
-        env=ENV,
-    )
+    """A file's bytes at a commit (`cat-file blob`: no filter, no textconv)."""
+    done = run(workspace, "cat-file", "blob", f"{rev}:{path}", text=False)
     return done.stdout if done.returncode == 0 else None
 
 
@@ -83,12 +160,21 @@ def merges_between(workspace: str | Path, older: str, newer: str) -> list[str]:
 def diff_paths(workspace: str | Path, older: str, newer: str) -> list[str]:
     """Every path changed between two commits. Renames count as a delete and
     an add, so the old path is listed too."""
-    return out(workspace, "diff", "--no-ext-diff", "--no-renames", "--name-only", older, newer).splitlines()
+    return out(
+        workspace, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", older, newer
+    ).splitlines()
 
 
 def dirty(workspace: str | Path) -> list[str]:
     """Uncommitted and untracked paths (`.valor/` is excluded at setup)."""
-    return out(workspace, "status", "--porcelain", "--untracked-files=all").splitlines()
+    return out(
+        workspace,
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignore-submodules=all",
+    ).splitlines()
 
 
 def push_url(workspace: str | Path, remote: str = "origin") -> str:
@@ -110,31 +196,9 @@ def remote_head(workspace: str | Path, url: str) -> str | None:
     return None
 
 
-def rewrites(workspace: str | Path) -> list[str]:
-    """Config in the workspace's own scopes (local, worktree) that could send
-    a push elsewhere or pull other config in: any `include.*` or
-    `includeIf.*`, any `url.*` rule, any `remote.*.pushurl`. Rewrites in
-    Tom's global config are his and are not listed."""
-    listed = out(workspace, "config", "--list", "--show-scope", "--includes")
-    found = []
-    for line in listed.splitlines():
-        scope, _, entry = line.partition("\t")
-        key = entry.split("=", 1)[0].lower()
-        if scope not in ("local", "worktree"):
-            continue
-        if key.startswith(("include.", "includeif.", "url.")) or (
-            key.startswith("remote.") and key.endswith(".pushurl")
-        ):
-            found.append(f"{scope}: {entry}")
-    return found
-
-
 def push(workspace: str | Path, url: str, sha: str, branch_name: str) -> None:
-    """Push one commit to one branch at an explicit URL, never with force,
-    refusing when the workspace's config could rewrite where it lands."""
-    found = rewrites(workspace)
-    if found:
-        raise GitError(f"the workspace's config could redirect the push: {'; '.join(found)}")
+    """Push one commit to one branch at an explicit URL, never with force.
+    `run` refuses a workspace whose config could rewrite where it lands."""
     if run(workspace, "check-ref-format", "--branch", branch_name).returncode != 0:
         raise ValueError(f"branch name {branch_name!r} is malformed")
     if run(workspace, "cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
@@ -179,7 +243,18 @@ class Hunk:
 def hunks(workspace: str | Path, older: str, newer: str, path: str) -> list[Hunk]:
     """The hunks of one path's diff between two commits, as git computes
     them (three lines of context, so the header carries function context)."""
-    text = out(workspace, "diff", "--no-ext-diff", "--no-renames", "--no-color", older, newer, "--", path)
+    text = out(
+        workspace,
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--no-color",
+        older,
+        newer,
+        "--",
+        path,
+    )
     found: list[Hunk] = []
     current = None
     for line in text.splitlines():

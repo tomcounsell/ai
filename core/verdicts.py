@@ -187,18 +187,22 @@ async def record_check(
             payload["findings"] += [{"kind": "test failure", "text": t} for t in failures]
             payload["findings"] += [{"kind": "untested behavior", "text": t} for t in behaviors]
             payload["guard_id"] = machine.GUARD_BREADTH if behaviors else None
-        if check is Check.DOCS:
-            head = head or c.sha
-            if head != c.sha:
-                if not git.is_ancestor(b.workspace, c.sha, head):
-                    raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
-                if git.merges_between(b.workspace, c.sha, head):
-                    raise VerdictRefused("the docs commits hold a merge commit")
-            payload["head"] = head
-            payload["paths"] = git.diff_paths(b.workspace, c.sha, head) if head != c.sha else []
+        try:
+            if check is Check.DOCS:
+                head = head or c.sha
+                if head != c.sha:
+                    if not git.is_ancestor(b.workspace, c.sha, head):
+                        raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
+                    if git.merges_between(b.workspace, c.sha, head):
+                        raise VerdictRefused("the docs commits hold a merge commit")
+                payload["head"] = head
+                payload["paths"] = git.diff_paths(b.workspace, c.sha, head) if head != c.sha else []
+            if check in (Check.REVIEW, Check.DOCS):
+                older, newer = (b.base_sha, c.sha) if check is Check.REVIEW else (c.sha, payload["head"])
+                instances = _instances(b.workspace, older, newer, specs) if specs else []
+        except git.GitError as exc:
+            raise VerdictRefused(str(exc)) from None
         if check in (Check.REVIEW, Check.DOCS):
-            older, newer = (b.base_sha, c.sha) if check is Check.REVIEW else (c.sha, payload["head"])
-            instances = _instances(b.workspace, older, newer, specs) if specs else []
             payload["governance"] = {"adds": bool(instances), "instances": instances}
             ungranted = [i for i in instances if i["id"] not in f.granted]
             if check is Check.REVIEW:

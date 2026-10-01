@@ -16,6 +16,7 @@ Pure code: the standard library only, no I/O.
 import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePosixPath as Path
 from typing import Any
 
 
@@ -317,12 +318,10 @@ def join(checks: dict[Check, CheckVerdict], loops: Loops, counts: dict[str, int]
 
 def fold(rows: list[dict[str, Any]]) -> Fold:
     """The task's state from its rows, in id order. Total: never raises."""
-    rows = list(rows)
+    rows = [r for r in rows if isinstance(r, dict)]
     start = next((r for r in rows if r.get("type") == "task.started"), None)
-    try:
-        sdlc = isinstance(start["payload"], dict) and start["payload"].get("sdlc") == 1  # type: ignore[index]
-    except TypeError:
-        sdlc = False
+    payload = start.get("payload") if start is not None else None
+    sdlc = isinstance(payload, dict) and payload.get("sdlc") == 1
     if not sdlc:
         return _legacy(rows)
     f = Fold()
@@ -424,7 +423,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         if int(p["critique_rounds"]) not in ROUNDS or int(p["review_rounds"]) not in ROUNDS:
             return "loop counts outside 0..2"
         f.plan = {k: p.get(k) for k in ("path", "commit", "sha256", "stakes", "critique_rounds",
-                                          "review_rounds", "scope", "doc_paths")}  # fmt: skip
+                                          "review_rounds", "scope")}  # fmt: skip
         _enter(f, State.CRITIQUE, entry)
         return None
     if kind == "critique.decided":
@@ -435,9 +434,16 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         verdict = p["verdict"]
         if verdict not in VERDICTS[State.CRITIQUE]:
             return f"verdict {verdict!r} outside its enum"
-        for k, v in (p.get("raised") or {}).items():
-            if k in f.raised and int(v) in ROUNDS:
-                f.raised[k] = max(f.raised[k], int(v))
+        raised = p.get("raised") or {}
+        if not isinstance(raised, dict) or any(
+            k in f.raised and (not isinstance(v, int) or isinstance(v, bool) or v not in ROUNDS)
+            for k, v in raised.items()
+        ):
+            return "raised counts outside 0..2"
+        # Validated whole, then applied, so a row never half-applies.
+        for k, v in raised.items():
+            if k in f.raised:
+                f.raised[k] = max(f.raised[k], v)
         if verdict == "revise" and f.counts["critique_revisions"] < f.loops.critique_rounds:
             f.counts["critique_revisions"] += 1
             _enter(f, State.PLAN, entry)
@@ -569,10 +575,23 @@ def _legacy(rows: list[dict[str, Any]]) -> Fold:
     return f
 
 
-def is_doc_path(path: str, doc_paths: list[str] | tuple[str, ...]) -> bool:
-    if path.endswith(".md"):
-        return True
-    return any(path == d.rstrip("/") or path.startswith(d.rstrip("/") + "/") for d in doc_paths if d)
+# Markdown that is instruction, not description: rendered into a turn's
+# Brief or read by a harness as its standing orders. A docs commit never
+# touches these; changing them is the builder's work, under review.
+INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
+INSTRUCTION_DIRS = ("skills", "persona", ".claude")
+
+
+def is_doc_path(path: str) -> bool:
+    """Whether a docs commit may touch this path: a Markdown file, and not
+    one that instructs a turn (`INSTRUCTION_FILES` anywhere, anything under
+    `INSTRUCTION_DIRS` at any depth). A plan cannot widen this."""
+    parts = Path(path).parts
+    if not path.endswith(".md") or not parts:
+        return False
+    if parts[-1] in INSTRUCTION_FILES:
+        return False
+    return not any(part in INSTRUCTION_DIRS for part in parts[:-1])
 
 
 @dataclass(frozen=True)
@@ -615,7 +634,6 @@ def merge_predicate(
     if test is None or not (test.verdict == "pass" or gaps_ok):
         failed.append("3: test passed, or gaps with the repair round spent and the gaps on the delivery")
     docs = checks.get(Check.DOCS)
-    doc_paths = tuple((f.plan or {}).get("doc_paths") or ())
     if (
         docs is None
         or docs.verdict not in DOCS_PASS
@@ -623,7 +641,7 @@ def merge_predicate(
         or facts is None
         or not facts.ancestor
         or facts.merges
-        or not all(is_doc_path(p, doc_paths) for p in facts.paths)
+        or not all(is_doc_path(p) for p in facts.paths)
         or any(i.id not in f.granted for i in docs.instances)
     ):
         failed.append(

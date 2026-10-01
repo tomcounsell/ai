@@ -172,7 +172,7 @@ inputs are files and ledger rows, so their independence is structural.
 Review and docs start on every candidate, concurrently with the test run
 when the machine's turn slots allow (`docs/machine.md`); the docs session
 works in its own checkout of the candidate and commits only doc paths. Its
-prompt is the request, the plan, the diff, and the doc paths, asking for
+prompt is the request, the plan, and the diff, asking for
 the docs the change made untrue. The reviewer runs the same Opus model or
 an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
@@ -226,7 +226,7 @@ workspace, which the kernel reads when the turn ends:
 |---|---|---|
 | `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
 | `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
-| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions, doc paths | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
+| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 

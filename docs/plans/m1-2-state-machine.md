@@ -195,8 +195,8 @@ Pure code, no I/O, importing only the standard library.
   docs `updated` or `no_change`; its recorded head is the payload's
   `head_sha`; per `facts`, the candidate's sha is an ancestor of that
   head, no merge commit lies between them, and every path in `git diff
-  --no-renames --name-only` between them is a `.md` file or under a path
-  the plan names in `doc_paths`; and every instance the docs verdict named
+  --no-renames --name-only` between them is a Markdown file that instructs
+  no turn (`machine.is_doc_path`); and every instance the docs verdict named
   has a `guard.granted`. Term 5: an `approval.granted` for this effect id
   and payload digest with no `effect.intent` using it. Each term reads a
   row or a git fact; no model call decides.
@@ -232,7 +232,7 @@ New or changed rows:
 | `turn.started` | `runs` | as today, plus `state` | `events_one_turn_row` |
 | `turn.collected` | `session` | as today, plus `state`, `verdict`, `candidate` `{sha, turn_id}` when `candidate`, `errors` (signals that did not count, and why) | verdict in the enum for its state, and non-null whenever `state` is present (legacy rows have neither); `events_one_turn_row` unique on `(type, turn_id)` for `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` |
 | `question.asked` | `session` | as today, plus `state` (where `answered` returns) | |
-| `plan.written` | `session` | `turn_id`, `path`, `commit`, `sha256` of the file at that commit, `stakes`, `critique_rounds`, `review_rounds`, `scope` (each addition with the debt it pays), `doc_paths` | both counts in 0..2 |
+| `plan.written` | `session` | `turn_id`, `path`, `commit`, `sha256` of the file at that commit, `stakes`, `critique_rounds`, `review_rounds`, `scope` (each addition with the debt it pays) | both counts in 0..2 |
 | `critique.decided` | `verdict` CLI (manual), the critique runner in 1.4 | `plan_sha256`, `verdict` (`sound`, `revise`), `findings`, `raised` (either count), `leg`, `model`, `usd_micros`, `guard_id` (when `revise`), provenance when manual | enum; raised counts in 0..2 |
 | `test.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `red`, `gaps`), `command`, `failures`, `behaviors`, `leg`, `model`, `usd_micros`, `guard_id` (breadth, when behaviors are listed), provenance when manual | enum |
 | `review.decided` | `verdict` CLI, 1.4 | `candidate`, `verdict` (`pass`, `changes`, `governance_refused`), `findings` (each with a kind, `debt` among them), `governance` `{adds, instances: [{id, path, hunk, summary, incident, mission_item}]}`, `leg`, `model`, `usd_micros`, `guard_id` (review loop, on a verdict that completes join row 3 or 5), provenance when manual | enum |
@@ -343,7 +343,7 @@ the effects report. Changed:
     no question would change the result, and the intended approach) is
     `no_material_question`.
   - `plan`: `.valor/plan.json` (new) names the plan file and carries the
-    stakes, both counts, scope additions, and `doc_paths`. The kernel reads
+    stakes, both counts, and scope additions. The kernel reads
     the file at the workspace's HEAD through `core/git.py`; a plan not
     committed there, or counts outside 0..2, is an entry in `errors` and
     the verdict `idle`, and the next prompt says why. Valid: `plan.written`
@@ -611,8 +611,7 @@ scripted turns as in `test_session.py`). All spend $0 except the two
   nothing written, and the approval still unused: no docs verdict; review
   `pass` with an ungranted instance (built by raw insert, since the writer
   refuses it); test `red`; `gaps` with the repair round unspent; docs
-  paths touching `core/x.py`, and the same path accepted when the plan
-  names it in `doc_paths`; a merge commit between the candidate and the
+  paths touching `core/x.py`, a stage file, or a `CLAUDE.md`; a merge commit between the candidate and the
   docs head; a rename from `core/x.py` to `docs/x.md` (the old path counts);
   docs head not the payload's head; no approval.
 - An approval for a different digest: the merge effect of candidate 1 is
@@ -763,6 +762,57 @@ Evidence: `cd ~/src/valor-rebuild-m12 && VALOR_TEST_DB=valor_rebuild_test_m12
 .venv/bin/python -m pytest -q tests`: 211 passed, 3 skipped (the live
 tests). With `VALOR_LIVE=1`, `test_live_turn.py` and `test_live_session.py`
 passed once, metering about $0.17 together.
+
+## Patch round 1 (review round 1 of 2)
+
+On top of the docs session's `7a12ac817`. Every finding resolved:
+
+- **R1, the kernel ran turn-chosen programs.** `git status` ran a filter
+  clean driver the workspace's config named for paths a committed
+  `.gitattributes` assigned, and `git diff` ran a textconv driver. Chosen:
+  neutralise and refuse, not a kernel-owned clone, because whether the
+  candidate's tree is clean is a question only the work tree answers, so
+  the workspace must be read in place. `core/git.py` now runs every call
+  with no global or system config and no inherited `GIT_*` variable, pins
+  hooks, fsmonitor, credential helper, SSH and proxy commands, askpass,
+  the attributes file, pager, automatic gc, and the `ext::` transport off,
+  passes `--no-textconv --no-ext-diff` to every diff and ignores
+  submodules in `status`, reads files through `cat-file blob`, and before
+  any call refuses a workspace whose local or worktree config (includes
+  followed) holds any key that can name a program, redirect a push, or
+  pull config in (`git.hostile`). A refused workspace gets no candidate, no
+  instance, no git facts, no start, and no push; the reason reaches the
+  turn's next prompt or the caller. Release checks the performer's refusal
+  before the predicate, so the reason names the config.
+- **R2, doc paths came from the turn's plan.** `doc_paths` is gone from
+  `plan.json`, `plan.written`, the plan stage file, and the predicate. A
+  doc path is a Markdown file that instructs no turn: never a `CLAUDE.md`
+  or `AGENTS.md` anywhere, nothing under `skills/`, `persona/`, or
+  `.claude/` (`machine.is_doc_path`). The contract doc and the docs stage
+  file say so.
+- **R3, fold totality.** A `task.started` without a payload folds as
+  legacy; a critique's raises are validated whole before either applies,
+  and a raise that is not an integer 0 to 2 makes the row ignored. The
+  Hypothesis strategy now generates rows with no payload, start rows of
+  every shape, and mixed valid and invalid raises, and asserts that a row
+  the fold ignored changed nothing that decides anything.
+- **R4 and the test gaps T1 to T11** are tests in `tests/test_pipeline.py`
+  and `tests/test_machine.py`: the planted filter, textconv, fsmonitor,
+  and include (with a control showing plain git runs them) across done.md
+  collection, instance computation, the predicate's git facts, release,
+  and start; doc paths over code, stage files, `CLAUDE.md`, `AGENTS.md`,
+  `persona/`, `.claude/`; a join-row-7 delivery released; a docs instance
+  holding the merge until the grant; a docs head not descending; a test
+  verdict with governance; grant refusals; legacy refusals including the
+  CLI; review and repair rounds together; a failed merge outcome and the
+  next run's new request; a held merge for another candidate; the missing
+  judge and the merged status; the start command's manual judge; a check
+  runner run for the missing branch only. Beyond the findings: feedback
+  racing a release, two releases racing, and a plain `insteadOf` rewrite.
+- **T12** is in `docs/plans/valor-rebuild.md`, 1.4 Done.
+- **D1**, the Brief's docstring, says what the broker does.
+
+Evidence: 233 passed, 3 skipped (from 211); ruff clean on the code.
 
 ## Rollout at merge
 

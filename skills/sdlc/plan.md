@@ -19,8 +19,7 @@ Tom's answer, or a critique's findings on your last plan.
     {"path": "<the plan file, relative to the workspace>",
      "stakes": "<one sentence>",
      "critique_rounds": 0, "review_rounds": 0,
-     "scope": [{"item": "<added work>", "debt": "<the debt it pays>"}],
-     "doc_paths": ["<paths besides *.md that are docs>"]}
+     "scope": [{"item": "<added work>", "debt": "<the debt it pays>"}]}
 
 The kernel records it from the committed file. A material question found
 while planning goes in `.valor/question.md` instead.

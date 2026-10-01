@@ -73,7 +73,7 @@ elif stage == "plan":
         else:
             commit("docs/plan.md", f"plan {n}\n", "Plan")
         (v / "plan.json").write_text(json.dumps({"path": "docs/plan.md", "stakes": "a toy change",
-            **counts, "scope": [], "doc_paths": cfg.get("doc_paths", [])}))
+            **counts, "scope": []}))
 elif stage in ("build", "patch"):
     if act == "dirty":
         pathlib.Path("greeting.txt").write_text(f"uncommitted {n}\n")

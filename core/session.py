@@ -112,8 +112,11 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
             return None, f"plan.json {k} is {v!r}; each count is 0, 1, or 2"
     if not git.is_repo(workspace):
         return None, "the workspace is not a git repository, so the plan cannot be committed"
-    head = git.head(workspace)
-    body = git.show(workspace, "HEAD", path) if head else None
+    try:
+        head = git.head(workspace)
+        body = git.show(workspace, "HEAD", path) if head else None
+    except git.GitError as exc:
+        return None, str(exc)
     if body is None:
         return None, f"{path} is not committed at HEAD"
     local = Path(workspace) / path
@@ -126,17 +129,19 @@ def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | 
         "stakes": str(raw.get("stakes") or ""),
         **counts,
         "scope": list(raw.get("scope") or []),
-        "doc_paths": [str(d) for d in raw.get("doc_paths") or []],
     }, None
 
 
 def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
     if not git.is_repo(workspace):
         return None, "the workspace is not a git repository, so there is no commit to check"
-    left = git.dirty(workspace)
+    try:
+        left = git.dirty(workspace)
+        head = git.head(workspace)
+    except git.GitError as exc:
+        return None, str(exc)
     if left:
         return None, "done.md with uncommitted changes; commit everything first:\n" + "\n".join(left[:20])
-    head = git.head(workspace)
     if head is None:
         return None, "the workspace has no commit"
     return {"sha": head, "turn_id": turn_id}, None

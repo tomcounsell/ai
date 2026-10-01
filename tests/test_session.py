@@ -306,12 +306,16 @@ def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(tmp_path):
     receive = tmp_path / "receive"
     receive.write_text(f'#!/bin/sh\necho receive >> {marker}\nexec git-receive-pack "$@"\n')
     receive.chmod(0o755)
-    git(ws, "config", "core.hooksPath", str(tmp_path / "hooks"))
-    git(ws, "config", "remote.origin.receivepack", str(receive))
     head = git(ws, "rev-parse", "HEAD").strip()
 
+    # A hook in the default directory is pinned off; a hooks path or a
+    # receive program in the workspace's config refuses the push outright.
     pushed = PushBranch(ws).perform(broker.Action("push_branch", "valor/x", {"head_sha": head}), "key")
     assert pushed["sha"] == head and git(origin, "rev-parse", "valor/x").strip() == head
+    git(ws, "config", "core.hooksPath", str(tmp_path / "hooks"))
+    git(ws, "config", "remote.origin.receivepack", str(receive))
+    with pytest.raises(ValueError, match="core.hookspath"):
+        PushBranch(ws).perform(broker.Action("push_branch", "valor/y", {"head_sha": head}), "key")
     assert not marker.exists()
 
 

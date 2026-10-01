@@ -463,18 +463,50 @@ TYPES = [
     "review.decided", "docs.decided", "task.delivered", "feedback.given", "guard.granted",
     "effect.held", "effect.intent", "effect.outcome", "effect.refused", "something.else",
 ]  # fmt: skip
+MISSING = object()  # a row with no payload key at all
+RAISED = st.sampled_from(
+    [
+        {},
+        None,
+        "x",
+        {"critique_rounds": 2},
+        {"review_rounds": "x"},
+        {"critique_rounds": 2, "review_rounds": "x"},
+        {"critique_rounds": 1, "review_rounds": 3},
+        {"review_rounds": True},
+    ]
+)
+payloads = payloads.flatmap(lambda p: st.builds(lambda r: {**p, "raised": r} if "raised" in p else p, RAISED))
 rows_strategy = st.lists(
-    st.tuples(st.sampled_from(TYPES), st.one_of(payloads, st.sampled_from([None, "text", 3]))), max_size=40
+    st.tuples(st.sampled_from(TYPES), st.one_of(payloads, st.sampled_from([None, "text", 3, MISSING]))),
+    max_size=40,
+)
+STARTS = st.sampled_from(
+    [{"sdlc": 1, "instruction": "x"}, {"instruction": "x"}, None, MISSING, "text", {"sdlc": "1"}]
 )
 
 
-@settings(max_examples=400, deadline=None)
-@given(st.booleans(), rows_strategy)
-def test_every_prefix_folds_to_exactly_one_state(sdlc, generated):
-    start = {"sdlc": 1, "instruction": "x"} if sdlc else {"instruction": "x"}
-    rows = [{"id": 1, "type": "task.started", "payload": start}]
-    rows += [{"id": i + 2, "type": t, "payload": p} for i, (t, p) in enumerate(generated)]
+def _row(i: int, kind: str, payload) -> dict:
+    row = {"id": i, "type": kind}
+    if payload is not MISSING:
+        row["payload"] = payload
+    return row
+
+
+def _material(f: machine.Fold) -> tuple:
+    return (
+        f.state, f.return_to, dict(f.raised), dict(f.counts), f.candidate, tuple(sorted(f.checks)),
+        frozenset(f.granted), f.plan and f.plan.get("sha256"), f.join and f.join.row,
+    )  # fmt: skip
+
+
+@settings(max_examples=500, deadline=None)
+@given(STARTS, rows_strategy)
+def test_every_prefix_folds_to_exactly_one_state(start, generated):
+    rows = [_row(1, "task.started", start)]
+    rows += [_row(i + 2, t, p) for i, (t, p) in enumerate(generated)]
     stopped = False
+    previous = None
     for n in range(len(rows) + 1):
         f = machine.fold(rows[:n])
         assert isinstance(f.state, State)
@@ -485,3 +517,57 @@ def test_every_prefix_folds_to_exactly_one_state(sdlc, generated):
             assert all(v.candidate == f.candidate for v in f.checks.values())
         assert f.counts["review_rounds"] <= f.loops.review_rounds
         assert f.counts["repair_rounds"] <= 1
+        # A row the fold ignored changed nothing that decides anything.
+        if previous is not None and not f.legacy and f.ignored and f.ignored[-1]["id"] == n:
+            assert _material(f) == _material(previous)
+        previous = f
+
+
+def test_a_task_started_without_a_payload_folds_and_a_bad_raise_applies_nothing():
+    assert machine.fold([{"id": 1, "type": "task.started"}]).legacy
+    led = Ledger(critique_rounds=0).plan()
+    led.add("critique.decided", {"plan_sha256": led.plan_digest, "verdict": "revise",
+                                 "raised": {"critique_rounds": 2, "review_rounds": "x"}})  # fmt: skip
+    f = led.fold()
+    assert f.raised == {"critique_rounds": 0, "review_rounds": 0}  # neither count applied
+    assert f.state is State.CRITIQUE and "raised counts" in f.ignored[-1]["why"]
+
+
+def test_review_rounds_and_the_repair_round_together_bound_the_patches():
+    led = Ledger(review_rounds=1).to_checks()
+    patches = 0
+    for test, review in (("pass", "changes"), ("red", "pass"), ("red", "pass")):
+        led.checks(test, review, "no_change")
+        if led.state is State.PATCH:
+            patches += 1
+            led.build()
+    f = led.fold()
+    assert f.state is State.MERGE and f.join.row == 6 and f.join.outcome == "did_not_pass"
+    assert f.counts == {"critique_revisions": 0, "review_rounds": 1, "repair_rounds": 1}
+    assert patches == f.loops.review_rounds + 1  # the most a task patches before Tom sees it
+
+
+def test_a_failed_merge_outcome_stays_in_merge_and_a_merge_for_another_candidate_is_ignored():
+    led = Ledger().to_checks().checks("pass", "pass", "no_change")
+    led.add(
+        "effect.held", {"effect_id": "e1", "action_type": "merge", "payload": {"candidate": led.candidate}}
+    )
+    led.add("effect.intent", {"effect_id": "e1"})
+    led.add("effect.outcome", {"effect_id": "e1", "kind": "failed"})
+    f = led.fold()
+    assert f.state is State.MERGE and f.merge_effect["state"] == "failed"
+    stale = {"sha": "old", "turn_id": "t0"}
+    led.add("effect.held", {"effect_id": "e2", "action_type": "merge", "payload": {"candidate": stale}})
+    f = led.fold()
+    assert f.merge_effect["effect_id"] == "e1" and "not the current one" in f.ignored[-1]["why"]
+
+
+def test_the_predicate_refuses_when_the_docs_head_does_not_descend_or_git_facts_are_missing():
+    led = Ledger().to_checks()
+    led.check("test", "pass").check("review", "pass").check("docs", "updated", head="d1")
+    f = led.fold()
+    payload = {"candidate": led.candidate, "head_sha": "d1"}
+    ok = machine.GitFacts(True, (), ("docs/a.md",))
+    assert machine.merge_predicate(f, payload, approval_unused=True, facts=ok) == []
+    for facts in (machine.GitFacts(False, (), ()), None, machine.GitFacts(True, (), ("core/x.py",))):
+        assert [t[0] for t in machine.merge_predicate(f, payload, approval_unused=True, facts=facts)] == ["4"]

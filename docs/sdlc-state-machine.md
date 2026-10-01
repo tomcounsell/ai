@@ -425,7 +425,9 @@ removed (rebuild-baseline.md, Review rounds), hence the Opus class.
 
 **What runs.** A fresh session in its own checkout of the candidate. It
 reads the request, the plan, and the diff, and changes only doc paths:
-Markdown files and the paths the plan names as docs. Its commits sit on top
+Markdown files, never one that instructs a turn (a `CLAUDE.md` or
+`AGENTS.md` anywhere, anything under `skills/`, `persona/`, or `.claude/`). A plan cannot widen this: a doc path that let code ride in an
+unreviewed docs commit would be a merge on no review. Its commits sit on top
 of the candidate and touch nothing the test or review branch reads as code,
 so the three cannot conflict.
 

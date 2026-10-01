@@ -223,7 +223,7 @@ def test_a_replay_workspace_resolves_main(tmp_path):
 # -- the merge destination is the kernel's -------------------------------------------------
 
 
-@pytest.mark.parametrize("rewrite", ["url", "pushurl", "insteadof", "include"])
+@pytest.mark.parametrize("rewrite", ["url", "pushurl", "insteadof", "plain-insteadof", "include"])
 def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
     ws, origin = scripted.workspace(tmp_path)
     stranger = tmp_path / "stranger.git"
@@ -240,6 +240,8 @@ def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
             git(ws, "remote", "set-url", "--push", "origin", str(stranger))
         elif rewrite == "insteadof":
             git(ws, "config", f"url.{stranger}.pushInsteadOf", str(origin))
+        elif rewrite == "plain-insteadof":
+            git(ws, "config", f"url.{stranger}.insteadOf", str(origin))
         else:
             inc = tmp_path / "inc.gitconfig"
             inc.write_text(f'[url "{stranger}"]\n\tpushInsteadOf = {origin}\n')
@@ -440,16 +442,25 @@ def _docs_head(ws, *paths) -> str:
 
 
 @pytest.mark.parametrize(
-    ("paths", "doc_paths", "holds"),
+    ("paths", "holds"),
     [
-        (["docs/guide.md"], [], True),
-        (["core/x.py"], [], False),
-        (["core/x.py"], ["core"], True),
+        (["docs/guide.md"], True),
+        (["README.md", "docs/deep/notes.md"], True),
+        (["core/x.py"], False),
+        (["skills/sdlc/build.md"], False),
+        (["CLAUDE.md"], False),
+        (["docs/CLAUDE.md"], False),
+        (["AGENTS.md"], False),
+        (["persona/voice.md"], False),
+        ([".claude/agents/x.md"], False),
+        (["docs/guide.md", "core/x.py"], False),
     ],
 )
-def test_docs_commits_must_touch_only_doc_paths(dsn, tmp_path, paths, doc_paths, holds):
+def test_docs_commits_must_touch_only_markdown_that_instructs_no_turn(dsn, tmp_path, paths, holds):
+    """Doc paths are Markdown only, never a file that instructs a turn, and a
+    plan cannot widen them: anything else in a docs commit would merge with
+    no review keyed to it."""
     ws, _ = scripted.workspace(tmp_path)
-    scripted.steer(ws, doc_paths=doc_paths)
 
     async def go():
         task = await to_checks(dsn, ws)
@@ -827,11 +838,19 @@ def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn,
                 await session.feedback(conn, b.id, "x")
             with pytest.raises(LookupError, match="predates"):
                 await verdicts.record_judge(conn, b.id, "precise")
+            with pytest.raises(LookupError, match="predates"):
+                await session.answer(conn, b.id, "x")
+            with pytest.raises(LookupError, match="predates"):
+                await verdicts.record_check(conn, b.id, Check.TEST, "pass")
+            with pytest.raises(LookupError, match="predates"):
+                await guards.grant(conn, b.id, "i", note="x", incident="i", mission_item="1")
             await broker.approve(conn, held.effect_id, note="push it")
             pushed = await broker.release(conn, held.effect_id)
         return st, pushed, await drive(dsn, b.id)
 
     st, pushed, out = run(go())
+    by_hand = cli("verdict", st["task_id"], "test", "pass")
+    assert by_hand.returncode == 1 and "predates" in by_hand.stderr
     assert st["legacy"] is True and st["state"] == "merge"
     assert pushed.kind == "done" and git(origin, "rev-parse", "valor/old") == head
     assert out["status"] == "legacy"
@@ -880,3 +899,333 @@ def test_an_instance_id_ignores_line_numbers_and_counts_the_function_context(tmp
     shifted = commit(ws, "m.py", "# a header line\n" + gated)
     again = kgit.hunks(ws, shifted_base, shifted, "m.py")
     assert [h.id() for h in again] == [first.id(), second.id()]  # line numbers moved, ids did not
+
+
+# -- the kernel runs no program the workspace's config names --------------------------------
+
+
+def _plant(tmp_path: Path, ws: Path) -> Path:
+    """A filter clean driver for *.py (assigned by a committed .gitattributes),
+    a diff textconv driver, an fsmonitor hook, and an include pulling in a
+    second filter: every one would write `marker` if git ran it."""
+    marker = tmp_path / "ran"
+    driver = tmp_path / "driver.sh"
+    driver.write_text(
+        f'#!/bin/sh\ntouch {marker}\nif [ -n "$1" ] && [ -f "$1" ]; then cat "$1"; else cat; fi\n'
+    )
+    driver.chmod(0o755)
+    monitor = tmp_path / "monitor.sh"
+    monitor.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    monitor.chmod(0o755)
+    included = tmp_path / "included.gitconfig"
+    included.write_text(f'[filter "other"]\n\tclean = {driver}\n')
+    git(ws, "config", "filter.evil.clean", str(driver))
+    git(ws, "config", "diff.evil.textconv", str(driver))
+    git(ws, "config", "core.fsmonitor", str(monitor))
+    git(ws, "config", "include.path", str(included))
+    return marker
+
+
+def test_no_kernel_git_call_runs_a_program_the_workspace_config_names(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, ".gitattributes", "*.py filter=evil diff=evil\n*.txt filter=other\n", "attributes")
+    git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        _gate(ws)
+        scripted.steer(ws, build="reasons")
+        await drive(dsn, task)
+        await scripted.checks(dsn, task)  # a merge held, all three passing
+        f = await fold(dsn, task)
+        effect = f.merge_effect["effect_id"]
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+        b = tasks.Brief(**await tasks_doc(dsn, task))
+        marker = _plant(tmp_path, ws)
+        (ws / "hooks" / "gate.py").write_text("def gate():\n    return 'touched'\n")  # stat-dirty
+        results = {}
+        async with await db.connect(dsn) as conn:
+            try:
+                await broker.release(conn, effect)
+            except broker.Refused as exc:
+                results["release"] = str(exc)
+            results["facts"] = broker._git_facts(str(ws), f, {"head_sha": f.candidate.sha})
+            try:
+                verdicts._instances(
+                    str(ws), b.base_sha, f.candidate.sha, [verdicts.InstanceSpec("hooks/gate.py", 1)]
+                )
+            except Exception as exc:  # noqa: BLE001
+                results["instances"] = type(exc).__name__
+            (ws / ".valor").mkdir(exist_ok=True)
+            (ws / ".valor" / "done.md").write_text("done")
+            found = scripted_signals(ws)
+            results["collected"] = await session.record(
+                conn, task, "planted", found, state=State.PATCH, workspace=str(ws)
+            )
+            try:
+                tasks.resolve_workspace(str(ws))
+            except tasks.WorkspaceRefused as exc:
+                results["start"] = str(exc)
+            written = await ledger.read(conn, task)
+        return results, written, marker
+
+    results, written, marker = run(go())
+    before_control = marker.exists()
+    subprocess.run(["git", "-C", str(ws), "status"], capture_output=True, check=False)  # plain git
+    after_control = marker.exists()
+    assert before_control is False  # no kernel call ran a planted program
+    assert after_control is True  # the plants are live: plain git ran one
+    assert "will not run" in results["release"] or "run a program" in results["release"]
+    assert results["facts"] is None and results["instances"] == "GitError"
+    assert results["collected"] == "idle"
+    collected = next(
+        r["payload"]
+        for r in written
+        if r["type"] == "turn.collected" and r["payload"]["turn_id"] == "planted"
+    )
+    assert any("filter.evil.clean" in e for e in collected["errors"])
+    assert "include.path" in results["start"] and "filter.other.clean" in results["start"]
+    assert not [r for r in written if r["type"] == "effect.intent"]
+
+
+async def tasks_doc(dsn, task) -> dict:
+    async with await db.connect(dsn) as conn:
+        row = await (
+            await conn.execute("SELECT body FROM documents WHERE kind = 'task' AND id = %s", (task,))
+        ).fetchone()
+    return row[0]
+
+
+def scripted_signals(ws):
+    from core import signals
+
+    return signals.collect(ws, "planted")
+
+
+# -- the review's test gaps ---------------------------------------------------------------
+
+
+def test_a_delivery_with_gaps_after_the_repair_round_is_requested_and_released(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, test="red")  # join row 5: the repair round
+        await drive(dsn, task)
+        await scripted.check(dsn, task, "test", "gaps", behaviors=["archived teams"])
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        f = await fold(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, f.merge_effect["effect_id"], note="merge with the gap")
+            done = await broker.release(conn, f.merge_effect["effect_id"])
+        return f, done
+
+    f, done = run(go())
+    assert f.join.row == 7 and f.delivery["outcome"] == "gaps" and f.delivery["gaps"] == ["archived teams"]
+    assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
+
+
+def test_a_docs_governance_instance_holds_the_merge_until_tom_grants_it(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        head = commit(ws, "docs/rules.md", "Every merge needs a second review.\n", "a rule")
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "review", "pass")
+        rule = verdicts.InstanceSpec("docs/rules.md", 1, "a second review", "incident Z", "1")
+        await scripted.check(dsn, task, "docs", "updated", head=head, governance=[rule])
+        await drive(dsn, task)
+        await drive(dsn, task)
+        held_back = await fold(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await guards.grant(conn, task, held_back.instances()[0].id, note="yes, that rule")
+            with pytest.raises(guards.GrantRefused, match="already granted"):
+                await guards.grant(conn, task, held_back.instances()[0].id, note="again")
+        delivered = await drive(dsn, task)
+        effect = delivered["state"]["merge_effect"]["effect_id"]
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+            done = await broker.release(conn, effect)
+        return held_back, done, head, await rows(dsn, task)
+
+    held_back, done, head, written = run(go())
+    assert held_back.state is State.MERGE and held_back.join.row == 1 and held_back.merge_effect is None
+    assert not [r for r in written if r["type"] == "effect.refused"]
+    assert done.kind == "done" and git(origin, "rev-parse", "main") == head
+
+
+def test_a_docs_head_that_does_not_descend_from_the_candidate_is_refused(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        git(ws, "checkout", "-q", "-b", "elsewhere", "HEAD~2")
+        side = commit(ws, "docs/side.md", "side\n")
+        git(ws, "checkout", "-q", "valor/work")
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="does not descend"):
+                await verdicts.record_check(conn, task, Check.DOCS, "updated", head=side, **scripted.MANUAL)
+            with pytest.raises(verdicts.VerdictRefused, match="only review and docs"):
+                await verdicts.record_check(
+                    conn, task, Check.TEST, "pass", governance=[verdicts.InstanceSpec("README.md", 1)],
+                    **scripted.MANUAL,
+                )  # fmt: skip
+            with pytest.raises(guards.GrantRefused, match="in checks"):
+                await guards.grant(conn, task, "any", note="yes", incident="i", mission_item="1")
+
+    run(go())
+
+
+def test_a_failed_merge_stays_in_merge_and_the_next_run_requests_it_again(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        first = await merge_effect(dsn, task)
+        key = next(
+            r["payload"]["idempotency_key"] for r in await rows(dsn, task) if r["type"] == "effect.held"
+        )
+        async with await db.connect(dsn) as conn:  # a push the remote refused, as the broker records it
+            await ledger.append(conn, task, "effect.intent", {"effect_id": first, "idempotency_key": key})
+            await ledger.append(conn, task, "effect.outcome",
+                                {"effect_id": first, "idempotency_key": key, "kind": "failed"})  # fmt: skip
+        failed = await fold(dsn, task)
+        again = await drive(dsn, task)
+        return first, failed, again
+
+    first, failed, again = run(go())
+    assert failed.state is State.MERGE and failed.merge_effect["state"] == "failed"
+    assert again["status"] == "delivered"
+    effect = again["state"]["merge_effect"]
+    assert effect["state"] == "held" and effect["effect_id"] != first
+
+
+def test_the_router_names_the_missing_judge_and_reports_a_merged_task(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        waiting = await scripted.start(dsn, ws, mode=None)
+        judge = await drive(dsn, waiting)
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+            await broker.release(conn, effect)
+        return judge, await drive(dsn, task)
+
+    judge, merged = run(go())
+    assert judge["status"] == "no runner" and judge["missing"] == ["judge"]
+    assert merged["status"] == "merged" and merged["state"]["state"] == "merged"
+
+
+def test_the_start_command_records_the_manual_judge_with_the_starters_provenance(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    ids = {}
+    for mode in ("bare", "clarify"):
+        out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--mode", mode,
+                  "--by", "stand-in", "--role-played")  # fmt: skip
+        assert out.returncode == 0, out.stderr
+        ids[mode] = out.stdout.strip()
+    for mode, verdict in (("bare", "precise"), ("clarify", "thin")):
+        judged = next(r["payload"] for r in run(rows(dsn, ids[mode])) if r["type"] == "judge.decided")
+        assert judged["verdict"] == verdict and judged["leg"] == "manual"
+        assert judged["provenance"]["by"] == "stand-in" and judged["provenance"]["role_played"] is True
+    with pytest.raises(ValueError, match="mode"):
+        tasks.Brief(instruction="x", budget_usd_micros=0, mode="interview")
+
+
+def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    ran: list = []
+
+    async def test_runner(ctx: router.Context) -> dict:
+        ran.append(ctx.check)
+        async with await db.connect(ctx.dsn) as conn:
+            await verdicts.record_check(conn, ctx.task_id, Check.TEST, "pass", leg="test runner")
+        return {"status": "moved"}
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        return await drive(dsn, task, runners={**scripted.RUNNERS, Check.TEST: test_runner})
+
+    out = run(go())
+    assert ran == [Check.TEST]
+    assert out["status"] == "delivered" and out["state"]["checks"]["test"]["verdict"] == "pass"
+
+
+# -- races ---------------------------------------------------------------------------------
+
+
+def test_feedback_racing_the_release_never_lets_a_merge_follow_the_feedback(dsn, tmp_path):
+    """Release checks the predicate and writes its intent under the task's
+    lock in one transaction; feedback takes the same lock. Whichever wins,
+    no merge intent lands after a feedback row, and the ledger stays
+    consistent."""
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+
+        async def release():
+            async with await db.connect(dsn) as conn:
+                try:
+                    return await broker.release(conn, effect)
+                except broker.Refused as exc:
+                    return exc
+
+        async def give():
+            async with await db.connect(dsn) as conn:
+                try:
+                    return await session.feedback(conn, task, "one more thing")
+                except LookupError as exc:
+                    return exc
+
+        released, fed = await asyncio.gather(release(), give())
+        return released, fed, await rows(dsn, task), await scripted.status(dsn, task)
+
+    released, _fed, written, st = run(go())
+    ids = {r["type"]: r["id"] for r in written if r["type"] in ("effect.intent", "feedback.given")}
+    if "effect.intent" in ids and "feedback.given" in ids:
+        assert ids["effect.intent"] < ids["feedback.given"]  # feedback came after the merge started
+    assert "effect.intent" in ids or isinstance(released, broker.MergeRefused)
+    assert tasks.audit(st) == []
+
+
+def test_two_releases_of_one_merge_push_once(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+
+        async def release():
+            async with await db.connect(dsn) as conn:
+                try:
+                    return await broker.release(conn, effect)
+                except (broker.Refused, broker.NotApproved) as exc:
+                    return exc
+
+        outs = await asyncio.gather(release(), release())
+        return outs, await rows(dsn, task), (await fold(dsn, task)).candidate.sha
+
+    outs, written, sha = run(go())
+    assert len([r for r in written if r["type"] == "effect.intent"]) == 1
+    assert len([r for r in written if r["type"] == "effect.outcome"]) == 1
+    assert any(getattr(o, "kind", None) == "done" for o in outs)
+    assert git(origin, "rev-parse", "main") == sha

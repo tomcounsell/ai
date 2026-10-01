@@ -212,9 +212,19 @@ reaches the real branch only on Tom's tap (Mission item 1, Evidence
 - The kernel provisions each task's workspace (lifted from
   `scripts/replay_workspace.py`), including the app's environment so the
   suite can run.
-- Fresh sessions for critique, review, and docs; the docs branch's commits
-  outside doc paths are dropped and recorded as a `changes` finding.
-- `checks.test` runs the suite at head and base, then the breadth call.
+- Fresh sessions for critique, review, and docs, registered as runners in
+  the composition root (`core/__main__.py`, `RUNNERS`); each stage whose
+  runner lands is removed from `python -m core verdict`, and the command
+  is deleted. Tests show, through the router: the docs branch's commits
+  outside doc paths (`machine.is_doc_path`) are dropped when its turn ends
+  and recorded as a `changes` finding; a branch whose turn fails or is
+  stopped leaves no verdict, and the next run reruns that branch and only
+  that one; the docs session works in its own checkout, so docs commits
+  no longer ride into the next candidate after a send-back.
+- `checks.test` runs the suite at head and base, then the breadth call;
+  `test.decided` carries the command, the failures at head that do not
+  fail at base, the listed behaviors, and the breadth call's model,
+  confidence, cost, and guard id.
 - The blind verifier: Opus in a fresh session, rerunning the tests in an
   Apple container built by the kernel; `review.decided` carries the
   governance boolean. Container RAM measured.

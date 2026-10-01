@@ -4,8 +4,9 @@
 Both are `act` and push to the origin URL the kernel recorded when the task
 started (`Brief.origin_url`), never to whatever the workspace's config names
 now: the turn owns that config. A push is refused when the workspace's own
-config holds any include, URL rewrite, or push URL (`core.git.rewrites`),
-since git would apply a rewrite even to an explicit URL. The push carries
+config holds any include, URL rewrite, push URL, or anything else
+`core.git.hostile` names, since git would apply a rewrite even to an
+explicit URL and the kernel runs no program the turn chose. The push carries
 `<head_sha>:refs/heads/<branch>` and never `--force`: a branch that moved
 under the broker is Tom's to read, not the broker's to overwrite. The
 performers run in the kernel's process, outside the turn's sandbox, which is
@@ -44,25 +45,32 @@ class PushBranch:
         return self._rewrites()
 
     def _rewrites(self) -> str | None:
-        found = git.rewrites(self.workspace)
-        return f"the workspace's config could redirect the push: {'; '.join(found)}" if found else None
+        found = git.hostile(self.workspace)
+        return (
+            f"the workspace's git config could redirect the push or run a program: {'; '.join(found)}"
+            if found
+            else None
+        )
 
     def destination(self, action) -> tuple[str, str]:
         return self.url or git.push_url(self.workspace), action.target
 
     def perform(self, action, key: str) -> dict:
-        url, branch = self.destination(action)
         said = self.refuse(action)
         if said:
             raise ValueError(said)
+        url, branch = self.destination(action)
         git.push(self.workspace, url, action.payload["head_sha"], branch)
         return {"remote": url, "branch": branch, "sha": action.payload["head_sha"]}
 
     def lookup(self, action, key: str) -> dict | None:
-        url, branch = self.destination(action)
-        sha = action.payload.get("head_sha")
-        if sha and git.remote_sha(self.workspace, url, branch) == sha:
-            return {"remote": url, "branch": branch, "sha": sha}
+        try:
+            url, branch = self.destination(action)
+            sha = action.payload.get("head_sha")
+            if sha and git.remote_sha(self.workspace, url, branch) == sha:
+                return {"remote": url, "branch": branch, "sha": sha}
+        except git.GitError:
+            pass  # the workspace is refused; the outcome is failed, reconciled later
         return None
 
 

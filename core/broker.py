@@ -228,6 +228,10 @@ async def release(conn, effect_id: str) -> Outcome:
                 (effect_id, described["payload_sha256"]),
             )
         ).fetchone()
+        action = Action(described["action_type"], described["target"], described["payload"])
+        refuse = getattr(PERFORMERS.get(action.action_type), "refuse", None)
+        if refuse is not None and (said := refuse(action)):
+            raise Refused(said)
         if described["action_type"] == "merge":
             f = machine.fold(await ledger.read(conn, task_id))
             facts = _git_facts((await tasks.brief(conn, task_id)).workspace, f, described["payload"])
@@ -238,10 +242,6 @@ async def release(conn, effect_id: str) -> Outcome:
                 raise MergeRefused(failed)
         if row is None:
             raise NotApproved(f"effect {effect_id} has no approval from Tom")
-        action = Action(described["action_type"], described["target"], described["payload"])
-        refuse = getattr(PERFORMERS.get(action.action_type), "refuse", None)
-        if refuse is not None and (said := refuse(action)):
-            raise Refused(said)
         await _intent(conn, task_id, effect_id, described, approval_id=row[0])
     return await _perform(conn, task_id, effect_id, action, described)
 

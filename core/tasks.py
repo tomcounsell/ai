@@ -34,10 +34,12 @@ class Brief:
 
     `budget_usd_micros` is money, the only budget unit. `max_effect_class`
     is the ceiling no effect under this task may exceed. `governance_grant`
-    is Tom's grant for this task to add a check, gate, hook, validator,
-    review round, or approval step; with none, the broker refuses any action
-    that adds governance, and with one, each such action is still `act` and
-    waits for his tap.
+    is Tom's advance word that this task may add a check, gate, hook,
+    validator, review round, or approval step, shown in every turn's Brief.
+    It grants nothing by itself: the broker computes whether a merge adds
+    governance from the review and docs verdicts, and refuses it while any
+    instance they name lacks Tom's own tap (`guard.granted`), Brief grant or
+    not.
 
     `workspace` is the directory a turn works in, `model` the model it runs,
     and `harness` the harness's own settings for the task (its isolation).
@@ -88,6 +90,11 @@ def resolve_workspace(workspace: str | None, target_branch: str | None = None) -
     repository, or has no origin, gives what it can."""
     if not git.is_repo(workspace):
         return {}
+    found_hostile = git.hostile(workspace)
+    if found_hostile:
+        raise WorkspaceRefused(
+            "the workspace's git config names what the kernel will not run: " + "; ".join(found_hostile)
+        )
     if git.branch(workspace) is None:
         raise WorkspaceRefused(f"{workspace} is on a detached HEAD; check out a branch first")
     found: dict[str, str | None] = {"base_sha": git.head(workspace)}

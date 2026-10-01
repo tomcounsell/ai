@@ -5,7 +5,7 @@ task's workspace, read when the turn ends.
 - `.valor/no_question.md`: from a clarify turn, why no question would
   change the result, and the approach.
 - `.valor/plan.json`: from a plan turn, the committed plan file and its
-  stakes, loop counts, scope additions, and doc paths.
+  stakes, loop counts, and scope additions.
 - `.valor/done.md`: from a build or patch turn, a candidate: what was
   delivered and how it was verified.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
