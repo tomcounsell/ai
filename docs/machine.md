@@ -162,20 +162,22 @@ money and wall time, not local memory.
 
 ## Judgement: hosted, with a fallback that is never resident
 
-Judgement goes to a hosted Jev-class API. Nothing in the judgement tier
-runs a model on the Air. The open-weight equivalent behind the same port is
-the fallback for when the hosted leg is down or refuses, and it is not
-resident on the Air.
+Judgement goes to a hosted Jev-class API (TypeSafe's Jev). Nothing in the
+judgement tier runs a model on the Air. An open-weight model behind the
+same port is the fallback for when the hosted leg fails or abstains, and it
+is not resident on the Air.
 
 Why: a Jev-class open-weight model in the 7 to 8 billion parameter range,
 quantized to 4 bits, needs about 5 GB for its weights and cache (estimate;
 not measured). Resident, it takes most of the 6 GB headroom with every
 turn. Loaded beside a turn, it pushes the machine into swap.
 
-The fallback is the same open-weight model hosted by a second provider,
-reached through the same port (Tom, 2026-10-01). It costs the Air no
-memory and stays available while a turn holds the slot. A low-confidence
-call takes its abstain route, per [judgement-layer.md](judgement-layer.md).
+The fallback is hosted too: Qwen3-235B-A22B Instruct 2507 on Parasail,
+reached through OpenRouter. Tom asked for Jev's own model on a second
+provider (2026-10-01), but Jev's base model is not published. It costs the
+Air no memory and stays available while a turn holds the slot. A call
+neither leg answers with confidence takes its abstain route, per
+[judgement-layer.md](judgement-layer.md).
 
 ## Sandboxes
 
@@ -235,16 +237,19 @@ sleep disabled is Tom's call.
 
 ## Keychain
 
-Secrets the running system reads live in the macOS Keychain, read by name
-at process start; a missing name fails the start with the name in the
-error. No secret is in a dotfile, in the repository, or in a turn's
-environment. This serves the constraint "bounded authority and spend": a
-credential is authority, and a turn holds none.
+Kernel-held secrets live in the kernel key directory, the directory of
+the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which both
+turn sandbox profiles deny. They are not in the Keychain, because a turn
+can read the login keychain (below). A secret is read by name when the
+process that needs it starts; a missing name fails the start with the name
+in the error. No secret is in the repository or in a turn's environment.
+This serves the constraint "bounded authority and spend": a credential is
+authority, and a turn holds none.
 
 | Secret | Read by | Today |
 |---|---|---|
 | The Anthropic credential for frontier turns | The gateway, which forwards the harness's own credential upstream | Claude Code's own login, which Claude Code keeps in the Keychain. The kernel holds no API key of its own |
-| The judgement API key | The kernel process | Not built |
+| The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run` or `calibrate` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
 | Mail credentials | The email bridge | Not built |
 | Git hosting tokens | The broker's performer for a released push, never the turn | Not needed yet: pushes go to a local bare origin |
@@ -260,14 +265,15 @@ login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on
 login to call the provider around the gateway is an accepted risk, because
 budgets are for visibility and honest metering, not a hard wall.
 
-**The one exception: the kernel databases' password file.** The passwords
-for `valor_kernel` and the owner role on the kernel databases live in a
-libpq password file, `~/.config/valor-kernel/pgpass` (the `pg_passfile`
-setting; mode 600, directory mode 700), not in the Keychain. A Keychain
-item is readable by a turn through `security`, and the vault `.env` syncs
-to iCloud and is loaded into the environment of the old system's
-unsandboxed sessions; this file is neither, and both turn sandbox profiles
-deny its directory by its setting. libpq reads it for every kernel
+**The kernel key directory.** The passwords for `valor_kernel` and the
+owner role on the kernel databases live in a libpq password file,
+`~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
+the judgement keys in `judgement-keys` beside it, a path derived from the
+password file's so the sandbox deny, derived from the same setting, cannot
+drift from it. A Keychain item is readable by a turn through `security`,
+and the vault `.env` syncs to iCloud and is loaded into the environment of
+the old system's unsandboxed sessions; this directory is neither, and both
+turn sandbox profiles deny it. libpq reads the password file for every kernel
 connection, so no kernel process holds the password in a string or its
 environment. `python -m core secure-login` makes it and is the only code
 that writes it. Tom's own `psql` reaches the kernel databases by

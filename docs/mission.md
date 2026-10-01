@@ -100,8 +100,10 @@ computes whether a merge adds governance from the review and docs verdicts
 on its candidate, each of which names every instance by its hunk. A merge
 with an instance Tom has not granted by his own tap (`python -m core
 grant`) is refused; the Brief's field does not stand in for the tap. The
-blind verifier's boolean over every diff is part of the design; the current
-kernel has no verifier, and review verdicts are recorded by hand.
+boolean is a judgement asked over every hunk of a diff
+(`core/judgement_sites.py`), and a review or docs verdict given those
+answers takes its instances from them; the kernel has no verifier to
+ask it, and review verdicts are recorded by hand.
 
 A guard Tom grants is ledgered with three things: the incident, the mission
 item, and the expiry date ninety days out; a grant missing the incident or

@@ -9,8 +9,8 @@ The rule: integration first, no mocks.
 - Real Postgres.
 - Real containers.
 - Real bridges against test accounts.
-- No mocks, fakes, or patched clients.
-- Every test declares its live spend: the money it may cost per run.
+- No mocks, fakes, or patched clients. A model provider is a real local HTTP upstream speaking its wire format, its bodies shaped by responses recorded live (`tests/judgement_upstream.py`, `tests/fixtures/record_judgement.py`).
+- Every test declares its live spend: the money it may cost per run (`pytest.mark.spend`). Live tests run only with `VALOR_LIVE=1`.
 
 The emulator (human-originated historical requests, labelled by the human decision, scored by cheap judgement) runs today from `scripts/` while it is an experiment, and moves here in the design.
 

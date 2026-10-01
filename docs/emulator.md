@@ -21,7 +21,7 @@ Tom as evidence for his decision.
 |---|---|
 | Item | One historical request, as a JSON file: the repository, the clean base commit, the request verbatim, the answer key, the reference, the services its tests need, and the verification commands |
 | Run | One item replayed in one arm, in its own workspace, as one kernel task. Named `<item>-<arm>` |
-| Arm | The condition a run is replayed under. Today: `bare` (the request alone) and `clarify` (the Brief asks Valor to inspect, then send its material questions and intended approach before editing) |
+| Arm | The condition a run is replayed under: `bare` (the judge decides `precise`, so the request goes straight to the plan), `clarify` (the judge decides `thin`, so Valor inspects, then sends its material questions and intended approach before editing), or `routed` (the real judgement legs decide) |
 | Clean base | A commit holding the repository as it stood when Tom asked, with nothing that already states the answer |
 | Answer key | Tom's recorded intent for the item: his words where they exist (an issue comment, a Notion card, his review), and inferences from the merged code, marked as such, where they do not |
 | Reference | The merged PR's diff: one accepted realization of the intent, shown to the judge and never to Valor |
@@ -131,11 +131,18 @@ a turn that can read the answer is not being measured.
 
 ### The driver: `scripts/replay.py`
 
-`replay.py ITEM.json --arm bare|clarify [--judge]` builds the workspace,
-starts a kernel task (`python -m core start --mode <arm> --target-branch
-main`, so the arm is the judge's verdict) at effect ceiling
-`act`, no governance grant, with the item's budget (default $8.00, Opus 5.5),
-and loops `python -m core run` until one of:
+`replay.py ITEM.json --arm bare|clarify|routed [--judge]` builds the
+workspace, starts a kernel task (`python -m core start --target-branch
+main`) at effect ceiling `act`, no governance grant, with the item's budget
+(default $8.00, Opus 5.5), and loops `python -m core run` until one of the
+outcomes below. The kernel has no switch for the arm. For `bare` and
+`clarify` the driver starts the local judgement upstream
+(`python -m tests.judgement_upstream --answer precise|thin`) and points the
+kernel's leg endpoints at it (`VALOR_JEV_URL`, `VALOR_OPEN_WEIGHT_URL`), so
+the real judge runner, port, metering, and rows run and decide as forced;
+each attempt's endpoint host on the row (127.0.0.1) shows the arm was
+forced, and a loopback endpoint needs no key. `routed` uses the real
+endpoints and the keys in the kernel key directory.
 
 | Outcome | When |
 |---|---|
@@ -429,10 +436,9 @@ its expiry:
   Route: #894 (leans on an example), #191 and #188 (one-line asks). Straight
   to build: #872, #646, #893 (precise). #633 is the hard case: the request was
   precise and clarify hurt.
-- **Its arm.** A `routed` arm replays each item with the classifier deciding
-  the mode. It should match clarify on the one-liners and bare on the precise
-  items, at less attention than clarify spends on every item. The kernel's
-  task modes are `bare` and `clarify` today; `routed` is design.
+- **Its arm.** The `routed` arm replays each item with the classifier
+  deciding. It should match clarify on the one-liners and bare on the
+  precise items, at less attention than clarify spends on every item.
 - **Its saving.** The first demonstration estimated the classifier at well
   under $0.05 a request and the saving at $1.40 to $1.80 of $2.97, plus both
   review rounds. Replaying #894 with and without it measures that estimate

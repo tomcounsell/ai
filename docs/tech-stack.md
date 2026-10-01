@@ -54,9 +54,9 @@ enforcing outside the model is AI Control [4].
 | Memory | popoto over Postgres | chosen, not built |
 | Model gateway | in-house aiohttp proxy, Anthropic wire format | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
-| Model seats | a pinned registry in `core/settings.py`: frontier, reviewer, light; judgement arrives with the judgement tier | in use |
+| Model seats | a pinned registry in `core/settings.py`: frontier, reviewer, light; the judgement legs pinned beside it | in use |
 | Frontier provider | Anthropic, one provider | in use |
-| Judgement tier | Jev, with OpenAI's Decisions API for judgements that need images; open-weight fallback hosted by a second provider behind the same port | chosen, not built; fallback provider open |
+| Judgement tier | Jev (`jev-1.13.0`), with the open-weight fallback Qwen3-235B-A22B Instruct 2507 on Parasail fp8 through OpenRouter behind the same port; OpenAI's Decisions API for judgements that need images | in use; the images leg chosen, not built |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
@@ -68,7 +68,7 @@ enforcing outside the model is AI Control [4].
 | Approval from a phone | Telegram or a web page | open |
 | Bridges | Telegram and email modules | chosen, not built; libraries open |
 | Scheduling | launchd | chosen, not built |
-| Secrets | macOS Keychain, durable copy in the vault; the kernel databases' passwords in a libpq password file outside both | chosen, not built; the password file in use |
+| Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys) in the kernel key directory, durable copy of the keys in the vault; the bridges' in the macOS Keychain | the key directory in use; the Keychain chosen, not built |
 | Dashboard | read-only views over `core/` read models | chosen, not built; framework open |
 | Run and view the app | a headless browser in the workspace | open |
 | Machine | one install per Mac, designed for one machine; MacBook Air M4, 16 GB as the target | chosen; the experiments ran on a 64 GB Mac |
@@ -261,7 +261,7 @@ Model choice is data the kernel reads, not code: a small registry of pinned
 model ids with their prices and the seats they fill (`core/settings.py`,
 `SEATS`). `python -m core start --model` takes a seat name or a model id
 and records the pinned id in the Brief. Status: **in use** for frontier,
-reviewer, and light; the judgement seat arrives with the judgement tier.
+reviewer, and light; the judgement legs are pinned beside the seats.
 
 - **Frontier**: the newest model, for turns.
 - **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
@@ -292,7 +292,8 @@ the fallback. A low-confidence call takes its judgement task's abstain
 route, which reaches Tom only through a step he would see anyway. A
 classifier decides what a thing is; it never decides what a thing may do. The taxonomy, the port, and
 confidence gating are [judgement-layer.md](judgement-layer.md). Status:
-**chosen, not built**.
+**in use** for the request judge; the breadth and governance calls are
+built, and the runners that call them are milestone 1.4's.
 
 What the stack fixes:
 
@@ -302,8 +303,9 @@ What the stack fixes:
   wrong for this machine.
 - **Metered like every other call.** Judgement calls are reserved and
   charged against the task's budget, so their cost shows in the same
-  ledger. The current gateway meters Anthropic Messages calls only;
-  metering the judgement legs is design ([judgement-layer.md](judgement-layer.md)).
+  ledger: in the kernel process through `core/budget.py`, the gateway's
+  rows with `route: judgement`, no HTTP route
+  ([judgement-layer.md](judgement-layer.md)).
 - **First use: the request judge.** Each incoming request is read by the
   judgement tier before the first turn. An underspecified request (a
   one-line ask, an ask that leans on an example, an ask naming existing UI
@@ -316,14 +318,26 @@ What the stack fixes:
   about the old SDLC stages). Serves Mission items 3 and 6. The
   demonstration estimated the judge's cost at well under $0.05 a request
   against $1.40 to $1.80 of frontier spend it would have saved; an estimate,
-  to be measured by replay.
+  to be measured by replay. Calibration measured about $0.000033 (Jev) and
+  $0.00023 (fallback) per call.
 
 **Vendor.** Jev is the primary leg, including for client request text
 (Tom, 2026-10-01). Jev takes no images, so a judgement that needs one goes
-to OpenAI's Decisions API behind the same port. The fallback is the same
-open-weight model hosted by a second provider, never resident on this
-machine (Tom, 2026-10-01); which model and which provider are **open**
-([judgement-layer.md](judgement-layer.md), [machine.md](machine.md)).
+to OpenAI's Decisions API behind the same port (not built). The fallback is
+hosted, never resident on this machine. Jev's base model is not published,
+so it cannot be the same model on a second provider (Tom's ask,
+2026-10-01): it is Qwen3-235B-A22B Instruct 2507, open weights and no
+reasoning tokens, on Parasail at fp8 through OpenRouter with provider
+fallback off ([judgement-layer.md](judgement-layer.md),
+[machine.md](machine.md)).
+
+| Model (as pinned) | Input $/Mtok | Output $/Mtok | Checked | Source |
+|---|---|---|---|---|
+| `jev-1.13.0` | 0.042 | 0 | 2026-10-02 | https://docs.typesafe.ai/models |
+| `qwen/qwen3-235b-a22b-2507@parasail/fp8` | 0.14 | 0.80 | 2026-10-02 | OpenRouter's endpoints list for the model, Parasail fp8 |
+
+The table is `JUDGEMENT_PRICES` in `core/settings.py`, kept apart from the
+gateway's Anthropic prices.
 
 ## 6. Harness and sandbox
 
@@ -513,12 +527,14 @@ objective and never a bare script ([routines.md](routines.md)). Status:
 **chosen, not built**. Serves "Bounded authority and spend": scheduled work
 spends from a budget like any other task.
 
-**Secrets.** macOS Keychain on the machine, with the vault `.env` as the
-durable copy; nothing in a dotfile in the repository. Status: **chosen, not
-built**. The kernel's one secret of its own is the kernel databases'
-passwords, in a libpq password file outside the Keychain and the vault
-([machine.md](machine.md), Keychain, for why); the provider credential is
-Claude Code's, and the workspace database password is a fixed test value.
+**Secrets.** Kernel-held secrets live in the kernel key directory, which
+both turn sandbox profiles deny: the kernel databases' passwords in a libpq
+password file, and the judgement keys in `judgement-keys` beside it, copied
+from the vault `.env` by `python -m core judgement-keys` ([machine.md](machine.md),
+Keychain, for why not the Keychain). Status: **in use**. The bridges'
+secrets go in the macOS Keychain: **chosen, not built**. Nothing secret is
+in the repository; the frontier credential is Claude Code's, and the
+workspace database password is a fixed test value.
 
 **Telemetry.** None beyond the ledger. The events table is the only record
 with evidentiary standing; `python -m core status` and `ledger` read it.
@@ -542,7 +558,7 @@ memory figure from them carries over; the RAM budget per component is
 - **One Postgres server for the kernel**, resident. Workspace clusters start
   with their task and stop with it.
 - **No resident model.** Judgement is hosted (section 5). The open-weight
-  fallback is hosted by a second provider.
+  fallback is hosted too (Parasail, through OpenRouter).
 - **Bridges resident, everything else on demand.** The bridges are the only
   components that must be up when Tom is not at the machine. Routines start
   under launchd and exit.

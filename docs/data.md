@@ -39,7 +39,7 @@ verdict enum, is generated from `core/machine.py` (`VERDICTS`) and applied by
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | `bigint` identity | The order of the ledger. Every reader orders by it |
-| `task_id` | `text` | The stream the row belongs to: a task's id, or `corrections` for Tom's corrections |
+| `task_id` | `text` | The stream the row belongs to: a task's id, or a named stream (`corrections`, `guards`, `judgement`) |
 | `type` | `text` | The event type, `noun.verb` (`turn.started`, `effect.held`) |
 | `payload` | `jsonb` | The event's fields. Ids of what the row regards live here |
 | `at` | `timestamptz` | `clock_timestamp()`, the wall time of the insert |
@@ -54,6 +54,8 @@ and a GIN index over `payload` (`jsonb_path_ops`) for containment queries
 A **stream** is the set of rows sharing a `task_id`. A task's stream holds
 everything that happened to it. The `corrections` stream holds every
 correction Tom has given, numbered from one, and applies to every task.
+The `guards` stream holds the seeded guards, and the `judgement` stream
+every calibration record.
 
 ### documents
 
@@ -67,9 +69,11 @@ correction Tom has given, numbered from one, and applies to every task.
 The primary key is `(kind, id)`. A document is what the kernel commits to
 once and never changes. The `task` document is the Brief as the task
 started: instruction, budget in micro-dollars, effect ceiling,
-`governance_grant`, workspace, model, harness settings, the starter's mode,
-and where a merge goes: the target branch, origin's push URL as an absolute
-path, and the workspace's head at start (`core/tasks.py`, `Brief`). The kernel role cannot update a document, so
+`governance_grant`, workspace, model, harness settings, and where a merge
+goes: the target branch, origin's push URL as an absolute path, and the
+workspace's head at start (`core/tasks.py`, `Brief`). `Brief.load` reads
+only the fields the Brief has, so a stored document carrying an older
+field (`mode`) still loads. The kernel role cannot update a document, so
 anything that changes about a task after it starts is an event on its
 stream, never an edit to its Brief. Tom's feedback that widened the
 demonstration's scope from one profile item to seven was two
@@ -88,12 +92,15 @@ payload carries the ids listed; a reader relies on nothing else.
 
 | Writer | Type | Payload | Serves |
 |---|---|---|---|
-| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `budget_usd_micros`, `max_effect_class`, `governance_grant`, mode, `target_branch`, `origin_url`, `base_sha`. A row without `sdlc` is a legacy task (State is a fold, below) | Bounded authority and spend |
-| `core/tasks.py`, `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), leg (`manual` until 1.3), `judgement_id`, `guard_id` when thin, provenance when manual | Mission items 3 and 6 |
+| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `budget_usd_micros`, `max_effect_class`, `governance_grant`, `target_branch`, `origin_url`, `base_sha`, provenance. A calibration task's carries `calibration` (the site) instead of `sdlc`, with instruction, budget, `max_effect_class: read`, and provenance. A row with neither is a legacy task (State is a fold, below) | Bounded authority and spend |
+| `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), `leg: judgement`, `judgement_id`, `answered`, `p_precise`, label, `abstained`, model, `usd_micros`, `guard_id` when thin. Rows from before the judge ran carry `leg: manual` and provenance | Mission items 3 and 6 |
+| `core/judgement.py` | `judgement.answered` | `judgement_id`, site, `task_sha256`, `calibrated_sha256`, `inputs_sha256`, `ref`, `usd_micros`, attempts (per leg: model, endpoint host, outcome, `call_id`, charge, latency, and on failure a reason, status, and fixed sentence), answers (per question: label, probabilities, `p_proceed`, decision, the provider's pick, leg, model), action, `abstained`, leg, model | Mission item 6; the routing a judgement causes is legible |
+| `core/judgement.py` | `judgement.failed` | as `judgement.answered` without answers, action, leg, or model; plus `on_failure` and `too_large` | As above |
+| `core/judgement_sites.py` | `judgement.calibrated` | on the `judgement` stream: site, `run`, `task_sha256`, both pinned models, floors, `at`, the calibration task's id, `n`, label sources, per leg the Brier score with its n, confusion counts, abstain rate, accuracy, error rate, cost per call, `all_correct`; `entry_check`; every case | Calibration discipline (`docs/judgement-layer.md`) |
 | `core/tasks.py` | `task.stopped` | reason, by | Lossless stop |
-| `core/budget.py` | `gateway.reserved` | `call_id`, `turn_id`, model, `usd_micros` (worst case), estimated input, `max_tokens` | Money conserved per call |
+| `core/budget.py` | `gateway.reserved` | `call_id`, `turn_id`, model, `usd_micros` (worst case), estimated input, `max_tokens`. A judgement call's (written through `core/judgement.py`) has `turn_id` null and adds `route: judgement`, `judgement_id`, site, leg | Money conserved per call |
 | `core/budget.py` | `gateway.refused` | the call's fields plus reason | Bounded spend; the refusal is itself recorded |
-| `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage | Money conserved per call |
+| `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage. A judgement call's adds the judgement fields above and `unused`, `unsent`, or `usage_missing` when they apply | Money conserved per call |
 | `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
@@ -101,7 +108,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/session.py` | `question.asked` | `question_id`, `turn_id`, text, the state the answer returns to | Mission item 6 |
 | `core/session.py` | `plan.written` | `turn_id`, path, commit, `sha256` of the file at that commit, stakes, `critique_rounds`, `review_rounds`, scope additions | Mission items 1 and 3 |
 | `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg, model, `usd_micros`, `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
-| `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg, model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`; review and docs add the governance answer and its instances (id, path, line, function context, incident, mission item); docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
+| `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg, model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`, and, when a breadth judgement was given, `breadth` (its `judgement_id`, actions, abstained, model, `usd_micros`, `guard_id`); review and docs add the governance answer and its instances (id, path, line, function context, summary, incident, mission item), and, when governance judgements were given, their ids, `abstain_instances`, and `unjudged_hunks`; docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
 | `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
 | `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`, `governance_refused`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions, the instances awaiting Tom's tap. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
@@ -169,6 +176,7 @@ the kernel code does.
 | `events_one_correction_number` | `payload->>'number'` | `correction.recorded` | Two corrections sharing a number |
 | `events_one_stop` | `task_id` | `task.stopped` | A task stopped twice |
 | `events_one_judge` | `task_id` | `judge.decided` | Two judge verdicts for one task |
+| `events_one_judgement` | `payload->>'judgement_id'` | `judgement.answered`, `judgement.failed` | Two outcomes for one judgement |
 | `events_one_turn_row` | `(type, payload->>'turn_id')` | `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` | One turn collected twice, so two candidates from one turn |
 | `events_one_guard` | `payload->>'guard_id'` | `guard.granted` | A guard granted twice |
 | `events_one_instance_grant` | `(task_id, payload->>'instance_id')` | `guard.granted` with an instance | One governance instance granted twice on a task |
@@ -264,7 +272,9 @@ no `sdlc` predates the state machine: it folds read-only by the old
 kernel's precedence (stopped; a delivery not reopened by feedback is
 `merge`; an unanswered question is `waiting`; feedback after a delivery is
 `patch`; any turn is `build`; else `judge`), and nothing but stop, budget
-raise, approve, and release writes to it. The instance so far is
+raise, approve, and release writes to it. A calibration task folds with
+`calibration` set and nothing else, and every SDLC writer, stop, budget
+raise, and turn refuses it. The instance so far is
 provenance (`core/tasks.py`, `provenance`): a field a row never recorded
 reads as null, never as a default. Answers and feedback recorded before
 `role_played` existed read `role_played: null`, and approvals recorded

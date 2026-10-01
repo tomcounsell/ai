@@ -68,7 +68,6 @@ the task starts:
 | `workspace` | the directory the task's turns work in |
 | `model` | the model its turns run |
 | `harness` | the harness's settings for the task, its isolation included |
-| `mode` | `bare` or `clarify`: the starter's judge verdict (`precise` or `thin`) until the judge runs (milestone 1.3); none leaves the task in `judge` |
 | `target_branch`, `origin_url`, `base_sha` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then |
 
 The Brief a turn receives is **dispatched**: rendered from the ledger as the
@@ -127,7 +126,8 @@ Serves bounded authority and spend. Only Tom raises a committed budget
 provenance; a stopped task takes none); a turn that hits a refusal ends the
 run as `budget exhausted`, and the next run after a raise continues. The
 budget meters what passes the gateway and is not a wall around the
-provider (see Limits).
+provider (see Limits). Judgement calls are reserved and charged the same
+way in the kernel process, with no HTTP route (judgement-layer.md).
 
 **Design.** Conservation down the tree (see The objective tree), and:
 
@@ -285,7 +285,7 @@ Three records say what happened in a turn:
 
 | Record | Written by | Holds | Built |
 |---|---|---|---|
-| Gateway rows | the gateway | every model call: model, reservation, charge, usage | yes |
+| Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, reservation, charge, usage | yes |
 | Turn record | the kernel | `turn.started` (the state, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
@@ -411,9 +411,9 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
 
 ## The judgement tier in the loop
 
-Each judgement is a Jev call through `JudgementPort` in
-[judgement-layer.md](judgement-layer.md) and decides what a thing is,
-nothing about what it may do. The SDLC uses three:
+Each judgement is a Jev call, with an open-weight fallback, through
+`JudgementPort` in [judgement-layer.md](judgement-layer.md) and decides
+what a thing is, nothing about what it may do. The SDLC uses three:
 
 1. **Before any plan: is this request thin?** A thin request (a one-line
    ask, one leaning on an example, one naming existing UI without scope)
@@ -423,16 +423,17 @@ nothing about what it may do. The SDLC uses three:
    items 3 and 6; ninety-day expiry). Clarify raised fidelity on one-line
    requests and changed nothing on precise ones; asked unconditionally it
    hurt once (#633), so it is never the default (rebuild-baseline.md,
-   Aggregate). **Built:** the `judge` state, `judge.decided`, and the
-   seeded guard; the verdict is recorded by hand (`start --mode`) until
-   the classifier (milestone 1.3).
+   Aggregate). **Built:** the judge runner asks before any turn and the
+   kernel records `judge.decided` from the answer, firing the seeded guard.
 2. **After the tests: are they broad enough?** The breadth check in
-   [sdlc-state-machine.md](sdlc-state-machine.md). **Design.**
+   [sdlc-state-machine.md](sdlc-state-machine.md). **Built:** the call and
+   the test verdict read from it. **Design:** the test runner (1.4).
 3. **Over every diff: does this add governance?** The blind verifier's one
-   boolean, "does this add a check, gate, hook, round, or review step". A
-   yes with no grant is a refused merge. **Built:** review and docs
-   verdicts carry the answer and its instances, and the broker refuses a
-   merge with an instance lacking Tom's tap. **Design:** the judgement.
+   boolean, "does this add a check, gate, hook, round, or review step",
+   asked per hunk. A yes with no grant is a refused merge. **Built:** the
+   judgement, review and docs verdicts that take their instances from it,
+   and the broker's refusal of a merge with an instance lacking Tom's tap.
+   **Design:** the review and docs runners that call it (1.4).
 
 ## Verification
 
@@ -564,7 +565,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
-| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the verifier's boolean over every diff (design) | governing constraint |
+| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the judgement over every hunk (built; the runners calling it are 1.4's) | governing constraint |
 | A merge on a model's say-so, or redirected by a turn | the merge predicate, five terms read from rows and git, checked with the intent in one transaction; origin's URL and the target branch recorded at start and bound into the approval; a workspace config that names a program, redirects a push, or includes other config refused | bounded authority |
 | Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
@@ -572,7 +573,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
-| Thin request built on a guess | the `judge` state routes a thin request to `clarify` (built; the judgement is by hand until 1.3) | Mission 3, 6 |
+| Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
 | A wrong plan reaches code | critique, rounds set by stakes (the loop built; the fresh session is 1.4's) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
 | Verifier too lenient | Opus-class blind reviewer, never cheaper; human audit sample (design) | Evidence |

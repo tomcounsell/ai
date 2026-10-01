@@ -86,13 +86,11 @@ the predicate. Postgres refuses a verdict outside its enum (a `CHECK`
 constraint generated from `VERDICTS`). A turn's Brief carries the stage
 file for its state from `skills/sdlc/`.
 
-Runners exist for `clarify`, `plan`, `build`, and `patch`. The judge's is
-milestone 1.3's; critique, test, review, and docs are 1.4's. Until each
-exists the router stops there and says so, and a person records the
+Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
+`build`, and `patch`; critique, test, review, and docs are 1.4's. Until
+each exists the router stops there and says so, and a person records the
 verdict with `python -m core verdict TASK STAGE VERDICT` (`leg: manual`,
-with provenance), which refuses a stage that has a runner. `start --mode
-bare|clarify` records the judge's verdict the same way (`precise` or
-`thin`).
+with provenance), which refuses a stage that has a runner.
 
 **Before 1.4, a limitation.** With no separate docs checkout, docs commits
 recorded by hand sit in the builder's workspace on top of the candidate
@@ -184,9 +182,8 @@ two idle turns, a failed turn, or `stopped`) or reaches a stage with no
 runner, then prints one status line and returns. The router reads verdicts
 and follows the table; it never writes a verdict and never decides
 authority. One run per task at a time: a run holds a session advisory lock
-on the task for its whole run, a second returns `already running`, and a
-run whose lock connection died returns `lock lost` before its next turn or
-write.
+on the task for its whole run, a second returns `already running`, and one
+whose lock connection died returns `lock lost` before its next turn or write.
 
 | State | Tier | Why that tier |
 |---|---|---|
@@ -216,18 +213,19 @@ written, never a paraphrase (Mission item 1).
 **Goal.** Route a request whose intent lives only in Tom's head to
 `clarify`, and let a precise one through untouched.
 
-**What it asks.** One judgement-tier call over the request and a short
-summary of the code it names, against three cues the evidence identified:
-a one-line ask whose intent lives only in Tom's head; an ask that leans on
-an example which may stand for a wider requirement; an ask that names
-existing UI or behavior without saying what happens to it.
+**What it asks.** One judgement-tier call over the request, the thread
+(empty until the bridges), and the project, against three cues: a one-line
+ask whose intent lives only in Tom's head; an ask leaning on an example
+that may stand for a wider requirement; an ask naming existing UI or
+behavior without saying what happens to it. A code summary as input is a
+gap until the emulator measures it.
 
-**Exit evidence.** `judgement.answered` at site `intake.underspecified`:
-the label, the confidence, the leg and model, the metered cost, and the
-guard id, mapped to the task's one `judge.decided` row. `precise` goes to
-`plan`; `thin` goes to `clarify`. A call below its confidence floor counts
-as `thin`: a wrong `thin` costs one clarify turn that may end without
-bothering Tom, a wrong `precise` costs review rounds.
+**Exit evidence.** `judgement.answered` (or `judgement.failed`) at site
+`intake.underspecified`, read by the kernel into the one `judge.decided`
+(`leg: judgement`, the `judgement_id`, P(precise), model, cost, guard id
+when thin). `precise` goes to `plan`; anything short of the floor,
+including both legs failing, is `thin`, to `clarify`: a wrong `thin` costs
+one clarify turn, a wrong `precise` costs review rounds.
 
 **Guard record.** Granted by Tom on 2026-10-01; mission items 3 and 6.
 Incidents: psyoptimal #894 (task `32f800bce8a2`: two feedback rounds for
@@ -365,17 +363,17 @@ then docs, with judgement calls beside whatever holds the slot.
 **What runs.** The app's relevant suite in the workspace at the candidate's
 head and at the task's base commit, deterministic. Then one judgement call
 (use shape 8 in [judgement-layer.md](judgement-layer.md)) over the diff and
-the tests the candidate added or changed, listing behaviors no test
-exercises: records in states other than the obvious one, every member of an
-enumeration the code branches on, existing tests whose bounds encode the
-old behavior. The breadth call runs whether the suite passed or not, so one
-patch gets both.
+the tests it changed: three yes/no questions, one per gap kind (records in
+states other than the obvious one, a member of an enumeration the code
+branches on, existing tests whose bounds encode the old behavior); the
+kernel lists each kind at caution as a behavior. It runs whether the suite
+passed or not, so one patch gets both. Both legs failing leaves no verdict,
+to rerun; after two such runs the failure is listed as a behavior.
 
 **Exit evidence.** `test.decided`: the candidate, the command, the failures
-at head that do not fail at base, the listed behaviors, the breadth call's
-model, confidence, cost, and guard id, and the verdict. No failures and no
-listed behaviors is `pass`; any failure is `red`; a green suite with listed
-behaviors is `gaps`.
+at head that do not fail at base, the behaviors, the breadth judgement
+(id, actions, model, cost, guard id), and the verdict the kernel computes:
+any failure `red`, else any behavior `gaps`, else `pass`.
 
 **Why.** Mission item 1 ("testing actual use"). On popoto #633 the clarify
 arm broke a bound in an existing test and was accepted anyway
@@ -400,8 +398,10 @@ the builder's Opus model in a fresh session, or an Opus-class model from
 another vendor through another harness, never a cheaper class. It reads the
 request, Tom's answers and feedback, the plan, the diff, and the docs at the
 candidate as the contract, never the executor's narration. It reruns the
-checks itself, so it needs nothing from the test branch, and asks the
-governance boolean over the diff.
+checks itself, so it needs nothing from the test branch. The kernel asks
+the governance boolean per hunk (use shape 6); the verifier can add
+instances, never remove one. Both legs failing leaves no verdict, to rerun;
+after two such runs the unjudged hunks become one instance.
 
 **Exit evidence.** `review.decided`: the candidate, the verdict, the
 findings (each with a kind, `debt` among them), the governance boolean and

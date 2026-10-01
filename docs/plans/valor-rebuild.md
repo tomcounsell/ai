@@ -516,7 +516,6 @@ Tom can overturn any of these; each is reversible.
 ## Open items
 
 - Which of Valor's Macs hosts the rebuild from milestone 2.
-- The provider hosting the open-weight judgement fallback (needed in 1.3).
 - Tom's confirmation of the answer keys for cuttlefish #646, popoto #191,
   and popoto #188 (needed in 1.5).
 - Skill system requirements (before `skills/` grows past `skills/sdlc/`).
