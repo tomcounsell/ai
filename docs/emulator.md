@@ -58,9 +58,10 @@ answer to a question.
 
 Four scripts in `scripts/`, sharing `scripts/replay_common.py`. The design
 places the emulator under `tests/` (see `tests/README.md`); it lives in
-`scripts/` while it is an experiment. Items, answer keys, results, and every
-workspace live in the experiment directory, `valor-demo`, outside the
-repository, set by `VALOR_DEMO`.
+`scripts/` while it is an experiment. Items, answer keys, results, and each
+run's spec live in the experiment directory, `valor-demo`, outside the
+repository, set by `VALOR_DEMO`; the kernel keeps each run's workspace
+under its `work_dir` setting (`~/valor-tasks`).
 
 ### The item
 
@@ -94,36 +95,39 @@ lives in an index beside the items.
 
 ### The workspace: `scripts/replay_workspace.py`
 
-Builds what a run works in, under `runs/<run>/`:
+Fetches the item's repository into a bare cache of the experiment's own
+(through `gh`, as Tom) and writes the run's project spec,
+`runs/<run>/project.toml`. The kernel provisions the rest when the driver
+starts the task (`core/workspace.py`; docs/harnesses.md, The workspace):
 
-- **The clone.** Cloned from a shared bare cache at the base commit with no
-  tags, one branch, its reflog expired and garbage collected, so it holds no
-  commit after the base. The builder prints the count of commits after the
-  base; it is zero.
-- **The origin.** A local bare repository is the clone's only remote, `main`
-  at the base, and its `HEAD` names `main`, so a task's merge has a target
-  branch. Only the broker's `push_branch` and `merge` performers write it,
-  after approval. Nothing reaches GitHub.
-- **Services.** One Postgres cluster for every run, on `127.0.0.1:5439` with
-  password auth, separate from the kernel's own database; each run gets its
-  own database, owned by a `test` role. Each run that asks for Redis gets its
-  own `redis-server` on a port no other run holds (6391 to 6399), with no
-  persistence and its file-writing commands closed. The turn's environment
-  points the app's tests at both.
+- **The clone.** At the base commit with no tags, one branch, its reflog
+  expired and garbage collected, so it holds no commit after the base.
+- **The origin.** A local bare repository is the clone's only remote,
+  `main` at the base, and its `HEAD` names `main`, so a task's merge has a
+  target branch. Only the broker's `push_branch` and `merge` performers
+  write it, after approval. Nothing reaches GitHub.
+- **Services.** A Postgres cluster of the task's own, with its own roles,
+  passwords, and port, separate from the kernel's database, and a
+  `redis-server` of its own when the run asks, with no persistence and its
+  file-writing commands closed. The turn's environment points the app's
+  tests at both.
 - **Isolation.** A `home/` the turn can read and not write: a git config with
-  no credential helper, an empty gh config, a `harness.json` with an
-  allowlisted environment, and a sandbox-exec profile.
+  no credential helper, an empty gh config, and the sandbox-exec profiles.
 
-The sandbox profile lets a turn read and write its own run directory and its
-own Claude Code transcripts, and nothing else under `~/src`: not other runs,
-the caches, the items, the answer keys, the results, or Tom's checkouts. It
-denies his notes, mail, messages, cloud folders, keys, gh config, and earlier
-transcripts and plans. On loopback a turn reaches the kernel's gateway, the
-ports 8000 to 8009, and the services its run asked for; the machine's own
-Postgres (5432) and Redis (6379) are out of reach. Denies precede allows,
-because a network rule after the loopback allows makes sandbox-exec refuse
-allowed ports (rebuild-demonstration.md, "Kernel findings", 3). Turns run
-with web fetch and search off.
+The working session's profile lets a turn read and write its own clone,
+caches, and state, and nothing else of the work directory or `~/src`: not
+other runs, the caches, the items, the answer keys, the results, or Tom's
+checkouts. It denies his notes, mail, messages, cloud folders, keys, gh
+config, and earlier transcripts. On loopback a turn reaches the kernel's
+gateway, the ports 8000 to 8009, and its task's own services; the
+machine's own Postgres (5432) and Redis (6379) are out of reach. Denies
+precede allows, because a network rule after the loopback allows makes
+sandbox-exec refuse allowed ports (rebuild-demonstration.md, "Kernel
+findings", 3). Turns run with web fetch and search off.
+
+`--teardown RUN` stops the run's task and removes its workspace through
+the kernel (`python -m core workspace remove`), which stops its services
+and frees their ports.
 
 This serves the constraint "Bounded authority and spend" for replays (a turn holds
 no credential that reaches the world) and the validity of the measurement:
@@ -132,17 +136,17 @@ a turn that can read the answer is not being measured.
 ### The driver: `scripts/replay.py`
 
 `replay.py ITEM.json --arm bare|clarify|routed [--judge]` builds the
-workspace, starts a kernel task (`python -m core start --target-branch
-main`) at effect ceiling `act`, no governance grant, with the item's budget
-(default $8.00, Opus 5.5), and loops `python -m core run` until one of the
-outcomes below. The kernel has no switch for the arm. For `bare` and
-`clarify` the driver starts the local judgement upstream
-(`python -m tests.judgement_upstream --answer precise|thin`) and points the
-kernel's leg endpoints at it (`VALOR_JEV_URL`, `VALOR_OPEN_WEIGHT_URL`), so
-the real judge runner, port, metering, and rows run and decide as forced;
-each attempt's endpoint host on the row (127.0.0.1) shows the arm was
-forced, and a loopback endpoint needs no key. `routed` uses the real
-endpoints and the keys in the kernel key directory.
+workspace's spec, starts a kernel task (`python -m core start --project SPEC
+--base SHA`) at effect ceiling `act`, no governance grant, with the item's
+budget (default $8.00, Opus 5.5), and loops `python -m core run` until one
+of the outcomes below. The kernel has no switch for the arm. For `bare` and
+`clarify` the driver starts the local judgement upstream (`python -m
+tests.judgement_upstream --answer precise|thin`) and points the kernel's leg
+endpoints at it (`VALOR_JEV_URL`, `VALOR_OPEN_WEIGHT_URL`), so the real
+judge runner, port, metering, and rows run and decide as forced; each
+attempt's endpoint host on the row (127.0.0.1) shows the arm was forced, and
+a loopback endpoint needs no key. `routed` uses the real endpoints and the
+keys in the kernel key directory.
 
 | Outcome | When |
 |---|---|
@@ -153,9 +157,10 @@ endpoints and the keys in the kernel key directory.
 | `failed` | more than two runs of the task failed |
 | `run cap` | sixteen `core run` calls without an outcome |
 | `an effect other than a local push is held for Tom` | any held effect the driver may not release |
-| `NO RUNNER ...` | the router reached a stage with no runner (critique and the checks, until milestone 1.4); the driver records no verdict for them |
+| `NO RUNNER ...` | the router reached a stage with no runner (the checks, until milestone 1.4); the driver records no verdict for them |
 
-Until milestone 1.4, then, a replay whose plan is written ends at critique
+Critique runs as the kernel's fresh session, charged to the run's budget.
+Until the check runners exist, a replay whose build writes a candidate ends
 with `NO RUNNER`, and no replay reaches a delivery.
 
 The driver approves and releases a held `push_branch` only when the

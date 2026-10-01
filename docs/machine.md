@@ -242,8 +242,8 @@ sleep disabled is Tom's call.
 ## Keychain
 
 Kernel-held secrets live in the kernel key directory, the directory of
-the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which both
-turn sandbox profiles deny. They are not in the Keychain, because a turn
+the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which every
+sandbox profile denies. They are not in the Keychain, because a turn
 can read the login keychain (below). A secret is read by name when the
 process that needs it starts; a missing name fails the start with the name
 in the error. No secret is in the repository or in a turn's environment.
@@ -272,12 +272,13 @@ budgets are for visibility and honest metering, not a hard wall.
 **The kernel key directory.** The passwords for `valor_kernel` and the
 owner role on the kernel databases live in a libpq password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
-the judgement keys in `judgement-keys` beside it, a path derived from the
-password file's so the sandbox deny, derived from the same setting, cannot
-drift from it. A Keychain item is readable by a turn through `security`,
+the judgement keys in `judgement-keys` and the optional long-lived Claude
+token in `claude-token` beside it, paths derived from the password file's
+so the sandbox deny, derived from the same setting, cannot drift from
+them. A Keychain item is readable by a turn through `security`,
 and the vault `.env` syncs to iCloud and is loaded into the environment of
-the old system's unsandboxed sessions; this directory is neither, and both
-turn sandbox profiles deny it. libpq reads the password file for every kernel
+the old system's unsandboxed sessions; this directory is neither, and every
+sandbox profile denies it. libpq reads the password file for every kernel
 connection, so no kernel process holds the password in a string or its
 environment. `python -m core secure-login` makes it and is the only code
 that writes it. Tom's own `psql` reaches the kernel databases by
@@ -293,7 +294,8 @@ Two kinds of cluster run on each machine, never one shared.
   socket. The kernel connects as `valor_kernel`, which can read and append
   and never update or delete the ledger. Roles and grants are
   [data.md](data.md).
-- **A workspace cluster**, on demand, on its own port with password
+- **A workspace cluster** per task the kernel provisions, on demand, on
+  its own port (5440 to 5599; its Redis, 6400 to 6499) with password
   authentication, owned by the workspace, holding only the app's test
   databases. The turn's sandbox reaches it and is denied the machine
   cluster.
@@ -308,7 +310,7 @@ secure-login` puts three `scram-sha-256` rules (socket, `127.0.0.1`, `::1`)
 in a marked block ahead of every other rule in `pg_hba.conf`, written to a
 temporary file and renamed into place, and puts the original back without
 reloading if the server would not parse the result. Other databases on the
-cluster keep their `trust` rules. Both turn sandbox profiles deny the
+cluster keep their `trust` rules. Every workspace sandbox profile denies the
 cluster's data directory (the `pg_data_dir` setting), so a turn cannot
 edit `pg_hba.conf` or the heap files.
 
@@ -330,8 +332,8 @@ digests of the events and documents, read from the dump's own snapshot,
 and the dump's own SHA-256). The newest 30 are kept; the ledger itself is
 kept forever. The dump refuses a missing directory (an unmounted disk), a
 directory on the cluster's own disk, and a `pg_data_dir` setting that is
-not the cluster's real data directory (read from the server), since both
-turn sandbox profiles deny that setting's path. One dump runs at a time per
+not the cluster's real data directory (read from the server), since every
+sandbox profile denies that setting's path. One dump runs at a time per
 directory, under an exclusive lock on `.valor_rebuild.lock` there: the disk
 is exFAT, which has neither hard links nor an exclusive rename, so the lock
 is what keeps two dumps from taking one name. The directory is synced to

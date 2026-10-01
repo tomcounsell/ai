@@ -62,7 +62,7 @@ enforcing outside the model is AI Control [4].
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
 | Sandbox for the verifier | Apple `container` (hypervisor-isolated Linux VMs) | chosen, not built |
 | Which sandbox for which work | owned by [architecture.md](architecture.md); containers for turns | open |
-| Workspace services | a Postgres cluster per workspace, scram auth | in use |
+| Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
 | Approval surface | the `python -m core` CLI | in use |
 | Approval from a phone | Telegram or a web page | open |
@@ -122,14 +122,15 @@ never crosses a process the turn can reach. Serves "Reliable stop, recovery,
 and correction".
 
 **Credential boundaries.** The kernel holds the database connection as
-`valor_kernel` and performs effects through the broker. It holds no model
-provider key: the gateway forwards the credential the `claude` CLI sends,
-which is Claude Code's own login on this Mac. A turn's environment is an
-allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`, locale, terminal) with
-no tokens and no agent sockets. Status: **in use**.
+`valor_kernel` and performs effects through the broker. The gateway sets
+the Claude credential on every call: `claude-token` in the kernel key
+directory when present, else Claude Code's own login read from the
+Keychain. A turn's environment is an allowlist (`HOME`, `USER`, `PATH`,
+`SHELL`, `TMPDIR`, locale, terminal) with no tokens and no agent sockets;
+its Claude Code carries only a placeholder. Status: **in use**.
 
-The turn's own process authenticates with the machine's Claude login, so a
-turn could call the provider around the gateway with that credential: the
+A turn can still read the machine's Claude login from the Keychain, so it
+could call the provider around the gateway with that credential: the
 sandbox profile limits loopback but leaves the public internet open
 (section 6). The gateway is the metered path, not the only path. Tom
 accepted this on 2026-10-01 and it is not to be closed: budgets are for
@@ -381,9 +382,9 @@ added on a second real need (Mission item 5).
 
 ### Sandbox: what runs today
 
-Every demonstration and replay turn ran under a **`sandbox-exec`** profile
-generated per workspace (`scripts/demo_workspace.sh`,
-`scripts/replay_workspace.py`). Status: **in use**.
+Every workspace turn runs under a **`sandbox-exec`** profile generated per
+workspace (`core/workspace.py`; `scripts/demo_workspace.sh` for the
+demonstration). Status: **in use**.
 
 The profile's rules (files, loopback, binding, the `valor.turn.<turn id>`
 mark the reaper uses) are specified in [harnesses.md](harnesses.md) (The
@@ -437,22 +438,23 @@ and reachable hosts are the effect class in practice [11].
 
 ## 7. Workspaces
 
-A task works in a workspace built by a script, not by the turn:
+The kernel provisions a task's workspace from a project spec
+(`core/workspace.py`, `projects/`), never the turn:
 
 - a clone of the repository holding only the history up to the base commit;
 - a local bare repository as the clone's only remote, which the turn cannot
-  write and the broker pushes to;
-- when the app needs one, a Postgres cluster of the workspace's own on a
-  fixed loopback port with `scram-sha-256` authentication and a `test` role
-  that may create databases and nothing more, so a superuser login is never
-  a way out of the sandbox;
+  write and the broker pushes to, and the kernel mirror, which only the
+  kernel writes and the merge reads;
+- when the app needs them, a Postgres cluster of the task's own on its own
+  loopback port with `scram-sha-256` authentication and an `app` role that
+  may create databases and nothing more, so a superuser login is never a
+  way out of the sandbox, and a Redis of its own;
 - an empty gh config and a git config with no credential helper.
 
-Status: **in use** (`scripts/demo_workspace.sh`, `scripts/replay_workspace.py`,
-`tools/workspace.py`). Serves Mission item 1 (the turn tests actual use
-against a real database) inside "Bounded authority and spend". How a
-workspace is provisioned and torn down as part of a task is
-[architecture.md](architecture.md); its memory cost is
+Status: **in use** (`python -m core start --project`). Serves Mission item
+1 (the turn tests actual use against a real database) inside "Bounded
+authority and spend". How a workspace is provisioned and torn down as part
+of a task is [architecture.md](architecture.md); its memory cost is
 [machine.md](machine.md).
 
 **Running and viewing the app.** No turn in the demonstration or the baseline
@@ -483,14 +485,15 @@ remote the turn cannot. Status: **in use**.
   `http.*`, or includes other config, because that config is the turn's to write (`core/git.py`). `lookup`
   answers present (the branch holds the commit, at its tip or below),
   absent, or unknown; `broker.reconcile` uses it to settle a dangling merge
-  intent. It pushes to the origin URL recorded at start and refuses the
-  task's target branch.
+  intent. It pushes to the task's `push_url` (else the origin URL recorded
+  at start) and refuses the task's target branch.
 - **`merge`** (`act`, `tools/push_branch.py`): the kernel's push of a
-  passed candidate onto the target branch, released only when the merge
-  predicate holds; no turn is offered it.
+  passed candidate onto the target branch, from the kernel mirror when the
+  task has one, released only when the merge predicate holds; no turn is
+  offered it.
 - **`WorkspaceWrite`** (`propose`) and **`OutboxAppend`** (`act`)
-  (`tools/workspace.py`): a file in the workspace, and a local outbox that
-  stands where a bridge's send will.
+  (`tests/performers.py`), for the tests only: a file in the workspace, and
+  a local outbox that stands where a bridge's send will.
 
 Serves "Bounded authority and spend": a sandbox holds no credential capable
 of an effect outside it, and every effect that leaves is a typed action [11].

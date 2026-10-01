@@ -72,9 +72,9 @@ started: instruction, budget in micro-dollars, effect ceiling,
 `governance_grant`, workspace, model, harness settings, and where a merge
 goes: the target branch, origin's push URL as an absolute path, and the
 workspace's head at start (`core/tasks.py`, `Brief`); for a task the kernel
-provisioned, also the kernel mirror's path, where `push_branch` goes
-(`push_url`), and the project spec as it was at start with the task's
-service ports (`project`). `Brief.load` reads
+provisioned, also the kernel mirror's path (`mirror`), where
+`push_branch` goes (`push_url`), and the project spec as it was at start
+with the task's service ports (`project`). `Brief.load` reads
 only the fields the Brief has, so a stored document carrying an older
 field (`mode`) still loads. The kernel role cannot update a document, so
 anything that changes about a task after it starts is an event on its
@@ -444,9 +444,8 @@ different clusters, and a turn cannot reach the kernel's.
   port, with password authentication on every login, a superuser password
   generated and discarded once the app's role exists, and an app role with
   only what the app's tests need (`CREATEDB` for Django's test runner).
-  The demonstration's ran on `127.0.0.1:5439`; the replays gave each
-  concurrent run its own databases (rebuild-baseline.md, Infrastructure
-  fixed during the series).
+  Each task the kernel provisions gets one of its own on a port from 5440
+  to 5599 (replays included); the demonstration's ran on `127.0.0.1:5439`.
 - The turn's sandbox denies port 5432 and the machine socket, the password
   file's directory, the machine cluster's data directory, and the backup
   disk; it allows the workspace cluster's port and denies the workspace

@@ -119,11 +119,16 @@ then sets:
 - `GIT_TERMINAL_PROMPT=0`; `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM=1`
   when the task gives a git config; `GH_CONFIG_DIR` when it gives a gh
   config directory.
+- `DISABLE_AUTOUPDATER=1`; `TMPDIR` and `CLAUDE_CODE_TMPDIR` from the
+  task's `tmpdir`; from its `claude_config_dir`, `CLAUDE_CONFIG_DIR` (the
+  turn's own Claude Code state, no login) and a placeholder
+  `CLAUDE_CODE_OAUTH_TOKEN` the gateway replaces.
 - `VALOR_TURN`, set by the kernel: the turn's id, which the reaper uses.
 
-**The task's harness settings** come from `python -m core start
---harness-config FILE` and are stored on the task: `sandbox_profile`,
-`gitconfig`, `gh_config_dir`, `env`, and `max_output_tokens`.
+**The task's harness settings** come from provisioning (`python -m core
+start --project`) or from `--harness-config FILE`, and are stored on the
+task: `sandbox_profile`, `gitconfig`, `gh_config_dir`, `tmpdir`,
+`claude_config_dir`, `env`, and `max_output_tokens`.
 `sandbox_profile` is required: `workspace_turn` raises `Unsandboxed` for a
 task without one, before anything is spawned or reserved, and `python -m
 core run` reports it. The wrapper prefixes the argv with `sandbox-exec -D
@@ -177,15 +182,14 @@ the docs the change made untrue. The reviewer runs the same Opus model or
 an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
 
-The kernel's support today: the working session for every row above. The
-critique runs as a fresh session (`core/fresh.py`): a blind checkout made
-from the kernel mirror holding only the base's tree and the plan's tree as
-two kernel commits, inputs written by the kernel from ledger rows under
-`.valor/inputs/`, its own sandbox profile, `TMPDIR`, and Claude Code config
-directory, a Brief carrying the verdict channel (`skills/sdlc/verdict.md`)
-in place of the working session's, and one verdict file,
+The kernel's support today: the working session for every row above, and
+critique as a fresh session (`core/fresh.py`): a blind checkout from the
+kernel mirror holding only the base's and the plan's trees as two kernel
+commits, inputs the kernel writes from ledger rows under `.valor/inputs/`,
+its own profile, `TMPDIR`, and Claude Code config, the verdict channel
+(`skills/sdlc/verdict.md`) in its Brief, and one verdict file,
 `.valor/verdict.json`, read without following links or blocking. Review and
-docs are milestone 1.4's next tasks.
+docs follow in milestone 1.4.
 
 Each prompt is followed by what did not count from the previous turn
 (`errors` on its `turn.collected`) and what became of the effects it
@@ -279,10 +283,10 @@ Three records of a turn exist:
    the gateway's `gateway.charged` and `gateway.refused` rows for every
    model call, `turn.collected`, `turn.reaped`, and `turn.ended`. Written by
    the kernel; the turn cannot edit it.
-2. **Claude Code's session file**, the JSONL under `~/.claude/projects/`:
-   every message, tool call, and tool result. The baseline's leak scan read
-   every tool call of every run from these files (rebuild-baseline.md,
-   Caveats).
+2. **Claude Code's session file**, the JSONL under `projects/` in the
+   turn's config directory: every message, tool call, and tool result. The
+   baseline's leak scan read every tool call of every run from these files
+   (rebuild-baseline.md, Caveats).
 3. **The workspace's git history and the bare origin's reflog**
    (`core.logAllRefUpdates always`).
 
@@ -342,34 +346,38 @@ read its answer). The stance is AI Control's: the protocol holds even if the
 model tries to get around it [4].
 
 A workspace turn runs under a sandbox-exec profile written for its workspace
-(`scripts/demo_workspace.sh` for the demonstration, `sandbox_profile` in
-`scripts/replay_workspace.py` for replays). The profile starts from
-`(allow default)` and denies what a turn must not reach. It runs as Tom's
-user.
+(`core/workspace.py` for every task the kernel provisions, replays
+included; `scripts/demo_workspace.sh` for the demonstration). The profile
+starts from `(allow default)` and denies what a turn must not reach. It
+runs as Tom's user.
 
 ### Files
 
 - **Denied, read and write:** `~/src` (Tom's checkouts, which hold the
   answers), `~/work-vault`, Desktop, Documents, Downloads, Dropbox, iCloud
-  and cloud storage, Mail, Messages, `~/.ssh`, `~/.config/gh`, and Claude
-  Code's projects, plans, file history, and `history.jsonl`.
-- **Allowed back, read and write:** the run's own directory, and the one
-  `~/.claude/projects/` directory holding this workspace's sessions.
-- **Read only:** the shared `bin/` (uv), first on the turn's `PATH`.
-- **Stat only:** the run directory's ancestors, so tools that resolve real
-  paths (uv building a virtualenv) work; listing them stays denied.
-- **Denied writes inside the run:** the bare origin, the run's `home/` (its
-  own profile, git config, and harness settings), and `replay.json`.
-- **Denied entirely:** the workspace Postgres cluster's data directory, and
-  the kernel's own paths, each named by its setting: the directory of the
-  kernel databases' password file (`pg_passfile`), the machine cluster's
-  data directory (`pg_data_dir`), and the backup disk (`backup_dir`).
+  and cloud storage, Mail, Messages, `~/.ssh`, `~/.config/gh`, Claude
+  Code's `~/.claude/projects` and `history.jsonl`, and the whole work
+  directory (`work_dir`), other tasks included.
+- **Allowed back, read and write:** for the working session (`turn.sb`),
+  its clone, caches, and `state/work/` (its `TMPDIR` and Claude Code
+  config); for a fresh session, only its own check directory.
+- **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for
+  the working session, its task's `home/` and bare origin.
+- **Stat only:** the allowed directories' ancestors, so tools that resolve
+  real paths (uv building a virtualenv) work; listing them stays denied.
+- **Denied to a fresh session:** `/private/tmp`, `/private/var/folders`,
+  `~/.claude`, and `~/.claude.json`, so it reads nothing the builder left.
+- **Denied entirely:** the kernel's own paths, each named by its setting:
+  the kernel key directory (`pg_passfile`'s), the machine cluster's data
+  directory (`pg_data_dir`), and the backup disk (`backup_dir`).
+- **The demonstration's profile** allows back its run directory and that
+  workspace's one `~/.claude/projects/` directory instead.
 
 ### Loopback connects, and rule order
 
 A turn reaches the public internet, so package installs work. On loopback it
 reaches only the gateway (at whatever port the OS gave it, passed in as
-`GATEWAY_PORT`), the services its run asked for, and dev servers on 8000 to
+`GATEWAY_PORT`), its own task's service ports, and dev servers on 8000 to
 8009. The machine's own Postgres (5432 and its socket, which hold the
 kernel's ledger) and Redis (6379) are out of reach.
 
@@ -379,13 +387,14 @@ followed the allow block. The demonstration's second turn failed with
 "Unable to connect to API (EPERM)" because its gateway drew such a port; the
 first turn's port happened to work (rebuild-demonstration.md, Kernel
 findings 3). The profile opens with a deny of all of loopback and the
-machine Postgres sockets, then allows the gateway, the run's services, and
+machine Postgres sockets, then allows the gateway, the task's services, and
 the dev ports. `tests/test_demo_sandbox.py` expands both profiles and probes
 them under the real sandbox-exec at 24 OS-assigned gateway ports.
 
 ### Binding
 
-A turn may listen only on 8000 to 8009 and on unix sockets inside its run.
+A turn may listen only on 8000 to 8009 and on unix sockets inside the
+directories it may write.
 sandbox-exec matches a bind rule on the port alone: `localhost:8001` admits
 `0.0.0.0:8001`, `[::]:8001`, and the LAN address, and a literal address does
 not parse. So the dev ports are reachable from the LAN while something
@@ -413,25 +422,27 @@ listening beyond its dev ports and reap what it leaves running").
 Stated so the boundary is drawn where it is [4]:
 
 - The turn runs as the machine's user. A deliberate keychain read through
-  `security` is not fenced, and Claude Code itself reads its credential
-  from the keychain.
+  `security` is not fenced, though in a provisioned task Claude Code holds
+  only a placeholder credential.
 - The public internet is open, so a turn could reach a provider directly,
   outside the gateway, or reach GitHub anonymously. The baseline found no
   such call in any transcript (rebuild-baseline.md, Caveats).
 - Both openings above are accepted (Tom, 2026-10-01): no separate macOS
   user, and budgets are for visibility and honest metering, not a hard
   wall.
-- `/tmp` is shared between runs. Common file names recurred across items in
-  the baseline.
+- The working session has a `TMPDIR` of its own and a fresh session cannot
+  reach `/private/tmp`, but the working session can still write `/tmp`
+  directly, which every task shares. Common file names recurred across
+  items in the baseline.
 - Narrowed for kernel workspaces, not closed: their profiles deny writes to
   the machine user's startup places, `~/.local/bin` (which the user's PATH
   puts before `/usr/bin`), `~/Library/LaunchAgents`, the shell's rc files
   (`~/.zshrc` and the like), Claude Code's install (`~/.local/share/claude`)
   and state (`~/.claude`, `~/.claude.json`), git's global config, and
   Homebrew's prefix, and every turn runs with `DISABLE_AUTOUPDATER=1`. The
-  demonstration's profile denies none of these, and other such places
-  remain: a turn could leave a program there that a later process of the
-  user, outside the sandbox, runs. So can the caches under
+  demonstration's profile denies none of these, and other places remain
+  where a turn could leave a program that a later unsandboxed process of
+  the user runs. So can the caches under
   `/var/folders` that Apple's `/usr/bin` shims read: `/usr/bin/git` is the
   `xcrun` shim, which finds the real git through such a cache. The kernel
   runs nothing from that reach outside the sandbox: its git is the Command
@@ -444,12 +455,12 @@ Stated so the boundary is drawn where it is [4]:
   exception is `claude_code.turn`, a tool-less turn with no workspace that
   runs unsandboxed and only in tests (the router never builds one).
   Homebrew's Postgres tools, which `python -m core backup` runs from
-  launchd, sit in the user's own prefix too.
-- (Closed for kernel workspaces: each task has a Postgres cluster of its own
-  with roles and passwords of its own, on its own port, and the turn's
-  profile reaches only that port.) Every demonstration database is owned by
-  the same `test` role with the same
-  password, so a turn could connect to another run's database on 5439.
+  launchd, sit in the user's own prefix too; a task's Postgres and Redis
+  run only under `service.sb`.
+- The demonstration's databases share one `test` role and password on
+  5439, so a turn there could connect to another run's database. A task
+  the kernel provisions has its own cluster, roles, and passwords, and its
+  profiles reach only its own ports.
 - sandbox-exec is marked deprecated by Apple. The plan names Apple
   containers for sandboxes; which one runs which work is
   `docs/architecture.md`'s (The turn sandbox and reaping). A container closes
@@ -477,11 +488,14 @@ shed: it survives `setsid`, re-parenting to launchd, and a process retitling
 itself over its environment, which redis-server does; platform binaries hide
 their environment from other processes altogether. With the sandbox mark
 disabled, the redis test's daemon survives. `tests/test_reap.py` reaps a
-double-forked `setsid` daemon and a redis-server daemonized inside the replay
-sandbox, and leaves a bystander alive.
+double-forked `setsid` daemon and a redis-server daemonized inside a task
+turn's sandbox, and leaves a bystander alive.
 
-The replay judge's verification commands run under the same profile with
-their own mark, and are reaped the same way.
+A task's services, marked `valor.service.<task id>`, are stopped by that
+mark when its run returns, or, after a killed kernel, by the next run of
+any task unless their own run is live (`services.reaped`). The replay
+judge's verification commands run under the task's `turn.sb` with their
+own mark, and are reaped the same way.
 
 ## The workspace
 
@@ -489,52 +503,55 @@ Serves Mission item 1 (delivering within authority) and the constraint
 **bounded authority**: a turn works on a real clone and every push is an
 `act` effect Tom releases.
 
-`scripts/replay_workspace.py` builds a workspace for any repository and base
-commit; `scripts/demo_workspace.sh` built the demonstration's. Each produces:
+`core/workspace.py` provisions a task's workspace from a project spec
+(`projects/`) under `work_dir/<task id>/` before the task starts; a replay
+writes its spec (`scripts/replay_workspace.py`).
 
 | Part | What it is |
 |---|---|
-| the clone | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
-| `origin.git/` | a local bare repository, the clone's only remote, `main` at the base, every ref update logged, non-fast-forward pushes refused. The sandbox denies the turn writes to it. Only the broker's `push_branch` and `merge` performers write it, from the kernel's process, after Tom approves and releases the push |
-| `home/` | the turn's git config (Valor's identity, no credential helper), an empty gh config, the sandbox profile, and `harness.json` for `core start --harness-config` |
-| services | what the run's tests need, below |
+| `repo/` | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
+| `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. No turn writes it; only the broker's `push_branch` and `merge`, from the kernel's process, after Tom releases the push |
+| `kernel.git/` | the kernel mirror: seeded with the base, and fed each plan commit, candidate, and hand-recorded docs head; the merge predicate and the merge read it. No turn reads or writes it |
+| `home/` | git config (Valor's identity, no credential helper), an empty gh config, `pgpass`, and the profiles: `turn.sb`, each fresh session's, and `service.sb` |
+| `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's `TMPDIR` and Claude Code config; each fresh session's checkout, `tmp/`, and `claude/` |
+| `pg/`, `redis/` | the task's services, below |
 
-Nothing reaches GitHub. A push to GitHub is a different performer behind the
-same broker and the same `act` class.
+The setup commands run once in `repo/` under `turn.sb`; a failure is
+recorded on the Brief (`project.setup_result`) and the task still starts.
+Nothing reaches GitHub. The clone has no PR, issue, or later commit to
+read; the emulator's leak check greps the base tree before the first turn.
 
-The clone itself has no PR, issue, or later commit to read, and a leak check
-greps the base tree for the feature before the first turn
-(rebuild-demonstration.md, Setup). That check is the emulator's
-(`docs/emulator.md`); the workspace is what makes it possible.
+**The mirror's fetch** treats the builder's clone as hostile: its config
+checked first, alternates and shallow clones refused, the sending side
+inside the turn's sandbox, the receiving git with fsck, one pack under a
+size limit, a footprint watchdog, and replace refs and grafts off. A plan
+or candidate the fetch refuses does not count.
 
-### Per-run services
+### Per-task services
 
-A run declares the services its tests need (`postgres`, `redis`, or none).
-Services run outside the sandbox, so each is configured so a turn cannot use
-it as a way out:
+A project declares the services its tests need (`postgres`, `redis`, or
+none). The binaries are Homebrew's, in a prefix a turn can write, so each
+runs under `service.sb`: read and write only its own directory, bind only
+its port, no outbound connection, marked `valor.service.<task id>`.
 
-- **Postgres.** One cluster for workspaces, separate from the kernel's, on
-  `127.0.0.1:5439` with scram-sha-256 auth on every login. The superuser
-  password is random and discarded once the `test` role exists, because a
-  superuser login to a server outside the sandbox would be an escape. Each
-  run gets its own database owned by `test`. The turn's environment points
-  the app at it (`TEST_DB_*`, `DATABASE_URL`, `PG*`). This separation came
-  from the demonstration's first incident: the machine cluster trusted every
-  loopback connection, so a turn could have written ledger rows as the
-  kernel's role or a superuser (rebuild-demonstration.md, Kernel findings 1;
-  commit 923e16e7f). The kernel database's role separation is
-  `docs/data.md`'s.
-- **Redis.** One redis-server per run that asks for it, on its own port
-  (6391 to 6399), bound to 127.0.0.1, no persistence, no unix socket, and
-  the protected configs (`dir`, `dbfilename`), `DEBUG`, and `MODULE` closed,
-  since those would let a turn write files through a server outside the
-  sandbox.
-  Postgres being the only database in Valor's own design, Redis here is a
-  dependency of the repository under test (popoto), never of the kernel.
+- **Postgres.** A cluster of the task's own on `127.0.0.1` only (no unix
+  socket), port 5440 to 5599, scram-sha-256 on every login. The superuser
+  password is random and removed once the roles exist, since a superuser
+  login would be an escape. `app` owns database `app` and may create
+  databases (and manage only the spec's extra roles); the passwords are in
+  `home/pgpass`; `PG*`, `DATABASE_URL`, and `TEST_DB_*` point the app at
+  it. Separate
+  clusters came from the demonstration's first incident: the machine
+  cluster trusted loopback, so a turn could have written ledger rows as
+  the kernel (rebuild-demonstration.md, Kernel findings 1).
+- **Redis.** One redis-server when the project asks, port 6400 to 6499, on
+  127.0.0.1, no persistence, no unix socket, and the protected configs
+  (`dir`, `dbfilename`), `DEBUG`, and `MODULE` closed; `REDIS_URL` points
+  the app at it. A dependency of the repository under test, not the kernel.
 
-Tearing a run down drops its database and deletes its directory. **Gap**:
-for a workspace the kernel provisioned, removal stops the task's Postgres
-and Redis by their service mark.
+A port is the lowest one free and named by no task without a
+`workspace.removed` row. `python -m core workspace remove TASK` (stopped or
+merged only) stops the services, deletes the directory, frees the ports.
 
 ## Testing actual use: a browser
 

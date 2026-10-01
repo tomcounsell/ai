@@ -385,9 +385,6 @@ from it; Mission item 1. Every replay wrote fewer tests than its reference:
 exclusion, and the demonstration wrote 10 tests against the reference's 35
 (rebuild-baseline.md, Test breadth; rebuild-demonstration.md).
 
-**Gap.** The suite needs the app's environment in the workspace, which the
-demonstration's lacked; provisioning is in [architecture.md](architecture.md).
-
 #### `checks.review`: one blind verification per candidate
 
 **Goal.** An independent verdict on whether the candidate does what was
@@ -544,8 +541,10 @@ an absolute path) and the target branch (the flag, or the branch origin's
 candidate, so Tom's approval binds them, and the push goes to that URL
 whatever the workspace's config says later; a workspace whose own config
 names a program, redirects a push, or includes other config is refused
-(`core/git.py`, `HOSTILE`). A turn cannot request a merge, and its
-`push_branch` cannot target the target branch.
+(`core/git.py`, `HOSTILE`). For a task the kernel provisioned, the origin
+is its own bare one, and the predicate's git facts and the merge's push
+come from the kernel mirror, which no turn writes. A turn cannot request a
+merge, and its `push_branch` cannot target the target branch.
 
 **Governance instances.** A review or docs verdict names each instance by
 a path and a line inside its hunk; the kernel reads the hunk from the

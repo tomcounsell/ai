@@ -68,15 +68,16 @@ the task starts:
 | `workspace` | the directory the task's turns work in |
 | `model` | the model its turns run |
 | `harness` | the harness's settings for the task, its isolation included |
-| `target_branch`, `origin_url`, `base_sha` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then |
+| `target_branch`, `origin_url`, `base_sha`, `mirror`, `push_url`, `project` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then; for a task the kernel provisioned, also the kernel mirror, where `push_branch` goes, and the project spec with the task's service ports |
 
 The Brief a turn receives is **dispatched**: rendered from the ledger as the
 turn starts, carrying the task's commitments, every correction in force, the
 signal channel (how the turn reaches Tom, listing the effects the registered
 performers offer), and the stage file for the state the turn runs in
-(`skills/sdlc/<state>.md`). `turn.started` records the full dispatched text,
-its SHA-256, and the correction numbers it carried, so what a turn was told
-is a lookup.
+(`skills/sdlc/<state>.md`); a fresh session gets the verdict channel
+(`skills/sdlc/verdict.md`) instead. `turn.started` records the dispatched
+text whole, its SHA-256, and the correction numbers it carried, so what a
+turn was told is a lookup.
 
 **State.** A task's state is the SDLC state machine's, folded from its
 ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
@@ -103,8 +104,9 @@ every model call it:
    input rate plus every output token the call may produce, under the
    task's lock, refusing with a `gateway.refused` row if it exceeds what
    remains or the task is stopped;
-3. forwards the call and streams the response back unchanged, reading the
-   provider's reported usage as it passes;
+3. forwards the call with the kernel's own Claude credential (harnesses.md,
+   Metering through the gateway) and streams the response back unchanged,
+   reading the provider's reported usage as it passes;
 4. charges what the provider reported in a `gateway.charged` row. A call
    cut before its usage arrives is charged its input plus every output
    token it was allowed, so the ledger never records less than the invoice.
@@ -129,13 +131,11 @@ budget meters what passes the gateway and is not a wall around the
 provider (see Limits). Judgement calls are reserved and charged the same
 way in the kernel process, with no HTTP route (judgement-layer.md).
 
-**Design.** Conservation down the tree (see The objective tree), and:
-
-- **Overrun is a question to Tom.** A task that runs out ends with what it
-  spent, what it produced, and what it asks for; Tom's grant raises the
-  root. Exhaustion is never silence.
-- **A deadline.** A hung tool spends no money, so a per-task wall-clock
-  deadline catches what money cannot; the idle bound plays that part.
+**Design.** Conservation down the tree (see The objective tree). Overrun
+is a question to Tom: a task that runs out ends with what it spent, what it
+produced, and what it asks for; Tom's grant raises the root, and exhaustion
+is never silence. A hung tool spends no money, so a per-task wall-clock
+deadline catches what money cannot; the idle bound plays that part.
 
 ## Effect classes and the broker
 
@@ -176,16 +176,16 @@ This is the governing constraint as a kernel fact. A `merge` is released
 only when the merge predicate holds, checked in the transaction that
 writes its intent ([sdlc-state-machine.md](sdlc-state-machine.md)).
 
-Four performers run in the kernel's process: `push_branch` (`act`) pushes
-one commit to one branch, never the target branch, and `merge` (`act`,
-offered to no turn) pushes a passed candidate onto it, both to the origin
-URL recorded at start, never forcing; `workspace_write` (`propose`) and
-`outbox_send` (`act`) serve the tests. The kernel runs no program a turn
-chose: its git (the Command Line Tools' install), `ps`, and `sandbox-exec`
-are checked before each run to be root's alone (`core/binaries.py`), and
-its git refuses a workspace whose own config names a program, redirects a
-push, sets any `push.*` or `http.*`, or includes other config
-(`core/git.py`; [tech-stack.md](tech-stack.md), the broker's performers).
+Two performers run in the kernel's process, never forcing: `push_branch`
+(`act`) pushes one commit to one branch, never the target branch, to `push_url`
+or else the origin URL recorded at start; `merge` (`act`, offered to no turn)
+pushes a passed candidate onto the target branch at the recorded origin URL,
+from the kernel mirror when there is one. The kernel runs no program a turn
+chose: its git (the Command Line Tools' install), `ps`, and `sandbox-exec` are
+checked before each run to be root's alone (`core/binaries.py`), and its git
+refuses a workspace whose config names a program, redirects a push, sets any
+`push.*` or `http.*`, or includes other config (`core/git.py`;
+[tech-stack.md](tech-stack.md), the broker's performers).
 
 The constraint it enforces: bounded authority and spend. In the first
 demonstration all three deliveries went out as held pushes that landed only
@@ -207,15 +207,12 @@ separate records:
    each approval good for one intent: one tap, one effect. An effect whose
    payload changed after approval has no matching approval and is refused.
 
-**Design.**
-
-- **Cards rendered by the kernel.** On a bridge, an approval is a typed
-  card rendered from structured fields: the action, its target, a summary
-  of the payload, and the destination's audience. Agent prose appears only
-  in a marked, length-capped note, since agent text on a card is a
-  persuasion channel aimed at the one person who can widen authority.
-- **Expiry.** An unanswered approval expires into a refusal with a typed
-  cause, never an indefinite wait.
+**Design.** On a bridge, an approval is a typed card the kernel renders
+from structured fields: the action, its target, a summary of the payload,
+and the destination's audience. Agent prose appears only in a marked,
+length-capped note, since agent text on a card is a persuasion channel
+aimed at the one person who can widen authority. An unanswered approval
+expires into a refusal with a typed cause, never an indefinite wait.
 
 ## Stop
 
@@ -286,7 +283,7 @@ Three records say what happened in a turn:
 | Record | Written by | Holds | Built |
 |---|---|---|---|
 | Gateway rows | the gateway; the judgement port for its own calls (`route: judgement`) | every model call: model, reservation, charge, usage | yes |
-| Turn record | the kernel | `turn.started` (the state, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
+| Turn record | the kernel | `turn.started` (the state, `fresh` and the stage for a fresh session, harness, argv, the dispatched Brief, its digest, correction numbers), `turn.collected`, `turn.reaped`, `turn.ended` (outcome, return code, the harness's result, stderr tail, metered spend) | yes |
 | Effect ledger | the broker | intent, outcome, refusal, hold, approval for every effect | yes |
 
 The harness's transcript of tool calls and results is a fourth record, but
@@ -302,55 +299,48 @@ process to reap and which directory a resume belongs to.
 ## The turn sandbox and reaping
 
 **Built.** A task's `harness` settings name the sandbox-exec profile every
-workspace turn runs under (`workspace_turn` refuses a task without one); its rules and the reaper's marks in full are in
-[harnesses.md](harnesses.md), and this section states what they guarantee. The first demonstration and the baseline ran every
-turn under one (rebuild-demonstration.md, Setup, Isolation). The profile:
-
-- confines reads and writes to the workspace and what the toolchain needs,
-  away from Tom's other checkouts, notes, transcripts, and keys;
-- denies writes to the workspace's bare `origin`, so a push leaves only
-  through the broker's `push_branch` or `merge`;
-- on loopback, reaches only the gateway, the workspace's own Postgres, and
-  the app's dev ports, and never the kernel's database;
-- puts denies before allows, because sandbox-exec refused allowed ports at
-  random when a network rule followed the allows (rebuild-demonstration.md,
-  Kernel findings 3).
+workspace turn runs under (`workspace_turn` refuses a task without one);
+[harnesses.md](harnesses.md) has its rules and the reaper's marks in full,
+and this section states what they guarantee. The first demonstration and
+the baseline ran every turn under one (rebuild-demonstration.md, Setup,
+Isolation). The profile confines reads and writes to the workspace and
+what the toolchain needs, away from Tom's other checkouts, notes,
+transcripts, and keys; denies writes to the bare `origin`, so a push leaves
+only through the broker's `push_branch` or `merge`; on loopback reaches
+only the gateway, the workspace's own Postgres, and the app's dev ports,
+never the kernel's database; and puts denies before allows, because
+sandbox-exec refused allowed ports at random when a network rule followed
+the allows (rebuild-demonstration.md, Kernel findings 3).
 
 The environment is an allowlist carrying no tokens or agent sockets, with
 an empty gh config and a git config without a credential helper. Web fetch
 and web search are off. The public internet is reachable, so package
 installs work.
 
-**Reaping.** A turn's processes do not outlive it. Every turn runs with
-`VALOR_TURN` set to its id, and its sandbox profile denies the mach name
-`valor.turn.<id>`. When the turn ends, every process of this user that is
-in the turn's process group, carries the marker in its environment, or sits
-under a sandbox denying the turn's name receives `SIGTERM`, then `SIGKILL`
-two seconds later, and `turn.reaped` lists them. The sandbox mark is the
+**Reaping.** A turn's processes do not outlive it. When the turn ends,
+every process of this user in its process group, carrying `VALOR_TURN=<id>`
+in its environment, or under a sandbox denying the mach name
+`valor.turn.<id>` receives `SIGTERM`, then `SIGKILL` two seconds later, and
+`turn.reaped` lists them. The sandbox mark is the
 one a daemon cannot shed: it survives `setsid`, re-parenting to launchd, and
 a process overwriting its own environment. Serves: reliable stop; and the
 16 GB machine, where a leaked test server holds memory a later turn needs.
 
-**Workspace provisioning.** Built (`core/workspace.py`): `python -m core
-start --project NAME` provisions the task's workspace from a project spec
-(`projects/`) before the task starts: a clone holding history only up to
-the base, a local bare origin as its only remote (where `push_branch` goes,
-and, until the GitHub credential, the merge), the kernel mirror (a bare
-repository only the kernel writes, seeded with the base, into which plan
-commits, candidates, and docs heads are fetched, and from which the merge
-predicate and the merge read), a Postgres cluster of the task's own with
-password auth and a Redis when the project asks, each on a port of the
-task's own and run under a service sandbox, the project's setup run once
-under the turn's sandbox, and the sandbox profiles. Services run only while
-the task's run holds the router; every run first stops the services of
-other tasks a killed kernel left up, unless their own run is live. The disk
-is kept after a stop until `python -m core workspace remove`. Serves
+**Workspace provisioning.** Built (`core/workspace.py`): `python -m core start
+--project NAME` provisions a task's workspace from a project spec
+(`projects/`) before the task starts: a clone holding history only up to the
+base; a local bare origin as its only remote, where `push_branch` goes and,
+until the GitHub credential, the merge; the kernel mirror, a bare repository
+only the kernel writes, into which plan commits, candidates, and docs heads
+are fetched and from which the merge predicate and the merge read; a Postgres
+cluster of the task's own (and a Redis when the project asks) on its own
+ports, under a service sandbox; and the project's setup, run once under the
+turn's sandbox. Services run only while a run of the task lasts; every run
+first stops those a killed kernel left up for tasks whose run is not live. The
+disk is kept until `python -m core workspace remove`. The mirror's fetch
+treats the builder's clone as hostile (harnesses.md, The workspace). Serves
 Mission item 1 (Valor works without Tom setting up the gaps) and bounded
-authority. The fetch into the mirror treats the builder's clone as hostile:
-its config is checked first, alternates and shallow clones are refused,
-the sending side runs inside the turn's sandbox, and the receiving side
-runs with fsck, one pack file under a file-size limit, a footprint
-watchdog, and replace refs and grafts off.
+authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which
 sandbox. Turns run under sandbox-exec on the host, as built and as both
@@ -379,13 +369,11 @@ mistakes and never what excellent looks like. Serves: Evidence, "Tom's
 feedback, both directions"; Mission item 2; and corrections that are
 first-class, carry provenance, and reach every session and agent.
 
-**Design.**
-
-- **Corrections reaching subagents.** Unverified, a gap
-  (rebuild-demonstration.md, Correction 1 rendering, last line).
-- **Withdrawal.** A later row naming a correction withdraws or replaces it.
-- **Narrower scopes and relevance.** A scope beyond `global`, and rendering
-  by relevance, arrive when one is needed or length measurably costs a turn.
+**Design.** Corrections reaching subagents is unverified, a gap
+(rebuild-demonstration.md, Correction 1 rendering, last line). A later row
+naming a correction withdraws or replaces it. A scope beyond `global`, and
+rendering by relevance, arrive when one is needed or length measurably
+costs a turn.
 
 ## The attention log
 
@@ -586,7 +574,7 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
 | Thin request built on a guess | the judge runner's judgement routes a thin request to `clarify` (built) | Mission 3, 6 |
-| A wrong plan reaches code | critique, rounds set by stakes (the loop built; the fresh session is 1.4's) | Mission 1 |
+| A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
 | Verifier too lenient | Opus-class blind reviewer, never cheaper; human audit sample (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |

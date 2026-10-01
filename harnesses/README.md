@@ -14,7 +14,7 @@ Governed by [docs/harnesses.md](../docs/harnesses.md).
 
 ## The Claude Code wrapper
 
-`claude_code.py` builds two kinds of turn. `turn` is one self-contained `claude -p` call with no tools by default. `workspace_turn` is one turn of a task that works in a directory: it keeps Claude Code's own system prompt and tools, appends the persona and the dispatched Brief re-rendered every turn, resumes the task's session, edits and runs commands without prompting, and runs with safe mode, no MCP servers, and no web tools. The task's `harness` settings must name the sandbox-exec profile the turn runs under (it refuses a task without one), and may give git and gh their own config and add the workspace's own variables to the environment. The environment it passes is an allowlist; tokens and agent sockets stay behind.
+`claude_code.py` builds two kinds of turn. `turn` is one self-contained `claude -p` call with no tools by default. `workspace_turn` is one turn of a task that works in a directory: it keeps Claude Code's own system prompt and tools, appends the persona and the dispatched Brief re-rendered every turn, resumes the task's session (a fresh session never resumes), edits and runs commands without prompting, and runs with safe mode, no MCP servers, and no web tools. The task's `harness` settings must name the sandbox-exec profile the turn runs under (it refuses a task without one), and may give git and gh their own config, give the turn its own `TMPDIR` and Claude Code config directory (the turn then carries a placeholder credential the gateway replaces), and add the workspace's own variables to the environment. The environment it passes is an allowlist; tokens and agent sockets stay behind.
 
 ## Imports
 
