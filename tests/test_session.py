@@ -143,6 +143,7 @@ def test_question_answer_delivery_and_a_push_held_for_tom(dsn, workspace):
     attention = second["state"]["attention"]
     assert attention == [
         {
+            "kind": "question",
             "question_id": attention[0]["question_id"],
             "question": "Which greeting do you want?",
             "answer": "Morning, Tom.",
@@ -168,6 +169,117 @@ def test_question_answer_delivery_and_a_push_held_for_tom(dsn, workspace):
         "task.delivered",
     ]
     assert not (ws / ".valor" / "question.md").exists() and not (ws / ".valor" / "done.md").exists()
+
+
+# Delivers on its first turn with one effect request. A turn opening with
+# Tom's feedback delivers again only when the feedback says "revise", and
+# otherwise leaves nothing, so a stale done.md or effect file read again
+# would show as a delivery or an effect it did not make.
+DELIVERER = r"""
+import json, pathlib, sys
+prompt, resume = sys.argv[1], sys.argv[2]
+v = pathlib.Path(".valor")
+(v / "effects").mkdir(parents=True, exist_ok=True)
+with (v / "turns.jsonl").open("a") as f:
+    f.write(json.dumps({"prompt": prompt, "resume": resume}) + "\n")
+if not resume:
+    (v / "effects" / "send.json").write_text(
+        json.dumps({"action_type": "no_such_action", "target": "tom", "payload": {}}))
+    (v / "done.md").write_text("First delivery.")
+elif "revise" in prompt:
+    (v / "done.md").write_text("Second delivery, revised per Tom's feedback.")
+print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+"""
+
+
+def deliverer_for(prompt, resume, b):
+    def build(url, brief):
+        return claude_code.TurnCommand(
+            argv=[sys.executable, "-c", DELIVERER, prompt, resume or ""],
+            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+            cwd=b.workspace,
+            harness="script",
+            parse=claude_code.parse,
+        )
+
+    return build
+
+
+def test_feedback_reopens_a_delivery_and_the_next_run_resumes_the_same_session(dsn, tmp_path):
+    async def go():
+        task = await new_task(dsn, tmp_path)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        first = await session.run(gateway, task, deliverer_for, dsn=dsn)
+        async with await db.connect(dsn) as conn:
+            await session.feedback(conn, task, "Please revise the wording.")
+            reopened = await tasks.status(conn, task)
+            with pytest.raises(LookupError):
+                await session.feedback(conn, task, "feedback on an undelivered task")
+        second = await session.run(gateway, task, deliverer_for, dsn=dsn)
+        async with await db.connect(dsn) as conn:
+            await session.feedback(conn, task, "Looks fine, nothing to change.")
+        third = await session.run(gateway, task, deliverer_for, dsn=dsn)
+        await gateway.close()
+        async with await db.connect(dsn) as conn:
+            return first, reopened, second, third, await ledger.read(conn, task)
+
+    first, reopened, second, third, rows = run(go())
+    assert first["status"] == "delivered" and first["state"]["delivered"] == "First delivery."
+    assert reopened["state"] == "live" and reopened["delivered"] == "First delivery."
+    assert second["status"] == "delivered"
+    assert second["state"]["delivered"] == "Second delivery, revised per Tom's feedback."
+    # The resumed turn after the third feedback wrote nothing: the consumed
+    # done.md and effect file under .valor/handled/ were not read again.
+    assert third["status"] == "idle"
+    assert third["state"]["delivered"] == "Second delivery, revised per Tom's feedback."
+
+    turns = [json.loads(line) for line in (tmp_path / ".valor" / "turns.jsonl").read_text().splitlines()]
+    assert [t["resume"] for t in turns] == ["", "session-1", "session-1", "session-1"]
+    assert turns[1]["prompt"].startswith("Tom reviewed your delivery and, as project manager, sends it back")
+    assert "Please revise the wording." in turns[1]["prompt"]
+    assert "no_such_action -> tom" in turns[1]["prompt"]
+    assert turns[3]["prompt"].startswith("Continue.")
+
+    collected = [r["payload"] for r in rows if r["type"] == "turn.collected"]
+    assert [len(c["effects"]) for c in collected] == [1, 0, 0, 0]
+    assert [c["done"] for c in collected[2:]] == [None, None]
+    assert [r["payload"]["summary"] for r in rows if r["type"] == "task.delivered"] == [
+        "First delivery.",
+        "Second delivery, revised per Tom's feedback.",
+    ]
+    given = [r["payload"] for r in rows if r["type"] == "feedback.given"]
+    assert given[0]["provenance"]["by"] == "tom" and given[0]["provenance"]["at"]
+    assert given[0]["on_delivery"] == "First delivery."
+
+    attention = third["state"]["attention"]
+    assert [(a["kind"], a["feedback"]) for a in attention] == [
+        ("feedback", "Please revise the wording."),
+        ("feedback", "Looks fine, nothing to change."),
+    ]
+
+
+def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, workspace):
+    ws, _ = workspace
+
+    async def go():
+        task = await new_task(dsn, ws)
+        gateway = Gateway(dsn)
+        await gateway.start()
+        waiting = await session.run(gateway, task, turn_for, dsn=dsn)
+        await gateway.close()
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(LookupError, match="open question"):
+                await session.feedback(conn, task, "feedback while a question is open")
+            await ledger.append(conn, task, "task.delivered", {"turn_id": "t", "summary": "delivered"})
+            await tasks.stop(conn, task, reason="test")
+            with pytest.raises(LookupError, match="stopped"):
+                await session.feedback(conn, task, "feedback on a stopped task")
+            return waiting, await ledger.read(conn, task)
+
+    waiting, rows = run(go())
+    assert waiting["status"] == "waiting"
+    assert not [r for r in rows if r["type"] == "feedback.given"]
 
 
 def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_prompt(dsn, tmp_path):

@@ -141,7 +141,13 @@ async def stop(conn, task_id: str, *, reason: str, by: str = "tom") -> bool:
 
 
 async def status(conn, task_id: str) -> dict[str, Any]:
-    """The task as a fold over its ledger."""
+    """The task as a fold over its ledger.
+
+    `attention` lists every point where Tom acted on the task, in ledger
+    order: each question (`kind` "question") with his answer, and each piece
+    of feedback on a delivery (`kind` "feedback"). `delivered` is the latest
+    delivery's summary; feedback after it puts the task back to `live` until
+    the next `task.delivered`."""
     rows = await ledger.read(conn, task_id)
     committed = 0
     charged = 0
@@ -150,6 +156,7 @@ async def status(conn, task_id: str) -> dict[str, Any]:
     effects: dict[str, str] = {}
     attention: list[dict[str, Any]] = []
     delivered = None
+    reopened = False
     stopped = False
     for row in rows:
         kind, p = row["type"], row["payload"]
@@ -173,20 +180,34 @@ async def status(conn, task_id: str) -> dict[str, Any]:
         elif kind == "effect.refused":
             effects[p["effect_id"]] = "refused"
         elif kind == "question.asked":
-            attention.append({"question_id": p["question_id"], "question": p["text"], "answer": None})
+            attention.append(
+                {"kind": "question", "question_id": p["question_id"], "question": p["text"], "answer": None}
+            )
         elif kind == "question.answered":
             for q in attention:
-                if q["question_id"] == p["question_id"]:
+                if q.get("question_id") == p["question_id"]:
                     q["answer"] = p["text"]
+        elif kind == "feedback.given":
+            attention.append(
+                {
+                    "kind": "feedback",
+                    "feedback_id": p["feedback_id"],
+                    "on_delivery": p["on_delivery"],
+                    "feedback": p["text"],
+                    "provenance": p["provenance"],
+                }
+            )
+            reopened = True
         elif kind == "task.delivered":
             delivered = p["summary"]
+            reopened = False
         elif kind == "task.stopped":
             stopped = True
     if stopped:
         state = "stopped"
-    elif delivered is not None:
+    elif delivered is not None and not reopened:
         state = "delivered"
-    elif any(q["answer"] is None for q in attention):
+    elif any(q["kind"] == "question" and q["answer"] is None for q in attention):
         state = "waiting for Tom"
     else:
         state = "live"

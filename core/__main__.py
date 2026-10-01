@@ -7,8 +7,10 @@ start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
 run TASK_ID                    run turns until a question, a delivery, the
                                budget's end, or a stop; prints one status line
 answer TASK_ID TEXT            Tom's answer to the task's open question
+feedback TASK_ID TEXT          Tom's feedback on a delivered task; the next
+                               run resumes its session with it
 status TASK_ID                 the task as a fold over its ledger, with the
-                               attention log (questions and answers)
+                               attention log (questions, answers, feedback)
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task now, wherever its turn runs
 pending                        act-class effects held for Tom
@@ -113,6 +115,12 @@ async def _run(args) -> None:
         elif args.command == "answer":
             question_id = await session.answer(conn, args.task_id, args.text)
             print(f"answered question {question_id}; continue with: python -m core run {args.task_id}")
+        elif args.command == "feedback":
+            try:
+                feedback_id = await session.feedback(conn, args.task_id, args.text)
+            except LookupError as exc:
+                raise SystemExit(str(exc.args[0])) from None
+            print(f"feedback {feedback_id} recorded; continue with: python -m core run {args.task_id}")
         elif args.command == "status":
             print(json.dumps(await tasks.status(conn, args.task_id), indent=2))
         elif args.command == "ledger":
@@ -167,6 +175,9 @@ def main() -> None:
     answer = sub.add_parser("answer")
     answer.add_argument("task_id")
     answer.add_argument("text")
+    feedback = sub.add_parser("feedback")
+    feedback.add_argument("task_id")
+    feedback.add_argument("text")
     sub.add_parser("status").add_argument("task_id")
     sub.add_parser("ledger").add_argument("task_id")
     stop = sub.add_parser("stop")
