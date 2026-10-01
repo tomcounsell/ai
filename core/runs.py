@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from core import db, ledger, tasks
+from core import db, ledger, machine, tasks
 from core.gateway import Gateway
 from core.settings import settings
 
@@ -62,9 +62,12 @@ async def run_turn(
     task_id: str,
     build: Callable[[str, str], TurnCommand],
     dsn: str | None = None,
+    state: str | None = None,
 ) -> dict[str, Any]:
-    """Run one turn of the task to its end or its stop. Returns the
-    `turn.ended` payload."""
+    """Run one turn of the task to its end or its stop, in `state` (the
+    state machine's state the turn works in, recorded on `turn.started`;
+    None for a turn outside the machine). Returns the `turn.ended`
+    payload."""
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -76,7 +79,7 @@ async def run_turn(
             if await tasks.is_stopped(conn, task_id):
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)
-            dispatched = await tasks.dispatch(conn, task_id)
+            dispatched = await tasks.dispatch(conn, task_id, state=machine.State(state) if state else None)
             command = build(base_url, dispatched["text"], turn_id)
             await ledger.append(
                 conn,
@@ -84,6 +87,7 @@ async def run_turn(
                 "turn.started",
                 {
                     "turn_id": turn_id,
+                    "state": state,
                     "harness": command.harness,
                     "argv": command.argv,
                     "brief": dispatched["text"],

@@ -79,21 +79,44 @@ Both serve the constraint "reliable stop, recovery, and correction".
 
 ## What exists and what is design
 
-The current kernel (`core/tasks.py`, `core/session.py`) computes four
-states as a fold over the ledger: `live` (`clarify`, `plan`, `build`,
-`patch`, and `checks` while work is due), `waiting for Tom` (`waiting`),
-`delivered` (`merge`, `merged`), and `stopped`.
+The machine is kernel code: `core/machine.py` holds the types below, the
+total fold, the join, and the merge predicate; `core/router.py` is the
+control loop; `core/session.py` runs the working session; `core/verdicts.py`
+writes verdict rows; `core/guards.py` holds the guard records; the broker
+(`core/broker.py`) enforces the predicate. A verdict outside its enum is
+refused by Postgres (a `CHECK` constraint generated from `VERDICTS`).
+Stage instructions are plain files in `skills/sdlc/`, one per stage, and a
+turn's Brief carries the file for the state it runs in.
 
-The kernel has the question and answer path, the feedback loop, the held
-`act` effect with approve and release, stop, the attention log with
-provenance, and two first-turn modes on the Brief (`bare`, `clarify`)
-chosen by whoever starts the task. A turn that writes `.valor/done.md`
-produces `task.delivered` at once. Everything else here is design.
+Runners exist for `clarify`, `plan`, `build`, and `patch` (the working
+session). The judge's runner is the judgement port's (milestone 1.3); the
+critique, test, review, and docs runners are milestone 1.4's. Until each
+exists, the router stops at that stage and says so, and a person records
+its verdict by hand with `python -m core verdict TASK STAGE VERDICT`, the
+row carrying `leg: manual` and provenance; the command refuses a stage
+that has a runner, so it closes stage by stage, and 1.4 deletes it. The
+start command's `--mode bare|clarify` records the judge's verdict the same
+way (`precise` or `thin`) until 1.3.
+
+**Before 1.4, a limitation.** There is no separate docs checkout, so docs
+commits recorded by hand sit in the builder's workspace on top of the
+candidate. After a send-back to `patch` they ride into the next candidate,
+although docs commits belong to their candidate (`checks.docs` below).
+
+**Tasks from before the machine.** A `task.started` without `sdlc: 1` is
+a legacy task. It folds, read-only, by the old kernel's precedence
+(stopped; a delivery not reopened by feedback is `merge`; an unanswered
+question is `waiting`; feedback after a delivery is `patch`; any turn is
+`build`; else `judge`). The router and every verdict, answer, feedback,
+and grant refuse it; status, stop, approve, and release still work.
 
 ## Types
 
-The model as the kernel will hold it. Names are design; the shapes follow
-the kernel's convention of frozen dataclasses and JSONB payloads.
+The model as `core/machine.py` holds it, in brief; the shapes follow the
+kernel's convention of frozen dataclasses and JSONB payloads. Every
+working-session state (`clarify`, `plan`, `build`, `patch`) also has the
+verdicts `idle` and `failed`, since any turn can end with neither of its
+stage's signals or fail, and `turn.collected` always carries a verdict.
 
 ```python
 class State(StrEnum):
@@ -106,8 +129,10 @@ class Check(StrEnum):            # the three branches of CHECKS
     TEST = "test"; REVIEW = "review"; DOCS = "docs"
 
 VERDICTS: dict[State | Check, frozenset[str]] = {  # one enum each in code
-    State.JUDGE: {"precise", "thin"}, State.CLARIFY: {"asked", "no_material_question"},
-    State.PLAN: {"planned", "asked"}, State.CRITIQUE: {"sound", "revise"},
+    State.JUDGE: {"precise", "thin"},
+    State.CLARIFY: {"asked", "no_material_question", "idle", "failed"},
+    State.PLAN: {"planned", "asked", "idle", "failed"}, State.CRITIQUE: {"sound", "revise"},
+    State.BUILD: {"candidate", "asked", "idle", "failed"},  # PATCH the same
     Check.TEST: {"pass", "red", "gaps"},
     Check.REVIEW: {"pass", "changes", "governance_refused"},
     Check.DOCS: {"updated", "no_change", "changes"}, ...
@@ -215,9 +240,13 @@ ceiling, and unrelated debt is a new task for Tom. Mission items 1 and 5.
 `python -m core run TASK` is the router. Each call folds the ledger to the
 current state, runs the work that state calls for, records its verdict, and
 continues until the task needs Tom (`waiting`, `merge`, the budget's end,
-two idle turns, a failed turn, or `stopped`), then prints one status line
-and returns. The router reads verdicts and follows the table; it never
-decides authority.
+two idle turns, a failed turn, or `stopped`) or reaches a stage with no
+runner, then prints one status line and returns. The router reads verdicts
+and follows the table; it never writes a verdict and never decides
+authority. One run per task at a time: a run holds a session advisory lock
+on the task for its whole run, a second returns `already running`, and a
+run whose lock connection died returns `lock lost` before its next turn or
+write.
 
 | State | Tier | Why that tier |
 |---|---|---|
@@ -287,7 +316,8 @@ question would materially change the result (`no_material_question`, to
 
 **Why.** Mission items 3 and 6; asking under uncertainty follows [3]. On
 #872 the clarify message raised both questions the old system had put to
-Tom (rebuild-baseline.md). `no_material_question` is design.
+Tom (rebuild-baseline.md). The turn shows `no_material_question` by
+writing `.valor/no_question.md` (`skills/sdlc/clarify.md`).
 
 ### `waiting`: Tom has a question
 
@@ -459,9 +489,9 @@ Markdown files and the paths the plan names as docs. Its commits sit on top
 of the candidate and touch nothing the test or review branch reads as code,
 so the three cannot conflict.
 
-**Exit evidence.** `docs.decided`: the candidate, the docs commits on top
-of it, their paths, and the governance boolean over their diff (a doc can
-add a rule). `updated` or `no_change` passes. `changes` means a doc states
+**Exit evidence.** `docs.decided`: the candidate, the head of the docs
+commits on top of it, their paths, and the governance boolean over their
+diff (a doc can add a rule). `updated` or `no_change` passes. `changes` means a doc states
 something the code should still honor and the candidate breaks it, or a doc
 cannot be made true without a code change. The kernel checks the commits'
 paths when the turn ends: a commit outside the doc paths is dropped and
@@ -486,8 +516,19 @@ them together, with the loop counts (see Loops), and moves the task once:
 | `pass` | test `red`, or docs `changes` | the repair round spent | `merge`, as a delivery that did not pass |
 | `pass` | test `gaps`, docs passing | the repair round spent | `merge`, with the gaps listed |
 
-The join writes `task.delivered` when it sends the task to `merge`, and
-the findings it passes to `patch` on the turn's prompt.
+The rows are read in this order and the first that matches decides, so a
+review `governance_refused` goes to Tom before a red test is looked at, and
+a review `changes` with a round left goes to `patch` whatever docs
+answered on governance. Row 2 reads review only; a docs instance awaiting
+a tap reaches Tom in `merge` and holds the merge request until he grants
+it (predicate term 4). The join is a function of the verdict rows, so no
+row records it. The verdict that completes a join to `merge` writes
+`task.delivered` with it, and the kernel then requests the merge for a
+delivery that passed (or passed with gaps); the router requests it again
+on any run that finds the task in `merge` without one, so a crash between
+the two strands nothing. A delivery that did not pass, or whose review
+refused governance, gets no merge request: no predicate could release it.
+The findings the join passes to `patch` are the next turn's prompt.
 
 ### `patch`: the builder resolves the findings
 
@@ -538,17 +579,41 @@ these are facts in the task's ledger:
 1. one candidate `C`, the current one, with a `test.decided`, a
    `review.decided`, and a `docs.decided` row each keyed by `C`; no
    verdict for any other candidate counts;
-2. the review verdict `pass`, its governance boolean answered no, or the
-   Brief carries a `governance_grant` and Tom tapped each instance;
+2. the review verdict `pass`, its governance boolean answered no, or every
+   governance instance it names granted by Tom's own tap (a
+   `guard.granted` bound to the instance); the Brief's `governance_grant`
+   does not stand in for a tap;
 3. the test verdict `pass`, or `gaps` with the repair round spent and the
    gaps on the delivery; never `red`;
 4. the docs verdict `updated` or `no_change`, its commits running from `C`
-   to the head being merged and touching only doc paths, with its
-   governance boolean answered no or granted;
+   to the head being merged with no merge commit between, every path `git
+   diff --no-renames` names between them a doc path (so a rename out of a
+   code path counts the old path), read from git at release, and its
+   governance boolean answered no or each instance granted;
 5. an unused `approval.granted` bound to this merge effect's digest.
 
-Each term is deterministic: a row exists or it does not. No model call
-decides whether a merge may happen. After the release the task is
+Each term is deterministic: a row exists or a git fact holds, or not. No
+model call decides whether a merge may happen. The broker checks all five
+and writes the merge's intent in one transaction under the task's lock.
+
+**Where a merge goes.** At start the kernel records origin's push URL (as
+an absolute path) and the target branch (the flag, or the branch origin's
+`HEAD` names). The merge's payload carries both with the head and the
+candidate, so Tom's approval binds them, and the push goes to that URL
+whatever the workspace's config says later; a workspace whose own config
+holds an include, a URL rewrite, or a push URL is refused before the
+intent. A turn cannot request a merge, and its `push_branch` cannot target
+the target branch.
+
+**Governance instances.** A review or docs verdict names each instance by
+a path and a line inside its hunk; the kernel reads the hunk from the
+candidate's real diff and refuses an instance it does not find. An
+instance's id is a digest of its path, the hunk header's function context,
+and its added lines, without line numbers, so a review rerun or a later
+candidate with the same hunk names the same id, and a grant (bound to the
+id) holds across patches; a changed, moved, or split hunk is a new
+instance and needs a new tap. Identical added lines in the same function
+context of the same file share an id. After the release the task is
 `merged`; a defect found in use comes back as `feedback.given` on the same
 task and goes to `patch` (Mission item 1, "resolving discovered defects").
 

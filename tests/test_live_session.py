@@ -1,7 +1,9 @@
 """A task over several real turns, end to end through the command line, on a
 toy git repository: start; run until Valor asks Tom a question; answer; run
-until Valor delivers and requests a push; approve; release; the bare origin
-gets the branch; every turn's Brief carried the corrections.
+until the plan is committed; critique by hand; run until Valor builds a
+candidate and requests a push; the three checks by hand; approve and release
+the push and the merge; the bare origin gets both; every turn's Brief
+carried the corrections and its stage.
 
 Every turn runs under a sandbox-exec profile that keeps the bare origin
 unwritable and loopback closed except for the gateway.
@@ -34,9 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTRUCTION = (
     "Create greeting.txt in the workspace holding a one-line greeting for Tom. "
     "Tom has a particular greeting in mind that you cannot infer, so on your first turn "
-    "do nothing except ask him which greeting he wants, then end the turn. Once he answers: "
-    "write the file, commit it on the current branch, request a push_branch of that commit "
-    "to the branch valor/greeting, write done.md, and end the turn."
+    "do nothing except ask him which greeting he wants, then end the turn. "
+    "When you build: write the file, commit it on the current branch, request a push_branch "
+    "of that commit to the branch valor/greeting, and finish the stage as it says."
 )
 
 
@@ -62,6 +64,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     ws, origin, home = root / "ws", root / "origin.git", root / "home"
     home.mkdir()
     sh("git", "init", "-q", "--bare", str(origin))
+    sh("git", "symbolic-ref", "HEAD", "refs/heads/main", cwd=origin)
     sh("git", "init", "-q", "-b", "main", str(ws))
     (ws / "README.md").write_text("A toy repository.\n")
     (home / "gitconfig").write_text("[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n")
@@ -69,6 +72,7 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     sh(*git, "add", "README.md", cwd=ws)
     sh(*git, "commit", "-qm", "base", cwd=ws)
     sh("git", "remote", "add", "origin", str(origin), cwd=ws)
+    sh("git", "push", "-q", "origin", "HEAD:refs/heads/main", cwd=ws)
     (ws / ".git" / "info" / "exclude").write_text(".valor/\n")
     (home / "sandbox.sb").write_text(
         "(version 1)\n(allow default)\n"
@@ -90,25 +94,37 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     task = core(
         "start", INSTRUCTION, "--budget-usd", "0.25", "--ceiling", "act",
         "--workspace", str(ws), "--model", "light", "--harness-config", str(home / "harness.json"),
+        "--mode", "bare",
     )  # fmt: skip
+    who = ["--by", "live test", "--role-played"]
     assert core("run", task).startswith("QUESTION")
     core("answer", task, "Say exactly: Morning, Tom.")
-    assert core("run", task).startswith("DELIVERED")
-    held = [e for e, s in json.loads(core("status", task))["effects"].items() if s == "pending"]
-    assert held, "expected a push_branch held for Tom"
-    assert sh("git", "branch", "--list", cwd=origin) == ""
-    core("approve", held[0], "--note", "yes, push it")
-    core("release", held[0])
+    assert core("run", task).startswith("NO RUNNER")  # the plan is written; critique has no runner
+    core("verdict", task, "critique", "sound", *who)
+    assert core("run", task).startswith("NO RUNNER")  # the candidate waits on its checks
+    state = json.loads(core("status", task))
+    candidate = state["candidate"]["sha"]
+    for stage, verdict in (("test", "pass"), ("review", "pass"), ("docs", "no_change")):
+        core("verdict", task, stage, verdict, *who)
+    state = json.loads(core("status", task))
+    assert state["state"] == "merge" and state["merge_effect"]["state"] == "held"
+    held = [e for e, s in state["effects"].items() if s == "pending"]
+    assert len(held) == 2, "expected a push_branch and the merge held for Tom"
+    for effect in held:
+        core("approve", effect, "--note", "yes")
+        core("release", effect)
+    assert sh("git", "rev-parse", "main", cwd=origin) == candidate
     pushed = sh("git", "rev-parse", "valor/greeting", cwd=origin)
-    assert pushed == sh("git", "rev-parse", "HEAD", cwd=ws)
     assert "Morning, Tom." in sh("git", "show", f"{pushed}:greeting.txt", cwd=origin)
+    assert json.loads(core("status", task))["state"] == "merged"
 
     async def turns():
         async with await db.connect(dsn) as conn:
             return [r["payload"] for r in await ledger.read(conn, task) if r["type"] == "turn.started"]
 
     started = asyncio.run(turns())
-    assert len(started) >= 2
+    assert len(started) >= 3
+    assert "# Stage: plan" in started[0]["brief"]
     for t in started:
         argv = t["argv"]
         assert t["corrections"] and t["corrections"][0] == 1
@@ -119,4 +135,4 @@ def test_a_question_an_answer_a_delivery_and_a_held_push_from_the_command_line(d
     assert all("--resume" in t["argv"] for t in started[1:])
     state = json.loads(core("status", task))
     assert state["attention_counts"]["question"]["total"] == 1
-    assert state["attention_counts"]["approval"]["total"] == 1
+    assert state["attention_counts"]["approval"]["total"] == 2

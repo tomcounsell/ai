@@ -2,7 +2,7 @@
 tracking: none
 slug: m1-2-state-machine
 type: build
-status: planned
+status: built
 critique_rounds: 2
 review_rounds: 2
 ---
@@ -151,8 +151,8 @@ Pure code, no I/O, importing only the standard library.
   and a `critique.decided` whose `plan_sha256` is not the current plan's.
 - **Loop window.** Counts restart at `task.started` and at every
   `feedback.given`, as the doc says. `loops` is the larger, per count, of
-  the current plan's value and every raise a critique made in the window,
-  so a revised plan cannot lower a count a critique raised. A raise
+  the current plan's value and every raise a critique made on the task, so
+  a revised plan cannot lower a count a critique raised. A raise
   applies to the verdict carrying it: a `revise` that raises
   `critique_rounds` from 0 to 1 is itself sent back to `plan`. A `revise`
   goes to `plan` while revisions in the window are fewer than
@@ -241,30 +241,45 @@ New or changed rows:
 | `feedback.given` | `session.feedback` | as today, plus `candidate` | |
 | `guard.granted` | `migrate` (the seeded guards, on the `guards` stream), `guards.grant` (a governance instance, on the task) | `guard_id`, `name`, `incident`, `mission_items`, `granted_at`, `expires` (granted plus ninety days), `note` (Tom's literal message), provenance; on a task also `instance_id` and the `candidate` it was granted on | `events_one_guard` unique on `guard_id` |
 
-**The enum constraint.** One `CHECK` constraint, `events_verdict_in_enum`,
-generated from `machine.VERDICTS` by `machine.constraint_sql()`, so the
-enum lives in one place. `db.migrate` applies it after `schema.sql` in a
-`DO` block that reads `pg_constraint`: absent, it is added; present with
-the same definition, nothing happens; present with a different definition
-(a later milestone changed `VERDICTS`), it is dropped and added in the same
-transaction. Adding a `CHECK` scans the table and rewrites no row, which
-`test_migrate_history.py` proves on a copy of the real ledger. A verdict
-outside its enum is refused by Postgres whatever code writes it.
+**The enum constraint.** One `CHECK` constraint generated from
+`machine.VERDICTS` by `machine.constraint_sql()`, so the enum lives in one
+place. Its name is `events_verdict_in_enum_<digest>`, the digest of the
+generated SQL, because Postgres deparses a stored constraint (casts,
+parentheses) and its text never equals the generated text. `db.migrate`
+reads `pg_constraint` under an advisory lock: the current name in place
+means nothing to do; otherwise every older one is dropped and the current
+one added in one transaction. It is always added `NOT VALID`, so history
+is never rechecked: the rule is that a verdict value may be removed from
+`VERDICTS` and history holding it does not refuse the change, while every
+new row is checked. Nothing is rewritten, which `test_migrate_history.py`
+proves on a copy of the real ledger. A verdict outside its enum is refused
+by Postgres whatever code writes it.
 
-**Governance instance ids.** `id` is the SHA-256 of the instance's path
-and the hunk's added lines, without line numbers, so a review rerun on the
-same candidate, or a later candidate whose hunk did not change, names the
-same id. A `guard.granted` binds to the instance id, not to the candidate:
-an unchanged hunk stays granted across patches, and a changed hunk is a new
-instance needing a new tap. The candidate it was first granted on is
-recorded for the record only.
+**Governance instance ids.** A review or docs verdict names an instance by
+a path and a line inside its hunk. The kernel reads the hunk itself from
+the candidate's real diff (`git diff` from the task's base for review, from
+the candidate to the docs head for docs) and refuses an instance it does
+not find there; reviewer-supplied hunk text is never used. `id` is a digest
+of the path, the hunk header's function context, and the hunk's added
+lines, without line numbers, so a review rerun on the same candidate, or a
+later candidate whose hunk did not change, names the same id, and the same
+added lines in two functions are two instances. Identical added lines in
+the same function context of the same file share an id. A moved or split
+hunk gets new ids and needs new taps: accepted. A `guard.granted` binds to
+the instance id, not to the candidate: an unchanged hunk stays granted
+across patches. A task grant gets a fresh `guard_id` (`grant-<id>`), and
+`events_one_instance_grant` makes `(task_id, instance_id)` unique, so the
+same hunk granted on another task is not refused by `events_one_guard`.
 
 A writer that would write a row the fold would ignore refuses instead:
 `answer` needs `waiting`; `feedback` needs `merge` or `merged` and no merge
 effect with an intent and no outcome; `verdict` needs the task in that
 stage (and in `checks`, a current candidate); `grant` needs `merge` and an
 instance of the current candidate's review or docs verdict without a
-grant. Each takes the task's advisory lock, folds, checks, and appends in
+grant. A review naming an ungranted instance must be `governance_refused`,
+and a `governance_refused` naming only instances already granted is
+refused at write (such a review is `pass`), so a review cannot strand the
+task in `merge`. Each takes the task's advisory lock, folds, checks, and appends in
 one transaction, as `answer` does today.
 
 ### 4. Verdict writers and the join's effects: `core/verdicts.py` (new)
@@ -280,7 +295,10 @@ The merge effect is requested by `pipeline.ensure_merge` (in this module),
 called after that transaction commits and by the router on every run that
 finds the task in `merge`: when the delivery passed or passed with gaps
 and the fold shows no held, in-flight, or done merge effect for the
-current candidate, it requests one. The broker's idempotency key makes a
+current candidate, it requests one. It requests nothing while any
+governance instance of the candidate awaits Tom's tap, and does not repeat
+a request refused with the same payload unless Tom has granted something
+since, so repeated runs never fill the ledger with `effect.refused` rows. The broker's idempotency key makes a
 repeat request return the same effect, so a crash between `task.delivered`
 and the request leaves nothing stranded: the next `run` requests it. A
 delivery that did not pass, or whose review refused governance, requests
@@ -349,7 +367,12 @@ the effects report. Changed:
 
 A run first takes a session-scoped `pg_try_advisory_lock` on `run:<task>`
 on a connection it holds for the whole run; if another run holds it, it
-returns `already running` and does nothing. Then it folds, and: `waiting`,
+returns `already running` and does nothing. A session lock lives only as
+long as its connection, and an idle connection can die during a long turn,
+so the run checks it (`SELECT 1`) before each turn and before recording a
+turn's verdict, and returns `lock lost` if it is gone. A transaction-pooling
+proxy between the kernel and Postgres would break this, since it keeps no
+session; the kernel connects directly. Then it folds, and: `waiting`,
 `merged`, `stopped`, and legacy tasks return at once with one status line;
 `merge` calls `ensure_merge` and returns; a state with a runner runs it
 and folds again; a state without one returns `no runner`. In `checks` it
@@ -363,8 +386,9 @@ turn return as today. The router never writes a verdict.
 `governance`, `delivered`, alongside today's money, turns, effects, and
 attention. `scripts/replay.py` and `scripts/role_play_tom.py` change in the
 same commit: `waiting` replaces `waiting for Tom`, `merge` replaces
-`delivered`, the driver releases a held `merge` the way it releases a
-local push, and a `no runner` line ends the run with that outcome rather
+`delivered`, the driver releases a held `merge` when its payload's URL is
+the run's own origin (the URL the approval binds, not whatever the
+workspace's remote config says now), and a `no runner` line ends the run with that outcome rather
 than looping to the run cap. So no replay can finish between 1.2 and 1.4;
 the takeover gate in 1.5 is where replays run the whole pipeline.
 
@@ -427,18 +451,30 @@ is not edited anywhere; it stays verbatim.
   `adds_governance`, now as the broker computed it.
 - **The merge destination is the kernel's, not the turn's.** At start, the
   kernel resolves `origin`'s push URL in the workspace (before any turn
-  has run) and records it as `origin_url` on the Brief and `task.started`.
+  has run), as an absolute path (`get-url` returns a relative path as it
+  was written), and records it as `origin_url` on the Brief and
+  `task.started`.
   The merge payload carries `url`, `target_branch`, `head_sha`, and the
   candidate, so Tom's approval digest binds all of them. The performer
   pushes `head_sha` to `refs/heads/<target_branch>` at that URL, never with
-  force, and refuses when the workspace's config holds any `pushurl` or any
-  `url.*.insteadOf` or `url.*.pushInsteadOf` rule, since those rewrite even
-  an explicit URL. `push_branch` does the same (recorded URL, same
+  force. It reads the workspace's effective config with `git config --list
+  --show-scope --includes` and refuses any `include.*` or `includeIf.*`,
+  any `url.*` rule, and any `remote.*.pushurl` from the local or worktree
+  scope: a rewrite applies even to an explicit URL, and an include can
+  bring one in from a file `--get-regexp` on the local file never reads.
+  Tom's global rewrites are his and are not refused. The performer's
+  refusal is checked at request and again at release before the intent,
+  so a refused release writes nothing and leaves the approval unused. `push_branch` does the same (recorded URL, same
   refusal) and refuses the task's `target_branch` as its target, so the
   only way onto the target branch is the merge and its predicate.
 - **`target_branch`** is `--target-branch` at start, defaulting to
   `origin`'s `HEAD` symbolic ref as `git ls-remote --symref` reports it;
-  when that cannot be resolved, start refuses and asks for the flag.
+  when that cannot be resolved (an origin made with `git init --bare` on a
+  machine with no `init.defaultBranch` has an unborn `master` HEAD, and
+  `ls-remote` prints nothing), start refuses and asks for the flag.
+  `scripts/replay_workspace.py` and `scripts/demo_workspace.sh` now set
+  their origin's `HEAD` to `main`, and `scripts/replay.py` passes
+  `--target-branch main` explicitly.
   Start also refuses a workspace on a detached `HEAD`. `base_sha` is the
   workspace's `HEAD` at start (1.4's test branch runs the suite there).
 - **`release` in one transaction.** Today the approval is read in one
@@ -529,7 +565,9 @@ scripted turns as in `test_session.py`). All spend $0 except the two
   `CheckViolation`; each value in `VERDICTS` is accepted; a
   `turn.collected` with a `state` and no verdict is refused; plan counts of
   3 and a critique raise of 3 are refused. Migrating twice leaves one
-  constraint, and changing `VERDICTS` in a scratch database replaces it.
+  constraint; replacing it in a scratch database with a narrower enum
+  succeeds over history holding the removed value, and a new row with that
+  value is refused.
 - A second `judge.decided` and a second `turn.collected` for one turn are
   refused by their unique indexes.
 
@@ -581,15 +619,25 @@ scripted turns as in `test_session.py`). All spend $0 except the two
   approved, feedback produces candidate 2 and its merge effect; candidate
   2's effect does not release on candidate 1's approval (term 5), and
   candidate 1's effect does not release although approved (term 1).
-- The destination: after start, the turn sets `origin`'s URL, a
-  `pushurl`, or a `url.*.insteadOf` rule in the workspace; the merge
-  refuses (rewrite rules) or pushes only to the recorded URL, and the
-  stranger repository receives nothing. `push_branch` to the target branch
+- The destination: after the merge is held, the turn sets `origin`'s URL,
+  a `pushurl`, a `url.*.pushInsteadOf` rule, or an `include.path` naming a
+  file that holds such a rule; the release refuses (writing nothing, the
+  approval unused) or pushes only to the recorded URL, and the stranger
+  repository receives nothing. `push_branch` to the target branch
   is refused. An effect file with action type `merge` is recorded with its
   error and never reaches the broker.
 - Start: the target branch defaults to `origin`'s `HEAD` (in a workspace
-  on a work branch, it is `main`, not the work branch); a detached `HEAD`
-  is refused.
+  on a work branch, it is `main`, not the work branch); an origin whose
+  `HEAD` is unborn needs the flag; a detached `HEAD` is refused; an origin
+  made by exactly the commands `scripts/replay_workspace.py` runs resolves
+  `main`; a relative remote URL is recorded absolute.
+- Instance ids: the same added lines in two functions are two ids; the same
+  hunk with its line numbers shifted keeps its ids; a review naming a line
+  with no added lines is refused; a `governance_refused` naming only
+  granted instances is refused.
+- The replay driver leaves a held merge whose payload names another URL.
+- Repeated runs while an instance awaits a tap add no `effect.refused`;
+  after the grant the next run requests the merge.
 - The governance flag: an effect file carrying `adds_governance` gets an
   effect recorded with `false`; a merge whose review named an ungranted
   instance is refused at request; a task whose Brief carries a
@@ -621,7 +669,8 @@ scripted turns as in `test_session.py`). All spend $0 except the two
 - `grant` has no `--by` or `--role-played`; its row says `by: tom`,
   `role_played: false`; a grant without an incident is refused.
 - Two `run` processes on one task: the second returns `already running`
-  and starts no turn.
+  and starts no turn; a run whose lock connection is terminated returns
+  `lock lost` and runs no turn.
 - Stage rendering: the dispatched Brief carries `channel.md` and the
   current state's file, changes when the state does, and lists every
   registered performer offering a `usage` line and not `merge`.
@@ -687,6 +736,33 @@ them.
   (no governance dashboard).
 - Concurrent branches in `checks`: the router runs them one at a time,
   which the doc allows with identical semantics.
+
+## Build record
+
+Built on `m1.2-state-machine` from plan `2ff4e5102` and critique round 2's
+findings (the eight fixes above: the include bypass, the replay origin's
+`HEAD`, the constraint digest and `NOT VALID`, the lock check, instance ids
+from the real diff with function context and per-task uniqueness, the
+`governance_refused` write rule, the driver's merge URL check, and no
+merge requests while a tap is awaited). Settled while building:
+
+- A performer's `refuse` runs at release too, before the intent (the
+  rewrite refusal included), so a refused release consumes nothing.
+- A new candidate clears the fold's merge effect, so a candidate after
+  feedback gets its own merge request.
+- The `verdict` command's suite option is `--suite-command`, since
+  `--command` collided with the subcommand.
+- Critique raises hold for the task, not only the loop window.
+- The judge's manual verdict at start counts as a `verdict` attention
+  entry, like any manual verdict.
+- `ruff format --check .` reports a Python block in
+  `docs/bridges/telegram.md` on the base commit as well; it is not this
+  build's and is left alone. Code paths are clean.
+
+Evidence: `cd ~/src/valor-rebuild-m12 && VALOR_TEST_DB=valor_rebuild_test_m12
+.venv/bin/python -m pytest -q tests`: 211 passed, 3 skipped (the live
+tests). With `VALOR_LIVE=1`, `test_live_turn.py` and `test_live_session.py`
+passed once, metering about $0.17 together.
 
 ## Rollout at merge
 

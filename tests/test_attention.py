@@ -18,8 +18,9 @@ from psycopg.types.json import Jsonb
 
 from core import broker, budget, db, ledger, session, tasks
 from core.gateway import Gateway
+from tests import scripted
 from tests.conftest import TEST_DB
-from tests.test_session import turn_for
+from tests.scripted import turn_for
 from tools.workspace import OutboxAppend
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -88,6 +89,8 @@ def test_an_approval_carries_provenance_and_counts_apart_from_questions_and_feed
         "feedback": {"total": 0, "role_played": 0, "unknown": 0},
         "approval": {"total": 2, "role_played": 1, "unknown": 0},
         "budget_raise": {"total": 0, "role_played": 0, "unknown": 0},
+        "verdict": {"total": 0, "role_played": 0, "unknown": 0},
+        "grant": {"total": 0, "role_played": 0, "unknown": 0},
     }
 
 
@@ -145,6 +148,8 @@ def test_rows_from_before_provenance_read_what_they_recorded_and_no_more(dsn):
         "feedback": 1,
         "approval": 1,
         "budget_raise": 0,
+        "verdict": 0,
+        "grant": 0,
     }
 
 
@@ -227,8 +232,11 @@ def test_the_cli_raise_is_folded_and_shown_in_the_next_brief(dsn, tmp_path):
 
 
 def test_a_run_stopped_by_an_empty_budget_runs_again_after_a_raise(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, plan="ask")
+
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0, workspace=str(tmp_path), max_effect_class="act")
+        task = await scripted.start(dsn, ws, budget_usd_micros=0)
         gateway = Gateway(dsn)
         await gateway.start()
         first = await session.run(gateway, task, turn_for, dsn=dsn)
@@ -240,7 +248,8 @@ def test_a_run_stopped_by_an_empty_budget_runs_again_after_a_raise(dsn, tmp_path
 
     first, second = run(go())
     assert first["status"] == "budget exhausted"
-    assert second["status"] == "waiting"  # a turn ran and asked its question
+    # a turn ran and asked its question, which moved the task to waiting
+    assert second["status"] == "moved" and second["state"]["state"] == "waiting"
 
 
 def test_racing_raises_and_reservations_never_exceed_the_committed_total(dsn):
@@ -324,17 +333,23 @@ def test_the_cli_raise_refuses_an_unknown_task_and_an_amount_not_above_zero(dsn,
 
 def test_an_open_question_is_listed_and_not_counted(dsn):
     async def go():
-        task = await new_task(dsn, budget_usd_micros=0)
+        task = await new_task(dsn, budget_usd_micros=0, mode="bare")
         async with await db.connect(dsn) as conn:
             async with conn.transaction():
                 await ledger.append(
-                    conn, task, "question.asked", {"question_id": "q1", "turn_id": "t", "text": "?"}
+                    conn,
+                    task,
+                    "question.asked",
+                    {"question_id": "q1", "turn_id": "t", "text": "?", "state": "plan"},
                 )
             return await tasks.status(conn, task)
 
     state = run(go())
-    assert state["state"] == "waiting for Tom"
-    assert [(a["kind"], a["answer"]) for a in state["attention"]] == [("question", None)]
+    assert state["state"] == "waiting" and state["return_to"] == "plan"
+    assert [(a["kind"], a.get("answer")) for a in state["attention"]] == [
+        ("verdict", None),
+        ("question", None),
+    ]
     assert state["attention_counts"]["question"] == {"total": 0, "role_played": 0, "unknown": 0}
 
 

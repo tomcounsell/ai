@@ -1,7 +1,8 @@
 """Connections and the schema.
 
 The kernel connects as `valor_kernel`, which can read and append and never
-update or delete the ledger. Only `migrate` connects as the owner. Every
+update or delete the ledger. Only `migrate` connects as the owner: it applies the schema, the verdict
+constraint, correction 1, and the seeded guards. Every
 connection string names the kernel's password file (`settings.pg_passfile`)
 and never a password; the credential itself is `core/credentials.py`'s.
 """
@@ -12,7 +13,7 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from core import corrections
+from core import corrections, guards, machine
 from core.settings import settings
 
 SCHEMA = Path(__file__).with_name("schema.sql")
@@ -53,8 +54,44 @@ def migrate(
     with psycopg.connect(settings.dsn(owner=True, database=database, **where)) as conn:
         conn.execute(schema.read_text())
         conn.commit()
+        verdict_constraint(conn)
         _seed_correction_one(conn)
+        guards.seed(conn)
     return settings.dsn(database=database, **where)
+
+
+def verdict_constraint(
+    conn: psycopg.Connection, expression: str | None = None, name: str | None = None
+) -> bool:
+    """Put the verdict enum's CHECK constraint in place, from
+    `machine.constraint_sql`. Its name carries a digest of its SQL: the
+    current name in place means nothing to do; otherwise every older one is
+    dropped and the current one added in one transaction. It is added `NOT
+    VALID`, so rows already written are never rechecked: a verdict value may
+    be removed from `VERDICTS` without history refusing the change, and the
+    constraint still refuses every new row outside the enum. Returns whether
+    it changed anything."""
+    expression = expression or machine.constraint_sql()
+    name = name or machine.constraint_name()
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('verdict-constraint', 0))")
+        names = [
+            r[0]
+            for r in conn.execute(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'events'::regclass "
+                "AND conname LIKE 'events_verdict_in_enum%%'"
+            ).fetchall()
+        ]
+        if names == [name]:
+            return False
+        for old in names:
+            conn.execute(sql.SQL("ALTER TABLE events DROP CONSTRAINT {}").format(sql.Identifier(old)))
+        conn.execute(
+            sql.SQL("ALTER TABLE events ADD CONSTRAINT {} CHECK ({}) NOT VALID").format(
+                sql.Identifier(name), sql.SQL(expression)
+            )
+        )
+    return True
 
 
 def _seed_correction_one(conn: psycopg.Connection) -> None:

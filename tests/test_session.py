@@ -1,9 +1,12 @@
-"""A task's turns on real Postgres: a question waits for Tom, his answer
-resumes the same session, a delivery settles the task, and a push it
-requested reaches a real bare repository only after his tap.
+"""The working session on real Postgres and real git: a thin request asks,
+Tom's answer lands in the session that asked, the plan is recorded from a
+committed file, the build's candidate goes through the checks to a merge
+held for Tom, and feedback after the merge patches in the same session.
 
-No model call: each turn is a real Python subprocess that plays Valor's
-part by writing `.valor/` files, the way a `claude -p` turn would.
+No model call: each turn is a scripted subprocess (`tests/scripted.py`)
+that plays its stage by writing `.valor/` files and committing, the way a
+`claude -p` turn would. Verdicts for stages with no runner yet are recorded
+by hand, as `python -m core verdict` records them.
 """
 
 import asyncio
@@ -15,409 +18,210 @@ from pathlib import Path
 
 import pytest
 
-from core import broker, budget, db, ledger, session, signals, tasks
+from core import broker, budget, db, ledger, router, session, signals, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
+from tests import scripted
 from tests.conftest import TEST_DB
+from tests.scripted import git
 from tools.push_branch import PushBranch
 
 pytestmark = pytest.mark.spend(usd=0)
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# Asks on its first turn; on the turn that opens with Tom's answer, commits
-# the answer, requests a push of that commit, and delivers.
-VALOR = r"""
-import json, pathlib, subprocess, sys
-prompt, resume, brief = sys.argv[1], sys.argv[2], sys.argv[3]
-v = pathlib.Path(".valor")
-(v / "effects").mkdir(parents=True, exist_ok=True)
-log = v / "turns.jsonl"
-with log.open("a") as f:
-    f.write(json.dumps({"prompt": prompt, "resume": resume, "brief": brief}) + "\n")
-if prompt.startswith("Tom answered"):
-    pathlib.Path("greeting.txt").write_text(prompt.splitlines()[-1] + "\n")
-    git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
-    subprocess.run(git + ["add", "greeting.txt"], check=True)
-    subprocess.run(git + ["commit", "-qm", "Greet Tom"], check=True)
-    sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    (v / "effects" / "push.json").write_text(json.dumps(
-        {"action_type": "push_branch", "target": "valor/greeting", "payload": {"head_sha": sha}}))
-    (v / "done.md").write_text("greeting.txt says what Tom asked for, committed and offered for push.")
-else:
-    (v / "question.md").write_text("Which greeting do you want?")
-print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
-"""
-
 
 def run(coro):
     return asyncio.run(coro)
 
 
-def git(cwd, *args) -> str:
-    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout
+async def drive(dsn, task) -> dict:
+    gateway = Gateway(dsn)
+    await gateway.start()
+    try:
+        return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+    finally:
+        await gateway.close()
 
 
-def turn_for(prompt, resume, b):
-    def build(url, brief, turn_id):
-        return claude_code.TurnCommand(
-            argv=[sys.executable, "-c", VALOR, prompt, resume or "", brief],
-            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
-            cwd=b.workspace,
-            harness="script",
-            parse=claude_code.parse,
-        )
-
-    return build
-
-
-@pytest.fixture
-def workspace(tmp_path):
-    origin = tmp_path / "origin.git"
-    ws = tmp_path / "ws"
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
-    subprocess.run(["git", "init", "-q", str(ws)], check=True)
-    git(
-        ws,
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@example.com",
-        "commit",
-        "-q",
-        "--allow-empty",
-        "-m",
-        "base",
-    )
-    git(ws, "remote", "add", "origin", str(origin))
-    return ws, origin
-
-
-async def new_task(dsn, ws, **kw) -> str:
-    async with await db.connect(dsn) as conn:
-        return await tasks.start(
-            conn,
-            tasks.Brief(
-                instruction="Write Tom a greeting.",
-                budget_usd_micros=kw.pop("budget_usd_micros", 1_000),
-                max_effect_class="act",
-                workspace=str(ws),
-                **kw,
-            ),
-        )
-
-
-def test_question_answer_delivery_and_a_push_held_for_tom(dsn, workspace):
-    ws, origin = workspace
-    broker.register(PushBranch(ws))
+def test_a_thin_request_asks_and_the_answer_resumes_the_session_that_asked(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await new_task(dsn, ws)
-        gateway = Gateway(dsn)
-        await gateway.start()
-        first = await session.run(gateway, task, turn_for, dsn=dsn)
+        task = await scripted.start(dsn, ws, mode="clarify")
+        first = await drive(dsn, task)
+        again = await drive(dsn, task)  # runs no turn
         async with await db.connect(dsn) as conn:
             with pytest.raises(LookupError):
                 await session.answer(conn, "no-such-task", "x")
-            waiting = await session.run(gateway, task, turn_for, dsn=dsn)  # runs no turn
             await session.answer(conn, task, "Morning, Tom.")
             with pytest.raises(LookupError):
                 await session.answer(conn, task, "a second answer to nothing")
-        second = await session.run(gateway, task, turn_for, dsn=dsn)
-        again = await session.run(gateway, task, turn_for, dsn=dsn)  # runs no turn
-        await gateway.close()
-        async with await db.connect(dsn) as conn:
-            held = next(e for e, s in second["state"]["effects"].items() if s == "pending")
-            with pytest.raises(broker.NotApproved):
-                await broker.release(conn, held)
-            before = git(origin, "branch", "--list")
-            await broker.approve(conn, held, note="push it")
-            pushed = await broker.release(conn, held)
-            return task, first, waiting, second, again, before, pushed, await ledger.read(conn, task)
+        second = await drive(dsn, task)
+        return task, first, again, second
 
-    _, first, waiting, second, again, before, pushed, rows = run(go())
-    assert first["status"] == "waiting" and first["question"]["question"] == "Which greeting do you want?"
-    assert waiting["status"] == "waiting"
-    assert second["status"] == "delivered" and "greeting.txt" in second["state"]["delivered"]
-    assert again["status"] == "delivered"
-    assert before == ""
-    assert pushed.kind == "done"
-    assert git(origin, "rev-parse", "valor/greeting").strip() == git(ws, "rev-parse", "HEAD").strip()
-
-    attention = second["state"]["attention"]
-    assert attention == [
-        {
-            "kind": "question",
-            "question_id": attention[0]["question_id"],
-            "question": "Which greeting do you want?",
-            "answer": "Morning, Tom.",
-            "provenance": attention[0]["provenance"],
-        }
-    ]
-    assert attention[0]["provenance"]["by"] == "tom" and attention[0]["provenance"]["role_played"] is False
-    answered = next(r["payload"] for r in rows if r["type"] == "question.answered")
-    assert answered["provenance"]["by"] == "tom"
-
-    turns = [json.loads(line) for line in (ws / ".valor" / "turns.jsonl").read_text().splitlines()]
-    assert len(turns) == 2  # the waiting and delivered runs ran no turn
-    assert turns[0]["prompt"] == "Write Tom a greeting." and turns[0]["resume"] == ""
-    assert turns[1]["prompt"] == "Tom answered your question:\n\nMorning, Tom."
-    assert turns[1]["resume"] == "session-1"
-    for t in turns:
-        assert "# Corrections from Tom" in t["brief"] and signals.PROTOCOL in t["brief"]
-    started = [r["payload"] for r in rows if r["type"] == "turn.started"]
-    assert [s["brief"] for s in started] == [t["brief"] for t in turns]
-    assert [
-        r["type"] for r in rows if r["type"] in ("question.asked", "question.answered", "task.delivered")
-    ] == [
-        "question.asked",
-        "question.answered",
-        "task.delivered",
-    ]
-    assert not (ws / ".valor" / "question.md").exists() and not (ws / ".valor" / "done.md").exists()
+    _task, first, again, second = run(go())
+    assert first["status"] == "waiting" and again["status"] == "waiting"
+    assert second["status"] == "no runner" and second["missing"] == ["critique"]
+    st = second["state"]
+    assert st["state"] == "critique" and st["plan"]["path"] == "docs/plan.md"
+    assert st["plan"]["review_rounds"] == 1 and st["plan"]["commit"] == git(ws, "rev-parse", "HEAD")
+    t = scripted.turns(ws)
+    assert [x["stage"] for x in t] == ["clarify", "clarify", "plan"]
+    assert t[0]["prompt"] == "Write Tom a greeting." and t[0]["resume"] == ""
+    assert t[1]["prompt"] == "# Tom's answer\n\nMorning, Tom." and t[1]["resume"] == "session-1"
+    assert t[2]["prompt"].startswith("# No material question") and t[2]["resume"] == "session-1"
+    for x in t:
+        assert "# Corrections from Tom" in x["brief"] and "# How this task reaches Tom" in x["brief"]
+    assert "push_branch" in t[0]["brief"] and "`merge`" not in t[0]["brief"]
+    assert (st["attention_counts"]["question"]["total"], st["attention_counts"]["verdict"]["total"]) == (1, 1)
 
 
-# Delivers on its first turn with one effect request. A turn opening with
-# Tom's feedback delivers again only when the feedback says "revise", and
-# otherwise leaves nothing, so a stale done.md or effect file read again
-# would show as a delivery or an effect it did not make.
-DELIVERER = r"""
-import json, pathlib, sys
-prompt, resume = sys.argv[1], sys.argv[2]
-v = pathlib.Path(".valor")
-(v / "effects").mkdir(parents=True, exist_ok=True)
-with (v / "turns.jsonl").open("a") as f:
-    f.write(json.dumps({"prompt": prompt, "resume": resume}) + "\n")
-if not resume:
-    (v / "effects" / "send.json").write_text(
-        json.dumps({"action_type": "no_such_action", "target": "tom", "payload": {}}))
-    (v / "done.md").write_text("First delivery.")
-elif "revise" in prompt:
-    (v / "done.md").write_text("Second delivery, revised per Tom's feedback.")
-print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
-"""
-
-
-def deliverer_for(prompt, resume, b):
-    def build(url, brief, turn_id):
-        return claude_code.TurnCommand(
-            argv=[sys.executable, "-c", DELIVERER, prompt, resume or ""],
-            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
-            cwd=b.workspace,
-            harness="script",
-            parse=claude_code.parse,
-        )
-
-    return build
-
-
-def test_feedback_reopens_a_delivery_and_the_next_run_resumes_the_same_session(dsn, tmp_path):
-    async def go():
-        task = await new_task(dsn, tmp_path)
-        gateway = Gateway(dsn)
-        await gateway.start()
-        first = await session.run(gateway, task, deliverer_for, dsn=dsn)
-        async with await db.connect(dsn) as conn:
-            await session.feedback(conn, task, "Please revise the wording.")
-            reopened = await tasks.status(conn, task)
-            with pytest.raises(LookupError):
-                await session.feedback(conn, task, "feedback on an undelivered task")
-        second = await session.run(gateway, task, deliverer_for, dsn=dsn)
-        async with await db.connect(dsn) as conn:
-            await session.feedback(conn, task, "Looks fine, nothing to change.")
-        third = await session.run(gateway, task, deliverer_for, dsn=dsn)
-        await gateway.close()
-        async with await db.connect(dsn) as conn:
-            return first, reopened, second, third, await ledger.read(conn, task)
-
-    first, reopened, second, third, rows = run(go())
-    assert first["status"] == "delivered" and first["state"]["delivered"] == "First delivery."
-    assert reopened["state"] == "live" and reopened["delivered"] == "First delivery."
-    assert second["status"] == "delivered"
-    assert second["state"]["delivered"] == "Second delivery, revised per Tom's feedback."
-    # The resumed turn after the third feedback wrote nothing: the consumed
-    # done.md and effect file under .valor/handled/ were not read again.
-    assert third["status"] == "idle"
-    assert third["state"]["delivered"] == "Second delivery, revised per Tom's feedback."
-
-    turns = [json.loads(line) for line in (tmp_path / ".valor" / "turns.jsonl").read_text().splitlines()]
-    assert [t["resume"] for t in turns] == ["", "session-1", "session-1", "session-1"]
-    assert turns[1]["prompt"].startswith("Tom reviewed your delivery and, as project manager, sends it back")
-    assert "Please revise the wording." in turns[1]["prompt"]
-    assert "no_such_action -> tom" in turns[1]["prompt"]
-    assert turns[3]["prompt"].startswith("Continue.")
-
-    collected = [r["payload"] for r in rows if r["type"] == "turn.collected"]
-    assert [len(c["effects"]) for c in collected] == [1, 0, 0, 0]
-    assert [c["done"] for c in collected[2:]] == [None, None]
-    assert [r["payload"]["summary"] for r in rows if r["type"] == "task.delivered"] == [
-        "First delivery.",
-        "Second delivery, revised per Tom's feedback.",
-    ]
-    given = [r["payload"] for r in rows if r["type"] == "feedback.given"]
-    assert given[0]["provenance"]["by"] == "tom" and given[0]["provenance"]["at"]
-    assert given[0]["on_delivery"] == "First delivery."
-
-    attention = third["state"]["attention"]
-    assert [(a["kind"], a["feedback"]) for a in attention] == [
-        ("feedback", "Please revise the wording."),
-        ("feedback", "Looks fine, nothing to change."),
-    ]
-
-
-# Asks on its first turn and delivers on every turn that opens with an answer
-# or feedback; exits 1 without a result when `.valor/fail_next` exists (and
-# removes it), the way a turn the sandbox or the network broke would end.
-FLAKY = r"""
-import json, pathlib, sys
-prompt, resume = sys.argv[1], sys.argv[2]
-v = pathlib.Path(".valor")
-v.mkdir(exist_ok=True)
-with (v / "turns.jsonl").open("a") as f:
-    f.write(json.dumps({"prompt": prompt, "resume": resume}) + "\n")
-if (v / "fail_next").exists():
-    (v / "fail_next").unlink()
-    sys.exit(1)
-if not resume:
-    (v / "question.md").write_text("Which greeting?")
-elif prompt.startswith(("Tom answered", "Tom reviewed")):
-    (v / "done.md").write_text("Delivered: " + prompt.splitlines()[2])
-print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
-"""
-
-
-def flaky_for(prompt, resume, b):
-    def build(url, brief, turn_id):
-        return claude_code.TurnCommand(
-            argv=[sys.executable, "-c", FLAKY, prompt, resume or ""],
-            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
-            cwd=b.workspace,
-            harness="script",
-            parse=claude_code.parse,
-        )
-
-    return build
-
-
-def test_a_failed_turn_leaves_the_answer_and_the_feedback_for_the_next_turn(dsn, tmp_path):
-    fail_next = tmp_path / ".valor" / "fail_next"
+def test_a_candidate_reaches_a_held_merge_and_feedback_after_the_merge_patches(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+    scripted.steer(ws, push="valor/greeting")
 
     async def go():
-        task = await new_task(dsn, tmp_path)
-        gateway = Gateway(dsn)
-        await gateway.start()
-        outs = [await session.run(gateway, task, flaky_for, dsn=dsn)]
+        task = await scripted.start(dsn, ws)
+        planned = await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        built = await drive(dsn, task)
+        await scripted.checks(dsn, task)
+        delivered = await drive(dsn, task)
+        st = delivered["state"]
+        merge = next(
+            e for e, s in st["effects"].items() if s == "pending" and e == st["merge_effect"]["effect_id"]
+        )
+        push = next(e for e, s in st["effects"].items() if s == "pending" and e != merge)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, push, note="push it")
+            await broker.release(conn, push)
+            await broker.approve(conn, merge, note="merge it")
+            merged = await broker.release(conn, merge)
+            await session.feedback(conn, task, "Greet him by name.")
+        patched = await drive(dsn, task)
+        return task, planned, built, delivered, merged, patched
+
+    _task, planned, built, delivered, merged, patched = run(go())
+    assert planned["status"] == "no runner" and built["missing"] == ["test", "review", "docs"]
+    cand = built["state"]["candidate"]
+    assert cand["sha"] == git(ws, "rev-parse", "HEAD~1")  # the patch committed on top since
+    assert delivered["status"] == "delivered" and delivered["state"]["delivery"]["outcome"] == "passed"
+    assert "greeting.txt" in delivered["state"]["delivered"]
+    assert merged.kind == "done" and git(origin, "rev-parse", "main") == cand["sha"]
+    assert git(origin, "rev-parse", "valor/greeting") == cand["sha"]
+    assert patched["status"] == "no runner" and patched["state"]["candidate"]["sha"] != cand["sha"]
+    t = scripted.turns(ws)
+    assert [x["stage"] for x in t] == ["plan", "build", "patch"]
+    assert t[1]["prompt"].startswith("# Critique: sound")
+    assert t[2]["prompt"].startswith("# Tom's feedback on the delivery\n\nGreet him by name.")
+    assert all(x["resume"] == "session-1" for x in t[1:])
+    assert "Plan: docs/plan.md" in t[1]["brief"] and "# Stage: build" in t[1]["brief"]
+
+
+def test_a_failed_turn_leaves_the_answer_for_the_next_turn(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, mode="clarify")
+        outs = [await drive(dsn, task)]
         async with await db.connect(dsn) as conn:
             await session.answer(conn, task, "Morning, Tom.", by="stand-in", role_played=True)
-        fail_next.touch()
-        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
-        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
-        async with await db.connect(dsn) as conn:
-            await session.feedback(conn, task, "Shorter, please.")
-        fail_next.touch()
-        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
-        outs.append(await session.run(gateway, task, flaky_for, dsn=dsn))
-        await gateway.close()
+        scripted.steer(ws, fail_next=True)
+        outs.append(await drive(dsn, task))
+        outs.append(await drive(dsn, task))
         return outs
 
     outs = run(go())
-    assert [o["status"] for o in outs] == ["waiting", "failed", "delivered", "failed", "delivered"]
-    assert outs[2]["state"]["delivered"] == "Delivered: Morning, Tom."
-    assert outs[4]["state"]["delivered"] == "Delivered: Shorter, please."
-
-    prompts = [
-        json.loads(line)["prompt"] for line in (tmp_path / ".valor" / "turns.jsonl").read_text().splitlines()
-    ]
-    answered = "Tom answered your question:\n\nMorning, Tom."
-    assert prompts[1:3] == [answered, answered]
-    assert prompts[3] == prompts[4] and "Shorter, please." in prompts[3]
-
-    question, feedback = outs[4]["state"]["attention"]
+    assert [o["status"] for o in outs] == ["waiting", "failed", "no runner"]
+    prompts = [x["prompt"] for x in scripted.turns(ws)]
+    answered = "# Tom's answer\n\nMorning, Tom."
+    assert prompts[1] == answered and prompts[2] == answered  # sent again after the failed turn
+    question = outs[2]["state"]["attention"][1]
     assert question["provenance"]["by"] == "stand-in" and question["provenance"]["role_played"] is True
-    assert feedback["provenance"]["by"] == "tom" and feedback["provenance"]["role_played"] is False
 
 
-def test_the_clarify_mode_is_recorded_and_carried_in_the_brief_and_bare_is_unchanged(dsn, tmp_path):
-    async def go():
-        async with await db.connect(dsn) as conn:
-            bare = await new_task(dsn, tmp_path)
-            clarify = await new_task(dsn, tmp_path, mode="clarify")
-            return (
-                await tasks.dispatch(conn, bare),
-                await tasks.dispatch(conn, clarify),
-                await ledger.read(conn, clarify),
-            )
-
-    bare, clarify, rows = run(go())
-    assert signals.CLARIFY not in bare["text"] and bare["text"].endswith(signals.PROTOCOL)
-    assert clarify["text"].endswith(signals.PROTOCOL + "\n\n" + signals.CLARIFY)
-    assert rows[0]["type"] == "task.started" and rows[0]["payload"]["mode"] == "clarify"
-    with pytest.raises(ValueError, match="mode"):
-        tasks.Brief(instruction="x", budget_usd_micros=0, mode="interview")
-
-
-def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, workspace):
-    ws, _ = workspace
+def test_two_turns_with_no_signal_return_idle_and_the_next_prompt_says_continue(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
 
     async def go():
-        task = await new_task(dsn, ws)
-        gateway = Gateway(dsn)
-        await gateway.start()
-        waiting = await session.run(gateway, task, turn_for, dsn=dsn)
-        await gateway.close()
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        scripted.steer(ws, build="nothing")
+        return await drive(dsn, task)
+
+    out = run(go())
+    assert out["status"] == "idle" and out["state"]["state"] == "build"
+    t = scripted.turns(ws)
+    assert t[-2]["prompt"].startswith("# Critique: sound") and t[-1]["prompt"] == "Continue."
+
+
+def test_a_stopped_task_takes_no_feedback_and_an_open_question_takes_an_answer(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, mode="clarify")
+        waiting = await drive(dsn, task)
         async with await db.connect(dsn) as conn:
             with pytest.raises(LookupError, match="open question"):
                 await session.feedback(conn, task, "feedback while a question is open")
-            await ledger.append(conn, task, "task.delivered", {"turn_id": "t", "summary": "delivered"})
             await tasks.stop(conn, task, reason="test")
             with pytest.raises(LookupError, match="stopped"):
                 await session.feedback(conn, task, "feedback on a stopped task")
+            with pytest.raises(LookupError):
+                await session.answer(conn, task, "an answer to a stopped task")
             return waiting, await ledger.read(conn, task)
 
     waiting, rows = run(go())
     assert waiting["status"] == "waiting"
-    assert not [r for r in rows if r["type"] == "feedback.given"]
+    assert not [r for r in rows if r["type"] in ("feedback.given", "question.answered")]
 
 
 def test_an_unread_effect_request_and_continue_carry_the_outcome_into_the_next_prompt(dsn, tmp_path):
-    (tmp_path / ".valor" / "effects").mkdir(parents=True)
-    (tmp_path / ".valor" / "effects" / "bad.json").write_text("not json")
-    (tmp_path / ".valor" / "effects" / "send.json").write_text(
+    ws, _ = scripted.workspace(tmp_path)
+    (ws / ".valor" / "effects").mkdir(parents=True)
+    (ws / ".valor" / "effects" / "bad.json").write_text("not json")
+    (ws / ".valor" / "effects" / "send.json").write_text(
         json.dumps({"action_type": "no_such_action", "target": "tom", "payload": {}})
+    )
+    (ws / ".valor" / "effects" / "merge.json").write_text(
+        json.dumps({"action_type": "merge", "target": "main", "payload": {"head_sha": "x"}})
     )
 
     async def go():
-        task = await new_task(dsn, tmp_path)
-        found = signals.collect(tmp_path, "turn-1")
+        task = await scripted.start(dsn, ws)
+        found = signals.collect(ws, "turn-1")
         async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "turn.started", {"turn_id": "turn-1", "state": "plan"})
             await ledger.append(
                 conn,
                 task,
                 "turn.ended",
                 {"turn_id": "turn-1", "outcome": "done", "result": {"session_id": "s"}},
             )
-            await session.record(conn, task, "turn-1", found)
-            return await session.next_prompt(conn, task), await tasks.status(conn, task)
+            verdict = await session.record(conn, task, "turn-1", found, state=tasks.machine.State.PLAN,
+                                           workspace=str(ws))  # fmt: skip
+            return verdict, await session.next_prompt(conn, task), await tasks.status(conn, task)
 
-    (prompt, resume), state = run(go())
-    assert resume == "s" and prompt.startswith("Continue.")
+    verdict, (prompt, resume), state = run(go())
+    assert verdict == "idle" and resume == "s" and prompt.startswith("Continue.")
     assert "bad.json: unreadable request" in prompt
     assert "no_such_action -> tom" in prompt and "refused: no performer" in prompt
-    assert state["state"] == "live"
-    assert list((tmp_path / ".valor" / "handled" / "turn-1" / "effects").iterdir())
+    assert "merge.json: the merge is the kernel's to request" in prompt
+    assert state["state"] == "plan" and list(state["effects"].values()) == ["refused"]
+    assert list((ws / ".valor" / "handled" / "turn-1" / "effects").iterdir())
 
 
 def test_a_spent_budget_runs_no_turn(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
     async def go():
-        task = await new_task(dsn, tmp_path, budget_usd_micros=0)
-        gateway = Gateway(dsn)
-        await gateway.start()
-        out = await session.run(gateway, task, turn_for, dsn=dsn)
-        await gateway.close()
-        return out
+        task = await scripted.start(dsn, ws, budget_usd_micros=0)
+        return await drive(dsn, task)
 
     assert run(go())["status"] == "budget exhausted"
-    assert not (tmp_path / ".valor").exists()
+    assert scripted.turns(ws) == []
 
 
 def test_opus_5_5_has_its_own_price_and_one_hour_cache_writes_cost_double_input():
@@ -466,7 +270,11 @@ def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_r
             claude_code.workspace_turn("hi", cwd=str(tmp_path), harness=harness)
 
     async def start():
-        return await new_task(dsn, tmp_path)
+        async with await db.connect(dsn) as conn:
+            return await tasks.start(
+                conn,
+                tasks.Brief(instruction="x", budget_usd_micros=1_000, workspace=str(tmp_path), mode="bare"),
+            )
 
     task = run(start())
     out = subprocess.run(
@@ -483,12 +291,12 @@ def test_a_workspace_turn_without_a_sandbox_profile_is_refused_before_anything_r
         async with await db.connect(dsn) as conn:
             return [r["type"] for r in await ledger.read(conn, task)]
 
-    assert run(rows()) == ["task.started"]  # no turn started, nothing reserved
+    assert run(rows()) == ["task.started", "judge.decided"]  # no turn started, nothing reserved
     assert not (tmp_path / ".valor").exists()
 
 
-def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(workspace, tmp_path):
-    ws, origin = workspace
+def test_a_push_runs_nothing_the_workspace_config_or_hooks_name(tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
     marker = tmp_path / "ran"
     hook = f"#!/bin/sh\necho $0 >> {marker}\n"
     for path in (ws / ".git" / "hooks" / "pre-push", tmp_path / "hooks" / "pre-push"):

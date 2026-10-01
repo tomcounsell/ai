@@ -1,25 +1,29 @@
-"""The task record, its Brief, stop, and the consistency audit.
+"""The task record, its Brief, stop, status, and the consistency audit.
 
 A task is one JSONB document holding its Brief, written once, plus the
-events that name it. Status is a fold over the events, never a stored field,
-so a stop at any instant leaves nothing to reconcile between the two.
+events that name it. Its state is `machine.fold` over the events, never a
+stored field, so a stop at any instant leaves nothing to reconcile between
+the two.
 """
 
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from core import corrections, ledger, signals
+from core import corrections, git, ledger, machine
+from core.settings import settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
-# How the Brief asks Valor to open the task. `bare` gives the instruction
-# alone; `clarify` is an experimental arm whose Brief tells Valor to spend
-# its first turn inspecting and asking (`signals.CLARIFY`). The mode is data
-# in the Brief, never something the kernel enforces.
+# The starter's manual judge verdict until the judgement port (1.3) runs the
+# judge: `start --mode bare` records `precise`, `--mode clarify` records
+# `thin`, each `leg: manual` with the starter's provenance. No mode leaves
+# the task in `judge`.
 MODES = ("bare", "clarify")
+JUDGE_FOR_MODE = {"bare": "precise", "clarify": "thin"}
 
 STOP_CHANNEL = "valor_stop"
 
@@ -37,7 +41,11 @@ class Brief:
 
     `workspace` is the directory a turn works in, `model` the model it runs,
     and `harness` the harness's own settings for the task (its isolation).
-    `mode` is one of `MODES`.
+    `mode` is one of `MODES` or None. `target_branch` is the branch a merge
+    lands on, `origin_url` the absolute push URL of the workspace's origin
+    as it was at start (the merge goes there, whatever the workspace's
+    config says later), and `base_sha` the workspace's head at start; all
+    three come from `resolve_workspace`.
     """
 
     instruction: str
@@ -47,7 +55,10 @@ class Brief:
     workspace: str | None = None
     model: str = "haiku"
     harness: dict[str, Any] = field(default_factory=dict)
-    mode: str = "bare"
+    mode: str | None = None
+    target_branch: str | None = None
+    origin_url: str | None = None
+    base_sha: str | None = None
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -56,7 +67,7 @@ class Brief:
             raise ValueError("a budget is never negative")
         if self.max_effect_class not in EFFECT_RANK:
             raise ValueError(f"unknown effect class {self.max_effect_class!r}")
-        if self.mode not in MODES:
+        if self.mode is not None and self.mode not in MODES:
             raise ValueError(f"unknown mode {self.mode!r}")
 
 
@@ -64,8 +75,37 @@ class TaskStopped(RuntimeError):
     pass
 
 
-async def start(conn, brief: Brief) -> str:
-    """Write the task document and its first event in one transaction."""
+class WorkspaceRefused(ValueError):
+    pass
+
+
+def resolve_workspace(workspace: str | None, target_branch: str | None = None) -> dict[str, str | None]:
+    """Where a task's merge goes, read once at start, before any turn can
+    touch the workspace's config: origin's push URL (absolute), the target
+    branch (given, or the branch origin's HEAD names), and the workspace's
+    head. A workspace on a detached HEAD is refused; so is an origin whose
+    HEAD names no branch when none is given. A directory that is not a git
+    repository, or has no origin, gives what it can."""
+    if not git.is_repo(workspace):
+        return {}
+    if git.branch(workspace) is None:
+        raise WorkspaceRefused(f"{workspace} is on a detached HEAD; check out a branch first")
+    found: dict[str, str | None] = {"base_sha": git.head(workspace)}
+    try:
+        url = git.push_url(workspace)
+    except git.GitError:
+        return found
+    target = target_branch or git.remote_head(workspace, url)
+    if target is None:
+        raise WorkspaceRefused(f"origin ({url}) has no HEAD branch; pass --target-branch")
+    return {**found, "origin_url": url, "target_branch": target}
+
+
+async def start(
+    conn, brief: Brief, *, by: str = "tom", via: str = "the command line", role_played: bool = False
+) -> str:
+    """Write the task document and its first event in one transaction, and
+    with a mode, the manual judge verdict beside them."""
     async with conn.transaction():
         await conn.execute(
             "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
@@ -76,13 +116,31 @@ async def start(conn, brief: Brief) -> str:
             brief.id,
             "task.started",
             {
+                "sdlc": 1,
                 "instruction": brief.instruction,
                 "budget_usd_micros": brief.budget_usd_micros,
                 "max_effect_class": brief.max_effect_class,
                 "governance_grant": brief.governance_grant,
                 "mode": brief.mode,
+                "target_branch": brief.target_branch,
+                "origin_url": brief.origin_url,
+                "base_sha": brief.base_sha,
             },
         )
+        if brief.mode is not None:
+            verdict = JUDGE_FOR_MODE[brief.mode]
+            await ledger.append(
+                conn,
+                brief.id,
+                "judge.decided",
+                {
+                    "verdict": verdict,
+                    "leg": "manual",
+                    "judgement_id": None,
+                    "guard_id": machine.GUARD_JUDGE if verdict == "thin" else None,
+                    "provenance": ledger.provenance(by, via, role_played),
+                },
+            )
     return brief.id
 
 
@@ -95,15 +153,33 @@ async def brief(conn, task_id: str) -> Brief:
     return Brief(**row[0])
 
 
-async def dispatch(conn, task_id: str) -> dict[str, Any]:
+def stage_text(state: machine.State) -> str | None:
+    """The stage file for a state, or None for a state no turn runs in."""
+    path = Path(settings.stages_dir) / f"{state.value}.md"
+    return path.read_text().strip() if path.is_file() else None
+
+
+def channel_text(offered: list[str]) -> str:
+    effects = "\n".join(f"  - {line}" for line in offered) or "  - none"
+    return (Path(settings.stages_dir) / "channel.md").read_text().strip().replace("{effects}", effects)
+
+
+async def dispatch(conn, task_id: str, state: machine.State | None = None) -> dict[str, Any]:
     """The Brief as a turn receives it: the task's commitments plus every
     correction in force, rendered from the ledger now, never from a copy
     made when the task started, and for a task with a workspace, how the
-    turn reaches Tom. Returns the text, the correction numbers it carries,
-    and the text's digest."""
+    turn reaches Tom (`skills/sdlc/channel.md`, listing the effects the
+    registered performers offer) and the stage file for the state the task
+    is in (`skills/sdlc/<state>.md`). Returns the text, the correction
+    numbers it carries, and the text's digest."""
+    from core import broker
+
     b = await brief(conn, task_id)
+    rows = await ledger.read(conn, task_id)
+    f = machine.fold(rows)
+    state = state or f.state
     standing = await corrections.in_force(conn)
-    committed = money(await ledger.read(conn, task_id))["committed_usd_micros"]
+    committed = money(rows)["committed_usd_micros"]
     head = (
         "# Brief\n\n"
         f"Task: {b.id}\n"
@@ -114,11 +190,14 @@ async def dispatch(conn, task_id: str) -> dict[str, Any]:
     )
     if b.workspace:
         head += f"\nWorkspace: {b.workspace}"
+    if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN):
+        head += f"\nPlan: {f.plan['path']} at {f.plan['commit']}"
     sections = [head, corrections.render(standing)]
     if b.workspace:
-        sections.append(signals.PROTOCOL)
-        if b.mode == "clarify":
-            sections.append(signals.CLARIFY)
+        sections.append(channel_text(broker.offered()))
+        stage = stage_text(state)
+        if stage:
+            sections.append(stage)
     text = "\n\n".join(sections)
     return {
         "text": text,
@@ -191,30 +270,31 @@ def money(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # Every kind of attention entry, in the order `attention_counts` lists them.
-ATTENTION_KINDS = ("question", "feedback", "approval", "budget_raise")
+# A manual verdict is a person playing a stage no runner plays yet; a grant
+# is Tom's tap on one governance instance.
+ATTENTION_KINDS = ("question", "feedback", "approval", "budget_raise", "verdict", "grant")
 
 
 async def status(conn, task_id: str) -> dict[str, Any]:
     """The task as a fold over its ledger.
 
-    `attention` lists every point where Tom acted on the task, in ledger
-    order, each labelled by `kind`: a question (`question`) with his
-    answer, feedback on a delivery (`feedback`), an approval of a held
-    effect (`approval`), and a raise of the budget (`budget_raise`), each
-    with the provenance it was recorded with (see `provenance`).
-    `attention_counts` counts each kind, with how many were role-played and
-    how many are unknown (rows that recorded no `role_played`), so
-    approvals are counted apart from questions and feedback. A question not
-    yet answered is listed and not counted. `delivered` is the latest
-    delivery's summary; feedback after it puts the task back to `live`
-    until the next `task.delivered`."""
+    The state machine's fold (`machine.Fold.summary`: `state`, `legacy`,
+    `return_to`, `plan`, `loops`, `counts`, `candidate`, `checks`, `join`,
+    `governance`, `merge_effect`), the money, every turn and effect, and
+    the attention log. `attention` lists every point where Tom acted on the
+    task, in ledger order, each labelled by `kind`: a question with his
+    answer, feedback on a delivery, an approval of a held effect, a raise of
+    the budget, a manual verdict, and a governance grant, each with the
+    provenance it was recorded with (see `provenance`). `attention_counts`
+    counts each kind, with how many were role-played and how many are
+    unknown (rows that recorded no `role_played`). A question not yet
+    answered is listed and not counted. `delivered` is the latest
+    delivery's summary."""
     rows = await ledger.read(conn, task_id)
+    f = machine.fold(rows)
     turns: dict[str, str | None] = {}
     effects: dict[str, str] = {}
     attention: list[dict[str, Any]] = []
-    delivered = None
-    reopened = False
-    stopped = False
     for row in rows:
         kind, p = row["type"], row["payload"]
         if kind == "turn.started":
@@ -248,7 +328,6 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "provenance": provenance(row),
                 }
             )
-            reopened = True
         elif kind == "approval.granted":
             attention.append(
                 {
@@ -269,28 +348,35 @@ async def status(conn, task_id: str) -> dict[str, Any]:
                     "provenance": provenance(row),
                 }
             )
-        elif kind == "task.delivered":
-            delivered = p["summary"]
-            reopened = False
-        elif kind == "task.stopped":
-            stopped = True
-    if stopped:
-        state = "stopped"
-    elif delivered is not None and not reopened:
-        state = "delivered"
-    elif any(q["kind"] == "question" and q["answer"] is None for q in attention):
-        state = "waiting for Tom"
-    else:
-        state = "live"
+        elif kind in machine.VERDICT_ROWS and p.get("leg") == "manual":
+            attention.append(
+                {
+                    "kind": "verdict",
+                    "stage": machine.VERDICT_ROWS[kind].value,
+                    "verdict": p.get("verdict"),
+                    "provenance": provenance(row),
+                }
+            )
+        elif kind == "guard.granted" and p.get("instance_id"):
+            attention.append(
+                {
+                    "kind": "grant",
+                    "guard_id": p["guard_id"],
+                    "instance_id": p["instance_id"],
+                    "note": p.get("note"),
+                    "provenance": provenance(row),
+                }
+            )
     return {
         "task_id": task_id,
-        "state": state,
+        **f.summary(),
         **money(rows),
         "turns": turns,
         "effects": effects,
         "attention": attention,
         "attention_counts": _counts(attention),
-        "delivered": delivered,
+        "delivered": (f.delivery or {}).get("summary"),
+        "delivery": f.delivery,
     }
 
 

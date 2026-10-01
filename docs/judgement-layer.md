@@ -14,11 +14,13 @@ fraction of a cent. Authority (constraint "Bounded authority and spend"): a
 classifier decides what a thing is; the kernel decides what it may do. The
 layer is built so that the second sentence holds by structure.
 
-Status. The current kernel has no judgement layer. It has the clarify mode
-the first judgement task routes to (`core/tasks.py`, `core/signals.py`), the
-broker's refusal of an action flagged as adding governance without a grant
-(`core/broker.py`), and the gateway that meters every model call against a
-task's budget (`core/gateway.py`, `core/budget.py`). Everything else in this
+Status. The current kernel has no judgement layer. It has the `judge` state
+and the `clarify` state the first judgement task routes to
+(`core/machine.py`, `skills/sdlc/clarify.md`), with the judge's verdict
+recorded by hand until this layer runs it; the broker's refusal of a merge
+whose review or docs verdict names a governance instance Tom has not
+granted (`core/broker.py`); and the gateway that meters every model call
+against a task's budget (`core/gateway.py`, `core/budget.py`). Everything else in this
 doc is design, and each section says which.
 
 ## Terms
@@ -68,10 +70,12 @@ Serves: constraint "Bounded authority and spend".
   thing is, which is a question a cheap model can be trusted with only as far
   as its calibration record shows [4].
 
-The kernel already holds one half of this boundary in code: the broker treats
-an action flagged `adds_governance` as `act` and refuses it when the Brief
-carries no `governance_grant`. Today the requester sets that flag. Setting it
-from a judgement over the diff is use shape 6 and is design.
+The kernel already holds one half of this boundary in code: the broker
+computes a merge's `adds_governance` from the review and docs verdicts,
+never from the requester, treats such a merge as `act`, and refuses it while
+any instance lacks Tom's tap. Today a person records those verdicts by hand.
+Answering the governance boolean by a judgement over the diff is use shape 6
+and is design.
 
 ## Task taxonomy
 
@@ -410,10 +414,11 @@ calibration record reports each, and because the clarify turn's questions
 differ: an `example_as_spec` request most needs "is the example the whole
 requirement?", the demonstration's question 1.
 
-A clarify route starts the first turn in the `clarify` mode the kernel
-already has (`core/signals.py`, `CLARIFY`): Valor inspects without editing
-and sends one message holding its material questions, each with the answer
-it will assume, and its intended approach. That keeps Mission item 3's
+A clarify route moves the task to the `clarify` state the kernel already
+has (`skills/sdlc/clarify.md`): Valor inspects without editing and sends one
+message holding its material questions, each with the answer it will
+assume, and its intended approach, or says that none would change the
+result and goes on to the plan. That keeps Mission item 3's
 order: the message is a proposed first version of the decisions, not a
 questionnaire.
 
@@ -485,9 +490,10 @@ The SDLC opens with this judgement, after intake and before the plan
 (`docs/sdlc-state-machine.md`). The call runs after the task record exists
 and before its first turn, charged to the task's budget, and its
 `judgement.answered` row sits in the task's ledger ahead of `turn.started`.
-The kernel maps the label to the first turn's mode. The current kernel takes
-the mode from `core start --mode`, written into the Brief at start;
-recording it from the judgement is design.
+The kernel maps the label to the `judge` state's verdict (`judge.decided`).
+The current kernel records that verdict from `core start --mode` (`bare` is
+`precise`, `clarify` is `thin`) with `leg: manual`; recording it from the
+judgement is design.
 
 ### The guard entry
 

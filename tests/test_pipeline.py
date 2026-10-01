@@ -1,0 +1,882 @@
+"""The state machine's writes on real Postgres and real git: verdicts outside
+their enum refused by the database, where a merge goes and what may stop
+it, governance instances and Tom's taps, each term of the merge predicate,
+recovery after a crash, one run per task, legacy tasks, and the seeded
+guards.
+
+No model call: turns are scripted subprocesses (`tests/scripted.py`).
+Live spend: none.
+"""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import psycopg
+import pytest
+from psycopg.types.json import Jsonb
+
+from core import broker, budget, db, guards, ledger, machine, router, session, tasks, verdicts
+from core.gateway import Gateway
+from core.machine import Check, State
+from core.settings import settings
+from tests import scripted
+from tests.conftest import TEST_DB
+from tests.scripted import commit, git
+from tools.push_branch import PushBranch
+
+pytestmark = pytest.mark.spend(usd=0)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+def cli(*args) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "core", *args],
+        cwd=ROOT,
+        env={**os.environ, "VALOR_DB": TEST_DB},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+async def drive(dsn, task, runners=None) -> dict:
+    gateway = Gateway(dsn)
+    await gateway.start()
+    try:
+        return await router.run(gateway, task, runners or scripted.RUNNERS, dsn=dsn)
+    finally:
+        await gateway.close()
+
+
+async def to_checks(dsn, ws, **kw) -> str:
+    """A task with a candidate waiting on its three checks."""
+    task = await scripted.start(dsn, ws, **kw)
+    await drive(dsn, task)
+    await scripted.critique(dsn, task)
+    out = await drive(dsn, task)
+    assert out["missing"] == ["test", "review", "docs"], out
+    return task
+
+
+async def rows(dsn, task) -> list[dict]:
+    async with await db.connect(dsn) as conn:
+        return await ledger.read(conn, task)
+
+
+async def fold(dsn, task) -> machine.Fold:
+    return machine.fold(await rows(dsn, task))
+
+
+async def merge_effect(dsn, task) -> str:
+    return (await fold(dsn, task)).merge_effect["effect_id"]
+
+
+# -- the verdict enum is the database's -------------------------------------------------
+
+
+BAD_ROWS = [
+    ("judge.decided", {"verdict": "unsure"}),
+    ("judge.decided", {}),
+    ("critique.decided", {"verdict": "fine"}),
+    ("critique.decided", {"verdict": "sound", "raised": {"review_rounds": 3}}),
+    ("test.decided", {"verdict": "green"}),
+    ("review.decided", {"verdict": "approved"}),
+    ("docs.decided", {"verdict": "ok"}),
+    ("turn.collected", {"turn_id": "x1", "state": "build", "verdict": "planned"}),
+    ("turn.collected", {"turn_id": "x2", "state": "build"}),
+    ("turn.collected", {"turn_id": "x3", "state": "merge", "verdict": "released"}),
+    ("plan.written", {"critique_rounds": 3, "review_rounds": 0}),
+    ("plan.written", {"critique_rounds": 0}),
+]
+
+
+@pytest.mark.parametrize(("kind", "payload"), BAD_ROWS)
+def test_a_verdict_outside_its_enum_is_refused_by_the_database(dsn, kind, payload):
+    with psycopg.connect(dsn, autocommit=True) as conn, pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO events (task_id, type, payload) VALUES ('enum-test', %s, %s)",
+            (kind, Jsonb(payload)),
+        )
+
+
+def test_every_value_in_verdicts_is_accepted_and_legacy_collected_rows_still_are(dsn):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for type_, stage in machine.VERDICT_ROWS.items():
+            for v in machine.VERDICTS[stage]:
+                conn.execute(
+                    "INSERT INTO events (task_id, type, payload) VALUES (%s, %s, %s)",
+                    (f"enum-ok-{type_}-{v}", type_, Jsonb({"verdict": v})),
+                )
+        for s in machine.WORKING:
+            for v in machine.VERDICTS[s]:
+                conn.execute(
+                    "INSERT INTO events (task_id, type, payload) VALUES ('enum-ok', 'turn.collected', %s)",
+                    (Jsonb({"turn_id": f"{s}-{v}", "state": s.value, "verdict": v}),),
+                )
+        conn.execute(
+            "INSERT INTO events (task_id, type, payload) VALUES ('enum-ok', 'turn.collected', %s)",
+            (Jsonb({"turn_id": "legacy", "question": None, "done": "x", "effects": []}),),
+        )
+
+
+def test_the_constraint_is_put_in_place_once_and_a_removed_value_does_not_recheck_history(tmp_path):
+    database = f"{settings.test_database}_enum_{os.getpid()}"
+    dsn = db.migrate(database, fresh=True)
+    owner = settings.dsn(owner=True, database=database)
+    try:
+        with psycopg.connect(owner, autocommit=True) as conn:
+            assert db.verdict_constraint(conn) is False  # migrate put the current one in place
+            db.migrate(database)
+            names = conn.execute(
+                "SELECT conname FROM pg_constraint WHERE conname LIKE 'events_verdict_in_enum%%'"
+            ).fetchall()
+            assert names == [(machine.constraint_name(),)]
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES ('t', 'judge.decided', %s)",
+                (Jsonb({"verdict": "thin"}),),
+            )
+        # A later VERDICTS without `thin`: the history holding `thin` does
+        # not refuse the change, and a new `thin` is refused.
+        narrower = machine.constraint_sql().replace("IN ('precise', 'thin')", "IN ('precise')")
+        with psycopg.connect(owner, autocommit=True) as conn:
+            assert db.verdict_constraint(conn, narrower, "events_verdict_in_enum_narrower") is True
+        with psycopg.connect(dsn, autocommit=True) as conn, pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES ('u', 'judge.decided', %s)",
+                (Jsonb({"verdict": "thin"}),),
+            )
+    finally:
+        with psycopg.connect(settings.dsn(owner=True, database="postgres"), autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+
+
+def test_one_judge_verdict_per_task_and_one_collected_row_per_turn(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    task = run(scripted.start(dsn, ws, mode="clarify"))
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES (%s, 'judge.decided', %s)",
+                (task, Jsonb({"verdict": "precise"})),
+            )
+        payload = Jsonb({"turn_id": f"{task}-t", "state": "clarify", "verdict": "idle"})
+        conn.execute(
+            "INSERT INTO events (task_id, type, payload) VALUES (%s, 'turn.collected', %s)", (task, payload)
+        )
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO events (task_id, type, payload) VALUES (%s, 'turn.collected', %s)",
+                (task, payload),
+            )
+
+
+# -- start: where the merge goes ---------------------------------------------------------
+
+
+def test_the_target_branch_is_origins_head_and_the_url_is_recorded_absolute(tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+    git(ws, "remote", "set-url", "origin", "../origin.git")  # relative, as written
+    where = tasks.resolve_workspace(str(ws))
+    assert where["target_branch"] == "main"  # not the work branch the workspace is on
+    assert where["origin_url"] == str(origin.resolve())
+    assert where["base_sha"] == git(ws, "rev-parse", "HEAD")
+
+
+def test_an_unborn_origin_head_needs_the_flag_and_a_detached_head_is_refused(tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/master")  # what `git init --bare` leaves here
+    with pytest.raises(tasks.WorkspaceRefused, match="--target-branch"):
+        tasks.resolve_workspace(str(ws))
+    assert tasks.resolve_workspace(str(ws), "main")["target_branch"] == "main"
+    git(ws, "checkout", "-q", "--detach")
+    with pytest.raises(tasks.WorkspaceRefused, match="detached"):
+        tasks.resolve_workspace(str(ws), "main")
+    out = cli("start", "x", "--budget-usd", "1", "--workspace", str(ws), "--target-branch", "main")
+    assert out.returncode == 1 and "detached" in out.stderr
+
+
+def test_a_replay_workspace_resolves_main(tmp_path):
+    """The commands `scripts/replay_workspace.py` runs for a run's origin."""
+    origin, ws = tmp_path / "origin.git", tmp_path / "repo"
+    subprocess.run(["git", "init", "--quiet", "--bare", str(origin)], check=True)
+    git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
+    git(origin, "config", "core.logAllRefUpdates", "always")
+    git(origin, "config", "receive.denyNonFastForwards", "true")
+    subprocess.run(["git", "init", "-q", "-b", "valor/work", str(ws)], check=True)
+    base = commit(ws, "a.txt", "a\n")
+    git(ws, "remote", "add", "origin", str(origin))
+    git(ws, "push", "--quiet", "origin", f"{base}:refs/heads/main")
+    git(ws, "fetch", "--quiet", "origin")
+    assert tasks.resolve_workspace(str(ws))["target_branch"] == "main"
+
+
+# -- the merge destination is the kernel's -------------------------------------------------
+
+
+@pytest.mark.parametrize("rewrite", ["url", "pushurl", "insteadof", "include"])
+def test_a_turn_cannot_redirect_the_merge(dsn, tmp_path, rewrite):
+    ws, origin = scripted.workspace(tmp_path)
+    stranger = tmp_path / "stranger.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(stranger)], check=True)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        # After the merge is held, the turn's config is rewritten.
+        if rewrite == "url":
+            git(ws, "remote", "set-url", "origin", str(stranger))
+        elif rewrite == "pushurl":
+            git(ws, "remote", "set-url", "--push", "origin", str(stranger))
+        elif rewrite == "insteadof":
+            git(ws, "config", f"url.{stranger}.pushInsteadOf", str(origin))
+        else:
+            inc = tmp_path / "inc.gitconfig"
+            inc.write_text(f'[url "{stranger}"]\n\tpushInsteadOf = {origin}\n')
+            git(ws, "config", "include.path", str(inc))
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge it")
+            try:
+                out = await broker.release(conn, effect)
+            except broker.Refused as exc:
+                out = exc
+        return out, await rows(dsn, task)
+
+    out, written = run(go())
+    assert (
+        subprocess.run(
+            ["git", "-C", str(stranger), "rev-parse", "main"], capture_output=True, check=False
+        ).returncode
+        != 0
+    )
+    if rewrite == "url":  # the remote's name is not used: the recorded URL is
+        assert out.kind == "done" and git(origin, "rev-parse", "main") == out.result["sha"]
+    else:
+        assert isinstance(out, broker.Refused) and "redirect" in str(out)
+        assert not [r for r in written if r["type"] == "effect.intent"]  # the approval stays unused
+
+
+def test_push_branch_cannot_target_the_merge_branch_and_a_turn_cannot_request_a_merge(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        scripted.steer(ws, push="main", request_merge=True)
+        await drive(dsn, task)
+        return await rows(dsn, task)
+
+    written = run(go())
+    collected = [r["payload"] for r in written if r["type"] == "turn.collected"][-1]
+    by_file = {e["file"]: e for e in collected["effects"]}
+    assert by_file["merge.json"]["error"] == "the merge is the kernel's to request"
+    assert "effect_id" not in by_file["merge.json"]
+    assert by_file["push.json"]["kind"] == "refused" and "target branch" in by_file["push.json"]["error"]
+
+
+# -- governance instances and Tom's taps ------------------------------------------------------
+
+
+def _gate(ws) -> int:
+    """Commit a hook that adds a check; returns a line inside its hunk."""
+    commit(ws, "hooks/gate.py", "def gate():\n    return 'a check'\n", "add a gate")
+    return 1
+
+
+def test_a_governance_review_holds_the_merge_until_tom_taps_and_only_review_reruns(dsn, tmp_path):
+    ws, _origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, governance_grant="Tom: this task may add one gate")
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        _gate(ws)
+        scripted.steer(ws, build="reasons")  # the candidate is the gate commit
+        await drive(dsn, task)
+        spec = verdicts.InstanceSpec("hooks/gate.py", 1, "a gate on the push path", "incident X", "1")
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="governance_refused"):
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "pass", governance=[spec], **scripted.MANUAL
+                )
+            with pytest.raises(verdicts.VerdictRefused, match="no added lines"):
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "governance_refused",
+                    governance=[verdicts.InstanceSpec("README.md", 1)], **scripted.MANUAL,
+                )  # fmt: skip
+        await scripted.check(dsn, task, "review", "governance_refused", governance=[spec])
+        held = await fold(dsn, task)
+        # The Brief's grant does not stand in for the tap, and runs pile up no refusals.
+        await drive(dsn, task)
+        await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            direct = await broker.request(
+                conn, task, verdicts.merge_action(held, await tasks.brief(conn, task))
+            )
+        instance = held.instances()[0].id
+        no_by = cli("grant", task, instance, "--note", "yes", "--by", "stand-in")
+        granted = cli("grant", task, instance, "--note", "yes, this gate")
+        after_grant = await drive(dsn, task)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="is pass"):
+                await verdicts.record_check(
+                    conn, task, Check.REVIEW, "governance_refused", governance=[spec], **scripted.MANUAL
+                )
+        await scripted.check(dsn, task, "review", "pass", governance=[spec])
+        return task, held, direct, no_by, granted, after_grant, await fold(dsn, task), await rows(dsn, task)
+
+    _task, held, direct, no_by, granted, after_grant, final, written = run(go())
+    assert held.state is State.MERGE and held.join.row == 2 and held.merge_effect is None
+    assert direct.kind == "refused" and "no grant from Tom" in direct.error
+    assert len([r for r in written if r["type"] == "effect.refused"]) == 1  # only the direct request
+    assert no_by.returncode == 2  # a grant has no --by
+    assert granted.returncode == 0, granted.stderr
+    grant = next(r["payload"] for r in written if r["type"] == "guard.granted")
+    assert grant["provenance"]["by"] == "tom" and grant["provenance"]["role_played"] is False
+    assert grant["incident"] == "incident X" and grant["expires"]
+    assert after_grant["status"] == "no runner" and after_grant["missing"] == ["review"]
+    assert final.state is State.MERGE and final.join.row == 1 and final.merge_effect["state"] == "held"
+    held_row = next(r["payload"] for r in written if r["type"] == "effect.held")
+    assert held_row["action_type"] == "merge" and held_row["adds_governance"] is True
+
+
+def test_a_grant_without_an_incident_is_refused(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        _gate(ws)
+        scripted.steer(ws, build="reasons")  # the candidate is the gate commit
+        await drive(dsn, task)
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        bare = verdicts.InstanceSpec("hooks/gate.py", 2)  # names no incident, no mission item
+        await scripted.check(dsn, task, "review", "governance_refused", governance=[bare])
+        instance = (await fold(dsn, task)).instances()[0].id
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(guards.GrantRefused, match="missing either"):
+                await guards.grant(conn, task, instance, note="yes")
+            with pytest.raises(guards.GrantRefused, match="no governance instance"):
+                await guards.grant(conn, task, "not-an-instance", note="yes", incident="i", mission_item="1")
+            guard_id = await guards.grant(
+                conn, task, instance, note="yes", incident="incident Y", mission_item="1"
+            )
+        return guard_id, await fold(dsn, task)
+
+    guard_id, f = run(go())
+    assert guard_id.startswith("grant-") and f.state is State.CHECKS
+
+
+# -- the merge predicate, term by term -------------------------------------------------------
+
+
+def test_all_five_terms_hold_and_the_merge_lands_on_the_recorded_origin(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(broker.MergeRefused) as no_approval:
+                await broker.release(conn, effect)
+            await broker.approve(conn, effect, note="merge it")
+            done = await broker.release(conn, effect)
+        return task, no_approval.value, done, await fold(dsn, task)
+
+    _task, no_approval, done, f = run(go())
+    assert [t[0] for t in no_approval.terms] == ["5"]
+    assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
+    assert f.state is State.MERGED
+
+
+def test_a_red_test_refuses_the_merge_even_when_one_is_requested_and_approved(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws, max_effect_class="act")
+        await scripted.check(dsn, task, "test", "red", failures=["test_x"])
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        # The repair round sends it to patch once; a second red goes to Tom.
+        await drive(dsn, task)
+        await scripted.check(dsn, task, "test", "red", failures=["test_x"])
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "no_change")
+        f = await fold(dsn, task)
+        async with await db.connect(dsn) as conn:
+            held = await broker.request(conn, task, verdicts.merge_action(f, await tasks.brief(conn, task)))
+            await broker.approve(conn, held.effect_id, note="merge anyway")
+            with pytest.raises(broker.MergeRefused) as refused:
+                await broker.release(conn, held.effect_id)
+        return f, refused.value, await rows(dsn, task)
+
+    f, refused, written = run(go())
+    assert f.state is State.MERGE and f.join.outcome == "did_not_pass" and f.merge_effect is None
+    assert [t[0] for t in refused.terms] == ["3"]
+    assert not [r for r in written if r["type"] == "effect.intent"]
+
+
+def _docs_head(ws, *paths) -> str:
+    head = None
+    for path in paths:
+        head = commit(ws, path, "words\n", f"docs: {path}")
+    return head
+
+
+@pytest.mark.parametrize(
+    ("paths", "doc_paths", "holds"),
+    [
+        (["docs/guide.md"], [], True),
+        (["core/x.py"], [], False),
+        (["core/x.py"], ["core"], True),
+    ],
+)
+def test_docs_commits_must_touch_only_doc_paths(dsn, tmp_path, paths, doc_paths, holds):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, doc_paths=doc_paths)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        head = _docs_head(ws, *paths)
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "updated", head=head)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+            try:
+                return await broker.release(conn, effect)
+            except broker.MergeRefused as exc:
+                return exc
+
+    out = run(go())
+    if holds:
+        assert out.kind == "done"
+    else:
+        assert isinstance(out, broker.MergeRefused) and [t[0] for t in out.terms] == ["4"]
+
+
+def test_a_rename_out_of_a_code_path_counts_the_old_path(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    commit(ws, "core/x.py", "x = 1\n", "code")
+    git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        git(ws, "mv", "core/x.py", "docs/x.md")
+        git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "commit", "-qm", "move")
+        head = git(ws, "rev-parse", "HEAD")
+        await scripted.check(dsn, task, "test", "pass")
+        await scripted.check(dsn, task, "review", "pass")
+        await scripted.check(dsn, task, "docs", "updated", head=head)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge")
+            with pytest.raises(broker.MergeRefused) as refused:
+                await broker.release(conn, effect)
+        f = await fold(dsn, task)
+        return refused.value, f.checks[Check.DOCS].payload["paths"]
+
+    refused, paths = run(go())
+    assert [t[0] for t in refused.terms] == ["4"] and "core/x.py" in paths
+
+
+def test_a_docs_head_holding_a_merge_commit_is_refused_at_write(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        cand = git(ws, "rev-parse", "HEAD")
+        git(ws, "checkout", "-q", "-b", "side")
+        commit(ws, "docs/a.md", "a\n")
+        git(ws, "checkout", "-q", "valor/work")
+        commit(ws, "docs/b.md", "b\n")
+        git(ws, "-c", "user.name=t", "-c", "user.email=t@e", "merge", "-q", "--no-edit", "side")
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="merge commit"):
+                await verdicts.record_check(
+                    conn, task, Check.DOCS, "updated", head=git(ws, "rev-parse", "HEAD"), **scripted.MANUAL
+                )
+        return cand
+
+    run(go())
+
+
+def test_an_approval_for_another_digest_releases_nothing(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        first = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, first, note="merge the first")
+            await session.feedback(conn, task, "one more change")
+        await drive(dsn, task)
+        await scripted.checks(dsn, task)
+        second = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(broker.MergeRefused) as on_first_approval:
+                await broker.release(conn, second)
+            with pytest.raises(broker.MergeRefused) as stale:
+                await broker.release(conn, first)
+        return first, second, on_first_approval.value, stale.value
+
+    first, second, on_first_approval, stale = run(go())
+    assert first != second
+    assert [t[0] for t in on_first_approval.terms] == ["5"]
+    assert "1" in [t[0] for t in stale.terms]
+
+
+def test_the_predicate_terms_that_need_no_workspace():
+    led_rows = []
+
+    def add(t, p):
+        led_rows.append({"id": len(led_rows) + 1, "type": t, "payload": p})
+
+    c = {"sha": "c", "turn_id": "t1"}
+    add("task.started", {"sdlc": 1})
+    add("judge.decided", {"verdict": "precise"})
+    add("turn.started", {"turn_id": "t0", "state": "plan"})
+    add("turn.collected", {"turn_id": "t0", "state": "plan", "verdict": "planned"})
+    add("plan.written", {"sha256": "p", "critique_rounds": 0, "review_rounds": 0})
+    add("critique.decided", {"plan_sha256": "p", "verdict": "sound"})
+    add("turn.collected", {"turn_id": "t1", "state": "build", "verdict": "candidate", "candidate": c})
+    add("test.decided", {"candidate": c, "verdict": "gaps", "behaviors": ["b"]})
+    add("review.decided", {"candidate": c, "verdict": "pass"})
+    add("docs.decided", {"candidate": c, "verdict": "no_change", "head": "c"})
+    f = machine.fold(led_rows)
+    assert f.state is State.PATCH  # gaps with the repair round unspent go to patch, never to merge
+    f.state = State.MERGE  # as if it had: the predicate still refuses it
+    facts = machine.GitFacts(True, (), ())
+    payload = {"candidate": c, "head_sha": "c"}
+    terms = machine.merge_predicate(f, payload, approval_unused=True, facts=facts)
+    assert [t[0] for t in terms] == ["3"]
+    terms = machine.merge_predicate(f, {**payload, "head_sha": "other"}, approval_unused=True, facts=facts)
+    assert "4" in [t[0] for t in terms]
+    merges = machine.GitFacts(True, ("m",), ())
+    assert "4" in [t[0] for t in machine.merge_predicate(f, payload, approval_unused=True, facts=merges)]
+
+
+# -- recovery, one run at a time ------------------------------------------------------------
+
+
+def test_a_crash_between_the_delivery_and_the_merge_request_is_recovered_by_the_next_run(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        async with await db.connect(dsn) as conn:  # the writer, stopped before ensure_merge
+            for check in (Check.TEST, Check.REVIEW, Check.DOCS):
+                verdict = "no_change" if check is Check.DOCS else "pass"
+                await verdicts.record_check(conn, task, check, verdict, **scripted.MANUAL)
+        before = await fold(dsn, task)
+        await drive(dsn, task)
+        await drive(dsn, task)
+        return before, await rows(dsn, task)
+
+    before, written = run(go())
+    assert before.state is State.MERGE and before.merge_effect is None
+    assert len([r for r in written if r["type"] == "effect.held"]) == 1
+
+
+def test_feedback_waits_while_the_merge_is_in_flight(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task)
+        effect = await merge_effect(dsn, task)
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "effect.intent", {"effect_id": effect, "idempotency_key": "k"})
+            with pytest.raises(LookupError, match="in flight"):
+                await session.feedback(conn, task, "wait")
+
+    run(go())
+
+
+def test_a_second_run_of_a_task_returns_already_running_and_a_lost_lock_stops_the_run(
+    dsn, tmp_path, owner_dsn
+):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        holder = await db.connect(dsn)
+        await holder.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"run:{task}",))
+        busy = await drive(dsn, task)
+        await holder.close()
+
+        async def cut(ctx: router.Context) -> dict:
+            with psycopg.connect(owner_dsn, autocommit=True) as owner:
+                owner.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND granted AND pid <> pg_backend_pid() AND database = "
+                    "(SELECT oid FROM pg_database WHERE datname = current_database())"
+                )
+            return await scripted.working(ctx)
+
+        lost = await drive(dsn, task, runners={State.PLAN: cut})
+        return busy, lost
+
+    busy, lost = run(go())
+    assert busy["status"] == "already running"
+    assert lost["status"] == "lock lost"
+    assert scripted.turns(ws) == []  # no turn ran without the lock
+
+
+# -- the working session's evidence ---------------------------------------------------------
+
+
+def test_a_dirty_tree_is_no_candidate_and_the_next_prompt_says_what_is_uncommitted(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        await drive(dsn, task)
+        await scripted.critique(dsn, task)
+        scripted.steer(ws, build="dirty")
+        return await drive(dsn, task)
+
+    out = run(go())
+    assert out["status"] == "idle" and out["state"]["candidate"] is None
+    assert (
+        "uncommitted" in scripted.turns(ws)[-1]["prompt"]
+        and "greeting.txt" in scripted.turns(ws)[-1]["prompt"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("plan", "why"),
+    [("uncommitted", "is not committed at HEAD"), ("done", "done means nothing in plan")],
+)
+def test_a_plan_turn_without_a_committed_plan_is_no_plan(dsn, tmp_path, plan, why):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, plan=plan)
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        return await drive(dsn, task), await rows(dsn, task)
+
+    out, written = run(go())
+    assert out["status"] == "idle" and out["state"]["state"] == "plan"
+    assert not [r for r in written if r["type"] == "plan.written"]
+    assert why in scripted.turns(ws)[-1]["prompt"]
+
+
+def test_plan_counts_outside_zero_to_two_are_no_plan(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, counts={"critique_rounds": 3, "review_rounds": 0})
+
+    async def go():
+        task = await scripted.start(dsn, ws)
+        return await drive(dsn, task)
+
+    assert run(go())["status"] == "idle"
+    assert "each count is 0, 1, or 2" in scripted.turns(ws)[-1]["prompt"]
+
+
+def test_a_patch_with_reasons_and_no_change_gets_fresh_checks(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, review="changes")
+        scripted.steer(ws, patch="reasons")
+        out = await drive(dsn, task)
+        return out, await fold(dsn, task)
+
+    out, f = run(go())
+    assert out["missing"] == ["test", "review", "docs"] and f.checks == {}
+    assert f.candidate.sha == git(ws, "rev-parse", "HEAD") and f.candidate.turn_id
+
+
+def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    task = run(scripted.start(dsn, ws))
+    run(drive(dsn, task))
+    who = ["--by", "test", "--role-played"]
+    assert cli("verdict", task, "critique", "sound", *who).returncode == 0
+    run(drive(dsn, task))
+    assert cli("verdict", task, "test", "pass", *who).returncode == 0
+    out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
+    assert out.returncode == 0, out.stderr
+    assert cli("verdict", task, "docs", "no_change", *who).returncode == 0
+    assert run(fold(dsn, task)).state is State.PATCH  # join row 3: a review round was left
+    run(drive(dsn, task))
+    for stage, verdict in (("test", "pass"), ("review", "pass"), ("docs", "no_change")):
+        assert cli("verdict", task, stage, verdict, *who).returncode == 0
+    f = run(fold(dsn, task))
+    assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
+    refused = cli("verdict", task, "critique", "sound", *who)
+    assert refused.returncode == 1 and "not critique" in refused.stderr
+    assert "no manual verdict" in cli("verdict", task, "build", "candidate").stderr
+
+
+def test_a_stage_with_a_runner_takes_no_manual_verdict():
+    verdicts.manual_allowed(State.CRITIQUE, {State.PLAN: object()})
+    with pytest.raises(verdicts.VerdictRefused, match="has a runner"):
+        verdicts.manual_allowed(State.CRITIQUE, {State.CRITIQUE: object()})
+
+
+@pytest.mark.parametrize("where", ["judge", "plan", "critique", "checks", "merge"])
+def test_a_stopped_task_takes_nothing_more_in_any_state(dsn, tmp_path, where):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, mode=None if where == "judge" else "bare")
+        if where in ("critique", "checks", "merge"):
+            await drive(dsn, task)
+        if where in ("checks", "merge"):
+            await scripted.critique(dsn, task)
+            await drive(dsn, task)
+        if where == "merge":
+            await scripted.checks(dsn, task)
+        f = await fold(dsn, task)
+        assert f.state.value == where
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, task, reason="test")
+            before = len(await ledger.read(conn, task))
+            with pytest.raises(LookupError):
+                await session.answer(conn, task, "x")
+            with pytest.raises(LookupError):
+                await session.feedback(conn, task, "x")
+            with pytest.raises(LookupError):
+                await verdicts.record_judge(conn, task, "precise")
+            with pytest.raises(LookupError):
+                await verdicts.record_check(conn, task, Check.TEST, "pass")
+            with pytest.raises(LookupError):
+                await guards.grant(conn, task, "i", note="x", incident="i", mission_item="1")
+            with pytest.raises(tasks.TaskStopped):
+                await budget.raise_budget(conn, task, 1_000)
+            after = len(await ledger.read(conn, task))
+        out = await drive(dsn, task)
+        return before, after, out
+
+    before, after, out = run(go())
+    assert before == after and out["status"] == "stopped"
+
+
+def test_the_brief_renders_the_stage_and_the_offered_effects(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+
+    async def go():
+        task = await scripted.start(dsn, ws, mode="clarify")
+        async with await db.connect(dsn) as conn:
+            clarify = await tasks.dispatch(conn, task)
+            plan = await tasks.dispatch(conn, task, state=State.PLAN)
+        return clarify["text"], plan["text"]
+
+    clarify, plan = run(go())
+    assert "# Stage: clarify" in clarify and "# Stage: plan" not in clarify
+    assert "# Stage: plan" in plan and "plan.json" in plan
+    assert "`push_branch`" in clarify and "- `merge`" not in clarify
+
+
+# -- legacy tasks ----------------------------------------------------------------------------
+
+
+def test_a_legacy_task_is_read_only_but_its_held_push_can_still_be_released(dsn, tmp_path):
+    ws, origin = scripted.workspace(tmp_path)
+    head = git(ws, "rev-parse", "HEAD")
+
+    async def go():
+        b = tasks.Brief(
+            instruction="old", budget_usd_micros=0, max_effect_class="act", workspace=str(ws), mode="bare"
+        )
+        async with await db.connect(dsn) as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO documents (kind, id, body) VALUES ('task', %s, %s)",
+                (
+                    b.id,
+                    Jsonb(
+                        {
+                            k: v
+                            for k, v in b.__dict__.items()
+                            if k not in ("target_branch", "origin_url", "base_sha")
+                        }
+                    ),
+                ),
+            )
+            await ledger.append(conn, b.id, "task.started", {"instruction": "old", "budget_usd_micros": 0,
+                                                             "max_effect_class": "act", "mode": "bare"})  # fmt: skip
+            await ledger.append(conn, b.id, "task.delivered", {"turn_id": "t", "summary": "done"})
+        broker.register(PushBranch(ws))
+        async with await db.connect(dsn) as conn:
+            held = await broker.request(
+                conn, b.id, broker.Action("push_branch", "valor/old", {"head_sha": head})
+            )
+            st = await tasks.status(conn, b.id)
+            with pytest.raises(LookupError, match="predates"):
+                await session.feedback(conn, b.id, "x")
+            with pytest.raises(LookupError, match="predates"):
+                await verdicts.record_judge(conn, b.id, "precise")
+            await broker.approve(conn, held.effect_id, note="push it")
+            pushed = await broker.release(conn, held.effect_id)
+        return st, pushed, await drive(dsn, b.id)
+
+    st, pushed, out = run(go())
+    assert st["legacy"] is True and st["state"] == "merge"
+    assert pushed.kind == "done" and git(origin, "rev-parse", "valor/old") == head
+    assert out["status"] == "legacy"
+
+
+# -- guards ------------------------------------------------------------------------------------
+
+
+def test_migrate_seeds_the_granted_guards_once(dsn):
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        seeded = conn.execute(
+            "SELECT payload FROM events WHERE task_id = 'guards' AND type = 'guard.granted' ORDER BY id"
+        ).fetchall()
+    assert [p["guard_id"] for (p,) in seeded] == [g["guard_id"] for g in guards.SEEDED]
+    assert [p["guard_id"] for (p,) in seeded] == [
+        "intake.underspecified",
+        "checks.test.breadth",
+        "critique.loop",
+        "review.loop",
+    ]
+    for (p,) in seeded:
+        assert p["incident"] and p["mission_items"] and p["granted_at"] == "2026-10-01"
+        assert p["expires"] == "2026-12-30" and p["provenance"]["by"] == "tom"
+    db.migrate(TEST_DB)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        again = conn.execute(
+            "SELECT count(*) FROM events WHERE task_id = 'guards' AND type = 'guard.granted'"
+        ).fetchone()[0]
+    assert again == 4
+    assert json.dumps(seeded[0][0])  # plain JSON
+
+
+def test_an_instance_id_ignores_line_numbers_and_counts_the_function_context(tmp_path):
+    from core import git as kgit
+
+    ws, _ = scripted.workspace(tmp_path)
+    filler = "".join(f"    f{i} = {i}\n" for i in range(8))
+    body = f"def a():\n    y = 2\n{filler}\n\ndef b():\n    y = 2\n{filler}"
+    base = commit(ws, "m.py", body)
+    gated = body.replace("    y = 2\n", "    y = 2\n    check()\n")
+    one = commit(ws, "m.py", gated)
+    first, second = kgit.hunks(ws, base, one, "m.py")
+    assert first.added == second.added == ("    check()",)
+    assert first.id() != second.id()  # same added lines, different function context
+    shifted_base = commit(ws, "m.py", "# a header line\n" + body)
+    shifted = commit(ws, "m.py", "# a header line\n" + gated)
+    again = kgit.hunks(ws, shifted_base, shifted, "m.py")
+    assert [h.id() for h in again] == [first.id(), second.id()]  # line numbers moved, ids did not

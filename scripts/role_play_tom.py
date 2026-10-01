@@ -99,7 +99,7 @@ def stand_in(
     subject = f"task {task_id}"
     head = f"# Tom's request\n\n{brief.instruction}\n\n# Answer key\n\n{key}"
 
-    if state["state"] == "waiting for Tom":
+    if state["state"] == "waiting":
         question = next(q for q in state["attention"] if q["kind"] == "question" and q["answer"] is None)
         reply = claude_json(
             f"{head}\n\n# Valor's message\n\n{question['question']}",
@@ -112,7 +112,7 @@ def stand_in(
         core("answer", task_id, text, "--by", by, "--role-played")
         return {"kind": "answer", "text": text, "usd": reply["usd"], "reason": None}
 
-    if state["state"] == "delivered":
+    if state["state"] == "merge":
         rounds = sum(1 for a in state["attention"] if a["kind"] == "feedback")
         if rounds >= max_feedback:
             return {"kind": "cap", "text": None, "usd": 0.0, "reason": f"{rounds} feedback rounds used"}

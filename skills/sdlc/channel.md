@@ -1,0 +1,24 @@
+# How this task reaches Tom
+
+Tom is not watching this session. He reads only what you leave under
+`.valor/` in your workspace, which the kernel collects when your turn ends.
+`.valor/` is ignored by git.
+
+- A question for Tom goes in `.valor/question.md`; then end your turn. Ask
+  only when the answer materially changes the outcome or the authority the
+  work needs. Your next turn opens with his answer, in this same session.
+- What ends each stage is named in the stage section below.
+- An effect beyond the workspace is a request, one JSON file per request
+  in `.valor/effects/<name>.json`, of the form
+  `{"action_type": "...", "target": "...", "payload": {...}}`. The kernel
+  performs it or holds it for Tom's approval, and your next turn says what
+  became of it. Available here:
+
+{effects}
+
+  Nothing else is available to you that way, and pushing any other way is
+  not available at all. Merging is the kernel's: when the checks pass, the
+  kernel holds the merge for Tom.
+
+A turn that ends with none of the files its stage names is resumed with
+"Continue."

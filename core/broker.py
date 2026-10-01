@@ -14,9 +14,18 @@ every `act` pending. A held effect leaves only through `release`, which
 needs an `approval.granted` row from Tom bound to that effect's digest, and
 consumes it: one tap, one effect.
 
-Adding governance (a check, gate, hook, validator, review round, or approval
-step) is `act` whatever the performer declares, and is refused outright when
-the task's Brief carries no `governance_grant`.
+Whether an action adds governance (a check, gate, hook, validator, review
+round, or approval step) is the broker's to compute, never the requester's
+to say: a `merge` adds governance when the review or docs verdict for the
+candidate it names answered the governance boolean yes. Such a merge is
+refused while any instance it names lacks Tom's tap (`guard.granted`); the
+Brief's `governance_grant` does not stand in for the tap.
+
+A `merge` leaves only when the merge predicate holds
+(`machine.merge_predicate`): `release` evaluates it, with the git facts it
+reads from the workspace, in the same transaction, under the task's lock,
+that writes the intent, so nothing can land between the check and the
+intent.
 
 Performing follows intent, then outcome: the intent row commits before the
 performer runs, so a kill between the two leaves a findable dangling intent,
@@ -27,13 +36,18 @@ target, which is how a dangling intent is reconciled.
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from core import ledger, tasks
+from core import git, ledger, machine, tasks
 from core.tasks import EFFECT_RANK
 
 
 class Performer(Protocol):
+    """`usage` is the line a turn's Brief lists for this action, or None
+    when turns are not offered it. A performer may define `refuse(action)`,
+    returning why it will not take an action, checked at request."""
+
     action_type: str
     effect_class: str
+    usage: str | None
 
     def perform(self, action: Action, key: str) -> dict[str, Any]: ...
 
@@ -45,18 +59,17 @@ class Action:
     action_type: str
     target: str
     payload: dict[str, Any] = field(default_factory=dict)
-    adds_governance: bool = False
 
     def key(self) -> str:
         return f"{self.action_type}:{self.target}:{ledger.digest(self.payload)[:16]}"
 
-    def describe(self, effect_class: str) -> dict[str, Any]:
+    def describe(self, effect_class: str, adds_governance: bool) -> dict[str, Any]:
         return {
             "action_type": self.action_type,
             "effect_class": effect_class,
             "target": self.target,
             "payload": self.payload,
-            "adds_governance": self.adds_governance,
+            "adds_governance": adds_governance,
             "idempotency_key": self.key(),
             "payload_sha256": ledger.digest(self.payload),
         }
@@ -74,6 +87,20 @@ class NotApproved(RuntimeError):
     pass
 
 
+class Refused(RuntimeError):
+    """A release the performer will not take (`refuse`), checked before the
+    intent, so nothing is written and the approval stays unused."""
+
+
+class MergeRefused(Refused):
+    """A merge whose predicate does not hold; `terms` names each failing
+    term."""
+
+    def __init__(self, terms: list[str]):
+        super().__init__("the merge predicate does not hold: " + "; ".join(terms))
+        self.terms = terms
+
+
 PERFORMERS: dict[str, Performer] = {}
 
 
@@ -83,26 +110,55 @@ def register(performer: Performer) -> None:
     PERFORMERS[performer.action_type] = performer
 
 
+def offered() -> list[str]:
+    """The usage line of every registered performer a turn may request."""
+    return [p.usage for _, p in sorted(PERFORMERS.items()) if getattr(p, "usage", None)]
+
+
+def _governance(f: machine.Fold, action: Action) -> tuple[bool, list[machine.Instance]]:
+    """Whether the action adds governance, and the instances still lacking
+    Tom's tap. Only a merge carries a diff onto the target branch, so only
+    a merge can; it does when the review or docs verdict for the candidate
+    it names answered the governance boolean yes."""
+    if action.action_type != "merge":
+        return False, []
+    named = action.payload.get("candidate") or {}
+    if f.candidate is None or named != {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}:
+        return False, []
+    adds = any(
+        (v.payload.get("governance") or {}).get("adds")
+        for c, v in f.checks.items()
+        if c in (machine.Check.REVIEW, machine.Check.DOCS)
+    )
+    return adds, f.ungranted() if adds else []
+
+
 async def request(conn, task_id: str, action: Action) -> Outcome:
     performer = PERFORMERS.get(action.action_type)
-    effect_class = "act" if action.adds_governance else getattr(performer, "effect_class", "act")
-    described = action.describe(effect_class)
     effect_id = ledger.new_id()
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         brief = await tasks.brief(conn, task_id)
+        adds, ungranted = _governance(machine.fold(await ledger.read(conn, task_id)), action)
+        effect_class = "act" if adds else getattr(performer, "effect_class", "act")
+        described = action.describe(effect_class, adds)
         prior = await _prior(conn, task_id, described["idempotency_key"])
         if prior is not None:
             return prior
         reason = None
+        refuse = getattr(performer, "refuse", None)
         if performer is None:
             reason = f"no performer for {action.action_type}"
         elif await tasks.is_stopped(conn, task_id):
             reason = "task stopped"
         elif EFFECT_RANK[effect_class] > EFFECT_RANK[brief.max_effect_class]:
             reason = f"{effect_class} is above the task's ceiling {brief.max_effect_class}"
-        elif action.adds_governance and brief.governance_grant is None:
-            reason = "adds governance and the Brief carries no governance_grant"
+        elif ungranted:
+            reason = "adds governance with no grant from Tom for instance " + ", ".join(
+                f"{i.id} ({i.path})" for i in ungranted
+            )
+        elif refuse is not None and (said := refuse(action)):
+            reason = said
         if reason is not None:
             await ledger.append(
                 conn, task_id, "effect.refused", {"effect_id": effect_id, **described, "reason": reason}
@@ -111,7 +167,8 @@ async def request(conn, task_id: str, action: Action) -> Outcome:
         if effect_class == "act":
             await ledger.append(conn, task_id, "effect.held", {"effect_id": effect_id, **described})
             return Outcome(effect_id, "pending")
-    return await _perform(conn, task_id, effect_id, action, described, approval_id=None)
+        await _intent(conn, task_id, effect_id, described, approval_id=None)
+    return await _perform(conn, task_id, effect_id, action, described)
 
 
 async def approve(
@@ -147,7 +204,10 @@ async def approve(
 
 async def release(conn, effect_id: str) -> Outcome:
     """Perform a held `act` effect that Tom approved. Raises `NotApproved`
-    when no unused approval matches it."""
+    when no unused approval matches it, and for a `merge`, `MergeRefused`
+    naming every predicate term that does not hold. The checks and the
+    intent row are one transaction under the task's lock; nothing is
+    written when either refuses, and the approval stays unused."""
     async with conn.transaction():
         held = await _held(conn, effect_id)
         task_id, described = held["task_id"], held["payload"]
@@ -168,15 +228,41 @@ async def release(conn, effect_id: str) -> Outcome:
                 (effect_id, described["payload_sha256"]),
             )
         ).fetchone()
-    if row is None:
-        raise NotApproved(f"effect {effect_id} has no approval from Tom")
-    action = Action(
-        described["action_type"],
-        described["target"],
-        described["payload"],
-        described["adds_governance"],
-    )
-    return await _perform(conn, task_id, effect_id, action, described, approval_id=row[0])
+        if described["action_type"] == "merge":
+            f = machine.fold(await ledger.read(conn, task_id))
+            facts = _git_facts((await tasks.brief(conn, task_id)).workspace, f, described["payload"])
+            failed = machine.merge_predicate(
+                f, described["payload"], approval_unused=row is not None, facts=facts
+            )
+            if failed:
+                raise MergeRefused(failed)
+        if row is None:
+            raise NotApproved(f"effect {effect_id} has no approval from Tom")
+        action = Action(described["action_type"], described["target"], described["payload"])
+        refuse = getattr(PERFORMERS.get(action.action_type), "refuse", None)
+        if refuse is not None and (said := refuse(action)):
+            raise Refused(said)
+        await _intent(conn, task_id, effect_id, described, approval_id=row[0])
+    return await _perform(conn, task_id, effect_id, action, described)
+
+
+def _git_facts(workspace: str | None, f: machine.Fold, payload: dict[str, Any]) -> machine.GitFacts | None:
+    """What the workspace's history says between the candidate and the head
+    being merged, read now, never taken from a row."""
+    head = payload.get("head_sha")
+    if not workspace or f.candidate is None or not head:
+        return None
+    try:
+        ancestor = git.is_ancestor(workspace, f.candidate.sha, head)
+        if not ancestor:
+            return machine.GitFacts(False, (), ())
+        return machine.GitFacts(
+            True,
+            tuple(git.merges_between(workspace, f.candidate.sha, head)),
+            tuple(git.diff_paths(workspace, f.candidate.sha, head)),
+        )
+    except git.GitError:
+        return None
 
 
 async def pending(conn) -> list[dict[str, Any]]:
@@ -191,16 +277,20 @@ async def pending(conn) -> list[dict[str, Any]]:
     return [{"task_id": t, **p} for t, p in rows]
 
 
-async def _perform(conn, task_id, effect_id, action, described, *, approval_id) -> Outcome:
+async def _intent(conn, task_id, effect_id, described, *, approval_id) -> None:
+    """The intent row, inside the caller's transaction."""
+    await ledger.append(
+        conn,
+        task_id,
+        "effect.intent",
+        {"effect_id": effect_id, "idempotency_key": described["idempotency_key"], "approval_id": approval_id},
+    )
+
+
+async def _perform(conn, task_id, effect_id, action, described) -> Outcome:
+    """Run the performer after its intent committed, then write the outcome."""
     performer = PERFORMERS[action.action_type]
     key = described["idempotency_key"]
-    async with conn.transaction():
-        await ledger.append(
-            conn,
-            task_id,
-            "effect.intent",
-            {"effect_id": effect_id, "idempotency_key": key, "approval_id": approval_id},
-        )
     try:
         result, kind, error = performer.perform(action, key), "done", None
     except Exception as exc:  # noqa: BLE001  the target said no, or its state is in doubt

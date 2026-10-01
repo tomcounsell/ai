@@ -1,74 +1,84 @@
-"""`push_branch` (`act`): push one commit of a task's workspace to one branch
-of the workspace's `origin`.
+"""Pushing a task's commits: `push_branch` for a turn's own branch, and
+`merge`, the kernel's push of a passed candidate onto the target branch.
 
-The request names the branch as its target and the commit as `head_sha` in
-its payload, so the digest Tom approves binds both. The push carries
+Both are `act` and push to the origin URL the kernel recorded when the task
+started (`Brief.origin_url`), never to whatever the workspace's config names
+now: the turn owns that config. A push is refused when the workspace's own
+config holds any include, URL rewrite, or push URL (`core.git.rewrites`),
+since git would apply a rewrite even to an explicit URL. The push carries
 `<head_sha>:refs/heads/<branch>` and never `--force`: a branch that moved
 under the broker is Tom's to read, not the broker's to overwrite. The
-performer runs in the kernel's process, outside the turn's sandbox, which is
-what lets it write a remote the turn cannot. `lookup` asks the remote what
+performers run in the kernel's process, outside the turn's sandbox, which is
+what lets them write a remote the turn cannot. `lookup` asks the remote what
 the branch holds, which is how a dangling intent is reconciled.
 
-The workspace's git config and hooks are the turn's to write, so nothing
-they name runs or authenticates here: hooks, the fsmonitor, and the remote's
-receive and upload programs are pinned, and the push carries no credential
-helper, no SSH command, and no terminal prompt.
+`push_branch` names its branch as its target and its commit as `head_sha`,
+so the digest Tom approves binds both, and it refuses the task's target
+branch: the only way onto that branch is the merge and its predicate.
+`merge` is offered to no turn; its payload carries the URL, the target
+branch, the head, and the candidate, so Tom's approval binds all four.
 """
 
-import os
-import subprocess
 from pathlib import Path
 
-ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "false"}
+from core import git
 
 
 class PushBranch:
     action_type = "push_branch"
     effect_class = "act"
+    usage = (
+        '`push_branch`: target the branch name, payload `{"head_sha": "<full sha>"}`; pushes that '
+        "commit to that branch of the task's origin once Tom approves. Not the branch merges land on."
+    )
 
-    def __init__(self, workspace: str | Path, remote: str = "origin"):
+    def __init__(self, workspace: str | Path, url: str | None = None, protected: str | None = None):
         self.workspace = Path(workspace)
-        self.remote = remote
+        self.url = url  # None for a task started before origin URLs were recorded: read at push time
+        self.protected = protected
 
-    def _git(self, *args: str) -> subprocess.CompletedProcess:
-        pinned = [
-            "-c", "core.hooksPath=/dev/null",
-            "-c", "core.fsmonitor=false",
-            "-c", "credential.helper=",
-            "-c", "core.sshCommand=false",
-        ]  # fmt: skip
-        return subprocess.run(
-            ["git", "-C", str(self.workspace), *pinned, *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=ENV,
-        )
+    def refuse(self, action) -> str | None:
+        """Checked at request and again at release, before the intent."""
+        if self.protected and action.target == self.protected:
+            return f"{self.protected} is the task's target branch; only the merge lands there"
+        return self._rewrites()
+
+    def _rewrites(self) -> str | None:
+        found = git.rewrites(self.workspace)
+        return f"the workspace's config could redirect the push: {'; '.join(found)}" if found else None
+
+    def destination(self, action) -> tuple[str, str]:
+        return self.url or git.push_url(self.workspace), action.target
 
     def perform(self, action, key: str) -> dict:
-        branch, sha = action.target, action.payload["head_sha"]
-        if self._git("check-ref-format", "--branch", branch).returncode != 0:
-            raise ValueError(f"branch name {branch!r} is malformed")
-        if self._git("cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
-            raise ValueError(f"{sha} is not a commit in {self.workspace}")
-        pushed = self._git(
-            "push",
-            "--no-verify",
-            "--receive-pack=git-receive-pack",
-            self.remote,
-            f"{sha}:refs/heads/{branch}",
-        )
-        if pushed.returncode != 0:
-            raise RuntimeError(pushed.stderr.strip())
-        return self._where(branch, sha)
+        url, branch = self.destination(action)
+        said = self.refuse(action)
+        if said:
+            raise ValueError(said)
+        git.push(self.workspace, url, action.payload["head_sha"], branch)
+        return {"remote": url, "branch": branch, "sha": action.payload["head_sha"]}
 
     def lookup(self, action, key: str) -> dict | None:
-        branch, sha = action.target, action.payload.get("head_sha")
-        listed = self._git("ls-remote", "--upload-pack=git-upload-pack", self.remote, f"refs/heads/{branch}")
-        if listed.returncode == 0 and listed.stdout.split()[:1] == [sha]:
-            return self._where(branch, sha)
+        url, branch = self.destination(action)
+        sha = action.payload.get("head_sha")
+        if sha and git.remote_sha(self.workspace, url, branch) == sha:
+            return {"remote": url, "branch": branch, "sha": sha}
         return None
 
-    def _where(self, branch: str, sha: str) -> dict:
-        url = self._git("remote", "get-url", "--push", self.remote).stdout.strip()
-        return {"remote": url, "branch": branch, "sha": sha}
+
+class Merge(PushBranch):
+    action_type = "merge"
+    usage = None
+
+    def __init__(self, workspace: str | Path):
+        self.workspace = Path(workspace)
+        self.protected = None
+
+    def refuse(self, action) -> str | None:
+        p = action.payload
+        if not p.get("url") or p.get("target_branch") != action.target or not p.get("head_sha"):
+            return "a merge names its URL, target branch, and head"
+        return self._rewrites()
+
+    def destination(self, action) -> tuple[str, str]:
+        return action.payload["url"], action.payload["target_branch"]

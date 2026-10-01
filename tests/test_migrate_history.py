@@ -29,7 +29,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from core import db, ledger, tasks
+from core import db, guards, ledger, machine, tasks
 from core.settings import settings
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -106,7 +106,17 @@ def _migrate_with_change(database: str, tmp_path: Path) -> None:
 
 def _check(database: str, before: dict) -> None:
     after = _snapshot(database)
-    assert after["events"] == before["events"]  # no row rewritten: same xmin, same content
+    # No row rewritten: same xmin, same content. The only rows added are the
+    # seeded guards, once each, on their own stream.
+    assert after["events"][: len(before["events"])] == before["events"]
+    added = [r[0] for r in after["events"][len(before["events"]) :]]
+    with _owner(database) as conn:
+        kinds = conn.execute("SELECT task_id, type FROM events WHERE id = ANY(%s)", (added,)).fetchall()
+        guards_held = conn.execute(
+            "SELECT payload->>'guard_id' FROM events WHERE task_id = 'guards' AND type = 'guard.granted'"
+        ).fetchall()
+    assert set(kinds) <= {("guards", "guard.granted")}
+    assert sorted(g for (g,) in guards_held) == sorted(g["guard_id"] for g in guards.SEEDED)
     assert after["documents"] == before["documents"]
     assert after["filenodes"] == before["filenodes"]  # no table rewritten
     with _owner(database) as conn:
@@ -114,7 +124,22 @@ def _check(database: str, before: dict) -> None:
             "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'annotation'"
         ).fetchone()
         indexes = {r[0] for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'events'")}
-        assert {"events_type_idx", "events_one_raise_row", "events_one_correction_number"} <= indexes
+        assert {
+            "events_type_idx",
+            "events_one_raise_row",
+            "events_one_correction_number",
+            "events_one_judge",
+            "events_one_turn_row",
+            "events_one_guard",
+            "events_one_instance_grant",
+        } <= indexes
+        constraints = {
+            r[0]
+            for r in conn.execute(
+                "SELECT conname FROM pg_constraint WHERE conrelid = 'events'::regclass AND contype = 'c'"
+            )
+        }
+        assert machine.constraint_name() in constraints
         triggers = {
             r[0] for r in conn.execute("SELECT tgname FROM pg_trigger WHERE tgrelid = 'events'::regclass")
         }
@@ -174,8 +199,67 @@ def test_a_schema_change_applies_to_a_copy_of_the_kernel_ledger_without_rewritin
         assert len(before["events"]) > 1000 and before["money"]  # it holds history
         _migrate_with_change(copy, tmp_path)
         _check(copy, before)
+        _legacy_folds(copy)
     finally:
         _drop(copy)
+
+
+def old_state(rows: list[dict]) -> str:
+    """The four-state fold the kernel used before the state machine, kept
+    here as the oracle the legacy mapping is checked against: stopped, then
+    a delivery not reopened by feedback, then an unanswered question, then
+    live."""
+    asked: dict[str, bool] = {}
+    delivered = reopened = stopped = False
+    for row in rows:
+        kind, p = row["type"], row["payload"]
+        if kind == "question.asked":
+            asked[p["question_id"]] = False
+        elif kind == "question.answered":
+            asked[p["question_id"]] = True
+        elif kind == "feedback.given":
+            reopened = True
+        elif kind == "task.delivered":
+            delivered, reopened = True, False
+        elif kind == "task.stopped":
+            stopped = True
+    if stopped:
+        return "stopped"
+    if delivered and not reopened:
+        return "delivered"
+    if not all(asked.values()):
+        return "waiting for Tom"
+    return "live"
+
+
+ORACLE = {
+    "stopped": {machine.State.STOPPED},
+    "delivered": {machine.State.MERGE},
+    "waiting for Tom": {machine.State.WAITING},
+    "live": {machine.State.PATCH, machine.State.BUILD, machine.State.JUDGE},
+}
+
+
+def _legacy_folds(database: str) -> None:
+    """Every task of a ledger written before the state machine folds,
+    read-only, as legacy, to the state the old fold's precedence gives."""
+
+    async def go():
+        async with await db.connect(settings.dsn(database=database)) as conn:
+            ids = [
+                r[0]
+                for r in await (
+                    await conn.execute("SELECT id FROM documents WHERE kind = 'task' ORDER BY id")
+                ).fetchall()
+            ]
+            return {t: await ledger.read(conn, t) for t in ids}
+
+    streams = asyncio.run(go())
+    assert streams
+    for task, rows in streams.items():
+        f = machine.fold(rows)
+        assert f.legacy, task
+        assert f.state in ORACLE[old_state(rows)], (task, f.state, old_state(rows))
 
 
 EVERY_TYPE = [
@@ -219,6 +303,16 @@ EVERY_TYPE = [
         "budget.raised",
         {"raise_id": "r1", "usd_micros": 500, "provenance": ledger.provenance("tom", "cli", False)},
     ),
+    ("judge.decided", {"verdict": "precise", "leg": "manual", "judgement_id": None}),
+    (
+        "plan.written",
+        {"turn_id": "t1", "path": "p.md", "sha256": "d", "critique_rounds": 1, "review_rounds": 2},
+    ),
+    ("critique.decided", {"plan_sha256": "d", "verdict": "sound", "raised": {"review_rounds": 2}}),
+    ("test.decided", {"candidate": {"sha": "c", "turn_id": "t1"}, "verdict": "gaps"}),
+    ("review.decided", {"candidate": {"sha": "c", "turn_id": "t1"}, "verdict": "governance_refused"}),
+    ("docs.decided", {"candidate": {"sha": "c", "turn_id": "t1"}, "verdict": "no_change", "head": "c"}),
+    ("guard.granted", {"guard_id": "grant-x", "instance_id": "i1", "incident": "i", "mission_items": [1]}),
     ("task.stopped", {"reason": "test", "by": "tom"}),
 ]
 
@@ -240,7 +334,7 @@ def test_a_schema_change_applies_over_a_row_of_every_type_without_rewriting_it(t
         before = _snapshot(database)
         with _owner(database) as conn:
             types = {r[0] for r in conn.execute("SELECT DISTINCT type FROM events").fetchall()}
-        assert {k for k, _ in EVERY_TYPE} | {"task.started", "correction.recorded"} == types
+        assert {k for k, _ in EVERY_TYPE} | {"task.started", "correction.recorded", "guard.granted"} == types
         # The old computation never saw raises; the new fold adds them to
         # committed and remaining, and differs from the oracle by exactly
         # the raise.

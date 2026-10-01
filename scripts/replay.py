@@ -88,14 +88,23 @@ def _save(result: dict) -> None:
 
 def release_pushes(task_id: str, ws: dict, log: list) -> list[str]:
     """Approve and release every held push of the task whose push URL is
-    the run's own bare origin. Returns the held effects left alone."""
+    the run's own bare origin, and a held merge whose payload names that
+    origin (the URL the kernel recorded at start, which the approval binds,
+    not whatever the workspace's config says now). Returns the held effects
+    left alone."""
     left = []
     for line in core("pending").splitlines():
         effect_id, owner, action, *_ = line.split()
         if owner != task_id:
             continue
-        urls = ws_git(ws["workdir"], "remote", "get-url", "--push", "--all", "origin", check=False).split()
-        if action != "push_branch" or urls != [ws["origin"]]:
+        if action == "merge":
+            payload = json.loads(line.split(None, 5)[5])
+            urls = [payload.get("url")]
+        else:
+            urls = ws_git(
+                ws["workdir"], "remote", "get-url", "--push", "--all", "origin", check=False
+            ).split()
+        if action not in ("push_branch", "merge") or urls != [ws["origin"]]:
             left.append(effect_id)
             log.append({"at": now(), "step": "held effect left for Tom", "effect": line, "push_urls": urls})
             continue
@@ -229,6 +238,8 @@ def replay(item: dict, arm: str, args) -> dict:
                 ws["harness_config"],
                 "--mode",
                 arm,
+                "--target-branch",
+                "main",
             )
             _save(result)
         task_id, log = result["task_id"], result["log"]
@@ -250,7 +261,12 @@ def replay(item: dict, arm: str, args) -> dict:
                 result["outcome"] = "an effect other than a local push is held for Tom"
                 break
             state = status(task_id)
-            if state["state"] in ("waiting for Tom", "delivered"):
+            if line.startswith("NO RUNNER"):
+                # Critique and the checks have no runner until milestone 1.4;
+                # the driver never records a verdict for them.
+                result["outcome"] = line.splitlines()[0]
+                break
+            if state["state"] in ("waiting", "merge"):
                 reply = stand_in(
                     task_id,
                     item["answer_key"],

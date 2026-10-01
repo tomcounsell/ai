@@ -68,21 +68,23 @@ the task starts:
 | `workspace` | the directory the task's turns work in |
 | `model` | the model its turns run |
 | `harness` | the harness's settings for the task, its isolation included |
-| `mode` | `bare` or `clarify`: whether the first turn builds or inspects and asks |
+| `mode` | `bare` or `clarify`: the starter's judge verdict (`precise` or `thin`) until the judge runs (milestone 1.3); none leaves the task in `judge` |
+| `target_branch`, `origin_url`, `base_sha` | where a merge goes, read at start before any turn can touch the workspace's config: the branch, origin's push URL, the head then |
 
 The Brief a turn receives is **dispatched**: rendered from the ledger as
 the turn starts, carrying the task's commitments, every correction in force,
-and the signal protocol (how the turn reaches Tom). `turn.started` records
+the signal channel (how the turn reaches Tom, listing the effects the
+registered performers offer), and the stage file for the state the turn
+runs in (`skills/sdlc/<state>.md`). `turn.started` records
 the full dispatched text, its SHA-256, and the correction numbers it
 carried, so what a turn was told is a lookup.
 
-**State.** A task is `live`, `waiting for Tom` (an unanswered question),
-`delivered` (the latest delivery has no feedback after it), or `stopped`.
-Stop is final. A run of turns ends when the state leaves `live`, the budget
-is spent, a turn fails, or two turns in a row end with neither a question
-nor a delivery (the idle bound). These are the kernel's run states; the
-SDLC states a task moves through between request and delivery are in
-[sdlc-state-machine.md](sdlc-state-machine.md).
+**State.** A task's state is the SDLC state machine's, folded from its
+ledger (`core/machine.py`; [sdlc-state-machine.md](sdlc-state-machine.md)).
+Stop is final. A run (`core/router.py`) ends when the task needs Tom
+(`waiting`, `merge`, `merged`, `stopped`), reaches a stage with no runner,
+spends its budget, has a turn fail, or has two turns in a row end without
+their stage's signal (the idle bound).
 
 **Design.** The Brief gains an `attention_budget` beside the money budget
 (see The attention log) and, once tasks nest, a `parent_id` and a deadline.
@@ -259,15 +261,16 @@ ledger. Prompts per state are in [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
 `.valor/` in its workspace, read when the turn ends: `question.md` (a
-question for Tom; the task waits), `done.md` (a delivery: what, how it was
-verified, what Tom should know), and `effects/<name>.json` (one effect
-request each, passed to the broker). Each file is moved to
+question for Tom; the task waits), `no_question.md` (clarify found nothing
+to ask), `plan.json` (the committed plan, its stakes and loop counts),
+`done.md` (a **candidate**: what, how it was verified, what Tom should
+know), and `effects/<name>.json` (one effect request each, passed to the
+broker; a merge is never a turn's to request). Each file is moved to
 `.valor/handled/<turn_id>/` once read. The layout is specified in
-[harnesses.md](harnesses.md). Each signal becomes a ledger row
-(`question.asked`, the broker's rows, and today `task.delivered` for a
-`done.md`; in the design `done.md` is a **candidate**, and `task.delivered`
-waits for the test, review, and docs checks, per [sdlc-state-machine.md](sdlc-state-machine.md)),
-and `turn.collected` records everything the turn left.
+[harnesses.md](harnesses.md). `turn.collected` records everything the turn
+left with the state it ran in and its verdict, beside `question.asked` or
+`plan.written` where the verdict calls for one; `task.delivered` waits for
+the test, review, and docs checks, per [sdlc-state-machine.md](sdlc-state-machine.md).
 
 **An answer or feedback is spent only by a turn that finishes.** After a
 turn that fails or is stopped, the next turn opens with it again. This is
@@ -423,13 +426,17 @@ nothing about what it may do. The SDLC uses three:
    one-line requests and changed nothing on the precise ones; asked
    unconditionally it hurt once (#633), so the classifier routes and
    clarify is never the default (rebuild-baseline.md, Aggregate).
-   **Built:** the `mode` field and the clarify section of the Brief, chosen
-   by hand at `start`. **Design:** the classifier and its guard row.
+   **Built:** the `judge` state, its `judge.decided` row, and the guard
+   row (seeded by `migrate`); the verdict is recorded by hand at `start`
+   (`--mode`) until the classifier (milestone 1.3).
 2. **After the tests: are they broad enough?** The breadth check in
    [sdlc-state-machine.md](sdlc-state-machine.md). **Design.**
 3. **Over every diff: does this add governance?** The blind verifier's one
    boolean, "does this add a check, gate, hook, round, or review step". A
-   yes with no grant is a refused merge. **Design.**
+   yes with no grant is a refused merge. **Built:** the review and docs
+   verdicts carry the answer and its instances, the broker computes a
+   merge's governance flag from them, and a merge with an instance lacking
+   Tom's tap is refused. **Design:** the judgement that answers it.
 
 ## Verification
 
@@ -565,14 +572,17 @@ are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
-| Governance added without a grant | broker refuses governance actions with no grant; verifier boolean over every diff (design) | governing constraint |
+| Governance added without a grant | the broker computes a merge's governance flag from the review and docs verdicts and refuses it until Tom taps each instance; the verifier's boolean over every diff (design) | governing constraint |
+| A merge on a model's say-so | the merge predicate, five terms read from rows and git, checked with the intent in one transaction | bounded authority |
+| A turn redirects where a merge lands | origin's URL and the target branch recorded at start and bound into the approval; a workspace config with includes, rewrites, or a push URL refused | bounded authority |
+| Two runs of one task at once | a session advisory lock per run; a run whose lock died stops before its next turn | lossless stop |
 | A turn writes the ledger | ledger grants and trigger; kernel database unreachable from the sandbox | ledger the system cannot edit |
 | Stop lands mid-call or mid-effect | fence row read by gateway and broker; revoke, kill, drain, reap; intent before outcome | lossless stop |
 | Processes outlive their turn | reap by process group, environment marker, and sandbox mark | lossless stop; 16 GB |
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers, feedback, approvals, and raises | provenance |
-| Thin request built on a guess | judgement-tier routing to a clarify turn (design) | Mission 3, 6 |
-| A wrong plan reaches code | critique in a fresh session, rounds set by stakes (design) | Mission 1 |
+| Thin request built on a guess | the `judge` state routes a thin request to `clarify` (built; the judgement is by hand until 1.3) | Mission 3, 6 |
+| A wrong plan reaches code | critique, rounds set by stakes (the loop built; the fresh session is 1.4's) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
 | Verifier too lenient | Opus-class blind reviewer, never cheaper; human audit sample (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |

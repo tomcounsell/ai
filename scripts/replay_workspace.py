@@ -357,6 +357,9 @@ def build(
             f.write(".valor/\n")
         origin = run / "origin.git"
         sh("git", "init", "--quiet", "--bare", str(origin))
+        # origin's HEAD names main, where the base is pushed, so a task's
+        # merge has a target branch whatever init.defaultBranch says.
+        git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
         git(origin, "config", "core.logAllRefUpdates", "always")
         git(origin, "config", "receive.denyNonFastForwards", "true")
         git(workdir, "remote", "add", "origin", str(origin))

@@ -7,22 +7,38 @@ secure-login                   the kernel databases' password file, both roles'
 settings                       every setting, as shell assignments
 start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
       [--model SEAT_OR_ID] [--harness-config FILE] [--mode bare|clarify]
+      [--target-branch B] [--by B] [--role-played]
                                start a task; prints its id. `--model` takes a
                                seat (frontier, reviewer, light) or a model id.
-                               `clarify` has the Brief ask Valor to inspect and
-                               ask before building
-run TASK_ID                    run turns until a question, a delivery, the
-                               budget's end, or a stop; prints one status line
+                               `--mode` is the starter's judge verdict until
+                               the judge runs (bare: precise, clarify: thin);
+                               without it the task waits in judge. The merge
+                               lands on `--target-branch` (default: the branch
+                               origin's HEAD names) at origin's URL as it is now
+run TASK_ID                    run the task through the state machine until it
+                               needs Tom or a stage with no runner; prints one
+                               status line
 answer TASK_ID TEXT [--by B] [--role-played]
                                the answer to the task's open question
 feedback TASK_ID TEXT [--by B] [--role-played]
-                               feedback on a delivered task; the next run
-                               resumes its session with it. `--by` names who
-                               wrote it (default tom); `--role-played` marks a
-                               stand-in speaking for Tom
-status TASK_ID                 the task as a fold over its ledger, with the
-                               attention log (questions, answers, feedback,
-                               approvals, raises) and its counts
+                               feedback on a delivery (in merge or merged); the
+                               next run patches in the same session. `--by`
+                               names who wrote it (default tom); `--role-played`
+                               marks a stand-in speaking for Tom
+verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]... [--raise-critique N]
+      [--raise-review N] [--governance PATH:LINE]... [--incident T]
+      [--mission-item N] [--head SHA] [--suite-command C] [--failure T]...
+      [--behavior T]... [--by B] [--via V] [--role-played]
+                               record by hand the verdict of a stage that has
+                               no runner yet (judge, critique, test, review,
+                               docs), `leg: manual`
+grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
+                               Tom's tap on one governance instance of the
+                               delivery; always his, never role-played
+status TASK_ID                 the task as a fold over its ledger: its state,
+                               loops, candidate, checks, and the attention log
+                               (questions, answers, feedback, approvals, raises,
+                               manual verdicts, grants) and its counts
 budget raise TASK_ID N [--note T] [--by B] [--via V] [--role-played]
                                add N US dollars to the task's committed budget
 ledger TASK_ID                 every ledger row of the task
@@ -39,9 +55,9 @@ backup [--plist]               dump the kernel database to the backup disk and
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
-This module is the composition root: `run` and `release` wire the Claude
-Code harness and the workspace performers into the kernel. Nothing else in
-`core/` imports outside it.
+This module is the composition root: `run`, `verdict`, and `release` wire
+the Claude Code harness, the runners, and the workspace performers into the
+kernel. Nothing else in `core/` imports outside it.
 """
 
 import argparse
@@ -49,15 +65,18 @@ import asyncio
 import json
 from pathlib import Path
 
-from core import backup, broker, budget, corrections, credentials, db, ledger, session, tasks
+from core import backup, broker, budget, corrections, credentials, db, guards, ledger, router, session, tasks
+from core import verdicts as verdicts_
+from core.machine import State
 from core.settings import resolve_model, settings
 
 
 def _performers(b: tasks.Brief) -> None:
-    from tools.push_branch import PushBranch
+    from tools.push_branch import Merge, PushBranch
 
     if b.workspace:
-        broker.register(PushBranch(b.workspace))
+        broker.register(PushBranch(b.workspace, url=b.origin_url, protected=b.target_branch))
+        broker.register(Merge(b.workspace))
 
 
 def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
@@ -66,6 +85,15 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
     return claude_code.workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=b.harness
     )
+
+
+async def _working(ctx: router.Context) -> dict:
+    return await session.run(ctx.gateway, ctx.task_id, _turn_for, dsn=ctx.dsn, alive=ctx.alive)
+
+
+# The runner for each state this kernel can run. The judge (1.3) and the
+# critique and check runners (1.4) are added here.
+RUNNERS: dict = {State.CLARIFY: _working, State.PLAN: _working, State.BUILD: _working, State.PATCH: _working}
 
 
 def _usd(micros: int) -> str:
@@ -77,14 +105,24 @@ def _status_line(task_id: str, out: dict) -> str:
     spent = f"spent {_usd(state.get('charged_usd_micros', 0))}, remaining {_usd(state.get('remaining_usd_micros', 0))}"
     status = out["status"]
     if status == "waiting":
-        q = out["question"]
+        q = next(a for a in state["attention"] if a["kind"] == "question" and a["answer"] is None)
         return (
             f"QUESTION for Tom (task {task_id}, question {q['question_id']}; {spent}):\n\n{q['question']}\n\n"
             f'answer with: python -m core answer {task_id} "..."'
         )
     if status == "delivered":
+        d = state.get("delivery") or {}
+        lines = [
+            f"DELIVERED, {d.get('outcome', 'delivered')} (task {task_id}; {spent}):\n\n{state['delivered']}"
+        ]
+        for f in d.get("findings") or []:
+            lines.append(f"- [{f['source']}, {f['kind']}] {f['text']}")
+        for i in [g for g in state.get("governance", []) if not g["granted"]]:
+            lines.append(
+                f"\ngovernance awaiting Tom: instance {i['id']} in {i['path']}\n"
+                f'  grant with: python -m core grant {task_id} {i["id"]} --note "..."'
+            )
         held = [e for e, s in state.get("effects", {}).items() if s == "pending"]
-        lines = [f"DELIVERED (task {task_id}; {spent}):\n\n{state['delivered']}"]
         for effect_id in held:
             lines.append(
                 f"\nheld for Tom: effect {effect_id}\n"
@@ -92,12 +130,21 @@ def _status_line(task_id: str, out: dict) -> str:
                 f"  then:         python -m core release {effect_id}"
             )
         return "\n".join(lines)
+    if status == "no runner":
+        missing = out["missing"]
+        stage = state.get("state")
+        how = "; ".join(f"python -m core verdict {task_id} {m} VERDICT" for m in missing)
+        return f"NO RUNNER (task {task_id}, in {stage}; {spent}): no runner for {', '.join(missing)} yet; record by hand: {how}"
     turn = out.get("turn") or {}
     detail = {
         "stopped": "stopped",
+        "merged": "merged",
+        "legacy": "this task predates the state machine; it is read-only",
+        "already running": "another run of this task is in progress",
+        "lock lost": "the run's lock connection died; run again",
         "budget exhausted": "the budget is spent",
         "failed": f"the turn failed: {turn.get('stderr_tail') or turn.get('result')}",
-        "idle": f"{settings.idle_turns} turns ended without a question or delivery",
+        "idle": f"{settings.idle_turns} turns ended without their stage's signal",
     }[status]
     return f"{status.upper()} (task {task_id}; {spent}): {detail}"
 
@@ -113,12 +160,56 @@ async def _run_task(task_id: str) -> str:
     gateway = Gateway()
     await gateway.start()
     try:
-        out = await session.run(gateway, task_id, _turn_for)
+        out = await router.run(gateway, task_id, RUNNERS)
     except claude_code.Unsandboxed as exc:
         raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
         await gateway.close()
     return _status_line(task_id, out)
+
+
+def _instance(spec: str, args) -> verdicts_.InstanceSpec:
+    path, _, line = spec.rpartition(":")
+    if not path or not line.isdigit():
+        raise SystemExit(f"--governance takes PATH:LINE, not {spec!r}")
+    return verdicts_.InstanceSpec(path, int(line), args.summary or "", args.incident, args.mission_item)
+
+
+async def _verdict(conn, args) -> str:
+    stage = verdicts_.MANUAL_STAGES.get(args.stage)
+    if stage is None:
+        raise SystemExit(f"no manual verdict for {args.stage}; one of {', '.join(verdicts_.MANUAL_STAGES)}")
+    verdicts_.manual_allowed(stage, RUNNERS)
+    who = {"by": args.by, "via": args.via, "role_played": args.role_played}
+    _performers(await tasks.brief(conn, args.task_id))
+    if stage is State.JUDGE:
+        await verdicts_.record_judge(conn, args.task_id, args.verdict, **who)
+    elif stage is State.CRITIQUE:
+        raised = {
+            k: v
+            for k, v in (("critique_rounds", args.raise_critique), ("review_rounds", args.raise_review))
+            if v is not None
+        }
+        await verdicts_.record_critique(
+            conn, args.task_id, args.verdict, findings=args.finding, raised=raised, **who
+        )
+    else:
+        await verdicts_.record_check(
+            conn,
+            args.task_id,
+            stage,
+            args.verdict,
+            findings=args.finding,
+            governance=[_instance(g, args) for g in args.governance],
+            head=args.head,
+            command=args.suite_command,
+            failures=args.failure,
+            behaviors=args.behavior,
+            **who,
+        )
+        await verdicts_.ensure_merge(conn, args.task_id)
+    state = await tasks.status(conn, args.task_id)
+    return f"recorded {args.stage} {args.verdict}; task {args.task_id} is in {state['state']}"
 
 
 async def _run(args) -> None:
@@ -128,20 +219,29 @@ async def _run(args) -> None:
     async with await db.connect() as conn:
         if args.command == "start":
             harness = json.loads(Path(args.harness_config).read_text()) if args.harness_config else {}
+            workspace = str(Path(args.workspace).resolve()) if args.workspace else None
+            try:
+                where = tasks.resolve_workspace(workspace, args.target_branch)
+            except tasks.WorkspaceRefused as exc:
+                raise SystemExit(str(exc)) from None
             brief = tasks.Brief(
                 instruction=args.instruction,
                 budget_usd_micros=round(args.budget_usd * 1_000_000),
                 max_effect_class=args.ceiling,
-                workspace=str(Path(args.workspace).resolve()) if args.workspace else None,
+                workspace=workspace,
                 model=resolve_model(args.model),
                 harness=harness,
                 mode=args.mode,
+                **where,
             )
-            print(await tasks.start(conn, brief))
+            print(await tasks.start(conn, brief, by=args.by, role_played=args.role_played))
         elif args.command == "answer":
-            question_id = await session.answer(
-                conn, args.task_id, args.text, by=args.by, role_played=args.role_played
-            )
+            try:
+                question_id = await session.answer(
+                    conn, args.task_id, args.text, by=args.by, role_played=args.role_played
+                )
+            except LookupError as exc:
+                raise SystemExit(str(exc.args[0])) from None
             print(f"answered question {question_id}; continue with: python -m core run {args.task_id}")
         elif args.command == "feedback":
             try:
@@ -151,6 +251,25 @@ async def _run(args) -> None:
             except LookupError as exc:
                 raise SystemExit(str(exc.args[0])) from None
             print(f"feedback {feedback_id} recorded; continue with: python -m core run {args.task_id}")
+        elif args.command == "verdict":
+            try:
+                print(await _verdict(conn, args))
+            except (LookupError, ValueError) as exc:
+                raise SystemExit(str(exc.args[0] if exc.args else exc)) from None
+        elif args.command == "grant":
+            try:
+                guard_id = await guards.grant(
+                    conn,
+                    args.task_id,
+                    args.instance,
+                    note=args.note,
+                    incident=args.incident,
+                    mission_item=args.mission_item,
+                    via=args.via,
+                )
+            except LookupError as exc:
+                raise SystemExit(str(exc.args[0])) from None
+            print(f"granted {args.instance} as {guard_id}; continue with: python -m core run {args.task_id}")
         elif args.command == "status":
             print(json.dumps(await tasks.status(conn, args.task_id), indent=2))
         elif args.command == "ledger":
@@ -185,7 +304,10 @@ async def _run(args) -> None:
             if row is None:
                 raise SystemExit(f"no held effect {args.effect_id}")
             _performers(await tasks.brief(conn, row[0]))
-            outcome = await broker.release(conn, args.effect_id)
+            try:
+                outcome = await broker.release(conn, args.effect_id)
+            except (broker.Refused, broker.NotApproved, tasks.TaskStopped) as exc:
+                raise SystemExit(f"release refused: {exc}") from None
             print(
                 f"{outcome.kind} {json.dumps(outcome.result, sort_keys=True)}"
                 + (f" {outcome.error}" if outcome.error else "")
@@ -275,8 +397,36 @@ def main() -> None:
     start.add_argument("--workspace")
     start.add_argument("--model", default="light")
     start.add_argument("--harness-config")
-    start.add_argument("--mode", default="bare", choices=list(tasks.MODES))
+    start.add_argument("--mode", choices=list(tasks.MODES))
+    start.add_argument("--target-branch")
+    start.add_argument("--by", default="tom")
+    start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
+    verdict = sub.add_parser("verdict")
+    verdict.add_argument("task_id")
+    verdict.add_argument("stage")
+    verdict.add_argument("verdict")
+    verdict.add_argument("--finding", action="append", default=[])
+    verdict.add_argument("--raise-critique", type=int)
+    verdict.add_argument("--raise-review", type=int)
+    verdict.add_argument("--governance", action="append", default=[])
+    verdict.add_argument("--summary")
+    verdict.add_argument("--incident")
+    verdict.add_argument("--mission-item")
+    verdict.add_argument("--head")
+    verdict.add_argument("--suite-command", dest="suite_command")
+    verdict.add_argument("--failure", action="append", default=[])
+    verdict.add_argument("--behavior", action="append", default=[])
+    verdict.add_argument("--by", default="tom")
+    verdict.add_argument("--via", default="the command line")
+    verdict.add_argument("--role-played", action="store_true")
+    grant = sub.add_parser("grant")
+    grant.add_argument("task_id")
+    grant.add_argument("instance")
+    grant.add_argument("--note", required=True)
+    grant.add_argument("--incident")
+    grant.add_argument("--mission-item")
+    grant.add_argument("--via", default="the command line")
     for name in ("answer", "feedback"):
         reply = sub.add_parser(name)
         reply.add_argument("task_id")

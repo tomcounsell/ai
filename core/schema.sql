@@ -60,3 +60,18 @@ CREATE TRIGGER events_no_truncate BEFORE TRUNCATE ON events
 REVOKE ALL ON events, documents FROM PUBLIC;
 GRANT SELECT, INSERT ON events TO valor_kernel;
 GRANT SELECT, INSERT ON documents TO valor_kernel;
+
+-- The state machine's rows (core/machine.py). One judge verdict per task;
+-- one row of each turn type per turn; one grant per guard id, and one
+-- grant per governance instance on a task. The verdict enum is a CHECK
+-- constraint `db.migrate` adds from `machine.VERDICTS`.
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_judge
+    ON events (task_id) WHERE type = 'judge.decided';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_turn_row
+    ON events (type, (payload->>'turn_id'))
+    WHERE type IN ('turn.started', 'turn.ended', 'turn.collected', 'turn.reaped');
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_guard
+    ON events ((payload->>'guard_id')) WHERE type = 'guard.granted';
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_instance_grant
+    ON events (task_id, (payload->>'instance_id'))
+    WHERE type = 'guard.granted' AND payload->>'instance_id' IS NOT NULL;

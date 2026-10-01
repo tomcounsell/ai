@@ -77,11 +77,13 @@ def test_the_driver_releases_local_pushes_and_leaves_any_other_held(dsn, tmp_pat
     local, elsewhere = _run(tmp_path, "local"), _run(tmp_path, "elsewhere")
     broker.register(PushBranch(local["workdir"]))
     local_task = asyncio.run(_held_push(dsn, local))
+    broker.register(PushBranch(elsewhere["workdir"]))
+    other_task = asyncio.run(_held_push(dsn, elsewhere))
+    # The workspace's config is rewritten after the push was held, as a turn
+    # could rewrite it.
     stranger = tmp_path / "stranger.git"
     subprocess.run(["git", "init", "-q", "--bare", str(stranger)], check=True)
     git(elsewhere["workdir"], "remote", "set-url", "--push", "origin", str(stranger))
-    broker.register(PushBranch(elsewhere["workdir"]))
-    other_task = asyncio.run(_held_push(dsn, elsewhere))
 
     log: list = []
     assert replay.release_pushes(local_task, local, log) == []
@@ -133,3 +135,44 @@ def test_each_redis_run_gets_a_port_no_other_run_holds(tmp_path, monkeypatch):
     assert replay_workspace._redis_port(tmp_path / "runs" / "new") == 6392
     assert replay_workspace._redis_port(tmp_path / "runs" / "b") == 6393
     assert replay_workspace._redis_port(tmp_path / "runs" / "old") == 6390
+
+
+def test_the_driver_checks_a_merge_by_the_url_its_payload_carries(dsn, tmp_path, monkeypatch):
+    """A held merge is released when its payload names the run's own origin
+    (the URL the kernel recorded at start, which the approval binds), and
+    left held when it names any other, whatever the workspace's config
+    says now."""
+    from core import ledger
+
+    monkeypatch.setenv("VALOR_DB", TEST_DB)
+    ws = _run(tmp_path, "merge")
+
+    async def held(url: str) -> str:
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(
+                conn,
+                tasks.Brief(
+                    instruction="merge", budget_usd_micros=0, max_effect_class="act", workspace=ws["workdir"]
+                ),
+            )
+            payload = {
+                "url": url,
+                "target_branch": "main",
+                "head_sha": "x",
+                "candidate": {"sha": "x", "turn_id": "t"},
+            }
+            await ledger.append(
+                conn,
+                task,
+                "effect.held",
+                {"effect_id": ledger.new_id(), "action_type": "merge", "effect_class": "act", "target": "main",
+                 "payload": payload, "payload_sha256": ledger.digest(payload), "idempotency_key": ledger.new_id(),
+                 "adds_governance": False},
+            )  # fmt: skip
+            return task
+
+    elsewhere = asyncio.run(held(str(tmp_path / "stranger.git")))
+    log: list = []
+    left = replay.release_pushes(elsewhere, ws, log)
+    assert len(left) == 1 and log[-1]["step"] == "held effect left for Tom"
+    assert log[-1]["push_urls"] == [str(tmp_path / "stranger.git")]

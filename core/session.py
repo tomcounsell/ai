@@ -1,84 +1,204 @@
-"""A task's turns in one harness session: run until Valor asks Tom a
-question, delivers, runs out of money, or is stopped.
+"""The working session: the task's one harness session, in which clarify,
+plan, build, and patch run, each turn resuming the one before.
 
-Serves Mission item 6, spend attention as carefully as money. Every question
-Valor puts to Tom is a `question.asked` row and his answer a
-`question.answered` row with his provenance, and his feedback on a delivery a
-`feedback.given` row with his provenance, so the attention a task cost is a
-fold over its ledger (`tasks.status` returns it as `attention`).
+Serves Mission item 1 (one working context from inspection to delivery) and
+Mission item 6 (Tom's answer lands in the context that asked). `run` runs
+one state's turns until the task leaves that state, or until there is
+something for Tom: the budget's end, two idle turns, a failed turn, a stop.
+The router (`core/router.py`) decides what runs next.
 
-Feedback is how Tom, as project manager, sends a delivered task back to
-work: it takes only a delivered task, puts it back to `live`, and the next
-run resumes the same session with the feedback as its prompt. A stopped task
-takes none (stop is final), and a task waiting on a question takes Tom's
-answer instead.
+A turn's prompt is data from the row that moved the task into its state
+(`Fold.entry`): the instruction, Tom's answer, a critique's findings, every
+finding of the join, or Tom's feedback, under a short label; `Continue.`
+once a turn in the state has finished. What the turn should do with it is
+the stage file its Brief carries (`skills/sdlc/<state>.md`). An answer,
+findings, or feedback is spent only by a turn that finishes: after a turn
+that fails or is stopped, the next one opens with it again. Each prompt is
+followed by what became of the effects the previous turn requested.
 
-Each turn resumes the harness session the task's first turn opened, so Valor
-keeps its working context, and each turn still gets the Brief rendered from
-the ledger as it starts, corrections included. Money is conserved across all
-of a task's turns because every model call of every turn goes through the
-same gateway against the same committed budget.
+What a turn left under `.valor/` (see `core.signals`) is one
+`turn.collected` row carrying the state it ran in and its verdict, with a
+`question.asked` or `plan.written` beside it when the verdict calls for
+one. A signal that means nothing in the state, a plan not committed, or a
+candidate on a tree with uncommitted changes goes to `errors`, and the next
+prompt says so. The merge is the kernel's to request: a turn's request for
+one never reaches the broker.
 
-The turn's prompt is the instruction on the first turn, Tom's answer after a
-question, his feedback after a delivery, and "Continue." otherwise, each
-followed by what became of the effects the previous turn requested. An
-answer or feedback is spent only by a turn that finishes: after a turn that
-fails or is stopped, the next one opens with it again. What a turn left under `.valor/` (see
-`core.signals`) is recorded in one `turn.collected` row, effect requests go
-to the broker, and a question or delivery gets its own row.
+Every question is a `question.asked` row and its answer a
+`question.answered` row with Tom's provenance, and his feedback a
+`feedback.given` row, so the attention a task cost is a fold over its
+ledger (`tasks.status`).
 """
 
-from collections.abc import Callable
+import hashlib
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
-from core import broker, db, ledger, runs, signals, tasks
+from core import broker, db, git, ledger, machine, runs, signals, tasks
 from core.gateway import Gateway
+from core.machine import State
 from core.settings import settings
 
 # Builds one turn's command: (prompt, session to resume or None, Brief).
 TurnFor = Callable[[str, str | None, tasks.Brief], Callable[[str, str], runs.TurnCommand]]
+Alive = Callable[[], Awaitable[bool]]
 
 
-async def run(gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None = None) -> dict[str, Any]:
-    """Run turns until there is something for Tom. Returns `status` (one of
-    `waiting`, `delivered`, `stopped`, `budget exhausted`, `failed`, `idle`)
-    and what goes with it."""
+async def _always() -> bool:
+    return True
+
+
+async def run(
+    gateway: Gateway, task_id: str, turn_for: TurnFor, dsn: str | None = None, alive: Alive = _always
+) -> dict[str, Any]:
+    """Run turns in the task's current working state until it leaves it.
+    Returns `status`: `moved` (the fold left the state), `budget
+    exhausted`, `failed`, `idle`, `stopped`, or `lock lost` (the router's
+    run lock died), with the task's `state` from `tasks.status`."""
     dsn = dsn or gateway.dsn
     idle = 0
+    async with await db.connect(dsn) as conn:
+        state = machine.fold(await ledger.read(conn, task_id)).state
+    if state not in machine.WORKING:
+        return {"status": "moved"}
     while True:
+        if not await alive():
+            return {"status": "lock lost"}
         async with await db.connect(dsn) as conn:
-            state = await tasks.status(conn, task_id)
-            if state["state"] != "live":
-                return _settled(state)
-            if state["remaining_usd_micros"] <= 0:
-                return {"status": "budget exhausted", "state": state}
+            now = await tasks.status(conn, task_id)
+            if now["state"] != state.value:
+                return {"status": "moved", "state": now}
+            if now["remaining_usd_micros"] <= 0:
+                return {"status": "budget exhausted", "state": now}
             b = await tasks.brief(conn, task_id)
             prompt, resume = await next_prompt(conn, task_id)
         try:
-            ended = await runs.run_turn(gateway, task_id, turn_for(prompt, resume, b), dsn=dsn)
+            ended = await runs.run_turn(gateway, task_id, turn_for(prompt, resume, b), dsn=dsn, state=state)
         except tasks.TaskStopped:
             return {"status": "stopped"}
         found = signals.collect(b.workspace, ended["turn_id"]) if b.workspace else signals.Signals()
+        if not await alive():
+            return {"status": "lock lost", "turn": ended}
+        ok = ended["outcome"] == "done" and not ended["result"].get("is_error")
         async with await db.connect(dsn) as conn:
-            await record(conn, task_id, ended["turn_id"], found)
-            state = await tasks.status(conn, task_id)
+            await record(
+                conn, task_id, ended["turn_id"], found, state=state, workspace=b.workspace, finished=ok
+            )
+            now = await tasks.status(conn, task_id)
             refused = await _refused_in_turn(conn, task_id, ended["turn_id"])
-        if state["state"] != "live":
-            return _settled(state, ended)
+        if now["state"] == State.STOPPED.value:
+            return {"status": "stopped", "state": now, "turn": ended}
+        if now["state"] != state.value:
+            return {"status": "moved", "state": now, "turn": ended}
         if refused:
-            return {"status": "budget exhausted", "state": state, "turn": ended}
-        if ended["outcome"] != "done" or ended["result"].get("is_error"):
-            return {"status": "failed", "state": state, "turn": ended}
+            return {"status": "budget exhausted", "state": now, "turn": ended}
+        if not ok:
+            return {"status": "failed", "state": now, "turn": ended}
         idle += 1
         if idle >= settings.idle_turns:
-            return {"status": "idle", "state": state, "turn": ended}
+            return {"status": "idle", "state": now, "turn": ended}
 
 
-async def record(conn, task_id: str, turn_id: str, found: signals.Signals) -> None:
-    """Ledger what a turn left, sending each effect request to the broker."""
+def _plan(workspace: str | None, raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """A `plan.written` payload from a turn's `plan.json`, or why not."""
+    try:
+        path = str(raw["path"])
+        counts = {k: raw[k] for k in ("critique_rounds", "review_rounds")}
+    except KeyError as exc:
+        return None, f"plan.json lacks {exc.args[0]!r}"
+    for k, v in counts.items():
+        if not isinstance(v, int) or isinstance(v, bool) or v not in machine.ROUNDS:
+            return None, f"plan.json {k} is {v!r}; each count is 0, 1, or 2"
+    if not git.is_repo(workspace):
+        return None, "the workspace is not a git repository, so the plan cannot be committed"
+    head = git.head(workspace)
+    body = git.show(workspace, "HEAD", path) if head else None
+    if body is None:
+        return None, f"{path} is not committed at HEAD"
+    local = Path(workspace) / path
+    if not local.is_file() or local.read_bytes() != body:
+        return None, f"{path} has changes not committed"
+    return {
+        "path": path,
+        "commit": head,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "stakes": str(raw.get("stakes") or ""),
+        **counts,
+        "scope": list(raw.get("scope") or []),
+        "doc_paths": [str(d) for d in raw.get("doc_paths") or []],
+    }, None
+
+
+def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | None, str | None]:
+    if not git.is_repo(workspace):
+        return None, "the workspace is not a git repository, so there is no commit to check"
+    left = git.dirty(workspace)
+    if left:
+        return None, "done.md with uncommitted changes; commit everything first:\n" + "\n".join(left[:20])
+    head = git.head(workspace)
+    if head is None:
+        return None, "the workspace has no commit"
+    return {"sha": head, "turn_id": turn_id}, None
+
+
+def _verdict(
+    state: State, found: signals.Signals, workspace: str | None, turn_id: str, finished: bool
+) -> tuple[str, dict[str, Any], list[str]]:
+    """The turn's verdict in its state, what goes with it, and the signals
+    that did not count."""
+    errors: list[str] = []
+    extra: dict[str, Any] = {}
+    meant = {
+        State.CLARIFY: ("question", "no_question"),
+        State.PLAN: ("question", "plan"),
+        State.BUILD: ("question", "done"),
+        State.PATCH: ("question", "done"),
+    }[state]
+    for name in ("no_question", "plan", "done"):
+        if name not in meant and getattr(found, name) is not None:
+            errors.append(f"{name} means nothing in {state}; ignored")
+    if found.plan_error:
+        errors.append(found.plan_error)
+    if found.question is not None:
+        return "asked", extra, errors
+    if state is State.CLARIFY and found.no_question is not None:
+        return "no_material_question", extra, errors
+    if state is State.PLAN and found.plan is not None:
+        plan, why = _plan(workspace, found.plan)
+        if plan is None:
+            errors.append(why)
+        else:
+            extra["plan"] = plan
+            return "planned", extra, errors
+    if state in (State.BUILD, State.PATCH) and found.done is not None:
+        candidate, why = _candidate(workspace, turn_id)
+        if candidate is None:
+            errors.append(why)
+        else:
+            extra["candidate"] = candidate
+            return "candidate", extra, errors
+    return ("idle" if finished else "failed"), extra, errors
+
+
+async def record(
+    conn,
+    task_id: str,
+    turn_id: str,
+    found: signals.Signals,
+    *,
+    state: State,
+    workspace: str | None,
+    finished: bool = True,
+) -> str:
+    """Ledger what a turn left, sending each effect request but a merge to
+    the broker. Returns the verdict."""
+    verdict, extra, errors = _verdict(state, found, workspace, turn_id, finished)
     effects = []
     for entry in found.effects:
-        if "request" in entry:
+        if "request" in entry and entry["request"]["action_type"] == "merge":
+            entry = {**entry, "error": "the merge is the kernel's to request"}
+        elif "request" in entry:
             r = entry["request"]
             outcome = await broker.request(
                 conn, task_id, broker.Action(r["action_type"], r["target"], r["payload"])
@@ -87,21 +207,39 @@ async def record(conn, task_id: str, turn_id: str, found: signals.Signals) -> No
         effects.append(entry)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
+        current = machine.fold(await ledger.read(conn, task_id)).state
         await ledger.append(
             conn,
             task_id,
             "turn.collected",
-            {"turn_id": turn_id, "question": found.question, "done": found.done, "effects": effects},
+            {
+                "turn_id": turn_id,
+                "state": state.value,
+                "verdict": verdict,
+                "question": found.question,
+                "no_question": found.no_question,
+                "done": found.done,
+                "plan": found.plan,
+                "candidate": extra.get("candidate"),
+                "errors": errors,
+                "effects": effects,
+            },
         )
-        if found.question is not None:
+        if current is state and verdict == "asked":
             await ledger.append(
                 conn,
                 task_id,
                 "question.asked",
-                {"question_id": ledger.new_id(), "turn_id": turn_id, "text": found.question},
+                {
+                    "question_id": ledger.new_id(),
+                    "turn_id": turn_id,
+                    "text": found.question,
+                    "state": state.value,
+                },
             )
-        elif found.done is not None:
-            await ledger.append(conn, task_id, "task.delivered", {"turn_id": turn_id, "summary": found.done})
+        elif current is state and verdict == "planned":
+            await ledger.append(conn, task_id, "plan.written", {"turn_id": turn_id, **extra["plan"]})
+    return verdict
 
 
 async def answer(
@@ -114,26 +252,29 @@ async def answer(
     role_played: bool = False,
 ) -> str:
     """Record the answer to the task's open question. `by` names who wrote
-    it and `role_played` says whether they stood in for Tom. Returns its id."""
+    it and `role_played` says whether they stood in for Tom. Returns the
+    question's id."""
     text = text.strip()
     if not text:
         raise ValueError("an answer has text")
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
-        question = await open_question(conn, task_id)
-        if question is None:
-            raise LookupError(f"task {task_id} has no open question")
+        f = machine.fold(await ledger.read(conn, task_id))
+        if f.legacy:
+            raise LookupError(f"task {task_id} predates the state machine")
+        if f.state is not State.WAITING:
+            raise LookupError(f"task {task_id} has no open question (it is {f.state})")
         await ledger.append(
             conn,
             task_id,
             "question.answered",
             {
-                "question_id": question["question_id"],
+                "question_id": f.open_question,
                 "text": text,
                 "provenance": ledger.provenance(by, via, role_played),
             },
         )
-    return question["question_id"]
+    return f.open_question
 
 
 async def feedback(
@@ -145,21 +286,25 @@ async def feedback(
     via: str = "the command line",
     role_played: bool = False,
 ) -> str:
-    """Record feedback on the task's latest delivery, which puts the task
-    back to work. `by` and `role_played` are as for `answer`. Returns the
-    feedback's id."""
+    """Record Tom's feedback on the task's delivery, in `merge` or `merged`,
+    which sends the work to `patch` and opens a new loop window. Refused
+    while the merge's intent has no outcome. Returns the feedback's id."""
     text = text.strip()
     if not text:
         raise ValueError("feedback has text")
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
-        state = await tasks.status(conn, task_id)
-        if state["state"] == "stopped":
+        f = machine.fold(await ledger.read(conn, task_id))
+        if f.legacy:
+            raise LookupError(f"task {task_id} predates the state machine")
+        if f.state is State.STOPPED:
             raise LookupError(f"task {task_id} is stopped; a stopped task takes no feedback")
-        if state["state"] == "waiting for Tom":
+        if f.state is State.WAITING:
             raise LookupError(f"task {task_id} has an open question; answer it with `answer`")
-        if state["state"] != "delivered":
-            raise LookupError(f"task {task_id} has not delivered; feedback is on a delivery")
+        if f.state not in (State.MERGE, State.MERGED):
+            raise LookupError(f"task {task_id} is in {f.state}; feedback is on a delivery")
+        if f.merge_effect and f.merge_effect["state"] == "in_flight":
+            raise LookupError(f"task {task_id}'s merge is in flight; wait for its outcome")
         feedback_id = ledger.new_id()
         await ledger.append(
             conn,
@@ -167,7 +312,10 @@ async def feedback(
             "feedback.given",
             {
                 "feedback_id": feedback_id,
-                "on_delivery": state["delivered"],
+                "on_delivery": (f.delivery or {}).get("summary"),
+                "candidate": {"sha": f.candidate.sha, "turn_id": f.candidate.turn_id}
+                if f.candidate
+                else None,
                 "text": text,
                 "provenance": ledger.provenance(by, via, role_played),
             },
@@ -181,46 +329,49 @@ async def open_question(conn, task_id: str) -> dict[str, Any] | None:
     return unanswered[-1] if unanswered else None
 
 
+def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
+    if not entry:
+        return None
+    kind, p = entry["type"], entry["payload"]
+    if kind == "question.answered":
+        return f"# Tom's answer\n\n{p['text']}"
+    if kind == "feedback.given":
+        return f"# Tom's feedback on the delivery\n\n{p['text']}"
+    if kind == "critique.decided":
+        lines = [f"- [{x.get('kind', 'finding')}] {x.get('text', '')}" for x in p.get("findings") or []]
+        return f"# Critique: {p['verdict']}\n\n" + ("\n".join(lines) or "No findings.")
+    if kind == "join":
+        found = machine.fold(rows).join
+        lines = [f"- [{x.source}, {x.kind}] {x.text}" for x in (found.findings if found else ())]
+        return "# Findings from the checks\n\n" + ("\n".join(lines) or "No findings were written.")
+    if kind == "turn.collected" and p.get("verdict") == "no_material_question":
+        return f"# No material question; on to the plan\n\n{p.get('no_question') or ''}".strip()
+    return None
+
+
 async def next_prompt(conn, task_id: str) -> tuple[str, str | None]:
     """The next turn's prompt and the harness session it resumes."""
     rows = await ledger.read(conn, task_id)
-    session = None
-    last = None
-    answered = None
-    feedback = None
-    for row in rows:
-        p = row["payload"]
-        if row["type"] == "turn.ended":
-            result = p.get("result") or {}
-            session = result.get("session_id") or session
-            if p["outcome"] == "done" and not result.get("is_error"):
-                answered = feedback = None
-        elif row["type"] == "turn.collected":
-            last = p
-        elif row["type"] == "question.answered":
-            answered = p["text"]
-        elif row["type"] == "feedback.given":
-            feedback = p["text"]
-    if session is None:
-        return (await tasks.brief(conn, task_id)).instruction, None
-    if feedback is not None:
-        prompt = (
-            "Tom reviewed your delivery and, as project manager, sends it back with this feedback:\n\n"
-            f"{feedback}\n\n"
-            "Act on it in this workspace. When the work is ready again, write a new `.valor/done.md`."
-        )
-    elif answered is not None:
-        prompt = f"Tom answered your question:\n\n{answered}"
+    f = machine.fold(rows)
+    if f.session is None:
+        prompt = (await tasks.brief(conn, task_id)).instruction
     else:
-        prompt = "Continue."
-    report = _effects_report(last, (await tasks.status(conn, task_id))["effects"])
-    return (f"{prompt}\n\n{report}" if report else prompt), session
+        prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."
+    notes = _errors_report(f.last_collected)
+    report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
+    return "\n\n".join(x for x in (prompt, notes, report) if x), f.session
+
+
+def _errors_report(collected: dict[str, Any] | None) -> str:
+    if not collected or not collected.get("errors"):
+        return ""
+    return "What did not count from your last turn:\n" + "\n".join(f"- {e}" for e in collected["errors"])
 
 
 def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> str:
     """What became of the last turn's effect requests, as the ledger has
     them now (a held push Tom has since released reads as done)."""
-    if not collected or not collected["effects"]:
+    if not collected or not collected.get("effects"):
         return ""
     lines = ["What became of the effects you requested last turn:"]
     for e in collected["effects"]:
@@ -237,18 +388,6 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
         }.get(kind, kind)
         lines.append(f"- {r['action_type']} -> {r['target']} (effect {e['effect_id']}): {said}")
     return "\n".join(lines)
-
-
-def _settled(state: dict[str, Any], turn: dict[str, Any] | None = None) -> dict[str, Any]:
-    status = {"stopped": "stopped", "delivered": "delivered", "waiting for Tom": "waiting"}[state["state"]]
-    out = {"status": status, "state": state}
-    if turn is not None:
-        out["turn"] = turn
-    if status == "waiting":
-        out["question"] = next(
-            q for q in state["attention"] if q["kind"] == "question" and q["answer"] is None
-        )
-    return out
 
 
 async def _refused_in_turn(conn, task_id: str, turn_id: str) -> bool:

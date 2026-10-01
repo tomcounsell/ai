@@ -7,7 +7,7 @@ import aiohttp
 import psycopg
 import pytest
 
-from core import broker, budget, db, runs, tasks
+from core import broker, budget, db, ledger, runs, tasks
 from core.gateway import Gateway
 from tools.workspace import OutboxAppend, WorkspaceWrite
 
@@ -143,49 +143,44 @@ def test_act_is_held_until_tom_approves_and_the_approval_is_used_once(dsn, tmp_p
     assert tasks.audit(state) == []
 
 
-def test_ceiling_governance_and_stop_refuse_effects(dsn, tmp_path):
+def test_ceiling_and_stop_refuse_effects(dsn, tmp_path):
     broker.register(WorkspaceWrite(tmp_path))
     broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
 
     async def go():
         low = await new_task(dsn, budget_usd_micros=0, max_effect_class="propose")
-        granted = await new_task(
-            dsn,
-            budget_usd_micros=0,
-            max_effect_class="act",
-            governance_grant="tom: one gate for the merge path",
-        )
         async with await db.connect(dsn) as conn:
             above = await broker.request(conn, low, broker.Action("outbox_send", "tom", {"text": "x"}))
-            gate = broker.Action("workspace_write", "gate.py", {"text": "#"}, adds_governance=True)
-            ungranted = await broker.request(conn, low, gate)
-            with_grant = await broker.request(conn, granted, gate)
             await tasks.stop(conn, low, reason="test")
             after_stop = await broker.request(
                 conn, low, broker.Action("workspace_write", "b.txt", {"text": "b"})
             )
-        return above, ungranted, with_grant, after_stop
+        return above, after_stop
 
-    above, ungranted, with_grant, after_stop = run(go())
+    above, after_stop = run(go())
     assert above.kind == "refused" and "ceiling" in above.error
-    assert ungranted.kind == "refused"  # the ceiling or the missing grant, either refuses
-    assert with_grant.kind == "pending"  # governance is act: it waits for Tom
     assert after_stop.kind == "refused" and after_stop.error == "task stopped"
-    assert not (tmp_path / "gate.py").exists()
+    assert not (tmp_path / "b.txt").exists()
 
 
-def test_governance_with_no_grant_is_refused_even_under_an_act_ceiling(dsn, tmp_path):
-    broker.register(WorkspaceWrite(tmp_path))
+def test_the_requester_cannot_say_whether_an_action_adds_governance(dsn, tmp_path):
+    """The flag is the broker's to compute from the review and docs verdicts
+    (tests/test_pipeline.py has the merge cases); no requester can set it,
+    and what the broker computed is what the ledger records."""
+    broker.register(OutboxAppend(tmp_path / "outbox.jsonl"))
+    with pytest.raises(TypeError):
+        broker.Action("outbox_send", "tom", {"text": "x"}, adds_governance=True)
 
     async def go():
         task = await new_task(dsn, budget_usd_micros=0, max_effect_class="act")
         async with await db.connect(dsn) as conn:
-            return await broker.request(
-                conn, task, broker.Action("workspace_write", "g.py", {"text": "#"}, adds_governance=True)
-            )
+            held = await broker.request(conn, task, broker.Action("outbox_send", "tom", {"text": "x"}))
+            rows = await ledger.read(conn, task)
+        return held, rows
 
-    outcome = run(go())
-    assert outcome.kind == "refused" and "governance_grant" in outcome.error
+    held, rows = run(go())
+    assert held.kind == "pending"
+    assert next(r for r in rows if r["type"] == "effect.held")["payload"]["adds_governance"] is False
 
 
 # -- stop is immediate and lossless ---------------------------------------------

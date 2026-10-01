@@ -4,9 +4,11 @@ Versioned skills.
 
 ## Scope
 
-Reserved. The structure of the versioned skill system, and of skills that refactor repo-specific skills in other repos, is deferred until Tom's requirements are gathered. In this phase the directory holds this README and nothing else.
+The structure of the versioned skill system, and of skills that refactor repo-specific skills in other repos, is deferred until Tom's requirements are gathered. Until then the directory holds plain files, unversioned:
 
-Governed by no doc yet; one is written when the requirements are gathered. Until then [docs/harnesses.md](../docs/harnesses.md) (Skill rendering) and [docs/sdlc-state-machine.md](../docs/sdlc-state-machine.md) (stages are skills) state what skills must fit.
+- `sdlc/`: one file per stage of the SDLC state machine (`clarify.md`, `plan.md`, `critique.md`, `build.md`, `review.md`, `docs.md`, `patch.md`), each stating the stage's goal and exit evidence, not steps, and `channel.md`, how a turn reaches Tom through `.valor/`. `core/tasks.py` renders `channel.md` (with the effects the registered performers offer) and the current state's file into a turn's Brief. The judge is a classifier prompt (`docs/judgement-layer.md`) and the merge is the kernel's, so neither has a file. `critique.md`, `review.md`, and `docs.md` wait for the fresh sessions of milestone 1.4.
+
+The versioned system is governed by no doc yet; one is written when the requirements are gathered. Until then [docs/harnesses.md](../docs/harnesses.md) (Skill rendering) and [docs/sdlc-state-machine.md](../docs/sdlc-state-machine.md) (stages are skills) state what skills must fit.
 
 ## Imports
 

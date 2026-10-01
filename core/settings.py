@@ -100,6 +100,13 @@ class Settings:
         default_factory=lambda: _env("VALOR_LOG_DIR", str(Path.home() / "Library" / "Logs" / "valor"))
     )
 
+    # -- the stage files a turn's Brief renders (skills/sdlc) -----------------
+    stages_dir: str = field(
+        default_factory=lambda: _env(
+            "VALOR_STAGES", str(Path(__file__).resolve().parent.parent / "skills" / "sdlc")
+        )
+    )
+
     # -- the replay and demonstration workspaces ------------------------------
     demo_dir: str = field(default_factory=lambda: _env("VALOR_DEMO", str(Path.home() / "src" / "valor-demo")))
 

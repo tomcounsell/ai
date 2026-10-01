@@ -13,7 +13,7 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 ## Performers
 
 - `workspace.py`: `workspace_write` (`propose`) and `outbox_send` (`act`), local performers for the kernel's own tests.
-- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its `origin`, never with force, after Tom's tap.
+- `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, after Tom's tap; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, released only when the merge predicate holds; no turn is offered it. Both push to the origin URL the kernel recorded at start and refuse a workspace whose own config holds an include, a URL rewrite, or a push URL. A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
 
 ## Imports
 

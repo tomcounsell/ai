@@ -112,21 +112,18 @@ def test_a_live_reply_is_written_at_once_and_sent_only_after_tom_approves_from_t
             with pytest.raises(broker.NotApproved):
                 await broker.release(conn, held.effect_id)
             lines_before = outbox.exists()
-            gate = broker.Action("workspace_write", "hooks/gate.py", {"text": "#"}, adds_governance=True)
-            guard = await broker.request(conn, task, gate)
             pending = cli("pending")
             cli("approve", held.effect_id, "--note", "yes, send it")
             sent = await broker.release(conn, held.effect_id)
             again = await broker.release(conn, held.effect_id)
             state = await tasks.status(conn, task)
         await gateway.close()
-        return ended, text, wrote, held, lines_before, guard, pending, sent, again, state
+        return ended, text, wrote, held, lines_before, pending, sent, again, state
 
-    ended, text, wrote, held, lines_before, guard, pending, sent, again, state = asyncio.run(go())
+    ended, text, wrote, held, lines_before, pending, sent, again, state = asyncio.run(go())
     assert ended["outcome"] == "done" and "ready" in text.lower()
     assert wrote.kind == "done" and (tmp_path / "reply.txt").read_text() == text
     assert held.kind == "pending" and not lines_before and held.effect_id in pending
-    assert guard.kind == "refused" and "governance_grant" in guard.error
     assert sent.kind == "done" and again.effect_id == held.effect_id
     assert len(outbox.read_text().splitlines()) == 1
     assert state["attention_counts"]["approval"]["total"] == 1

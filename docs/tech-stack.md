@@ -44,7 +44,7 @@ enforcing outside the model is AI Control [4].
 | Environments and lockfile | uv, `uv.lock` | in use |
 | Runtime dependencies | `psycopg[binary]` 3, `aiohttp` | in use |
 | Tests | pytest, real Postgres, a `spend` marker on every live test | in use |
-| Property tests | Hypothesis, for budget conservation down the tree | chosen, not built |
+| Property tests | Hypothesis: the state machine's fold; budget conservation down the tree next | in use |
 | Schemas | frozen dataclasses in `core/` | in use; Pydantic open |
 | Kernel process | `python -m core`, one process per command, no daemon | in use; a resident process open |
 | Database | Postgres 18, as a document store | in use |
@@ -77,13 +77,13 @@ enforcing outside the model is AI Control [4].
 
 **Python 3.14**, pinned in `.python-version`; `requires-python = ">=3.14"` in
 `pyproject.toml`. **uv** builds the environment from `uv.lock`, which holds
-nineteen packages in all. The kernel's runtime dependencies are two:
+twenty-one packages in all. The kernel's runtime dependencies are two:
 `psycopg[binary]` for Postgres and `aiohttp` for the gateway. Everything else
 is the standard library. Status: **in use**. Serves the selection rule: a
 two-dependency kernel is one a person can read.
 
-`ruff` is configured for a 110-character line. pytest is the only dev
-dependency. Status: **in use**.
+`ruff` is configured for a 110-character line. pytest and Hypothesis are the dev
+dependencies. Status: **in use**.
 
 **Tests.** pytest against real Postgres, real `claude -p` turns, and real
 sandbox profiles, with no mocks (`tests/README.md`). Every live test declares
@@ -94,9 +94,11 @@ thing is evidence, and a mocked one is narration.
 **Hypothesis.** The kernel's money invariant is a property: for any sequence
 of reservations, charges, and stops, nothing is spent that was not reserved
 and nothing reserved exceeds what remains. Property tests state that
-directly. Status: **chosen, not built**. It arrives with the objective tree,
-since conservation down a tree is where a sequence of operations can break it
-and one task record barely can. Serves "Bounded authority and spend".
+directly. Status: **in use** for the state machine: every prefix of a
+generated ledger folds to exactly one state (`tests/test_machine.py`), a dev
+dependency. The money property arrives with the objective tree, since
+conservation down a tree is where a sequence of operations can break it and
+one task record barely can. Serves "Bounded authority and spend".
 
 **Schemas.** The kernel's records (the Brief, `TurnCommand`, the gateway
 `Grant`) are frozen dataclasses and JSON payloads. Status: **in use**.

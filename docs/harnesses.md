@@ -146,16 +146,20 @@ in the context that asked, so he never restates the task).
 A task's first frontier turn opens a Claude Code session, the working
 session; every later clarify, plan, build, and patch turn resumes it
 with `--resume`. `core.session.next_prompt` reads the session id from the
-last `turn.ended` that carried one, and chooses the prompt:
+last `turn.ended` that carried one, and builds the prompt as data from the
+row that moved the task into its state, under a short label. What the turn
+should do with it is the stage file its Brief carries
+(`skills/sdlc/<state>.md`), never sentences in the kernel:
 
 | After | The turn's prompt |
 |---|---|
 | nothing (first turn) | the task's instruction |
 | Tom's answer to a question | the answer |
-| a critique's findings | the findings, asking for a revised plan or, with no rounds left, for the build |
-| findings from the checks (test failures, breadth gaps, review findings, docs findings, joined) | every finding together, asking for a new `done.md` (a patch) |
-| Tom's feedback on a delivery | the feedback, framed as project-manager review, asking for a new `done.md` (a patch) |
-| a turn that left neither | "Continue." |
+| clarify found nothing to ask | its statement, as the plan stage opens |
+| a critique's verdict | the verdict and its findings (a revision, or the build when no rounds are left) |
+| findings from the checks (test failures, breadth gaps, review findings, docs findings, joined) | every finding together (a patch) |
+| Tom's feedback on a delivery | the feedback (a patch) |
+| a turn in the same state that finished | "Continue." |
 
 **Patch is a resume.** A patch never starts a new agent: it is the session
 that built, resumed with what came back (Tom, 2026-10-01). The session knows
@@ -173,10 +177,11 @@ the docs the change made untrue. The reviewer runs the same Opus model or
 an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
 
-The kernel's support today: the working session for first turn, answers,
-and feedback. The other rows, and the fresh sessions, are design.
+The kernel's support today: the working session for every row above. The
+fresh sessions are milestone 1.4's.
 
-Each prompt is followed by what became of the effects the previous turn
+Each prompt is followed by what did not count from the previous turn
+(`errors` on its `turn.collected`) and what became of the effects it
 requested, read from the ledger now, so a push Tom has since released reads
 as done. An answer or feedback is spent only by a turn that finishes: after
 a failed or stopped turn the next one opens with it again. That rule exists
@@ -219,21 +224,26 @@ workspace, which the kernel reads when the turn ends:
 
 | File | Meaning | What the kernel does |
 |---|---|---|
-| `.valor/question.md` | a question for Tom | `question.asked`; the task waits for `python -m core answer` |
-| `.valor/done.md` | a candidate delivery: what, how it was verified, what Tom should know | today `task.delivered`; in the design a candidate that the test, review, and docs checks pass before `task.delivered` (`docs/sdlc-state-machine.md`) |
-| `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses |
+| `.valor/question.md` | a question for Tom, in clarify, plan, build, or patch | `question.asked` naming the state the answer returns to; the task waits for `python -m core answer` |
+| `.valor/no_question.md` | clarify: why no question would change the result, and the approach | the verdict `no_material_question`; the plan follows without Tom |
+| `.valor/plan.json` | plan: the plan file's path, stakes, both loop counts, scope additions, doc paths | read from the committed file at HEAD; `plan.written` with its commit and digest. A plan not committed, or counts outside 0 to 2, is an error and no plan |
+| `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree, the head commit and the turn are the candidate, and the checks run; uncommitted changes are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
+| `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses; a `merge` request is recorded with an error and never reaches it |
 
 `core.signals.collect` reads them, then moves each to
 `.valor/handled/<turn_id>/`, so no signal is read twice. An effect file that
 is not a JSON object with `action_type` and `target` is recorded with an
-error and no request. Everything a turn left is one `turn.collected` row; a
-question takes precedence over `done.md` in the same turn. `.valor/` is in
+error and no request. Everything a turn left is one `turn.collected` row
+with the state it ran in and its verdict; a question takes precedence over
+the other signals in the same turn, and a signal that means nothing in the
+state (a `done.md` during plan) is an error, not acted on. `.valor/` is in
 the clone's `.git/info/exclude`, so signals never enter a commit.
 
 Files, because writing one is a deliberate tool call that survives whatever
 prose follows it, and a turn killed midway leaves what it wrote readable.
-The text of the protocol is `signals.PROTOCOL`, carried in every workspace
-turn's Brief; it lists the effects available (today, `push_branch`) and says
+The text of the channel is `skills/sdlc/channel.md`, carried in every
+workspace turn's Brief; it lists the effects the registered performers
+offer (each performer's `usage` line; the merge offers none) and says
 pushing any other way is unavailable, which the sandbox makes true.
 
 The text inside a signal file grants nothing. A question is shown to Tom; an
@@ -242,10 +252,11 @@ ceiling. The turn's own words never decide what it may do [7].
 
 Asking before building is decided outside the harness: the judgement step
 that routes an underspecified request to a clarify turn is
-`docs/judgement-layer.md`'s. A clarify turn uses this same channel: it
-inspects, writes its questions and intended approach to `question.md`, and
-ends. The current kernel carries that instruction as the `clarify` mode's
-section of the Brief (`signals.CLARIFY`).
+`docs/judgement-layer.md`'s, and the `judge` state in
+`docs/sdlc-state-machine.md` routes it. A clarify turn uses this same
+channel: it inspects, then writes its questions, assumed answers, and
+intended approach to `question.md`, or says in `no_question.md` that none
+would change the result (`skills/sdlc/clarify.md`).
 
 ## Transcripts
 
@@ -523,6 +534,8 @@ Codex or Pi has been run here.
 Each wrapper will turn a versioned skill into what its harness loads. The
 skill system is deferred until Tom's requirements are gathered
 (`skills/README.md`). Until then a workspace turn loads no skills from this
-machine (safe mode). A repository's own `CLAUDE.md` and `.claude/` stay in
+machine (safe mode). The stage instructions are plain files in
+`skills/sdlc/`, one per stage, which the kernel renders into the Brief as
+text, so they need nothing harness-specific. A repository's own `CLAUDE.md` and `.claude/` stay in
 the clone as files the turn can read, as they did in the baseline
 (rebuild-baseline.md, Setup).

@@ -29,8 +29,10 @@ kernel does with the rows (budgets, the broker, approvals, stop, steering).
 
 ## The tables
 
-`core/schema.sql` holds the whole schema: two tables, five partial unique
-indexes, one trigger function, and the grants.
+`core/schema.sql` holds the schema: two tables, nine partial unique
+indexes, one trigger function, and the grants. One `CHECK` constraint, the
+verdict enum, is generated from `core/machine.py` (`VERDICTS`) and applied by
+`db.migrate` (Verdicts refused at write, below).
 
 ### events
 
@@ -65,8 +67,9 @@ correction Tom has given, numbered from one, and applies to every task.
 The primary key is `(kind, id)`. A document is what the kernel commits to
 once and never changes. The `task` document is the Brief as the task
 started: instruction, budget in micro-dollars, effect ceiling,
-`governance_grant`, workspace, model, harness settings, and mode
-(`core/tasks.py`, `Brief`). The kernel role cannot update a document, so
+`governance_grant`, workspace, model, harness settings, the starter's mode,
+and where a merge goes: the target branch, origin's push URL as an absolute
+path, and the workspace's head at start (`core/tasks.py`, `Brief`). The kernel role cannot update a document, so
 anything that changes about a task after it starts is an event on its
 stream, never an edit to its Brief. Tom's feedback that widened the
 demonstration's scope from one profile item to seven was two
@@ -85,20 +88,25 @@ payload carries the ids listed; a reader relies on nothing else.
 
 | Writer | Type | Payload | Serves |
 |---|---|---|---|
-| `core/tasks.py` | `task.started` | instruction, `budget_usd_micros`, `max_effect_class`, `governance_grant`, mode | Bounded authority and spend |
+| `core/tasks.py` | `task.started` | `sdlc: 1`, instruction, `budget_usd_micros`, `max_effect_class`, `governance_grant`, mode, `target_branch`, `origin_url`, `base_sha`. A row without `sdlc` is a legacy task (State is a fold, below) | Bounded authority and spend |
+| `core/tasks.py`, `core/verdicts.py` | `judge.decided` | verdict (`precise`, `thin`), leg (`manual` until 1.3), `judgement_id`, `guard_id` when thin, provenance when manual | Mission items 3 and 6 |
 | `core/tasks.py` | `task.stopped` | reason, by | Lossless stop |
 | `core/budget.py` | `gateway.reserved` | `call_id`, `turn_id`, model, `usd_micros` (worst case), estimated input, `max_tokens` | Money conserved per call |
 | `core/budget.py` | `gateway.refused` | the call's fields plus reason | Bounded spend; the refusal is itself recorded |
 | `core/budget.py` | `gateway.charged` | `call_id`, `usd_micros` (actual), `turn_id`, model, `price_checked` (the day the price used was checked), provider status, cut, usage | Money conserved per call |
-| `core/runs.py` | `turn.started` | `turn_id`, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
+| `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
-| `core/session.py` | `turn.collected` | `turn_id`, what the turn left under `.valor/`: question, delivery, effect requests | Legibility |
-| `core/session.py` | `question.asked` | `question_id`, `turn_id`, text | Mission item 6 |
+| `core/session.py` | `turn.collected` | `turn_id`, the state it ran in and its verdict, what the turn left under `.valor/` (question, no-question statement, plan signal, delivery note, effect requests), the candidate (head sha and turn id) when the verdict is `candidate`, and `errors`: the signals that did not count and why | Legibility; the state machine |
+| `core/session.py` | `question.asked` | `question_id`, `turn_id`, text, the state the answer returns to | Mission item 6 |
+| `core/session.py` | `plan.written` | `turn_id`, path, commit, `sha256` of the file at that commit, stakes, `critique_rounds`, `review_rounds`, scope additions, `doc_paths` | Mission items 1 and 3 |
+| `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg, model, `usd_micros`, `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
+| `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg, model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`; review and docs add the governance answer and its instances (id, path, line, function context, incident, mission item); docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
-| `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
-| `core/session.py` | `task.delivered` | `turn_id`, summary. Written today when a turn leaves `done.md`; in the design that is a candidate, and `task.delivered` is written when the join of the test, review, and docs checks sends the task to `merge`. Those checks write `test.decided`, `review.decided`, and `docs.decided`, each keyed by the candidate's head SHA and producing turn, and the merge predicate reads only rows keyed by the current candidate (`docs/sdlc-state-machine.md`) | Mission item 1 |
-| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` | Nothing `act`-class leaves without Tom's tap |
+| `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
+| `core/verdicts.py` | `task.delivered` | the candidate, outcome (`passed`, `gaps`, `did_not_pass`, `governance_refused`), the join's row, summary (the candidate turn's `done.md`), the three verdicts, every finding, the gaps, the plan's scope additions, the instances awaiting Tom's tap. Written with the verdict that completes a join to `merge`. Legacy rows hold `turn_id` and summary only | Mission item 1 |
+| `core/guards.py` | `guard.granted` | `guard_id`, name, incident, mission items, `granted_at`, `expires` (ninety days on), Tom's note, provenance; on a task also `instance_id`, path, and the candidate it was granted on. The seeded guards sit on the `guards` stream | The governing constraint |
+| `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` (computed by the broker; for a `merge`, from the candidate's review and docs verdicts) | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), provenance (`by`, `via`, `at`, `role_played`) | One tap, one effect |
 | `core/budget.py` | `budget.raised` | `raise_id`, `usd_micros`, note, provenance | Only Tom raises a committed budget |
@@ -160,6 +168,23 @@ the kernel code does.
 | `events_approval_used_once` | `payload->>'approval_id'` | `effect.intent` with an approval | One approval releasing two effects: one tap, one effect |
 | `events_one_correction_number` | `payload->>'number'` | `correction.recorded` | Two corrections sharing a number |
 | `events_one_stop` | `task_id` | `task.stopped` | A task stopped twice |
+| `events_one_judge` | `task_id` | `judge.decided` | Two judge verdicts for one task |
+| `events_one_turn_row` | `(type, payload->>'turn_id')` | `turn.started`, `turn.ended`, `turn.collected`, `turn.reaped` | One turn collected twice, so two candidates from one turn |
+| `events_one_guard` | `payload->>'guard_id'` | `guard.granted` | A guard granted twice |
+| `events_one_instance_grant` | `(task_id, payload->>'instance_id')` | `guard.granted` with an instance | One governance instance granted twice on a task |
+
+### Verdicts refused at write
+
+`events_verdict_in_enum_<digest>` is a `CHECK` constraint built from
+`machine.VERDICTS` (`machine.constraint_sql`): every verdict row's verdict,
+a `turn.collected` row's verdict for the state it names (required whenever
+a state is present), plan counts and critique raises in 0 to 2. So the fold
+never meets a verdict outside its enum, whatever code wrote the row. The
+name carries a digest of the generated SQL: `db.migrate` leaves a current
+one alone, and otherwise drops the older one and adds the current one in
+one transaction. It is added `NOT VALID`, so rows already written are
+never rechecked: a value may leave `VERDICTS` without history refusing the
+change, and every new row is still checked.
 
 These are what make every fold over the ledger total: a reader never meets
 two charges for one call or two outcomes for one effect and has to choose.
@@ -203,13 +228,17 @@ its idempotency key on the target (`docs/architecture.md`, the broker).
 ## State is a fold over events
 
 The kernel stores no status field. A task's state is computed by reading
-its stream in `id` order and folding: `core/tasks.py`, `status`, returns
-the state (`live`, `waiting for Tom`, `delivered`, `stopped`), committed
+its stream in `id` order and folding: `core/machine.py`, `fold`, gives the
+state machine's state (one of eleven; `docs/sdlc-state-machine.md`), and
+`core/tasks.py`, `status`, returns it with the plan, loop counts, the
+current candidate and its checks, the governance instances, committed
 and charged money, open reservations, remaining money, every turn and its
 outcome, every effect and its state, the latest delivery, and the
 attention log. The harness session a turn resumes is folded the same way,
-from the last `turn.ended` result that carried a session id
-(`core/session.py`, `next_prompt`).
+from the last `turn.ended` result that carried a session id. The fold is
+total: a row that is not a transition from the state the task is in is
+ignored and listed, never an error, and a property test folds every prefix
+of generated ledgers to exactly one state (`tests/test_machine.py`).
 
 This is what makes stop lossless at the storage level. A stop at any
 instant leaves rows that each landed whole or not at all, and no stored
@@ -219,7 +248,12 @@ charged, every turn ended, no effect between intent and outcome, nothing
 charged past the committed budget.
 
 **Shape changes.** A row is never rewritten, so when an event's payload
-gains a field, readers handle both shapes. The instance so far is
+gains a field, readers handle both shapes. A task whose `task.started` has
+no `sdlc` predates the state machine: it folds read-only by the old
+kernel's precedence (stopped; a delivery not reopened by feedback is
+`merge`; an unanswered question is `waiting`; feedback after a delivery is
+`patch`; any turn is `build`; else `judge`), and nothing but stop,
+approve, and release writes to it. The instance so far is
 provenance (`core/tasks.py`, `provenance`): a field a row never recorded
 reads as null, never as a default. Answers and feedback recorded before
 `role_played` existed read `role_played: null`, and approvals recorded

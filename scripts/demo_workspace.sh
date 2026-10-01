@@ -91,6 +91,7 @@ else
 
     # -- the bare origin: main at the base commit, every ref update logged
     git init --quiet --bare origin.git
+    git -C origin.git symbolic-ref HEAD refs/heads/main
     git -C origin.git config core.logAllRefUpdates always
     git -C origin.git config receive.denyNonFastForwards true
     git -C psyoptimal remote add origin "$DEMO/origin.git"

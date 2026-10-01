@@ -154,10 +154,10 @@ guard Tom granted, ledgered with its incident (the demonstration, #894, and
 the baseline runs on #191 and #188), Mission items 3 and 6, and a
 ninety-day expiry. The persona says how Valor asks once it is asking.
 
-The current kernel has no classifier: a task's Brief carries `mode`, `bare`
-or `clarify`, set when the task starts, and a `clarify` Brief carries the
-clarifying instructions (`core/signals.py`, `CLARIFY`). In every mode,
-Valor may still ask under Mission item 3's bar.
+The current kernel has no classifier: the starter's `--mode` records the
+judge's verdict by hand, and a task routed to `clarify` carries the clarify
+stage's instructions (`skills/sdlc/clarify.md`). In every stage, Valor may
+still ask under Mission item 3's bar.
 
 **How to ask.** A clarify turn inspects and changes nothing, then sends one
 message:
@@ -369,9 +369,9 @@ order:
    author, date, and channel (`core/corrections.py`). A correction recorded
    now reaches the next turn of every task, including tasks already
    running.
-4. **How the task reaches Tom.** The `.valor/` protocol for asking,
-   delivering, and requesting effects (`core/signals.py`, `PROTOCOL`), and
-   the clarify section when the task was routed to a clarify turn.
+4. **How the task reaches Tom.** The `.valor/` channel for asking,
+   delivering, and requesting effects (`skills/sdlc/channel.md`), and the
+   stage file for the state the turn runs in (`skills/sdlc/<state>.md`).
 
 Persona first, because it is the standing identity every task shares; the
 Brief and corrections follow, because they are specific and later, and a
