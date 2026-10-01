@@ -18,7 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core import broker, db, judgement_sites, router, session, tasks, verdicts
+from core import broker, db, fresh, judgement_sites, ledger, router, session, tasks, verdicts
+from core import workspace as kws
 from core.machine import Check, State
 from harnesses import claude_code
 from tests import judgement_upstream
@@ -165,8 +166,8 @@ MANUAL = {"by": "test", "via": "the test suite", "role_played": True}
 
 
 def performers(b: tasks.Brief) -> None:
-    broker.register(PushBranch(b.workspace, url=b.origin_url, protected=b.target_branch))
-    broker.register(Merge(b.workspace))
+    broker.register(PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch))
+    broker.register(Merge(b.mirror or b.workspace))
 
 
 async def _always() -> bool:
@@ -221,3 +222,135 @@ async def checks(
     await check(dsn, task, "test", test)
     await check(dsn, task, "review", review, governance=kw.pop("governance", ()))
     return await check(dsn, task, "docs", docs, **kw)
+
+
+# -- fresh sessions -------------------------------------------------------------
+
+FRESH = r"""
+import json, os, pathlib, re, subprocess, sys
+prompt, brief = sys.argv[1], sys.argv[2]
+cfg_path = pathlib.Path(os.environ["VALOR_SCRIPT"])
+cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+m = re.search(r"^# Stage: (\w+)", brief, re.M)
+stage = m.group(1) if m else None
+log = cfg_path.parent / "valor-turns.jsonl"
+listing = subprocess.run(["git", "log", "--format=%s"], capture_output=True, text=True).stdout.split()
+with log.open("a") as f:
+    f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": None, "brief": brief, "fresh": True,
+                        "cwd": os.getcwd(), "log": listing, "env": {k: os.environ.get(k) for k in
+                        ("TMPDIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER")}}) + "\n")
+acts = cfg.get("fresh_acts") or []
+act = acts.pop(0) if acts else cfg.get(stage, "sound")
+cfg["fresh_acts"] = acts
+cfg_path.write_text(json.dumps(cfg))
+v = pathlib.Path(".valor")
+v.mkdir(exist_ok=True)
+(v / "effects").mkdir(exist_ok=True)
+(v / "effects" / "push.json").write_text(json.dumps({"action_type": "push_branch", "target": "x", "payload": {}}))
+if act == "fail":
+    sys.exit(1)
+if act == "hang":
+    import time
+    time.sleep(60)
+if act == "sound":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
+elif act == "revise":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "revise", "findings": [
+        {"kind": "premise", "text": "the plan reads the wrong module"}]}))
+elif act == "raise":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 2}}))
+elif act == "bad_raise":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [], "raise": {"review_rounds": 5}}))
+elif act == "malformed":
+    (v / "verdict.json").write_text("not json")
+elif act == "symlink":
+    (v / "verdict.json").symlink_to(cfg["target"])
+elif act == "fifo":
+    os.mkfifo(v / "verdict.json")
+elif act == "dir_symlink":
+    real = pathlib.Path("real-valor")
+    real.mkdir()
+    (real / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
+    for p in v.rglob("*"):
+        if p.is_file():
+            p.unlink()
+    for p in sorted(v.rglob("*"), reverse=True):
+        p.rmdir()
+    v.rmdir()
+    v.symlink_to(real.resolve())
+elif act == "big":
+    (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": [{"kind": "x", "text": "y" * 300000}]}))
+print(json.dumps({"result": "ok", "session_id": "fresh-session", "is_error": False}))
+"""
+
+
+def fresh_for(script_dir: Path):
+    """A fresh session played by a Python subprocess in its checkout, steered
+    by the builder workspace's script file."""
+
+    def make(prompt, checkout, model, harness):
+        def build(url, brief, turn_id):
+            env = {"PATH": os.environ["PATH"], "HOME": os.environ["HOME"],
+                   "VALOR_SCRIPT": str(script_dir / "valor-script.json")}  # fmt: skip
+            env["TMPDIR"] = harness["tmpdir"]
+            env["CLAUDE_CONFIG_DIR"] = harness["claude_config_dir"]
+            return claude_code.TurnCommand(
+                argv=[sys.executable, "-c", FRESH, prompt, brief],
+                env=env,
+                cwd=checkout,
+                harness="script",
+                parse=claude_code.parse,
+            )
+
+        return build
+
+    return make
+
+
+def toy_repo(tmp_path: Path) -> Path:
+    """A source repository the kernel provisions from: `main` with one commit."""
+    src = tmp_path / "src" / "toy"
+    src.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    commit(src, "README.md", "a toy repository\n", "base")
+    return src
+
+
+async def provisioned(dsn: str, tmp_path: Path, judge: str | None = "precise", services=(), budget_usd_micros: int = 1_000,
+                      **spec_kw) -> tuple[str, tasks.Brief]:  # fmt: skip
+    """A task on a workspace the kernel provisioned from a toy repository,
+    under `tmp_path/work`, judged by the real judge runner."""
+    src = toy_repo(tmp_path)
+    spec = kws.Spec.from_dict(
+        {
+            "name": "toy",
+            "repo": str(src),
+            "kind": "plain",
+            "suite": "true",
+            "services": list(services),
+            **spec_kw,
+        }
+    )
+    task_id = ledger.new_id()
+    ports = {}
+    async with await db.connect(dsn) as conn:
+        taken = await kws.taken_ports(conn)
+    if "postgres" in services:
+        ports["postgres"] = kws.choose_port((5560, 5599), taken)
+    if "redis" in services:
+        ports["redis"] = kws.choose_port((6460, 6499), taken)
+    made = kws.provision(task_id, spec, ports, work=tmp_path / "work")
+    b = tasks.Brief(
+        id=task_id, instruction="Write Tom a greeting.", budget_usd_micros=budget_usd_micros, max_effect_class="act",
+        **made.brief_fields(),
+    )  # fmt: skip
+    performers(b)
+    async with await db.connect(dsn) as conn:
+        await tasks.start(conn, b)
+    if judge is not None:
+        await run_judge(dsn, task_id, judge)
+    return task_id, b
+
+
+def fresh_runners(ws: Path) -> dict:
+    return {**RUNNERS, State.CRITIQUE: fresh.critique_runner(fresh_for(ws / ".git"))}

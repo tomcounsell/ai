@@ -116,3 +116,80 @@ def test_an_overloaded_provider_is_charged_nothing(dsn):
     error = b'{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
     result = _call(dsn, error, status=529, content_type="application/json")
     _check(result, body=error, status=529, usd=0, complete=False)
+
+
+# -- the credential: the gateway's, never the turn's ---------------------------------------
+
+
+async def _recording_upstream(seen: list, status: int = 200):
+    async def handle(request: web.Request) -> web.Response:
+        await request.read()
+        seen.append({k.lower(): v for k, v in request.headers.items()})
+        return web.Response(status=status, body=WHOLE, headers={"content-type": "application/json"})
+
+    app = web.Application()
+    app.router.add_post("/v1/messages", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+
+
+def _credentialed_call(dsn, credential, *, status=200, headers=None):
+    from core.gateway import TURN_TOKEN
+
+    async def go():
+        seen: list = []
+        runner, url = await _recording_upstream(seen, status)
+        gateway = Gateway(dsn, upstream=url, credential=credential)
+        await gateway.start()
+        try:
+            async with await db.connect(dsn) as conn:
+                task = await tasks.start(conn, tasks.Brief(instruction="x", budget_usd_micros=1_000_000))
+            base = gateway.issue(task, "turn-1")
+            sent = {"authorization": f"Bearer {TURN_TOKEN}", "x-api-key": "sk-turn-key", **(headers or {})}
+            async with (
+                aiohttp.ClientSession() as s,
+                s.post(f"{base}/v1/messages", json=BODY, headers=sent) as r,
+            ):
+                return r.status, await r.json(), seen
+        finally:
+            await gateway.close()
+            await runner.cleanup()
+
+    return asyncio.run(go())
+
+
+def test_the_gateway_replaces_the_turns_placeholder_with_the_kernels_credential(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("kernel-held-token\n")
+    status, _, seen = _credentialed_call(dsn, ClaudeLogin(str(token)))
+    assert status == 200
+    assert seen[0]["authorization"] == "Bearer kernel-held-token"
+    assert "x-api-key" not in seen[0]
+
+
+def test_no_kernel_credential_is_a_401_naming_the_remedy_and_no_call(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    login = ClaudeLogin(str(tmp_path / "absent"), service=f"valor-test-no-such-item-{tmp_path.name}")
+    status, body, seen = _credentialed_call(dsn, login)
+    assert status == 401 and not seen
+    assert "no Claude login in the Keychain" in body["error"]["message"]
+
+
+def test_a_401_upstream_rereads_the_credential(dsn, tmp_path):
+    from core.gateway import ClaudeLogin
+
+    token = tmp_path / "claude-token"
+    token.write_text("first\n")
+    login = ClaudeLogin(str(token), ttl_s=3600)
+    assert login.token() == "first"
+    token.write_text("second\n")
+    assert login.token() == "first"  # cached
+    status, _, seen = _credentialed_call(dsn, login, status=401)
+    assert status == 401 and seen[0]["authorization"] == "Bearer first"
+    assert login.token() == "second"  # the 401 invalidated the cache

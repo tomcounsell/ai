@@ -8,9 +8,8 @@ through here. For each `POST /v1/messages` the gateway:
 1. prices the model and reserves the call's worst case against the task's
    remaining budget (refused, with a ledger row, if it does not fit or the
    task is stopped);
-2. forwards the request upstream with the harness's own credentials and
-   streams the response back unchanged, reading the usage the provider
-   reports as it passes;
+2. forwards the request upstream and streams the response back unchanged,
+   reading the usage the provider reports as it passes;
 3. charges what the provider reported when the call closes.
 
 A revoke cuts every in-flight call of the task at once. A call that
@@ -18,23 +17,106 @@ ends without its final usage (cut, or the client died) is charged its input
 as reported plus every output token it was allowed, so the ledger never
 records less than the invoice. Other paths (token counting, model lists)
 cost nothing and pass through unmetered.
+
+**The credential.** A turn runs with its own Claude Code config directory,
+which holds no login, so it carries a placeholder (`TURN_TOKEN`) and the
+gateway, when given a `credential`, drops whatever `authorization` or
+`x-api-key` the turn sent and sets the kernel's own: a long-lived token in
+the kernel key directory (`claude setup-token`) when one is there, otherwise
+the access token of the machine's Claude Code login, read from the Keychain
+through the root-owned `security` at most once a minute and again after a
+401. The kernel never refreshes that login: refresh tokens rotate, and a
+refresh here could sign out the user's own sessions. An expired login is a
+401 naming the remedy, never a silent fallback. No credential is ever in a
+ledger row, an exception, or a log line.
 """
 
 import asyncio
 import json
 import secrets
+import subprocess
+import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import aiohttp
 from aiohttp import web
 
-from core import budget, db
+from core import binaries, budget, db
 from core.ledger import new_id
 from core.settings import settings
 
 # Hop-by-hop and length headers are recomputed on each side.
 DROP_REQUEST = {"host", "content-length", "accept-encoding", "connection", "transfer-encoding"}
 DROP_RESPONSE = {"content-length", "content-encoding", "transfer-encoding", "connection"}
+
+
+# What a turn carries in place of a Claude credential; the gateway replaces it.
+TURN_TOKEN = "valor-turn-holds-no-credential"
+CREDENTIAL_HEADERS = {"authorization", "x-api-key"}
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+class CredentialUnavailable(RuntimeError):
+    """The kernel has no usable Claude credential; the message names the
+    remedy and never any part of a credential."""
+
+
+class ClaudeLogin:
+    """The credential the gateway sends upstream for every turn."""
+
+    def __init__(self, token_file: str | None = None, ttl_s: float = 60.0, service: str = KEYCHAIN_SERVICE):
+        self.token_file = Path(token_file or settings.claude_token_file)
+        self.service = service
+        self.ttl_s = ttl_s
+        self._cached: tuple[str, float] | None = None
+        self._lock = threading.Lock()
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._cached = None
+
+    def token(self) -> str:
+        with self._lock:
+            now = time.monotonic()
+            if self._cached and now - self._cached[1] < self.ttl_s:
+                return self._cached[0]
+            value = self._read()
+            self._cached = (value, now)
+            return value
+
+    def _read(self) -> str:
+        if self.token_file.is_file():
+            value = self.token_file.read_text().strip()
+            if value:
+                return value
+        try:
+            done = subprocess.run(
+                [binaries.require(binaries.SECURITY), "find-generic-password", "-s", self.service, "-w"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (binaries.Untrusted, subprocess.TimeoutExpired) as exc:
+            raise CredentialUnavailable(f"the Keychain could not be read: {type(exc).__name__}") from None
+        if done.returncode != 0:
+            raise CredentialUnavailable(
+                "no Claude login in the Keychain: log in with `claude`, or install a long-lived token "
+                f"at {self.token_file}"
+            )
+        try:
+            oauth = json.loads(done.stdout)["claudeAiOauth"]
+            access, expires = oauth["accessToken"], oauth.get("expiresAt")
+        except ValueError, KeyError, TypeError:
+            raise CredentialUnavailable("the Keychain's Claude login is not in the shape expected") from None
+        if expires is not None and float(expires) / 1000 < time.time() + 30:
+            raise CredentialUnavailable(
+                "the Claude login's access token has expired: run any claude session, or install a "
+                f"long-lived token at {self.token_file} (`claude setup-token`)"
+            )
+        return access
 
 
 @dataclass
@@ -85,8 +167,11 @@ class Meter:
 
 
 class Gateway:
-    def __init__(self, dsn: str | None = None, upstream: str | None = None):
+    def __init__(
+        self, dsn: str | None = None, upstream: str | None = None, credential: ClaudeLogin | None = None
+    ):
         self.dsn = dsn or settings.dsn()
+        self.credential = credential
         self.upstream = (upstream or settings.upstream).rstrip("/")
         self.grants: dict[str, Grant] = {}
         self.revoked: set[str] = set()
@@ -154,12 +239,22 @@ class Gateway:
         body = await request.read()
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQUEST}
         headers["accept-encoding"] = "identity"
+        if self.credential is not None:
+            headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
+            try:
+                headers["authorization"] = "Bearer " + await asyncio.to_thread(self.credential.token)
+            except CredentialUnavailable as exc:
+                return _error(401, "authentication_error", str(exc))
         if request.method == "POST" and tail.rstrip("/") == "v1/messages":
             call = asyncio.create_task(self._metered(request, grant, path, headers, body))
             self.calls.setdefault(grant.task_id, set()).add(call)
             call.add_done_callback(self.calls[grant.task_id].discard)
-            return await asyncio.shield(call)
-        return await self._forward(request, path, headers, body)
+            response = await asyncio.shield(call)
+        else:
+            response = await self._forward(request, path, headers, body)
+        if response.status == 401 and self.credential is not None:
+            self.credential.invalidate()
+        return response
 
     async def _forward(self, request, path, headers, body) -> web.StreamResponse:
         try:

@@ -331,14 +331,26 @@ one a daemon cannot shed: it survives `setsid`, re-parenting to launchd, and
 a process overwriting its own environment. Serves: reliable stop; and the
 16 GB machine, where a leaked test server holds memory a later turn needs.
 
-**Workspace provisioning.** What the demonstration ran in: a clone holding
-history only up to the base commit, a local bare repository as its only
-remote, a Postgres cluster of its own with password auth, and the sandbox
-above. Today scripts build it (`scripts/demo_workspace.sh`,
-`scripts/replay_workspace.py`). **Design:** the kernel provisions a
-workspace per task from the request's repository and the same template, and
-retains its disk after a stop. Serves Mission item 1 (Valor works without
-Tom setting up the gaps) and bounded authority.
+**Workspace provisioning.** Built (`core/workspace.py`): `python -m core
+start --project NAME` provisions the task's workspace from a project spec
+(`projects/`) before the task starts: a clone holding history only up to
+the base, a local bare origin as its only remote (where `push_branch` goes,
+and, until the GitHub credential, the merge), the kernel mirror (a bare
+repository only the kernel writes, seeded with the base, into which plan
+commits, candidates, and docs heads are fetched, and from which the merge
+predicate and the merge read), a Postgres cluster of the task's own with
+password auth and a Redis when the project asks, each on a port of the
+task's own and run under a service sandbox, the project's setup run once
+under the turn's sandbox, and the sandbox profiles. Services run only while
+the task's run holds the router; every run first stops the services of
+other tasks a killed kernel left up, unless their own run is live. The disk
+is kept after a stop until `python -m core workspace remove`. Serves
+Mission item 1 (Valor works without Tom setting up the gaps) and bounded
+authority. The fetch into the mirror treats the builder's clone as hostile:
+its config is checked first, alternates and shallow clones are refused,
+the sending side runs inside the turn's sandbox, and the receiving side
+runs with fsck, one pack file under a file-size limit, a footprint
+watchdog, and replace refs and grafts off.
 
 **Design, the sandbox split.** This doc owns which work runs under which
 sandbox. Turns run under sandbox-exec on the host, as built and as both

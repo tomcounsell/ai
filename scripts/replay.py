@@ -256,6 +256,10 @@ def _replay(item: dict, arm: str, args) -> dict:
             max_output_tokens=args.max_output_tokens,
             rebuild=args.rebuild,
         )
+        if result is not None and result.get("task_id"):
+            ws = replay_workspace.attach(
+                {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
+            )
         if result is None:
             result = {
                 "run": run_name,
@@ -279,15 +283,17 @@ def _replay(item: dict, arm: str, args) -> dict:
                 str(args.budget),
                 "--ceiling",
                 "act",
-                "--workspace",
-                ws["workdir"],
+                "--project",
+                ws["spec"],
+                "--base",
+                ws["base"],
                 "--model",
                 args.model,
-                "--harness-config",
-                ws["harness_config"],
-                "--target-branch",
-                "main",
             )
+            ws = replay_workspace.attach(
+                {**ws, "task_id": result["task_id"]}, json.loads(core("workspace", "show", result["task_id"]))
+            )
+            result["workspace"] = ws
             _save(result)
         task_id, log = result["task_id"], result["log"]
         print(f"{run_name}: task {task_id}", file=sys.stderr)
@@ -297,9 +303,6 @@ def _replay(item: dict, arm: str, args) -> dict:
             if runs >= MAX_RUNS:
                 result["outcome"] = "run cap"
                 break
-            replay_workspace.ensure_services(
-                item["services"], ws.get("redis_port", replay_workspace.REDIS_PORT)
-            )
             line = core("run", task_id)
             runs += 1
             log.append({"at": now(), "step": "run", "said": line[:2000]})
@@ -309,7 +312,7 @@ def _replay(item: dict, arm: str, args) -> dict:
                 break
             state = status(task_id)
             if line.startswith("NO RUNNER"):
-                # Critique and the checks have no runner until milestone 1.4;
+                # The checks have no runner until milestones 1.4b and 1.4c;
                 # the driver never records a verdict for them.
                 result["outcome"] = line.splitlines()[0]
                 break

@@ -9,7 +9,7 @@ import pytest
 
 from core import broker, budget, db, ledger, runs, tasks
 from core.gateway import Gateway
-from tools.workspace import OutboxAppend, WorkspaceWrite
+from tests.performers import OutboxAppend, WorkspaceWrite
 
 pytestmark = pytest.mark.spend(usd=0)
 

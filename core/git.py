@@ -137,13 +137,22 @@ class GitError(RuntimeError):
     pass
 
 
-def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.CompletedProcess:
-    """The trusted git (`settings.git_bin`, checked each call), never
-    whichever `git` comes first on a PATH."""
+def binary() -> str:
+    """The trusted git's path, checked now."""
     try:
-        binary = binaries.require_git(settings.git_bin)
+        return binaries.require_git(settings.git_bin)
     except binaries.Untrusted as exc:
         raise GitError(str(exc)) from None
+
+
+def _git(
+    workspace: str | Path, *args: str, text: bool = True, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """The trusted git (`settings.git_bin`, checked each call), never
+    whichever `git` comes first on a PATH, in its own process group, killed
+    whole when it outlives its limit (the smaller of `git_timeout_s` and
+    what is left of the caller's `deadline`)."""
+    git_bin = binary()
     limit = settings.git_timeout_s
     ends = _DEADLINE.get()
     if ends is not None:
@@ -151,11 +160,11 @@ def _git(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Com
         if limit <= 0:
             raise GitError(f"git {' '.join(args[:2])}: the deadline for this perform has passed")
     proc = subprocess.Popen(
-        [binary, "-C", str(workspace), *PINNED, *args],
+        [git_bin, "-C", str(workspace), *PINNED, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
-        env=env(),
+        env={**env(), **(extra_env or {})},
         start_new_session=True,
     )
     try:
@@ -212,6 +221,17 @@ def run(workspace: str | Path, *args: str, text: bool = True) -> subprocess.Comp
             "key is refused): " + "; ".join(found)
         )
     return _git(workspace, *args, text=text)
+
+
+def trusted(cwd: str | Path, *args: str, extra_env: dict[str, str] | None = None) -> str:
+    """One git call in a repository only the kernel writes (its cache, a
+    task's mirror and bare origin, a checkout it is making), with no hostile
+    check: no turn can have written its config. Raises `GitError` on a
+    non-zero exit."""
+    done = _git(cwd, *args, extra_env=extra_env)
+    if done.returncode != 0:
+        raise GitError(f"git {' '.join(args[:3])}: {done.stderr.strip()[:300]}")
+    return done.stdout.strip()
 
 
 def out(workspace: str | Path, *args: str) -> str:

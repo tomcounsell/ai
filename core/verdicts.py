@@ -22,11 +22,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from core import broker, git, judgement, judgement_sites, ledger, machine, tasks
+from core import broker, git, judgement, judgement_sites, ledger, machine, tasks, workspace
 from core.machine import Check, State
 
 MANUAL_STAGES: dict[str, State | Check] = {
-    "critique": State.CRITIQUE,
     "test": Check.TEST,
     "review": Check.REVIEW,
     "docs": Check.DOCS,
@@ -73,6 +72,16 @@ async def _fold(conn, task_id: str, *stages: State) -> tuple[list[dict], machine
 
 def _manual(leg: str, by: str, via: str, role_played: bool) -> dict[str, Any]:
     return {"provenance": ledger.provenance(by, via, role_played)} if leg == "manual" else {}
+
+
+def _session_leg(leg: str, turn_id: str | None, model: str | None) -> dict[str, Any]:
+    """A verdict a fresh session's turn produced names that turn and its
+    model; one with neither is refused."""
+    if leg == "manual":
+        return {}
+    if not turn_id or not model:
+        raise VerdictRefused(f"a {leg} verdict names the turn that produced it and its model")
+    return {"turn_id": turn_id}
 
 
 def _would(rows: list[dict], kind: str, payload: dict[str, Any]) -> machine.Fold:
@@ -127,11 +136,16 @@ async def record_judge(conn, task_id: str, judgement_id: str) -> int:
 async def record_critique(
     conn, task_id: str, verdict: str, *, findings: Iterable = (), raised: Mapping[str, int] | None = None,
     leg: str = "manual", model: str | None = None, usd_micros: int = 0, by: str = "tom",
-    via: str = "the command line", role_played: bool = False,
+    via: str = "the command line", role_played: bool = False, turn_id: str | None = None,
+    plan_sha256: str | None = None,
 ) -> int:  # fmt: skip
+    """`plan_sha256`, when given, is the plan the session read; a verdict on
+    a plan that is no longer the current one is refused."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         rows, f = await _fold(conn, task_id, State.CRITIQUE)
+        if plan_sha256 is not None and plan_sha256 != f.plan["sha256"]:
+            raise VerdictRefused("the plan changed since this critique read it")
         payload = {
             "plan_sha256": f.plan["sha256"],
             "verdict": verdict,
@@ -140,6 +154,7 @@ async def record_critique(
             "leg": leg,
             "model": model,
             "usd_micros": usd_micros,
+            **_session_leg(leg, turn_id, model),
             **_manual(leg, by, via, role_played),
         }
         sent_back = verdict == "revise" and _would(rows, "critique.decided", payload).state is State.PLAN
@@ -177,7 +192,7 @@ async def record_check(
     failures: Iterable[str] = (), behaviors: Iterable[str] = (), leg: str = "manual",
     model: str | None = None, usd_micros: int = 0, by: str = "tom", via: str = "the command line",
     role_played: bool = False, breadth: str | None = None, governance_from: Iterable[str] | None = None,
-    notes: Mapping[str, Mapping[str, Any]] | None = None,
+    notes: Mapping[str, Mapping[str, Any]] | None = None, turn_id: str | None = None,
 ) -> machine.Fold:  # fmt: skip
     """Record one branch's verdict on the current candidate. Returns the
     fold after it; when it completes a join to `merge`, `task.delivered` is
@@ -207,9 +222,13 @@ async def record_check(
             "leg": leg,
             "model": model,
             "usd_micros": usd_micros,
+            **_session_leg(leg, turn_id, model),
             **_manual(leg, by, via, role_played),
         }
         specs = list(governance)
+        # A task the kernel provisioned keeps its commits in the kernel
+        # mirror, which no turn writes; git facts are read there.
+        repo = b.mirror or b.workspace
         if breadth is not None and check is not Check.TEST:
             raise VerdictRefused("only the test branch takes a breadth judgement")
         if governance_from is not None and check is Check.TEST:
@@ -242,12 +261,14 @@ async def record_check(
             if check is Check.DOCS:
                 head = head or c.sha
                 if head != c.sha:
-                    if not git.is_ancestor(b.workspace, c.sha, head):
+                    if b.mirror:
+                        _docs_into_mirror(b, head, task_id)
+                    if not git.is_ancestor(repo, c.sha, head):
                         raise VerdictRefused(f"{head} does not descend from the candidate {c.sha}")
-                    if git.merges_between(b.workspace, c.sha, head):
+                    if git.merges_between(repo, c.sha, head):
                         raise VerdictRefused("the docs commits hold a merge commit")
                 payload["head"] = head
-                payload["paths"] = git.diff_paths(b.workspace, c.sha, head) if head != c.sha else []
+                payload["paths"] = git.diff_paths(repo, c.sha, head) if head != c.sha else []
             judged: dict[str, Any] | None = None
             if check in (Check.REVIEW, Check.DOCS):
                 older, newer = (b.base_sha, c.sha) if check is Check.REVIEW else (c.sha, payload["head"])
@@ -255,12 +276,12 @@ async def record_check(
                     ids = list(governance_from)
                     try:
                         judged = judgement_sites.governance_outcome(
-                            rows, ids, judgement_sites.diff_hunks(b.workspace, older, newer)
+                            rows, ids, judgement_sites.diff_hunks(repo, older, newer)
                         )
                     except (judgement_sites.Unusable, judgement_sites.Unanswered) as exc:
                         raise VerdictRefused(str(exc)) from None
                     specs = [InstanceSpec(h.path, h.start) for h in judged["instances"]] + specs
-                instances = _union(_instances(b.workspace, older, newer, specs) if specs else [])
+                instances = _union(_instances(repo, older, newer, specs) if specs else [])
                 if judged is not None and judged["unjudged"]:
                     instances.append(judgement_sites.unjudged_instance(judged["unjudged"]))
                 instances = _annotate(instances, notes or {})
@@ -300,6 +321,25 @@ async def record_check(
         if f.state is State.CHECKS and after.state is State.MERGE and after.join is not None:
             await ledger.append(conn, task_id, "task.delivered", _delivery(after, rows, event_id))
     return after
+
+
+def _docs_into_mirror(b: tasks.Brief, head: str, task_id: str) -> None:
+    """A docs head recorded by hand sits in the builder's clone; it counts
+    only once fetched into the kernel mirror, never into the builder's
+    branch, so it cannot ride into the next candidate."""
+    if not re_sha(head):
+        raise VerdictRefused(f"{head!r} is not a full commit id")
+    try:
+        workspace.fetch_into_mirror(
+            b.mirror, b.workspace, head, f"refs/valor/docs/{head}", b.harness["sandbox_profile"],
+            f"mirror-docs-{task_id}",
+        )  # fmt: skip
+    except workspace.FetchRefused as exc:
+        raise VerdictRefused(str(exc)) from None
+
+
+def re_sha(value: str) -> bool:
+    return len(value) == 40 and all(ch in "0123456789abcdef" for ch in value)
 
 
 def _union(instances: list[dict[str, Any]]) -> list[dict[str, Any]]:

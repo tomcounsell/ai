@@ -728,7 +728,9 @@ def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_pat
     task = run(scripted.start(dsn, ws))
     run(drive(dsn, task))
     who = ["--by", "test", "--role-played"]
-    assert cli("verdict", task, "critique", "sound", *who).returncode == 0
+    critique = cli("verdict", task, "critique", "sound", *who)
+    assert critique.returncode == 1 and "critique has a runner" in critique.stderr
+    run(scripted.critique(dsn, task))
     run(drive(dsn, task))
     assert cli("verdict", task, "test", "pass", *who).returncode == 0
     out = cli("verdict", task, "review", "changes", "--finding", "naming:rename x", *who)
@@ -740,9 +742,10 @@ def test_the_verdict_command_records_by_hand_and_requests_the_merge(dsn, tmp_pat
         assert cli("verdict", task, stage, verdict, *who).returncode == 0
     f = run(fold(dsn, task))
     assert f.state is State.MERGE and f.merge_effect["state"] == "held"  # the CLI registered the performer
-    refused = cli("verdict", task, "critique", "sound", *who)
-    assert refused.returncode == 1 and "not critique" in refused.stderr
-    assert "no manual verdict" in cli("verdict", task, "build", "candidate").stderr
+    refused = cli("verdict", task, "test", "pass", *who)
+    assert refused.returncode == 1 and "not checks" in refused.stderr
+    assert "build has a runner" in cli("verdict", task, "build", "candidate").stderr
+    assert "no manual verdict" in cli("verdict", task, "merge", "released").stderr
 
 
 def test_a_stage_with_a_runner_takes_no_manual_verdict():
@@ -1143,7 +1146,7 @@ def test_the_start_command_leaves_the_judge_to_the_runner_and_keeps_the_starters
     with pytest.raises(TypeError):
         tasks.Brief(instruction="x", budget_usd_micros=0, mode="bare")
     by_hand = cli("verdict", task, "judge", "precise")
-    assert by_hand.returncode == 1 and "no manual verdict for judge" in by_hand.stderr
+    assert by_hand.returncode == 1 and "judge has a runner" in by_hand.stderr
 
 
 def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
@@ -1153,7 +1156,9 @@ def test_the_router_runs_only_the_check_branch_still_missing(dsn, tmp_path):
     async def test_runner(ctx: router.Context) -> dict:
         ran.append(ctx.check)
         async with await db.connect(ctx.dsn) as conn:
-            await verdicts.record_check(conn, ctx.task_id, Check.TEST, "pass", leg="test runner")
+            await verdicts.record_check(
+                conn, ctx.task_id, Check.TEST, "pass", leg="test runner", turn_id="t1", model="m"
+            )
         return {"status": "moved"}
 
     async def go():

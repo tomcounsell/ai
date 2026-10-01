@@ -36,10 +36,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import replay_workspace
 from replay_common import DEMO, claude_json, git, machine_lock, now, sh, ws_git
 
 from core import ledger, runs
+from core import workspace as kws
 from harnesses.claude_code import KEEP_ENV
 
 DIFF_LIMIT = 70_000
@@ -99,7 +99,9 @@ def export_final(result: dict) -> Path:
     source = ws["origin"] if final["pushed"] else ws["workdir"]
     git(store, "fetch", "--quiet", "--no-tags", source, "+refs/heads/*:refs/remotes/candidate/*")
     git(store, "cat-file", "-e", f"{final['sha']}^{{commit}}")
-    tree = Path(ws["run_dir"]) / "verify" / Path(ws["workdir"]).name
+    # Inside the task's own state, where its working session's profile lets
+    # the verification commands read and write.
+    tree = Path(ws["task_dir"]) / "state" / "work" / "tmp" / "verify" / Path(ws["workdir"]).name
     if tree.exists():
         shutil.rmtree(tree)
     tree.mkdir(parents=True)
@@ -124,14 +126,18 @@ def verify(result: dict) -> list[dict]:
             "GIT_CONFIG_NOSYSTEM": "1",
             "GH_CONFIG_DIR": harness["gh_config_dir"],
             "GIT_TERMINAL_PROMPT": "0",
+            **({"TMPDIR": harness["tmpdir"]} if harness.get("tmpdir") else {}),
         }
     )
-    replay_workspace.ensure_services(item["services"], ws.get("redis_port", replay_workspace.REDIS_PORT))
+    project = ws.get("project") or {}
+    services, ports = project.get("services") or [], project.get("ports") or {}
+    lay = kws.Layout(Path(ws["task_dir"]))
+    kws.start_services(ws["task_id"], lay, services, ports)
     out = []
     for command in item["verify"]:
         mark = ledger.new_id()
         argv = [
-            "sandbox-exec",
+            "/usr/bin/sandbox-exec",
             "-D",
             "GATEWAY_PORT=1",
             "-D",
@@ -158,6 +164,7 @@ def verify(result: dict) -> list[dict]:
             text = text.decode(errors="replace") if isinstance(text, bytes) else text
         reaped = runs.reap(mark)
         out.append({"command": command, "exit": code, "output_tail": text[-OUTPUT_TAIL:], "reaped": reaped})
+    kws.stop_services(ws["task_id"], lay)
     return out
 
 

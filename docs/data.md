@@ -71,7 +71,10 @@ once and never changes. The `task` document is the Brief as the task
 started: instruction, budget in micro-dollars, effect ceiling,
 `governance_grant`, workspace, model, harness settings, and where a merge
 goes: the target branch, origin's push URL as an absolute path, and the
-workspace's head at start (`core/tasks.py`, `Brief`). `Brief.load` reads
+workspace's head at start (`core/tasks.py`, `Brief`); for a task the kernel
+provisioned, also the kernel mirror's path, where `push_branch` goes
+(`push_url`), and the project spec as it was at start with the task's
+service ports (`project`). `Brief.load` reads
 only the fields the Brief has, so a stored document carrying an older
 field (`mode`) still loads. The kernel role cannot update a document, so
 anything that changes about a task after it starts is an event on its
@@ -104,10 +107,13 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/runs.py` | `turn.started` | `turn_id`, the state the turn runs in, harness, argv, the dispatched Brief whole, `brief_sha256`, correction numbers | Corrections reach every turn; legibility |
 | `core/runs.py` | `turn.ended` | `turn_id`, outcome (`done`, `failed`, `stopped`), return code, parsed result (including the harness session id), stderr tail, metered spend | Lossless stop |
 | `core/runs.py` | `turn.reaped` | `turn_id`, the processes stopped after the turn | Lossless stop |
+| `core/runs.py` | `turn.started` (fresh) | as any `turn.started`, plus `fresh: true` and the stage; the fold never resumes its session | Independent checks |
 | `core/session.py` | `turn.collected` | `turn_id`, the state it ran in and its verdict, what the turn left under `.valor/` (question, no-question statement, plan signal, delivery note, effect requests), the candidate (head sha and turn id) when the verdict is `candidate`, and `errors`: the signals that did not count and why | Legibility; the state machine |
 | `core/session.py` | `question.asked` | `question_id`, `turn_id`, text, the state the answer returns to | Mission item 6 |
 | `core/session.py` | `plan.written` | `turn_id`, path, commit, `sha256` of the file at that commit, stakes, `critique_rounds`, `review_rounds`, scope additions | Mission items 1 and 3 |
-| `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg, model, `usd_micros`, `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
+| `core/verdicts.py` | `critique.decided` | `plan_sha256`, verdict, findings, raised counts, leg (`session` from the fresh critique session, or `manual` in older rows), model, `usd_micros`, `turn_id` of the fresh turn, `guard_id` when it sends the plan back, provenance when manual | Mission item 1 |
+| `core/router.py` | `services.reaped` | the processes of other tasks' workspace services the run stopped (pid, command, task, signal) | Lossless stop; 16 GB |
+| `core/__main__.py` | `workspace.removed` | the removed task directory, provenance | Frees the task's service ports |
 | `core/verdicts.py` | `test.decided`, `review.decided`, `docs.decided` | the candidate, verdict, findings, leg, model, `usd_micros`, provenance when manual; test adds command, failures, untested behaviors, the breadth `guard_id`, and, when a breadth judgement was given, `breadth` (its `judgement_id`, actions, abstained, model, `usd_micros`, `guard_id`); review and docs add the governance answer and its instances (id, path, line, function context, summary, incident, mission item), and, when governance judgements were given, their ids, `abstain_instances`, and `unjudged_hunks`; docs adds its head and the paths it changed; the verdict that completes a join sending work to `patch` names `review.loop` | Mission item 1; Evidence "Independent checks" |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
 | `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, the candidate, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |

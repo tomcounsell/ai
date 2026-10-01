@@ -123,20 +123,6 @@ def test_replays_share_the_machine_in_slots(tmp_path, monkeypatch):
     assert entered and entered[0] >= released
 
 
-def test_each_redis_run_gets_a_port_no_other_run_holds(tmp_path, monkeypatch):
-    import json
-
-    import replay_workspace
-
-    monkeypatch.setattr(replay_workspace, "DEMO", tmp_path)
-    for name, info in {"old": {}, "a": {"redis_port": 6391}, "b": {"redis_port": 6393}}.items():
-        (tmp_path / "runs" / name).mkdir(parents=True)
-        (tmp_path / "runs" / name / "replay.json").write_text(json.dumps(info))
-    assert replay_workspace._redis_port(tmp_path / "runs" / "new") == 6392
-    assert replay_workspace._redis_port(tmp_path / "runs" / "b") == 6393
-    assert replay_workspace._redis_port(tmp_path / "runs" / "old") == 6390
-
-
 def test_the_driver_checks_a_merge_by_the_url_its_payload_carries(dsn, tmp_path, monkeypatch):
     """A held merge is released when its payload names the run's own origin
     (the URL the kernel recorded at start, which the approval binds), and

@@ -87,7 +87,8 @@ constraint generated from `VERDICTS`). A turn's Brief carries the stage
 file for its state from `skills/sdlc/`.
 
 Runners exist for `judge` (it asks the judgement port), `clarify`, `plan`,
-`build`, and `patch`; critique, test, review, and docs are 1.4's. Until
+`build`, `patch`, and `critique` (a fresh session, `core/fresh.py`, on a
+workspace the kernel provisioned); test, review, and docs are 1.4's. Until
 each exists the router stops there and says so, and a person records the
 verdict with `python -m core verdict TASK STAGE VERDICT` (`leg: manual`,
 with provenance), which refuses a stage that has a runner.

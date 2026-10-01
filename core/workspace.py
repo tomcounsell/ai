@@ -1,0 +1,1195 @@
+"""Kernel workspaces: one directory per task, provisioned before the task
+starts, from a project spec the kernel reads (never the candidate).
+
+    <work_dir>/
+      cache/<name>.git     bare clone per repository, fetched by the kernel
+      bin/                 shared tools (uv), read-only to every sandbox
+      <task_id>/
+        repo/              the builder's clone: the working session's cwd
+        origin.git/        local bare origin: push_branch's target (and, until
+                           1.4d, the merge's); no turn writes it
+        kernel.git/        the kernel mirror: the base, plan commits,
+                           candidates, docs heads; no turn writes it
+        home/              gitconfig, empty gh config, pgpass, profiles/*.sb
+        cache/             the builder's uv and npm caches
+        state/work/        the working session's own TMPDIR and Claude Code
+                           config directory (so its session files)
+        checks/<name>/     a fresh session's repo/, tmp/, claude/
+        pg/data, pg/run    the task's Postgres cluster and its socket
+        redis/             the task's redis-server, when the project asks
+
+Every program the kernel starts here that is not root's alone runs inside a
+sandbox-exec profile written by this module: the working session's
+(`turn.sb`), a fresh session's (`<stage>-<key>.sb`), and the services'
+(`service.sb`). Profiles start from `(allow default)` and deny before they
+allow. Each denies the whole work directory and allows back only its own
+paths, so a fresh session cannot read the builder's clone, state, or
+transcripts; each denies writes to the user's startup places (launch
+agents, shell rc files, `~/.local/bin`, Claude Code's install, git's global
+config, Homebrew's prefix), which narrows, and does not close, the opening
+that a turn leaves a program for a later unsandboxed process of the user.
+
+The services (`initdb`, `pg_ctl`, `postgres`, `redis-server`) are Homebrew's,
+in the user's own prefix, so they only ever run under `service.sb`, marked by
+the mach name `valor.service.<task_id>`, which is how they are found and
+stopped, also after the kernel died.
+
+The kernel mirror is fed from the builder's clone by `fetch_into_mirror`:
+the clone's config checked first, alternates and shallow clones refused,
+the sending side run inside the turn's own sandbox, the receiving side with
+fsck, one pack file under a file-size limit, and a footprint watchdog.
+"""
+
+import ctypes
+import functools
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import time
+import tomllib
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from core import binaries, git, runs
+from core.settings import settings
+
+KINDS = ("python-uv", "django", "node", "plain")
+SERVICES = ("postgres", "redis")
+DEV_PORTS = range(8000, 8010)
+HOME = Path.home()
+GITCONFIG = "[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n[init]\n\tdefaultBranch = main\n"
+# Read and write denied to every workspace sandbox, under the user's home.
+HOME_DENIED = (
+    "src",
+    "work-vault",
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Dropbox",
+    "Library/CloudStorage",
+    "Library/Mobile Documents",
+    "Library/Mail",
+    "Library/Messages",
+    ".ssh",
+    ".config/gh",
+)
+# Writes denied to every workspace sandbox: where a later unsandboxed
+# process of the user would run what a turn left.
+HOME_WRITE_DENIED = (
+    "Library/LaunchAgents",
+    ".local/bin",
+    ".local/share/claude",
+    ".claude",
+    ".config/git",
+)
+HOME_WRITE_DENIED_FILES = (
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".zlogin",
+    ".bash_profile",
+    ".bashrc",
+    ".profile",
+    ".claude.json",
+    ".gitconfig",
+)
+SYSTEM_WRITE_DENIED = ("/opt/homebrew",)
+
+
+class Refused(ValueError):
+    """A project or a provisioning step the kernel will not take."""
+
+
+# -- project specs -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spec:
+    """A project, read once at start and copied into the Brief, so editing
+    the file never changes a running task. `suite` names the command the
+    kernel runs to decide red or pass; a candidate never chooses it."""
+
+    name: str
+    repo: str
+    kind: str
+    suite: str
+    branch: str | None = None
+    services: tuple[str, ...] = ()
+    roles: tuple[str, ...] = ()
+    setup: tuple[str, ...] = ()
+    lint: str | None = None
+    merge_url: str | None = None
+    target_branch: str | None = None
+    env: dict[str, str] = field(default_factory=dict)
+    max_output_tokens: int | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Spec:
+        for key in ("name", "repo", "kind", "suite"):
+            if not isinstance(raw.get(key), str) or not raw[key]:
+                raise Refused(f"a project spec names {key!r}")
+        known = set(cls.__dataclass_fields__)
+        unknown = sorted(set(raw) - known)
+        if unknown:
+            raise Refused(f"unknown project spec keys: {unknown}")
+        if raw["kind"] not in KINDS:
+            raise Refused(f"kind {raw['kind']!r} is not one of {', '.join(KINDS)}")
+        services = tuple(raw.get("services") or ())
+        bad = sorted(set(services) - set(SERVICES))
+        if bad:
+            raise Refused(f"unknown services {bad}; known: {', '.join(SERVICES)}")
+        roles = tuple(raw.get("roles") or ())
+        for r in roles:
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", r) or r in ("app", "postgres"):
+                raise Refused(f"role name {r!r} is not allowed")
+        if roles and "postgres" not in services:
+            raise Refused("roles need the postgres service")
+        cap = raw.get("max_output_tokens")
+        if cap is not None and (not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0):
+            raise Refused("max_output_tokens is a positive integer")
+        env = raw.get("env") or {}
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+            raise Refused("a project's env maps names to strings")
+        return cls(
+            name=raw["name"],
+            repo=raw["repo"],
+            kind=raw["kind"],
+            suite=raw["suite"],
+            branch=raw.get("branch"),
+            services=services,
+            roles=roles,
+            setup=tuple(raw.get("setup") or ()),
+            lint=raw.get("lint"),
+            merge_url=raw.get("merge_url"),
+            target_branch=raw.get("target_branch"),
+            env=dict(env),
+            max_output_tokens=cap,
+        )
+
+    @classmethod
+    def load(cls, name_or_path: str) -> Spec:
+        path = Path(name_or_path)
+        if not path.suffix:
+            path = Path(settings.projects_dir) / f"{name_or_path}.toml"
+        try:
+            raw = tomllib.loads(path.read_text())
+        except FileNotFoundError:
+            raise Refused(f"no project spec at {path}") from None
+        except tomllib.TOMLDecodeError as exc:
+            raise Refused(f"{path}: {exc}") from None
+        return cls.from_dict(raw)
+
+
+# -- paths --------------------------------------------------------------------------
+
+
+def work_dir() -> Path:
+    return Path(settings.work_dir).expanduser()
+
+
+@dataclass(frozen=True)
+class Layout:
+    root: Path
+
+    @property
+    def repo(self) -> Path:
+        return self.root / "repo"
+
+    @property
+    def origin(self) -> Path:
+        return self.root / "origin.git"
+
+    @property
+    def mirror(self) -> Path:
+        return self.root / "kernel.git"
+
+    @property
+    def home(self) -> Path:
+        return self.root / "home"
+
+    @property
+    def profiles(self) -> Path:
+        return self.home / "profiles"
+
+    @property
+    def cache(self) -> Path:
+        return self.root / "cache"
+
+    @property
+    def work_state(self) -> Path:
+        return self.root / "state" / "work"
+
+    @property
+    def checks(self) -> Path:
+        return self.root / "checks"
+
+    @property
+    def pg(self) -> Path:
+        return self.root / "pg"
+
+    @property
+    def redis(self) -> Path:
+        return self.root / "redis"
+
+
+def layout(task_id: str, base: Path | None = None) -> Layout:
+    if not re.fullmatch(r"[0-9a-f]{6,64}", task_id):
+        raise Refused(f"{task_id!r} is not a task id")
+    return Layout((base or work_dir()) / task_id)
+
+
+def kernel_paths() -> list[Path]:
+    """What no workspace sandbox may read or write: the kernel key
+    directory, the machine cluster's data directory, the backup disk."""
+    return [Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)]
+
+
+# -- sandbox profiles -----------------------------------------------------------------
+
+
+def _paths(kind: str, paths) -> list[str]:
+    return [f'    ({kind} "{p}")' for p in paths]
+
+
+def profile(
+    *,
+    rw: list[Path],
+    ro: list[Path] = (),
+    ports: list[int] = (),
+    work: Path | None = None,
+    home: Path = HOME,
+    fresh: bool = False,
+    kernel: list[Path] | None = None,
+    service: str | None = None,
+    bind_ports: list[int] = (),
+) -> str:
+    """A sandbox-exec profile. `rw` and `ro` are allowed back after the
+    denies; `work` (the work directory) is denied as a whole first. A
+    `fresh` profile also denies `/private/tmp`, `/private/var/folders`, and
+    the user's Claude Code state, since a fresh session has its own. A
+    `service` profile is marked by the mach name `valor.service.<service>`
+    and may bind `bind_ports` only; a turn's profile is marked by
+    `valor.turn.<VALOR_TURN>`, may bind the dev ports, and reaches the
+    gateway (`GATEWAY_PORT`) and `ports` on loopback."""
+    denied = [home / d for d in HOME_DENIED]
+    if work is not None:
+        denied.append(work)
+    lines = [
+        "(version 1)",
+        "(allow default)",
+        "(deny file-read* file-write*",
+        *_paths("subpath", denied),
+        f'    (subpath "{home / ".claude" / "projects"}")',
+        f'    (literal "{home / ".claude" / "history.jsonl"}"))',
+    ]
+    if fresh:
+        lines += [
+            "(deny file-read* file-write*",
+            '    (subpath "/private/tmp")',
+            '    (subpath "/private/var/folders")',
+            f'    (subpath "{home / ".claude"}")',
+            f'    (literal "{home / ".claude.json"}"))',
+        ]
+    lines += [
+        "(deny file-write*",
+        *_paths("subpath", [home / d for d in HOME_WRITE_DENIED]),
+        *_paths("literal", [home / f for f in HOME_WRITE_DENIED_FILES]),
+        *_paths("subpath", SYSTEM_WRITE_DENIED),
+        ")",
+        "(allow file-read* file-write*",
+        *_paths("subpath", rw),
+        ")",
+    ]
+    if ro:
+        lines += ["(allow file-read*", *_paths("subpath", ro), ")"]
+    ancestors = sorted({str(a) for p in [*rw, *ro] for a in Path(p).parents})
+    lines += ["(allow file-read-metadata", *_paths("literal", ancestors), ")"]
+    lines += [
+        "(deny file-read* file-write*",
+        *_paths("subpath", kernel if kernel is not None else kernel_paths()),
+        ")",
+        '(deny process-exec (regex #"/git-credential-osxkeychain$"))',
+    ]
+    if service:
+        lines += [
+            f'(deny mach-lookup (global-name "valor.service.{service}"))',
+            "(deny network-bind network-inbound)",
+            "(allow network-bind network-inbound",
+            *[f'    (local ip "localhost:{p}")' for p in bind_ports],
+            *[f'    (local unix-socket (subpath "{p}"))' for p in rw],
+            ")",
+            "(deny network-outbound",
+            '    (remote ip "*:*"))',
+            "(allow network-outbound",
+            *[f'    (remote unix-socket (subpath "{p}"))' for p in rw],
+            ")",
+        ]
+        return "\n".join(lines) + "\n"
+    lines += [
+        '(deny mach-lookup (global-name (string-append "valor.turn." (param "VALOR_TURN"))))',
+        "(deny network-bind network-inbound)",
+        "(allow network-bind network-inbound",
+        *(f'    (local ip "localhost:{p}")' for p in DEV_PORTS),
+        *[f'    (local unix-socket (subpath "{p}"))' for p in rw],
+        ")",
+        "(deny network-outbound",
+        '    (remote ip "localhost:*")',
+        f'    (remote ip "localhost:{settings.pgport}")',
+        f'    (remote unix-socket (path-literal "{settings.pg_socket_real}"))',
+        f'    (remote unix-socket (path-literal "{settings.pg_socket}")))',
+        "(allow network-outbound",
+        '    (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))',
+        *(f'    (remote ip "localhost:{p}")' for p in [*DEV_PORTS, *ports]),
+    ]
+    lines[-1] += ")"
+    return "\n".join(lines) + "\n"
+
+
+def turn_profile(
+    lay: Layout, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
+) -> str:
+    """The working session's (and provisioning setup's) profile: its clone,
+    its caches, its own state; its task's home and origin read-only."""
+    return profile(
+        rw=[lay.repo, lay.cache, lay.work_state],
+        ro=[lay.home, lay.origin, lay.root.parent / "bin"],
+        ports=ports,
+        work=lay.root.parent,
+        home=home,
+        kernel=kernel,
+    )
+
+
+def check_profile(
+    lay: Layout, check_dir: Path, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
+) -> str:
+    """A fresh session's profile: its own checkout, tmp, and Claude Code
+    config, and nothing else of the work directory."""
+    return profile(
+        rw=[check_dir],
+        ro=[lay.root.parent / "bin"],
+        ports=ports,
+        work=lay.root.parent,
+        home=home,
+        fresh=True,
+        kernel=kernel,
+    )
+
+
+def service_profile(
+    lay: Layout, task_id: str, ports: list[int], *, home: Path = HOME, kernel: list[Path] | None = None
+) -> str:
+    return profile(
+        rw=[lay.pg, lay.redis],
+        work=lay.root.parent,
+        home=home,
+        kernel=kernel,
+        service=task_id,
+        bind_ports=ports,
+    )
+
+
+def sandboxed(profile_path: Path, mark: str, *argv: str) -> list[str]:
+    """An argv run under `profile_path`, with the turn mark `mark` (a turn
+    or a provisioning step; the gateway port is 0, so no gateway)."""
+    return [
+        binaries.require(binaries.SANDBOX_EXEC),
+        "-D",
+        "GATEWAY_PORT=1",
+        "-D",
+        f"VALOR_TURN={mark}",
+        "-f",
+        str(profile_path),
+        *argv,
+    ]
+
+
+# -- ports ----------------------------------------------------------------------------
+
+
+def _bindable(port: int) -> bool:
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+async def taken_ports(conn) -> set[int]:
+    """Every service port named by a task whose workspace has not been
+    removed."""
+    rows = await (
+        await conn.execute(
+            "SELECT d.body->'project'->'ports' FROM documents d WHERE d.kind = 'task' "
+            "AND d.body->'project'->'ports' IS NOT NULL AND NOT EXISTS ("
+            "  SELECT 1 FROM events e WHERE e.task_id = d.id AND e.type = 'workspace.removed')"
+        )
+    ).fetchall()
+    out: set[int] = set()
+    for (ports,) in rows:
+        out.update(int(v) for v in (ports or {}).values())
+    return out
+
+
+def choose_port(span: tuple[int, int], taken: set[int]) -> int:
+    for port in range(span[0], span[1] + 1):
+        if port not in taken and _bindable(port):
+            return port
+    raise Refused(f"no free port in {span[0]} to {span[1]}; held by tasks' workspaces: {sorted(taken)}")
+
+
+# -- provisioning -----------------------------------------------------------------------
+
+
+def _cache(spec: Spec, source: str | None, work: Path) -> Path:
+    """The kernel's bare clone of the repository, fetched by its trusted git:
+    a local path, or a public HTTPS URL fetched anonymously. A private
+    repository needs the credential, which is 1.4d's."""
+    origin = source or spec.repo
+    local = Path(origin).expanduser()
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", (local.resolve().name if local.exists() else origin.rstrip("/")
+                                            .rsplit("/", 1)[-1]).removesuffix(".git"))  # fmt: skip
+    cache = work / "cache" / f"{name}.git"
+    url = str(local.resolve()) if local.exists() else origin
+    if not local.exists() and not url.startswith("https://"):
+        raise Refused(f"{origin} is neither a local repository nor an https URL")
+    if not cache.exists():
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        git.trusted(cache.parent, "init", "-q", "--bare", str(cache))
+    try:
+        git.trusted(
+            cache,
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--upload-pack=git-upload-pack",
+            url,
+            "+refs/heads/*:refs/heads/*",
+        )
+    except git.GitError as exc:
+        if "Authentication" in str(exc) or "could not read Username" in str(exc):
+            raise Refused(
+                f"{origin} needs a credential to fetch; private repositories wait for 1.4d"
+            ) from None
+        raise Refused(f"fetching {origin}: {exc}") from None
+    listed = git.trusted(cache, "ls-remote", "--symref", "--upload-pack=git-upload-pack", url, "HEAD")
+    for line in listed.splitlines():
+        if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+            git.trusted(cache, "symbolic-ref", "HEAD", line[len("ref: ") : -len("\tHEAD")])
+    return cache
+
+
+def _commit_of(cache: Path, rev: str) -> str:
+    try:
+        return git.trusted(cache, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+    except git.GitError:
+        raise Refused(f"{rev} is not a commit of the repository") from None
+
+
+@dataclass
+class Provisioned:
+    """What `provision` made, as Brief fields."""
+
+    workspace: str
+    mirror: str
+    push_url: str
+    origin_url: str
+    target_branch: str
+    base_sha: str
+    harness: dict[str, Any]
+    project: dict[str, Any]
+
+    def brief_fields(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def harness_env(lay: Layout, spec: Spec, ports: dict[str, int], passwords: dict[str, str]) -> dict[str, str]:
+    """The turn's environment for this project: tools first on PATH, the
+    caches under the task, the database and Redis it was given."""
+    bin_dir = lay.root.parent / "bin"
+    env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+        "UV_CACHE_DIR": str(lay.cache / "uv"),
+        "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
+        "npm_config_cache": str(lay.cache / "npm"),
+    }
+    if "postgres" in spec.services:
+        port = ports["postgres"]
+        env.update(
+            {
+                "PGHOST": "127.0.0.1",
+                "PGPORT": str(port),
+                "PGUSER": "app",
+                "PGDATABASE": "app",
+                "PGPASSFILE": str(lay.home / "pgpass"),
+                "DATABASE_URL": f"postgresql://app:{passwords['app']}@127.0.0.1:{port}/app",
+                "TEST_DB_HOST": "127.0.0.1",
+                "TEST_DB_PORT": str(port),
+                "TEST_DB_USER": "app",
+                "TEST_DB_PASSWORD": passwords["app"],
+                "TEST_DB_NAME": "test_app",
+            }
+        )
+    if "redis" in spec.services:
+        port = ports["redis"]
+        env.update({"REDIS_URL": f"redis://127.0.0.1:{port}/0", "REDIS_HOST": "127.0.0.1",
+                    "REDIS_PORT": str(port)})  # fmt: skip
+    env.update(
+        {
+            k: v.replace("{port}", str(ports.get("postgres", ""))).replace(
+                "{passfile}", str(lay.home / "pgpass")
+            )
+            for k, v in spec.env.items()
+        }
+    )
+    return env
+
+
+def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | None = None,
+              source: str | None = None, work: Path | None = None) -> Provisioned:  # fmt: skip
+    """Build the task's workspace. Anything that fails removes what was
+    made and raises `Refused`; no task row exists yet."""
+    lay = layout(task_id, work)
+    if lay.root.exists():
+        raise Refused(f"{lay.root} already exists")
+    try:
+        return _provision(lay, task_id, spec, ports, base=base, source=source)
+    except BaseException as exc:
+        stop_services(task_id, lay)
+        shutil.rmtree(lay.root, ignore_errors=True)
+        if isinstance(exc, (git.GitError, subprocess.SubprocessError, OSError)):
+            raise Refused(f"provisioning failed: {exc}") from None
+        raise
+
+
+def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, base: str | None,
+               source: str | None) -> Provisioned:  # fmt: skip
+    cache = _cache(spec, source, lay.root.parent)
+    branch = spec.branch or _remote_head(cache)
+    base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
+    target = spec.target_branch or branch
+    for d in (lay.repo.parent, lay.home / "gh", lay.profiles, lay.cache, lay.work_state / "tmp",
+              lay.work_state / "claude", lay.checks):  # fmt: skip
+        d.mkdir(parents=True, exist_ok=True)
+    (lay.root.parent / "bin").mkdir(exist_ok=True)
+    # The clone: history up to the base only, no tags, one work branch.
+    ref = f"refs/heads/valor-base/{task_id}"
+    git.trusted(cache, "update-ref", ref, base_sha)
+    try:
+        git.trusted(lay.root, "clone", "-q", "--no-tags", "--single-branch", "--branch",
+                    f"valor-base/{task_id}", f"file://{cache}", str(lay.repo))  # fmt: skip
+    finally:
+        git.trusted(cache, "update-ref", "-d", ref)
+    work_branch = f"valor/{task_id[:8]}"
+    git.trusted(lay.repo, "checkout", "-q", "-b", work_branch)
+    git.trusted(lay.repo, "branch", "-q", "-D", f"valor-base/{task_id}")
+    git.trusted(lay.repo, "remote", "remove", "origin")
+    git.trusted(lay.repo, "reflog", "expire", "--expire=now", "--all")
+    git.trusted(lay.repo, "gc", "-q", "--prune=now")
+    with (lay.repo / ".git" / "info" / "exclude").open("a") as f:
+        f.write(".valor/\n")
+    # The bare origin: the target branch at the base.
+    git.trusted(lay.root, "init", "-q", "--bare", str(lay.origin))
+    git.trusted(lay.origin, "symbolic-ref", "HEAD", f"refs/heads/{target}")
+    git.trusted(lay.origin, "config", "core.logAllRefUpdates", "always")
+    git.trusted(lay.origin, "config", "receive.denyNonFastForwards", "true")
+    git.trusted(lay.repo, "remote", "add", "origin", str(lay.origin))
+    git.trusted(lay.repo, "push", "-q", "--no-verify", str(lay.origin), f"{base_sha}:refs/heads/{target}")
+    git.trusted(lay.repo, "fetch", "-q", "origin")
+    # The kernel mirror, seeded with the base from the kernel's own cache.
+    git.trusted(lay.root, "init", "-q", "--bare", str(lay.mirror))
+    git.trusted(lay.mirror, "fetch", "-q", "--no-tags", f"file://{cache}", f"{base_sha}:refs/valor/base")
+    # Home: identity, empty gh, the profiles.
+    (lay.home / "gitconfig").write_text(GITCONFIG)
+    service_ports = [ports[s] for s in spec.services]
+    (lay.profiles / "turn.sb").write_text(turn_profile(lay, service_ports))
+    passwords: dict[str, str] = {}
+    if spec.services:
+        (lay.profiles / "service.sb").write_text(service_profile(lay, task_id, service_ports))
+    if "postgres" in spec.services:
+        passwords = _init_postgres(lay, task_id, spec, ports["postgres"])
+    if "redis" in spec.services:
+        lay.redis.mkdir(parents=True, exist_ok=True)
+    env = harness_env(lay, spec, ports, passwords)
+    harness = {
+        "sandbox_profile": str(lay.profiles / "turn.sb"),
+        "gitconfig": str(lay.home / "gitconfig"),
+        "gh_config_dir": str(lay.home / "gh"),
+        "tmpdir": str(lay.work_state / "tmp"),
+        "claude_config_dir": str(lay.work_state / "claude"),
+        "env": env,
+        **({"max_output_tokens": spec.max_output_tokens} if spec.max_output_tokens else {}),
+    }
+    start_services(task_id, lay, spec.services, ports)
+    try:
+        setup = _setup(lay, spec, harness, task_id)
+    finally:
+        stop_services(task_id, lay)
+    project = {
+        "name": spec.name,
+        "kind": spec.kind,
+        "suite": spec.suite,
+        "lint": spec.lint,
+        "setup": list(spec.setup),
+        "setup_result": setup,
+        "services": list(spec.services),
+        "roles": list(spec.roles),
+        "ports": ports,
+        "repo": spec.repo,
+        "merge_url": spec.merge_url,
+        "env": spec.env,
+    }
+    return Provisioned(
+        workspace=str(lay.repo),
+        mirror=str(lay.mirror),
+        push_url=str(lay.origin),
+        # Until 1.4d every merge lands on the task's own bare origin.
+        origin_url=str(lay.origin),
+        target_branch=target,
+        base_sha=base_sha,
+        harness=harness,
+        project=project,
+    )
+
+
+def _remote_head(cache: Path) -> str:
+    try:
+        return git.trusted(cache, "symbolic-ref", "--short", "HEAD")
+    except git.GitError:
+        raise Refused("the repository names no default branch; give the spec a branch") from None
+
+
+def _setup(lay: Layout, spec: Spec, harness: dict[str, Any], task_id: str) -> dict[str, Any]:
+    """Each setup command once, in the clone, under the turn's profile, with
+    the turn's environment; a failure is recorded, never fatal."""
+    out: list[dict[str, Any]] = []
+    env = turn_environment(harness)
+    for command in spec.setup:
+        mark = f"setup-{task_id}-{len(out)}"
+        argv = sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c", command)
+        try:
+            ran = subprocess.run(
+                argv, cwd=lay.repo, env={**env, runs.TURN_ENV: mark}, capture_output=True, text=True,
+                timeout=settings.setup_timeout_s, check=False,
+            )  # fmt: skip
+            code, text = ran.returncode, ran.stdout + ran.stderr
+        except subprocess.TimeoutExpired as exc:
+            code, text = "timeout", str(exc)
+        runs.reap(mark)
+        out.append({"command": command, "exit": code, "tail": text[-1500:]})
+        if code != 0:
+            return {"ok": False, "commands": out}
+    return {"ok": True, "commands": out}
+
+
+def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
+    """The environment a sandboxed step of the task gets: the allowlist the
+    harness uses, the task's own, its TMPDIR, no credential."""
+    keep = ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM")
+    env = {k: os.environ[k] for k in keep if k in os.environ}
+    env.update(harness.get("env", {}))
+    if harness.get("tmpdir"):
+        env["TMPDIR"] = harness["tmpdir"]
+    if harness.get("gitconfig"):
+        env["GIT_CONFIG_GLOBAL"] = harness["gitconfig"]
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+    if harness.get("gh_config_dir"):
+        env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+# -- services -----------------------------------------------------------------------------
+
+
+def _pg(name: str) -> str:
+    return str(Path(settings.pg_bin) / name)
+
+
+def _service_run(lay: Layout, task_id: str, *argv: str, timeout: float = 120) -> subprocess.CompletedProcess:
+    """A service program under the service profile."""
+    full = [binaries.require(binaries.SANDBOX_EXEC), "-f", str(lay.profiles / "service.sb"), *argv]
+    return subprocess.run(
+        full,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(lay.pg), "LANG": "C", "LC_ALL": "C"},
+    )
+
+
+def _init_postgres(lay: Layout, task_id: str, spec: Spec, port: int) -> dict[str, str]:
+    """A cluster of the task's own with password auth on every login. The
+    superuser password lives in a file only until the roles exist, then is
+    removed from the role and the file deleted."""
+    data = lay.pg / "data"
+    lay.pg.mkdir(parents=True, exist_ok=True)
+    super_pw = secrets.token_urlsafe(24)
+    pwfile = lay.pg / "init.pw"
+    pwfile.write_text(super_pw + "\n")
+    pwfile.chmod(0o600)
+    try:
+        done = _service_run(
+            lay, task_id, _pg("initdb"), "-D", str(data), "-U", "postgres", "--auth=scram-sha-256",
+            f"--pwfile={pwfile}", "-E", "UTF8", "--locale=C",
+        )  # fmt: skip
+        if done.returncode != 0:
+            raise Refused(f"initdb: {done.stderr.strip()[-400:]}")
+    finally:
+        pwfile.unlink(missing_ok=True)
+    with (data / "postgresql.conf").open("a") as f:
+        f.write(
+            f"\n# valor workspace: TCP on loopback only, no unix socket\nlisten_addresses = '127.0.0.1'\n"
+            f"port = {port}\nunix_socket_directories = ''\n"
+        )
+    _start_postgres(lay, task_id)
+    passwords = {r: secrets.token_urlsafe(24) for r in ("app", *spec.roles)}
+    try:
+        import psycopg
+        from psycopg import sql
+
+        with psycopg.connect(
+            host="127.0.0.1", port=port, dbname="postgres", user="postgres", password=super_pw,
+            autocommit=True,
+        ) as conn:  # fmt: skip
+            extra = sql.SQL(" CREATEROLE") if spec.roles else sql.SQL("")
+            conn.execute(
+                sql.SQL("CREATE ROLE app LOGIN CREATEDB{} PASSWORD {}").format(
+                    extra, sql.Literal(passwords["app"])
+                )
+            )
+            conn.execute("CREATE DATABASE app OWNER app")
+            for r in spec.roles:
+                conn.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        sql.Identifier(r), sql.Literal(passwords[r])
+                    )
+                )
+                conn.execute(sql.SQL("GRANT {} TO app WITH ADMIN OPTION").format(sql.Identifier(r)))
+            conn.execute("ALTER ROLE postgres PASSWORD NULL")
+    finally:
+        _stop_postgres(lay, task_id)
+    passfile = lay.home / "pgpass"
+    passfile.write_text("".join(f"127.0.0.1:{port}:*:{r}:{pw}\n" for r, pw in passwords.items()))
+    passfile.chmod(0o600)
+    return passwords
+
+
+def _start_postgres(lay: Layout, task_id: str) -> None:
+    data = lay.pg / "data"
+    if _service_run(lay, task_id, _pg("pg_ctl"), "-D", str(data), "status").returncode == 0:
+        return
+    done = _service_run(
+        lay,
+        task_id,
+        _pg("pg_ctl"),
+        "-D",
+        str(data),
+        "-l",
+        str(lay.pg / "postgres.log"),
+        "-w",
+        "-t",
+        "60",
+        "start",
+    )
+    if done.returncode != 0:
+        raise Refused(f"the task's Postgres did not start; see {lay.pg / 'postgres.log'}")
+
+
+def _stop_postgres(lay: Layout, task_id: str) -> None:
+    data = lay.pg / "data"
+    if (data / "postmaster.pid").exists():
+        _service_run(lay, task_id, _pg("pg_ctl"), "-D", str(data), "-m", "fast", "-w", "-t", "60", "stop")
+
+
+def _start_redis(lay: Layout, task_id: str, port: int) -> None:
+    pidfile = lay.redis / "redis.pid"
+    if pidfile.exists() and _alive(pidfile):
+        return
+    redis = shutil.which("redis-server", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
+    if redis is None:
+        raise Refused("no redis-server installed")
+    done = _service_run(
+        lay, task_id, redis, "--port", str(port), "--bind", "127.0.0.1", "--protected-mode", "yes",
+        "--save", "", "--appendonly", "no", "--unixsocket", "", "--dir", str(lay.redis),
+        "--enable-protected-configs", "no", "--enable-debug-command", "no", "--enable-module-command", "no",
+        "--daemonize", "yes", "--pidfile", str(pidfile), "--logfile", str(lay.redis / "redis.log"),
+    )  # fmt: skip
+    if done.returncode != 0:
+        raise Refused(f"redis-server did not start: {done.stderr.strip()[-300:]}")
+    for _ in range(100):
+        if _connects(port):
+            return
+        time.sleep(0.05)
+    raise Refused(f"redis-server did not come up on {port}; see {lay.redis / 'redis.log'}")
+
+
+def _alive(pidfile: Path) -> bool:
+    try:
+        os.kill(int(pidfile.read_text().strip()), 0)
+        return True
+    except ValueError, OSError:
+        return False
+
+
+def _connects(port: int) -> bool:
+    s = socket.socket()
+    s.settimeout(0.2)
+    try:
+        s.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def start_services(task_id: str, lay: Layout | None, services, ports: dict[str, int]) -> None:
+    """Start the task's services if they are down (idempotent)."""
+    lay = lay or layout(task_id)
+    if "postgres" in services:
+        _start_postgres(lay, task_id)
+    if "redis" in services:
+        _start_redis(lay, task_id, int(ports["redis"]))
+
+
+def stop_services(task_id: str, lay: Layout | None = None) -> list[dict[str, Any]]:
+    """Stop the task's services: Postgres cleanly, then every process left
+    under its service mark. Returns what the mark reaped."""
+    lay = lay or layout(task_id)
+    if (lay.profiles / "service.sb").exists():
+        try:
+            _stop_postgres(lay, task_id)
+        except subprocess.TimeoutExpired:
+            pass
+    return runs.reap_sandboxed(f"valor.service.{task_id}", "valor.service.none")
+
+
+def services_of(brief) -> tuple[list[str], dict[str, int]]:
+    project = getattr(brief, "project", None) or {}
+    return list(project.get("services") or []), {k: int(v) for k, v in (project.get("ports") or {}).items()}
+
+
+# -- the kernel mirror ------------------------------------------------------------------------
+
+
+class FetchRefused(RuntimeError):
+    pass
+
+
+@functools.cache
+def _rusage():
+    lib = ctypes.CDLL("/usr/lib/libproc.dylib")
+    lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    lib.proc_pid_rusage.restype = ctypes.c_int
+    return lib.proc_pid_rusage
+
+
+def footprint(pid: int) -> int:
+    """A process's physical footprint in bytes (`rusage_info_v2`), or 0."""
+    buf = ctypes.create_string_buffer(512)
+    if _rusage()(pid, 2, buf) != 0:
+        return 0
+    return int.from_bytes(buf.raw[72:80], "little")
+
+
+def _group(pgid: int) -> list[int]:
+    listing = subprocess.run(
+        [binaries.require(binaries.PS), "-A", "-o", "pid=,pgid="], capture_output=True, text=True, check=False
+    ).stdout
+    return [
+        int(p) for p, g in (line.split() for line in listing.splitlines() if line.strip()) if int(g) == pgid
+    ]
+
+
+def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, max_footprint: int,
+            timeout: float) -> tuple[int | str, str]:  # fmt: skip
+    """Run `argv` in its own process group with a file-size limit, killing
+    the whole group when its summed footprint passes `max_footprint` or the
+    time limit passes. Returns the exit code (or `footprint`, `timeout`) and
+    the stderr tail."""
+
+    # The file-size limit is set by /bin/sh (root's) before it execs the
+    # command, since a preexec function is unsafe in a threaded process.
+    blocks = max(1, max_bytes // 512)
+    wrapped = ["/bin/sh", "-c", f'ulimit -f {blocks} && exec "$@"', "sh", *argv]
+    proc = subprocess.Popen(
+        wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
+    )
+    deadline = time.monotonic() + timeout
+    why: int | str | None = None
+    while proc.poll() is None:
+        if time.monotonic() > deadline:
+            why = "timeout"
+        elif sum(footprint(p) for p in _group(proc.pid)) > max_footprint:
+            why = "footprint"
+        if why:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            break
+        time.sleep(0.5)
+    _, err = proc.communicate()
+    return (why or proc.returncode), err.decode(errors="replace")[-400:]
+
+
+def fetch_into_mirror(
+    mirror: str | Path,
+    source: str | Path,
+    sha: str,
+    ref: str,
+    turn_profile_path: str | Path,
+    mark: str,
+    *,
+    max_bytes: int | None = None,
+    max_footprint: int | None = None,
+) -> None:
+    """Fetch one commit from a clone a turn controls into the kernel mirror,
+    under `ref`. Raises `FetchRefused` with the reason."""
+    source, mirror = Path(source), Path(mirror)
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise FetchRefused(f"{sha!r} is not a full commit id")
+    if not ref.startswith("refs/valor/"):
+        raise FetchRefused(f"{ref} is not a mirror ref")
+    try:
+        found = git.hostile(source)
+    except git.GitError as exc:
+        raise FetchRefused(str(exc)) from None
+    if found:
+        raise FetchRefused("the clone's git config names what the kernel will not run: " + "; ".join(found))
+    gitdir = source / ".git" if (source / ".git").is_dir() else source
+    for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow"):
+        if (gitdir / name).exists() or (gitdir / name).is_symlink():
+            raise FetchRefused(f"the clone has {name}, which the kernel will not fetch from")
+    git_bin = git.binary()
+    upload = " ".join(
+        shlex.quote(a)
+        for a in [
+            binaries.require(binaries.SANDBOX_EXEC), "-D", "GATEWAY_PORT=1", "-D", f"VALOR_TURN={mark}",
+            "-f", str(turn_profile_path), git_bin, "-c", "uploadpack.allowAnySHA1InWant=true", "upload-pack",
+        ]
+    )  # fmt: skip
+    argv = [
+        git_bin, "-C", str(mirror), *git.PINNED,
+        "-c", "transfer.fsckObjects=true", "-c", "fetch.fsckObjects=true", "-c", "fetch.unpackLimit=1",
+        "-c", "transfer.unpackLimit=1", "-c", "protocol.file.allow=always",
+        "fetch", "-q", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+        f"--upload-pack={upload}", str(source), f"+{sha}:{ref}",
+    ]  # fmt: skip
+    code, err = bounded(
+        argv,
+        cwd=mirror,
+        env=git.env(),
+        max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
+        max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
+        timeout=settings.git_timeout_s,
+    )
+    runs.reap(mark)
+    if code != 0:
+        try:
+            git.trusted(mirror, "update-ref", "-d", ref)
+        except git.GitError:
+            pass
+        if code == "footprint":
+            raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
+        if code == "timeout":
+            raise FetchRefused("the fetch into the kernel mirror did not finish in time")
+        raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
+
+
+# -- fresh checkouts -----------------------------------------------------------------------------
+
+KERNEL_IDENTITY = {
+    "GIT_AUTHOR_NAME": "Valor kernel",
+    "GIT_AUTHOR_EMAIL": "kernel@valor.invalid",
+    "GIT_COMMITTER_NAME": "Valor kernel",
+    "GIT_COMMITTER_EMAIL": "kernel@valor.invalid",
+    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
+}
+
+
+def fresh_dir(check_dir: Path) -> Path:
+    """Remove and make a fresh session's directory, never following a link."""
+    if check_dir.is_symlink():
+        check_dir.unlink()
+    elif check_dir.exists():
+        shutil.rmtree(check_dir)
+    for d in (check_dir / "tmp", check_dir / "claude"):
+        d.mkdir(parents=True)
+    return check_dir
+
+
+def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[str, str]:
+    """A repository at `dest` holding exactly two commits the kernel made:
+    `base` (the base's tree) and `candidate` (`rev`'s tree), with only the
+    objects those trees reach, so no builder commit message, intermediate
+    commit, or object outside the two trees exists in it."""
+    mirror = Path(mirror)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    git.trusted(dest.parent, "init", "-q", "-b", "main", str(dest))
+    borrow = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects"), **KERNEL_IDENTITY}
+    base_tree = git.trusted(dest, "rev-parse", f"{base}^{{tree}}", extra_env=borrow)
+    rev_tree = git.trusted(dest, "rev-parse", f"{rev}^{{tree}}", extra_env=borrow)
+    first = git.trusted(dest, "commit-tree", base_tree, "-m", "base", extra_env=borrow)
+    second = git.trusted(dest, "commit-tree", rev_tree, "-p", first, "-m", "candidate", extra_env=borrow)
+    git.trusted(dest, "update-ref", "refs/heads/main", second, extra_env=borrow)
+    git.trusted(dest, "repack", "-a", "-d", "-q", extra_env=borrow)
+    git.trusted(dest, "checkout", "-q", "-f", "main")
+    with (dest / ".git" / "info" / "exclude").open("a") as f:
+        f.write(".valor/\n")
+    return {"base": first, "candidate": second}
+
+
+def check_harness(lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str]) -> dict[str, Any]:
+    """The harness settings of one fresh session: its own profile, TMPDIR,
+    Claude Code config directory, and the trusted git first on PATH."""
+    name = check_dir.name
+    path = lay.profiles / f"{name}.sb"
+    path.write_text(check_profile(lay, check_dir, ports))
+    git_dir = str(Path(git.binary()).parent)
+    fresh_env = {
+        k: v for k, v in env.items() if k not in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "npm_config_cache")
+    }
+    fresh_env["PATH"] = f"{git_dir}:{fresh_env.get('PATH', '/usr/bin:/bin')}"
+    return {
+        "sandbox_profile": str(path),
+        "tmpdir": str(check_dir / "tmp"),
+        "claude_config_dir": str(check_dir / "claude"),
+        "env": fresh_env,
+    }
+
+
+def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    """The verdict a fresh session left at `.valor/verdict.json`, opened
+    component by component without following links and without blocking;
+    then moved to `.valor/handled/<turn_id>/`. Returns (verdict, why not)."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        root = os.open(checkout, flags | os.O_DIRECTORY)
+    except OSError as exc:
+        return None, f"the checkout cannot be opened: {exc.strerror}"
+    try:
+        try:
+            valor = os.open(".valor", flags | os.O_DIRECTORY, dir_fd=root)
+        except FileNotFoundError:
+            return None, "no .valor/verdict.json"
+        except OSError as exc:
+            return None, f".valor is not a plain directory ({exc.strerror})"
+        try:
+            try:
+                fd = os.open("verdict.json", flags | os.O_NONBLOCK, dir_fd=valor)
+            except FileNotFoundError:
+                return None, "no .valor/verdict.json"
+            except OSError as exc:
+                return None, f"verdict.json is not a plain file ({exc.strerror})"
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    return None, "verdict.json is not a regular file"
+                if st.st_size > settings.verdict_max_bytes:
+                    return None, f"verdict.json is over {settings.verdict_max_bytes} bytes"
+                body = os.read(fd, settings.verdict_max_bytes + 1)
+            finally:
+                os.close(fd)
+            why = _file_away(valor, "verdict.json", turn_id)
+            if why:
+                return None, why
+        finally:
+            os.close(valor)
+    finally:
+        os.close(root)
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, "verdict.json is not JSON"
+    if not isinstance(data, dict):
+        return None, "verdict.json is not a JSON object"
+    return data, None
+
+
+def _file_away(valor: int, name: str, turn_id: str) -> str | None:
+    """Move `.valor/<name>` to `.valor/handled/<turn_id>/<name>`, every step
+    relative to a descriptor and never through a link."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
+    fds = []
+    try:
+        parent = valor
+        for part in ("handled", turn_id):
+            try:
+                os.mkdir(part, 0o755, dir_fd=parent)
+            except FileExistsError:
+                pass
+            try:
+                parent = os.open(part, flags, dir_fd=parent)
+            except OSError as exc:
+                return f".valor/{part} is not a plain directory ({exc.strerror})"
+            fds.append(parent)
+        os.rename(name, name, src_dir_fd=valor, dst_dir_fd=parent)
+        return None
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def remove(task_id: str, lay: Layout | None = None) -> None:
+    lay = lay or layout(task_id)
+    stop_services(task_id, lay)
+    if lay.root.exists():
+        shutil.rmtree(lay.root)
+
+
+# -- other tasks' services --------------------------------------------------------------------
+
+
+async def sweep(conn, task_id: str) -> list[dict[str, Any]]:
+    """Stop the services of every other task whose run is not live, which a
+    killed kernel left up. Under the `workspace:ports` lock, each other task
+    with services is stopped only when its router lock (`run:<task>`) can be
+    taken, so a run in progress keeps its services. Returns what was
+    stopped, each entry naming its task."""
+    import asyncio
+
+    stopped: list[dict[str, Any]] = []
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
+    try:
+        rows = await (
+            await conn.execute(
+                "SELECT d.id, d.body->>'mirror' FROM documents d WHERE d.kind = 'task' AND d.id <> %s "
+                "AND jsonb_array_length(COALESCE(d.body->'project'->'services', '[]'::jsonb)) > 0 "
+                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = d.id AND e.type = 'workspace.removed')",
+                (task_id,),
+            )
+        ).fetchall()
+        marked = await asyncio.to_thread(runs.marked_services, [other for other, _ in rows])
+        for other, mirror in rows:
+            if other not in marked:
+                continue
+            key = f"run:{other}"
+            got = await (
+                await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+            ).fetchone()
+            if not got[0]:
+                continue
+            try:
+                lay = Layout(Path(mirror).parent) if mirror else None
+                found = await asyncio.to_thread(stop_services, other, lay)
+                stopped += [{**r, "task": other} for r in found]
+            finally:
+                await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
+    return stopped

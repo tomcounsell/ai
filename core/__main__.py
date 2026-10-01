@@ -13,6 +13,14 @@ start INSTRUCTION --budget-usd N [--ceiling C] [--workspace DIR]
                                The task starts in judge. The merge lands on
                                `--target-branch` (default: the branch origin's
                                HEAD names) at origin's URL as it is now
+start INSTRUCTION --project NAME_OR_FILE [--branch B] [--base SHA] --budget-usd N ...
+                               provision the task's workspace from a project
+                               spec (clone at the base, bare origin, kernel
+                               mirror, its own Postgres and Redis, setup), then
+                               start it; the merge lands on its own origin
+workspace show TASK_ID         where the kernel provisioned the task
+workspace remove TASK_ID       delete a stopped or merged task's workspace and
+                               free its ports
 run TASK_ID                    run the task through the state machine until it
                                needs Tom or a stage with no runner; prints one
                                status line. The judge asks the judgement port;
@@ -35,13 +43,13 @@ feedback TASK_ID TEXT [--by B] [--role-played]
                                next run patches in the same session. `--by`
                                names who wrote it (default tom); `--role-played`
                                marks a stand-in speaking for Tom
-verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]... [--raise-critique N]
-      [--raise-review N] [--governance PATH:LINE]... [--incident T]
+verdict TASK_ID STAGE VERDICT [--finding KIND:TEXT]...
+      [--governance PATH:LINE]... [--incident T]
       [--mission-item N] [--head SHA] [--suite-command C] [--failure T]...
       [--behavior T]... [--by B] [--via V] [--role-played]
                                record by hand the verdict of a stage that has
-                               no runner yet (critique, test, review, docs),
-                               `leg: manual`
+                               no runner yet (test, review, docs), `leg:
+                               manual`; critique has its runner
 grant TASK_ID INSTANCE --note TEXT [--incident T] [--mission-item N] [--via V]
                                Tom's tap on one governance instance of the
                                delivery; always his, never role-played
@@ -73,6 +81,7 @@ imports outside it.
 
 import argparse
 import asyncio
+import dataclasses
 import json
 from pathlib import Path
 
@@ -83,13 +92,16 @@ from core import (
     corrections,
     credentials,
     db,
+    fresh,
     guards,
     judgement,
     judgement_sites,
     ledger,
+    machine,
     router,
     session,
     tasks,
+    workspace,
 )
 from core import verdicts as verdicts_
 from core.machine import State
@@ -100,8 +112,10 @@ def _performers(b: tasks.Brief) -> None:
     from tools.push_branch import Merge, PushBranch
 
     if b.workspace:
-        broker.register(PushBranch(b.workspace, url=b.origin_url, protected=b.target_branch))
-        broker.register(Merge(b.workspace))
+        # push_branch goes to the task's own bare origin; the merge pushes
+        # from the kernel mirror when the kernel provisioned the task.
+        broker.register(PushBranch(b.workspace, url=b.push_url or b.origin_url, protected=b.target_branch))
+        broker.register(Merge(b.mirror or b.workspace))
 
 
 def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
@@ -110,6 +124,12 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
     return claude_code.workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=b.harness
     )
+
+
+def _fresh_for(prompt: str, checkout: str, model: str, harness: dict):
+    from harnesses import claude_code
+
+    return claude_code.workspace_turn(prompt, cwd=checkout, model=model, harness=harness)
 
 
 async def _working(ctx: router.Context) -> dict:
@@ -138,14 +158,15 @@ def port(keyfile: str | None = None) -> judgement.JudgementPort:
 
 
 def runners(judgement_port: judgement.JudgementPort | None) -> dict:
-    """The runner for each state this kernel can run. The critique and check
-    runners (1.4) are added here."""
+    """The runner for each state this kernel can run. The check runners
+    (1.4b, 1.4c) are added here."""
     return {
         State.JUDGE: judgement_sites.judge_runner(judgement_port),
         State.CLARIFY: _working,
         State.PLAN: _working,
         State.BUILD: _working,
         State.PATCH: _working,
+        State.CRITIQUE: fresh.critique_runner(_fresh_for),
     }
 
 
@@ -209,7 +230,7 @@ def _status_line(task_id: str, out: dict) -> str:
 
 
 async def _run_task(task_id: str) -> str:
-    from core.gateway import Gateway
+    from core.gateway import ClaudeLogin, Gateway
 
     async with await db.connect() as conn:
         b = await tasks.brief(conn, task_id)
@@ -220,7 +241,7 @@ async def _run_task(task_id: str) -> str:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
         raise SystemExit(f"run refused: {exc}") from None
-    gateway = Gateway()
+    gateway = Gateway(credential=ClaudeLogin())
     await gateway.start()
     try:
         out = await router.run(gateway, task_id, runners(judgement_port))
@@ -229,6 +250,87 @@ async def _run_task(task_id: str) -> str:
     finally:
         await gateway.close()
     return _status_line(task_id, out)
+
+
+async def _start_project(conn, args) -> str:
+    """Provision the task's workspace from its project spec, then start it,
+    under the lock that keeps two starts from taking one port."""
+    if args.workspace or args.harness_config or args.target_branch:
+        raise SystemExit(
+            "--project provisions the workspace; it takes no --workspace, --harness-config, or --target-branch"
+        )
+    try:
+        spec = workspace.Spec.load(args.project)
+        if args.branch:
+            spec = dataclasses.replace(spec, branch=args.branch, target_branch=args.branch)
+    except workspace.Refused as exc:
+        raise SystemExit(f"start refused: {exc}") from None
+    task_id = ledger.new_id()
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
+    try:
+        taken = await workspace.taken_ports(conn)
+        ports: dict[str, int] = {}
+        if "postgres" in spec.services:
+            ports["postgres"] = workspace.choose_port(settings.pg_ports, taken)
+        if "redis" in spec.services:
+            ports["redis"] = workspace.choose_port(settings.redis_ports, taken)
+        made = await asyncio.to_thread(workspace.provision, task_id, spec, ports, base=args.base)
+        brief = tasks.Brief(
+            id=task_id,
+            instruction=args.instruction,
+            budget_usd_micros=round(args.budget_usd * 1_000_000),
+            max_effect_class=args.ceiling,
+            model=resolve_model(args.model),
+            **made.brief_fields(),
+        )
+        try:
+            return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
+        except BaseException:
+            await asyncio.to_thread(workspace.remove, task_id)
+            raise
+    except workspace.Refused as exc:
+        raise SystemExit(f"start refused: {exc}") from None
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
+
+
+async def _workspace(conn, args) -> str:
+    """`workspace show TASK` prints where the kernel provisioned it;
+    `workspace remove TASK` (Tom's) deletes it, only once the task is
+    stopped or merged, and frees its ports."""
+    try:
+        b = await tasks.brief(conn, args.task_id)
+    except KeyError:
+        raise SystemExit(f"no task {args.task_id}") from None
+    if not b.mirror:
+        raise SystemExit(f"task {args.task_id} has no workspace the kernel provisioned")
+    if args.workspace_command == "show":
+        keys = (
+            "workspace",
+            "mirror",
+            "push_url",
+            "origin_url",
+            "target_branch",
+            "base_sha",
+            "harness",
+            "project",
+        )
+        return json.dumps({k: getattr(b, k) for k in keys}, indent=2)
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{args.task_id}")
+        f = machine.fold(await ledger.read(conn, args.task_id))
+        if f.state not in (State.STOPPED, State.MERGED):
+            raise SystemExit(
+                f"task {args.task_id} is in {f.state}; only a stopped or merged task's workspace is removed"
+            )
+        await asyncio.to_thread(workspace.remove, args.task_id, workspace.Layout(Path(b.mirror).parent))
+        await ledger.append(
+            conn,
+            args.task_id,
+            "workspace.removed",
+            {"path": str(Path(b.mirror).parent), "provenance": ledger.provenance(args.by, args.via, False)},
+        )
+    return f"removed the workspace of task {args.task_id}"
 
 
 def _instance(spec: str, args) -> verdicts_.InstanceSpec:
@@ -240,35 +342,27 @@ def _instance(spec: str, args) -> verdicts_.InstanceSpec:
 
 async def _verdict(conn, args) -> str:
     stage = verdicts_.MANUAL_STAGES.get(args.stage)
+    if stage is None and args.stage in {k.value for k in RUNNERS}:
+        raise SystemExit(f"{args.stage} has a runner; its verdict is the runner's to record")
     if stage is None:
         raise SystemExit(f"no manual verdict for {args.stage}; one of {', '.join(verdicts_.MANUAL_STAGES)}")
     verdicts_.manual_allowed(stage, RUNNERS)
     who = {"by": args.by, "via": args.via, "role_played": args.role_played}
     _performers(await tasks.brief(conn, args.task_id))
-    if stage is State.CRITIQUE:
-        raised = {
-            k: v
-            for k, v in (("critique_rounds", args.raise_critique), ("review_rounds", args.raise_review))
-            if v is not None
-        }
-        await verdicts_.record_critique(
-            conn, args.task_id, args.verdict, findings=args.finding, raised=raised, **who
-        )
-    else:
-        await verdicts_.record_check(
-            conn,
-            args.task_id,
-            stage,
-            args.verdict,
-            findings=args.finding,
-            governance=[_instance(g, args) for g in args.governance],
-            head=args.head,
-            command=args.suite_command,
-            failures=args.failure,
-            behaviors=args.behavior,
-            **who,
-        )
-        await verdicts_.ensure_merge(conn, args.task_id)
+    await verdicts_.record_check(
+        conn,
+        args.task_id,
+        stage,
+        args.verdict,
+        findings=args.finding,
+        governance=[_instance(g, args) for g in args.governance],
+        head=args.head,
+        command=args.suite_command,
+        failures=args.failure,
+        behaviors=args.behavior,
+        **who,
+    )
+    await verdicts_.ensure_merge(conn, args.task_id)
     state = await tasks.status(conn, args.task_id)
     return f"recorded {args.stage} {args.verdict}; task {args.task_id} is in {state['state']}"
 
@@ -304,7 +398,9 @@ async def _run(args) -> None:
         print(json.dumps(record, indent=2))
         return
     async with await db.connect() as conn:
-        if args.command == "start":
+        if args.command == "start" and args.project:
+            print(await _start_project(conn, args))
+        elif args.command == "start":
             harness = json.loads(Path(args.harness_config).read_text()) if args.harness_config else {}
             workspace = str(Path(args.workspace).resolve()) if args.workspace else None
             try:
@@ -321,6 +417,8 @@ async def _run(args) -> None:
                 **where,
             )
             print(await tasks.start(conn, brief, by=args.by, role_played=args.role_played))
+        elif args.command == "workspace":
+            print(await _workspace(conn, args))
         elif args.command == "answer":
             try:
                 question_id = await session.answer(
@@ -507,6 +605,11 @@ def main() -> None:
     start.add_argument("--model", default="light")
     start.add_argument("--harness-config")
     start.add_argument("--target-branch")
+    start.add_argument(
+        "--project", help="a project spec's name (in projects_dir) or path: provision the workspace"
+    )
+    start.add_argument("--base", help="with --project: the base commit (default: the branch's head)")
+    start.add_argument("--branch", help="with --project: the branch to start from and merge onto")
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
@@ -515,8 +618,6 @@ def main() -> None:
     verdict.add_argument("stage")
     verdict.add_argument("verdict")
     verdict.add_argument("--finding", action="append", default=[])
-    verdict.add_argument("--raise-critique", type=int)
-    verdict.add_argument("--raise-review", type=int)
     verdict.add_argument("--governance", action="append", default=[])
     verdict.add_argument("--summary")
     verdict.add_argument("--incident")
@@ -541,6 +642,12 @@ def main() -> None:
         reply.add_argument("text")
         reply.add_argument("--by", default="tom")
         reply.add_argument("--role-played", action="store_true")
+    ws_cmd = sub.add_parser("workspace").add_subparsers(dest="workspace_command", required=True)
+    ws_cmd.add_parser("show").add_argument("task_id")
+    remove = ws_cmd.add_parser("remove")
+    remove.add_argument("task_id")
+    remove.add_argument("--by", default="tom")
+    remove.add_argument("--via", default="the command line")
     sub.add_parser("status").add_argument("task_id")
     sub.add_parser("ledger").add_argument("task_id")
     stop = sub.add_parser("stop")

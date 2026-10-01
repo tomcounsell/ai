@@ -178,7 +178,14 @@ an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
 
 The kernel's support today: the working session for every row above. The
-fresh sessions are milestone 1.4's.
+critique runs as a fresh session (`core/fresh.py`): a blind checkout made
+from the kernel mirror holding only the base's tree and the plan's tree as
+two kernel commits, inputs written by the kernel from ledger rows under
+`.valor/inputs/`, its own sandbox profile, `TMPDIR`, and Claude Code config
+directory, a Brief carrying the verdict channel (`skills/sdlc/verdict.md`)
+in place of the working session's, and one verdict file,
+`.valor/verdict.json`, read without following links or blocking. Review and
+docs are milestone 1.4's next tasks.
 
 Each prompt is followed by what did not count from the previous turn
 (`errors` on its `turn.collected`) and what became of the effects it
@@ -193,8 +200,11 @@ so the session's memory of an older Brief never stands in for the current
 one.
 
 Claude Code keeps the session as a JSONL file under
-`~/.claude/projects/<workspace path with / and . as ->/`. Resume is scoped to
-that directory: a session resumes only from the same workspace path.
+`<config dir>/projects/<workspace path with / and . as ->/`, where the config
+directory is the turn's own (`CLAUDE_CONFIG_DIR`; for a kernel workspace,
+`state/work/claude` for the working session, kept for the life of the task).
+Resume is scoped to that directory: a session resumes only from the same
+workspace path and config directory.
 
 ### What resume costs
 
@@ -297,7 +307,12 @@ carrying a per-turn token in the path. Claude Code sends every call through
 that base URL: the main loop, its own side calls, and any subagent it starts
 inside the turn. The demonstration's 69 model calls all passed the gateway,
 and the gateway and the harness agreed on the total (rebuild-demonstration.md,
-Money). The gateway forwards each call with the harness's own credentials;
+Money). A turn runs with its own Claude Code config directory, which holds
+no login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`) and the
+gateway sets the kernel's credential on each call: a long-lived token in the
+kernel key directory when one is there, otherwise the access token of the
+machine's Claude Code login read from the Keychain; the kernel never
+refreshes that login, and an expired one fails the call naming the remedy;
 the harness never holds a budget, and a refused call reaches it as an API
 error.
 
@@ -408,10 +423,14 @@ Stated so the boundary is drawn where it is [4]:
   wall.
 - `/tmp` is shared between runs. Common file names recurred across items in
   the baseline.
-- The profile denies no write to the machine user's own startup places:
-  `~/.local/bin` (which the user's PATH puts before `/usr/bin`),
-  `~/Library/LaunchAgents`, and the shell's rc files (`~/.zshrc` and the
-  like). A turn could leave a program there that a later process of the
+- Narrowed for kernel workspaces, not closed: their profiles deny writes to
+  the machine user's startup places, `~/.local/bin` (which the user's PATH
+  puts before `/usr/bin`), `~/Library/LaunchAgents`, the shell's rc files
+  (`~/.zshrc` and the like), Claude Code's install (`~/.local/share/claude`)
+  and state (`~/.claude`, `~/.claude.json`), git's global config, and
+  Homebrew's prefix, and every turn runs with `DISABLE_AUTOUPDATER=1`. The
+  demonstration's profile denies none of these, and other such places
+  remain: a turn could leave a program there that a later process of the
   user, outside the sandbox, runs. So can the caches under
   `/var/folders` that Apple's `/usr/bin` shims read: `/usr/bin/git` is the
   `xcrun` shim, which finds the real git through such a cache. The kernel
@@ -426,7 +445,10 @@ Stated so the boundary is drawn where it is [4]:
   runs unsandboxed and only in tests (the router never builds one).
   Homebrew's Postgres tools, which `python -m core backup` runs from
   launchd, sit in the user's own prefix too.
-- Every replay database is owned by the same `test` role with the same
+- (Closed for kernel workspaces: each task has a Postgres cluster of its own
+  with roles and passwords of its own, on its own port, and the turn's
+  profile reaches only that port.) Every demonstration database is owned by
+  the same `test` role with the same
   password, so a turn could connect to another run's database on 5439.
 - sandbox-exec is marked deprecated by Apple. The plan names Apple
   containers for sandboxes; which one runs which work is
@@ -511,7 +533,8 @@ it as a way out:
   dependency of the repository under test (popoto), never of the kernel.
 
 Tearing a run down drops its database and deletes its directory. **Gap**:
-it leaves the run's redis-server running; stopping it belongs in teardown.
+for a workspace the kernel provisioned, removal stops the task's Postgres
+and Redis by their service mark.
 
 ## Testing actual use: a browser
 

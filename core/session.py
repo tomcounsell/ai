@@ -35,7 +35,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from core import broker, db, git, ledger, machine, runs, signals, tasks
+from core import broker, db, git, ledger, machine, runs, signals, tasks, workspace
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
@@ -83,7 +83,14 @@ async def run(
         ok = ended["outcome"] == "done" and not ended["result"].get("is_error")
         async with await db.connect(dsn) as conn:
             await record(
-                conn, task_id, ended["turn_id"], found, state=state, workspace=b.workspace, finished=ok
+                conn,
+                task_id,
+                ended["turn_id"],
+                found,
+                state=state,
+                workspace=b.workspace,
+                finished=ok,
+                brief=b,
             )
             now = await tasks.status(conn, task_id)
             refused = await _refused_in_turn(conn, task_id, ended["turn_id"])
@@ -147,8 +154,28 @@ def _candidate(workspace: str | None, turn_id: str) -> tuple[dict[str, str] | No
     return {"sha": head, "turn_id": turn_id}, None
 
 
+def _keep(brief: tasks.Brief | None, sha: str, ref: str, turn_id: str) -> str | None:
+    """Fetch a plan commit or a candidate into the kernel mirror of a task
+    the kernel provisioned; why not, or None. A task without a mirror keeps
+    nothing."""
+    if brief is None or not brief.mirror:
+        return None
+    try:
+        workspace.fetch_into_mirror(
+            brief.mirror, brief.workspace, sha, ref, brief.harness["sandbox_profile"], f"mirror-{turn_id}"
+        )
+    except (workspace.FetchRefused, git.GitError) as exc:
+        return str(exc)
+    return None
+
+
 def _verdict(
-    state: State, found: signals.Signals, workspace: str | None, turn_id: str, finished: bool
+    state: State,
+    found: signals.Signals,
+    workspace: str | None,
+    turn_id: str,
+    finished: bool,
+    brief: tasks.Brief | None = None,
 ) -> tuple[str, dict[str, Any], list[str]]:
     """The turn's verdict in its state, what goes with it, and the signals
     that did not count."""
@@ -171,6 +198,9 @@ def _verdict(
         return "no_material_question", extra, errors
     if state is State.PLAN and found.plan is not None:
         plan, why = _plan(workspace, found.plan)
+        if plan is not None:
+            why = _keep(brief, plan["commit"], f"refs/valor/plans/{turn_id}", turn_id)
+            plan = None if why else plan
         if plan is None:
             errors.append(why)
         else:
@@ -178,6 +208,9 @@ def _verdict(
             return "planned", extra, errors
     if state in (State.BUILD, State.PATCH) and found.done is not None:
         candidate, why = _candidate(workspace, turn_id)
+        if candidate is not None:
+            why = _keep(brief, candidate["sha"], f"refs/valor/candidates/{turn_id}", turn_id)
+            candidate = None if why else candidate
         if candidate is None:
             errors.append(why)
         else:
@@ -195,10 +228,12 @@ async def record(
     state: State,
     workspace: str | None,
     finished: bool = True,
+    brief: tasks.Brief | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
-    the broker. Returns the verdict."""
-    verdict, extra, errors = _verdict(state, found, workspace, turn_id, finished)
+    the broker. Returns the verdict. For a task with a kernel mirror, a plan
+    commit or a candidate counts only once it is fetched into the mirror."""
+    verdict, extra, errors = _verdict(state, found, workspace, turn_id, finished, brief)
     effects = []
     for entry in found.effects:
         if "request" in entry and entry["request"]["action_type"] == "merge":

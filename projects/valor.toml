@@ -1,0 +1,21 @@
+# This repository, as the kernel builds it after takeover. The rebuild's
+# branch is given at start (`python -m core start ... --project valor
+# --branch <the rebuild branch>`). Until 1.4d every merge lands on the
+# task's own bare origin; merge_url is honoured from then, for targets Tom
+# has granted.
+name = "valor"
+repo = "https://github.com/tomcounsell/ai.git"
+kind = "python-uv"
+services = ["postgres"]
+roles = ["valor_kernel"]
+setup = ["uv sync --frozen"]
+suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
+lint = "uv run ruff check ."
+merge_url = "https://github.com/tomcounsell/ai.git"
+
+[env]
+VALOR_PGHOST = "127.0.0.1"
+VALOR_PGPORT = "{port}"
+VALOR_PG_OWNER = "app"
+VALOR_PG_PASSFILE = "{passfile}"
+VALOR_TEST_DB = "app_test"

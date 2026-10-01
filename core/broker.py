@@ -350,7 +350,10 @@ async def _release(conn, effect_id: str) -> Outcome:
             raise Refused(said)
         if described["action_type"] == "merge":
             f = machine.fold(await ledger.read(conn, task_id))
-            facts = _git_facts((await tasks.brief(conn, task_id)).workspace, f, described["payload"])
+            b = await tasks.brief(conn, task_id)
+            # A task the kernel provisioned reads its git facts from the
+            # kernel mirror, which no turn writes.
+            facts = _git_facts(b.mirror or b.workspace, f, described["payload"])
             failed = machine.merge_predicate(
                 f, described["payload"], approval_unused=row is not None, facts=facts
             )

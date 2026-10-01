@@ -29,6 +29,7 @@ import os
 from urllib.parse import urlparse
 
 from core import binaries
+from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
 from core.settings import settings
 
@@ -131,7 +132,10 @@ def workspace_turn(
     config directory; `env`, variables added to the turn's environment (the
     workspace's own settings, such as where its test database listens);
     `max_output_tokens`, the per-call output cap, which sets the gateway's
-    worst-case reservation for each call. The rest are optional.
+    worst-case reservation for each call; `tmpdir`, the turn's own
+    `TMPDIR`; `claude_config_dir`, its own Claude Code config directory,
+    with the gateway supplying the credential. The rest are optional. A
+    fresh session (critique, review, docs) is this with no `resume`.
     """
     harness = harness or {}
     if not harness.get("sandbox_profile"):
@@ -156,6 +160,18 @@ def workspace_turn(
             env["GIT_CONFIG_NOSYSTEM"] = "1"
         if harness.get("gh_config_dir"):
             env["GH_CONFIG_DIR"] = harness["gh_config_dir"]
+        env["DISABLE_AUTOUPDATER"] = "1"
+        if harness.get("tmpdir"):
+            # Claude Code keeps its own scratch under /tmp/claude-<uid>
+            # unless told otherwise; a fresh session's profile denies /tmp.
+            env["TMPDIR"] = env["CLAUDE_CODE_TMPDIR"] = harness["tmpdir"]
+        if harness.get("claude_config_dir"):
+            # The turn's own Claude Code state (sessions, todos, snapshots),
+            # shared with no other turn. It holds no login, so the turn
+            # carries a placeholder the gateway replaces with the kernel's
+            # credential (core/gateway.py).
+            env["CLAUDE_CONFIG_DIR"] = harness["claude_config_dir"]
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = TURN_TOKEN
         argv = [
             settings.claude,
             "-p",

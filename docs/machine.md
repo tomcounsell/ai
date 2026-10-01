@@ -83,10 +83,14 @@ Daemons a test suite leaves behind (a daemonized `redis-server`, a dev
 server) are in that list. This is what keeps on-demand memory on demand,
 and it serves the constraint "reliable stop, recovery, and correction".
 
-The workspace cluster and a run's Redis start when the run is provisioned
-and stop when its task ends. Idle, the workspace cluster costs 36 MB;
-after a test suite has filled its buffers it costs ten times that, which
-is why it is stopped rather than left up.
+Each task the kernel provisions has a workspace cluster of its own (and a
+Redis when its project asks). They start when a run of the task first
+needs them and stop when that run returns, and every run first stops the
+services of other tasks a killed kernel left up, unless their own run is
+live, so on the 16 GB machine only the running task's services are up.
+Idle, a workspace cluster costs 36 MB; after a test suite has filled its
+buffers it costs ten times that, which is why it is stopped rather than
+left up.
 
 ## The RAM budget
 
@@ -248,7 +252,7 @@ authority, and a turn holds none.
 
 | Secret | Read by | Today |
 |---|---|---|
-| The Anthropic credential for frontier turns | The gateway, which forwards the harness's own credential upstream | Claude Code's own login, which Claude Code keeps in the Keychain. The kernel holds no API key of its own |
+| The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |
 | The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run` or `calibrate` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
 | Telegram API id, hash, and session | The Telegram bridge | Not built |
 | Mail credentials | The email bridge | Not built |

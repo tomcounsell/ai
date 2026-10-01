@@ -42,6 +42,9 @@ class Check(StrEnum):
 
 # The states a turn of the working session runs in.
 WORKING = (State.CLARIFY, State.PLAN, State.BUILD, State.PATCH)
+# What the fold records as the state of a fresh session's turn: never a
+# working state, so its session id is never resumed.
+FRESH = "fresh"
 
 VERDICTS: dict[State | Check, frozenset[str]] = {
     State.JUDGE: frozenset({"precise", "thin"}),
@@ -367,14 +370,17 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
     entry = {"type": kind, "id": row.get("id"), "payload": p}
     s = f.state
     if kind == "turn.started":
-        f.turn_states[str(p["turn_id"])] = str(p.get("state"))
+        f.turn_states[str(p["turn_id"])] = FRESH if p.get("fresh") else str(p.get("state"))
         return None
     if kind == "turn.ended":
         turn_id = str(p["turn_id"])  # read before anything changes, so a malformed row changes nothing
         result = p.get("result") or {}
         if not isinstance(result, dict):
             return "turn.ended result is not an object"
-        if result.get("session_id"):
+        # Only the working session's turns name the session the next
+        # clarify, plan, build, or patch turn resumes; a fresh session's
+        # (critique, review, docs) never does.
+        if result.get("session_id") and f.turn_states.get(turn_id) != FRESH:
             f.session = result["session_id"]
         if (
             p.get("outcome") == "done"
@@ -549,6 +555,7 @@ def _legacy(rows: list[dict[str, Any]]) -> Fold:
     f = Fold(legacy=True)
     stopped = delivered = reopened = turns = False
     asked: dict[str, bool] = {}
+    fresh: set[str] = set()
     for row in rows:
         try:
             kind, p = row["type"], row["payload"]
@@ -565,9 +572,12 @@ def _legacy(rows: list[dict[str, Any]]) -> Fold:
                 asked[str(p["question_id"])] = True
             elif kind == "turn.started":
                 turns = True
+                if p.get("fresh"):
+                    fresh.add(str(p["turn_id"]))
             elif kind == "turn.ended":
                 result = p.get("result") or {}
-                f.session = result.get("session_id") or f.session
+                if str(p["turn_id"]) not in fresh:
+                    f.session = result.get("session_id") or f.session
         except (KeyError, TypeError, AttributeError) as exc:
             f.ignored.append({"id": row.get("id"), "type": row.get("type"), "why": f"malformed: {exc!r}"})
     if stopped:

@@ -1,4 +1,4 @@
-"""Two local performers for the broker.
+"""Two local performers for the broker, used only by the tests.
 
 `WorkspaceWrite` (`propose`) writes a file inside a task's workspace
 directory: reversible, since the file can be deleted. `OutboxAppend` (`act`)

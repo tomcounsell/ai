@@ -63,11 +63,14 @@ async def run_turn(
     build: Callable[[str, str], TurnCommand],
     dsn: str | None = None,
     state: str | None = None,
+    fresh: str | None = None,
 ) -> dict[str, Any]:
     """Run one turn of the task to its end or its stop, in `state` (the
     state machine's state the turn works in, recorded on `turn.started`;
-    None for a turn outside the machine). Returns the `turn.ended`
-    payload."""
+    None for a turn outside the machine). `fresh` names the stage of a fresh
+    session (critique, review, docs): its Brief carries the verdict channel,
+    and `turn.started` says `fresh: true`, so the fold never resumes its
+    session. Returns the `turn.ended` payload."""
     turn_id = ledger.new_id()
     dsn = dsn or gateway.dsn
     listener = await db.connect(dsn)
@@ -82,7 +85,9 @@ async def run_turn(
             if await tasks.is_stopped(conn, task_id):
                 gateway.retire(task_id)
                 raise tasks.TaskStopped(task_id)
-            dispatched = await tasks.dispatch(conn, task_id, state=machine.State(state) if state else None)
+            dispatched = await tasks.dispatch(
+                conn, task_id, state=machine.State(state) if state else None, fresh=fresh
+            )
             command = build(base_url, dispatched["text"], turn_id)
             await ledger.append(
                 conn,
@@ -91,6 +96,7 @@ async def run_turn(
                 {
                     "turn_id": turn_id,
                     "state": state,
+                    **({"fresh": True, "stage": fresh} if fresh else {}),
                     "harness": command.harness,
                     "argv": command.argv,
                     "brief": dispatched["text"],
@@ -167,7 +173,49 @@ def _kill_group(pid: int) -> None:
 def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
     """Stop every process the turn left behind (marked with `turn_id`, or in
     process group `pgid`); return what was stopped."""
-    pids = _turn_processes(turn_id, pgid)
+    return _stop(_turn_processes(turn_id, pgid))
+
+
+def reap_sandboxed(name: str, control: str) -> list[dict[str, Any]]:
+    """Stop every process of this user under a sandbox that denies the mach
+    name `name` and not `control` (an App Sandbox denies every such name):
+    how a task's services are found, also after the kernel died."""
+    denies = _sandbox_check()
+    if not denies:
+        return []
+    listing = subprocess.run(
+        [binaries.require(binaries.PS), "-A", "-o", "pid=,uid="], capture_output=True, text=True, check=True
+    ).stdout
+    pids = []
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or int(fields[1]) != os.getuid() or int(fields[0]) == os.getpid():
+            continue
+        pid = int(fields[0])
+        if denies(pid, name) and not denies(pid, control):
+            pids.append(pid)
+    return _stop(pids)
+
+
+def marked_services(task_ids: list[str]) -> set[str]:
+    """Which of these tasks have a process of this user running under their
+    service mark (`valor.service.<task>`), from one process listing."""
+    denies = _sandbox_check()
+    if not denies or not task_ids:
+        return set()
+    listing = subprocess.run(
+        [binaries.require(binaries.PS), "-A", "-o", "pid=,uid="], capture_output=True, text=True, check=True
+    ).stdout
+    found: set[str] = set()
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or int(fields[1]) != os.getuid() or denies(int(fields[0]), "valor.service.none"):
+            continue
+        found.update(t for t in task_ids if t not in found and denies(int(fields[0]), f"valor.service.{t}"))
+    return found
+
+
+def _stop(pids: list[int]) -> list[dict[str, Any]]:
     if not pids:
         return []
     names = _commands(pids)

@@ -191,6 +191,30 @@ class Settings:
     # -- the replay and demonstration workspaces ------------------------------
     demo_dir: str = field(default_factory=lambda: _env("VALOR_DEMO", str(Path.home() / "src" / "valor-demo")))
 
+    # -- kernel workspaces: one directory per task, outside ~/src (which the
+    # turn sandbox denies); project specs; per-task service ports ----------
+    work_dir: str = field(default_factory=lambda: _env("VALOR_WORK", str(Path.home() / "valor-tasks")))
+    projects_dir: str = field(
+        default_factory=lambda: _env(
+            "VALOR_PROJECTS", str(Path(__file__).resolve().parent.parent / "projects")
+        )
+    )
+    pg_ports: tuple[int, int] = (5440, 5599)
+    redis_ports: tuple[int, int] = (6400, 6499)
+    # How long one `setup` command may run at provisioning.
+    setup_timeout_s: float = field(default_factory=lambda: float(_env("VALOR_SETUP_TIMEOUT_S", "1200")))
+    # The kernel mirror's fetch from a builder's clone: the largest file the
+    # receiving git may write, and the footprint past which it is killed
+    # (macOS enforces no memory limit on a process).
+    mirror_fetch_max_bytes: int = field(
+        default_factory=lambda: int(_env("VALOR_MIRROR_FETCH_MAX_BYTES", str(2 * 1024**3)))
+    )
+    mirror_fetch_max_footprint_mb: int = field(
+        default_factory=lambda: int(_env("VALOR_MIRROR_FETCH_MAX_FOOTPRINT_MB", "1024"))
+    )
+    # The largest verdict file a fresh session may leave.
+    verdict_max_bytes: int = 256 * 1024
+
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate. An underestimate
     # spends money nobody reserved, so it leans high: English and JSON run
@@ -217,6 +241,13 @@ class Settings:
         setting, so the turn sandbox profiles' deny (derived from the same
         directory) cannot drift from it."""
         return str(Path(self.pg_passfile).parent / "judgement-keys")
+
+    @property
+    def claude_token_file(self) -> str:
+        """A long-lived Claude token (`claude setup-token`), in the kernel key
+        directory, which the gateway sends upstream in place of the dummy a
+        turn carries. Absent, the gateway reads the Keychain login."""
+        return str(Path(self.pg_passfile).parent / "claude-token")
 
     @property
     def pg_socket(self) -> str:

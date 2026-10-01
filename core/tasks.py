@@ -40,7 +40,12 @@ class Brief:
     lands on, `origin_url` the absolute push URL of the workspace's origin
     as it was at start (the merge goes there, whatever the workspace's
     config says later), and `base_sha` the workspace's head at start; all
-    three come from `resolve_workspace`.
+    three come from `resolve_workspace`, or from `core.workspace` for a task
+    the kernel provisioned. For such a task `mirror` is the kernel mirror
+    (the bare repository only the kernel writes, which the merge predicate
+    and the merge read), `push_url` where `push_branch` goes (the task's own
+    bare origin), and `project` the project spec as it was at start, with
+    the task's service ports.
     """
 
     instruction: str
@@ -53,6 +58,9 @@ class Brief:
     target_branch: str | None = None
     origin_url: str | None = None
     base_sha: str | None = None
+    mirror: str | None = None
+    push_url: str | None = None
+    project: dict[str, Any] | None = None
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -185,9 +193,11 @@ async def brief(conn, task_id: str) -> Brief:
     return Brief.load(row[0])
 
 
-def stage_text(state: machine.State) -> str | None:
-    """The stage file for a state, or None for a state no turn runs in."""
-    path = Path(settings.stages_dir) / f"{state.value}.md"
+def stage_text(state: machine.State | str) -> str | None:
+    """The stage file for a state (or a check's name), or None for one no
+    turn runs in."""
+    name = state.value if isinstance(state, machine.State) else str(state)
+    path = Path(settings.stages_dir) / f"{name}.md"
     return path.read_text().strip() if path.is_file() else None
 
 
@@ -196,14 +206,23 @@ def channel_text(offered: list[str]) -> str:
     return (Path(settings.stages_dir) / "channel.md").read_text().strip().replace("{effects}", effects)
 
 
-async def dispatch(conn, task_id: str, state: machine.State | None = None) -> dict[str, Any]:
+def verdict_text() -> str:
+    return (Path(settings.stages_dir) / "verdict.md").read_text().strip()
+
+
+async def dispatch(
+    conn, task_id: str, state: machine.State | None = None, *, fresh: str | None = None
+) -> dict[str, Any]:
     """The Brief as a turn receives it: the task's commitments plus every
     correction in force, rendered from the ledger now, never from a copy
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing the effects the
     registered performers offer) and the stage file for the state the task
-    is in (`skills/sdlc/<state>.md`). Returns the text, the correction
-    numbers it carries, and the text's digest."""
+    is in (`skills/sdlc/<state>.md`). A `fresh` session (critique, review,
+    docs: the stage's name) gets the verdict channel
+    (`skills/sdlc/verdict.md`) in place of the working session's, offering
+    no effect and no question, and its stage's file. Returns the text, the
+    correction numbers it carries, and the text's digest."""
     from core import broker
 
     b = await brief(conn, task_id)
@@ -220,12 +239,17 @@ async def dispatch(conn, task_id: str, state: machine.State | None = None) -> di
         f"Effect ceiling: {b.max_effect_class}\n"
         f"Governance grant: {b.governance_grant or 'none'}"
     )
-    if b.workspace:
+    if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"
-    if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN):
+    if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN) and not fresh:
         head += f"\nPlan: {f.plan['path']} at {f.plan['commit']}"
     sections = [head, corrections.render(standing)]
-    if b.workspace:
+    if fresh:
+        sections.append(verdict_text())
+        stage = stage_text(fresh)
+        if stage:
+            sections.append(stage)
+    elif b.workspace:
         sections.append(channel_text(broker.offered()))
         stage = stage_text(state)
         if stage:

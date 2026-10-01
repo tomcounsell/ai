@@ -1,6 +1,6 @@
 """The workspace sandbox-exec profiles under the real `sandbox-exec`: the
-demonstration's, as `scripts/demo_workspace.sh` writes it, and a replay's,
-as `scripts/replay_workspace.py` builds it.
+demonstration's, as `scripts/demo_workspace.sh` writes it, and a kernel
+task's working session's, as `core/workspace.py` writes it.
 
 A turn's gateway listens on whatever port the OS hands it, so a profile has
 to admit the gateway at every port, not only the one a first turn happened to
@@ -39,10 +39,8 @@ pytestmark = [
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 SCRIPT = SCRIPTS / "demo_workspace.sh"
-sys.path.insert(0, str(SCRIPTS))
 
-import replay_workspace
-
+from core import workspace as kws
 from core.settings import settings
 
 PROBE = """
@@ -191,75 +189,94 @@ def test_the_gateway_is_reachable_at_any_port_and_the_rest_of_loopback_is_not(tm
             s.close()
 
 
-def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
-    home = tmp_path / "home"
-    demo = home / "src" / "valor-demo"
-    run = demo / "runs" / "toy-1-bare"
-    workdir = run / "toy"
-    other = demo / "runs" / "toy-1-clarify" / "toy"
-    for d in (workdir, run / "home", run / "origin.git", other, demo / "items", demo / "bin"):
-        d.mkdir(parents=True)
+def _task(tmp_path: Path, name: str = "abcdef000001") -> kws.Layout:
+    """A task's directory laid out as `core/workspace.py` provisions one."""
+    lay = kws.Layout(tmp_path / "home" / "valor-tasks" / name)
+    for d in (lay.repo, lay.home, lay.origin, lay.mirror, lay.cache, lay.work_state, lay.checks, lay.pg / "data",
+              lay.root.parent / "bin"):  # fmt: skip
+        d.mkdir(parents=True, exist_ok=True)
+    return lay
+
+
+def _turn_profile(tmp_path: Path, lay: kws.Layout, ports: list[int], kernel=None) -> Path:
+    profile = tmp_path / f"{lay.root.name}.sb"
+    profile.write_text(kws.turn_profile(lay, ports, home=tmp_path / "home", kernel=kernel))
+    return profile
+
+
+def test_a_task_turn_reaches_its_own_services_and_clone_and_nothing_else(tmp_path):
+    lay, other = _task(tmp_path), _task(tmp_path, "abcdef000002")
+    key = tmp_path / "home" / "src" / "valor-demo" / "items" / "answer-key.md"
+    key.parent.mkdir(parents=True)
     files = {
-        "own": workdir / "app.py",
-        "key": demo / "items" / "answer-key.md",
-        "other": other / "app.py",
-        "sandbox": run / "home" / "sandbox.sb",
-        "origin": run / "origin.git" / "HEAD",
-        "tool": demo / "bin" / "uv",
+        "own": lay.repo / "app.py",
+        "key": key,
+        "other": other.repo / "app.py",
+        "home": lay.home / "gitconfig",
+        "origin": lay.origin / "HEAD",
+        "mirror": lay.mirror / "HEAD",
+        "pgdata": lay.pg / "data" / "pg_hba.conf",
+        "tool": lay.root.parent / "bin" / "uv",
+        "state": lay.work_state / "tmp.txt",
     }
     for f in files.values():
         f.write_text("x")
-    profile = tmp_path / "replay.sb"
-    profile.write_text(
-        replay_workspace.sandbox_profile(
-            run=run,
-            workdir=workdir,
-            ports=replay_workspace.ports_for(["postgres", "redis"]),
-            home=home,
-            tools=demo / "bin",
-        )
-    )
+    profile = _turn_profile(tmp_path, lay, [5545, 6445])
     with socket.socket() as gateway:
         gateway.bind(("127.0.0.1", 0))
         gateway.listen()
         port = gateway.getsockname()[1]
         assert _probe(
-            profile, port, port, 5439, 6390, 8003, settings.pgport, 6379, settings.pg_socket, 6391
-        ) == [
-            "open",
-            "open",
-            "open",
-            "open",
-            "denied",
-            "denied",
-            "denied",
-            "denied",
-        ]
+            profile, port, port, 5545, 6445, 8003, settings.pgport, 6379, settings.pg_socket, 5546, 5439
+        ) == ["open", "open", "open", "open", "denied", "denied", "denied", "denied", "denied"]
     assert _probe(
         profile,
         port,
         f"read:{files['own']}",
         f"write:{files['own']}",
-        f"read:{files['sandbox']}",
-        f"write:{files['sandbox']}",
+        f"read:{files['home']}",
+        f"write:{files['home']}",
+        f"read:{files['origin']}",
         f"write:{files['origin']}",
+        f"read:{files['mirror']}",
+        f"read:{files['pgdata']}",
         f"read:{files['key']}",
         f"read:{files['other']}",
         f"read:{files['tool']}",
         f"write:{files['tool']}",
-        f"stat:{demo / 'runs'}",
-        f"stat:{home / 'src'}",
-        f"list:{demo / 'runs'}",
-        f"list:{home / 'src'}",
+        f"write:{files['state']}",
+        f"stat:{lay.root.parent}",
+        f"list:{lay.root.parent}",
+        f"list:{tmp_path / 'home' / 'src'}",
     ) == [
-        *["open", "open", "open", "denied", "denied", "denied", "denied", "open", "denied"],
-        *["open", "open", "denied", "denied"],
+        *["open", "open", "open", "denied", "open", "denied", "denied", "denied", "denied", "denied"],
+        *["open", "denied", "open", "open", "denied", "denied"],
     ]
 
 
-def test_a_replay_without_services_reaches_neither_service():
-    ports = replay_workspace.ports_for([])
-    assert 5439 not in ports and 6390 not in ports and 8000 in ports
+def test_a_task_turn_reaches_the_gateway_at_any_port(tmp_path):
+    profile = _turn_profile(tmp_path, _task(tmp_path), [5545])
+    listeners = []
+    for _ in range(24):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen()
+        listeners.append(s)
+    try:
+        ports = [s.getsockname()[1] for s in listeners]
+        for i, port in enumerate(ports):
+            assert _probe(profile, port, port, 5545, settings.pgport, ports[i - 1]) == [
+                "open", "open", "denied", "denied"
+            ], f"gateway port {port}"  # fmt: skip
+    finally:
+        for s in listeners:
+            s.close()
+
+
+def test_a_task_without_services_reaches_neither_service(tmp_path):
+    lay = _task(tmp_path)
+    profile = _turn_profile(tmp_path, lay, [])
+    assert _probe(profile, 1, 5545, 6445, 8000) == ["denied", "denied", "open"]
 
 
 def _binds(own_dir: Path) -> dict[str, str]:
@@ -288,20 +305,11 @@ def test_the_demo_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
     assert dict(zip(binds, _probe(profile, 1, *binds))) == binds
 
 
-def test_a_replay_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
-    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
-    (run / "toy").mkdir(parents=True)
-    profile = tmp_path / "replay.sb"
-    profile.write_text(
-        replay_workspace.sandbox_profile(
-            run=run,
-            workdir=run / "toy",
-            ports=replay_workspace.ports_for(["postgres", "redis"]),
-            home=tmp_path / "home",
-        )
-    )
-    binds = _binds(run)
-    assert dict(zip(binds, _probe(profile, 1, *binds))) == binds
+def test_a_task_turn_listens_only_on_dev_ports_and_its_own_sockets(tmp_path):
+    lay = _task(tmp_path)
+    profile = _turn_profile(tmp_path, lay, [5545, 6445])
+    binds = _binds(lay.repo)
+    assert dict(zip(binds, _probe(profile, 1, *binds), strict=True)) == binds
 
 
 def test_the_demo_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
@@ -313,35 +321,21 @@ def test_the_demo_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_pat
     assert found == ["denied"] * len(probes) + ["open"]
 
 
-def test_a_replay_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
-    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
-    (run / "toy").mkdir(parents=True)
-    (run / "toy" / "own.txt").write_text("x")
+def test_a_task_turn_cannot_reach_the_kernels_credential_data_or_dumps(tmp_path):
+    lay = _task(tmp_path)
+    (lay.repo / "own.txt").write_text("x")
     kernel = _kernel(tmp_path)
-    profile = tmp_path / "replay.sb"
-    profile.write_text(
-        replay_workspace.sandbox_profile(
-            run=run,
-            workdir=run / "toy",
-            ports=replay_workspace.ports_for([]),
-            home=tmp_path / "home",
-            kernel=list(kernel.values()),
-        )
-    )
+    profile = _turn_profile(tmp_path, lay, [], kernel=list(kernel.values()))
     probes = _kernel_probes(kernel)
-    found = _probe(profile, 1, *probes, f"read:{run / 'toy' / 'own.txt'}")
+    found = _probe(profile, 1, *probes, f"read:{lay.repo / 'own.txt'}")
     assert found == ["denied"] * len(probes) + ["open"]
 
 
-def test_by_default_a_replay_profile_denies_the_kernel_paths_its_settings_name(tmp_path):
+def test_by_default_a_task_profile_denies_the_kernel_paths_its_settings_name(tmp_path):
     """The real paths, from settings: the password file's directory, the
     machine cluster's data directory, and the backup disk (whose name is a
     private-use character). Probed read-only where they exist."""
-    run = tmp_path / "home" / "src" / "valor-demo" / "runs" / "toy-1-bare"
-    (run / "toy").mkdir(parents=True)
-    text = replay_workspace.sandbox_profile(
-        run=run, workdir=run / "toy", ports=replay_workspace.ports_for([]), home=tmp_path / "home"
-    )
+    text = kws.turn_profile(_task(tmp_path), [], home=tmp_path / "home")
     for path in (Path(settings.pg_passfile).parent, Path(settings.pg_data_dir), Path(settings.backup_dir)):
         assert f'(subpath "{path}")' in text
     profile = tmp_path / "replay.sb"

@@ -20,8 +20,8 @@ from core import broker, budget, db, ledger, session, tasks
 from core.gateway import Gateway
 from tests import scripted
 from tests.conftest import TEST_DB
+from tests.performers import OutboxAppend
 from tests.scripted import turn_for
-from tools.workspace import OutboxAppend
 
 pytestmark = pytest.mark.spend(usd=0)
 

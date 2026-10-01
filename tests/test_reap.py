@@ -4,7 +4,7 @@ says which were stopped.
 The incident: a replay turn ran a test setup that daemonized two
 redis-servers (one on *:6379, one on a socket in /tmp); they re-parented to
 launchd and outlived the turn. Here a stand-in turn daemonizes a child the
-classic way (fork, setsid, fork), and another, under the replay sandbox,
+classic way (fork, setsid, fork), and another, under a task turn's sandbox,
 daemonizes a real redis-server, which retitles itself over its environment
 so only the sandbox's mark names it. A process the turn did not start is
 left alone.
@@ -24,11 +24,8 @@ from pathlib import Path
 import pytest
 
 from core import db, ledger, runs, tasks
+from core import workspace as kws
 from core.gateway import Gateway
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-
-import replay_workspace
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -122,16 +119,13 @@ def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
     shutil.which("sandbox-exec") is None or shutil.which("redis-server") is None,
     reason="needs macOS sandbox-exec and redis-server",
 )
-def test_a_redis_server_daemonized_inside_the_replay_sandbox_is_reaped(dsn, tmp_path, short_dir):
-    run = short_dir
-    workdir = run / "toy"
-    workdir.mkdir()
-    profile = run / "sandbox.sb"
-    profile.write_text(
-        replay_workspace.sandbox_profile(
-            run=run, workdir=workdir, ports=replay_workspace.ports_for([]), home=tmp_path / "home"
-        )
-    )
+def test_a_redis_server_daemonized_inside_a_task_turn_sandbox_is_reaped(dsn, tmp_path, short_dir):
+    lay = kws.Layout(short_dir / "abcdef000001")
+    for d in (lay.repo, lay.home, lay.cache, lay.work_state):
+        d.mkdir(parents=True)
+    run = workdir = lay.repo
+    profile = lay.home / "turn.sb"
+    profile.write_text(kws.turn_profile(lay, [], home=tmp_path / "home"))
     redis = shutil.which("redis-server")
     socket_path = str(run / "redis.sock")
     build = lambda url, brief, turn_id: runs.TurnCommand(

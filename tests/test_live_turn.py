@@ -21,7 +21,7 @@ from core import broker, db, runs, tasks
 from core.gateway import Gateway
 from harnesses import claude_code
 from tests.conftest import TEST_DB
-from tools.workspace import OutboxAppend, WorkspaceWrite
+from tests.performers import OutboxAppend, WorkspaceWrite
 
 pytestmark = [
     pytest.mark.spend(usd=0.15),

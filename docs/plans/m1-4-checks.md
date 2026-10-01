@@ -182,7 +182,7 @@ default `~/valor-tasks`), outside `~/src` because the turn sandbox denies
     state/work/             the working session's own TMPDIR and Claude Code config dir; only the builder writes it
     checks/                 fresh checkouts, each with its own tmp/ and claude/; only the kernel and that check write it
     checks/seed/            the dependency cache the base's setup filled; written once by the kernel's base run
-    pg/data, pg/run         the task's Postgres cluster and its socket; no turn reads or writes
+    pg/data                 the task's Postgres cluster (TCP on loopback, no unix socket); no turn reads or writes
     redis/                  the task's redis-server, when its project asks
 ```
 
@@ -481,7 +481,7 @@ another run's database" opening.
 - **Cluster.** `initdb` into `<task>/pg/data` with `--auth=scram-sha-256`
   and a random superuser password from a file deleted as soon as the app
   role exists; nothing keeps it. `listen_addresses = '127.0.0.1'`, the
-  unix socket in `<task>/pg/run`, the port allocated below.
+  TCP on loopback only (no unix socket: a socket path under a long work directory passes the 103-byte limit), the port allocated below.
 - **Roles.** `app` (login, `CREATEDB`, owner of database `app`), plus each
   of the spec's `roles`, each with a random password written to
   `<task>/home/pgpass` (mode 600), the one credential the app is meant to
@@ -1354,3 +1354,54 @@ and a footprint watchdog on the mirror fetch; no read-only cache (1.4b);
 parametrize and non-Python rules (1.4b); the trusted git first on fresh
 sessions' `PATH`. 1.2's replace-ref fix is carried in 1.4a's first commit
 (1a1a6235d), "carried from 1.2's open finding pending Tom".
+
+## Build record (1.4a)
+
+Built on `m1.4-checks`. The first commit (1a1a6235d) carries 1.2's
+replace-ref fix, "carried from 1.2's open finding pending Tom", with a test
+for each of a replace ref and a graft; it is dropped on rebase onto 1.2's
+own fix.
+
+**The login check.** `claude -p` 2.1.287 with a fresh `CLAUDE_CONFIG_DIR`
+answers "Not logged in" and sends nothing; with a dummy
+`CLAUDE_CODE_OAUTH_TOKEN` it sends `Authorization: Bearer <dummy>` to the
+base URL (both checked against a local probe server). So the gateway holds
+the credential (`core/gateway.py`, `ClaudeLogin`): `claude-token` in the
+kernel key directory when present, otherwise the Keychain login's access
+token. Claude Code also keeps scratch under `/tmp/claude-<uid>` unless
+`CLAUDE_CODE_TMPDIR` names another place; every turn sets it to its own
+`TMPDIR`. One live fresh critique (Haiku) then ran under the fresh profile,
+with `/private/tmp`, `/private/var/folders`, and `~/.claude` denied, needed
+no path allowed back, wrote a valid verdict, and kept its transcript in its
+own config directory.
+
+Settled while building:
+
+- The task's Postgres listens on TCP loopback only: a unix socket under a
+  long work directory passed the 103-byte path limit.
+- `GATEWAY_PORT=1` for sandboxed steps with no gateway (0 does not parse).
+- The file-size limit on the mirror fetch is set by `/bin/sh -c 'ulimit -f'`,
+  since a preexec function is unsafe in the threaded kernel.
+- The sweep runs at the start of every router run, for every task; it looks
+  for marked service processes with one process listing and stops a task's
+  only when its router lock is free.
+- `start --project` takes `--branch`, since the rebuild's branch is not the
+  repository's default; `projects/valor.toml` names none.
+- Replays provision through the kernel: `scripts/replay_workspace.py`
+  writes the spec, `replay.py` starts with `--project` and reads the
+  workspace back with `workspace show`, and the judge verifies inside the
+  task's own state with its services started and stopped by the kernel. The
+  replay profile tests moved to the kernel's profiles
+  (`tests/test_demo_sandbox.py`, `tests/test_reap.py`).
+- `verdict` lost `--raise-critique` and `--raise-review` with the critique
+  stage; a stage with a runner is refused as having one.
+- A raise outside 0 to 2 in a verdict file is no verdict; a lower raise
+  changes nothing (the fold takes the higher count).
+
+Evidence: `cd ~/src/valor-rebuild-m14 && VALOR_TEST_DB=valor_rebuild_test_m14
+.venv/bin/python -m pytest -q tests` (see the done note for the counts);
+`uvx ruff check .` and `uvx ruff format --check` on the code clean.
+`VALOR_LIVE=1 ... tests/test_live_fresh.py` passed once, metering $0.034
+(an earlier attempt that ran out of its $0.15 budget metered $0.066).
+`tests/test_live_session.py` was rewritten for `start --project` and the
+critique runner and not run (it now runs an Opus critique, up to $1.00).

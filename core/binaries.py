@@ -24,6 +24,7 @@ from pathlib import Path
 GIT_CANDIDATES = ("/Library/Developer/CommandLineTools/usr/bin/git",)
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 PS = "/bin/ps"
+SECURITY = "/usr/bin/security"
 
 
 class Untrusted(RuntimeError):
