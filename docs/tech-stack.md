@@ -122,12 +122,12 @@ never crosses a process the turn can reach. Serves "Reliable stop, recovery,
 and correction".
 
 **Credential boundaries.** The kernel holds the database connection as
-`valor_kernel` and performs effects through the broker. The gateway sets
-the Claude credential on every call: `claude-token` in the kernel key
-directory when present, else Claude Code's own login read from the
-Keychain. A turn's environment is an allowlist (`HOME`, `USER`, `PATH`,
-`SHELL`, `TMPDIR`, locale, terminal) with no tokens and no agent sockets;
-its Claude Code carries only a placeholder. Status: **in use**.
+`valor_kernel` and performs effects through the broker. The gateway sets the
+Claude credential on every call: `claude-token` in the kernel key directory
+when present, else Claude Code's own login read from the Keychain. A turn's
+environment is an allowlist (`HOME`, `USER`, `PATH`, `SHELL`, `TMPDIR`,
+locale, terminal) with no tokens, no agent sockets, and only a placeholder
+Claude credential. Status: **in use**.
 
 A turn can still read the machine's Claude login from the Keychain, so it
 could call the provider around the gateway with that credential: the
@@ -230,9 +230,10 @@ input is estimated at three bytes per token for the reservation, the
 reservation runs under the task's advisory lock, and the response streams
 back unchanged while the gateway reads the provider's usage.
 
-Other paths (token counting, model lists) pass through unmetered. `revoke`
-retires the task's tokens and cancels its in-flight calls at once; the stop
-path calls it before killing the turn's process group.
+Token counting and model lists pass unmetered; any other path is refused once
+the gateway holds the credential. `revoke` retires the task's tokens and
+cancels its in-flight calls at once; the stop path calls it before killing
+the turn's process group.
 
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps each call's output. The cap is what
 keeps the worst-case reservation close to a call's real cost, so it is part
@@ -443,12 +444,11 @@ The kernel provisions a task's workspace from a project spec
 
 - a clone of the repository holding only the history up to the base commit;
 - a local bare repository as the clone's only remote, which the turn cannot
-  write and the broker pushes to, and the kernel mirror, which only the
-  kernel writes and the merge reads;
+  write and the broker pushes to, and the kernel mirror the merge reads;
 - when the app needs them, a Postgres cluster of the task's own on its own
   loopback port with `scram-sha-256` authentication and an `app` role that
-  may create databases and nothing more, so a superuser login is never a
-  way out of the sandbox, and a Redis of its own;
+  may create databases and nothing more (a superuser login would be a way
+  out of the sandbox), and a Redis of its own;
 - an empty gh config and a git config with no credential helper.
 
 Status: **in use** (`python -m core start --project`). Serves Mission item

@@ -86,11 +86,11 @@ and it serves the constraint "reliable stop, recovery, and correction".
 Each task the kernel provisions has a workspace cluster of its own (and a
 Redis when its project asks). They start when a run of the task first
 needs them and stop when that run returns, and every run first stops the
-services of other tasks a killed kernel left up, unless their own run is
-live, so on the 16 GB machine only the running task's services are up.
-Idle, a workspace cluster costs 36 MB; after a test suite has filled its
-buffers it costs ten times that, which is why it is stopped rather than
-left up.
+services a killed kernel left up, for other tasks and for provisionings
+that died, unless their own run or provisioning is live, so on the 16 GB
+machine only the running task's services are up. Idle, a workspace cluster
+costs 36 MB; after a test suite has filled its buffers it costs ten times
+that, which is why it is stopped rather than left up.
 
 ## The RAM budget
 

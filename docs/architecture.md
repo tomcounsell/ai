@@ -336,11 +336,10 @@ are fetched and from which the merge predicate and the merge read; a Postgres
 cluster of the task's own (and a Redis when the project asks) on its own
 ports, under a service sandbox; and the project's setup, run once under the
 turn's sandbox. Services run only while a run of the task lasts; every run
-first stops those a killed kernel left up for tasks whose run is not live. The
-disk is kept until `python -m core workspace remove`. The mirror's fetch
-treats the builder's clone as hostile (harnesses.md, The workspace). Serves
-Mission item 1 (Valor works without Tom setting up the gaps) and bounded
-authority.
+first stops those a killed kernel left up whose run or provisioning is not
+live. The disk is kept until `python -m core workspace remove`. The mirror's
+fetch treats the builder's clone as hostile (harnesses.md, The workspace).
+Serves Mission item 1 and bounded authority.
 
 **Design, the sandbox split.** This doc owns which work runs under which
 sandbox. Turns run under sandbox-exec on the host, as built and as both
