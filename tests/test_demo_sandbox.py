@@ -7,7 +7,8 @@ to admit the gateway at every port, not only the one a first turn happened to
 get. It must still keep the machine's Postgres (5432, TCP and socket), its
 Redis (6379), and the rest of loopback out of reach, while a replay reaches
 the replays' own Postgres (5439) and Redis (6390). A replay's turn reads and
-writes its own run and nothing else in the replay directory.
+writes its own run and nothing else in the replay directory, and reads and
+runs the shared binaries in its `bin/`.
 
 Live spend: none.
 """
@@ -125,7 +126,7 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
     run = demo / "runs" / "toy-1-bare"
     workdir = run / "toy"
     other = demo / "runs" / "toy-1-clarify" / "toy"
-    for d in (workdir, run / "home", run / "origin.git", other, demo / "items"):
+    for d in (workdir, run / "home", run / "origin.git", other, demo / "items", demo / "bin"):
         d.mkdir(parents=True)
     files = {
         "own": workdir / "app.py",
@@ -133,6 +134,7 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
         "other": other / "app.py",
         "sandbox": run / "home" / "sandbox.sb",
         "origin": run / "origin.git" / "HEAD",
+        "tool": demo / "bin" / "uv",
     }
     for f in files.values():
         f.write_text("x")
@@ -143,6 +145,7 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
             workdir=workdir,
             ports=replay_workspace.ports_for(["postgres", "redis"]),
             home=home,
+            tools=demo / "bin",
         )
     )
     with socket.socket() as gateway:
@@ -169,7 +172,9 @@ def test_a_replay_reaches_its_own_services_and_run_and_nothing_else(tmp_path):
         f"write:{files['origin']}",
         f"read:{files['key']}",
         f"read:{files['other']}",
-    ) == ["open", "open", "open", "denied", "denied", "denied", "denied"]
+        f"read:{files['tool']}",
+        f"write:{files['tool']}",
+    ) == ["open", "open", "open", "denied", "denied", "denied", "denied", "open", "denied"]
 
 
 def test_a_replay_without_services_reaches_neither_service():

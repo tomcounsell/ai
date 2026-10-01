@@ -26,6 +26,8 @@ Layout under $VALOR_DEMO (default /Users/tomcounsell/src/valor-demo):
                                 127.0.0.1:5439, password auth (made by
                                 scripts/demo_workspace.sh); each run gets its
                                 own database, owned by the `test` role
+    bin/                        binaries every run shares (uv): first on the
+                                turn's PATH, readable, not writable
     redis/                      one redis-server for every workspace, on
                                 127.0.0.1:6390, no persistence; its log and pid
 
@@ -42,6 +44,7 @@ Live spend: none. Network: a clone or fetch from GitHub, run as Tom.
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -57,6 +60,7 @@ REDIS_PORT = 6390
 DEV_PORTS = range(8000, 8010)
 SERVICES = ("postgres", "redis")
 HOME = Path.home()
+TOOLS = DEMO / "bin"
 
 
 def transcripts_dir(workdir: Path) -> Path:
@@ -64,10 +68,13 @@ def transcripts_dir(workdir: Path) -> Path:
     return HOME / ".claude" / "projects" / re.sub(r"[/.]", "-", str(workdir))
 
 
-def sandbox_profile(*, run: Path, workdir: Path, ports: list[int], home: Path = HOME) -> str:
+def sandbox_profile(
+    *, run: Path, workdir: Path, ports: list[int], home: Path = HOME, tools: Path = TOOLS
+) -> str:
     """The sandbox-exec profile for a turn working in `workdir` inside
     `run`; `GATEWAY_PORT` is a parameter, since the gateway takes whatever
-    port the OS hands it."""
+    port the OS hands it. `tools` (binaries such as uv that the replays
+    share) is readable and runnable, not writable."""
     denied = [
         "src",
         "work-vault",
@@ -94,6 +101,7 @@ def sandbox_profile(*, run: Path, workdir: Path, ports: list[int], home: Path = 
         "(allow file-read* file-write*",
         f'    (subpath "{run}")',
         f'    (subpath "{transcripts_dir(workdir)}"))',
+        f'(allow file-read* (subpath "{tools}"))',
         "(deny file-write*",
         f'    (subpath "{run / "origin.git"}")',
         f'    (subpath "{run / "home"}")',
@@ -303,7 +311,7 @@ def build(
         "[user]\n\tname = Valor Engels\n\temail = valor@yuda.me\n[init]\n\tdefaultBranch = main\n"
     )
     (home / "sandbox.sb").write_text(sandbox_profile(run=run, workdir=workdir, ports=ports_for(services)))
-    env: dict[str, str] = {}
+    env: dict[str, str] = {"PATH": f"{TOOLS}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
     if "postgres" in services:
         name = db_name(run_name)
         if not _psql(f"SELECT 1 FROM pg_database WHERE datname = '{name}'"):
