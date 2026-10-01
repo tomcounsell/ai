@@ -111,14 +111,17 @@ def workspace_turn(
     `sandbox_profile`, a sandbox-exec profile the whole turn runs under,
     given the gateway's port as `GATEWAY_PORT`; `gitconfig`, used as git's
     global config with the system config ignored; `gh_config_dir`, gh's
-    config directory; `max_output_tokens`, the per-call output cap, which
-    sets the gateway's worst-case reservation for each call.
+    config directory; `env`, variables added to the turn's environment (the
+    workspace's own settings, such as where its test database listens);
+    `max_output_tokens`, the per-call output cap, which sets the gateway's
+    worst-case reservation for each call.
     """
     harness = harness or {}
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
     def build(base_url: str, brief: str) -> TurnCommand:
         env = {k: os.environ[k] for k in KEEP_ENV if k in os.environ}
+        env.update(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
         env["GIT_TERMINAL_PROMPT"] = "0"

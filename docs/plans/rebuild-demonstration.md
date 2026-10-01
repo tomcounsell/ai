@@ -29,8 +29,10 @@ stays out of this record and out of Valor's reach.
 - `origin.git/`: a local bare repository, the clone's only remote. A push is
   an `act` effect: Valor requests it, the broker holds it, and it lands only
   after Tom approves and releases it. Nothing reaches GitHub.
-- The Postgres role the app's test settings name (`test`), in this Mac's
-  cluster.
+- `pg/`: a Postgres cluster of the workspace's own, separate from the one
+  holding the kernel's ledger, on `127.0.0.1:5439` with password auth. Its
+  `test` role (password `test`, CREATEDB) is what the app's tests use; the
+  turn's environment points them at it (`TEST_DB_*`, `DATABASE_URL`, `PG*`).
 - The leak check found no plan doc, code, or note describing the feature.
   The base tree mentions the sports career start-date fields (the existing
   data the request refers to) and an existing "Complete your profile" link;
@@ -43,10 +45,11 @@ sockets, an empty gh config, a git config with no credential helper, and a
 sandbox-exec profile. Under that profile a turn cannot read Tom's other
 checkouts, notes, earlier Claude Code transcripts and plans, or keys; cannot
 write the bare origin or run git's keychain helper; and on loopback reaches
-only the gateway, Postgres over TCP, and ports 8000 to 8009. It can reach
-the public internet, so package installs work. It runs as Tom's user, so a
-deliberate keychain read through the `security` tool, or a TCP connection to
-Postgres as the kernel's role (the cluster trusts loopback), is not fenced.
+only the gateway, the workspace's Postgres, and ports 8000 to 8009; this
+Mac's own Postgres (port 5432 and its socket) is out of reach, and the
+workspace cluster's data directory is neither readable nor writable. It can
+reach the public internet, so package installs work. It runs as Tom's user,
+so a deliberate keychain read through the `security` tool is not fenced.
 
 **Authority and money.** Effect ceiling `act`, governance grant none,
 budget $15.00, model Claude Opus 5.5 (`claude-opus-5-5`, $4 input and $20

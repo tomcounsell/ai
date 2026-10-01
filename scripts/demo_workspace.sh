@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # The demonstration's workspace: psyoptimal at the replay's base commit with
-# no history after it, a local bare repository as its only remote, the
-# Postgres role its tests expect, and the isolation every turn runs under.
+# no history after it, a local bare repository as its only remote, a
+# Postgres cluster of its own for the app's tests, and the isolation every
+# turn runs under.
 #
-#     scripts/demo_workspace.sh            # build it (refuses if it exists)
-#     scripts/demo_workspace.sh --rebuild  # delete it and build it again
+#     scripts/demo_workspace.sh             # build what is missing, start Postgres
+#     scripts/demo_workspace.sh --rebuild   # delete everything and build it again
+#     scripts/demo_workspace.sh --teardown  # stop the workspace's Postgres, delete it
 #
 # Layout under $DEMO (default /Users/tomcounsell/src/valor-demo):
 #   psyoptimal/          the clone Valor works in, branch valor/profile-completion
 #   origin.git/          bare repository, the clone's `origin`; only the
 #                        broker's push_branch performer writes it, after Tom's tap
+#   pg/data/             the workspace's Postgres cluster, on 127.0.0.1:$PG_PORT
+#                        with password auth; a turn can neither read nor write it
+#   pg/run/              that cluster's unix socket
+#   pg/postgres.log      its server log
 #   home/gitconfig       git's global config for a turn: Valor's identity, no
 #                        credential helper
 #   home/gh/             an empty gh config directory: gh is unauthenticated
 #   home/sandbox.sb      the sandbox-exec profile every turn runs under
-#   home/harness.json    the above, as `python -m core start --harness-config`
+#   home/harness.json    the above, as `python -m core start --harness-config`,
+#                        with the environment pointing the app at pg/
 #
 # Live spend: none. Network: one clone from GitHub, run as Tom.
 
@@ -24,39 +31,63 @@ REPO="yudame/psyoptimal"
 BASE="ebdbf645a0c3302a90b77652852142f45983e84b"
 BRANCH="valor/profile-completion"
 DEMO="${VALOR_DEMO:-/Users/tomcounsell/src/valor-demo}"
+PG_BIN="/opt/homebrew/opt/postgresql@18/bin"
+PG_PORT="${VALOR_DEMO_PG_PORT:-5439}"
 
-if [[ "${1:-}" == "--rebuild" ]]; then
-    rm -rf "$DEMO/psyoptimal" "$DEMO/origin.git" "$DEMO/home"
-fi
-if [[ -e "$DEMO/psyoptimal" ]]; then
-    echo "$DEMO/psyoptimal exists; pass --rebuild to start over" >&2
-    exit 1
-fi
 mkdir -p "$DEMO"
 DEMO="$(cd "$DEMO" && pwd -P)"
+PG="$DEMO/pg"
 cd "$DEMO"
 
-# -- the clone, holding nothing after the base commit ---------------------------
-scratch="$(mktemp -d)"
-gh repo clone "$REPO" "$scratch/full" -- --quiet
-git -C "$scratch/full" cat-file -e "$BASE^{commit}"
-git -C "$scratch/full" branch --quiet --force replay-base "$BASE"
-git clone --quiet --no-tags --single-branch --branch replay-base "file://$scratch/full" psyoptimal
-rm -rf "$scratch"
-git -C psyoptimal checkout --quiet -b "$BRANCH"
-git -C psyoptimal branch --quiet -D replay-base
-git -C psyoptimal remote remove origin
-git -C psyoptimal reflog expire --expire=now --all
-git -C psyoptimal gc --quiet --prune=now
-echo ".valor/" >> psyoptimal/.git/info/exclude
+stop_postgres() {
+    if [[ -f "$PG/data/postmaster.pid" ]]; then
+        "$PG_BIN/pg_ctl" -D "$PG/data" -m fast -w stop
+    fi
+}
 
-# -- the bare origin: main at the base commit, every ref update logged ----------
-git init --quiet --bare origin.git
-git -C origin.git config core.logAllRefUpdates always
-git -C origin.git config receive.denyNonFastForwards true
-git -C psyoptimal remote add origin "$DEMO/origin.git"
-git -C psyoptimal push --quiet origin "$BASE:refs/heads/main"
-git -C psyoptimal fetch --quiet origin
+case "${1:-}" in
+    --teardown)
+        stop_postgres
+        rm -rf "$PG"
+        echo "workspace Postgres stopped and deleted"
+        exit 0
+        ;;
+    --rebuild)
+        stop_postgres
+        rm -rf "$DEMO/psyoptimal" "$DEMO/origin.git" "$DEMO/home" "$PG"
+        ;;
+    "") ;;
+    *)
+        echo "usage: $0 [--rebuild | --teardown]" >&2
+        exit 2
+        ;;
+esac
+
+# -- the clone, holding nothing after the base commit ---------------------------
+if [[ -e psyoptimal ]]; then
+    echo "keeping $DEMO/psyoptimal (pass --rebuild to start over)"
+else
+    scratch="$(mktemp -d)"
+    gh repo clone "$REPO" "$scratch/full" -- --quiet
+    git -C "$scratch/full" cat-file -e "$BASE^{commit}"
+    git -C "$scratch/full" branch --quiet --force replay-base "$BASE"
+    git clone --quiet --no-tags --single-branch --branch replay-base "file://$scratch/full" psyoptimal
+    rm -rf "$scratch"
+    git -C psyoptimal checkout --quiet -b "$BRANCH"
+    git -C psyoptimal branch --quiet -D replay-base
+    git -C psyoptimal remote remove origin
+    git -C psyoptimal reflog expire --expire=now --all
+    git -C psyoptimal gc --quiet --prune=now
+    echo ".valor/" >> psyoptimal/.git/info/exclude
+
+    # -- the bare origin: main at the base commit, every ref update logged
+    git init --quiet --bare origin.git
+    git -C origin.git config core.logAllRefUpdates always
+    git -C origin.git config receive.denyNonFastForwards true
+    git -C psyoptimal remote add origin "$DEMO/origin.git"
+    git -C psyoptimal push --quiet origin "$BASE:refs/heads/main"
+    git -C psyoptimal fetch --quiet origin
+fi
 
 # -- what a turn runs under ----------------------------------------------------
 mkdir -p home/gh
@@ -72,9 +103,11 @@ EOF
 # session files, and everything a toolchain needs. It may not read Tom's
 # other checkouts (his psyoptimal holds the answer), his notes, his earlier
 # Claude Code transcripts and plans, or his keys; it may not write the bare
-# origin or run git's keychain credential helper; and on this Mac's loopback it reaches only the gateway, Postgres
-# over TCP for the app's tests, and dev servers on 8000-8009. The kernel's
-# Postgres socket and Redis are out of reach.
+# origin, touch the workspace cluster's data directory, or run git's keychain
+# credential helper; and on this Mac's loopback it reaches only the gateway,
+# the workspace's Postgres on $PG_PORT, and dev servers on 8000-8009. This
+# Mac's own Postgres (port 5432 and its socket, which hold the kernel's
+# ledger) and Redis are out of reach.
 H="$HOME"
 PG_SOCKET="$(cd /tmp && pwd -P)/.s.PGSQL.5432"
 TRANSCRIPTS="$H/.claude/projects/$(echo "$DEMO/psyoptimal" | tr '/.' '--')"
@@ -102,31 +135,79 @@ cat > home/sandbox.sb <<EOF
     (subpath "$DEMO")
     (subpath "$TRANSCRIPTS"))
 (deny file-write* (subpath "$DEMO/origin.git"))
+(deny file-read* file-write* (subpath "$PG/data"))
+(deny file-write* (literal "$PG/postgres.log"))
 (deny process-exec (regex #"/git-credential-osxkeychain$"))
 (deny network-outbound (remote ip "localhost:*"))
 (allow network-outbound
     (remote ip (string-append "localhost:" (param "GATEWAY_PORT")))
-    (remote ip "localhost:5432")
+    (remote ip "localhost:$PG_PORT")
 $(for p in 8000 8001 8002 8003 8004 8005 8006 8007 8008 8009; do echo "    (remote ip \"localhost:$p\")"; done))
-(deny network-outbound (remote unix-socket (path-literal "$PG_SOCKET")))
+(deny network-outbound
+    (remote ip "localhost:5432")
+    (remote unix-socket (path-literal "$PG_SOCKET"))
+    (remote unix-socket (path-literal "/tmp/.s.PGSQL.5432")))
 EOF
 
+# The app's settings read the database from the environment: settings/test.py
+# takes TEST_DB_* (it connects to `postgres` and creates test_psyoptimal
+# itself), the dev settings take DATABASE_URL, and psql takes PG*.
 cat > home/harness.json <<EOF
 {
   "sandbox_profile": "$DEMO/home/sandbox.sb",
   "gitconfig": "$DEMO/home/gitconfig",
-  "gh_config_dir": "$DEMO/home/gh"
+  "gh_config_dir": "$DEMO/home/gh",
+  "env": {
+    "TEST_DB_HOST": "127.0.0.1",
+    "TEST_DB_PORT": "$PG_PORT",
+    "TEST_DB_USER": "test",
+    "TEST_DB_PASSWORD": "test",
+    "DATABASE_URL": "postgresql://test:test@127.0.0.1:$PG_PORT/psyoptimal",
+    "PGHOST": "127.0.0.1",
+    "PGPORT": "$PG_PORT",
+    "PGUSER": "test",
+    "PGPASSWORD": "test",
+    "PGDATABASE": "postgres"
+  }
 }
 EOF
 
-# -- Postgres for the app's tests ----------------------------------------------
-# settings/test.py names postgresql://test:test@localhost:5432/test_psyoptimal,
-# so the role lives in this Mac's one cluster. Django's test runner creates
-# its own test database, which needs CREATEDB.
-psql -h /tmp -d postgres -qAt > /dev/null <<'SQL'
-SELECT 'CREATE ROLE test LOGIN CREATEDB PASSWORD ''test''' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'test')\gexec
-SELECT 'CREATE DATABASE test_psyoptimal OWNER test' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'test_psyoptimal')\gexec
+# -- the workspace's own Postgres ----------------------------------------------
+# A cluster of its own, so a turn never shares one with the kernel's ledger.
+# It listens on 127.0.0.1:$PG_PORT and a socket in pg/run, and every login,
+# socket or TCP, needs a password. The superuser's password is random and
+# thrown away once the `test` role exists: the server runs outside the
+# sandbox, so a superuser login would be a way out of it. `test` has
+# CREATEDB, which Django's test runner needs; `psyoptimal` is the dev
+# database DATABASE_URL names.
+if [[ ! -f "$PG/data/PG_VERSION" ]]; then
+    if lsof -nP -iTCP:"$PG_PORT" -sTCP:LISTEN > /dev/null 2>&1; then
+        echo "port $PG_PORT is taken; set VALOR_DEMO_PG_PORT" >&2
+        exit 1
+    fi
+    rm -rf "$PG"
+    mkdir -p "$PG/run"
+    chmod 700 "$PG"
+    pwfile="$(mktemp)"
+    trap 'rm -f "$pwfile"' EXIT
+    openssl rand -hex 32 > "$pwfile"
+    "$PG_BIN/initdb" --pgdata="$PG/data" --username=postgres --pwfile="$pwfile" \
+        --auth=scram-sha-256 --encoding=UTF8 --locale=C > /dev/null
+    cat >> "$PG/data/postgresql.conf" <<EOF
+listen_addresses = '127.0.0.1'
+port = $PG_PORT
+unix_socket_directories = '$PG/run'
+EOF
+    "$PG_BIN/pg_ctl" -D "$PG/data" -l "$PG/postgres.log" -w start > /dev/null
+    PGPASSWORD="$(cat "$pwfile")" "$PG_BIN/psql" -h "$PG/run" -p "$PG_PORT" -U postgres -d postgres -qAt > /dev/null <<'SQL'
+CREATE ROLE test LOGIN CREATEDB PASSWORD 'test';
+CREATE DATABASE psyoptimal OWNER test;
 SQL
+    rm -f "$pwfile"
+elif ! "$PG_BIN/pg_ctl" -D "$PG/data" status > /dev/null 2>&1; then
+    "$PG_BIN/pg_ctl" -D "$PG/data" -l "$PG/postgres.log" -w start > /dev/null
+fi
+echo "workspace Postgres: test:test@127.0.0.1:$PG_PORT, socket $PG/run, log $PG/postgres.log"
 
 # -- leak check: anything in the base tree that already holds the answer -------
 echo "== leak check at $BASE"

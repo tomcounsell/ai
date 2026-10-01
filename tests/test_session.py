@@ -231,7 +231,12 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
         cwd="/w",
         resume="abc",
         model="opus",
-        harness={"sandbox_profile": "/p.sb", "gitconfig": "/g", "gh_config_dir": "/gh"},
+        harness={
+            "sandbox_profile": "/p.sb",
+            "gitconfig": "/g",
+            "gh_config_dir": "/gh",
+            "env": {"TEST_DB_PORT": "5439"},
+        },
     )
     command = build("http://127.0.0.1:4321/t/token", "# Brief")
     argv = command.argv
@@ -242,3 +247,4 @@ def test_a_workspace_turn_resumes_runs_sandboxed_and_carries_no_credentials(monk
     assert "GH_TOKEN" not in command.env and "SSH_AUTH_SOCK" not in command.env
     assert command.env["GH_CONFIG_DIR"] == "/gh" and command.env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert command.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:4321/t/token"
+    assert command.env["TEST_DB_PORT"] == "5439"
