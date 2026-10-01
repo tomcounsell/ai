@@ -118,7 +118,12 @@ $2.972649 against a harness-reported $2.972625 (rebuild-demonstration.md,
 Money): the meter sees what Claude Code spends on its own account.
 
 Serves bounded authority and spend. Only Tom raises a committed budget; a
-turn that hits a refusal ends the run as `budget exhausted`.
+turn that hits a refusal ends the run as `budget exhausted`. The budget
+meters what passes the gateway; it is not a wall around the provider. A
+turn that deliberately called the provider directly with the machine's
+Claude login would spend outside it, and Tom accepted that on 2026-10-01:
+budgets are for visibility and honest metering. Effect ceilings are not
+relaxed by this; effects still leave only through the broker.
 
 **Design.** Conservation down the tree (see The objective tree), and:
 
@@ -239,12 +244,12 @@ given the gateway URL, the dispatched Brief, and the turn's id, plus how to
 read the result. The kernel never knows which harness it runs; the Claude
 Code wrapper and its flags are in [harnesses.md](harnesses.md).
 
-A task's turns resume one harness session, so Valor keeps its working
-context across a question, an answer, and feedback. Each turn still gets
-the Brief re-rendered from the ledger. The prompt is the instruction on the
-first turn, Tom's answer after a question, his feedback after a delivery,
-and "Continue." otherwise, followed by what became of the effects the
-previous turn requested.
+A task's frontier turns resume one working session (clarify, plan, build,
+patch, docs), so Valor keeps its context across a question, a send-back,
+and feedback; a patch is that session resumed, compacted when it nears the
+context limit, never a new agent (Tom, 2026-10-01). Critique and review run
+in fresh sessions. Each turn gets the Brief re-rendered from the ledger.
+Prompts per state are in [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
 `.valor/` in its workspace, read when the turn ends: `question.md` (a
@@ -254,8 +259,8 @@ request each, passed to the broker). Each file is moved to
 `.valor/handled/<turn_id>/` once read. The layout is specified in
 [harnesses.md](harnesses.md). Each signal becomes a ledger row
 (`question.asked`, the broker's rows, and today `task.delivered` for a
-`done.md`; in the design `done.md` is a **candidate**, and only a passing
-`verify` writes `task.delivered`, per [sdlc-state-machine.md](sdlc-state-machine.md)),
+`done.md`; in the design `done.md` is a **candidate**, and `task.delivered`
+waits for test, breadth, review, and docs, per [sdlc-state-machine.md](sdlc-state-machine.md)),
 and `turn.collected` records everything the turn left.
 
 **An answer or feedback is spent only by a turn that finishes.** After a
@@ -395,84 +400,65 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
 
 ## The judgement tier in the loop
 
-The judgement tier sits at two points in the loop. Each is a Jev-class call
-through `JudgementPort` in [judgement-layer.md](judgement-layer.md), and
-each decides what a thing is and nothing about what it may do.
+Each judgement is a Jev call through `JudgementPort` in
+[judgement-layer.md](judgement-layer.md) and decides what a thing is,
+nothing about what it may do. The SDLC uses three:
 
-**1. Before the first turn: is this request thin?** A classifier reads the
-request and a short summary of the code it touches and routes it. A precise
-request goes straight to build (`mode` `bare`). An underspecified one, a
-one-line ask, an ask that leans on an example, or an ask naming existing UI
-without scope, opens with a clarify turn (`mode` `clarify`): Valor inspects,
-changes nothing, and sends one message holding its material questions,
-the answer it will assume for each, and its intended approach.
-
-This is a guard Tom granted on 2026-10-01, and it is ledgered as one: the
-incidents are the first demonstration (psyoptimal #894, two PM rounds for
-three decisions one message would have settled) and the replay baseline;
-the mission items are 3 and 6; it expires ninety days after it is
-recorded unless it has fired. The evidence that it helps only where it
-routes: clarify raised judged fidelity on the one-line requests (popoto
-#191 from 1 to 3, hidden tests 3/11 to 7/11; popoto #188 from 4 to 5 at
-half the spend) and changed nothing on the three precise ones
-(rebuild-baseline.md, Results per item and Aggregate). Asked
-unconditionally it hurt once: on popoto #633 the question carried a wrong
-premise, the answer did not correct it, and correctness fell from 5 to 2.
-So the classifier routes, and clarify is never the default.
-
-**Built:** the `mode` field and the clarify section of the Brief. Today
-`mode` is chosen by hand at `start`, and the kernel does not check that a
-clarify turn asked. **Design:** the classifier (judgement task
-`intake.underspecified`), its guard row, and its confidence gate (an
-abstain routes to clarify, never to a question about the classifier).
-
-**2. Over every diff: does this add governance?** The blind verifier asks
-one Jev-class boolean, "does this add a check, gate, hook, round, or review
-step". A yes with no grant is a refused merge. **Design;** not built.
+1. **Before any plan: is this request thin?** A thin request (a one-line
+   ask, an ask that leans on an example, an ask naming existing UI without
+   scope) opens with a clarify turn: Valor inspects, changes nothing, and
+   sends one message with its material questions, the answer it assumes
+   for each, and its intended approach. A guard Tom granted on 2026-10-01,
+   ledgered with its incidents (psyoptimal #894; popoto #191 and #188), mission
+   items 3 and 6, and a ninety-day expiry. Clarify raised fidelity on the
+   one-line requests and changed nothing on the precise ones; asked
+   unconditionally it hurt once (#633), so the classifier routes and
+   clarify is never the default (rebuild-baseline.md, Aggregate).
+   **Built:** the `mode` field and the clarify section of the Brief, chosen
+   by hand at `start`. **Design:** the classifier and its guard row.
+2. **After the tests: are they broad enough?** The breadth check in
+   [sdlc-state-machine.md](sdlc-state-machine.md). **Design.**
+3. **Over every diff: does this add governance?** The blind verifier's one
+   boolean, "does this add a check, gate, hook, round, or review step". A
+   yes with no grant is a refused merge. **Design.**
 
 ## Verification
 
-One blind verification per delivery. No review rounds.
+The `review` checkpoint of [sdlc-state-machine.md](sdlc-state-machine.md):
+one blind verification per pass, with as many send-backs to patch as the
+plan allows (0, 1, or 2, set by the stakes).
 
 **Design.** Nothing in the kernel verifies yet; the baseline's judge
 (`scripts/judge_replay.py`) ran outside it. The verifier:
 
-- **Reads** the request, Tom's answers and feedback, the diff, the
+- **Reads** the request, Tom's answers and feedback, the plan, the diff, the
   deterministic check results, and the effect ledger. It never reads the
   agent's narrative (`done.md`, the transcript), so it judges what happened
   and not what Valor said happened.
 - **Runs deterministic checks first** in a fresh container from a
-  kernel-built image: the repository's tests, its linter, and the test
-  breadth check that [sdlc-state-machine.md](sdlc-state-machine.md) places
-  before verification. The results are recorded before the verifier reads
-  any prose, so a delivery saying "all tests pass" is judged against the
-  kernel's own record.
-- **Is an independent model, never the executor's snapshot,** because a
-  model grading its own output prefers it [16], and **equally strong**,
-  because a weaker judge underestimates a stronger executor [18]. The
-  baseline showed the cost of a weak reviewer: the Sonnet stand-in accepted
-  popoto #191 bare, which the judge scored 1 for fidelity, and accepted
-  #633 clarify with the stale-cache bug moved, not removed
-  (rebuild-baseline.md, Review rounds).
-- **Returns a typed verdict:** pass, fail, or abstain, with a result per
-  requirement, a `predicted_failure` probability, and the governance
-  boolean. Every verdict is a ledger row from the first one.
-
-**Why one and no rounds.** No replay needed a review round to be accepted;
-the one review that mattered, Tom's on #633, caught a subtle state bug,
-which is what a strong blind verifier with the tests in hand is for
-(rebuild-baseline.md, Review rounds). Plan and critique rounds are cut on
-the same evidence: neither arm wrote a plan and both reached the same
-fidelity (rebuild-baseline.md, Plan, critique, revise).
+  kernel-built image: the repository's tests and its linter. The results
+  are recorded before the verifier reads any prose, so a delivery saying
+  "all tests pass" is judged against the kernel's own record.
+- **Is Opus-class, never cheaper** (Tom, 2026-10-01): the builder's own
+  Opus model in a fresh blind session, or an Opus-class model from another
+  vendor through another harness. A weaker judge underestimates a stronger
+  executor [18]; the baseline's Sonnet stand-in accepted popoto #191 bare at
+  fidelity 1 and #633 clarify with the stale-cache bug moved, not removed
+  (rebuild-baseline.md, Review rounds). A model grading its own output
+  prefers it [16]; blindness (no narration, a session that did not build,
+  checks it reran itself) is what counters that when the model is the same.
+- **Returns a typed verdict:** pass, changes, or governance refused, with a
+  result per requirement, a `predicted_failure` probability, and the
+  governance boolean. Every verdict is a ledger row from the first one.
 
 **Calibration and autonomy.** A human audit sample of verdicts, weighted
 toward work that left the workspace and every `act`, with a smaller share of
-failures and abstentions, is the ground truth [4, 17]. Calibration is false
-accept, false reject, and Brier score [12] with sample size; raw pass rate
-is never reported alone [14]. A degrading series lowers the highest class
-the system may commit without Tom; raising it is only Tom's decision,
-recorded as a grant. Serves: autonomy shrinks automatically on evidence and
-grows only by Tom's decision.
+failures, is the ground truth [4, 17]. Calibration is false accept, false
+reject, and Brier score [12] with sample size; raw pass rate is never
+reported alone [14]. A degrading series lowers the highest class the system
+may commit without Tom; raising it is only Tom's decision, recorded as a
+grant. Serves: autonomy shrinks automatically on evidence and grows only by
+Tom's decision.
 
 **Verify by use.** No run in either experiment looked at a UI result in a
 browser (rebuild-baseline.md, Browser use). A headless browser in the
@@ -532,41 +518,41 @@ engine; delivery is keyed by transport, so a task started by email answers
 by email. The bridge port is owned by [bridges/telegram.md](bridges/telegram.md);
 [bridges/email.md](bridges/email.md) conforms to it. Today the surface is the command line.
 
-## How a task flows from request to delivery
+## How a task flows from request to merge
 
-1. **Request.** Tom's message reaches the kernel through a bridge. The
-   kernel starts a task: a Brief with a money budget, an attention budget,
-   an effect ceiling (`act` for work that pushes), governance grant none,
-   and a provisioned workspace.
-2. **Judge.** The judgement tier reads the request and routes it: precise
-   to build, thin to clarify.
-3. **Clarify, if routed.** One inspecting turn ends with one message: the
-   material questions, the answer Valor assumes for each, and its intended
-   approach. Tom's answer is a ledger row and opens the next turn.
-4. **Build.** Turns in one resumed session, every model call metered, every
-   effect through the broker, until Valor writes `done.md`: a candidate.
-5. **Test breadth.** The check in [sdlc-state-machine.md](sdlc-state-machine.md)
-   runs before verification. The baseline's hidden tests found what every
-   replay left untested: archived-team guards on #872, the list key and hash
-   exclusion on #191 (rebuild-baseline.md, Test breadth).
-6. **Verify.** One blind verification. A fail returns the task to build
-   with the verdict as the prompt.
-7. **Deliver.** The delivery reaches Tom with its summary, the decisions
+1. **Intake.** Tom's message reaches the kernel through a bridge. The
+   kernel starts a task: a Brief with a money budget ($8 by default for a
+   task started from Telegram), an attention budget, an effect ceiling
+   (`act` for work that pushes), governance grant none, and a provisioned
+   workspace.
+2. **Judge, then clarify if thin.** One inspecting turn, one message.
+3. **Plan.** The working session writes the plan: approach, stakes, how
+   many critique and review loops (0 to 2 each), and any related tech debt
+   pulled into scope.
+4. **Critique.** A fresh session reads the plan; `revise` sends it back
+   while the plan's critique rounds last.
+5. **Build, test, breadth.** The working session builds until it writes
+   `done.md`, a candidate; the suite runs at head and base; the breadth
+   check reads the diff and tests.
+6. **Review, patch.** One blind verification per pass. Findings go to the
+   same working session, resumed, while the plan's review rounds last.
+7. **Docs.** The working session makes every doc the change made untrue
+   true again.
+8. **Merge.** The delivery reaches Tom with its summary, the decisions
    Valor made that he may want to change, and its held effects. Each `act`
-   is a card; his tap approves it, and release performs it.
-8. **Feedback, if any.** Tom's feedback reopens the task in the same
-   session; a later delivery is a new `task.delivered`.
+   is a card; his tap approves it, and release performs it. Feedback,
+   before or after the merge, goes to `patch` on the same task.
 
-The attention log, the money spent, and the verdict are read from the
-ledger at every step. The states, verdicts, and gates of steps 2 to 7 are
-owned by [sdlc-state-machine.md](sdlc-state-machine.md).
+The attention log, the money spent, and every verdict are read from the
+ledger at every step. The states, verdicts, loops, and the merge predicate
+are owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 
 ## Failure points and where each is caught
 
 | Failure | Caught by | Serves |
 |---|---|---|
 | Runaway spend | per-call reservation in money against the task's remaining; only Tom raises it | bounded spend |
-| A call made outside the meter | the harness's base URL is the gateway (a deliberate direct call: see Limits) | bounded spend |
+| A call made outside the meter | the harness's base URL is the gateway; a deliberate direct call is an accepted risk (see Limits) | honest metering |
 | Irreversible effect without consent | broker reads the class from the performer and holds every `act`; release needs a matching unused approval | bounded authority |
 | Approval replayed or payload changed after approval | approval bound to the payload digest, consumed once | bounded authority |
 | Governance added without a grant | broker refuses governance actions with no grant; verifier boolean over every diff (design) | governing constraint |
@@ -576,8 +562,9 @@ owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 | A failed turn loses Tom's answer or feedback | spent only by a turn that finishes | correction |
 | A stand-in's words read as Tom's | `role_played` on answers and feedback (approvals: design) | provenance |
 | Thin request built on a guess | judgement-tier routing to a clarify turn (design) | Mission 3, 6 |
+| A wrong plan reaches code | critique in a fresh session, rounds set by stakes (design) | Mission 1 |
 | Delivery claims success | blind verifier reading checks and the ledger, never the narrative (design) | docs describe reality |
-| Verifier too lenient | independent, equally strong model; human audit sample (design) | Evidence |
+| Verifier too lenient | Opus-class blind reviewer, never cheaper; human audit sample (design) | Evidence |
 | Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
 
 ## Limits
@@ -589,11 +576,14 @@ owned by [sdlc-state-machine.md](sdlc-state-machine.md).
 - **Tool results are the agent's account.** The transcript is written
   inside the sandbox and can be falsified there; the verifier re-executes
   in a fresh container for that reason.
-- **The sandbox runs as Tom's user.** A deliberate keychain read through the
-  `security` tool is not fenced (rebuild-demonstration.md, Setup,
-  Isolation), and the public internet is reachable, so a turn set on it
-  could reach the provider with Claude Code's own credential and bypass
-  the meter. Effects on shared targets leave only through the broker, which
-  runs outside the sandbox.
-- **One provider.** Until a second exists, the verifier's independence rests
-  on a different model, and the audit sample carries more weight.
+- **The sandbox runs as the machine's user.** A deliberate keychain read
+  through the `security` tool is not fenced (rebuild-demonstration.md,
+  Setup, Isolation), and the public internet is reachable, so a turn set
+  on it could reach the provider with the machine's Claude login and
+  bypass the meter. Tom accepted this on 2026-10-01 and chose no separate
+  macOS user for turns: budgets give visibility and honest metering, not a
+  hard wall. Effects on shared targets still leave only through the
+  broker, which runs outside the sandbox.
+- **One provider today.** Until a second is metered, the reviewer is the
+  builder's model in a blind fresh session, and the audit sample carries
+  more weight.
