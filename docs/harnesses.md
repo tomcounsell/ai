@@ -309,18 +309,17 @@ carrying a per-turn token in the path. Claude Code sends every call through
 that base URL: the main loop, its own side calls, and any subagent it starts
 inside the turn. The demonstration's 69 model calls all passed the gateway,
 and the gateway and the harness agreed on the total (rebuild-demonstration.md,
-Money). A turn runs with its own Claude Code config directory, which holds no
-login, so it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`) and the gateway
-sets the kernel's credential on each call: a long-lived token in the kernel
-key directory when one is there, otherwise the access token of the machine's
-Claude Code login, read from the Keychain at most once a minute (the first
-401 after a read allows one more); the credential goes only to
-`v1/messages`, its `count_tokens`, `v1/models`, and one model by an id of
-letters, digits, `.`, `_`, and `-`; every path is checked as it arrived,
-undecoded (no percent escape, no empty, `.`, or `..` segment) and forwarded
-byte for byte, and any other path is refused; the kernel never refreshes the login, and an
-expired one fails the call naming the remedy; the harness never holds a
-budget, and a refused call reaches it as an API error.
+Money). The gateway checks each path as it arrived, undecoded, and forwards it
+byte for byte; a percent escape, a backslash, or an empty, `.`, or `..`
+segment is a 400. A turn's own Claude Code config directory holds no login, so
+it carries a placeholder (`CLAUDE_CODE_OAUTH_TOKEN`), and the gateway sets the
+kernel's credential, only on `v1/messages`, its `count_tokens`, `v1/models`,
+and `v1/models/<id>` (letters, digits, `.`, `_`, `-`), refusing any other path
+with a 403: a long-lived token in the kernel key directory when one is there,
+else the machine's Claude Code login read from the Keychain at most once a
+minute (the first 401 after a read allows one more). The kernel never
+refreshes the login, and an expired one fails the call naming the remedy. The
+harness never holds a budget, and a refused call reaches it as an API error.
 
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` bounds each call's output, and the gateway
 reserves each call's worst case from that bound before forwarding. A lower
@@ -363,13 +362,11 @@ a turn must not reach. It runs as Tom's user.
   (`work_dir`), other tasks included.
 - **Allowed back, read and write:** for the working session (`turn.sb`), its
   clone, caches, and `state/work/` (its `TMPDIR` and Claude Code config); for
-  a fresh session, only its own check directory.
+  a fresh session, only its own check directory, with `/private/tmp`,
+  `/private/var/tmp`, `/private/var/folders`, and `~/.claude*` denied.
 - **Read only:** the shared `bin/` (uv), first on the turn's `PATH`; for the
-  working session, its task's `home/` and bare origin.
-- **Stat only:** the allowed directories' ancestors, so tools that resolve
-  real paths (uv building a virtualenv) work; listing them stays denied.
-- **Denied to a fresh session:** `/private/tmp`, `/private/var/tmp`,
-  `/private/var/folders`, `~/.claude`, and `~/.claude.json`.
+  working session, its task's `home/` and bare origin. **Stat only:** the
+  allowed directories' ancestors (not listable), so real paths resolve.
 - **Denied entirely:** the kernel's own paths, each named by its setting: the
   kernel key directory (`pg_passfile`'s), the machine cluster's data directory
   (`pg_data_dir`), and the backup disk (`backup_dir`).
@@ -531,8 +528,8 @@ the sending side inside the turn's sandbox; the receiving git with fsck, one
 pack under a size limit, a footprint watchdog, and replace refs and grafts
 off. A tree holding a top-level `.valor` (any case) is refused, since the
 kernel makes `.valor` itself for a fresh session's inputs, written through
-descriptors that follow no link and overwrite no file. A refused plan or
-candidate does not count.
+descriptors that follow no link and overwrite no file. A refused plan,
+candidate, or docs head does not count.
 
 ### Per-task services
 
