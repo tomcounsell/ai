@@ -136,8 +136,8 @@ call).
 No leg runs resident on the Mac. The design hosts the open-weight fallback
 on an endpoint: on 16 GB, beside Postgres, one container runtime, one
 `claude -p`, and the bridges, there is no room for a resident classifier
-worth running (`docs/machine.md`). Which provider hosts it, or whether a
-local copy loads only while no turn holds the slot, is open (see "Open").
+worth running (`docs/machine.md`). It is the same open-weight model hosted
+by a second provider (Tom, 2026-10-01); which provider is open.
 
 Models are pinned by exact version on both legs. A version change is a new
 calibration record before the task routes to it.
@@ -329,9 +329,9 @@ Notes per shape:
    to fix the doc or the code; it blocks nothing by itself.
 8. The baseline: every replay wrote fewer tests than its reference, and the
    hidden tests found what that missed (rebuild-baseline.md, "Test
-   breadth"). The `breadth` state runs the suite deterministically, then
-   this judgement; a `gap` label yields the state's `gaps` verdict
-   (`docs/sdlc-state-machine.md`).
+   breadth"). The test branch of the checks runs the suite
+   deterministically, then this judgement; a `gap` label on a green suite
+   yields the branch's `gaps` verdict (`docs/sdlc-state-machine.md`).
 9. Proxy scores on replays. The emulator doc owns the proxies and the
    human labels they are checked against.
 10. Exit codes, refusal rows, and the gateway's errors decide most failures
@@ -537,8 +537,7 @@ governance dashboard: each is the disease presenting as the cure.
 
 ## Open
 
-- Which provider hosts the open-weight fallback, or whether a local copy
-  loads only while no turn holds the slot.
+- Which second provider hosts the open-weight fallback.
 - The tier bars: minimum `n` and Brier ceilings per error-cost tier.
 - What happens at expiry to a guard that did fire: renewal by a new grant,
   or kept until it stops firing.

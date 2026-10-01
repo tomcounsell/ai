@@ -97,7 +97,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/session.py` | `question.asked` | `question_id`, `turn_id`, text | Mission item 6 |
 | `core/session.py` | `question.answered` | `question_id`, text, provenance | Mission item 6 |
 | `core/session.py` | `feedback.given` | `feedback_id`, `on_delivery`, text, provenance | Mission item 1; Evidence "Tom's feedback, both directions" |
-| `core/session.py` | `task.delivered` | `turn_id`, summary. Written today when a turn leaves `done.md`; in the design that is a candidate, and `task.delivered` is written when the task reaches `merge` (`docs/sdlc-state-machine.md`) | Mission item 1 |
+| `core/session.py` | `task.delivered` | `turn_id`, summary. Written today when a turn leaves `done.md`; in the design that is a candidate, and `task.delivered` is written when the join of the test, review, and docs checks sends the task to `merge`. Those checks write `test.decided`, `review.decided`, and `docs.decided`, each keyed by the candidate's head SHA and producing turn, and the merge predicate reads only rows keyed by the current candidate (`docs/sdlc-state-machine.md`) | Mission item 1 |
 | `core/broker.py` | `effect.held` | `effect_id`, action type, effect class, target, payload, `payload_sha256`, idempotency key, `adds_governance` | Nothing `act`-class leaves without Tom's tap |
 | `core/broker.py` | `effect.refused` | as `effect.held`, plus reason | Bounded authority |
 | `core/broker.py` | `approval.granted` | `approval_id`, `effect_id`, `payload_sha256`, note (Tom's literal message), by | One tap, one effect |

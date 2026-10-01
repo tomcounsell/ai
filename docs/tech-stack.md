@@ -56,7 +56,7 @@ enforcing outside the model is AI Control [4].
 | Model prices | a table in `core/budget.py` | in use |
 | Model seats | a pinned registry of frontier, reviewer, and judgement seats | chosen, not built |
 | Frontier provider | Anthropic, one provider | in use |
-| Judgement tier | Jev, with OpenAI's Decisions API for judgements that need images; open-weight fallback behind the same port | chosen, not built; fallback host open |
+| Judgement tier | Jev, with OpenAI's Decisions API for judgements that need images; open-weight fallback hosted by a second provider behind the same port | chosen, not built; fallback provider open |
 | Harness | the `claude` CLI, one `claude -p` per turn | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
@@ -309,10 +309,10 @@ What the stack fixes:
 
 **Vendor.** Jev is the primary leg, including for client request text
 (Tom, 2026-10-01). Jev takes no images, so a judgement that needs one goes
-to OpenAI's Decisions API behind the same port. Which open-weight model is
-the fallback, and where it runs given 16 GB, are **open**. The fallback
-cannot run resident on this machine. The router's design hosts it ([judgement-layer.md](judgement-layer.md));
-the local, load-on-demand alternative is sized in [machine.md](machine.md).
+to OpenAI's Decisions API behind the same port. The fallback is the same
+open-weight model hosted by a second provider, never resident on this
+machine (Tom, 2026-10-01); which model and which provider are **open**
+([judgement-layer.md](judgement-layer.md), [machine.md](machine.md)).
 
 ## 6. Harness and sandbox
 
@@ -518,7 +518,7 @@ memory figure from them carries over; the RAM budget per component is
 - **One Postgres server for the kernel**, resident. Workspace clusters start
   with their task and stop with it.
 - **No resident model.** Judgement is hosted (section 5). The open-weight
-  fallback runs elsewhere or on demand.
+  fallback is hosted by a second provider.
 - **Bridges resident, everything else on demand.** The bridges are the only
   components that must be up when Tom is not at the machine. Routines start
   under launchd and exit.

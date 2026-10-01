@@ -125,6 +125,13 @@ rule, not a check on the agent: it enforces the 16 GB constraint, and it
 serves Mission item 1, since a turn swapped to disk or killed by memory
 pressure is a lost turn Tom has to notice.
 
+**The checks after a candidate.** Test, review, and docs run in parallel
+in the design ([sdlc-state-machine.md](sdlc-state-machine.md)), but on
+the Air each takes the one slot: the review and docs turns are turns, and
+the test branch's suite run is turn-sized work (the 3,000 MB line above).
+So the Air runs them back to back, test, review, then docs, with the same
+verdicts and the same join as running them at once.
+
 The current kernel runs turns one after another within a task and has no
 cross-task scheduler. The replay scripts held a lock-file slot per run; a
 kernel-held turn slot in Postgres is the design.
@@ -165,14 +172,10 @@ quantized to 4 bits, needs about 5 GB for its weights and cache (estimate;
 not measured). Resident, it takes most of the 6 GB headroom with every
 turn. Loaded beside a turn, it pushes the machine into swap.
 
-The fallback's placement is open (see Open questions). Two shapes fit 16
-GB: the same open-weight model hosted by a second provider, reached through
-the same port; or a local copy loaded only when no turn holds the slot,
-unloaded after the call, and never started by launchd. The first costs no
-memory and keeps the fallback available while a turn runs. The second
-works offline and makes every fallback call wait for the slot. In both
-cases a low-confidence call takes its abstain route, per
-[judgement-layer.md](judgement-layer.md).
+The fallback is the same open-weight model hosted by a second provider,
+reached through the same port (Tom, 2026-10-01). It costs the Air no
+memory and stays available while a turn holds the slot. A low-confidence
+call takes its abstain route, per [judgement-layer.md](judgement-layer.md).
 
 ## Sandboxes
 
@@ -276,10 +279,7 @@ Kernel findings 1). It costs one more Postgres, 36 MB idle.
 
 ## Open questions for Tom
 
-1. **Where does the open-weight fallback run?** Hosted at a second provider
-   (no memory, available during turns) or local and loaded only when the
-   turn slot is free (offline, waits for the slot).
-2. **Mains power and sleep.** Whether the machine is kept awake, or a power
+1. **Mains power and sleep.** Whether the machine is kept awake, or a power
    assertion per turn is enough.
 
 ## Gaps
@@ -292,5 +292,3 @@ Each estimate above is a gap until measured on the Air:
   the work it runs (a Django test suite is the first case to measure).
 - An Apple container's real memory cost at its default allocation.
 - A headless browser rendering one page of a workspace app.
-- The open-weight fallback's memory at a quantization good enough to stand
-  in for the hosted leg.

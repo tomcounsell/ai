@@ -245,11 +245,11 @@ read the result. The kernel never knows which harness it runs; the Claude
 Code wrapper and its flags are in [harnesses.md](harnesses.md).
 
 A task's frontier turns resume one working session (clarify, plan, build,
-patch, docs), so Valor keeps its context across a question, a send-back,
-and feedback; a patch is that session resumed, compacted when it nears the
-context limit, never a new agent (Tom, 2026-10-01). Critique and review run
-in fresh sessions. Each turn gets the Brief re-rendered from the ledger.
-Prompts per state are in [harnesses.md](harnesses.md).
+patch), so Valor keeps its context across a question, a send-back, and
+feedback; a patch is that session resumed, compacted when it nears the
+context limit, never a new agent (Tom, 2026-10-01). Critique, review, and
+docs run in fresh sessions. Each turn gets the Brief re-rendered from the
+ledger. Prompts per state are in [harnesses.md](harnesses.md).
 
 **The signal channel.** A turn reaches the kernel through files under
 `.valor/` in its workspace, read when the turn ends: `question.md` (a
@@ -260,7 +260,7 @@ request each, passed to the broker). Each file is moved to
 [harnesses.md](harnesses.md). Each signal becomes a ledger row
 (`question.asked`, the broker's rows, and today `task.delivered` for a
 `done.md`; in the design `done.md` is a **candidate**, and `task.delivered`
-waits for test, breadth, review, and docs, per [sdlc-state-machine.md](sdlc-state-machine.md)),
+waits for the test, review, and docs checks, per [sdlc-state-machine.md](sdlc-state-machine.md)),
 and `turn.collected` records everything the turn left.
 
 **An answer or feedback is spent only by a turn that finishes.** After a
@@ -392,10 +392,10 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
   attention log. Valor proposes the label in its next delivery; Tom's
   correction overrides it.
 - **An attention budget.** The Brief carries `attention_budget`, counted
-  in escalations (questions, feedback rounds, approvals). The kernel never
-  refuses a question for exceeding it, because a refused question makes
-  Valor guess, which costs more attention later. Crossing it is a ledger
-  row and is shown on the delivery. Per-task attention against budget,
+  in interruptions: questions and feedback rounds, with approvals counted
+  separately (Tom, 2026-10-01). The kernel never refuses a question for
+  exceeding it, because a refused question makes Valor guess, which costs
+  more attention later. Crossing it is a ledger row, shown on the delivery. Per-task attention against budget,
   with dollars against budget, is the pair Mission item 6 asks for.
 
 ## The judgement tier in the loop
@@ -424,9 +424,9 @@ nothing about what it may do. The SDLC uses three:
 
 ## Verification
 
-The `review` checkpoint of [sdlc-state-machine.md](sdlc-state-machine.md):
-one blind verification per pass, with as many send-backs to patch as the
-plan allows (0, 1, or 2, set by the stakes).
+The review branch of the checks in [sdlc-state-machine.md](sdlc-state-machine.md):
+one blind verification per candidate, beside test and docs, with as many
+send-backs to patch as the plan allows (0, 1, or 2, set by the stakes).
 
 **Design.** Nothing in the kernel verifies yet; the baseline's judge
 (`scripts/judge_replay.py`) ran outside it. The verifier:
@@ -531,14 +531,15 @@ by email. The bridge port is owned by [bridges/telegram.md](bridges/telegram.md)
    pulled into scope.
 4. **Critique.** A fresh session reads the plan; `revise` sends it back
    while the plan's critique rounds last.
-5. **Build, test, breadth.** The working session builds until it writes
-   `done.md`, a candidate; the suite runs at head and base; the breadth
-   check reads the diff and tests.
-6. **Review, patch.** One blind verification per pass. Findings go to the
-   same working session, resumed, while the plan's review rounds last.
-7. **Docs.** The working session makes every doc the change made untrue
-   true again.
-8. **Merge.** The delivery reaches Tom with its summary, the decisions
+5. **Build.** The working session builds until it writes `done.md`, a
+   candidate.
+6. **Test, review, and docs, in parallel.** Each checks the same candidate
+   in a fresh session: the suite at head and base plus the breadth check,
+   the blind verifier, and a docs session that commits only doc paths.
+   When all three have ruled, any findings go together to one patch in the
+   working session, resumed, and the three run again on the new candidate,
+   within the plan's loop counts.
+7. **Merge.** The delivery reaches Tom with its summary, the decisions
    Valor made that he may want to change, and its held effects. Each `act`
    is a card; his tap approves it, and release performs it. Feedback,
    before or after the merge, goes to `patch` on the same task.

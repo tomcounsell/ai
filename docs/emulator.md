@@ -383,7 +383,8 @@ A baseline run cost $0.48 to $2.13 of Valor's turns (mean $1.42) and $0.10 to
 $0.92 of stand-in and judge. Wall time was 3 to 36 minutes per run with three
 in parallel; on one slot the thirteen runs take about two and a half hours.
 A run costs about $1.73 all in, so a sweep of the six baseline items in two
-arms, three repetitions each, is about $62.
+arms, three repetitions each, is about $62, over the $25 cap per full run
+(see Growing the item set).
 
 **Bounded spend.** Valor's turns are bounded by the task budget through the
 kernel's gateway. The stand-in and the judge are not: they call `claude -p`
@@ -456,8 +457,10 @@ An item qualifies when:
 
 Agent-authored requests, items whose only verification needs a browser or a
 device the workspace lacks, and items whose answers live nowhere are set
-aside, not scored with a guess. Which repositories, which date range, and
-the budget per sweep are Tom's to set.
+aside, not scored with a guess. Tom set the scope on 2026-10-01: items
+from psyoptimal, popoto, and cuttlefish, requests he wrote in the last 12
+months, and $25 per full emulator run, which at about $1.73 a run is about
+14 runs.
 
 ## Boundary with the kernel's tests
 

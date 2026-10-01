@@ -30,6 +30,17 @@ high-stakes work. The plan and the review may pull in related tech debt.
 Patch is the builder's own session, resumed and compacted if needed, never a
 new agent.
 
+**Added 2026-10-01 by Tom: "docs and test and pr review can always run in
+parallel."** After every build and every patch, test (with the breadth
+check), review, and docs check the same candidate commit concurrently, each
+in a fresh session; docs commits only doc paths. Their verdicts join: any
+findings go together to one patch in the builder's session, and all three
+run again on the new candidate. Review findings count against the plan's
+review loops; a send-back where review passed but test or docs did not is
+one fixed repair round per task. Merge needs all three to pass on the same
+final commit. On the 16 GB Air the three run back to back with the same
+result. (docs/sdlc-state-machine.md, docs/machine.md)
+
 ### 2. Is this the build order?
 *Example:* the kernel (task, budget, ledger, approvals) and its database first;
 Telegram and email second; the `claude` CLI wrapper third; persona and
@@ -101,8 +112,9 @@ costs well under $0.05; on #894, asking first would have saved an estimated $1.4
 (docs/judgement-layer.md, docs/tech-stack.md, docs/machine.md)
 
 **Primary answered 2026-10-01 by Tom: Jev for now.** OpenAI's Decisions
-API for any judgement that needs images, since Jev takes none. The backup
-is still open.
+API for any judgement that needs images, since Jev takes none. **Backup
+answered 2026-10-01: A** (default, not objected to): the same open-weight
+model hosted by a second provider. Which provider is still open.
 
 ### 8. Can the old code in `_archive_/` be deleted once the rebuild plan is written?
 *Example:* `_archive_/agent/pipeline_state.py` and the old bridge and worker
@@ -146,8 +158,9 @@ approvals, that is 5 interruptions; not counting them, 2.
 - **At the limit.** **A.** Never block; flag it on the delivery. **(Recommended)** A blocked question makes Valor guess, which costs you more later. **B.** Stop and ask.
 (docs/mission.md, docs/architecture.md, docs/data.md)
 
-**At the limit answered 2026-10-01 by Tom: A** (default, not objected
-to): counted and shown, never blocking. How to count is still open.
+**Answered 2026-10-01 by Tom: A and A** (defaults, not objected to).
+Questions and feedback rounds count as interruptions, approvals separately;
+counted and shown, never blocking.
 
 ### 12. When you start a task from a Telegram message, what budget does it get?
 *Example:* you message "list() in popoto hydrates every row twice, fix it".
@@ -164,6 +177,9 @@ cuttlefish for about $22 in total.
 - **B.** Different repos, dates, or budget (say which).
 (docs/emulator.md)
 
+**Answered 2026-10-01 by Tom: A.** psyoptimal, popoto, and cuttlefish;
+requests from the last 12 months; $25 cap per full emulator run.
+
 ## Can wait
 
 ### 14. Should replies in one chat be pre-approved, so you stop tapping each one?
@@ -171,25 +187,35 @@ cuttlefish for about $22 in total.
 - **A.** Not yet; tap each one. **(Recommended)** Pre-approval widens authority; revisit once you see how many taps it really is. **B.** Yes, per chat.
 (docs/bridges/telegram.md, docs/bridges/email.md)
 
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
+
 ### 15. When a check reaches its 90-day expiry and it did catch something, what happens?
 *Example:* in 90 days the test-breadth check comes due, and it caught missing tests on two deliveries.
 - **A.** It expires unless you renew it with a new tap. **(Recommended)** Keeps checks from piling up silently. **B.** It stays as long as it keeps catching things.
 (docs/judgement-layer.md, docs/mission.md)
+
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
 
 ### 16. Should the 90-day cleanup (removing unused routines, checks, and tools) merge without your tap?
 *Example:* a branch that deletes a routine nobody ran since July.
 - **A.** No, it waits for a tap like any merge. **(Recommended)** One tap per sweep is cheap. **B.** Yes, pre-approved.
 (docs/routines.md)
 
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
+
 ### 17. Is "the email passed your domain's DMARC check" enough proof an email is from you?
 *Example:* an email from your address saying "start on psyoptimal #893".
 - **A.** Yes, and treat it as an approved check now. **(Recommended)** Without it anyone could spoof your address. **B.** No, email can only start tasks after a Telegram confirmation.
 (docs/bridges/email.md)
 
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
+
 ### 18. How do you approve from your phone?
 *Example:* Valor asks to push the #894 branch while you are out.
 - **A.** A tap in Telegram. **(Recommended)** No new surface to build. **B.** A small web page, with a passkey signature for pushes and sends.
 (docs/tech-stack.md)
+
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
 
 ### 19. What should the skill system do?
 *Example:* today `do-build` lives in this repo and is copied to every machine;
@@ -197,11 +223,17 @@ you also want skills that update psyoptimal's own repo-specific skills.
 - **A.** Decide when `skills/` is built. **(Recommended)** Nothing in the first three components needs it. **B.** Tell me the requirements now (a voice note is fine).
 (skills/README.md, docs/harnesses.md)
 
+**Default stands from 2026-10-01: A**, unless Tom says otherwise.
+
 ### 20. Small machine and housekeeping calls
 - **Sleep:** keep the Air awake on mains power **(Recommended)**, or let each session hold it awake. (docs/machine.md)
 - **Backups:** nightly database dump to an external disk, keep 30 dumps and keep the ledger forever **(Recommended)**. (docs/data.md, docs/tech-stack.md)
 - **Answer keys:** confirm the inferred answers for cuttlefish #646, popoto #191, and popoto #188 (about 5 minutes). (docs/emulator.md)
 - **Flutter:** do not install Flutter for the one usable mobile test case (localsend #2765) **(Recommended)**. (docs/emulator.md)
+
+**Defaults stand from 2026-10-01** for sleep (kept awake on mains),
+backups, and Flutter, unless Tom says otherwise. The answer keys still need
+Tom's confirmation.
 
 ## Decided by default (tell me if wrong)
 

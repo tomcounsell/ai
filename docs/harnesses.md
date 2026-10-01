@@ -139,7 +139,7 @@ context from inspection to delivery) and Mission item 6 (Tom's answer lands
 in the context that asked, so he never restates the task).
 
 A task's first frontier turn opens a Claude Code session, the working
-session; every later clarify, plan, build, patch, and docs turn resumes it
+session; every later clarify, plan, build, and patch turn resumes it
 with `--resume`. `core.session.next_prompt` reads the session id from the
 last `turn.ended` that carried one, and chooses the prompt:
 
@@ -148,9 +148,8 @@ last `turn.ended` that carried one, and chooses the prompt:
 | nothing (first turn) | the task's instruction |
 | Tom's answer to a question | the answer |
 | a critique's findings | the findings, asking for a revised plan or, with no rounds left, for the build |
-| a `red` test run, breadth gaps, or review findings | the failures, gaps, or findings, asking for a new `done.md` (a patch) |
+| findings from the checks (test failures, breadth gaps, review findings, docs findings, joined) | every finding together, asking for a new `done.md` (a patch) |
 | Tom's feedback on a delivery | the feedback, framed as project-manager review, asking for a new `done.md` (a patch) |
-| a review that passed | the doc paths and the diff, asking for the docs the change made untrue |
 | a turn that left neither | "Continue." |
 
 **Patch is a resume.** A patch never starts a new agent: it is the session
@@ -158,12 +157,16 @@ that built, resumed with what came back (Tom, 2026-10-01). The session knows
 why each line is there; a fresh agent would rebuild that context from the
 diff at the cost of a full read and lose the decisions not written down.
 
-**Fresh sessions for critique and review.** Critique and review each run in
-a session of their own that never resumes, and never reads, the working
-session. Their inputs are files and ledger rows, so their independence is
-structural. The reviewer runs the same Opus model or an Opus-class model
-from another vendor through that vendor's harness; the port below is what
-lets either run without the kernel knowing which.
+**Fresh sessions for critique, review, and docs.** Each runs in a session
+of its own that never resumes, and never reads, the working session. Their
+inputs are files and ledger rows, so their independence is structural.
+Review and docs start on every candidate, concurrently with the test run
+when the machine's turn slots allow (`docs/machine.md`); the docs session
+works in its own checkout of the candidate and commits only doc paths. Its
+prompt is the request, the plan, the diff, and the doc paths, asking for
+the docs the change made untrue. The reviewer runs the same Opus model or
+an Opus-class model from another vendor through that vendor's harness; the
+port below is what lets either run without the kernel knowing which.
 
 The kernel's support today: the working session for first turn, answers,
 and feedback. The other rows, and the fresh sessions, are design.
@@ -212,7 +215,7 @@ workspace, which the kernel reads when the turn ends:
 | File | Meaning | What the kernel does |
 |---|---|---|
 | `.valor/question.md` | a question for Tom | `question.asked`; the task waits for `python -m core answer` |
-| `.valor/done.md` | a candidate delivery: what, how it was verified, what Tom should know | today `task.delivered`; in the design a candidate that test, breadth, review, and docs pass before `task.delivered` (`docs/sdlc-state-machine.md`) |
+| `.valor/done.md` | a candidate delivery: what, how it was verified, what Tom should know | today `task.delivered`; in the design a candidate that the test, review, and docs checks pass before `task.delivered` (`docs/sdlc-state-machine.md`) |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs, holds for Tom, or refuses |
 
 `core.signals.collect` reads them, then moves each to

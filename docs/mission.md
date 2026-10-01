@@ -248,14 +248,15 @@ drift [14].
 Mission item 6 gives each task an attention budget beside its money budget.
 The current kernel's only budget unit is money (`core/tasks.py`, `Brief`);
 attention is recorded and reported. In the design the Brief carries
-`attention_budget`, counted in escalations (questions, feedback rounds,
-approvals). The kernel never refuses a question for exceeding it, because a
+`attention_budget`, counted in interruptions: questions and feedback
+rounds, with approvals counted separately, since an approval is the price
+of keeping Valor's authority small rather than a sign it was confused (Tom,
+2026-10-01). The kernel never refuses a question for exceeding it, because a
 refused question makes Valor guess, which costs more attention later;
 crossing it is a ledger row, shown on the delivery. The mechanism is
 `docs/architecture.md`'s (The attention log). Refusing or stopping on the
 attention budget would be a gate, and under the governance constraint it
-would need an incident and Tom's grant. Whether escalations are the right
-unit is open (`docs/plans/rebuild-open-questions.md`).
+would need an incident and Tom's grant.
 
 ## First evidence: the demonstration and the baseline
 
@@ -352,8 +353,9 @@ The same records are why each stage's instructions are light: neither arm
 wrote a plan document, and both reached fidelity 4 on the items whose old
 pipeline ran a full plan, critique, and revision chain (rebuild-baseline.md,
 "Plan, critique, revise"). They covered six small changes and no large,
-high-stakes one, so Tom kept every stage as a checkpoint and let each plan
-set how many critique and review loops its stakes earn (2026-10-01). Every
+high-stakes one, so Tom kept every stage as a checkpoint, let each plan
+set how many critique and review loops its stakes earn, and had test,
+review, and docs run in parallel on every candidate (2026-10-01). Every
 replay wrote fewer tests than its reference, and the hidden tests found
 what that missed (rebuild-baseline.md, "Test breadth"). Both readings shape
 `docs/sdlc-state-machine.md`.
