@@ -900,6 +900,16 @@ before the suite and the branch reruns.
 5. `record_check(DOCS, verdict, head=kept, governance_from=ids, ...)`; any
    dropped commit makes the verdict `changes`.
 
+Every fresh checkout in 1.4b and 1.4c (test, docs, review) is made the way
+1.4a's critique checkout is after its patch: a candidate whose tree holds a
+top-level `.valor` (any letter case) is refused at collection and at
+checkout, `.valor` must not exist before the kernel makes it, inputs and
+any password-file copy are written relative to a descriptor with
+`O_NOFOLLOW` and `O_EXCL`, no verdict file may exist before the turn, and
+any turn-chosen text the kernel embeds in a file it writes is JSON-quoted.
+For docs, whose checkout is a real clone, the same refusal covers the docs
+session's own commits.
+
 `record_check` refuses a non-manual test verdict without `breadth` and a
 non-manual review or docs verdict without `governance_from`. `test` and
 `docs` leave `MANUAL_STAGES`.
@@ -1405,3 +1415,52 @@ Evidence: `cd ~/src/valor-rebuild-m14 && VALOR_TEST_DB=valor_rebuild_test_m14
 (an earlier attempt that ran out of its $0.15 budget metered $0.066).
 `tests/test_live_session.py` was rewritten for `start --project` and the
 critique runner and not run (it now runs an Opus critique, up to $1.00).
+
+## Patch round 1 (review round 1 of 2)
+
+On top of the docs session's `0f24a571c`. Every finding resolved:
+
+- **R1.** A plan or candidate whose tree holds a top-level `.valor` (any
+  case) is no plan and no candidate (`session._keep`), and `blind_checkout`
+  refuses one; `workspace.write_inputs` makes `.valor` itself (refusing one
+  that exists), writes each input relative to a descriptor with
+  `O_NOFOLLOW` and `O_EXCL`, and refuses a verdict file before the turn;
+  turn-chosen text in `plan.md` is JSON-quoted. Both reproductions are
+  tests (a committed `.valor/inputs` symlink to a stand-in for
+  `~/.zshenv`, and a committed `.valor/verdict.json`). 1.4b's outline says
+  the same holds for test, docs, and review.
+- **R2.** The file-size limit runs under `/bin/bash` with 1024-byte blocks;
+  a test writes 4 MB under a 1 MB limit and finds exactly 1 MB.
+- **R3.** A refused or killed fetch deletes `tmp_*` packs, `incoming-*`, and
+  `tmp_objdir-*`; the size-limit and delta tests assert none remain.
+- **R4.** The comments in `core/workspace.py` (no socket; gateway port 1)
+  and `core/fresh.py` (what blindness covers) say what is true.
+- **R5.** Fresh profiles deny `/private/var/tmp`; harnesses.md's Known
+  openings says blindness holds for the paths the kernel names.
+- **R6.** With a credential, the gateway forwards only `v1/messages`,
+  `v1/messages/count_tokens`, and `v1/models`; anything else is a 403.
+- **R7.** The sweep also stops the services of task directories with no task
+  row whose `provision:<id>` lock is free; `workspace remove ID` removes
+  such a directory.
+- **R8.** `start --project` holds `workspace:ports` only to choose the ports
+  and record them in the task's directory (`ports.json`, which
+  `taken_ports` reads), and holds `provision:<id>` through provisioning;
+  the sweep only try-locks `workspace:ports` and skips when it is busy.
+- **R9.** A `.git` gitfile or a `commondir` refuses the fetch.
+- **R10.** The kernel's cache is keyed by the URL's digest.
+- **R11.** The Keychain's expiry is parsed inside the check; the Keychain is
+  read at most once a minute, failures included and whatever a 401 asked;
+  `advice.graftFileDeprecated=false` is pinned.
+- **T1 to T15** are tests: a cluster that will not start fails the run
+  naming its log with no turn; the cluster is up during a turn and down
+  after; `start --project` refusals, `--branch`, two concurrent starts on
+  distinct ports, a failing start removing its workspace; a provisioning
+  whose cluster will not start leaving nothing; the cache's refusals; a
+  refused mirror fetch is no plan; the fetch's time limit, sha, and ref
+  refusals; `ClaudeLogin` through an injected Keychain reader (no test reads
+  the real Keychain); `CLAUDE_CODE_TMPDIR`; session verdicts naming their
+  turn and model; a mismatched plan digest; a lower raise; a docs head that
+  is not a full sha or cannot be fetched; the replay workspace's
+  build, attach, and teardown through the kernel; critique with no database
+  credential and no service port (`check_harness(services=False)`); and a
+  merged task's workspace and Redis removed through the command line.

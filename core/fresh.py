@@ -10,10 +10,19 @@ A fresh session gets:
   exists in it;
 - inputs as files under `.valor/inputs/`, written by the kernel from ledger
   rows: the request verbatim, Tom's answers and feedback with provenance,
-  the diff against the base, and the stage's own;
+  the diff against the base, and the stage's own. A plan or candidate whose
+  tree holds `.valor` is refused, `.valor` must not exist before the kernel
+  makes it, and every input is written relative to a descriptor with no
+  link followed and no file overwritten, so nothing committed can redirect
+  a write or plant a verdict;
 - its own sandbox profile, `TMPDIR`, and Claude Code config directory, with
-  the whole work directory, `/private/tmp`, `/private/var/folders`, and the
-  user's Claude Code state denied, so it reads nothing the builder wrote;
+  the whole work directory, `/private/tmp`, `/private/var/tmp`,
+  `/private/var/folders`, and the user's Claude Code state denied, so it
+  reads nothing the builder wrote in the paths the kernel names for the
+  builder (its clone, caches, `TMPDIR`, and Claude Code state); what the
+  builder writes elsewhere in the user's home is outside this (harnesses.md,
+  Known openings). Critique gets no database credential and no service
+  port;
 - a Brief carrying the stage file and the verdict channel
   (`skills/sdlc/verdict.md`) instead of the working session's: no question,
   no effect;
@@ -26,6 +35,7 @@ writes no verdict: the runner returns `failed` (or `stopped`), and the next
 run starts the stage again.
 """
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -63,10 +73,9 @@ def _answers(rows: list[dict]) -> str:
     return "\n\n".join(out) or "No questions were asked and no feedback was given."
 
 
-def _write(checkout: Path, name: str, text: str) -> None:
-    inputs = checkout / ".valor" / "inputs"
-    inputs.mkdir(parents=True, exist_ok=True)
-    (inputs / name).write_text(text)
+def _quoted(value: Any) -> str:
+    """A value a turn chose, as JSON: quoted, newlines escaped."""
+    return json.dumps(value, ensure_ascii=False)
 
 
 def critique_inputs(
@@ -81,10 +90,10 @@ def critique_inputs(
         "answers.md": _answers(rows),
         "diff.patch": diff,
         "plan.md": (
-            f"The plan file: {plan.get('path')}\n"
-            f"Its stakes: {plan.get('stakes')}\n"
+            f"The plan file: {_quoted(plan.get('path'))}\n"
+            f"Its stakes: {_quoted(plan.get('stakes'))}\n"
             f"Critique rounds: {plan.get('critique_rounds')}; review rounds: {plan.get('review_rounds')}\n"
-            f"Scope additions: {plan.get('scope') or 'none'}\n"
+            f"Scope additions: {_quoted(plan.get('scope') or [])}\n"
         ),
         "critiques.md": "\n\n".join(
             f"## Critique {i + 1}: {c.get('verdict')}\n\n"
@@ -93,8 +102,7 @@ def critique_inputs(
         )
         or "No earlier critique.",
     }
-    for name, text in files.items():
-        _write(checkout, name, text)
+    workspace.write_inputs(checkout, files)
     return list(files)
 
 
@@ -164,9 +172,11 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None):
                                made["base"], made["candidate"])  # fmt: skip
         except git.GitError as exc:
             return {"status": "failed", "state": state, "turn": {"result": f"critique checkout: {exc}"}}
-        files = critique_inputs(checkout, rows, f, b, diff)
-        _, ports = workspace.services_of(b)
-        harness = workspace.check_harness(lay, check_dir, list(ports.values()), b.harness.get("env", {}))
+        try:
+            files = critique_inputs(checkout, rows, f, b, diff)
+        except (OSError, ValueError) as exc:
+            return {"status": "failed", "state": state, "turn": {"result": f"critique inputs: {exc}"}}
+        harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
         model = model_ or resolve_model(SEATS["critique"])
         if not await ctx.alive():
             return {"status": "lock lost"}

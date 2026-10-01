@@ -72,7 +72,7 @@ def probe(profile: str | Path, *targets, mark: str = "probe") -> list[str]:
     return done.stdout.split()
 
 
-def spec(src: Path, **kw) -> kws.Spec:
+def spec(src: Path | str, **kw) -> kws.Spec:
     return kws.Spec.from_dict({"name": "toy", "repo": str(src), "kind": "plain", "suite": "true", **kw})
 
 
@@ -384,6 +384,7 @@ def test_a_fetch_past_its_size_limit_fails_and_leaves_no_ref(tmp_path):
     with pytest.raises(kws.FetchRefused):
         fetch(made, sha, max_bytes=1024 * 1024)
     assert git(made.mirror, "rev-parse", "--verify", "--quiet", "refs/valor/candidates/t", check=False) == ""
+    assert _partials(made.mirror) == []
 
 
 def _pack_object(kind: int, data: bytes, size: int | None = None) -> bytes:
@@ -604,3 +605,218 @@ def test_workspace_remove_is_refused_while_the_task_runs_and_frees_the_ports_aft
 
     ports, rows = run(after())
     assert port not in ports and rows[0]["payload"]["provenance"]["by"] == "tom"
+
+
+def _partials(repo) -> list[str]:
+    objects = Path(repo) / "objects"
+    return [
+        p.name
+        for p in [*objects.glob("pack/tmp_*"), *objects.glob("incoming-*"), *objects.glob("tmp_objdir-*")]
+    ]
+
+
+def test_the_file_size_limit_is_the_limit_asked_for(tmp_path):
+    out = tmp_path / "big"
+    code, _ = kws.bounded(
+        ["/bin/dd", "if=/dev/zero", f"of={out}", "bs=1024", "count=4096"],
+        cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024 * 1024, max_footprint=1024**3, timeout=30,
+    )  # fmt: skip
+    assert code != 0 and out.stat().st_size == 1024 * 1024
+
+
+def test_a_command_past_its_time_is_killed(tmp_path):
+    code, _ = kws.bounded(
+        ["/bin/sleep", "30"], cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, max_bytes=1024, max_footprint=1024**3,
+        timeout=1,
+    )  # fmt: skip
+    assert code == "timeout"
+
+
+def test_a_fetch_names_one_full_commit_and_one_mirror_ref(tmp_path):
+    _, made = provision(tmp_path)
+    sha = candidate(made)
+    with pytest.raises(kws.FetchRefused, match="not a full commit"):
+        fetch(made, sha[:12])
+    with pytest.raises(kws.FetchRefused, match="not a mirror ref"):
+        fetch(made, sha, ref="refs/heads/main")
+
+
+@pytest.mark.parametrize("plant", ["gitfile", "commondir"])
+def test_a_clone_whose_git_directory_lives_elsewhere_is_refused(tmp_path, plant):
+    _, made = provision(tmp_path)
+    sha = candidate(made)
+    repo = Path(made.workspace)
+    if plant == "gitfile":
+        real = tmp_path / "real.git"
+        (repo / ".git").rename(real)
+        (repo / ".git").write_text(f"gitdir: {real}\n")
+    else:
+        (repo / ".git" / "commondir").write_text(str(tmp_path) + "\n")
+    with pytest.raises(kws.FetchRefused):
+        fetch(made, sha)
+
+
+def test_two_repositories_with_one_name_never_share_a_cache(tmp_path):
+    a = scripted.toy_repo(tmp_path / "a")
+    b = scripted.toy_repo(tmp_path / "b")
+    work = tmp_path / "work"
+    ca = kws._cache(spec(a), None, work)
+    cb = kws._cache(spec(b), None, work)
+    assert ca != cb and ca.parent == cb.parent
+
+
+def test_cache_refusals(tmp_path):
+    with pytest.raises(kws.Refused, match="neither a local repository nor an https URL"):
+        kws._cache(spec("git@github.com:tomcounsell/ai.git"), None, tmp_path)
+    with pytest.raises(kws.Refused, match="needs a credential|fetching"):
+        kws._cache(spec("https://github.com/tomcounsell/valor-no-such-repository-0000.git"), None, tmp_path)
+
+
+def test_a_cluster_that_will_not_start_leaves_no_directory_and_no_services(tmp_path):
+    import socket
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen()
+    port = holder.getsockname()[1]
+    src = scripted.toy_repo(tmp_path)
+    task = ledger.new_id()
+    try:
+        with pytest.raises(kws.Refused, match="did not start"):
+            kws.provision(task, spec(src, services=["postgres"]), {"postgres": port}, work=tmp_path / "work")
+    finally:
+        holder.close()
+    assert not (tmp_path / "work" / task).exists()
+    assert not runs.marked_services([task])
+
+
+def test_a_provisioning_killed_mid_setup_is_swept_once_its_provisioning_is_not_live(dsn, tmp_path):
+    other = ledger.new_id()
+    work = tmp_path / "work"
+    src = scripted.toy_repo(tmp_path)
+    port = kws.choose_port((5540, 5579), set())
+    kws.provision(other, spec(src, services=["postgres"]), {"postgres": port}, work=work)
+    lay = kws.Layout(work / other)
+    kws.start_services(other, lay, ["postgres"], {"postgres": port})  # as a kernel killed mid-setup left it
+
+    async def sweep(hold: bool):
+        holder = await db.connect(dsn)
+        try:
+            if hold:
+                await holder.execute(
+                    "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (f"provision:{other}",)
+                )
+            async with await db.connect(dsn) as conn:
+                return await kws.sweep(conn, "abcdef999999", work)
+        finally:
+            await holder.close()
+
+    assert run(sweep(hold=True)) == [] and runs.marked_services([other])
+    found = run(sweep(hold=False))
+    assert found and all(p["task"] == other and p["orphan"] for p in found)
+    assert not runs.marked_services([other])
+    assert port in kws.reserved_ports(work)  # its ports stay reserved until it is removed
+
+
+def test_a_sweep_never_waits_on_the_ports_lock(dsn, tmp_path):
+    async def go():
+        holder = await db.connect(dsn)
+        try:
+            await holder.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
+            async with await db.connect(dsn) as conn:
+                return await asyncio.wait_for(kws.sweep(conn, "abcdef999999", tmp_path), 5)
+        finally:
+            await holder.close()
+
+    assert run(go()) == []
+
+
+def test_a_run_fails_naming_the_log_when_the_tasks_postgres_will_not_start_and_spends_no_turn(dsn, tmp_path):
+    task, b = run(scripted.provisioned(dsn, tmp_path, services=["postgres"]))
+    lay = kws.Layout(Path(b.mirror).parent)
+    (lay.pg / "data" / "PG_VERSION").write_text("1\n")
+
+    async def go():
+        gateway = Gateway(dsn)
+        await gateway.start()
+        try:
+            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+        finally:
+            await gateway.close()
+
+    out = run(go())
+    assert out["status"] == "failed" and "postgres.log" in out["turn"]["result"]
+    assert not [r for r in run(_rows(dsn, task)) if r["type"] == "turn.started"]
+
+
+def test_the_tasks_postgres_is_up_while_a_runners_turn_runs_and_down_after(dsn, tmp_path):
+    task, b = run(scripted.provisioned(dsn, tmp_path, services=["postgres"]))
+    port = b.project["ports"]["postgres"]
+    scripted.steer(Path(b.workspace), probe_port=port)
+
+    async def go():
+        gateway = Gateway(dsn)
+        await gateway.start()
+        try:
+            return await router.run(gateway, task, scripted.RUNNERS, dsn=dsn)
+        finally:
+            await gateway.close()
+
+    run(go())
+    assert scripted.turns(Path(b.workspace))[0]["port_open"] is True
+    assert not runs.marked_services([task])
+
+
+async def _rows(dsn, task):
+    async with await db.connect(dsn) as conn:
+        return await ledger.read(conn, task)
+
+
+# -- the command line ---------------------------------------------------------------------
+
+
+def _cli(tmp_path, *args):
+    import sys
+
+    from tests.conftest import TEST_DB
+
+    root = Path(__file__).resolve().parent.parent
+    return subprocess.run(
+        [sys.executable, "-m", "core", *args], cwd=root, capture_output=True, text=True, check=False,
+        env={**os.environ, "VALOR_DB": TEST_DB, "VALOR_WORK": str(tmp_path / "work")},
+    )  # fmt: skip
+
+
+def _spec_file(tmp_path, **extra) -> Path:
+    src = tmp_path / "src" / "toy"
+    if not src.exists():
+        src = scripted.toy_repo(tmp_path)
+        git(src, "branch", "rebuild")
+    lines = ['name = "toy"', f'repo = "{src}"', 'kind = "plain"', 'suite = "true"']
+    lines += [f"{k} = {json.dumps(v)}" for k, v in extra.items()]
+    path = tmp_path / "toy.toml"
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_start_project_from_the_command_line(dsn, tmp_path):
+    spec_path = _spec_file(tmp_path, services=["postgres"])
+    for flag in (["--workspace", "x"], ["--harness-config", "x"], ["--target-branch", "x"]):
+        refused = _cli(tmp_path, "start", "go", "--budget-usd", "1", "--project", str(spec_path), *flag)
+        assert refused.returncode == 1 and "takes no --workspace" in refused.stderr
+    bad = _cli(tmp_path, "start", "go", "--budget-usd", "-1", "--project", str(spec_path))
+    assert bad.returncode == 1 and "start refused" in bad.stderr
+    work = tmp_path / "work"
+    assert not [
+        d for d in work.iterdir() if d.name != "cache" and d.name != "bin"
+    ]  # the workspace was removed
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        started = list(pool.map(lambda _: _cli(tmp_path, "start", "go", "--budget-usd", "1", "--project",
+                                               str(spec_path), "--branch", "rebuild"), range(2)))  # fmt: skip
+    assert all(s.returncode == 0 for s in started), [s.stderr for s in started]
+    shown = [json.loads(_cli(tmp_path, "workspace", "show", s.stdout.strip()).stdout) for s in started]
+    assert shown[0]["project"]["ports"]["postgres"] != shown[1]["project"]["ports"]["postgres"]
+    assert {s["target_branch"] for s in shown} == {"rebuild"}
+    assert all(s["project"]["ports"]["postgres"] != 5439 for s in shown)

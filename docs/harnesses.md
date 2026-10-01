@@ -421,6 +421,21 @@ listening beyond its dev ports and reap what it leaves running").
 
 Stated so the boundary is drawn where it is [4]:
 
+- A fresh session's blindness holds for the paths the kernel names for the
+  builder: its clone, its caches, its `TMPDIR`, and its Claude Code config
+  directory, all inside the task's directory, which every fresh profile
+  denies, together with `/private/tmp`, `/private/var/tmp`,
+  `/private/var/folders`, and the user's Claude Code state. The working
+  session can still write elsewhere in the user's home or the machine
+  (`~/Library/Caches`, `~/.cache`, `/Users/Shared`), and a fresh session
+  can read those places, so a builder set on it could leave a note there
+  for a reviewer. Nothing reads such a note on purpose; the review's
+  independence rests on its inputs, its checkout, and its own reruns.
+- A plan or candidate whose tree holds a top-level `.valor` (any letter
+  case) is refused, since that is where the kernel writes a fresh session's
+  inputs and reads its verdict; the kernel makes `.valor` itself and writes
+  each input relative to a descriptor, following no link and overwriting no
+  file.
 - The turn runs as the machine's user. A deliberate keychain read through
   `security` is not fenced, though in a provisioned task Claude Code holds
   only a placeholder credential.

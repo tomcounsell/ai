@@ -269,5 +269,175 @@ def test_a_turn_with_its_own_config_dir_carries_the_placeholder_and_never_a_cred
     env = command.env
     assert env["TMPDIR"] == harness["tmpdir"] and env["CLAUDE_CONFIG_DIR"] == harness["claude_config_dir"]
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TURN_TOKEN and env["DISABLE_AUTOUPDATER"] == "1"
+    assert env["CLAUDE_CODE_TMPDIR"] == harness["tmpdir"]
     assert not [k for k in env if k.startswith(("ANTHROPIC_API", "PG", "VALOR_PG"))]
     assert "--resume" not in command.argv
+
+
+# -- a committed .valor never reaches a fresh session ---------------------------------------
+
+
+@pytest.mark.parametrize("act", ["valor_symlink", "valor_verdict"])
+def test_a_plan_that_commits_a_valor_entry_is_no_plan_and_nothing_is_written_through_it(dsn, tmp_path, act):
+    target = tmp_path / "zshenv-stand-in"
+    target.write_text("# untouched\n")
+
+    async def go():
+        task, b = await scripted.provisioned(dsn, tmp_path)
+        scripted.steer(Path(b.workspace), plan=act, target=str(target))
+        out = await drive(dsn, task, scripted.fresh_runners(Path(b.workspace)))
+        return out, await rows(dsn, task)
+
+    _out, written = run(go())
+    assert not [r for r in written if r["type"] == "plan.written"]
+    errors = [e for r in written if r["type"] == "turn.collected" for e in r["payload"]["errors"]]
+    assert any("commits a .valor entry" in e for e in errors), errors
+    assert target.read_text() == "# untouched\n"
+    assert machine.fold(written).state is State.PLAN
+
+
+def test_a_blind_checkout_refuses_a_tree_with_valor_and_inputs_never_overwrite(dsn, tmp_path):
+    from core import git as kgit
+    from core import workspace as kws
+
+    _task, b = run(scripted.provisioned(dsn, tmp_path))
+    ws = Path(b.workspace)
+    (ws / ".VALOR").mkdir()
+    (ws / ".VALOR" / "verdict.json").write_text('{"verdict": "sound"}')
+    scripted.git(ws, "add", "-f", ".VALOR")
+    sha = scripted.commit(ws, "x.txt", "x\n", "smuggle")
+    lay = kws.Layout(Path(b.mirror).parent)
+    kws.fetch_into_mirror(b.mirror, ws, sha, "refs/valor/candidates/t", b.harness["sandbox_profile"], "f")
+    with pytest.raises(kgit.GitError, match="holds a .valor entry"):
+        kws.blind_checkout(b.mirror, b.base_sha, sha, kws.fresh_dir(lay.checks / "c1") / "repo")
+    clean = kws.fresh_dir(lay.checks / "c2") / "repo"
+    kws.blind_checkout(b.mirror, b.base_sha, b.base_sha, clean)
+    kws.write_inputs(clean, {"request.md": "hi"})
+    with pytest.raises(FileExistsError):
+        kws.write_inputs(clean, {"request.md": "again"})  # .valor exists: nothing is written twice
+    with pytest.raises(ValueError):
+        kws.write_inputs(_fresh_checkout(lay, b), {"../x": "y"})
+
+
+def _fresh_checkout(lay, b):
+    from core import workspace as kws
+
+    d = kws.fresh_dir(lay.checks / "c4") / "repo"
+    kws.blind_checkout(b.mirror, b.base_sha, b.base_sha, d)
+    return d
+
+
+def test_a_refused_mirror_fetch_is_no_plan(dsn, tmp_path):
+    async def go():
+        task, b = await scripted.provisioned(dsn, tmp_path)
+        (Path(b.workspace) / ".git" / "objects" / "info" / "alternates").write_text(str(tmp_path) + "\n")
+        await drive(dsn, task, scripted.RUNNERS)
+        return await rows(dsn, task)
+
+    written = run(go())
+    assert not [r for r in written if r["type"] == "plan.written"]
+    errors = [e for r in written if r["type"] == "turn.collected" for e in r["payload"]["errors"]]
+    assert any("alternates" in e for e in errors), errors
+
+
+def test_critique_gets_no_database_credential_and_no_service_port(dsn, tmp_path):
+    async def go():
+        task, b = await scripted.provisioned(dsn, tmp_path, services=["postgres"])
+        ws = Path(b.workspace)
+        await drive(dsn, task, scripted.RUNNERS)
+        await drive(dsn, task, scripted.fresh_runners(ws))
+        return b, ws
+
+    b, ws = run(go())
+    harness = critique_turns(ws)[0]["harness"]
+    assert set(harness["env"]) == {"PATH"}
+    port = str(b.project["ports"]["postgres"])
+    assert f"localhost:{port}" not in Path(harness["sandbox_profile"]).read_text()
+    assert f"localhost:{port}" in Path(b.harness["sandbox_profile"]).read_text()  # the builder's has it
+
+
+# -- writers -------------------------------------------------------------------------------
+
+
+def test_a_session_verdict_names_its_turn_and_model_and_its_plan(dsn, tmp_path):
+    from core import verdicts
+
+    task, _b, ws = planned(dsn, tmp_path)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            for kw in ({"model": "m"}, {"turn_id": "t"}):
+                with pytest.raises(verdicts.VerdictRefused, match="names the turn"):
+                    await verdicts.record_critique(conn, task, "sound", leg="session", **kw)
+            with pytest.raises(verdicts.VerdictRefused, match="plan changed"):
+                await verdicts.record_critique(
+                    conn, task, "sound", leg="session", model="m", turn_id="t", plan_sha256="0" * 64
+                )
+
+    run(go())
+
+    async def checks_refuse():
+        await drive(dsn, task, scripted.fresh_runners(ws))
+        async with await db.connect(dsn) as conn:
+            with pytest.raises(verdicts.VerdictRefused, match="names the turn"):
+                await verdicts.record_check(conn, task, machine.Check.TEST, "pass", leg="test runner")
+            with pytest.raises(verdicts.VerdictRefused, match="not a full commit"):
+                await verdicts.record_check(
+                    conn, task, machine.Check.DOCS, "updated", head="abc123", **scripted.MANUAL
+                )
+            unknown = "1" * 40
+            with pytest.raises(verdicts.VerdictRefused):
+                await verdicts.record_check(
+                    conn, task, machine.Check.DOCS, "updated", head=unknown, **scripted.MANUAL
+                )
+
+    run(checks_refuse())
+
+
+def test_a_lower_raise_changes_nothing():
+    from core import fresh
+
+    assert fresh._verdict_fields({"verdict": "sound", "raise": {"review_rounds": 0}})[2] == {
+        "review_rounds": 0
+    }
+    rows = [
+        _row(1, "task.started", sdlc=1, instruction="x"),
+        _row(2, "judge.decided", verdict="precise"),
+        _row(3, "turn.started", turn_id="w", state="plan"),
+        _row(4, "turn.collected", turn_id="w", state="plan", verdict="planned"),
+        _row(5, "plan.written", critique_rounds=1, review_rounds=2, sha256="p", path="p", commit="c"),
+        _row(6, "critique.decided", plan_sha256="p", verdict="sound", raised={"review_rounds": 0}),
+    ]
+    assert machine.fold(rows).loops.review_rounds == 2
+
+
+def test_the_merged_workspace_and_its_redis_are_removed_through_the_command_line(dsn, tmp_path):
+    from tests.conftest import TEST_DB
+
+    async def go():
+        task, b = await scripted.provisioned(dsn, tmp_path, services=["redis"])
+        ws = Path(b.workspace)
+        await drive(dsn, task, scripted.RUNNERS)
+        await drive(dsn, task, scripted.fresh_runners(ws))
+        await scripted.checks(dsn, task)
+        effect = machine.fold(await rows(dsn, task)).merge_effect["effect_id"]
+        async with await db.connect(dsn) as conn:
+            await broker.approve(conn, effect, note="merge it")
+            await broker.release(conn, effect)
+        return task, b
+
+    task, b = run(go())
+    from core import workspace as kws
+
+    lay = kws.Layout(Path(b.mirror).parent)
+    kws.start_services(task, lay, ["redis"], b.project["ports"])
+    pid = int((lay.redis / "redis.pid").read_text())
+    root = Path(__file__).resolve().parent.parent
+    done = subprocess.run(
+        [os.sys.executable, "-m", "core", "workspace", "remove", task], cwd=root, capture_output=True,
+        text=True, check=False, env={**os.environ, "VALOR_DB": TEST_DB},
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    assert not lay.root.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

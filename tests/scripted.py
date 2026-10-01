@@ -35,8 +35,16 @@ m = re.search(r"^# Stage: (\w+)", brief, re.M)
 stage = m.group(1) if m else None
 log = g / "valor-turns.jsonl"
 n = len(log.read_text().splitlines()) + 1 if log.exists() else 1
+port_open = None
+if cfg.get("probe_port"):
+    import socket
+    s = socket.socket()
+    s.settimeout(1)
+    port_open = s.connect_ex(("127.0.0.1", int(cfg["probe_port"]))) == 0
+    s.close()
 with log.open("a") as f:
-    f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": resume, "brief": brief}) + "\n")
+    f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": resume, "brief": brief,
+                        "port_open": port_open}) + "\n")
 if cfg.pop("fail_next", False):
     cfg_path.write_text(json.dumps(cfg))
     sys.exit(1)
@@ -70,6 +78,23 @@ elif stage == "plan":
     if act == "done":
         (v / "done.md").write_text("A delivery during the plan.")
     else:
+        if act in ("valor_symlink", "valor_verdict"):
+            (v / "inputs").mkdir(exist_ok=True)
+            if act == "valor_symlink":
+                target = pathlib.Path(cfg["target"])
+                (v / "inputs" / "request.md").symlink_to(target)
+            else:
+                (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
+            subprocess.run(git + ["add", "-f", ".valor"], check=True)
+            commit("docs/plan.md", f"plan {n}\n", "Plan")
+            subprocess.run(["git", "rm", "-q", "-r", "--cached", ".valor"], check=True)
+            for p in (v / "inputs" / "request.md", v / "verdict.json"):
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+            (v / "plan.json").write_text(json.dumps({"path": "docs/plan.md", "stakes": "a toy change",
+                **counts, "scope": []}))
+            print(json.dumps({"result": "ok", "session_id": resume or "session-1", "is_error": False}))
+            sys.exit(0)
         if act == "uncommitted":
             pathlib.Path("docs").mkdir(exist_ok=True)
             pathlib.Path("docs/plan.md").write_text(f"plan {n}\n")
@@ -238,7 +263,8 @@ listing = subprocess.run(["git", "log", "--format=%s"], capture_output=True, tex
 with log.open("a") as f:
     f.write(json.dumps({"stage": stage, "prompt": prompt, "resume": None, "brief": brief, "fresh": True,
                         "cwd": os.getcwd(), "log": listing, "env": {k: os.environ.get(k) for k in
-                        ("TMPDIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER")}}) + "\n")
+                        ("TMPDIR", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "DISABLE_AUTOUPDATER")},
+                        "harness": json.loads(os.environ.get("VALOR_HARNESS", "{}"))}) + "\n")
 acts = cfg.get("fresh_acts") or []
 act = acts.pop(0) if acts else cfg.get(stage, "sound")
 cfg["fresh_acts"] = acts
@@ -294,6 +320,7 @@ def fresh_for(script_dir: Path):
                    "VALOR_SCRIPT": str(script_dir / "valor-script.json")}  # fmt: skip
             env["TMPDIR"] = harness["tmpdir"]
             env["CLAUDE_CONFIG_DIR"] = harness["claude_config_dir"]
+            env["VALOR_HARNESS"] = json.dumps(harness)
             return claude_code.TurnCommand(
                 argv=[sys.executable, "-c", FRESH, prompt, brief],
                 env=env,

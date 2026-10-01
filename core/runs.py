@@ -180,6 +180,12 @@ def reap_sandboxed(name: str, control: str) -> list[dict[str, Any]]:
     """Stop every process of this user under a sandbox that denies the mach
     name `name` and not `control` (an App Sandbox denies every such name):
     how a task's services are found, also after the kernel died."""
+    return _stop(sandboxed_pids(name, control))
+
+
+def sandboxed_pids(name: str, control: str) -> list[int]:
+    """Every process of this user under a sandbox that denies `name` and
+    not `control`."""
     denies = _sandbox_check()
     if not denies:
         return []
@@ -194,7 +200,11 @@ def reap_sandboxed(name: str, control: str) -> list[dict[str, Any]]:
         pid = int(fields[0])
         if denies(pid, name) and not denies(pid, control):
             pids.append(pid)
-    return _stop(pids)
+    return pids
+
+
+def commands(pids: list[int]) -> dict[int, str]:
+    return _commands(pids) if pids else {}
 
 
 def marked_services(task_ids: list[str]) -> set[str]:

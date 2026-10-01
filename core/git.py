@@ -114,6 +114,7 @@ PINNED = [
     "-c", "core.commitGraph=false",
     "-c", "core.multiPackIndex=false",
     "-c", "submodule.recurse=false",
+    "-c", "advice.graftFileDeprecated=false",
 ]  # fmt: skip
 
 # Local or worktree config keys (lowercased) the kernel will not run git

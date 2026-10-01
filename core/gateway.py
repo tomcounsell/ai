@@ -24,8 +24,10 @@ gateway, when given a `credential`, drops whatever `authorization` or
 `x-api-key` the turn sent and sets the kernel's own: a long-lived token in
 the kernel key directory (`claude setup-token`) when one is there, otherwise
 the access token of the machine's Claude Code login, read from the Keychain
-through the root-owned `security` at most once a minute and again after a
-401. The kernel never refreshes that login: refresh tokens rotate, and a
+through the root-owned `security` at most once a minute (a 401 asks for a
+fresh read, still at most once a minute). The credential is sent only on
+the Messages API, its token counting, and the model list; any other path
+is refused. The kernel never refreshes that login: refresh tokens rotate, and a
 refresh here could sign out the user's own sessions. An expired login is a
 401 naming the remedy, never a silent fallback. No credential is ever in a
 ledger row, an exception, or a log line.
@@ -64,33 +66,54 @@ class CredentialUnavailable(RuntimeError):
 
 
 class ClaudeLogin:
-    """The credential the gateway sends upstream for every turn."""
+    """The credential the gateway sends upstream for every turn.
 
-    def __init__(self, token_file: str | None = None, ttl_s: float = 60.0, service: str = KEYCHAIN_SERVICE):
+    The Keychain is read at most once a minute (`min_interval_s`), whether
+    the last read succeeded or failed and whether or not a 401 since asked
+    for a fresh one, so an expired login does not run `security` on every
+    call. `keychain` reads the login item's JSON, or returns None when there
+    is none; tests pass their own."""
+
+    def __init__(
+        self,
+        token_file: str | None = None,
+        ttl_s: float = 60.0,
+        service: str = KEYCHAIN_SERVICE,
+        keychain=None,
+        min_interval_s: float = 60.0,
+    ):
         self.token_file = Path(token_file or settings.claude_token_file)
         self.service = service
         self.ttl_s = ttl_s
-        self._cached: tuple[str, float] | None = None
+        self.min_interval_s = min_interval_s
+        self.keychain = keychain or self._security
+        self._cached: tuple[str | CredentialUnavailable, float] | None = None
+        self._stale = False
         self._lock = threading.Lock()
 
     def invalidate(self) -> None:
         with self._lock:
-            self._cached = None
+            self._stale = True
 
     def token(self) -> str:
         with self._lock:
             now = time.monotonic()
-            if self._cached and now - self._cached[1] < self.ttl_s:
-                return self._cached[0]
-            value = self._read()
-            self._cached = (value, now)
+            if self._cached is not None:
+                value, at = self._cached
+                fresh = not self._stale and now - at < self.ttl_s
+                if fresh or now - at < self.min_interval_s:
+                    if isinstance(value, CredentialUnavailable):
+                        raise value
+                    return value
+            try:
+                value = self._read()
+            except CredentialUnavailable as exc:
+                self._cached, self._stale = (exc, now), False
+                raise
+            self._cached, self._stale = (value, now), False
             return value
 
-    def _read(self) -> str:
-        if self.token_file.is_file():
-            value = self.token_file.read_text().strip()
-            if value:
-                return value
+    def _security(self) -> str | None:
         try:
             done = subprocess.run(
                 [binaries.require(binaries.SECURITY), "find-generic-password", "-s", self.service, "-w"],
@@ -101,22 +124,44 @@ class ClaudeLogin:
             )
         except (binaries.Untrusted, subprocess.TimeoutExpired) as exc:
             raise CredentialUnavailable(f"the Keychain could not be read: {type(exc).__name__}") from None
-        if done.returncode != 0:
+        return done.stdout if done.returncode == 0 else None
+
+    def _read(self) -> str:
+        if self.token_file.is_file():
+            value = self.token_file.read_text().strip()
+            if value:
+                return value
+        raw = self.keychain()
+        if raw is None:
             raise CredentialUnavailable(
                 "no Claude login in the Keychain: log in with `claude`, or install a long-lived token "
                 f"at {self.token_file}"
             )
         try:
-            oauth = json.loads(done.stdout)["claudeAiOauth"]
-            access, expires = oauth["accessToken"], oauth.get("expiresAt")
+            oauth = json.loads(raw)["claudeAiOauth"]
+            access, expires = str(oauth["accessToken"]), oauth.get("expiresAt")
+            expired = expires is not None and float(expires) / 1000 < time.time() + 30
         except ValueError, KeyError, TypeError:
             raise CredentialUnavailable("the Keychain's Claude login is not in the shape expected") from None
-        if expires is not None and float(expires) / 1000 < time.time() + 30:
+        if expired:
             raise CredentialUnavailable(
                 "the Claude login's access token has expired: run any claude session, or install a "
                 f"long-lived token at {self.token_file} (`claude setup-token`)"
             )
+        if not access:
+            raise CredentialUnavailable("the Keychain's Claude login holds no access token")
         return access
+
+
+# The upstream paths a turn's calls may take with the kernel's credential:
+# the Messages API, its token counting, and the model list. Any other path
+# is refused rather than sent with the credential.
+CREDENTIALED_PATHS = ("v1/messages", "v1/messages/count_tokens", "v1/models")
+
+
+def credentialed(tail: str) -> bool:
+    tail = tail.rstrip("/")
+    return tail in CREDENTIALED_PATHS or tail.startswith("v1/models/")
 
 
 @dataclass
@@ -240,6 +285,8 @@ class Gateway:
         headers = {k: v for k, v in request.headers.items() if k.lower() not in DROP_REQUEST}
         headers["accept-encoding"] = "identity"
         if self.credential is not None:
+            if not credentialed(tail):
+                return _error(403, "permission_error", f"the gateway carries no turn to /{tail}")
             headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
             try:
                 headers["authorization"] = "Bearer " + await asyncio.to_thread(self.credential.token)

@@ -162,3 +162,51 @@ def test_the_driver_checks_a_merge_by_the_url_its_payload_carries(dsn, tmp_path,
     left = replay.release_pushes(elsewhere, ws, log)
     assert len(left) == 1 and log[-1]["step"] == "held effect left for Tom"
     assert log[-1]["push_urls"] == [str(tmp_path / "stranger.git")]
+
+
+def test_a_replay_workspace_is_provisioned_by_the_kernel_and_never_touches_the_shared_cluster(
+    dsn, tmp_path, monkeypatch
+):
+    import json
+
+    import replay_workspace
+
+    from tests import scripted
+
+    monkeypatch.setattr(replay_workspace, "DEMO", tmp_path / "demo")
+    monkeypatch.setenv("VALOR_DB", TEST_DB)
+    monkeypatch.setenv("VALOR_WORK", str(tmp_path / "work"))
+    src = scripted.toy_repo(tmp_path)
+    base = git(src, "rev-parse", "HEAD")
+    info = replay_workspace.build(str(src), base, "toy-1-bare", ["postgres", "redis"], max_output_tokens=2048)
+    spec = (tmp_path / "demo" / "runs" / "toy-1-bare" / "project.toml").read_text()
+    assert 'target_branch = "main"' in spec and "max_output_tokens = 2048" in spec
+    root = Path(__file__).resolve().parent.parent
+
+    def core(*args):
+        done = subprocess.run([sys.executable, "-m", "core", *args], cwd=root, capture_output=True, text=True,
+                              check=False)  # fmt: skip
+        assert done.returncode == 0, done.stderr
+        return done.stdout.strip()
+
+    task = core(
+        "start", "go", "--budget-usd", "1", "--ceiling", "act", "--project", info["spec"], "--base", base
+    )
+    ws = replay_workspace.attach({**info, "task_id": task}, json.loads(core("workspace", "show", task)))
+    assert Path(ws["workdir"]).is_dir() and ws["origin"].endswith("origin.git")
+    harness = json.loads(Path(ws["harness_config"]).read_text())
+    assert harness["max_output_tokens"] == 2048
+    env = json.dumps(harness["env"])
+    assert "5439" not in env and "test:test" not in env and "PGPASSWORD" not in env
+    ports = ws["project"]["ports"]
+    assert ports["postgres"] != 5439 and ports["redis"] not in range(6390, 6400)
+    replay_workspace.teardown("toy-1-bare")
+    assert not Path(ws["task_dir"]).exists() and not (tmp_path / "demo" / "runs" / "toy-1-bare").exists()
+
+    async def removed():
+        async with await db.connect(dsn) as conn:
+            rows = [r["type"] for r in await __import__("core.ledger", fromlist=["read"]).read(conn, task)]
+        return rows
+
+    rows = asyncio.run(removed())
+    assert "task.stopped" in rows and "workspace.removed" in rows

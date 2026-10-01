@@ -253,8 +253,11 @@ async def _run_task(task_id: str) -> str:
 
 
 async def _start_project(conn, args) -> str:
-    """Provision the task's workspace from its project spec, then start it,
-    under the lock that keeps two starts from taking one port."""
+    """Provision the task's workspace from its project spec, then start it.
+    The `workspace:ports` lock is held only while the ports are chosen and
+    recorded in the task's directory; the provisioning itself (clone,
+    cluster, setup) holds `provision:<task>`, which tells a sweep that the
+    directory, with no task row yet, is not an orphan."""
     if args.workspace or args.harness_config or args.target_branch:
         raise SystemExit(
             "--project provisions the workspace; it takes no --workspace, --harness-config, or --target-branch"
@@ -266,32 +269,43 @@ async def _start_project(conn, args) -> str:
     except workspace.Refused as exc:
         raise SystemExit(f"start refused: {exc}") from None
     task_id = ledger.new_id()
-    await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
+    lock = f"provision:{task_id}"
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
     try:
-        taken = await workspace.taken_ports(conn)
-        ports: dict[str, int] = {}
-        if "postgres" in spec.services:
-            ports["postgres"] = workspace.choose_port(settings.pg_ports, taken)
-        if "redis" in spec.services:
-            ports["redis"] = workspace.choose_port(settings.redis_ports, taken)
-        made = await asyncio.to_thread(workspace.provision, task_id, spec, ports, base=args.base)
-        brief = tasks.Brief(
-            id=task_id,
-            instruction=args.instruction,
-            budget_usd_micros=round(args.budget_usd * 1_000_000),
-            max_effect_class=args.ceiling,
-            model=resolve_model(args.model),
-            **made.brief_fields(),
-        )
+        await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
         try:
+            taken = await workspace.taken_ports(conn)
+            ports: dict[str, int] = {}
+            if "postgres" in spec.services:
+                ports["postgres"] = workspace.choose_port(settings.pg_ports, taken)
+            if "redis" in spec.services:
+                ports["redis"] = workspace.choose_port(settings.redis_ports, taken)
+            workspace.reserve(task_id, ports)
+        except workspace.Refused as exc:
+            raise SystemExit(f"start refused: {exc}") from None
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
+        try:
+            made = await asyncio.to_thread(workspace.provision, task_id, spec, ports, base=args.base)
+        except workspace.Refused as exc:
+            raise SystemExit(f"start refused: {exc}") from None
+        try:
+            brief = tasks.Brief(
+                id=task_id,
+                instruction=args.instruction,
+                budget_usd_micros=round(args.budget_usd * 1_000_000),
+                max_effect_class=args.ceiling,
+                model=resolve_model(args.model),
+                **made.brief_fields(),
+            )
             return await tasks.start(conn, brief, by=args.by, role_played=args.role_played)
-        except BaseException:
+        except BaseException as exc:
             await asyncio.to_thread(workspace.remove, task_id)
+            if isinstance(exc, ValueError):
+                raise SystemExit(f"start refused: {exc}") from None
             raise
-    except workspace.Refused as exc:
-        raise SystemExit(f"start refused: {exc}") from None
     finally:
-        await conn.execute("SELECT pg_advisory_unlock(hashtextextended('workspace:ports', 0))")
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
 
 
 async def _workspace(conn, args) -> str:
@@ -301,7 +315,7 @@ async def _workspace(conn, args) -> str:
     try:
         b = await tasks.brief(conn, args.task_id)
     except KeyError:
-        raise SystemExit(f"no task {args.task_id}") from None
+        return await _orphan(conn, args)
     if not b.mirror:
         raise SystemExit(f"task {args.task_id} has no workspace the kernel provisioned")
     if args.workspace_command == "show":
@@ -331,6 +345,30 @@ async def _workspace(conn, args) -> str:
             {"path": str(Path(b.mirror).parent), "provenance": ledger.provenance(args.by, args.via, False)},
         )
     return f"removed the workspace of task {args.task_id}"
+
+
+async def _orphan(conn, args) -> str:
+    """A task directory with no task row: a provisioning that died before
+    its start. `remove` deletes it once its provisioning is not live."""
+    try:
+        lay = workspace.layout(args.task_id)
+    except workspace.Refused as exc:
+        raise SystemExit(str(exc)) from None
+    if not lay.root.is_dir():
+        raise SystemExit(f"no task {args.task_id}")
+    if args.workspace_command == "show":
+        return json.dumps({"orphan": str(lay.root)}, indent=2)
+    key = f"provision:{args.task_id}"
+    got = await (
+        await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+    ).fetchone()
+    if not got[0]:
+        raise SystemExit(f"{lay.root} is being provisioned now")
+    try:
+        await asyncio.to_thread(workspace.remove, args.task_id, lay)
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+    return f"removed {lay.root}, which no task row names"
 
 
 def _instance(spec: str, args) -> verdicts_.InstanceSpec:

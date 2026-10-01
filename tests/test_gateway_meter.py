@@ -136,7 +136,7 @@ async def _recording_upstream(seen: list, status: int = 200):
     return runner, f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
 
 
-def _credentialed_call(dsn, credential, *, status=200, headers=None):
+def _credentialed_call(dsn, credential, *, status=200, headers=None, path="/v1/messages", method="post"):
     from core.gateway import TURN_TOKEN
 
     async def go():
@@ -151,9 +151,9 @@ def _credentialed_call(dsn, credential, *, status=200, headers=None):
             sent = {"authorization": f"Bearer {TURN_TOKEN}", "x-api-key": "sk-turn-key", **(headers or {})}
             async with (
                 aiohttp.ClientSession() as s,
-                s.post(f"{base}/v1/messages", json=BODY, headers=sent) as r,
+                s.request(method, f"{base}{path}", json=BODY, headers=sent) as r,
             ):
-                return r.status, await r.json(), seen
+                return r.status, await r.json(content_type=None), seen
         finally:
             await gateway.close()
             await runner.cleanup()
@@ -175,7 +175,7 @@ def test_the_gateway_replaces_the_turns_placeholder_with_the_kernels_credential(
 def test_no_kernel_credential_is_a_401_naming_the_remedy_and_no_call(dsn, tmp_path):
     from core.gateway import ClaudeLogin
 
-    login = ClaudeLogin(str(tmp_path / "absent"), service=f"valor-test-no-such-item-{tmp_path.name}")
+    login = ClaudeLogin(str(tmp_path / "absent"), keychain=lambda: None)
     status, body, seen = _credentialed_call(dsn, login)
     assert status == 401 and not seen
     assert "no Claude login in the Keychain" in body["error"]["message"]
@@ -186,10 +186,82 @@ def test_a_401_upstream_rereads_the_credential(dsn, tmp_path):
 
     token = tmp_path / "claude-token"
     token.write_text("first\n")
-    login = ClaudeLogin(str(token), ttl_s=3600)
+    login = ClaudeLogin(str(token), ttl_s=3600, min_interval_s=0)
     assert login.token() == "first"
     token.write_text("second\n")
     assert login.token() == "first"  # cached
     status, _, seen = _credentialed_call(dsn, login, status=401)
     assert status == 401 and seen[0]["authorization"] == "Bearer first"
     assert login.token() == "second"  # the 401 invalidated the cache
+
+
+def test_the_credential_goes_only_to_the_messages_api_and_the_model_list(dsn, tmp_path):
+    from core.gateway import ClaudeLogin, credentialed
+
+    token = tmp_path / "claude-token"
+    token.write_text("kernel-held-token\n")
+    status, body, seen = _credentialed_call(dsn, ClaudeLogin(str(token)), path="/v1/files", method="get")
+    assert status == 403 and not seen and "carries no turn" in body["error"]["message"]
+    assert (
+        credentialed("v1/messages")
+        and credentialed("v1/messages/count_tokens/")
+        and credentialed("v1/models")
+    )
+    assert credentialed("v1/models/claude-opus-5-5")
+    assert (
+        not credentialed("v1/files")
+        and not credentialed("v1/messages/batches")
+        and not credentialed("v1/organizations")
+    )
+
+
+def _keychain_json(expires_ms, token="kc-token"):
+    import json
+    import time
+
+    return json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": token,
+                "expiresAt": expires_ms or int(time.time() * 1000) + 3600_000,
+            }
+        }
+    )
+
+
+def test_the_kernels_claude_login_is_read_from_its_file_or_the_keychain_and_refused_when_unusable(tmp_path):
+    from core.gateway import ClaudeLogin, CredentialUnavailable
+
+    absent = str(tmp_path / "absent")
+    assert ClaudeLogin(absent, keychain=lambda: _keychain_json(None)).token() == "kc-token"
+    with pytest.raises(CredentialUnavailable, match="expired"):
+        ClaudeLogin(absent, keychain=lambda: _keychain_json(1000)).token()
+    for raw in ('{"x": 1}', "not json", '{"claudeAiOauth": {"accessToken": "t", "expiresAt": "soon"}}'):
+        with pytest.raises(CredentialUnavailable, match="not in the shape"):
+            ClaudeLogin(absent, keychain=lambda raw=raw: raw).token()
+    empty = tmp_path / "empty-token"
+    empty.write_text("\n")
+    assert ClaudeLogin(str(empty), keychain=lambda: _keychain_json(None)).token() == "kc-token"
+    file_token = tmp_path / "claude-token"
+    file_token.write_text("from-file\n")
+    assert (
+        ClaudeLogin(str(file_token), keychain=lambda: _keychain_json(None, "from-keychain")).token()
+        == "from-file"
+    )
+
+
+def test_an_expired_login_is_read_from_the_keychain_at_most_once_a_minute(tmp_path):
+    from core.gateway import ClaudeLogin, CredentialUnavailable
+
+    calls = []
+
+    def keychain():
+        calls.append(1)
+        return _keychain_json(1000)
+
+    login = ClaudeLogin(str(tmp_path / "absent"), keychain=keychain)
+    for _ in range(5):
+        with pytest.raises(CredentialUnavailable):
+            login.token()
+        login.invalidate()  # as a 401 would
+    assert len(calls) == 1

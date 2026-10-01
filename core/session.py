@@ -161,6 +161,11 @@ def _keep(brief: tasks.Brief | None, sha: str, ref: str, turn_id: str) -> str | 
     if brief is None or not brief.mirror:
         return None
     try:
+        if workspace.tree_has_valor(brief.workspace, sha, trusted=False):
+            return (
+                f"{sha[:12]} commits a .valor entry; .valor is the kernel's signal channel and never "
+                "part of a plan or candidate (git rm -r --cached .valor, then commit)"
+            )
         workspace.fetch_into_mirror(
             brief.mirror, brief.workspace, sha, ref, brief.harness["sandbox_profile"], f"mirror-{turn_id}"
         )

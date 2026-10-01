@@ -103,7 +103,7 @@ class _Services:
     async def sweep(self) -> None:
         """At the start of every run: stop what a killed kernel left up."""
         async with await db.connect(self.dsn) as conn:
-            reaped = await workspace.sweep(conn, self.task_id)
+            reaped = await workspace.sweep(conn, self.task_id, self.lay.root.parent if self.lay else None)
             if reaped:
                 async with conn.transaction():
                     await ledger.append(conn, self.task_id, "services.reaped", {"processes": reaped})

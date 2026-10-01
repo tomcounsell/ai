@@ -15,16 +15,20 @@ starts, from a project spec the kernel reads (never the candidate).
         state/work/        the working session's own TMPDIR and Claude Code
                            config directory (so its session files)
         checks/<name>/     a fresh session's repo/, tmp/, claude/
-        pg/data, pg/run    the task's Postgres cluster and its socket
+        pg/data            the task's Postgres cluster (TCP on loopback only)
         redis/             the task's redis-server, when the project asks
+        ports.json         the task's service ports, written when they are
+                           chosen, so no other start takes them
 
 Every program the kernel starts here that is not root's alone runs inside a
 sandbox-exec profile written by this module: the working session's
 (`turn.sb`), a fresh session's (`<stage>-<key>.sb`), and the services'
 (`service.sb`). Profiles start from `(allow default)` and deny before they
 allow. Each denies the whole work directory and allows back only its own
-paths, so a fresh session cannot read the builder's clone, state, or
-transcripts; each denies writes to the user's startup places (launch
+paths, so a fresh session cannot read the builder's clone, its TMPDIR, its
+Claude Code state, or its transcripts (what the builder writes elsewhere in
+the user's home, a cache for one, is outside this; see harnesses.md, Known
+openings); each denies writes to the user's startup places (launch
 agents, shell rc files, `~/.local/bin`, Claude Code's install, git's global
 config, Homebrew's prefix), which narrows, and does not close, the opening
 that a turn leaves a program for a later unsandboxed process of the user.
@@ -35,13 +39,15 @@ the mach name `valor.service.<task_id>`, which is how they are found and
 stopped, also after the kernel died.
 
 The kernel mirror is fed from the builder's clone by `fetch_into_mirror`:
-the clone's config checked first, alternates and shallow clones refused,
+the clone's config checked first, a gitfile, alternates, and shallow clones
+refused, a tree holding `.valor` refused,
 the sending side run inside the turn's own sandbox, the receiving side with
 fsck, one pack file under a file-size limit, and a footprint watchdog.
 """
 
 import ctypes
 import functools
+import hashlib
 import json
 import os
 import re
@@ -294,6 +300,7 @@ def profile(
         lines += [
             "(deny file-read* file-write*",
             '    (subpath "/private/tmp")',
+            '    (subpath "/private/var/tmp")',
             '    (subpath "/private/var/folders")',
             f'    (subpath "{home / ".claude"}")',
             f'    (literal "{home / ".claude.json"}"))',
@@ -399,7 +406,8 @@ def service_profile(
 
 def sandboxed(profile_path: Path, mark: str, *argv: str) -> list[str]:
     """An argv run under `profile_path`, with the turn mark `mark` (a turn
-    or a provisioning step; the gateway port is 0, so no gateway)."""
+    or a provisioning step). It has no gateway: the profile's gateway
+    parameter is given port 1, where nothing listens."""
     return [
         binaries.require(binaries.SANDBOX_EXEC),
         "-D",
@@ -426,9 +434,37 @@ def _bindable(port: int) -> bool:
         s.close()
 
 
-async def taken_ports(conn) -> set[int]:
+PORTS_FILE = "ports.json"
+
+
+def reserve(task_id: str, ports: dict[str, int], work: Path | None = None) -> Layout:
+    """Make the task's directory and record its ports in it, so a start that
+    chooses ports after this one, before this task's row exists, sees them
+    taken. Called under the `workspace:ports` lock."""
+    lay = layout(task_id, work)
+    lay.root.mkdir(parents=True, exist_ok=False)
+    (lay.root / PORTS_FILE).write_text(json.dumps(ports))
+    return lay
+
+
+def reserved_ports(work: Path | None = None) -> set[int]:
+    """The ports every task directory under the work directory recorded,
+    finished, in progress, or left by a provisioning that died."""
+    out: set[int] = set()
+    base = work or work_dir()
+    if not base.is_dir():
+        return out
+    for f in base.glob(f"*/{PORTS_FILE}"):
+        try:
+            out.update(int(v) for v in json.loads(f.read_text()).values())
+        except ValueError, OSError, AttributeError:
+            continue
+    return out
+
+
+async def taken_ports(conn, work: Path | None = None) -> set[int]:
     """Every service port named by a task whose workspace has not been
-    removed."""
+    removed, and every port a task directory has reserved."""
     rows = await (
         await conn.execute(
             "SELECT d.body->'project'->'ports' FROM documents d WHERE d.kind = 'task' "
@@ -436,7 +472,7 @@ async def taken_ports(conn) -> set[int]:
             "  SELECT 1 FROM events e WHERE e.task_id = d.id AND e.type = 'workspace.removed')"
         )
     ).fetchall()
-    out: set[int] = set()
+    out = reserved_ports(work)
     for (ports,) in rows:
         out.update(int(v) for v in (ports or {}).values())
     return out
@@ -458,10 +494,12 @@ def _cache(spec: Spec, source: str | None, work: Path) -> Path:
     repository needs the credential, which is 1.4d's."""
     origin = source or spec.repo
     local = Path(origin).expanduser()
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", (local.resolve().name if local.exists() else origin.rstrip("/")
-                                            .rsplit("/", 1)[-1]).removesuffix(".git"))  # fmt: skip
-    cache = work / "cache" / f"{name}.git"
     url = str(local.resolve()) if local.exists() else origin
+    stem = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    # Keyed by the URL's digest: two repositories with one basename never
+    # share a cache.
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:40] + "-" + hashlib.sha256(url.encode()).hexdigest()[:12]
+    cache = work / "cache" / f"{name}.git"
     if not local.exists() and not url.startswith("https://"):
         raise Refused(f"{origin} is neither a local repository nor an https URL")
     if not cache.exists():
@@ -561,8 +599,10 @@ def provision(task_id: str, spec: Spec, ports: dict[str, int], *, base: str | No
     """Build the task's workspace. Anything that fails removes what was
     made and raises `Refused`; no task row exists yet."""
     lay = layout(task_id, work)
-    if lay.root.exists():
+    if lay.root.exists() and sorted(p.name for p in lay.root.iterdir()) != [PORTS_FILE]:
         raise Refused(f"{lay.root} already exists")
+    if not lay.root.exists():
+        reserve(task_id, ports, work)
     try:
         return _provision(lay, task_id, spec, ports, base=base, source=source)
     except BaseException as exc:
@@ -867,14 +907,25 @@ def start_services(task_id: str, lay: Layout | None, services, ports: dict[str, 
 
 def stop_services(task_id: str, lay: Layout | None = None) -> list[dict[str, Any]]:
     """Stop the task's services: Postgres cleanly, then every process left
-    under its service mark. Returns what the mark reaped."""
+    under its service mark. Returns every process that was running under
+    the mark: those Postgres stopped cleanly (`stopped`) and those the mark
+    reaped (`SIGTERM`, `SIGKILL`)."""
     lay = lay or layout(task_id)
+    mark = f"valor.service.{task_id}"
+    before = runs.sandboxed_pids(mark, "valor.service.none")
+    names = runs.commands(before)
     if (lay.profiles / "service.sb").exists():
         try:
             _stop_postgres(lay, task_id)
         except subprocess.TimeoutExpired:
             pass
-    return runs.reap_sandboxed(f"valor.service.{task_id}", "valor.service.none")
+    reaped = runs.reap_sandboxed(mark, "valor.service.none")
+    killed = {r["pid"] for r in reaped}
+    return reaped + [
+        {"pid": pid, "command": names.get(pid, ""), "signal": "stopped"}
+        for pid in before
+        if pid not in killed
+    ]
 
 
 def services_of(brief) -> tuple[list[str], dict[str, int]]:
@@ -921,10 +972,11 @@ def bounded(argv: list[str], *, cwd: Path, env: dict[str, str], max_bytes: int, 
     time limit passes. Returns the exit code (or `footprint`, `timeout`) and
     the stderr tail."""
 
-    # The file-size limit is set by /bin/sh (root's) before it execs the
+    # The file-size limit is set by /bin/bash (root's) before it execs the
     # command, since a preexec function is unsafe in a threaded process.
-    blocks = max(1, max_bytes // 512)
-    wrapped = ["/bin/sh", "-c", f'ulimit -f {blocks} && exec "$@"', "sh", *argv]
+    # bash counts `ulimit -f` in 1024-byte blocks.
+    blocks = max(1, max_bytes // 1024)
+    wrapped = ["/bin/bash", "-c", f'ulimit -f {blocks} && exec "$@"', "bash", *argv]
     proc = subprocess.Popen(
         wrapped, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
     )
@@ -956,6 +1008,7 @@ def fetch_into_mirror(
     *,
     max_bytes: int | None = None,
     max_footprint: int | None = None,
+    timeout: float | None = None,
 ) -> None:
     """Fetch one commit from a clone a turn controls into the kernel mirror,
     under `ref`. Raises `FetchRefused` with the reason."""
@@ -970,8 +1023,11 @@ def fetch_into_mirror(
         raise FetchRefused(str(exc)) from None
     if found:
         raise FetchRefused("the clone's git config names what the kernel will not run: " + "; ".join(found))
-    gitdir = source / ".git" if (source / ".git").is_dir() else source
-    for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow"):
+    dotgit = source / ".git"
+    if dotgit.is_symlink() or (dotgit.exists() and not dotgit.is_dir()):
+        raise FetchRefused("the clone's .git is not a directory (a gitfile moves the real one elsewhere)")
+    gitdir = dotgit if dotgit.is_dir() else source
+    for name in ("objects/info/alternates", "objects/info/http-alternates", "shallow", "commondir"):
         if (gitdir / name).exists() or (gitdir / name).is_symlink():
             raise FetchRefused(f"the clone has {name}, which the kernel will not fetch from")
     git_bin = git.binary()
@@ -995,7 +1051,7 @@ def fetch_into_mirror(
         env=git.env(),
         max_bytes=max_bytes or settings.mirror_fetch_max_bytes,
         max_footprint=max_footprint or settings.mirror_fetch_max_footprint_mb * 1024 * 1024,
-        timeout=settings.git_timeout_s,
+        timeout=timeout or settings.git_timeout_s,
     )
     runs.reap(mark)
     if code != 0:
@@ -1003,11 +1059,38 @@ def fetch_into_mirror(
             git.trusted(mirror, "update-ref", "-d", ref)
         except git.GitError:
             pass
+        clean_partial(mirror)
         if code == "footprint":
             raise FetchRefused("the fetch into the kernel mirror passed its memory limit and was killed")
         if code == "timeout":
             raise FetchRefused("the fetch into the kernel mirror did not finish in time")
         raise FetchRefused(f"the fetch into the kernel mirror failed ({code}): {err.strip()}")
+
+
+def clean_partial(repo: Path) -> None:
+    """Delete what a refused or killed fetch left in the repository: the
+    temporary pack and index files and the quarantine directories."""
+    objects = Path(repo) / "objects"
+    for p in [*objects.glob("pack/tmp_*"), *objects.glob("incoming-*"), *objects.glob("tmp_objdir-*")]:
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+
+
+VALOR_DIR = ".valor"
+
+
+def tree_has_valor(
+    repo: str | Path, rev: str, *, trusted: bool, extra_env: dict[str, str] | None = None
+) -> bool:
+    """Whether the commit's tree holds a top-level `.valor` entry, in any
+    letter case (this Mac's file system ignores case). A committed `.valor`
+    would sit where the kernel writes a fresh session's inputs and reads its
+    verdict, so no such plan or candidate counts."""
+    args = ("ls-tree", "--name-only", "-z", rev)
+    listing = git.trusted(repo, *args, extra_env=extra_env) if trusted else git.out(repo, *args)
+    return any(name.casefold() == VALOR_DIR for name in listing.split("\0") if name)
 
 
 # -- fresh checkouts -----------------------------------------------------------------------------
@@ -1042,6 +1125,9 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
     dest.parent.mkdir(parents=True, exist_ok=True)
     git.trusted(dest.parent, "init", "-q", "-b", "main", str(dest))
     borrow = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(mirror / "objects"), **KERNEL_IDENTITY}
+    for r in (base, rev):
+        if tree_has_valor(dest, r, trusted=True, extra_env=borrow):
+            raise git.GitError(f"{r[:12]}'s tree holds a .valor entry")
     base_tree = git.trusted(dest, "rev-parse", f"{base}^{{tree}}", extra_env=borrow)
     rev_tree = git.trusted(dest, "rev-parse", f"{rev}^{{tree}}", extra_env=borrow)
     first = git.trusted(dest, "commit-tree", base_tree, "-m", "base", extra_env=borrow)
@@ -1054,16 +1140,27 @@ def blind_checkout(mirror: str | Path, base: str, rev: str, dest: Path) -> dict[
     return {"base": first, "candidate": second}
 
 
-def check_harness(lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str]) -> dict[str, Any]:
+def check_harness(
+    lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str], *, services: bool = False
+) -> dict[str, Any]:
     """The harness settings of one fresh session: its own profile, TMPDIR,
-    Claude Code config directory, and the trusted git first on PATH."""
+    Claude Code config directory, and the trusted git first on PATH. A
+    session that runs nothing against the task's services (critique) gets
+    none of their ports and only the PATH of the task's environment, so no
+    database credential; review and test get their own password-file copy
+    with `services` (1.4b, 1.4c)."""
     name = check_dir.name
     path = lay.profiles / f"{name}.sb"
-    path.write_text(check_profile(lay, check_dir, ports))
+    path.write_text(check_profile(lay, check_dir, ports if services else []))
     git_dir = str(Path(git.binary()).parent)
-    fresh_env = {
-        k: v for k, v in env.items() if k not in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "npm_config_cache")
-    }
+    if services:
+        fresh_env = {
+            k: v
+            for k, v in env.items()
+            if k not in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "npm_config_cache")
+        }
+    else:
+        fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
     fresh_env["PATH"] = f"{git_dir}:{fresh_env.get('PATH', '/usr/bin:/bin')}"
     return {
         "sandbox_profile": str(path),
@@ -1071,6 +1168,39 @@ def check_harness(lay: Layout, check_dir: Path, ports: list[int], env: dict[str,
         "claude_config_dir": str(check_dir / "claude"),
         "env": fresh_env,
     }
+
+
+def write_inputs(checkout: Path, files: dict[str, str]) -> None:
+    """Make `.valor/inputs/` in a checkout the kernel just made and write each
+    input there, every step relative to a descriptor: `.valor` must not
+    exist yet, nothing is followed through a link, and no file is
+    overwritten. So nothing committed in the tree can redirect a write, and
+    no verdict file exists before the session's turn."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | os.O_CLOEXEC
+    root = os.open(checkout, flags)
+    fds = [root]
+    try:
+        os.mkdir(VALOR_DIR, 0o755, dir_fd=root)  # FileExistsError if the tree brought one
+        valor = os.open(VALOR_DIR, flags, dir_fd=root)
+        fds.append(valor)
+        os.mkdir("inputs", 0o755, dir_fd=valor)
+        inputs = os.open("inputs", flags, dir_fd=valor)
+        fds.append(inputs)
+        for name, text in files.items():
+            if "/" in name or name.startswith("."):
+                raise ValueError(f"input name {name!r}")
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                         dir_fd=inputs)  # fmt: skip
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+        try:
+            os.stat("verdict.json", dir_fd=valor, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        raise FileExistsError("a verdict file exists before the session's turn")
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
 
 
 def read_verdict(checkout: Path, turn_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1155,16 +1285,23 @@ def remove(task_id: str, lay: Layout | None = None) -> None:
 # -- other tasks' services --------------------------------------------------------------------
 
 
-async def sweep(conn, task_id: str) -> list[dict[str, Any]]:
-    """Stop the services of every other task whose run is not live, which a
-    killed kernel left up. Under the `workspace:ports` lock, each other task
-    with services is stopped only when its router lock (`run:<task>`) can be
-    taken, so a run in progress keeps its services. Returns what was
-    stopped, each entry naming its task."""
+async def sweep(conn, task_id: str, work: Path | None = None) -> list[dict[str, Any]]:
+    """Stop the services a killed kernel left up: those of every other task
+    whose run is not live (its router lock `run:<task>` can be taken), and
+    those of any directory under `work` with no task row whose provisioning
+    is not live (its `provision:<id>` lock can be taken), which a kernel
+    killed mid-setup leaves. Takes the `workspace:ports` lock only if it is
+    free, so a start never waits on a sweep, nor a sweep on a start; a busy
+    lock skips this sweep, and the next run's does it. Returns what was
+    stopped, each entry naming its task or directory."""
     import asyncio
 
     stopped: list[dict[str, Any]] = []
-    await conn.execute("SELECT pg_advisory_lock(hashtextextended('workspace:ports', 0))")
+    got = await (
+        await conn.execute("SELECT pg_try_advisory_lock(hashtextextended('workspace:ports', 0))")
+    ).fetchone()
+    if not got[0]:
+        return stopped
     try:
         rows = await (
             await conn.execute(
@@ -1174,20 +1311,34 @@ async def sweep(conn, task_id: str) -> list[dict[str, Any]]:
                 (task_id,),
             )
         ).fetchall()
-        marked = await asyncio.to_thread(runs.marked_services, [other for other, _ in rows])
-        for other, mirror in rows:
-            if other not in marked:
-                continue
-            key = f"run:{other}"
+        candidates: dict[str, tuple[str, Layout | None]] = {
+            other: ("run", Layout(Path(mirror).parent) if mirror else None) for other, mirror in rows
+        }
+        if work is not None and work.is_dir():
+            dirs = [d.name for d in work.iterdir() if d.is_dir() and re.fullmatch(r"[0-9a-f]{12}", d.name)]
+            known = {
+                r[0]
+                for r in await (
+                    await conn.execute(
+                        "SELECT id FROM documents WHERE kind = 'task' AND id = ANY(%s)", (dirs,)
+                    )
+                ).fetchall()
+            }
+            for d in dirs:
+                if d not in known and d != task_id:
+                    candidates[d] = ("provision", Layout(work / d))
+        marked = await asyncio.to_thread(runs.marked_services, list(candidates))
+        for other in marked:
+            kind, lay = candidates[other]
+            key = f"{kind}:{other}"
             got = await (
                 await conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
             ).fetchone()
             if not got[0]:
                 continue
             try:
-                lay = Layout(Path(mirror).parent) if mirror else None
                 found = await asyncio.to_thread(stop_services, other, lay)
-                stopped += [{**r, "task": other} for r in found]
+                stopped += [{**r, "task": other, "orphan": kind == "provision"} for r in found]
             finally:
                 await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
     finally:
